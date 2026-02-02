@@ -27,6 +27,7 @@ set(CUDA_BACKEND_SOURCES
     kernels/batchnorm.cu
     kernels/conv2d.cu
     kernels/lstm.cu
+    kernels/gru.cu
     kernels/indexing.cu
     kernels/quantization/quantized_linear.cu
     kernels/quantization/quantized_conv2d.cu

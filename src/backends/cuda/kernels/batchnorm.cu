@@ -993,5 +993,343 @@ auto batchnorm2d_backward(const Tensor& grad_output,
     return std::make_tuple(grad_input, grad_gamma, grad_beta);
 }
 
+
+// ============================================================================
+// GroupNorm CUDA Kernels
+// ============================================================================
+
+template<typename T>
+__global__ void group_norm_forward_kernel(
+    const T* __restrict__ input,
+    const T* __restrict__ weight,
+    const T* __restrict__ bias,
+    T* __restrict__ output,
+    T* __restrict__ mean_out,
+    T* __restrict__ inv_std_out,
+    int64_t N, int64_t C, int64_t HW,
+    int64_t num_groups, int64_t channels_per_group,
+    float eps) {
+
+    // Each block handles one (sample, group) pair
+    int64_t group_idx = blockIdx.x;
+    int64_t n = group_idx / num_groups;
+    int64_t g = group_idx % num_groups;
+
+    if (n >= N || g >= num_groups) return;
+
+    int64_t c_start = g * channels_per_group;
+    int64_t group_size = channels_per_group * HW;
+
+    // Compute mean using parallel reduction
+    T local_sum = T(0);
+    for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
+        int64_t c_offset = i / HW;
+        int64_t hw = i % HW;
+        int64_t c = c_start + c_offset;
+        int64_t idx = (n * C + c) * HW + hw;
+        local_sum += input[idx];
+    }
+
+    // Warp reduction
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        local_sum += __shfl_down_sync(0xFFFFFFFF, local_sum, offset);
+    }
+
+    // Shared memory for inter-warp reduction
+    __shared__ T shared_sum[32];
+    int lane = threadIdx.x % warpSize;
+    int warp_id = threadIdx.x / warpSize;
+
+    if (lane == 0) shared_sum[warp_id] = local_sum;
+    __syncthreads();
+
+    // Final reduction in first warp
+    T mean = T(0);
+    if (warp_id == 0) {
+        int num_warps = (blockDim.x + warpSize - 1) / warpSize;
+        local_sum = (lane < num_warps) ? shared_sum[lane] : T(0);
+        for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+            local_sum += __shfl_down_sync(0xFFFFFFFF, local_sum, offset);
+        }
+        if (lane == 0) {
+            mean = local_sum / T(group_size);
+            shared_sum[0] = mean;
+        }
+    }
+    __syncthreads();
+    mean = shared_sum[0];
+
+    // Compute variance
+    T local_var = T(0);
+    for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
+        int64_t c_offset = i / HW;
+        int64_t hw = i % HW;
+        int64_t c = c_start + c_offset;
+        int64_t idx = (n * C + c) * HW + hw;
+        T diff = input[idx] - mean;
+        local_var += diff * diff;
+    }
+
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        local_var += __shfl_down_sync(0xFFFFFFFF, local_var, offset);
+    }
+
+    if (lane == 0) shared_sum[warp_id] = local_var;
+    __syncthreads();
+
+    T inv_std = T(0);
+    if (warp_id == 0) {
+        int num_warps = (blockDim.x + warpSize - 1) / warpSize;
+        local_var = (lane < num_warps) ? shared_sum[lane] : T(0);
+        for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+            local_var += __shfl_down_sync(0xFFFFFFFF, local_var, offset);
+        }
+        if (lane == 0) {
+            T variance = local_var / T(group_size);
+            inv_std = T(1) / sqrt(variance + T(eps));
+            shared_sum[0] = inv_std;
+            if (mean_out) mean_out[group_idx] = mean;
+            if (inv_std_out) inv_std_out[group_idx] = inv_std;
+        }
+    }
+    __syncthreads();
+    inv_std = shared_sum[0];
+
+    // Normalize and apply affine
+    for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
+        int64_t c_offset = i / HW;
+        int64_t hw = i % HW;
+        int64_t c = c_start + c_offset;
+        int64_t idx = (n * C + c) * HW + hw;
+        T normalized = (input[idx] - mean) * inv_std;
+        if (weight && bias) {
+            output[idx] = normalized * weight[c] + bias[c];
+        } else {
+            output[idx] = normalized;
+        }
+    }
+}
+
+template<typename T>
+__global__ void group_norm_backward_kernel(
+    const T* __restrict__ grad_output,
+    const T* __restrict__ input,
+    const T* __restrict__ weight,
+    const T* __restrict__ mean_saved,
+    const T* __restrict__ inv_std_saved,
+    T* __restrict__ grad_input,
+    T* __restrict__ grad_weight,
+    T* __restrict__ grad_bias,
+    int64_t N, int64_t C, int64_t HW,
+    int64_t num_groups, int64_t channels_per_group) {
+
+    int64_t group_idx = blockIdx.x;
+    int64_t n = group_idx / num_groups;
+    int64_t g = group_idx % num_groups;
+
+    if (n >= N || g >= num_groups) return;
+
+    int64_t c_start = g * channels_per_group;
+    int64_t group_size = channels_per_group * HW;
+
+    T mean = mean_saved[group_idx];
+    T inv_std = inv_std_saved[group_idx];
+
+    // Compute sum of grad_output * normalized and sum of grad_output
+    T local_sum_dy = T(0);
+    T local_sum_dy_xhat = T(0);
+
+    for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
+        int64_t c_offset = i / HW;
+        int64_t hw = i % HW;
+        int64_t c = c_start + c_offset;
+        int64_t idx = (n * C + c) * HW + hw;
+        T dy = grad_output[idx];
+        if (weight) dy = dy * weight[c];
+        T xhat = (input[idx] - mean) * inv_std;
+        local_sum_dy += dy;
+        local_sum_dy_xhat += dy * xhat;
+    }
+
+    // Warp reduction
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        local_sum_dy += __shfl_down_sync(0xFFFFFFFF, local_sum_dy, offset);
+        local_sum_dy_xhat += __shfl_down_sync(0xFFFFFFFF, local_sum_dy_xhat, offset);
+    }
+
+    __shared__ T shared_dy[32];
+    __shared__ T shared_dy_xhat[32];
+    int lane = threadIdx.x % warpSize;
+    int warp_id = threadIdx.x / warpSize;
+
+    if (lane == 0) {
+        shared_dy[warp_id] = local_sum_dy;
+        shared_dy_xhat[warp_id] = local_sum_dy_xhat;
+    }
+    __syncthreads();
+
+    T sum_dy, sum_dy_xhat;
+    if (warp_id == 0) {
+        int num_warps = (blockDim.x + warpSize - 1) / warpSize;
+        local_sum_dy = (lane < num_warps) ? shared_dy[lane] : T(0);
+        local_sum_dy_xhat = (lane < num_warps) ? shared_dy_xhat[lane] : T(0);
+        for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+            local_sum_dy += __shfl_down_sync(0xFFFFFFFF, local_sum_dy, offset);
+            local_sum_dy_xhat += __shfl_down_sync(0xFFFFFFFF, local_sum_dy_xhat, offset);
+        }
+        if (lane == 0) {
+            shared_dy[0] = local_sum_dy;
+            shared_dy_xhat[0] = local_sum_dy_xhat;
+        }
+    }
+    __syncthreads();
+    sum_dy = shared_dy[0];
+    sum_dy_xhat = shared_dy_xhat[0];
+
+    T inv_group_size = T(1) / T(group_size);
+
+    // Compute grad_input
+    for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
+        int64_t c_offset = i / HW;
+        int64_t hw = i % HW;
+        int64_t c = c_start + c_offset;
+        int64_t idx = (n * C + c) * HW + hw;
+        T dy = grad_output[idx];
+        if (weight) dy = dy * weight[c];
+        T xhat = (input[idx] - mean) * inv_std;
+        grad_input[idx] = inv_std * (dy - inv_group_size * (sum_dy + xhat * sum_dy_xhat));
+    }
+
+    // Accumulate grad_weight and grad_bias (atomic since multiple samples contribute)
+    if (weight && grad_weight && grad_bias) {
+        for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
+            int64_t c_offset = i / HW;
+            int64_t hw = i % HW;
+            int64_t c = c_start + c_offset;
+            int64_t idx = (n * C + c) * HW + hw;
+            T xhat = (input[idx] - mean) * inv_std;
+            atomicAdd(&grad_weight[c], grad_output[idx] * xhat);
+            atomicAdd(&grad_bias[c], grad_output[idx]);
+        }
+    }
+}
+
+// GroupNorm forward launcher
+auto group_norm_forward_kernel(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor& bias,
+    int64_t num_groups,
+    float eps,
+    cudaStream_t stream
+) -> std::tuple<Tensor, Tensor, Tensor> {
+    auto shape_span = input.shape();
+    std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t HW = 1;
+    for (size_t i = 2; i < shape.size(); ++i) HW *= shape[i];
+    int64_t channels_per_group = C / num_groups;
+
+    Tensor output(shape, input.dtype(), input.device());
+    Tensor mean_out({N * num_groups}, input.dtype(), input.device());
+    Tensor inv_std_out({N * num_groups}, input.dtype(), input.device());
+
+    int64_t num_group_instances = N * num_groups;
+    int block_size = 256;
+
+    if (input.dtype() == DType::Float32) {
+        group_norm_forward_kernel<float><<<num_group_instances, block_size, 0, stream>>>(
+            input.data<float>(), weight.data<float>(), bias.data<float>(),
+            output.data<float>(), mean_out.data<float>(), inv_std_out.data<float>(),
+            N, C, HW, num_groups, channels_per_group, eps);
+    } else if (input.dtype() == DType::Float64) {
+        group_norm_forward_kernel<double><<<num_group_instances, block_size, 0, stream>>>(
+            input.data<double>(), weight.data<double>(), bias.data<double>(),
+            output.data<double>(), mean_out.data<double>(), inv_std_out.data<double>(),
+            N, C, HW, num_groups, channels_per_group, eps);
+    } else {
+        throw std::runtime_error("group_norm_forward: only Float32 and Float64 supported");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return {output, mean_out, inv_std_out};
+}
+
+// GroupNorm backward launcher
+auto group_norm_backward_kernel(
+    const Tensor& grad_output,
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor& mean_saved,
+    const Tensor& inv_std_saved,
+    int64_t num_groups,
+    cudaStream_t stream
+) -> std::tuple<Tensor, Tensor, Tensor> {
+    auto shape_span = input.shape();
+    std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t HW = 1;
+    for (size_t i = 2; i < shape.size(); ++i) HW *= shape[i];
+    int64_t channels_per_group = C / num_groups;
+
+    Tensor grad_input(shape, input.dtype(), input.device());
+    Tensor grad_weight({C}, input.dtype(), input.device());
+    Tensor grad_bias({C}, input.dtype(), input.device());
+
+    // Zero-initialize grad_weight and grad_bias (atomicAdd accumulation)
+    cudaMemsetAsync(grad_weight.data_ptr(), 0, C * dtype_size(input.dtype()), stream);
+    cudaMemsetAsync(grad_bias.data_ptr(), 0, C * dtype_size(input.dtype()), stream);
+
+    int64_t num_group_instances = N * num_groups;
+    int block_size = 256;
+
+    if (input.dtype() == DType::Float32) {
+        group_norm_backward_kernel<float><<<num_group_instances, block_size, 0, stream>>>(
+            grad_output.data<float>(), input.data<float>(), weight.data<float>(),
+            mean_saved.data<float>(), inv_std_saved.data<float>(),
+            grad_input.data<float>(), grad_weight.data<float>(), grad_bias.data<float>(),
+            N, C, HW, num_groups, channels_per_group);
+    } else if (input.dtype() == DType::Float64) {
+        group_norm_backward_kernel<double><<<num_group_instances, block_size, 0, stream>>>(
+            grad_output.data<double>(), input.data<double>(), weight.data<double>(),
+            mean_saved.data<double>(), inv_std_saved.data<double>(),
+            grad_input.data<double>(), grad_weight.data<double>(), grad_bias.data<double>(),
+            N, C, HW, num_groups, channels_per_group);
+    } else {
+        throw std::runtime_error("group_norm_backward: only Float32 and Float64 supported");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return {grad_input, grad_weight, grad_bias};
+}
+
+// ============================================================================
+// InstanceNorm CUDA Kernels (delegates to GroupNorm with groups=C)
+// ============================================================================
+
+auto instance_norm_forward_kernel(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor& bias,
+    float eps,
+    cudaStream_t stream
+) -> std::tuple<Tensor, Tensor, Tensor> {
+    int64_t C = input.shape()[1];
+    return group_norm_forward_kernel(input, weight, bias, C, eps, stream);
+}
+
+auto instance_norm_backward_kernel(
+    const Tensor& grad_output,
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor& mean_saved,
+    const Tensor& inv_std_saved,
+    cudaStream_t stream
+) -> std::tuple<Tensor, Tensor, Tensor> {
+    int64_t C = input.shape()[1];
+    return group_norm_backward_kernel(grad_output, input, weight, mean_saved, inv_std_saved, C, stream);
+}
 } // namespace cuda
 } // namespace tenzor

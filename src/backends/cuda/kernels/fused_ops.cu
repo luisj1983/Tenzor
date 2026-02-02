@@ -2377,6 +2377,328 @@ auto fused_sgd_step_cuda(
     CUDA_CHECK(cudaGetLastError());
 }
 
+
+// ============================================================================
+// Fused Softmax Cross Entropy
+// ============================================================================
+
+template<typename T>
+__global__ void fused_softmax_cross_entropy_kernel(
+    const T* __restrict__ logits,    // (batch_size, num_classes)
+    const int64_t* __restrict__ targets,  // (batch_size)
+    T* __restrict__ loss,            // (batch_size) or scalar
+    T* __restrict__ grad_logits,     // (batch_size, num_classes) - optional
+    int64_t batch_size,
+    int64_t num_classes,
+    bool compute_grad) {
+
+    int64_t b = blockIdx.x;
+    if (b >= batch_size) return;
+
+    const T* logits_row = logits + b * num_classes;
+
+    // Step 1: Find max for numerical stability (parallel reduction in block)
+    extern __shared__ char shared_mem[];
+    T* sdata = reinterpret_cast<T*>(shared_mem);
+
+    T thread_max = -1e30f;
+    for (int64_t c = threadIdx.x; c < num_classes; c += blockDim.x) {
+        thread_max = max(thread_max, static_cast<T>(logits_row[c]));
+    }
+    sdata[threadIdx.x] = thread_max;
+    __syncthreads();
+
+    // Block reduction for max
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) {
+            sdata[threadIdx.x] = max(sdata[threadIdx.x], sdata[threadIdx.x + s]);
+        }
+        __syncthreads();
+    }
+    T max_val = sdata[0];
+    __syncthreads();
+
+    // Step 2: Compute sum of exp(logits - max)
+    T thread_sum = T(0);
+    for (int64_t c = threadIdx.x; c < num_classes; c += blockDim.x) {
+        thread_sum += exp(static_cast<T>(logits_row[c]) - max_val);
+    }
+    sdata[threadIdx.x] = thread_sum;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) {
+            sdata[threadIdx.x] += sdata[threadIdx.x + s];
+        }
+        __syncthreads();
+    }
+    T log_sum_exp = log(sdata[0]) + max_val;
+
+    // Step 3: Compute loss = log_sum_exp - logits[target]
+    int64_t target = targets[b];
+    if (threadIdx.x == 0) {
+        loss[b] = log_sum_exp - static_cast<T>(logits_row[target]);
+    }
+
+    // Step 4: Compute gradient if requested
+    if (compute_grad && grad_logits) {
+        T* grad_row = grad_logits + b * num_classes;
+        T inv_batch = T(1) / T(batch_size);
+        for (int64_t c = threadIdx.x; c < num_classes; c += blockDim.x) {
+            T softmax_val = exp(static_cast<T>(logits_row[c]) - log_sum_exp);
+            T grad = softmax_val;
+            if (c == target) grad -= T(1);
+            grad_row[c] = grad * inv_batch;
+        }
+    }
+}
+
+auto fused_softmax_cross_entropy_cuda(
+    const Tensor& logits,
+    const Tensor& targets,
+    bool compute_grad
+) -> std::tuple<Tensor, Tensor> {
+    auto shape_span = logits.shape();
+    int64_t batch_size = shape_span[0];
+    int64_t num_classes = shape_span[1];
+
+    Tensor loss({batch_size}, logits.dtype(), logits.device());
+    Tensor grad_logits;
+    if (compute_grad) {
+        grad_logits = Tensor(to_vector(shape_span), logits.dtype(), logits.device());
+    }
+
+    int block_size = std::min<int>(256, static_cast<int>(num_classes));
+    // Round up to next power of 2 for reduction
+    int bs = 1;
+    while (bs < block_size) bs <<= 1;
+    block_size = bs;
+    if (block_size > 1024) block_size = 1024;
+
+    size_t shared_mem = block_size * dtype_size(logits.dtype());
+
+    if (logits.dtype() == DType::Float32) {
+        fused_softmax_cross_entropy_kernel<float><<<batch_size, block_size, shared_mem>>>(
+            logits.data<float>(), targets.data<int64_t>(),
+            loss.data<float>(),
+            compute_grad ? grad_logits.data<float>() : nullptr,
+            batch_size, num_classes, compute_grad);
+    } else if (logits.dtype() == DType::Float64) {
+        fused_softmax_cross_entropy_kernel<double><<<batch_size, block_size, shared_mem>>>(
+            logits.data<double>(), targets.data<int64_t>(),
+            loss.data<double>(),
+            compute_grad ? grad_logits.data<double>() : nullptr,
+            batch_size, num_classes, compute_grad);
+    } else {
+        throw std::runtime_error("fused_softmax_cross_entropy: unsupported dtype");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return {loss, grad_logits};
+}
+
+// ============================================================================
+// Fused RMSProp Optimizer Step
+// ============================================================================
+
+template<typename T>
+__global__ void fused_rmsprop_step_kernel(
+    T* __restrict__ param,
+    const T* __restrict__ grad,
+    T* __restrict__ square_avg,
+    T* __restrict__ grad_avg,       // For centered RMSProp, nullptr otherwise
+    T* __restrict__ momentum_buffer, // For momentum, nullptr otherwise
+    float lr, float alpha, float eps,
+    float weight_decay, float momentum,
+    bool centered,
+    int64_t n) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+
+    T g = grad[idx];
+
+    // Weight decay
+    if (weight_decay != 0.0f) {
+        g = g + T(weight_decay) * param[idx];
+    }
+
+    // Update square average: v = alpha * v + (1 - alpha) * g^2
+    T sq = square_avg[idx];
+    sq = T(alpha) * sq + T(1.0f - alpha) * g * g;
+    square_avg[idx] = sq;
+
+    T avg;
+    if (centered && grad_avg) {
+        // Update grad average: g_avg = alpha * g_avg + (1 - alpha) * g
+        T ga = grad_avg[idx];
+        ga = T(alpha) * ga + T(1.0f - alpha) * g;
+        grad_avg[idx] = ga;
+        avg = sqrt(sq - ga * ga + T(eps));
+    } else {
+        avg = sqrt(sq + T(eps));
+    }
+
+    if (momentum > 0.0f && momentum_buffer) {
+        T buf = momentum_buffer[idx];
+        buf = T(momentum) * buf + g / avg;
+        momentum_buffer[idx] = buf;
+        param[idx] = param[idx] - T(lr) * buf;
+    } else {
+        param[idx] = param[idx] - T(lr) * g / avg;
+    }
+}
+
+auto fused_rmsprop_step_cuda(
+    Tensor& param,
+    const Tensor& grad,
+    Tensor& square_avg,
+    Tensor* grad_avg,
+    Tensor* momentum_buffer,
+    float lr, float alpha, float eps,
+    float weight_decay, float momentum,
+    bool centered,
+    cudaStream_t stream
+) -> void {
+    int64_t n = param.numel();
+    int block_size = 256;
+    int num_blocks = (n + block_size - 1) / block_size;
+
+    if (param.dtype() == DType::Float32) {
+        fused_rmsprop_step_kernel<float><<<num_blocks, block_size, 0, stream>>>(
+            param.data<float>(), grad.data<float>(), square_avg.data<float>(),
+            (centered && grad_avg) ? grad_avg->data<float>() : nullptr,
+            (momentum > 0.0f && momentum_buffer) ? momentum_buffer->data<float>() : nullptr,
+            lr, alpha, eps, weight_decay, momentum, centered, n);
+    } else if (param.dtype() == DType::Float64) {
+        fused_rmsprop_step_kernel<double><<<num_blocks, block_size, 0, stream>>>(
+            param.data<double>(), grad.data<double>(), square_avg.data<double>(),
+            (centered && grad_avg) ? grad_avg->data<double>() : nullptr,
+            (momentum > 0.0f && momentum_buffer) ? momentum_buffer->data<double>() : nullptr,
+            lr, alpha, eps, weight_decay, momentum, centered, n);
+    } else {
+        throw std::runtime_error("fused_rmsprop_step: unsupported dtype");
+    }
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// ============================================================================
+// Fused Adadelta Optimizer Step
+// ============================================================================
+
+template<typename T>
+__global__ void fused_adadelta_step_kernel(
+    T* __restrict__ param,
+    const T* __restrict__ grad,
+    T* __restrict__ square_avg,
+    T* __restrict__ acc_delta,
+    float rho, float eps, float lr, float weight_decay,
+    int64_t n) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+
+    T g = grad[idx];
+    if (weight_decay != 0.0f) {
+        g = g + T(weight_decay) * param[idx];
+    }
+
+    // v = rho * v + (1 - rho) * g^2
+    T sq = square_avg[idx];
+    sq = T(rho) * sq + T(1.0f - rho) * g * g;
+    square_avg[idx] = sq;
+
+    // delta = sqrt(acc_delta + eps) / sqrt(sq + eps) * g
+    T std_val = sqrt(sq + T(eps));
+    T delta = sqrt(acc_delta[idx] + T(eps)) / std_val * g;
+
+    // acc_delta = rho * acc_delta + (1 - rho) * delta^2
+    acc_delta[idx] = T(rho) * acc_delta[idx] + T(1.0f - rho) * delta * delta;
+
+    param[idx] = param[idx] - T(lr) * delta;
+}
+
+auto fused_adadelta_step_cuda(
+    Tensor& param,
+    const Tensor& grad,
+    Tensor& square_avg,
+    Tensor& acc_delta,
+    float rho, float eps, float lr, float weight_decay,
+    cudaStream_t stream
+) -> void {
+    int64_t n = param.numel();
+    int block_size = 256;
+    int num_blocks = (n + block_size - 1) / block_size;
+
+    if (param.dtype() == DType::Float32) {
+        fused_adadelta_step_kernel<float><<<num_blocks, block_size, 0, stream>>>(
+            param.data<float>(), grad.data<float>(), square_avg.data<float>(), acc_delta.data<float>(),
+            rho, eps, lr, weight_decay, n);
+    } else if (param.dtype() == DType::Float64) {
+        fused_adadelta_step_kernel<double><<<num_blocks, block_size, 0, stream>>>(
+            param.data<double>(), grad.data<double>(), square_avg.data<double>(), acc_delta.data<double>(),
+            rho, eps, lr, weight_decay, n);
+    } else {
+        throw std::runtime_error("fused_adadelta_step: unsupported dtype");
+    }
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// ============================================================================
+// Fused Adagrad Optimizer Step
+// ============================================================================
+
+template<typename T>
+__global__ void fused_adagrad_step_kernel(
+    T* __restrict__ param,
+    const T* __restrict__ grad,
+    T* __restrict__ sum_sq,
+    float lr, float lr_decay, float eps, float weight_decay,
+    int64_t step, int64_t n) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+
+    T g = grad[idx];
+    if (weight_decay != 0.0f) {
+        g = g + T(weight_decay) * param[idx];
+    }
+
+    float clr = lr / (T(1) + T(step - 1) * T(lr_decay));
+
+    // sum_sq += g^2
+    T sq = sum_sq[idx] + g * g;
+    sum_sq[idx] = sq;
+
+    // param -= clr * g / (sqrt(sum_sq) + eps)
+    param[idx] = param[idx] - T(clr) * g / (sqrt(sq) + T(eps));
+}
+
+auto fused_adagrad_step_cuda(
+    Tensor& param,
+    const Tensor& grad,
+    Tensor& sum_sq,
+    float lr, float lr_decay, float eps, float weight_decay,
+    int64_t step,
+    cudaStream_t stream
+) -> void {
+    int64_t n = param.numel();
+    int block_size = 256;
+    int num_blocks = (n + block_size - 1) / block_size;
+
+    if (param.dtype() == DType::Float32) {
+        fused_adagrad_step_kernel<float><<<num_blocks, block_size, 0, stream>>>(
+            param.data<float>(), grad.data<float>(), sum_sq.data<float>(),
+            lr, lr_decay, eps, weight_decay, step, n);
+    } else if (param.dtype() == DType::Float64) {
+        fused_adagrad_step_kernel<double><<<num_blocks, block_size, 0, stream>>>(
+            param.data<double>(), grad.data<double>(), sum_sq.data<double>(),
+            lr, lr_decay, eps, weight_decay, step, n);
+    } else {
+        throw std::runtime_error("fused_adagrad_step: unsupported dtype");
+    }
+    CUDA_CHECK(cudaGetLastError());
+}
 } // namespace cuda
 } // namespace tenzor
 

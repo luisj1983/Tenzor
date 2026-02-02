@@ -620,5 +620,247 @@ auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, cud
     return output;
 }
 
+
+// ============================================================================
+// Flatten (reshape wrapper)
+// ============================================================================
+
+auto flatten_kernel(const Tensor& input, int64_t start_dim, int64_t end_dim, cudaStream_t stream) -> Tensor {
+    auto shape = input.shape();
+    int64_t ndim = shape.size();
+
+    // Normalize negative dimensions
+    if (start_dim < 0) start_dim += ndim;
+    if (end_dim < 0) end_dim += ndim;
+
+    // Compute new shape
+    std::vector<int64_t> new_shape;
+    for (int64_t i = 0; i < start_dim; ++i) {
+        new_shape.push_back(shape[i]);
+    }
+    int64_t flat_size = 1;
+    for (int64_t i = start_dim; i <= end_dim; ++i) {
+        flat_size *= shape[i];
+    }
+    new_shape.push_back(flat_size);
+    for (int64_t i = end_dim + 1; i < ndim; ++i) {
+        new_shape.push_back(shape[i]);
+    }
+
+    return reshape_kernel(input, new_shape, stream);
+}
+
+// ============================================================================
+// Slice
+// ============================================================================
+
+template<typename T>
+__global__ void slice_kernel_impl(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    const int64_t* __restrict__ input_strides,
+    const int64_t* __restrict__ output_shape,
+    const int64_t* __restrict__ output_strides,
+    const int64_t* __restrict__ starts,
+    const int64_t* __restrict__ steps,
+    int64_t ndim,
+    int64_t total_elements) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total_elements) return;
+
+    // Convert linear output index to multi-dimensional index
+    int64_t input_offset = 0;
+    int64_t remaining = idx;
+    for (int64_t d = 0; d < ndim; ++d) {
+        int64_t dim_idx = remaining / output_strides[d];
+        remaining %= output_strides[d];
+        // Map output index to input index: input_idx = start + output_idx * step
+        int64_t input_dim_idx = starts[d] + dim_idx * steps[d];
+        input_offset += input_dim_idx * input_strides[d];
+    }
+
+    output[idx] = input[input_offset];
+}
+
+auto slice_kernel(
+    const Tensor& input,
+    const std::vector<int64_t>& starts,
+    const std::vector<int64_t>& ends,
+    const std::vector<int64_t>& steps,
+    cudaStream_t stream
+) -> Tensor {
+    auto input_shape = input.shape();
+    int64_t ndim = input_shape.size();
+
+    // Compute output shape
+    std::vector<int64_t> output_shape(ndim);
+    for (int64_t d = 0; d < ndim; ++d) {
+        int64_t s = (d < static_cast<int64_t>(starts.size())) ? starts[d] : 0;
+        int64_t e = (d < static_cast<int64_t>(ends.size())) ? ends[d] : input_shape[d];
+        int64_t st = (d < static_cast<int64_t>(steps.size())) ? steps[d] : 1;
+
+        // Normalize negative indices
+        if (s < 0) s += input_shape[d];
+        if (e < 0) e += input_shape[d];
+        s = std::max(int64_t(0), std::min(s, input_shape[d]));
+        e = std::max(int64_t(0), std::min(e, input_shape[d]));
+
+        output_shape[d] = (e - s + st - 1) / st;
+        if (output_shape[d] < 0) output_shape[d] = 0;
+    }
+
+    Tensor output(output_shape, input.dtype(), input.device());
+    int64_t total = output.numel();
+    if (total == 0) return output;
+
+    // Compute strides
+    std::vector<int64_t> input_strides(ndim);
+    std::vector<int64_t> output_strides(ndim);
+    input_strides[ndim - 1] = 1;
+    output_strides[ndim - 1] = 1;
+    for (int64_t d = ndim - 2; d >= 0; --d) {
+        input_strides[d] = input_strides[d + 1] * input_shape[d + 1];
+        output_strides[d] = output_strides[d + 1] * output_shape[d + 1];
+    }
+
+    // Pad starts and steps to ndim
+    std::vector<int64_t> padded_starts(ndim, 0);
+    std::vector<int64_t> padded_steps(ndim, 1);
+    for (int64_t d = 0; d < ndim; ++d) {
+        if (d < static_cast<int64_t>(starts.size())) {
+            padded_starts[d] = starts[d];
+            if (padded_starts[d] < 0) padded_starts[d] += input_shape[d];
+            padded_starts[d] = std::max(int64_t(0), std::min(padded_starts[d], input_shape[d]));
+        }
+        if (d < static_cast<int64_t>(steps.size())) {
+            padded_steps[d] = steps[d];
+        }
+    }
+
+    // Copy metadata to device
+    int64_t* d_input_strides;
+    int64_t* d_output_shape;
+    int64_t* d_output_strides;
+    int64_t* d_starts;
+    int64_t* d_steps;
+    size_t meta_bytes = ndim * sizeof(int64_t);
+    cudaMalloc(&d_input_strides, meta_bytes);
+    cudaMalloc(&d_output_shape, meta_bytes);
+    cudaMalloc(&d_output_strides, meta_bytes);
+    cudaMalloc(&d_starts, meta_bytes);
+    cudaMalloc(&d_steps, meta_bytes);
+    cudaMemcpyAsync(d_input_strides, input_strides.data(), meta_bytes, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_output_shape, output_shape.data(), meta_bytes, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_output_strides, output_strides.data(), meta_bytes, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_starts, padded_starts.data(), meta_bytes, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_steps, padded_steps.data(), meta_bytes, cudaMemcpyHostToDevice, stream);
+
+    int block_size = 256;
+    int num_blocks = (total + block_size - 1) / block_size;
+
+    if (input.dtype() == DType::Float32) {
+        slice_kernel_impl<float><<<num_blocks, block_size, 0, stream>>>(
+            input.data<float>(), output.data<float>(),
+            d_input_strides, d_output_shape, d_output_strides, d_starts, d_steps, ndim, total);
+    } else if (input.dtype() == DType::Float64) {
+        slice_kernel_impl<double><<<num_blocks, block_size, 0, stream>>>(
+            input.data<double>(), output.data<double>(),
+            d_input_strides, d_output_shape, d_output_strides, d_starts, d_steps, ndim, total);
+    } else if (input.dtype() == DType::Float16) {
+        slice_kernel_impl<__half><<<num_blocks, block_size, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(output.data_ptr()),
+            d_input_strides, d_output_shape, d_output_strides, d_starts, d_steps, ndim, total);
+    } else if (input.dtype() == DType::Int32) {
+        slice_kernel_impl<int32_t><<<num_blocks, block_size, 0, stream>>>(
+            input.data<int32_t>(), output.data<int32_t>(),
+            d_input_strides, d_output_shape, d_output_strides, d_starts, d_steps, ndim, total);
+    } else if (input.dtype() == DType::Int64) {
+        slice_kernel_impl<int64_t><<<num_blocks, block_size, 0, stream>>>(
+            input.data<int64_t>(), output.data<int64_t>(),
+            d_input_strides, d_output_shape, d_output_strides, d_starts, d_steps, ndim, total);
+    } else {
+        cudaFree(d_input_strides); cudaFree(d_output_shape); cudaFree(d_output_strides);
+        cudaFree(d_starts); cudaFree(d_steps);
+        throw std::runtime_error("slice: unsupported dtype");
+    }
+
+    cudaError_t err = cudaGetLastError();
+    cudaFree(d_input_strides); cudaFree(d_output_shape); cudaFree(d_output_strides);
+    cudaFree(d_starts); cudaFree(d_steps);
+
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA error in slice_kernel: ") + cudaGetErrorString(err));
+    }
+
+    return output;
+}
+
+// ============================================================================
+// Stack (unsqueeze + cat)
+// ============================================================================
+
+auto stack_kernel(std::span<const Tensor> tensors, int64_t dim, cudaStream_t stream) -> Tensor {
+    if (tensors.empty()) {
+        throw std::runtime_error("stack: expected non-empty tensor list");
+    }
+
+    // Unsqueeze each tensor at dim, then cat
+    std::vector<Tensor> unsqueezed;
+    unsqueezed.reserve(tensors.size());
+    for (const auto& t : tensors) {
+        unsqueezed.push_back(unsqueeze_kernel(t, dim, stream));
+    }
+
+    return cat_kernel(std::span<const Tensor>(unsqueezed.data(), unsqueezed.size()), dim, stream);
+}
+
+// ============================================================================
+// Split / Chunk (slice-based)
+// ============================================================================
+
+auto split_kernel(const Tensor& input, int64_t split_size, int64_t dim, cudaStream_t stream) -> std::vector<Tensor> {
+    auto shape = input.shape();
+    int64_t ndim = shape.size();
+    if (dim < 0) dim += ndim;
+
+    int64_t dim_size = shape[dim];
+    int64_t num_splits = (dim_size + split_size - 1) / split_size;
+
+    std::vector<Tensor> results;
+    results.reserve(num_splits);
+
+    for (int64_t i = 0; i < num_splits; ++i) {
+        int64_t start = i * split_size;
+        int64_t end = std::min(start + split_size, dim_size);
+
+        std::vector<int64_t> starts(ndim, 0);
+        std::vector<int64_t> ends(shape.begin(), shape.end());
+        std::vector<int64_t> steps(ndim, 1);
+        starts[dim] = start;
+        ends[dim] = end;
+
+        results.push_back(slice_kernel(input, starts, ends, steps, stream));
+    }
+
+    return results;
+}
+
+auto chunk_kernel(const Tensor& input, int64_t chunks, int64_t dim, cudaStream_t stream) -> std::vector<Tensor> {
+    auto shape = input.shape();
+    if (dim < 0) dim += static_cast<int64_t>(shape.size());
+    int64_t dim_size = shape[dim];
+    int64_t split_size = (dim_size + chunks - 1) / chunks;
+    return split_kernel(input, split_size, dim, stream);
+}
+
+// ============================================================================
+// Tile (repeat wrapper)
+// ============================================================================
+
+auto tile_kernel(const Tensor& input, const std::vector<int64_t>& reps, cudaStream_t stream) -> Tensor {
+    return repeat_kernel(input, reps, stream);
+}
 } // namespace cuda
 } // namespace tenzor

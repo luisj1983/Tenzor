@@ -6,6 +6,7 @@
 #include <cmath>
 #include <algorithm>
 #include <stdexcept>
+#include <cub/cub.cuh>
 
 namespace tenzor {
 namespace cuda {
@@ -39,6 +40,208 @@ inline T host_zero() { return T(0); }
 template<>
 inline __half host_zero<__half>() { return __float2half(0.0f); }
 
+
+// ============================================================================
+// Helper kernels for GPU-side scalar operations (avoids D2H transfers)
+// ============================================================================
+
+template<typename T>
+__global__ void divide_scalar_kernel(T* val, T divisor) {
+    *val = *val / divisor;
+}
+
+template<typename T>
+__global__ void pow_scalar_kernel(T* val, T exponent) {
+    *val = pow(*val, exponent);
+}
+
+// Convert __half array to float array (for sorting/reduction on types CUB doesn't support)
+__global__ void half_to_float_kernel(const __half* src, float* dst, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) dst[idx] = __half2float(src[idx]);
+}
+
+// Phase-2 reduction kernels: given block-level argmax/argmin indices,
+// compare original values at those indices to find the global winner.
+template<typename T>
+__global__ void argmax_final_kernel(const T* input, const int64_t* block_indices, int64_t* output, int num_blocks) {
+    __shared__ T shared_vals[REDUCTION_BLOCK_SIZE];
+    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    T best_val;
+    int64_t best_idx;
+
+    if (tid < num_blocks) {
+        best_idx = block_indices[tid];
+        best_val = input[best_idx];
+    } else {
+        best_val = -FLT_MAX;
+        best_idx = 0;
+    }
+
+    // Handle case where num_blocks > blockDim.x (unlikely but safe)
+    for (int i = tid + blockDim.x; i < num_blocks; i += blockDim.x) {
+        int64_t idx = block_indices[i];
+        T val = input[idx];
+        if (val > best_val) {
+            best_val = val;
+            best_idx = idx;
+        }
+    }
+
+    shared_vals[tid] = best_val;
+    shared_idxs[tid] = best_idx;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            if (shared_vals[tid + stride] > shared_vals[tid]) {
+                shared_vals[tid] = shared_vals[tid + stride];
+                shared_idxs[tid] = shared_idxs[tid + stride];
+            }
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        *output = shared_idxs[0];
+    }
+}
+
+template<typename T>
+__global__ void argmin_final_kernel(const T* input, const int64_t* block_indices, int64_t* output, int num_blocks) {
+    __shared__ T shared_vals[REDUCTION_BLOCK_SIZE];
+    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    T best_val;
+    int64_t best_idx;
+
+    if (tid < num_blocks) {
+        best_idx = block_indices[tid];
+        best_val = input[best_idx];
+    } else {
+        best_val = FLT_MAX;
+        best_idx = 0;
+    }
+
+    for (int i = tid + blockDim.x; i < num_blocks; i += blockDim.x) {
+        int64_t idx = block_indices[i];
+        T val = input[idx];
+        if (val < best_val) {
+            best_val = val;
+            best_idx = idx;
+        }
+    }
+
+    shared_vals[tid] = best_val;
+    shared_idxs[tid] = best_idx;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            if (shared_vals[tid + stride] < shared_vals[tid]) {
+                shared_vals[tid] = shared_vals[tid + stride];
+                shared_idxs[tid] = shared_idxs[tid + stride];
+            }
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        *output = shared_idxs[0];
+    }
+}
+
+// Half-precision variants of final reduction kernels
+__global__ void argmax_final_kernel_half(const __half* input, const int64_t* block_indices, int64_t* output, int num_blocks) {
+    __shared__ float shared_vals[REDUCTION_BLOCK_SIZE];
+    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    float best_val;
+    int64_t best_idx;
+
+    if (tid < num_blocks) {
+        best_idx = block_indices[tid];
+        best_val = __half2float(input[best_idx]);
+    } else {
+        best_val = -FLT_MAX;
+        best_idx = 0;
+    }
+
+    for (int i = tid + blockDim.x; i < num_blocks; i += blockDim.x) {
+        int64_t idx = block_indices[i];
+        float val = __half2float(input[idx]);
+        if (val > best_val) {
+            best_val = val;
+            best_idx = idx;
+        }
+    }
+
+    shared_vals[tid] = best_val;
+    shared_idxs[tid] = best_idx;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            if (shared_vals[tid + stride] > shared_vals[tid]) {
+                shared_vals[tid] = shared_vals[tid + stride];
+                shared_idxs[tid] = shared_idxs[tid + stride];
+            }
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        *output = shared_idxs[0];
+    }
+}
+
+__global__ void argmin_final_kernel_half(const __half* input, const int64_t* block_indices, int64_t* output, int num_blocks) {
+    __shared__ float shared_vals[REDUCTION_BLOCK_SIZE];
+    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    float best_val;
+    int64_t best_idx;
+
+    if (tid < num_blocks) {
+        best_idx = block_indices[tid];
+        best_val = __half2float(input[best_idx]);
+    } else {
+        best_val = FLT_MAX;
+        best_idx = 0;
+    }
+
+    for (int i = tid + blockDim.x; i < num_blocks; i += blockDim.x) {
+        int64_t idx = block_indices[i];
+        float val = __half2float(input[idx]);
+        if (val < best_val) {
+            best_val = val;
+            best_idx = idx;
+        }
+    }
+
+    shared_vals[tid] = best_val;
+    shared_idxs[tid] = best_idx;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            if (shared_vals[tid + stride] < shared_vals[tid]) {
+                shared_vals[tid] = shared_vals[tid + stride];
+                shared_idxs[tid] = shared_idxs[tid + stride];
+            }
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        *output = shared_idxs[0];
+    }
+}
 // ============================================================================
 // Warp-level reduction primitives
 // ============================================================================
@@ -1897,42 +2100,17 @@ static void launch_full_argmax(const T* d_input, int64_t* d_output, int64_t n, c
 
     if (num_blocks == 1) {
         argmax_full_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
-        cudaStreamSynchronize(stream);
     } else {
-        // Two-phase reduction
+        // Two-phase GPU-only reduction
         int64_t* d_temp;
         cudaMalloc(&d_temp, num_blocks * sizeof(int64_t));
         argmax_full_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
 
-        // Second pass: find argmax of argmaxes
-        // Copy intermediate values and indices to host for final reduction
-        std::vector<int64_t> temp_idxs(num_blocks);
-        cudaMemcpyAsync(temp_idxs.data(), d_temp, num_blocks * sizeof(int64_t), cudaMemcpyDeviceToHost, stream);
-        cudaStreamSynchronize(stream);
-
-        // Find the true maximum among the block results
-        T max_val = d_input[temp_idxs[0]];
-        int64_t max_idx = temp_idxs[0];
-
-        std::vector<T> temp_vals(num_blocks);
-        for (int i = 0; i < num_blocks; i++) {
-            cudaMemcpyAsync(&temp_vals[i], &d_input[temp_idxs[i]], sizeof(T), cudaMemcpyDeviceToHost, stream);
-        }
-        cudaStreamSynchronize(stream);
-
-        for (int i = 1; i < num_blocks; i++) {
-            if (temp_vals[i] > max_val) {
-                max_val = temp_vals[i];
-                max_idx = temp_idxs[i];
-            }
-        }
-
-        cudaMemcpyAsync(d_output, &max_idx, sizeof(int64_t), cudaMemcpyHostToDevice, stream);
-        cudaStreamSynchronize(stream);
+        // Phase 2: compare block results entirely on GPU
+        argmax_final_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, d_output, num_blocks);
         cudaFree(d_temp);
     }
 }
-
 // Helper function to launch argmin reduction
 template<typename T>
 static void launch_full_argmin(const T* d_input, int64_t* d_output, int64_t n, cudaStream_t stream = nullptr) {
@@ -1950,40 +2128,18 @@ static void launch_full_argmin(const T* d_input, int64_t* d_output, int64_t n, c
 
     if (num_blocks == 1) {
         argmin_full_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
-        cudaStreamSynchronize(stream);
     } else {
-        // Two-phase reduction
+        // Two-phase GPU-only reduction
         int64_t* d_temp;
         cudaMalloc(&d_temp, num_blocks * sizeof(int64_t));
         argmin_full_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
 
-        // Second pass: find argmin of argmins
-        std::vector<int64_t> temp_idxs(num_blocks);
-        cudaMemcpyAsync(temp_idxs.data(), d_temp, num_blocks * sizeof(int64_t), cudaMemcpyDeviceToHost, stream);
-        cudaStreamSynchronize(stream);
-
-        // Find the true minimum among the block results
-        T min_val = d_input[temp_idxs[0]];
-        int64_t min_idx = temp_idxs[0];
-
-        std::vector<T> temp_vals(num_blocks);
-        for (int i = 0; i < num_blocks; i++) {
-            cudaMemcpyAsync(&temp_vals[i], &d_input[temp_idxs[i]], sizeof(T), cudaMemcpyDeviceToHost, stream);
-        }
-        cudaStreamSynchronize(stream);
-
-        for (int i = 1; i < num_blocks; i++) {
-            if (temp_vals[i] < min_val) {
-                min_val = temp_vals[i];
-                min_idx = temp_idxs[i];
-            }
-        }
-
-        cudaMemcpyAsync(d_output, &min_idx, sizeof(int64_t), cudaMemcpyHostToDevice, stream);
-        cudaStreamSynchronize(stream);
+        // Phase 2: compare block results entirely on GPU
+        argmin_final_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, d_output, num_blocks);
         cudaFree(d_temp);
     }
 }
+
 
 // Helper function for dimensional argmax
 template<typename T>
@@ -2088,36 +2244,14 @@ static void launch_full_argmax_half(const __half* d_input, int64_t* d_output, in
 
     if (num_blocks == 1) {
         argmax_full_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
-        cudaStreamSynchronize(stream);
     } else {
-        // Two-phase reduction
+        // Two-phase GPU-only reduction
         int64_t* d_temp;
         cudaMalloc(&d_temp, num_blocks * sizeof(int64_t));
         argmax_full_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
 
-        // Second pass: find argmax of argmaxes
-        std::vector<int64_t> temp_idxs(num_blocks);
-        cudaMemcpyAsync(temp_idxs.data(), d_temp, num_blocks * sizeof(int64_t), cudaMemcpyDeviceToHost, stream);
-        cudaStreamSynchronize(stream);
-
-        // Find the true maximum among the block results
-        std::vector<__half> temp_vals(num_blocks);
-        for (int i = 0; i < num_blocks; i++) {
-            cudaMemcpyAsync(&temp_vals[i], &d_input[temp_idxs[i]], sizeof(__half), cudaMemcpyDeviceToHost, stream);
-        }
-        cudaStreamSynchronize(stream);
-
-        __half max_val = temp_vals[0];
-        int64_t max_idx = temp_idxs[0];
-        for (int i = 1; i < num_blocks; i++) {
-            if (__half2float(temp_vals[i]) > __half2float(max_val)) {
-                max_val = temp_vals[i];
-                max_idx = temp_idxs[i];
-            }
-        }
-
-        cudaMemcpyAsync(d_output, &max_idx, sizeof(int64_t), cudaMemcpyHostToDevice, stream);
-        cudaStreamSynchronize(stream);
+        // Phase 2: compare block results entirely on GPU
+        argmax_final_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, d_output, num_blocks);
         cudaFree(d_temp);
     }
 }
@@ -2137,39 +2271,18 @@ static void launch_full_argmin_half(const __half* d_input, int64_t* d_output, in
 
     if (num_blocks == 1) {
         argmin_full_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
-        cudaStreamSynchronize(stream);
     } else {
-        // Two-phase reduction
+        // Two-phase GPU-only reduction
         int64_t* d_temp;
         cudaMalloc(&d_temp, num_blocks * sizeof(int64_t));
         argmin_full_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
 
-        // Second pass: find argmin of argmins
-        std::vector<int64_t> temp_idxs(num_blocks);
-        cudaMemcpyAsync(temp_idxs.data(), d_temp, num_blocks * sizeof(int64_t), cudaMemcpyDeviceToHost, stream);
-        cudaStreamSynchronize(stream);
-
-        // Find the true minimum among the block results
-        std::vector<__half> temp_vals(num_blocks);
-        for (int i = 0; i < num_blocks; i++) {
-            cudaMemcpyAsync(&temp_vals[i], &d_input[temp_idxs[i]], sizeof(__half), cudaMemcpyDeviceToHost, stream);
-        }
-        cudaStreamSynchronize(stream);
-
-        __half min_val = temp_vals[0];
-        int64_t min_idx = temp_idxs[0];
-        for (int i = 1; i < num_blocks; i++) {
-            if (__half2float(temp_vals[i]) < __half2float(min_val)) {
-                min_val = temp_vals[i];
-                min_idx = temp_idxs[i];
-            }
-        }
-
-        cudaMemcpyAsync(d_output, &min_idx, sizeof(int64_t), cudaMemcpyHostToDevice, stream);
-        cudaStreamSynchronize(stream);
+        // Phase 2: compare block results entirely on GPU
+        argmin_final_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, d_output, num_blocks);
         cudaFree(d_temp);
     }
 }
+
 
 static void launch_dim_argmax_half(
     const __half* d_input,
@@ -2834,19 +2947,12 @@ static void launch_variance_computation(const T* d_input, T* d_output, int64_t n
     int num_blocks = std::min<int>((n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE, 1024);
 
     if (num_blocks == 1) {
-        variance_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, mean, d_mean_temp, n, correction);
-        cudaStreamSynchronize(stream);
+        variance_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, mean, d_output, n, correction);
 
-        // Divide by (n - correction)
-        T var_sum;
-        cudaMemcpyAsync(&var_sum, d_mean_temp, sizeof(T), cudaMemcpyDeviceToHost, stream);
-        cudaStreamSynchronize(stream);
-
+        // Divide by (n - correction) on GPU
         int64_t divisor = n - correction;
         if (divisor <= 0) divisor = 1;
-        T variance = var_sum / static_cast<T>(divisor);
-
-        cudaMemcpyAsync(d_output, &variance, sizeof(T), cudaMemcpyHostToDevice, stream);
+        divide_scalar_kernel<<<1, 1, 0, stream>>>(d_output, static_cast<T>(divisor));
     } else {
         // Two-phase reduction
         T* d_temp;
@@ -2855,19 +2961,12 @@ static void launch_variance_computation(const T* d_input, T* d_output, int64_t n
         variance_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, mean, d_temp, n, correction);
 
         // Second phase: sum the partial results
-        sum_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_mean_temp, num_blocks);
-        cudaStreamSynchronize(stream);
+        sum_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
 
-        // Divide by (n - correction)
-        T var_sum;
-        cudaMemcpyAsync(&var_sum, d_mean_temp, sizeof(T), cudaMemcpyDeviceToHost, stream);
-        cudaStreamSynchronize(stream);
-
+        // Divide by (n - correction) on GPU
         int64_t divisor = n - correction;
         if (divisor <= 0) divisor = 1;
-        T variance = var_sum / static_cast<T>(divisor);
-
-        cudaMemcpyAsync(d_output, &variance, sizeof(T), cudaMemcpyHostToDevice, stream);
+        divide_scalar_kernel<<<1, 1, 0, stream>>>(d_output, static_cast<T>(divisor));
         cudaFree(d_temp);
     }
 
@@ -3196,11 +3295,9 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, cudaSt
                     cudaFree(d_temp2);
                 }
 
-                // Take p-th root on host
-                cudaMemcpyAsync(&result, d_temp, sizeof(float), cudaMemcpyDeviceToHost, stream);
-                cudaStreamSynchronize(stream);
-                result = std::pow(result, 1.0f / p);
-                cudaMemcpyAsync(output_data, &result, sizeof(float), cudaMemcpyHostToDevice, stream);
+                // Take p-th root on GPU
+                pow_scalar_kernel<<<1, 1, 0, stream>>>(d_temp, 1.0f / p);
+                cudaMemcpyAsync(output_data, d_temp, sizeof(float), cudaMemcpyDeviceToDevice, stream);
                 cudaFree(d_temp);
             }
 
@@ -3256,11 +3353,9 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, cudaSt
                     cudaFree(d_temp2);
                 }
 
-                // Take p-th root on host
-                cudaMemcpyAsync(&result, d_temp, sizeof(double), cudaMemcpyDeviceToHost, stream);
-                cudaStreamSynchronize(stream);
-                result = std::pow(result, 1.0 / p);
-                cudaMemcpyAsync(output_data, &result, sizeof(double), cudaMemcpyHostToDevice, stream);
+                // Take p-th root on GPU
+                pow_scalar_kernel<<<1, 1, 0, stream>>>(d_temp, 1.0 / p);
+                cudaMemcpyAsync(output_data, d_temp, sizeof(double), cudaMemcpyDeviceToDevice, stream);
                 cudaFree(d_temp);
             }
 
@@ -3274,6 +3369,152 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, cudaSt
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         throw std::runtime_error(std::string("CUDA error in norm_kernel: ") + cudaGetErrorString(err));
+    }
+
+    return output;
+}
+
+
+// ============================================================================
+// Argsort kernel
+// ============================================================================
+
+template<typename T>
+__global__ void argsort_kernel(const T* input, int64_t* output, int64_t n, bool descending) {
+    // Bitonic sort for moderate-sized arrays on GPU
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+
+    // Initialize output indices
+    if (tid < n) {
+        output[tid] = tid;
+    }
+    __syncthreads();
+
+    // Bitonic sort passes
+    for (int64_t size = 2; size <= n; size *= 2) {
+        for (int64_t stride = size / 2; stride > 0; stride /= 2) {
+            if (tid < n) {
+                int64_t partner = tid ^ stride;
+                if (partner > tid && partner < n) {
+                    bool swap;
+                    T val_tid = input[output[tid]];
+                    T val_partner = input[output[partner]];
+
+                    // Determine sort direction for this sub-sequence
+                    bool ascending_dir = ((tid & size) == 0);
+                    if (descending) ascending_dir = !ascending_dir;
+
+                    if (ascending_dir) {
+                        swap = (val_tid > val_partner);
+                    } else {
+                        swap = (val_tid < val_partner);
+                    }
+
+                    if (swap) {
+                        int64_t temp = output[tid];
+                        output[tid] = output[partner];
+                        output[partner] = temp;
+                    }
+                }
+            }
+            __syncthreads();
+        }
+    }
+}
+
+// Index initialization kernel for argsort
+__global__ void iota_kernel(int64_t* output, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        output[idx] = idx;
+    }
+}
+
+// CUB-based argsort for larger arrays
+template<typename T>
+static void launch_argsort(const T* d_input, int64_t* d_output, int64_t n, bool descending, cudaStream_t stream = nullptr) {
+    if (n == 0) return;
+
+    if (n == 1) {
+        int64_t zero = 0;
+        cudaMemcpyAsync(d_output, &zero, sizeof(int64_t), cudaMemcpyHostToDevice, stream);
+        return;
+    }
+
+    // For small arrays, use the bitonic sort kernel
+    if (n <= MAX_BLOCK_SIZE) {
+        int block_size = 1;
+        while (block_size < n) block_size *= 2;
+        if (block_size > MAX_BLOCK_SIZE) block_size = MAX_BLOCK_SIZE;
+        argsort_kernel<<<1, block_size, 0, stream>>>(d_input, d_output, n, descending);
+        return;
+    }
+
+    // For larger arrays, use CUB DeviceRadixSort with key-value pairs
+    int64_t* d_indices_in;
+    cudaMalloc(&d_indices_in, n * sizeof(int64_t));
+
+    // Initialize indices 0..n-1
+    int init_blocks = (n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    iota_kernel<<<init_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_indices_in, n);
+
+    // Allocate output keys buffer
+    T* d_keys_out;
+    cudaMalloc(&d_keys_out, n * sizeof(T));
+
+    void* d_temp_storage = nullptr;
+    size_t temp_storage_bytes = 0;
+
+    if (descending) {
+        cub::DeviceRadixSort::SortPairsDescending(d_temp_storage, temp_storage_bytes,
+            d_input, d_keys_out, d_indices_in, d_output, n, 0, sizeof(T) * 8, stream);
+        cudaMalloc(&d_temp_storage, temp_storage_bytes);
+        cub::DeviceRadixSort::SortPairsDescending(d_temp_storage, temp_storage_bytes,
+            d_input, d_keys_out, d_indices_in, d_output, n, 0, sizeof(T) * 8, stream);
+    } else {
+        cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,
+            d_input, d_keys_out, d_indices_in, d_output, n, 0, sizeof(T) * 8, stream);
+        cudaMalloc(&d_temp_storage, temp_storage_bytes);
+        cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,
+            d_input, d_keys_out, d_indices_in, d_output, n, 0, sizeof(T) * 8, stream);
+    }
+
+    cudaFree(d_temp_storage);
+    cudaFree(d_keys_out);
+    cudaFree(d_indices_in);
+}
+
+
+auto argsort_kernel(const Tensor& input, int64_t dim, bool descending, cudaStream_t stream) -> Tensor {
+    const auto dtype = input.dtype();
+    const auto& device = input.device();
+    const auto& input_shape = input.shape();
+    const int64_t n = input.numel();
+
+    // Currently only supports sorting the flattened tensor (dim=-1 or single dimension)
+    // For multi-dim support, would need to sort along a specific axis
+    Tensor output(std::vector<int64_t>(input_shape.begin(), input_shape.end()), DType::Int64, device);
+
+    switch (dtype) {
+        case DType::Float32:
+            launch_argsort(input.data<float>(), output.data<int64_t>(), n, descending, stream);
+            break;
+        case DType::Float64:
+            launch_argsort(input.data<double>(), output.data<int64_t>(), n, descending, stream);
+            break;
+        case DType::Float16: {
+            // CUB RadixSort doesn't support __half, so convert to float32 and sort that
+            float* d_float_buf;
+            cudaMalloc(&d_float_buf, n * sizeof(float));
+            const __half* d_half = reinterpret_cast<const __half*>(input.data_ptr());
+            int blocks = (n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+            half_to_float_kernel<<<blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_half, d_float_buf, n);
+            launch_argsort(d_float_buf, output.data<int64_t>(), n, descending, stream);
+            cudaFree(d_float_buf);
+            break;
+        }
+        default:
+            throw std::runtime_error("argsort_kernel: unsupported dtype");
     }
 
     return output;

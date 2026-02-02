@@ -1700,5 +1700,161 @@ auto conv_transpose2d_forward_kernel(
     return output;
 }
 
+
+// ============================================================================
+// Depthwise Conv2d CUDA Kernel
+// ============================================================================
+
+template<typename T>
+__global__ void depthwise_conv2d_forward_kernel_impl(
+    const T* __restrict__ input,
+    const T* __restrict__ weight,
+    const T* __restrict__ bias,
+    T* __restrict__ output,
+    int64_t batch, int64_t channels,
+    int64_t in_h, int64_t in_w,
+    int64_t out_h, int64_t out_w,
+    int64_t kernel_h, int64_t kernel_w,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dilation_h, int64_t dilation_w,
+    bool has_bias) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = batch * channels * out_h * out_w;
+    if (idx >= total) return;
+
+    int64_t ow = idx % out_w;
+    int64_t oh = (idx / out_w) % out_h;
+    int64_t c = (idx / (out_w * out_h)) % channels;
+    int64_t n = idx / (out_w * out_h * channels);
+
+    T sum = T(0);
+    for (int64_t kh = 0; kh < kernel_h; ++kh) {
+        for (int64_t kw = 0; kw < kernel_w; ++kw) {
+            int64_t ih = oh * stride_h - pad_h + kh * dilation_h;
+            int64_t iw = ow * stride_w - pad_w + kw * dilation_w;
+
+            if (ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
+                int64_t input_idx = ((n * channels + c) * in_h + ih) * in_w + iw;
+                int64_t weight_idx = (c * kernel_h + kh) * kernel_w + kw;
+                sum += input[input_idx] * weight[weight_idx];
+            }
+        }
+    }
+
+    if (has_bias) {
+        sum += bias[c];
+    }
+
+    output[idx] = sum;
+}
+
+__global__ void depthwise_conv2d_forward_kernel_f16(
+    const __half* __restrict__ input,
+    const __half* __restrict__ weight,
+    const __half* __restrict__ bias,
+    __half* __restrict__ output,
+    int64_t batch, int64_t channels,
+    int64_t in_h, int64_t in_w,
+    int64_t out_h, int64_t out_w,
+    int64_t kernel_h, int64_t kernel_w,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dilation_h, int64_t dilation_w,
+    bool has_bias) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = batch * channels * out_h * out_w;
+    if (idx >= total) return;
+
+    int64_t ow = idx % out_w;
+    int64_t oh = (idx / out_w) % out_h;
+    int64_t c = (idx / (out_w * out_h)) % channels;
+    int64_t n = idx / (out_w * out_h * channels);
+
+    float sum = 0.0f;
+    for (int64_t kh = 0; kh < kernel_h; ++kh) {
+        for (int64_t kw = 0; kw < kernel_w; ++kw) {
+            int64_t ih = oh * stride_h - pad_h + kh * dilation_h;
+            int64_t iw = ow * stride_w - pad_w + kw * dilation_w;
+
+            if (ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
+                int64_t input_idx = ((n * channels + c) * in_h + ih) * in_w + iw;
+                int64_t weight_idx = (c * kernel_h + kh) * kernel_w + kw;
+                sum += __half2float(input[input_idx]) * __half2float(weight[weight_idx]);
+            }
+        }
+    }
+
+    if (has_bias) {
+        sum += __half2float(bias[c]);
+    }
+
+    output[idx] = __float2half(sum);
+}
+
+auto depthwise_conv2d_forward_kernel(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    cudaStream_t stream
+) -> Tensor {
+    auto input_shape = input.shape();
+    auto weight_shape = weight.shape();
+
+    int64_t batch = input_shape[0];
+    int64_t channels = input_shape[1];
+    int64_t in_h = input_shape[2];
+    int64_t in_w = input_shape[3];
+    int64_t kernel_h = weight_shape[2];
+    int64_t kernel_w = weight_shape[3];
+
+    int64_t out_h = (in_h + 2 * padding - dilation * (kernel_h - 1) - 1) / stride + 1;
+    int64_t out_w = (in_w + 2 * padding - dilation * (kernel_w - 1) - 1) / stride + 1;
+
+    Tensor output({batch, channels, out_h, out_w}, input.dtype(), input.device());
+
+    int64_t total = batch * channels * out_h * out_w;
+    int block_size = 256;
+    int num_blocks = (total + block_size - 1) / block_size;
+
+    bool has_bias = (bias != nullptr);
+
+    if (input.dtype() == DType::Float32) {
+        depthwise_conv2d_forward_kernel_impl<float><<<num_blocks, block_size, 0, stream>>>(
+            input.data<float>(), weight.data<float>(),
+            has_bias ? bias->data<float>() : nullptr,
+            output.data<float>(),
+            batch, channels, in_h, in_w, out_h, out_w,
+            kernel_h, kernel_w, stride, stride, padding, padding,
+            dilation, dilation, has_bias);
+    } else if (input.dtype() == DType::Float64) {
+        depthwise_conv2d_forward_kernel_impl<double><<<num_blocks, block_size, 0, stream>>>(
+            input.data<double>(), weight.data<double>(),
+            has_bias ? bias->data<double>() : nullptr,
+            output.data<double>(),
+            batch, channels, in_h, in_w, out_h, out_w,
+            kernel_h, kernel_w, stride, stride, padding, padding,
+            dilation, dilation, has_bias);
+    } else if (input.dtype() == DType::Float16) {
+        depthwise_conv2d_forward_kernel_f16<<<num_blocks, block_size, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<const __half*>(weight.data_ptr()),
+            has_bias ? reinterpret_cast<const __half*>(bias->data_ptr()) : nullptr,
+            reinterpret_cast<__half*>(output.data_ptr()),
+            batch, channels, in_h, in_w, out_h, out_w,
+            kernel_h, kernel_w, stride, stride, padding, padding,
+            dilation, dilation, has_bias);
+    } else {
+        throw std::runtime_error("depthwise_conv2d_forward: unsupported dtype");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return output;
+}
 } // namespace cuda
 } // namespace tenzor

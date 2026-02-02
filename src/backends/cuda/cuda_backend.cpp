@@ -1901,13 +1901,6 @@ public:
                 }
                 return {cuda::gather_relative_position_bias(inputs[0], inputs[1], num_positions, num_heads)};
             }
-            // Fused operations disabled - CUDA kernels not yet implemented
-            // Fall back to CPU fused operations for now
-            else if (op_name == "fused_linear_relu" || op_name == "fused_batchnorm_relu" ||
-                     op_name == "fused_softmax_cross_entropy" || op_name == "fused_add_relu" ||
-                     op_name == "fused_gelu" || op_name == "fused_layer_norm") {
-                throw std::runtime_error("CUDABackend: Fused operation '" + op_name + "' not yet implemented for CUDA. Use CPU backend for fused ops.");
-            }
             else {
                 throw std::runtime_error("CUDABackend: Unknown operation '" + op_name + "'");
             }

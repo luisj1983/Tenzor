@@ -279,6 +279,81 @@ namespace cuda {
     bool is_cudnn_available() noexcept;
     bool is_cudnn_frontend_available() noexcept;
 
+    // Conv2d backward and transpose
+    auto conv2d_backward_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& weight, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
+    auto conv_transpose2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
+    auto depthwise_conv2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, cudaStream_t stream) -> Tensor;
+
+#ifdef TENZOR_HAS_CUDNN
+    auto cudnn_conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
+    auto cudnn_conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& weight, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
+    auto cudnn_layer_norm_forward(const Tensor& input, const std::vector<int64_t>& normalized_shape, const Tensor& weight, const Tensor& bias, float eps, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
+    auto cudnn_layer_norm_backward(const Tensor& grad_output, const Tensor& input, const Tensor& weight, const Tensor& mean, const Tensor& inv_std, const std::vector<int64_t>& normalized_shape, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
+#endif
+
+    // Dropout operations
+    auto dropout_forward_kernel(const Tensor& input, float p, bool training, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
+    auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, float p, cudaStream_t stream) -> Tensor;
+
+    // LSTM operations
+    auto lstm_cell_forward_kernel(const Tensor& gates, const Tensor& c_prev, int64_t batch_size, int64_t hidden_size, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
+    auto lstm_cell_backward_kernel(const Tensor& grad_h, const Tensor& grad_c, const Tensor& gates, const Tensor& c_prev, const Tensor& c_out, int64_t batch_size, int64_t hidden_size, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
+
+    // GRU operations
+    struct GRUBackwardOutputs {
+        Tensor grad_reset;
+        Tensor grad_update;
+        Tensor grad_new_input;
+        Tensor grad_new_hidden;
+        Tensor grad_h_prev;
+    };
+    auto gru_cell_forward_kernel(const Tensor& reset_gates, const Tensor& update_gates, const Tensor& new_gates_input, const Tensor& new_gates_hidden, const Tensor& h_prev, int64_t batch_size, int64_t hidden_size, cudaStream_t stream) -> Tensor;
+    auto gru_cell_backward_kernel(const Tensor& grad_h, const Tensor& reset_gates, const Tensor& update_gates, const Tensor& new_gates_input, const Tensor& new_gates_hidden, const Tensor& h_prev, int64_t batch_size, int64_t hidden_size, cudaStream_t stream) -> GRUBackwardOutputs;
+
+    // Adaptive pooling operations
+    auto adaptive_avg_pool2d_forward(const Tensor& input, int64_t output_h, int64_t output_w, cudaStream_t stream) -> Tensor;
+    auto adaptive_avg_pool2d_backward(const Tensor& grad_output, int64_t H_in, int64_t W_in, cudaStream_t stream) -> Tensor;
+    auto adaptive_max_pool2d_forward(const Tensor& input, int64_t output_h, int64_t output_w, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
+    auto adaptive_max_pool2d_backward(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape, cudaStream_t stream) -> Tensor;
+
+    // GroupNorm / InstanceNorm operations
+    auto group_norm_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor& bias, int64_t num_groups, float eps, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
+    auto group_norm_backward_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& weight, const Tensor& mean_saved, const Tensor& inv_std_saved, int64_t num_groups, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
+    auto instance_norm_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor& bias, float eps, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
+    auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& weight, const Tensor& mean_saved, const Tensor& inv_std_saved, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
+
+    // RMSNorm backward
+    auto fused_rms_norm_backward_cuda(const Tensor& grad_output, const Tensor& input, const Tensor& weight, const Tensor& rrms) -> std::tuple<Tensor, Tensor>;
+
+    // Fused LayerNorm backward
+    auto fused_layer_norm_backward_cuda(const Tensor& grad_output, const Tensor& input, const Tensor& weight, const Tensor& mean, const Tensor& inv_std, const std::vector<int64_t>& normalized_shape) -> std::tuple<Tensor, Tensor, Tensor>;
+
+    // Creation operations
+    auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor;
+    auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor;
+    auto arange_kernel(float start, float end, float step, DType dtype, Device device, cudaStream_t stream) -> Tensor;
+    auto linspace_kernel(float start, float end, int64_t steps, DType dtype, Device device, cudaStream_t stream) -> Tensor;
+    auto eye_kernel(int64_t n, int64_t m, DType dtype, Device device, cudaStream_t stream) -> Tensor;
+
+    // Transform operations
+    auto flatten_kernel(const Tensor& input, int64_t start_dim, int64_t end_dim, cudaStream_t stream) -> Tensor;
+    auto slice_kernel(const Tensor& input, const std::vector<int64_t>& starts, const std::vector<int64_t>& ends, const std::vector<int64_t>& steps, cudaStream_t stream) -> Tensor;
+    auto stack_kernel(std::span<const Tensor> tensors, int64_t dim, cudaStream_t stream) -> Tensor;
+    auto split_kernel(const Tensor& input, int64_t split_size, int64_t dim, cudaStream_t stream) -> std::vector<Tensor>;
+    auto chunk_kernel(const Tensor& input, int64_t chunks, int64_t dim, cudaStream_t stream) -> std::vector<Tensor>;
+    auto tile_kernel(const Tensor& input, const std::vector<int64_t>& reps, cudaStream_t stream) -> Tensor;
+
+    // ArgSort
+    auto argsort_kernel(const Tensor& input, int64_t dim, bool descending, cudaStream_t stream) -> Tensor;
+
+    // Fused Softmax Cross Entropy
+    auto fused_softmax_cross_entropy_cuda(const Tensor& logits, const Tensor& targets, bool compute_grad) -> std::tuple<Tensor, Tensor>;
+
+    // Fused optimizer steps
+    auto fused_rmsprop_step_cuda(Tensor& param, const Tensor& grad, Tensor& square_avg, Tensor* grad_avg, Tensor* momentum_buffer, float lr, float alpha, float eps, float weight_decay, float momentum, bool centered, cudaStream_t stream) -> void;
+    auto fused_adadelta_step_cuda(Tensor& param, const Tensor& grad, Tensor& square_avg, Tensor& acc_delta, float rho, float eps, float lr, float weight_decay, cudaStream_t stream) -> void;
+    auto fused_adagrad_step_cuda(Tensor& param, const Tensor& grad, Tensor& sum_sq, float lr, float lr_decay, float eps, float weight_decay, int64_t step, cudaStream_t stream) -> void;
+
     // =========================================================================
     // Dispatch-Conformant Wrappers (SingleOutputKernelFn signature)
     // =========================================================================
@@ -437,18 +512,6 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         int64_t dim = parse_attr<int64_t>(attrs, "dim", INT64_MIN);
         bool keepdim = parse_attr<bool>(attrs, "keepdim", false);
         return std::vector<Tensor>{cuda::argmin_kernel(inputs[0], dim, keepdim, get_cuda_stream(attrs))};
-    });
-    // ArgSort - CPU fallback for now (proper CUDA implementation would use Thrust or CUB)
-    table.register_kernel(OpId::ArgSort, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // Transfer to CPU, do argsort, transfer back
-        Device original_device = inputs[0].device();
-        Tensor cpu_input = inputs[0].to(Device::cpu());
-        OpAttributes cpu_attrs = attrs;
-        cpu_attrs.erase("stream");  // Remove CUDA stream from attrs for CPU
-        std::vector<Tensor> cpu_inputs = {cpu_input};
-        // Dispatch will automatically use CPU backend since tensor is on CPU
-        auto result = tenzor::dispatch(OpId::ArgSort, cpu_inputs, cpu_attrs)[0];
-        return std::vector<Tensor>{result.to(original_device)};
     });
     table.register_kernel(OpId::Prod, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t dim = parse_attr<int64_t>(attrs, "dim", INT64_MIN);
@@ -1041,6 +1104,444 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return {cuda::roi_align_backward(inputs[0], inputs[1],
                                          batch_size, feat_height, feat_width,
                                          spatial_scale, sampling_ratio, aligned)};
+    });
+
+    // =========================================================================
+    // Conv2d Operations (Phase 1A - CRITICAL)
+    // =========================================================================
+#ifdef TENZOR_HAS_CUDNN
+    table.register_single_output_kernel(OpId::Conv2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // inputs: [input, weight] or [input, weight, bias]
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        return cuda::cudnn_conv2d_forward(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
+    });
+    table.register_kernel(OpId::Conv2dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv2d_backward(
+            inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, true, false, false, get_cuda_stream(attrs));
+        return {grad_input};
+    });
+    table.register_kernel(OpId::Conv2dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv2d_backward(
+            inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, false, true, false, get_cuda_stream(attrs));
+        return {grad_weight};
+    });
+    table.register_kernel(OpId::Conv2dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv2d_backward(
+            inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, false, false, true, get_cuda_stream(attrs));
+        return {grad_bias};
+    });
+#else
+    table.register_single_output_kernel(OpId::Conv2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        return cuda::conv2d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
+    });
+    table.register_kernel(OpId::Conv2dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        auto [grad_input, grad_weight, grad_bias] = cuda::conv2d_backward_kernel(
+            inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, true, false, false, get_cuda_stream(attrs));
+        return {grad_input};
+    });
+    table.register_kernel(OpId::Conv2dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        auto [grad_input, grad_weight, grad_bias] = cuda::conv2d_backward_kernel(
+            inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, false, true, false, get_cuda_stream(attrs));
+        return {grad_weight};
+    });
+    table.register_kernel(OpId::Conv2dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        auto [grad_input, grad_weight, grad_bias] = cuda::conv2d_backward_kernel(
+            inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, false, false, true, get_cuda_stream(attrs));
+        return {grad_bias};
+    });
+#endif
+
+    table.register_single_output_kernel(OpId::ConvTranspose2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t output_padding = parse_attr<int64_t>(attrs, "output_padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        return cuda::conv_transpose2d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, output_padding, dilation, groups, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::DepthwiseConv2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        return cuda::depthwise_conv2d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, get_cuda_stream(attrs));
+    });
+
+    // =========================================================================
+    // Dropout Operations (Phase 1B - CRITICAL)
+    // =========================================================================
+    table.register_kernel(OpId::Dropout, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float p = parse_attr<float>(attrs, "p", 0.5f);
+        bool training = parse_attr<bool>(attrs, "training", true);
+        auto [output, mask] = cuda::dropout_forward_kernel(inputs[0], p, training, get_cuda_stream(attrs));
+        return std::vector<Tensor>{output, mask};
+    });
+    table.register_single_output_kernel(OpId::DropoutBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        float p = parse_attr<float>(attrs, "p", 0.5f);
+        return cuda::dropout_backward_kernel(inputs[0], inputs[1], p, get_cuda_stream(attrs));
+    });
+
+    // =========================================================================
+    // LSTM Operations (Phase 1C - HIGH)
+    // =========================================================================
+    table.register_kernel(OpId::LSTMCellForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [gates, c_prev]
+        int64_t batch_size = parse_attr<int64_t>(attrs, "batch_size", 0);
+        int64_t hidden_size = parse_attr<int64_t>(attrs, "hidden_size", 0);
+        auto [h_out, c_out] = cuda::lstm_cell_forward_kernel(inputs[0], inputs[1], batch_size, hidden_size, get_cuda_stream(attrs));
+        return std::vector<Tensor>{h_out, c_out};
+    });
+    table.register_kernel(OpId::LSTMCellBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [grad_h, grad_c, gates, c_prev, c_out]
+        int64_t batch_size = parse_attr<int64_t>(attrs, "batch_size", 0);
+        int64_t hidden_size = parse_attr<int64_t>(attrs, "hidden_size", 0);
+        auto [grad_gates, grad_c_prev] = cuda::lstm_cell_backward_kernel(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+            batch_size, hidden_size, get_cuda_stream(attrs));
+        return std::vector<Tensor>{grad_gates, grad_c_prev};
+    });
+
+    // =========================================================================
+    // GRU Operations (Phase 1C - HIGH)
+    // =========================================================================
+    table.register_kernel(OpId::GRUCellForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [reset_gates, update_gates, new_gates_input, new_gates_hidden, h_prev]
+        int64_t batch_size = parse_attr<int64_t>(attrs, "batch_size", 0);
+        int64_t hidden_size = parse_attr<int64_t>(attrs, "hidden_size", 0);
+        auto h_out = cuda::gru_cell_forward_kernel(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+            batch_size, hidden_size, get_cuda_stream(attrs));
+        return std::vector<Tensor>{h_out};
+    });
+    table.register_kernel(OpId::GRUCellBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [grad_h, reset_gates, update_gates, new_gates_input, new_gates_hidden, h_prev]
+        int64_t batch_size = parse_attr<int64_t>(attrs, "batch_size", 0);
+        int64_t hidden_size = parse_attr<int64_t>(attrs, "hidden_size", 0);
+        auto result = cuda::gru_cell_backward_kernel(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5],
+            batch_size, hidden_size, get_cuda_stream(attrs));
+        return std::vector<Tensor>{result.grad_reset, result.grad_update, result.grad_new_input, result.grad_new_hidden, result.grad_h_prev};
+    });
+
+    // =========================================================================
+    // LayerNorm (non-fused) Operations (Phase 1D - HIGH)
+    // =========================================================================
+#ifdef TENZOR_HAS_CUDNN
+    table.register_kernel(OpId::LayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [input, weight, bias]
+        float eps = parse_attr<float>(attrs, "eps", 1e-5f);
+        auto normalized_shape = parse_int_list(attrs, "normalized_shape");
+        auto [output, mean, inv_std] = cuda::cudnn_layer_norm_forward(
+            inputs[0], normalized_shape, inputs[1], inputs[2], eps, get_cuda_stream(attrs));
+        return std::vector<Tensor>{output, mean, inv_std};
+    });
+    table.register_kernel(OpId::LayerNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [grad_output, input, weight, mean, inv_std]
+        auto normalized_shape = parse_int_list(attrs, "normalized_shape");
+        auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_layer_norm_backward(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], normalized_shape, get_cuda_stream(attrs));
+        return std::vector<Tensor>{grad_input, grad_weight, grad_bias};
+    });
+#else
+    table.register_kernel(OpId::LayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float eps = parse_attr<float>(attrs, "eps", 1e-5f);
+        auto normalized_shape = parse_int_list(attrs, "normalized_shape");
+        auto [output, mean, inv_std] = cuda::fused_layer_norm_cuda(
+            inputs[0], normalized_shape, inputs[1], inputs[2], eps);
+        return std::vector<Tensor>{output, mean, inv_std};
+    });
+    table.register_kernel(OpId::LayerNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        auto normalized_shape = parse_int_list(attrs, "normalized_shape");
+        auto [grad_input, grad_weight, grad_bias] = cuda::fused_layer_norm_backward_cuda(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], normalized_shape);
+        return std::vector<Tensor>{grad_input, grad_weight, grad_bias};
+    });
+#endif
+
+    // =========================================================================
+    // Adaptive Pooling Operations (Phase 1E / 3D - HIGH)
+    // =========================================================================
+    table.register_single_output_kernel(OpId::AdaptiveAvgPool2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t output_h = parse_attr<int64_t>(attrs, "output_h", 1);
+        int64_t output_w = parse_attr<int64_t>(attrs, "output_w", 1);
+        return cuda::adaptive_avg_pool2d_forward(inputs[0], output_h, output_w, get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::AdaptiveAvgPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t H_in = parse_attr<int64_t>(attrs, "input_h", 0);
+        int64_t W_in = parse_attr<int64_t>(attrs, "input_w", 0);
+        return cuda::adaptive_avg_pool2d_backward(inputs[0], H_in, W_in, get_cuda_stream(attrs));
+    });
+    table.register_kernel(OpId::AdaptiveMaxPool2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t output_h = parse_attr<int64_t>(attrs, "output_h", 1);
+        int64_t output_w = parse_attr<int64_t>(attrs, "output_w", 1);
+        auto [output, indices] = cuda::adaptive_max_pool2d_forward(inputs[0], output_h, output_w, get_cuda_stream(attrs));
+        return std::vector<Tensor>{output, indices};
+    });
+    table.register_single_output_kernel(OpId::AdaptiveMaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = parse_int_list(attrs, "input_shape");
+        return cuda::adaptive_max_pool2d_backward(inputs[0], inputs[1], input_shape, get_cuda_stream(attrs));
+    });
+
+    // =========================================================================
+    // GroupNorm / InstanceNorm Operations (Phase 3A-B - HIGH)
+    // =========================================================================
+    table.register_kernel(OpId::GroupNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [input, weight, bias]
+        int64_t num_groups = parse_attr<int64_t>(attrs, "num_groups", 1);
+        float eps = parse_attr<float>(attrs, "eps", 1e-5f);
+        auto [output, mean, inv_std] = cuda::group_norm_forward_kernel(
+            inputs[0], inputs[1], inputs[2], num_groups, eps, get_cuda_stream(attrs));
+        return std::vector<Tensor>{output, mean, inv_std};
+    });
+    table.register_kernel(OpId::GroupNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [grad_output, input, weight, mean, inv_std]
+        int64_t num_groups = parse_attr<int64_t>(attrs, "num_groups", 1);
+        auto [grad_input, grad_weight, grad_bias] = cuda::group_norm_backward_kernel(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], num_groups, get_cuda_stream(attrs));
+        return std::vector<Tensor>{grad_input, grad_weight, grad_bias};
+    });
+    table.register_kernel(OpId::InstanceNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float eps = parse_attr<float>(attrs, "eps", 1e-5f);
+        auto [output, mean, inv_std] = cuda::instance_norm_forward_kernel(
+            inputs[0], inputs[1], inputs[2], eps, get_cuda_stream(attrs));
+        return std::vector<Tensor>{output, mean, inv_std};
+    });
+    table.register_kernel(OpId::InstanceNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        auto [grad_input, grad_weight, grad_bias] = cuda::instance_norm_backward_kernel(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], get_cuda_stream(attrs));
+        return std::vector<Tensor>{grad_input, grad_weight, grad_bias};
+    });
+
+    // =========================================================================
+    // RMSNorm Backward (Phase 3C - HIGH)
+    // =========================================================================
+    table.register_kernel(OpId::RMSNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [grad_output, input, weight, rrms]
+        auto [grad_input, grad_weight] = cuda::fused_rms_norm_backward_cuda(
+            inputs[0], inputs[1], inputs[2], inputs[3]);
+        return std::vector<Tensor>{grad_input, grad_weight};
+    });
+
+    // =========================================================================
+    // ArgSort - GPU implementation (Phase 2D - HIGH)
+    // =========================================================================
+    table.register_single_output_kernel(OpId::ArgSort, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+        bool descending = parse_attr<bool>(attrs, "descending", false);
+        return cuda::argsort_kernel(inputs[0], dim, descending, get_cuda_stream(attrs));
+    });
+
+    // =========================================================================
+    // Creation Operations (Phase 3E - MEDIUM)
+    // =========================================================================
+    table.register_kernel(OpId::Zeros, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        auto shape = parse_int_list(attrs, "shape");
+        int dtype_int = parse_attr<int>(attrs, "dtype", static_cast<int>(DType::Float32));
+        DType dtype = static_cast<DType>(dtype_int);
+        int device_idx = parse_attr<int>(attrs, "device_index", 0);
+        Device device = Device::cuda(device_idx);
+        Tensor output(shape, dtype, device);
+        cudaMemsetAsync(output.data_ptr(), 0, output.numel() * dtype_size(dtype), get_cuda_stream(attrs));
+        return std::vector<Tensor>{output};
+    });
+    table.register_kernel(OpId::Ones, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        auto shape = parse_int_list(attrs, "shape");
+        int dtype_int = parse_attr<int>(attrs, "dtype", static_cast<int>(DType::Float32));
+        DType dtype = static_cast<DType>(dtype_int);
+        int device_idx = parse_attr<int>(attrs, "device_index", 0);
+        Device device = Device::cuda(device_idx);
+        Tensor output(shape, dtype, device);
+        return std::vector<Tensor>{cuda::fill_kernel(output, 1.0f, get_cuda_stream(attrs))};
+    });
+    table.register_kernel(OpId::Full, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        auto shape = parse_int_list(attrs, "shape");
+        float value = parse_attr<float>(attrs, "value", 0.0f);
+        int dtype_int = parse_attr<int>(attrs, "dtype", static_cast<int>(DType::Float32));
+        DType dtype = static_cast<DType>(dtype_int);
+        int device_idx = parse_attr<int>(attrs, "device_index", 0);
+        Device device = Device::cuda(device_idx);
+        Tensor output(shape, dtype, device);
+        return std::vector<Tensor>{cuda::fill_kernel(output, value, get_cuda_stream(attrs))};
+    });
+    table.register_kernel(OpId::Rand, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        auto shape = parse_int_list(attrs, "shape");
+        int dtype_int = parse_attr<int>(attrs, "dtype", static_cast<int>(DType::Float32));
+        DType dtype = static_cast<DType>(dtype_int);
+        int device_idx = parse_attr<int>(attrs, "device_index", 0);
+        Device device = Device::cuda(device_idx);
+        return std::vector<Tensor>{cuda::rand_kernel(shape, dtype, device, get_cuda_stream(attrs))};
+    });
+    table.register_kernel(OpId::Randn, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        auto shape = parse_int_list(attrs, "shape");
+        int dtype_int = parse_attr<int>(attrs, "dtype", static_cast<int>(DType::Float32));
+        DType dtype = static_cast<DType>(dtype_int);
+        int device_idx = parse_attr<int>(attrs, "device_index", 0);
+        Device device = Device::cuda(device_idx);
+        return std::vector<Tensor>{cuda::randn_kernel(shape, dtype, device, get_cuda_stream(attrs))};
+    });
+    table.register_kernel(OpId::Arange, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float start = parse_attr<float>(attrs, "start", 0.0f);
+        float end = parse_attr<float>(attrs, "end", 0.0f);
+        float step = parse_attr<float>(attrs, "step", 1.0f);
+        int dtype_int = parse_attr<int>(attrs, "dtype", static_cast<int>(DType::Float32));
+        DType dtype = static_cast<DType>(dtype_int);
+        int device_idx = parse_attr<int>(attrs, "device_index", 0);
+        Device device = Device::cuda(device_idx);
+        return std::vector<Tensor>{cuda::arange_kernel(start, end, step, dtype, device, get_cuda_stream(attrs))};
+    });
+    table.register_kernel(OpId::Linspace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float start = parse_attr<float>(attrs, "start", 0.0f);
+        float end = parse_attr<float>(attrs, "end", 1.0f);
+        int64_t steps = parse_attr<int64_t>(attrs, "steps", 100);
+        int dtype_int = parse_attr<int>(attrs, "dtype", static_cast<int>(DType::Float32));
+        DType dtype = static_cast<DType>(dtype_int);
+        int device_idx = parse_attr<int>(attrs, "device_index", 0);
+        Device device = Device::cuda(device_idx);
+        return std::vector<Tensor>{cuda::linspace_kernel(start, end, steps, dtype, device, get_cuda_stream(attrs))};
+    });
+    table.register_kernel(OpId::Eye, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t n = parse_attr<int64_t>(attrs, "n", 0);
+        int64_t m = parse_attr<int64_t>(attrs, "m", -1);
+        int dtype_int = parse_attr<int>(attrs, "dtype", static_cast<int>(DType::Float32));
+        DType dtype = static_cast<DType>(dtype_int);
+        int device_idx = parse_attr<int>(attrs, "device_index", 0);
+        Device device = Device::cuda(device_idx);
+        return std::vector<Tensor>{cuda::eye_kernel(n, m, dtype, device, get_cuda_stream(attrs))};
+    });
+
+    // =========================================================================
+    // Shape/Transform Operations (Phase 3F - MEDIUM)
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Flatten, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t start_dim = parse_attr<int64_t>(attrs, "start_dim", 0);
+        int64_t end_dim = parse_attr<int64_t>(attrs, "end_dim", -1);
+        return cuda::flatten_kernel(inputs[0], start_dim, end_dim, get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::Slice, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto starts = parse_int_list(attrs, "starts");
+        auto ends = parse_int_list(attrs, "ends");
+        auto steps = parse_int_list(attrs, "steps");
+        return cuda::slice_kernel(inputs[0], starts, ends, steps, get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::Stack, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+        return cuda::stack_kernel(inputs, dim, get_cuda_stream(attrs));
+    });
+    table.register_kernel(OpId::Split, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t split_size = parse_attr<int64_t>(attrs, "split_size", 1);
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+        return cuda::split_kernel(inputs[0], split_size, dim, get_cuda_stream(attrs));
+    });
+    table.register_kernel(OpId::Chunk, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t chunks = parse_attr<int64_t>(attrs, "chunks", 1);
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+        return cuda::chunk_kernel(inputs[0], chunks, dim, get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::Tile, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto reps = parse_int_list(attrs, "reps");
+        return cuda::tile_kernel(inputs[0], reps, get_cuda_stream(attrs));
+    });
+
+    // =========================================================================
+    // Fused Softmax Cross Entropy (Phase 4A - MEDIUM)
+    // =========================================================================
+    table.register_kernel(OpId::FusedSoftmaxCrossEntropy, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [logits, targets]
+        bool compute_grad = parse_attr<bool>(attrs, "compute_grad", true);
+        auto [loss, grad_logits] = cuda::fused_softmax_cross_entropy_cuda(inputs[0], inputs[1], compute_grad);
+        if (compute_grad) {
+            return std::vector<Tensor>{loss, grad_logits};
+        }
+        return std::vector<Tensor>{loss};
+    });
+
+    // =========================================================================
+    // Fused Optimizer Steps (Phase 4C - MEDIUM)
+    // =========================================================================
+    table.register_kernel(OpId::FusedRMSPropStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [param, grad, square_avg, grad_avg (optional), momentum_buffer (optional)]
+        float lr = parse_attr<float>(attrs, "lr", 0.01f);
+        float alpha = parse_attr<float>(attrs, "alpha", 0.99f);
+        float eps = parse_attr<float>(attrs, "eps", 1e-8f);
+        float weight_decay = parse_attr<float>(attrs, "weight_decay", 0.0f);
+        float momentum = parse_attr<float>(attrs, "momentum", 0.0f);
+        bool centered = parse_attr<bool>(attrs, "centered", false);
+
+        Tensor& param = const_cast<Tensor&>(inputs[0]);
+        Tensor& square_avg = const_cast<Tensor&>(inputs[2]);
+        Tensor* grad_avg = (centered && inputs.size() > 3) ? &const_cast<Tensor&>(inputs[3]) : nullptr;
+        Tensor* momentum_buffer = (momentum > 0.0f && inputs.size() > 4) ? &const_cast<Tensor&>(inputs[4]) : nullptr;
+
+        cuda::fused_rmsprop_step_cuda(param, inputs[1], square_avg, grad_avg, momentum_buffer,
+            lr, alpha, eps, weight_decay, momentum, centered, get_cuda_stream(attrs));
+        return std::vector<Tensor>{param};
+    });
+
+    table.register_kernel(OpId::FusedAdadeltaStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [param, grad, square_avg, acc_delta]
+        float rho = parse_attr<float>(attrs, "rho", 0.9f);
+        float eps = parse_attr<float>(attrs, "eps", 1e-6f);
+        float lr = parse_attr<float>(attrs, "lr", 1.0f);
+        float weight_decay = parse_attr<float>(attrs, "weight_decay", 0.0f);
+
+        Tensor& param = const_cast<Tensor&>(inputs[0]);
+        Tensor& square_avg = const_cast<Tensor&>(inputs[2]);
+        Tensor& acc_delta = const_cast<Tensor&>(inputs[3]);
+
+        cuda::fused_adadelta_step_cuda(param, inputs[1], square_avg, acc_delta,
+            rho, eps, lr, weight_decay, get_cuda_stream(attrs));
+        return std::vector<Tensor>{param};
+    });
+
+    table.register_kernel(OpId::FusedAdagradStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [param, grad, sum_sq]
+        float lr = parse_attr<float>(attrs, "lr", 0.01f);
+        float lr_decay = parse_attr<float>(attrs, "lr_decay", 0.0f);
+        float eps = parse_attr<float>(attrs, "eps", 1e-10f);
+        float weight_decay = parse_attr<float>(attrs, "weight_decay", 0.0f);
+        int64_t step = parse_attr<int64_t>(attrs, "step", 1);
+
+        Tensor& param = const_cast<Tensor&>(inputs[0]);
+        Tensor& sum_sq = const_cast<Tensor&>(inputs[2]);
+
+        cuda::fused_adagrad_step_cuda(param, inputs[1], sum_sq,
+            lr, lr_decay, eps, weight_decay, step, get_cuda_stream(attrs));
+        return std::vector<Tensor>{param};
     });
 }
 

@@ -5,6 +5,7 @@
 
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
+#include <cub/cub.cuh>
 #include <algorithm>
 #include <vector>
 #include <cstdint>
@@ -106,28 +107,45 @@ extern "C" void nms_cuda(const float* boxes, const float* scores,
         return;
     }
 
-    // Sort indices by score on CPU (could be done on GPU with thrust)
-    std::vector<int64_t> sorted_indices(num_boxes);
-    std::vector<float> scores_cpu(num_boxes);
-
-    // Copy scores to host
-    cudaMemcpy(scores_cpu.data(), scores, num_boxes * sizeof(float),
-               cudaMemcpyDeviceToHost);
-
-    // Sort indices
-    for (int64_t i = 0; i < num_boxes; ++i) {
-        sorted_indices[i] = i;
-    }
-    std::sort(sorted_indices.begin(), sorted_indices.end(),
-              [&scores_cpu](int64_t i, int64_t j) {
-                  return scores_cpu[i] > scores_cpu[j];
-              });
-
-    // Allocate device memory for sorted indices
+    // Sort indices by score on GPU using CUB RadixSort
+    // Allocate device memory for sort input/output
+    int64_t* d_indices_in;
     int64_t* d_sorted_indices;
+    float* d_scores_sorted;
+    cudaMalloc(&d_indices_in, num_boxes * sizeof(int64_t));
     cudaMalloc(&d_sorted_indices, num_boxes * sizeof(int64_t));
-    cudaMemcpy(d_sorted_indices, sorted_indices.data(),
-               num_boxes * sizeof(int64_t), cudaMemcpyHostToDevice);
+    cudaMalloc(&d_scores_sorted, num_boxes * sizeof(float));
+
+    // Initialize index array [0, 1, 2, ..., num_boxes-1] on host and copy to device
+    {
+        std::vector<int64_t> h_indices(num_boxes);
+        for (int64_t i = 0; i < num_boxes; ++i) h_indices[i] = i;
+        cudaMemcpy(d_indices_in, h_indices.data(),
+                   num_boxes * sizeof(int64_t), cudaMemcpyHostToDevice);
+    }
+
+    // Sort descending (highest score first) using CUB DeviceRadixSort
+    void* d_temp_storage = nullptr;
+    size_t temp_storage_bytes = 0;
+    cub::DeviceRadixSort::SortPairsDescending(
+        d_temp_storage, temp_storage_bytes,
+        scores, d_scores_sorted,
+        d_indices_in, d_sorted_indices,
+        static_cast<int>(num_boxes));
+    cudaMalloc(&d_temp_storage, temp_storage_bytes);
+    cub::DeviceRadixSort::SortPairsDescending(
+        d_temp_storage, temp_storage_bytes,
+        scores, d_scores_sorted,
+        d_indices_in, d_sorted_indices,
+        static_cast<int>(num_boxes));
+    cudaFree(d_temp_storage);
+    cudaFree(d_indices_in);
+    cudaFree(d_scores_sorted);
+
+    // Copy sorted indices to host for sequential suppression mask processing
+    std::vector<int64_t> sorted_indices(num_boxes);
+    cudaMemcpy(sorted_indices.data(), d_sorted_indices,
+               num_boxes * sizeof(int64_t), cudaMemcpyDeviceToHost);
 
     // Allocate suppression mask
     const int64_t num_chunks = (num_boxes + 63) / 64;

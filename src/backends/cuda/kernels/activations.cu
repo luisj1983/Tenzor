@@ -4,6 +4,8 @@
 #include <cfloat>
 #include <cstdio>
 #include "tenzor/core/tensor.hpp"
+#include <curand_kernel.h>
+#include <chrono>
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/backend/backend.hpp"  // For OpAttributes (dispatch wrappers)
 #include <stdexcept>
@@ -2933,5 +2935,183 @@ Tensor mish_backward_dispatch(std::span<const Tensor> inputs, const OpAttributes
     return mish_backward_kernel(inputs[0], inputs[1], get_stream(attrs));
 }
 
+
+// ============================================================================
+// Dropout Forward/Backward CUDA Kernels
+// ============================================================================
+
+template<typename T>
+__global__ void dropout_forward_kernel_impl(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    uint8_t* __restrict__ mask,
+    int64_t n,
+    float p,
+    float scale,
+    uint64_t seed) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+
+    // Initialize cuRAND state per thread
+    curandStatePhilox4_32_10_t state;
+    curand_init(seed, idx, 0, &state);
+
+    float rand_val = curand_uniform(&state);
+    bool keep = rand_val >= p;
+    mask[idx] = keep ? 1 : 0;
+    output[idx] = keep ? static_cast<T>(static_cast<float>(input[idx]) * scale) : T(0);
+}
+
+__global__ void dropout_forward_kernel_f16(
+    const __half* __restrict__ input,
+    __half* __restrict__ output,
+    uint8_t* __restrict__ mask,
+    int64_t n,
+    float p,
+    float scale,
+    uint64_t seed) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+
+    curandStatePhilox4_32_10_t state;
+    curand_init(seed, idx, 0, &state);
+
+    float rand_val = curand_uniform(&state);
+    bool keep = rand_val >= p;
+    mask[idx] = keep ? 1 : 0;
+    float val = keep ? __half2float(input[idx]) * scale : 0.0f;
+    output[idx] = __float2half(val);
+}
+
+template<typename T>
+__global__ void dropout_backward_kernel_impl(
+    const T* __restrict__ grad_output,
+    const uint8_t* __restrict__ mask,
+    T* __restrict__ grad_input,
+    int64_t n,
+    float scale) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+
+    grad_input[idx] = mask[idx] ? static_cast<T>(static_cast<float>(grad_output[idx]) * scale) : T(0);
+}
+
+__global__ void dropout_backward_kernel_f16(
+    const __half* __restrict__ grad_output,
+    const uint8_t* __restrict__ mask,
+    __half* __restrict__ grad_input,
+    int64_t n,
+    float scale) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+
+    float val = mask[idx] ? __half2float(grad_output[idx]) * scale : 0.0f;
+    grad_input[idx] = __float2half(val);
+}
+
+// Dropout forward: returns {output, mask}
+auto dropout_forward_kernel(const Tensor& input, float p, bool training, cudaStream_t stream)
+    -> std::pair<Tensor, Tensor> {
+
+    if (!training || p == 0.0f) {
+        // No dropout during inference or p=0
+        return {input, Tensor(std::vector<int64_t>{}, DType::UInt8, input.device())};
+    }
+
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+
+    if (p >= 1.0f) {
+        // Drop everything
+        Tensor output(shape, input.dtype(), input.device());
+        cudaMemsetAsync(output.data_ptr(), 0, output.numel() * dtype_size(output.dtype()), stream);
+        Tensor mask(shape, DType::UInt8, input.device());
+        cudaMemsetAsync(mask.data_ptr(), 0, mask.numel(), stream);
+        return {output, mask};
+    }
+
+    int64_t n = input.numel();
+    float scale = 1.0f / (1.0f - p);
+
+    Tensor output(shape, input.dtype(), input.device());
+    Tensor mask(shape, DType::UInt8, input.device());
+
+    int block_size = 256;
+    int num_blocks = (n + block_size - 1) / block_size;
+
+    // Generate seed from system entropy
+    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+
+    switch (input.dtype()) {
+        case DType::Float32:
+            dropout_forward_kernel_impl<float><<<num_blocks, block_size, 0, stream>>>(
+                input.data<float>(), output.data<float>(), mask.data<uint8_t>(),
+                n, p, scale, seed);
+            break;
+        case DType::Float64:
+            dropout_forward_kernel_impl<double><<<num_blocks, block_size, 0, stream>>>(
+                input.data<double>(), output.data<double>(), mask.data<uint8_t>(),
+                n, p, scale, seed);
+            break;
+        case DType::Float16:
+            dropout_forward_kernel_f16<<<num_blocks, block_size, 0, stream>>>(
+                reinterpret_cast<const __half*>(input.data_ptr()),
+                reinterpret_cast<__half*>(output.data_ptr()),
+                mask.data<uint8_t>(),
+                n, p, scale, seed);
+            break;
+        default:
+            throw std::runtime_error("dropout_forward: unsupported dtype");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return {output, mask};
+}
+
+// Dropout backward: grad_input = grad_output * mask * scale
+auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, float p, cudaStream_t stream)
+    -> Tensor {
+
+    if (p == 0.0f) {
+        return grad_output;
+    }
+
+    int64_t n = grad_output.numel();
+    float scale = 1.0f / (1.0f - p);
+
+    std::vector<int64_t> grad_shape(grad_output.shape().begin(), grad_output.shape().end());
+    Tensor grad_input(grad_shape, grad_output.dtype(), grad_output.device());
+
+    int block_size = 256;
+    int num_blocks = (n + block_size - 1) / block_size;
+
+    switch (grad_output.dtype()) {
+        case DType::Float32:
+            dropout_backward_kernel_impl<float><<<num_blocks, block_size, 0, stream>>>(
+                grad_output.data<float>(), mask.data<uint8_t>(), grad_input.data<float>(),
+                n, scale);
+            break;
+        case DType::Float64:
+            dropout_backward_kernel_impl<double><<<num_blocks, block_size, 0, stream>>>(
+                grad_output.data<double>(), mask.data<uint8_t>(), grad_input.data<double>(),
+                n, scale);
+            break;
+        case DType::Float16:
+            dropout_backward_kernel_f16<<<num_blocks, block_size, 0, stream>>>(
+                reinterpret_cast<const __half*>(grad_output.data_ptr()),
+                mask.data<uint8_t>(),
+                reinterpret_cast<__half*>(grad_input.data_ptr()),
+                n, scale);
+            break;
+        default:
+            throw std::runtime_error("dropout_backward: unsupported dtype");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return grad_input;
+}
 } // namespace cuda
 } // namespace tenzor

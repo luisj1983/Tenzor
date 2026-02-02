@@ -3194,6 +3194,119 @@ auto adaptive_avg_pool2d_backward(const Tensor& grad_output, int64_t H_in, int64
 }
 
 // ============================================================================
+// Adaptive Max Pooling 2D
+// ============================================================================
+
+template<typename T>
+__global__ void adaptive_max_pool2d_forward_kernel(
+    const T* input, T* output, int64_t* indices,
+    int64_t N, int64_t C, int64_t H_in, int64_t W_in,
+    int64_t H_out, int64_t W_out) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = N * C * H_out * W_out;
+    if (idx >= total) return;
+
+    int64_t w_out = idx % W_out;
+    int64_t h_out = (idx / W_out) % H_out;
+    int64_t c = (idx / (W_out * H_out)) % C;
+    int64_t n = idx / (W_out * H_out * C);
+
+    int64_t h_start = (h_out * H_in) / H_out;
+    int64_t h_end = ((h_out + 1) * H_in) / H_out;
+    int64_t w_start = (w_out * W_in) / W_out;
+    int64_t w_end = ((w_out + 1) * W_in) / W_out;
+
+    T max_val = input[((n * C + c) * H_in + h_start) * W_in + w_start];
+    int64_t max_idx = ((n * C + c) * H_in + h_start) * W_in + w_start;
+
+    for (int64_t h = h_start; h < h_end; ++h) {
+        for (int64_t w = w_start; w < w_end; ++w) {
+            int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
+            if (input[input_idx] > max_val) {
+                max_val = input[input_idx];
+                max_idx = input_idx;
+            }
+        }
+    }
+
+    output[idx] = max_val;
+    indices[idx] = max_idx;
+}
+
+auto adaptive_max_pool2d_forward(const Tensor& input, int64_t output_h, int64_t output_w, cudaStream_t stream) -> std::pair<Tensor, Tensor> {
+    auto shape = input.shape();
+    int64_t N = shape[0], C = shape[1], H_in = shape[2], W_in = shape[3];
+
+    Tensor output({N, C, output_h, output_w}, input.dtype(), input.device());
+    Tensor indices({N, C, output_h, output_w}, DType::Int64, input.device());
+
+    int64_t total = N * C * output_h * output_w;
+    dim3 grid, block;
+    compute_launch_config_1d(total, grid, block);
+
+    if (input.dtype() == DType::Float32) {
+        adaptive_max_pool2d_forward_kernel<<<grid, block, 0, stream>>>(
+            input.data<float>(), output.data<float>(), indices.data<int64_t>(),
+            N, C, H_in, W_in, output_h, output_w);
+    } else if (input.dtype() == DType::Float64) {
+        adaptive_max_pool2d_forward_kernel<<<grid, block, 0, stream>>>(
+            input.data<double>(), output.data<double>(), indices.data<int64_t>(),
+            N, C, H_in, W_in, output_h, output_w);
+    } else if (input.dtype() == DType::Float16) {
+        adaptive_max_pool2d_forward_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(output.data_ptr()),
+            indices.data<int64_t>(),
+            N, C, H_in, W_in, output_h, output_w);
+    } else {
+        throw std::runtime_error("adaptive_max_pool2d_forward: unsupported dtype");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return {output, indices};
+}
+
+template<typename T>
+__global__ void adaptive_max_pool2d_backward_kernel(
+    const T* grad_output, const int64_t* indices,
+    T* grad_input, int64_t total_output) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total_output) return;
+    atomicAdd(&grad_input[indices[idx]], grad_output[idx]);
+}
+
+auto adaptive_max_pool2d_backward(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape, cudaStream_t stream) -> Tensor {
+    Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
+    cudaMemsetAsync(grad_input.data_ptr(), 0, grad_input.numel() * dtype_size(grad_input.dtype()), stream);
+
+    int64_t total = grad_output.numel();
+    dim3 grid, block;
+    compute_launch_config_1d(total, grid, block);
+
+    if (grad_output.dtype() == DType::Float32) {
+        adaptive_max_pool2d_backward_kernel<<<grid, block, 0, stream>>>(
+            grad_output.data<float>(), indices.data<int64_t>(), grad_input.data<float>(), total);
+    } else if (grad_output.dtype() == DType::Float64) {
+        adaptive_max_pool2d_backward_kernel<<<grid, block, 0, stream>>>(
+            grad_output.data<double>(), indices.data<int64_t>(), grad_input.data<double>(), total);
+    } else if (grad_output.dtype() == DType::Float16) {
+        adaptive_max_pool2d_backward_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(grad_output.data_ptr()),
+            indices.data<int64_t>(),
+            reinterpret_cast<__half*>(grad_input.data_ptr()), total);
+    } else {
+        throw std::runtime_error("adaptive_max_pool2d_backward: unsupported dtype");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return grad_input;
+}
+
+
+
+// ============================================================================
 // Max Pooling 2D
 // ============================================================================
 
@@ -3637,6 +3750,31 @@ __global__ void create_attention_mask_kernel(
     attn_mask[idx] = (val_i != val_j) ? -100.0f : 0.0f;
 }
 
+__global__ void window_partition_kernel(
+    const float* img_mask, float* window_mask,
+    int64_t H, int64_t W, int64_t window_size,
+    int64_t nH, int64_t nW, int64_t M) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = nH * nW * M;
+    if (idx >= total) return;
+
+    int64_t pos_in_window = idx % M;
+    int64_t window_idx = idx / M;
+    int64_t ww = window_idx % nW;
+    int64_t wh = window_idx / nW;
+
+    int64_t h_local = pos_in_window / window_size;
+    int64_t w_local = pos_in_window % window_size;
+
+    int64_t h_global = wh * window_size + h_local;
+    int64_t w_global = ww * window_size + w_local;
+
+    window_mask[idx] = img_mask[h_global * W + w_global];
+}
+
+
+
 // ============================================================================
 // Public API wrappers (without explicit stream parameter)
 // ============================================================================
@@ -3684,16 +3822,25 @@ auto create_shifted_window_mask_cuda(int64_t H, int64_t W,
     float* window_data = window_mask.data<float>();
     const float* img_data = img_mask.data<float>();
 
-    // We need to do this on CPU for proper indexing or implement a CUDA kernel
-    // For simplicity, let's implement a direct approach
-    cudaMemset(window_data, 0, num_windows * M * sizeof(float));
+    // Window partition: copy from img_mask to windows
+    int64_t nH = H / window_size;
+    int64_t nW = W / window_size;
 
-    // Create attention mask
+    // Launch kernel to partition windows and compute attention mask
+    int partition_threads = 256;
+    int partition_blocks = (num_windows * M + partition_threads - 1) / partition_threads;
+    window_partition_kernel<<<partition_blocks, partition_threads>>>(
+        img_data, window_data, H, W, window_size, nH, nW, M);
+
+    // Create attention mask: mask[i, j] = -100 if window_mask[i] != window_mask[j]
     Tensor attn_mask({num_windows, M, M}, DType::Float32, cuda_device);
+    float* attn_data = attn_mask.data<float>();
 
-    // For the simplified version, just create an empty mask
-    // The full implementation would require proper window partitioning
-    cudaMemset(attn_mask.data<float>(), 0, num_windows * M * M * sizeof(float));
+    int mask_threads = 256;
+    int mask_blocks = (num_windows * M * M + mask_threads - 1) / mask_threads;
+    create_attention_mask_kernel<<<mask_blocks, mask_threads>>>(
+        window_data, attn_data, num_windows, M);
+
 
     CUDA_CHECK(cudaGetLastError());
 
@@ -3703,6 +3850,116 @@ auto create_shifted_window_mask_cuda(int64_t H, int64_t W,
     }
     return attn_mask;
 }
+
+
+// ============================================================================
+// Creation Operations
+// ============================================================================
+
+template<typename T>
+__global__ void arange_kernel_impl(T* output, T start, T step, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    output[idx] = start + static_cast<T>(idx) * step;
+}
+
+auto arange_kernel(float start, float end, float step, DType dtype, Device device, cudaStream_t stream) -> Tensor {
+    int64_t n = static_cast<int64_t>(std::ceil((end - start) / step));
+    if (n <= 0) n = 0;
+    Tensor output({n}, dtype, device);
+    if (n == 0) return output;
+
+    int block_size = 256;
+    int num_blocks = (n + block_size - 1) / block_size;
+
+    if (dtype == DType::Float32) {
+        arange_kernel_impl<float><<<num_blocks, block_size, 0, stream>>>(output.data<float>(), start, step, n);
+    } else if (dtype == DType::Float64) {
+        arange_kernel_impl<double><<<num_blocks, block_size, 0, stream>>>(output.data<double>(), static_cast<double>(start), static_cast<double>(step), n);
+    } else if (dtype == DType::Int32) {
+        arange_kernel_impl<int32_t><<<num_blocks, block_size, 0, stream>>>(output.data<int32_t>(), static_cast<int32_t>(start), static_cast<int32_t>(step), n);
+    } else if (dtype == DType::Int64) {
+        arange_kernel_impl<int64_t><<<num_blocks, block_size, 0, stream>>>(output.data<int64_t>(), static_cast<int64_t>(start), static_cast<int64_t>(step), n);
+    } else {
+        throw std::runtime_error("arange: unsupported dtype");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return output;
+}
+
+template<typename T>
+__global__ void linspace_kernel_impl(T* output, T start, T step, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    output[idx] = start + static_cast<T>(idx) * step;
+}
+
+auto linspace_kernel(float start, float end, int64_t steps, DType dtype, Device device, cudaStream_t stream) -> Tensor {
+    if (steps <= 0) return Tensor({0}, dtype, device);
+    Tensor output({steps}, dtype, device);
+
+    if (steps == 1) {
+        // Single element: just the start value
+        if (dtype == DType::Float32) {
+            cudaMemcpyAsync(output.data<float>(), &start, sizeof(float), cudaMemcpyHostToDevice, stream);
+        } else if (dtype == DType::Float64) {
+            double start_d = static_cast<double>(start);
+            cudaMemcpyAsync(output.data<double>(), &start_d, sizeof(double), cudaMemcpyHostToDevice, stream);
+        }
+        return output;
+    }
+
+    int block_size = 256;
+    int num_blocks = (steps + block_size - 1) / block_size;
+
+    if (dtype == DType::Float32) {
+        float step_val = (end - start) / static_cast<float>(steps - 1);
+        linspace_kernel_impl<float><<<num_blocks, block_size, 0, stream>>>(output.data<float>(), start, step_val, steps);
+    } else if (dtype == DType::Float64) {
+        double step_val = (static_cast<double>(end) - static_cast<double>(start)) / static_cast<double>(steps - 1);
+        linspace_kernel_impl<double><<<num_blocks, block_size, 0, stream>>>(output.data<double>(), static_cast<double>(start), step_val, steps);
+    } else {
+        throw std::runtime_error("linspace: unsupported dtype");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return output;
+}
+
+template<typename T>
+__global__ void eye_kernel_impl(T* output, int64_t rows, int64_t cols) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = rows * cols;
+    if (idx >= total) return;
+    int64_t r = idx / cols;
+    int64_t c = idx % cols;
+    output[idx] = (r == c) ? T(1) : T(0);
+}
+
+auto eye_kernel(int64_t n, int64_t m, DType dtype, Device device, cudaStream_t stream) -> Tensor {
+    if (m <= 0) m = n;
+    Tensor output({n, m}, dtype, device);
+    int64_t total = n * m;
+    int block_size = 256;
+    int num_blocks = (total + block_size - 1) / block_size;
+
+    if (dtype == DType::Float32) {
+        eye_kernel_impl<float><<<num_blocks, block_size, 0, stream>>>(output.data<float>(), n, m);
+    } else if (dtype == DType::Float64) {
+        eye_kernel_impl<double><<<num_blocks, block_size, 0, stream>>>(output.data<double>(), n, m);
+    } else if (dtype == DType::Int32) {
+        eye_kernel_impl<int32_t><<<num_blocks, block_size, 0, stream>>>(output.data<int32_t>(), n, m);
+    } else if (dtype == DType::Int64) {
+        eye_kernel_impl<int64_t><<<num_blocks, block_size, 0, stream>>>(output.data<int64_t>(), n, m);
+    } else {
+        throw std::runtime_error("eye: unsupported dtype");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return output;
+}
+
 
 // ============================================================================
 // Dispatch-Conformant Wrappers (SingleOutputKernelFn signature)
