@@ -2,9 +2,14 @@
  * @file roi_align.cu
  * @brief CUDA implementation of ROI Align with bilinear interpolation
  *
- * Supports Float32, Float64, and Float16 dtypes via templated kernels.
- * Float16 uses a specialized kernel that reads __half, computes in float,
- * and writes __half — avoiding full-tensor FP16→FP32→FP16 conversion.
+ * Supports Float32, Float64, and Float16 feature dtypes via templated kernels.
+ * ROI coordinates are always processed as Float32 regardless of feature dtype,
+ * matching the convention used by torchvision and Detectron2. This avoids
+ * unnecessary per-branch dtype conversions and eliminates redundant temporary
+ * allocations for non-Float32 ROI tensors.
+ *
+ * Float16 features use a specialized kernel that reads __half, computes in
+ * float, and writes __half — avoiding full-tensor FP16→FP32→FP16 conversion.
  */
 
 #include "tenzor/core/tensor.hpp"
@@ -68,9 +73,9 @@ __device__ inline T bilinear_interpolate_device(const T* data, int64_t height,
 
 template<typename T>
 __global__ void roi_align_forward_kernel(
-    const T* features,    // (N, C, H, W)
-    const T* rois,        // (num_rois, 5): (batch_idx, x1, y1, x2, y2)
-    T* output,            // (num_rois, C, output_h, output_w)
+    const T* features,       // (N, C, H, W)
+    const float* rois,       // (num_rois, 5): (batch_idx, x1, y1, x2, y2) — always float
+    T* output,               // (num_rois, C, output_h, output_w)
     int64_t num_rois, int64_t channels, int64_t feat_height, int64_t feat_width,
     int64_t output_h, int64_t output_w, T spatial_scale,
     int64_t sampling_ratio, bool aligned) {
@@ -85,13 +90,13 @@ __global__ void roi_align_forward_kernel(
     const int64_t c = (index / (output_w * output_h)) % channels;
     const int64_t roi_idx = index / (output_w * output_h * channels);
 
-    const T* roi = rois + roi_idx * 5;
+    const float* roi = rois + roi_idx * 5;
     const int64_t batch_idx = static_cast<int64_t>(roi[0]);
 
-    T roi_x1 = roi[1] * spatial_scale;
-    T roi_y1 = roi[2] * spatial_scale;
-    T roi_x2 = roi[3] * spatial_scale;
-    T roi_y2 = roi[4] * spatial_scale;
+    T roi_x1 = T(roi[1]) * spatial_scale;
+    T roi_y1 = T(roi[2]) * spatial_scale;
+    T roi_x2 = T(roi[3]) * spatial_scale;
+    T roi_y2 = T(roi[4]) * spatial_scale;
 
     if (aligned) {
         roi_x1 -= T(0.5);
@@ -139,7 +144,7 @@ __global__ void roi_align_forward_kernel(
 template<typename T>
 __global__ void roi_align_backward_kernel(
     const T* grad_output,    // (num_rois, C, output_h, output_w)
-    const T* rois,           // (num_rois, 5)
+    const float* rois,       // (num_rois, 5) — always float
     T* grad_features,        // (N, C, H, W)
     int64_t num_rois, int64_t channels, int64_t feat_height, int64_t feat_width,
     int64_t output_h, int64_t output_w, T spatial_scale,
@@ -155,13 +160,13 @@ __global__ void roi_align_backward_kernel(
     const int64_t c = (index / (output_w * output_h)) % channels;
     const int64_t roi_idx = index / (output_w * output_h * channels);
 
-    const T* roi = rois + roi_idx * 5;
+    const float* roi = rois + roi_idx * 5;
     const int64_t batch_idx = static_cast<int64_t>(roi[0]);
 
-    T roi_x1 = roi[1] * spatial_scale;
-    T roi_y1 = roi[2] * spatial_scale;
-    T roi_x2 = roi[3] * spatial_scale;
-    T roi_y2 = roi[4] * spatial_scale;
+    T roi_x1 = T(roi[1]) * spatial_scale;
+    T roi_y1 = T(roi[2]) * spatial_scale;
+    T roi_x2 = T(roi[3]) * spatial_scale;
+    T roi_y2 = T(roi[4]) * spatial_scale;
 
     if (aligned) {
         roi_x1 -= T(0.5);
@@ -259,7 +264,7 @@ __device__ inline float bilinear_interpolate_fp16(const __half* data, int64_t he
 
 __global__ void roi_align_forward_fp16_kernel(
     const __half* features,
-    const __half* rois,
+    const float* rois,       // ROIs always in float — no __half→float per-element conversion
     __half* output,
     int64_t num_rois, int64_t channels, int64_t feat_height, int64_t feat_width,
     int64_t output_h, int64_t output_w, float spatial_scale,
@@ -275,13 +280,13 @@ __global__ void roi_align_forward_fp16_kernel(
     const int64_t c = (index / (output_w * output_h)) % channels;
     const int64_t roi_idx = index / (output_w * output_h * channels);
 
-    const __half* roi = rois + roi_idx * 5;
-    const int64_t batch_idx = static_cast<int64_t>(__half2float(roi[0]));
+    const float* roi = rois + roi_idx * 5;
+    const int64_t batch_idx = static_cast<int64_t>(roi[0]);
 
-    float roi_x1 = __half2float(roi[1]) * spatial_scale;
-    float roi_y1 = __half2float(roi[2]) * spatial_scale;
-    float roi_x2 = __half2float(roi[3]) * spatial_scale;
-    float roi_y2 = __half2float(roi[4]) * spatial_scale;
+    float roi_x1 = roi[1] * spatial_scale;
+    float roi_y1 = roi[2] * spatial_scale;
+    float roi_x2 = roi[3] * spatial_scale;
+    float roi_y2 = roi[4] * spatial_scale;
 
     if (aligned) {
         roi_x1 -= 0.5f;
@@ -324,7 +329,7 @@ __global__ void roi_align_forward_fp16_kernel(
 
 __global__ void roi_align_backward_fp16_kernel(
     const __half* grad_output,
-    const __half* rois,
+    const float* rois,        // ROIs always in float
     float* grad_features,     // accumulate in float to avoid atomicAdd precision loss
     int64_t num_rois, int64_t channels, int64_t feat_height, int64_t feat_width,
     int64_t output_h, int64_t output_w, float spatial_scale,
@@ -340,13 +345,13 @@ __global__ void roi_align_backward_fp16_kernel(
     const int64_t c = (index / (output_w * output_h)) % channels;
     const int64_t roi_idx = index / (output_w * output_h * channels);
 
-    const __half* roi = rois + roi_idx * 5;
-    const int64_t batch_idx = static_cast<int64_t>(__half2float(roi[0]));
+    const float* roi = rois + roi_idx * 5;
+    const int64_t batch_idx = static_cast<int64_t>(roi[0]);
 
-    float roi_x1 = __half2float(roi[1]) * spatial_scale;
-    float roi_y1 = __half2float(roi[2]) * spatial_scale;
-    float roi_x2 = __half2float(roi[3]) * spatial_scale;
-    float roi_y2 = __half2float(roi[4]) * spatial_scale;
+    float roi_x1 = roi[1] * spatial_scale;
+    float roi_y1 = roi[2] * spatial_scale;
+    float roi_x2 = roi[3] * spatial_scale;
+    float roi_y2 = roi[4] * spatial_scale;
 
     if (aligned) {
         roi_x1 -= 0.5f;
@@ -443,27 +448,30 @@ auto roi_align_forward(const Tensor& features, const Tensor& rois,
         return output;
     }
 
+    // ROI coordinates (batch_idx, x1, y1, x2, y2) are always processed as Float32.
+    // This is a single conversion shared across all feature dtype branches, and is
+    // a no-op when rois are already Float32 (the common case).
+    const Tensor rois_f32 = (rois.dtype() == DType::Float32) ? rois : rois.to(DType::Float32);
+    const float* rois_ptr = rois_f32.data<float>();
+
     const int threads = 512;
     const int blocks = (total_outputs + threads - 1) / threads;
 
     if (dtype == DType::Float32) {
-        Tensor rois_in = (rois.dtype() == DType::Float32) ? rois : rois.to(DType::Float32);
         roi_align_forward_kernel<float><<<blocks, threads>>>(
-            features.data<float>(), rois_in.data<float>(), output.data<float>(),
+            features.data<float>(), rois_ptr, output.data<float>(),
             num_rois, channels, feat_height, feat_width,
             output_h, output_w, spatial_scale, sampling_ratio, aligned);
     } else if (dtype == DType::Float64) {
-        Tensor rois_in = (rois.dtype() == DType::Float64) ? rois : rois.to(DType::Float64);
         roi_align_forward_kernel<double><<<blocks, threads>>>(
-            features.data<double>(), rois_in.data<double>(), output.data<double>(),
+            features.data<double>(), rois_ptr, output.data<double>(),
             num_rois, channels, feat_height, feat_width,
             output_h, output_w, static_cast<double>(spatial_scale),
             sampling_ratio, aligned);
     } else if (dtype == DType::Float16) {
-        Tensor rois_in = (rois.dtype() == DType::Float16) ? rois : rois.to(DType::Float16);
         roi_align_forward_fp16_kernel<<<blocks, threads>>>(
             reinterpret_cast<const __half*>(features.data_ptr()),
-            reinterpret_cast<const __half*>(rois_in.data_ptr()),
+            rois_ptr,
             reinterpret_cast<__half*>(output.data_ptr()),
             num_rois, channels, feat_height, feat_width,
             output_h, output_w, spatial_scale, sampling_ratio, aligned);
@@ -491,6 +499,10 @@ auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
     int64_t total_features = batch_size * channels * feat_height * feat_width;
     int64_t total_grads = num_rois * channels * output_h * output_w;
 
+    // ROI coordinates always processed as Float32, shared across all branches.
+    const Tensor rois_f32 = (rois.dtype() == DType::Float32) ? rois : rois.to(DType::Float32);
+    const float* rois_ptr = rois_f32.data<float>();
+
     const int threads = 512;
 
     if (dtype == DType::Float32) {
@@ -498,10 +510,9 @@ auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
         ROI_CUDA_CHECK(cudaMemset(grad_features.data<float>(), 0, total_features * sizeof(float)));
         if (total_grads == 0) return grad_features;
 
-        Tensor rois_in = (rois.dtype() == DType::Float32) ? rois : rois.to(DType::Float32);
         const int blocks = (total_grads + threads - 1) / threads;
         roi_align_backward_kernel<float><<<blocks, threads>>>(
-            grad_output.data<float>(), rois_in.data<float>(), grad_features.data<float>(),
+            grad_output.data<float>(), rois_ptr, grad_features.data<float>(),
             num_rois, channels, feat_height, feat_width,
             output_h, output_w, spatial_scale, sampling_ratio, aligned);
         ROI_CUDA_CHECK(cudaGetLastError());
@@ -511,10 +522,9 @@ auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
         ROI_CUDA_CHECK(cudaMemset(grad_features.data<double>(), 0, total_features * sizeof(double)));
         if (total_grads == 0) return grad_features;
 
-        Tensor rois_in = (rois.dtype() == DType::Float64) ? rois : rois.to(DType::Float64);
         const int blocks = (total_grads + threads - 1) / threads;
         roi_align_backward_kernel<double><<<blocks, threads>>>(
-            grad_output.data<double>(), rois_in.data<double>(), grad_features.data<double>(),
+            grad_output.data<double>(), rois_ptr, grad_features.data<double>(),
             num_rois, channels, feat_height, feat_width,
             output_h, output_w, static_cast<double>(spatial_scale),
             sampling_ratio, aligned);
@@ -526,11 +536,10 @@ auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
         ROI_CUDA_CHECK(cudaMemset(grad_features_f32.data<float>(), 0, total_features * sizeof(float)));
 
         if (total_grads > 0) {
-            Tensor rois_in = (rois.dtype() == DType::Float16) ? rois : rois.to(DType::Float16);
             const int blocks = (total_grads + threads - 1) / threads;
             roi_align_backward_fp16_kernel<<<blocks, threads>>>(
                 reinterpret_cast<const __half*>(grad_output.data_ptr()),
-                reinterpret_cast<const __half*>(rois_in.data_ptr()),
+                rois_ptr,
                 grad_features_f32.data<float>(),
                 num_rois, channels, feat_height, feat_width,
                 output_h, output_w, spatial_scale, sampling_ratio, aligned);
