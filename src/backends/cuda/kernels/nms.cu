@@ -173,6 +173,8 @@ __global__ void nms_greedy_suppression_kernel(
 }
 
 // Host function to perform NMS on GPU
+// Uses an explicit stream to avoid implicit serialization with other CUDA work
+// that the default (null) stream would cause.
 extern "C" void nms_cuda(const float* boxes, const float* scores,
                          int64_t num_boxes, float iou_threshold,
                          int64_t* keep_indices, int64_t* num_keep) {
@@ -180,6 +182,10 @@ extern "C" void nms_cuda(const float* boxes, const float* scores,
         *num_keep = 0;
         return;
     }
+
+    // Create a dedicated stream so NMS doesn't serialize with other GPU work
+    cudaStream_t stream;
+    CUDA_CHECK(cudaStreamCreate(&stream));
 
     // Sort indices by score on GPU using CUB RadixSort
     // Allocate device memory for sort input/output
@@ -194,7 +200,7 @@ extern "C" void nms_cuda(const float* boxes, const float* scores,
     {
         int iota_block = 256;
         int iota_grid = (num_boxes + iota_block - 1) / iota_block;
-        nms_iota_kernel<<<iota_grid, iota_block>>>(d_indices_in, num_boxes);
+        nms_iota_kernel<<<iota_grid, iota_block, 0, stream>>>(d_indices_in, num_boxes);
     }
 
     // Sort descending (highest score first) using CUB DeviceRadixSort
@@ -204,25 +210,25 @@ extern "C" void nms_cuda(const float* boxes, const float* scores,
         d_temp_storage, temp_storage_bytes,
         scores, d_scores_sorted,
         d_indices_in, d_sorted_indices,
-        static_cast<int>(num_boxes));
+        static_cast<int>(num_boxes), 0, sizeof(float) * 8, stream);
     tenzor::backend::CachedMemoryGuard d_temp_storage_guard(temp_storage_bytes);
     d_temp_storage = d_temp_storage_guard.get();
     cub::DeviceRadixSort::SortPairsDescending(
         d_temp_storage, temp_storage_bytes,
         scores, d_scores_sorted,
         d_indices_in, d_sorted_indices,
-        static_cast<int>(num_boxes));
+        static_cast<int>(num_boxes), 0, sizeof(float) * 8, stream);
     CUDA_CHECK(cudaGetLastError());
 
     // Allocate suppression mask
     const int64_t num_chunks = (num_boxes + 63) / 64;
     tenzor::backend::CachedMemoryGuard d_suppression_mask_guard(num_boxes * num_chunks * sizeof(uint64_t));
     uint64_t* d_suppression_mask = static_cast<uint64_t*>(d_suppression_mask_guard.get());
-    CUDA_CHECK(cudaMemset(d_suppression_mask, 0, num_boxes * num_chunks * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMemsetAsync(d_suppression_mask, 0, num_boxes * num_chunks * sizeof(uint64_t), stream));
 
     // Launch NMS IoU kernel — one block per reference box
     const int threads_per_block = 256;
-    nms_kernel<<<num_boxes, threads_per_block>>>(
+    nms_kernel<<<num_boxes, threads_per_block, 0, stream>>>(
         boxes, d_sorted_indices, d_suppression_mask, num_boxes, iou_threshold);
 
     // Allocate device-side num_keep scalar
@@ -231,15 +237,16 @@ extern "C" void nms_cuda(const float* boxes, const float* scores,
 
     // Launch greedy suppression — 256 threads cooperate on inner chunk-OR loop
     size_t shared_bytes = num_chunks * sizeof(uint64_t) + sizeof(int64_t);
-    nms_greedy_suppression_kernel<<<1, 256, shared_bytes>>>(
+    nms_greedy_suppression_kernel<<<1, 256, shared_bytes, stream>>>(
         d_suppression_mask, d_sorted_indices, keep_indices, d_num_keep,
         num_boxes, num_chunks);
     CUDA_CHECK(cudaGetLastError());
 
-    // Only D2H transfer: the scalar num_keep (stream-scoped async + sync)
-    CUDA_CHECK(cudaMemcpyAsync(num_keep, d_num_keep, sizeof(int64_t), cudaMemcpyDeviceToHost, nullptr));
-    CUDA_CHECK(cudaStreamSynchronize(nullptr));
+    // D2H transfer on explicit stream — does not serialize with other streams
+    CUDA_CHECK(cudaMemcpyAsync(num_keep, d_num_keep, sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
 
+    CUDA_CHECK(cudaStreamDestroy(stream));
     // Memory automatically freed by CachedMemoryGuard destructors
 }
 

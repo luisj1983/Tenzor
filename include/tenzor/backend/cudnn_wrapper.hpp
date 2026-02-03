@@ -554,9 +554,33 @@ public:
 
     cudnnActivationDescriptor_t get() const { return desc_; }
 
-    void set_relu() {
+    void set(cudnnActivationMode_t mode, double coeff = 0.0) {
         CUDNN_CHECK(cudnnSetActivationDescriptor(
-            desc_, CUDNN_ACTIVATION_RELU, CUDNN_NOT_PROPAGATE_NAN, 0.0));
+            desc_, mode, CUDNN_NOT_PROPAGATE_NAN, coeff));
+    }
+
+    void set_relu() {
+        set(CUDNN_ACTIVATION_RELU);
+    }
+
+    void set_sigmoid() {
+        set(CUDNN_ACTIVATION_SIGMOID);
+    }
+
+    void set_tanh() {
+        set(CUDNN_ACTIVATION_TANH);
+    }
+
+    void set_elu(double alpha = 1.0) {
+        set(CUDNN_ACTIVATION_ELU, alpha);
+    }
+
+    void set_swish(double beta = 1.0) {
+        set(CUDNN_ACTIVATION_SWISH, beta);
+    }
+
+    void set_identity() {
+        set(CUDNN_ACTIVATION_IDENTITY);
     }
 
 private:
@@ -704,7 +728,53 @@ auto cudnn_conv2d_forward_nhwc(
  *
  * Single cuDNN call that fuses convolution, bias addition, and ReLU activation.
  */
+auto cudnn_fused_conv2d_activation_forward(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t groups,
+    cudnnActivationMode_t activation_mode,
+    double activation_coeff,
+    cudaStream_t stream
+) -> Tensor;
+
 auto cudnn_fused_conv2d_relu_forward(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t groups,
+    cudaStream_t stream
+) -> Tensor;
+
+auto cudnn_fused_conv2d_sigmoid_forward(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t groups,
+    cudaStream_t stream
+) -> Tensor;
+
+auto cudnn_fused_conv2d_tanh_forward(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t groups,
+    cudaStream_t stream
+) -> Tensor;
+
+auto cudnn_fused_conv2d_swish_forward(
     const Tensor& input,
     const Tensor& weight,
     const Tensor* bias,

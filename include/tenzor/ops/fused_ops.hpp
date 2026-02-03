@@ -87,6 +87,69 @@ auto fused_conv2d_relu(
 ) -> Tensor;
 
 /**
+ * @brief Fused convolution with sigmoid activation.
+ *
+ * Combines Conv2D + bias + sigmoid in a single cuDNN call.
+ * Commonly used in attention gates and output layers for binary classification.
+ *
+ * @param input Input tensor (N, C_in, H, W)
+ * @param weight Convolution weights (C_out, C_in/groups, KH, KW)
+ * @param bias Optional bias tensor (C_out), nullptr if no bias
+ * @param stride Convolution stride (default: 1)
+ * @param padding Convolution padding (default: 0)
+ * @return Output tensor (N, C_out, H_out, W_out)
+ */
+auto fused_conv2d_sigmoid(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias = nullptr,
+    int64_t stride = 1,
+    int64_t padding = 0
+) -> Tensor;
+
+/**
+ * @brief Fused convolution with tanh activation.
+ *
+ * Combines Conv2D + bias + tanh in a single cuDNN call.
+ * Commonly used in LSTM/GRU gates and generative models.
+ *
+ * @param input Input tensor (N, C_in, H, W)
+ * @param weight Convolution weights (C_out, C_in/groups, KH, KW)
+ * @param bias Optional bias tensor (C_out), nullptr if no bias
+ * @param stride Convolution stride (default: 1)
+ * @param padding Convolution padding (default: 0)
+ * @return Output tensor (N, C_out, H_out, W_out)
+ */
+auto fused_conv2d_tanh(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias = nullptr,
+    int64_t stride = 1,
+    int64_t padding = 0
+) -> Tensor;
+
+/**
+ * @brief Fused convolution with Swish (SiLU) activation.
+ *
+ * Combines Conv2D + bias + swish in a single cuDNN call.
+ * Swish(x) = x * sigmoid(x). Used in EfficientNet, MobileNetV3.
+ *
+ * @param input Input tensor (N, C_in, H, W)
+ * @param weight Convolution weights (C_out, C_in/groups, KH, KW)
+ * @param bias Optional bias tensor (C_out), nullptr if no bias
+ * @param stride Convolution stride (default: 1)
+ * @param padding Convolution padding (default: 0)
+ * @return Output tensor (N, C_out, H_out, W_out)
+ */
+auto fused_conv2d_swish(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias = nullptr,
+    int64_t stride = 1,
+    int64_t padding = 0
+) -> Tensor;
+
+/**
  * @brief Fused batch normalization with ReLU activation.
  *
  * Combines batch normalization and ReLU into single kernel.

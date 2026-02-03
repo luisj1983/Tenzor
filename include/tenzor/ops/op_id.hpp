@@ -234,6 +234,9 @@ enum class OpId : uint16_t {
     FusedAdadeltaStep,
     FusedAdagradStep,
     FusedAdamAtan2Step,
+    FusedConv2dSigmoid,
+    FusedConv2dTanh,
+    FusedConv2dSwish,
 
     // =========================================================================
     // Creation Operations (230-249)

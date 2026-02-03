@@ -1115,13 +1115,39 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 
 #ifdef TENZOR_HAS_CUDNN
     table.register_single_output_kernel(OpId::FusedConv2dReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        // inputs: [input, weight] or [input, weight, bias]
         int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
         int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
         int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
         int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return cuda::cudnn_fused_conv2d_relu_forward(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::FusedConv2dSigmoid, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        return cuda::cudnn_fused_conv2d_sigmoid_forward(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::FusedConv2dTanh, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        return cuda::cudnn_fused_conv2d_tanh_forward(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::FusedConv2dSwish, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        return cuda::cudnn_fused_conv2d_swish_forward(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
     });
 #endif
 

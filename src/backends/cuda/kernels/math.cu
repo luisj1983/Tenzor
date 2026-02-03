@@ -96,24 +96,34 @@ __global__ void check_for_zeros_kernel(const T* data, int64_t n, int* has_zero) 
 }
 
 // Host function to check for zeros in an integer tensor
-// Only enabled in debug builds to avoid the stream sync penalty in release
+// Only enabled in debug builds to avoid the stream sync penalty in release.
+// Uses pinned mapped host memory so the kernel writes directly to host-visible
+// memory, eliminating the explicit D2H memcpy.
 template<typename T>
 inline void check_integer_divisor_for_zeros(const T* data, int64_t n, cudaStream_t stream) {
 #ifndef NDEBUG
-    backend::CachedMemoryGuard d_has_zero_guard(sizeof(int));
-    auto* d_has_zero = static_cast<int*>(d_has_zero_guard.get());
-    int h_has_zero = 0;
+    // Allocate pinned host memory mapped into device address space —
+    // the kernel atomicExch writes directly through PCIe/NVLink without
+    // a separate cudaMemcpy D2H transfer
+    int* h_flag = nullptr;
+    CUDA_CHECK(cudaHostAlloc(&h_flag, sizeof(int), cudaHostAllocMapped));
+    *h_flag = 0;
 
-    CUDA_CHECK(cudaMemsetAsync(d_has_zero, 0, sizeof(int), stream));
+    int* d_flag = nullptr;
+    CUDA_CHECK(cudaHostGetDevicePointer(&d_flag, h_flag, 0));
 
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
-    check_for_zeros_kernel<<<grid, block, 0, stream>>>(data, n, d_has_zero);
+    check_for_zeros_kernel<<<grid, block, 0, stream>>>(data, n, d_flag);
 
-    CUDA_CHECK(cudaMemcpyAsync(&h_has_zero, d_has_zero, sizeof(int), cudaMemcpyDeviceToHost, stream));
+    // Sync still needed to ensure kernel completion before reading the flag,
+    // but we've eliminated the explicit cudaMemcpyAsync D2H round-trip
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
-    if (h_has_zero) {
+    bool has_zero = (*h_flag != 0);
+    CUDA_CHECK(cudaFreeHost(h_flag));
+
+    if (has_zero) {
         throw std::runtime_error("Integer division by zero");
     }
 #else

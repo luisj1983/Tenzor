@@ -674,10 +674,10 @@ auto cudnn_conv2d_forward(
 }
 
 // ============================================================================
-// Fused Conv2d + Bias + ReLU using cudnnConvolutionBiasActivationForward
+// Fused Conv2d + Bias + Activation using cudnnConvolutionBiasActivationForward
 // ============================================================================
 
-auto cudnn_fused_conv2d_relu_forward(
+auto cudnn_fused_conv2d_activation_forward(
     const Tensor& input,
     const Tensor& weight,
     const Tensor* bias,
@@ -685,6 +685,8 @@ auto cudnn_fused_conv2d_relu_forward(
     int64_t padding,
     int64_t dilation,
     int64_t groups,
+    cudnnActivationMode_t activation_mode,
+    double activation_coeff,
     cudaStream_t stream
 ) -> Tensor {
     auto input_shape = input.shape();
@@ -714,7 +716,7 @@ auto cudnn_fused_conv2d_relu_forward(
         case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
         case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
         default:
-            throw std::runtime_error("cuDNN FusedConv2dReLU: unsupported dtype");
+            throw std::runtime_error("cuDNN FusedConv2dActivation: unsupported dtype");
     }
 
     TensorDescriptor input_desc, output_desc;
@@ -726,7 +728,7 @@ auto cudnn_fused_conv2d_relu_forward(
     output_desc.set(cudnn_dtype, batch, out_channels, out_h, out_w);
     filter_desc.set(cudnn_dtype, out_channels, in_channels / groups, kernel_h, kernel_w);
     conv_desc.set(padding, padding, stride, stride, dilation, dilation, cudnn_dtype);
-    act_desc.set_relu();
+    act_desc.set(activation_mode, activation_coeff);
 
     if (groups > 1) {
         conv_desc.set_group_count(groups);
@@ -805,6 +807,66 @@ auto cudnn_fused_conv2d_relu_forward(
     }
 
     return output;
+}
+
+auto cudnn_fused_conv2d_relu_forward(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t groups,
+    cudaStream_t stream
+) -> Tensor {
+    return cudnn_fused_conv2d_activation_forward(
+        input, weight, bias, stride, padding, dilation, groups,
+        CUDNN_ACTIVATION_RELU, 0.0, stream);
+}
+
+auto cudnn_fused_conv2d_sigmoid_forward(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t groups,
+    cudaStream_t stream
+) -> Tensor {
+    return cudnn_fused_conv2d_activation_forward(
+        input, weight, bias, stride, padding, dilation, groups,
+        CUDNN_ACTIVATION_SIGMOID, 0.0, stream);
+}
+
+auto cudnn_fused_conv2d_tanh_forward(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t groups,
+    cudaStream_t stream
+) -> Tensor {
+    return cudnn_fused_conv2d_activation_forward(
+        input, weight, bias, stride, padding, dilation, groups,
+        CUDNN_ACTIVATION_TANH, 0.0, stream);
+}
+
+auto cudnn_fused_conv2d_swish_forward(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t groups,
+    cudaStream_t stream
+) -> Tensor {
+    return cudnn_fused_conv2d_activation_forward(
+        input, weight, bias, stride, padding, dilation, groups,
+        CUDNN_ACTIVATION_SWISH, 1.0, stream);
 }
 
 // ============================================================================

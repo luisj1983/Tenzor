@@ -19,6 +19,7 @@
 #include <stdexcept>
 #include <vector>
 #include <cub/cub.cuh>
+#include <thrust/iterator/counting_iterator.h>
 
 namespace tenzor {
 namespace cuda {
@@ -405,60 +406,9 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
 }
 
 // ============================================================================
-// masked_select kernel
+// masked_select kernel — uses CUB DeviceSelect::Flagged for single-pass
+// compaction instead of count + prefix_sum + gather (3 kernels → 1 CUB call)
 // ============================================================================
-
-// Count true elements in mask
-__global__ void count_true_kernel(const bool* mask, int64_t n, int64_t* count) {
-    __shared__ int64_t sdata[BLOCK_SIZE];
-
-    int64_t tid = threadIdx.x;
-    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
-
-    sdata[tid] = (i < n && mask[i]) ? 1 : 0;
-    __syncthreads();
-
-    // Reduction in shared memory
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) {
-            sdata[tid] += sdata[tid + s];
-        }
-        __syncthreads();
-    }
-
-    if (tid == 0) {
-        atomicAdd((unsigned long long*)count, (unsigned long long)sdata[0]);
-    }
-}
-
-// Compute prefix sum for positions
-__global__ void compute_positions_kernel(const bool* mask, int64_t* positions, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(i, n) {
-        if (mask[i]) {
-            // Use atomicAdd to get unique position
-            // This is not the most efficient but works for correctness
-            positions[i] = 1;
-        } else {
-            positions[i] = 0;
-        }
-    }
-}
-
-template<typename T>
-__global__ void masked_select_kernel_impl(
-    const T* input,
-    const bool* mask,
-    const int64_t* prefix_sum,
-    T* output,
-    int64_t n) {
-
-    CUDA_GRID_STRIDE_LOOP(i, n) {
-        if (mask[i]) {
-            int64_t out_idx = (i == 0) ? 0 : prefix_sum[i - 1];
-            output[out_idx] = input[i];
-        }
-    }
-}
 
 auto masked_select_kernel(const Tensor& input, const Tensor& mask,
                           cudaStream_t stream) -> Tensor {
@@ -471,77 +421,62 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask,
     // Convert mask to bool if needed
     Tensor bool_mask = mask;
     if (mask.dtype() != DType::Bool) {
-        // Create bool mask
-        Tensor temp({n}, DType::Bool, mask.device());
-        // For simplicity, assume mask is already bool-like
         bool_mask = mask;
     }
 
-    // Count true elements
-    backend::CachedMemoryGuard d_count_guard(sizeof(int64_t));
-    auto* d_count = static_cast<int64_t*>(d_count_guard.get());
-    CUDA_CHECK(cudaMemset(d_count, 0, sizeof(int64_t)));
+    const bool* d_flags = reinterpret_cast<const bool*>(bool_mask.data_ptr());
+    size_t elem_size = dtype_size(input.dtype());
 
-    int num_blocks = get_num_blocks(n);
-    count_true_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-        reinterpret_cast<const bool*>(bool_mask.data_ptr()), n, d_count);
+    // Allocate max-size temp output buffer and device counter for num_selected
+    backend::CachedMemoryGuard d_out_guard(n * elem_size);
+    backend::CachedMemoryGuard d_num_selected_guard(sizeof(int));
+    auto* d_num_selected = static_cast<int*>(d_num_selected_guard.get());
 
-    int64_t h_count;
-    CUDA_CHECK(cudaMemcpyAsync(&h_count, d_count, sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
+    // Use CUB DeviceSelect::Flagged — single optimized pass replaces
+    // count_true_kernel + compute_positions_kernel + masked_select_kernel_impl
+    #define RUN_FLAGGED_SELECT(T) do { \
+        const T* d_in = reinterpret_cast<const T*>(input.data_ptr()); \
+        T* d_output = static_cast<T*>(d_out_guard.get()); \
+        void* d_temp = nullptr; \
+        size_t temp_bytes = 0; \
+        cub::DeviceSelect::Flagged(d_temp, temp_bytes, \
+            d_in, d_flags, d_output, d_num_selected, \
+            static_cast<int>(n), stream); \
+        backend::CachedMemoryGuard d_temp_guard(temp_bytes); \
+        d_temp = d_temp_guard.get(); \
+        cub::DeviceSelect::Flagged(d_temp, temp_bytes, \
+            d_in, d_flags, d_output, d_num_selected, \
+            static_cast<int>(n), stream); \
+    } while(0)
+
+    switch (input.dtype()) {
+        case DType::Float32: RUN_FLAGGED_SELECT(float); break;
+        case DType::Float64: RUN_FLAGGED_SELECT(double); break;
+        case DType::Int32:   RUN_FLAGGED_SELECT(int32_t); break;
+        case DType::Int64:   RUN_FLAGGED_SELECT(int64_t); break;
+        case DType::Int8:    RUN_FLAGGED_SELECT(int8_t); break;
+        case DType::UInt8:   RUN_FLAGGED_SELECT(uint8_t); break;
+        case DType::Float16: RUN_FLAGGED_SELECT(__half); break;
+        default:
+            throw std::runtime_error("masked_select: unsupported dtype");
+    }
+
+    #undef RUN_FLAGGED_SELECT
+
+    // D2H sync — unavoidable for dynamic output size, but now happens after
+    // a single optimized CUB operation instead of 3 separate kernel launches
+    int h_count;
+    CUDA_CHECK(cudaMemcpyAsync(&h_count, d_num_selected, sizeof(int), cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
     if (h_count == 0) {
         return Tensor({0}, input.dtype(), input.device());
     }
 
-    // Compute prefix sum using CUB
-    backend::CachedMemoryGuard d_positions_guard(n * sizeof(int64_t));
-    auto* d_positions = static_cast<int64_t*>(d_positions_guard.get());
-    backend::CachedMemoryGuard d_prefix_sum_guard(n * sizeof(int64_t));
-    auto* d_prefix_sum = static_cast<int64_t*>(d_prefix_sum_guard.get());
-
-    // Initialize positions
-    compute_positions_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-        reinterpret_cast<const bool*>(bool_mask.data_ptr()), d_positions, n);
-
-    // Run exclusive prefix sum
-    void* d_temp_storage_query = nullptr;
-    size_t temp_storage_bytes = 0;
-    cub::DeviceScan::InclusiveSum(d_temp_storage_query, temp_storage_bytes,
-                                   d_positions, d_prefix_sum, n, stream);
-    backend::CachedMemoryGuard d_temp_storage_guard(temp_storage_bytes);
-    auto* d_temp_storage = d_temp_storage_guard.get();
-    cub::DeviceScan::InclusiveSum(d_temp_storage, temp_storage_bytes,
-                                   d_positions, d_prefix_sum, n, stream);
-
-    // Create output tensor
-    Tensor output({h_count}, input.dtype(), input.device());
-
-    #define LAUNCH_MASKED_SELECT(T) \
-        masked_select_kernel_impl<T><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
-            input.data<T>(), \
-            reinterpret_cast<const bool*>(bool_mask.data_ptr()), \
-            d_prefix_sum, output.data<T>(), n)
-
-    switch (input.dtype()) {
-        case DType::Float32: LAUNCH_MASKED_SELECT(float); break;
-        case DType::Float64: LAUNCH_MASKED_SELECT(double); break;
-        case DType::Int32:   LAUNCH_MASKED_SELECT(int32_t); break;
-        case DType::Int64:   LAUNCH_MASKED_SELECT(int64_t); break;
-        case DType::Int8:    LAUNCH_MASKED_SELECT(int8_t); break;
-        case DType::UInt8:   LAUNCH_MASKED_SELECT(uint8_t); break;
-        case DType::Float16:
-            masked_select_kernel_impl<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-                reinterpret_cast<const __half*>(input.data_ptr()),
-                reinterpret_cast<const bool*>(bool_mask.data_ptr()),
-                d_prefix_sum,
-                reinterpret_cast<__half*>(output.data_ptr()), n);
-            break;
-        default:
-            throw std::runtime_error("masked_select: unsupported dtype");
-    }
-
-    #undef LAUNCH_MASKED_SELECT
+    // Create properly-sized output and D2D copy from temp buffer
+    Tensor output({static_cast<int64_t>(h_count)}, input.dtype(), input.device());
+    CUDA_CHECK(cudaMemcpyAsync(output.data_ptr(), d_out_guard.get(),
+                                h_count * elem_size, cudaMemcpyDeviceToDevice, stream));
 
     CUDA_CHECK(cudaGetLastError());
     return output;
@@ -925,23 +860,19 @@ __global__ void nonzero_flag_kernel<__half>(
     }
 }
 
-__global__ void nonzero_gather_kernel(
-    const int64_t* flags,
-    const int64_t* prefix_sum,
+// Decompose compacted flat indices into multi-dimensional indices
+__global__ void decompose_flat_indices_kernel(
+    const int64_t* flat_indices,
     int64_t* output,
     const int64_t* shape,
-    int64_t n,
+    int64_t num_indices,
     int64_t ndim) {
 
-    CUDA_GRID_STRIDE_LOOP(i, n) {
-        if (flags[i]) {
-            int64_t out_row = (i == 0) ? 0 : prefix_sum[i - 1];
-            // Convert flat index to multi-dimensional indices
-            int64_t flat = i;
-            for (int64_t d = ndim - 1; d >= 0; --d) {
-                output[out_row * ndim + d] = flat % shape[d];
-                flat /= shape[d];
-            }
+    CUDA_GRID_STRIDE_LOOP(i, num_indices) {
+        int64_t flat = flat_indices[i];
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            output[i * ndim + d] = flat % shape[d];
+            flat /= shape[d];
         }
     }
 }
@@ -983,45 +914,49 @@ auto nonzero_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
 
     #undef LAUNCH_NONZERO_FLAG
 
-    // Compute prefix sum using CUB
-    backend::CachedMemoryGuard d_prefix_sum_guard(n * sizeof(int64_t));
-    auto* d_prefix_sum = static_cast<int64_t*>(d_prefix_sum_guard.get());
+    // Use CUB DeviceSelect::Flagged with CountingInputIterator to compact
+    // nonzero flat indices in a single pass — replaces InclusiveSum + gather
+    thrust::counting_iterator<int64_t> iota(0);
 
-    void* d_temp_storage_query = nullptr;
-    size_t temp_storage_bytes = 0;
-    cub::DeviceScan::InclusiveSum(d_temp_storage_query, temp_storage_bytes,
-                                   d_flags, d_prefix_sum, n, stream);
-    backend::CachedMemoryGuard d_temp_storage_guard(temp_storage_bytes);
-    auto* d_temp_storage = d_temp_storage_guard.get();
-    cub::DeviceScan::InclusiveSum(d_temp_storage, temp_storage_bytes,
-                                   d_flags, d_prefix_sum, n, stream);
+    backend::CachedMemoryGuard d_flat_indices_guard(n * sizeof(int64_t));
+    auto* d_flat_indices = static_cast<int64_t*>(d_flat_indices_guard.get());
 
-    // Read total count from last element of prefix sum
-    int64_t total_nonzero;
-    CUDA_CHECK(cudaMemcpyAsync(&total_nonzero, d_prefix_sum + n - 1,
-                                sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
+    backend::CachedMemoryGuard d_num_selected_guard(sizeof(int));
+    auto* d_num_selected = static_cast<int*>(d_num_selected_guard.get());
+
+    void* d_temp = nullptr;
+    size_t temp_bytes = 0;
+    cub::DeviceSelect::Flagged(d_temp, temp_bytes,
+        iota, d_flags, d_flat_indices, d_num_selected,
+        static_cast<int>(n), stream);
+    backend::CachedMemoryGuard d_temp_guard(temp_bytes);
+    d_temp = d_temp_guard.get();
+    cub::DeviceSelect::Flagged(d_temp, temp_bytes,
+        iota, d_flags, d_flat_indices, d_num_selected,
+        static_cast<int>(n), stream);
+
+    // Single D2H sync to get count (replaces two syncs in the old code)
+    int total_nonzero;
+    CUDA_CHECK(cudaMemcpyAsync(&total_nonzero, d_num_selected, sizeof(int), cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
     if (total_nonzero == 0) {
         return Tensor({0, ndim}, DType::Int64, input.device());
     }
 
-    // Allocate output tensor
-    Tensor output({total_nonzero, ndim}, DType::Int64, input.device());
+    // Allocate output tensor and decompose flat indices to multi-dim
+    Tensor output({static_cast<int64_t>(total_nonzero), ndim}, DType::Int64, input.device());
 
-    // Copy shape to device
     backend::CachedMemoryGuard d_shape_guard(ndim * sizeof(int64_t));
     auto* d_shape = static_cast<int64_t*>(d_shape_guard.get());
     CUDA_CHECK(cudaMemcpyAsync(d_shape, input.shape().data(),
                                 ndim * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
 
-    // Gather nonzero indices
-    nonzero_gather_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-        d_flags, d_prefix_sum, output.data<int64_t>(), d_shape, n, ndim);
+    int decompose_blocks = get_num_blocks(total_nonzero);
+    decompose_flat_indices_kernel<<<decompose_blocks, BLOCK_SIZE, 0, stream>>>(
+        d_flat_indices, output.data<int64_t>(), d_shape, total_nonzero, ndim);
 
     CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-
     return output;
 }
 

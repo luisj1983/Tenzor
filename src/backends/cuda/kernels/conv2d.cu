@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <vector>
 #include <iostream>
+#include <mutex>
 
 namespace tenzor {
 namespace cuda {
@@ -98,6 +99,24 @@ __device__ __host__ inline __half to_cuda_half(const Float16& x) {
 // Convert CUDA __half to Tenzor Float16
 __device__ __host__ inline Float16 from_cuda_half(const __half& x) {
     return Float16(__half_as_ushort(x));
+}
+
+// ============================================================================
+// Cached cuBLAS Handle (avoids ~100μs create/destroy overhead per call)
+// ============================================================================
+
+static cublasHandle_t conv2d_cublas_handle = nullptr;
+static std::mutex conv2d_cublas_mutex;
+
+static cublasHandle_t get_conv2d_cublas_handle() {
+    if (conv2d_cublas_handle == nullptr) {
+        std::lock_guard<std::mutex> lock(conv2d_cublas_mutex);
+        if (conv2d_cublas_handle == nullptr) {
+            CUBLAS_CHECK(cublasCreate(&conv2d_cublas_handle));
+            cublasSetMathMode(conv2d_cublas_handle, CUBLAS_TF32_TENSOR_OP_MATH);
+        }
+    }
+    return conv2d_cublas_handle;
 }
 
 // ============================================================================
@@ -826,28 +845,105 @@ auto conv2d_forward_kernel(
 
     // Check dtype and dispatch to appropriate implementation
     if (input.dtype() == DType::Float16) {
-        // FP16 path: promote to Float32 for numerical stability, then convert back.
-        // This prevents overflow in deep networks where accumulated convolution
-        // outputs exceed Float16 range (~65504). Matches cuDNN's mixed-precision approach.
-        Tensor input_f32 = input.to(DType::Float32);
-        Tensor weight_f32 = weight.to(DType::Float32);
-        const Tensor* bias_f32_ptr = nullptr;
-        Tensor bias_f32;
-        if (bias != nullptr) {
-            bias_f32 = bias->to(DType::Float32);
-            bias_f32_ptr = &bias_f32;
+        // Mixed-precision path: FP16 I/O with FP32 accumulation via cuBLAS GemmEx.
+        // This eliminates the 3x memory overhead of promoting entire tensors to Float32
+        // while maintaining numerical stability through FP32 accumulation (matching cuDNN).
+        CUDA_CHECK(cudaMemsetAsync(output.data_ptr(), 0, output.numel() * sizeof(Float16), stream));
+
+        cublasHandle_t cublas_handle = get_conv2d_cublas_handle();
+        CUBLAS_CHECK(cublasSetStream(cublas_handle, stream));
+
+        int64_t out_channels_per_group = out_channels / groups;
+
+        for (int64_t g = 0; g < groups; ++g) {
+            int64_t in_start = g * in_channels_per_group;
+            int64_t out_start = g * out_channels_per_group;
+
+            int64_t col_rows = batch * out_h * out_w;
+            int64_t col_cols = in_channels_per_group * kernel_h * kernel_w;
+            backend::CachedMemoryGuard col_buffer_guard(col_rows * col_cols * sizeof(__half));
+            auto* col_buffer = static_cast<__half*>(col_buffer_guard.get());
+
+            // im2col in FP16
+            dim3 grid, block;
+            int64_t total_elements = batch * out_h * out_w * in_channels_per_group * kernel_h * kernel_w;
+            compute_launch_config_1d(total_elements, grid, block);
+
+            const __half* input_ptr = reinterpret_cast<const __half*>(
+                input.data<Float16>() + in_start * height * width
+            );
+
+            im2col_kernel_f16<<<grid, block, 0, stream>>>(
+                input_ptr, col_buffer, batch, in_channels_per_group,
+                height, width, kernel_h, kernel_w, stride, padding, dilation, out_h, out_w
+            );
+            CUDA_CHECK(cudaGetLastError());
+
+            // cuBLAS GemmEx: FP16 I/O with FP32 accumulation (Tensor Core accelerated)
+            int64_t M = col_rows;
+            int64_t K = col_cols;
+            int64_t N = out_channels_per_group;
+
+            float alpha = 1.0f;
+            float beta = 0.0f;
+
+            const __half* weight_ptr = reinterpret_cast<const __half*>(
+                weight.data<Float16>() + out_start * in_channels_per_group * kernel_h * kernel_w
+            );
+
+            backend::CachedMemoryGuard temp_output_guard(M * N * sizeof(__half));
+            auto* temp_output = static_cast<__half*>(temp_output_guard.get());
+
+            CUBLAS_CHECK(cublasGemmEx(
+                cublas_handle,
+                CUBLAS_OP_T,    // transpose weight
+                CUBLAS_OP_N,    // don't transpose col_buffer
+                N, M, K,
+                &alpha,
+                weight_ptr, CUDA_R_16F, K,
+                col_buffer, CUDA_R_16F, K,
+                &beta,
+                temp_output, CUDA_R_16F, N,
+                CUBLAS_COMPUTE_32F,  // FP32 accumulation for numerical stability
+                CUBLAS_GEMM_DEFAULT
+            ));
+
+            // Transpose NHWC → NCHW
+            dim3 t_grid, t_block;
+            compute_launch_config_1d(M * N, t_grid, t_block);
+
+            nhwc_to_nchw_kernel<__half><<<t_grid, t_block, 0, stream>>>(
+                temp_output,
+                reinterpret_cast<__half*>(output.data<Float16>()),
+                batch, out_h, out_w, out_channels, N, out_start
+            );
+            CUDA_CHECK(cudaGetLastError());
         }
-        Tensor output_f32 = conv2d_forward_kernel(input_f32, weight_f32, bias_f32_ptr,
-                                                   stride, padding, dilation, groups, stream);
-        return output_f32.to(DType::Float16);
+
+        // Add bias if present
+        if (bias != nullptr) {
+            int64_t spatial_size = out_h * out_w;
+            const __half* bias_data = reinterpret_cast<const __half*>(bias->data<Float16>());
+            __half* output_data = reinterpret_cast<__half*>(output.data<Float16>());
+
+            dim3 grid, block;
+            int64_t total = batch * out_channels * out_h * out_w;
+            compute_launch_config_1d(total, grid, block);
+
+            add_bias_kernel_f16<<<grid, block, 0, stream>>>(
+                output_data, bias_data, batch, out_channels, spatial_size, total
+            );
+            CUDA_CHECK(cudaGetLastError());
+        }
+
+        return output;
     }
 
     // Initialize output to zeros (Float32 path)
     CUDA_CHECK(cudaMemsetAsync(output.data<float>(), 0, output.numel() * sizeof(float), stream));
 
-    // Create cuBLAS handle
-    cublasHandle_t cublas_handle;
-    CUBLAS_CHECK(cublasCreate(&cublas_handle));
+    // Get cached cuBLAS handle (avoids per-call create/destroy overhead)
+    cublasHandle_t cublas_handle = get_conv2d_cublas_handle();
     CUBLAS_CHECK(cublasSetStream(cublas_handle, stream));
 
     // Process each group separately
@@ -970,9 +1066,6 @@ auto conv2d_forward_kernel(
         );
         CUDA_CHECK(cudaGetLastError());
     }
-
-    // Cleanup
-    CUBLAS_CHECK(cublasDestroy(cublas_handle));
 
     return output;
 }
@@ -1243,9 +1336,8 @@ auto conv2d_backward_kernel(
         CUDA_CHECK(cudaMemsetAsync(grad_bias.data<float>(), 0, grad_bias.numel() * sizeof(float), stream));
     }
 
-    // Create cuBLAS handle
-    cublasHandle_t cublas_handle;
-    CUBLAS_CHECK(cublasCreate(&cublas_handle));
+    // Get cached cuBLAS handle (avoids per-call create/destroy overhead)
+    cublasHandle_t cublas_handle = get_conv2d_cublas_handle();
     CUBLAS_CHECK(cublasSetStream(cublas_handle, stream));
 
     int64_t out_channels_per_group = out_channels / groups;
@@ -1395,9 +1487,6 @@ auto conv2d_backward_kernel(
         );
         CUDA_CHECK(cudaGetLastError());
     }
-
-    // Cleanup
-    CUBLAS_CHECK(cublasDestroy(cublas_handle));
 
     return std::make_tuple(grad_input, grad_weight, grad_bias);
 }

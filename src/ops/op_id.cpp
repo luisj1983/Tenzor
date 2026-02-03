@@ -200,6 +200,9 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::FusedRMSPropStep)] = "fused_rmsprop_step";
     names[static_cast<size_t>(OpId::FusedAdadeltaStep)] = "fused_adadelta_step";
     names[static_cast<size_t>(OpId::FusedAdagradStep)] = "fused_adagrad_step";
+    names[static_cast<size_t>(OpId::FusedConv2dSigmoid)] = "fused_conv2d_sigmoid";
+    names[static_cast<size_t>(OpId::FusedConv2dTanh)] = "fused_conv2d_tanh";
+    names[static_cast<size_t>(OpId::FusedConv2dSwish)] = "fused_conv2d_swish";
 
     // Creation
     names[static_cast<size_t>(OpId::Zeros)] = "zeros";

@@ -116,6 +116,88 @@ auto fused_conv2d_relu(
     return dispatch(OpId::FusedConv2dReLU, inputs, attrs)[0];
 }
 
+static auto fused_conv2d_dispatch(
+    const char* name,
+    OpId op_id,
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride,
+    int64_t padding
+) -> Tensor {
+    if (input.ndim() != 4) {
+        throw std::runtime_error(
+            std::string(name) + ": input must be 4D (N, C, H, W), got " +
+            std::to_string(input.ndim()) + "D"
+        );
+    }
+    if (weight.ndim() != 4) {
+        throw std::runtime_error(
+            std::string(name) + ": weight must be 4D (C_out, C_in, KH, KW), got " +
+            std::to_string(weight.ndim()) + "D"
+        );
+    }
+    int64_t in_channels = input.shape()[1];
+    int64_t weight_in_channels = weight.shape()[1];
+    int64_t out_channels = weight.shape()[0];
+    if (in_channels != weight_in_channels) {
+        throw std::runtime_error(
+            std::string(name) + ": input channels mismatch: input has " +
+            std::to_string(in_channels) + ", weight expects " +
+            std::to_string(weight_in_channels)
+        );
+    }
+    if (bias != nullptr && bias->numel() != out_channels) {
+        throw std::runtime_error(
+            std::string(name) + ": bias size mismatch: expected " +
+            std::to_string(out_channels) + ", got " +
+            std::to_string(bias->numel())
+        );
+    }
+    std::vector<Tensor> inputs = {input, weight};
+    if (bias != nullptr) {
+        inputs.push_back(*bias);
+    }
+    OpAttributes attrs;
+    attrs["has_bias"] = bias != nullptr ? "true" : "false";
+    attrs["stride"] = std::to_string(stride);
+    attrs["padding"] = std::to_string(padding);
+    return dispatch(op_id, inputs, attrs)[0];
+}
+
+auto fused_conv2d_sigmoid(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride,
+    int64_t padding
+) -> Tensor {
+    return fused_conv2d_dispatch("fused_conv2d_sigmoid", OpId::FusedConv2dSigmoid,
+                                 input, weight, bias, stride, padding);
+}
+
+auto fused_conv2d_tanh(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride,
+    int64_t padding
+) -> Tensor {
+    return fused_conv2d_dispatch("fused_conv2d_tanh", OpId::FusedConv2dTanh,
+                                 input, weight, bias, stride, padding);
+}
+
+auto fused_conv2d_swish(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride,
+    int64_t padding
+) -> Tensor {
+    return fused_conv2d_dispatch("fused_conv2d_swish", OpId::FusedConv2dSwish,
+                                 input, weight, bias, stride, padding);
+}
+
 auto fused_batchnorm_relu(
     const Tensor& input,
     const Tensor& running_mean,
