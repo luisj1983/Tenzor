@@ -1246,8 +1246,9 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             throw std::runtime_error("sum: unsupported dtype");
     }
 
+#ifndef NDEBUG
     cudaStreamSynchronize(stream);
-
+#endif
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         throw std::runtime_error(std::string("CUDA error in sum_kernel: ") + cudaGetErrorString(err));
@@ -1317,8 +1318,9 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t st
         scale_kernel<<<grid_size, block_size, 0, stream>>>(data, n, scale);
     }
 
+#ifndef NDEBUG
     cudaStreamSynchronize(stream);
-
+#endif
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         throw std::runtime_error(std::string("CUDA error in mean_kernel: ") + cudaGetErrorString(err));
@@ -1425,8 +1427,9 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             throw std::runtime_error("max: unsupported dtype");
     }
 
+#ifndef NDEBUG
     cudaStreamSynchronize(stream);
-
+#endif
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         throw std::runtime_error(std::string("CUDA error in max_kernel: ") + cudaGetErrorString(err));
@@ -1533,8 +1536,9 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             throw std::runtime_error("min: unsupported dtype");
     }
 
+#ifndef NDEBUG
     cudaStreamSynchronize(stream);
-
+#endif
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         throw std::runtime_error(std::string("CUDA error in min_kernel: ") + cudaGetErrorString(err));
@@ -2333,8 +2337,9 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
             throw std::runtime_error("argmax: only Float32, Float64, Float16, Int32, and Int64 are supported");
     }
 
+#ifndef NDEBUG
     cudaStreamSynchronize(stream);
-
+#endif
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         throw std::runtime_error(std::string("CUDA error in argmax_kernel: ") + cudaGetErrorString(err));
@@ -2452,8 +2457,9 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
             throw std::runtime_error("argmin: only Float32, Float64, Float16, Int32, and Int64 are supported");
     }
 
+#ifndef NDEBUG
     cudaStreamSynchronize(stream);
-
+#endif
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         throw std::runtime_error(std::string("CUDA error in argmin_kernel: ") + cudaGetErrorString(err));
@@ -2706,8 +2712,9 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t st
             throw std::runtime_error("prod: only Float32, Float64, Int32, and Int64 are supported");
     }
 
+#ifndef NDEBUG
     cudaStreamSynchronize(stream);
-
+#endif
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         throw std::runtime_error(std::string("CUDA error in prod_kernel: ") + cudaGetErrorString(err));
@@ -2915,8 +2922,9 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
             throw std::runtime_error("var: only Float32 and Float64 are supported");
     }
 
+#ifndef NDEBUG
     cudaStreamSynchronize(stream);
-
+#endif
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         throw std::runtime_error(std::string("CUDA error in var_kernel: ") + cudaGetErrorString(err));
@@ -3013,8 +3021,9 @@ auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
             auto* output_data = output.data<float>();
             sum_reduce_sqrt_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(var_data, output_data, 1);
 
+#ifndef NDEBUG
             cudaStreamSynchronize(stream);
-
+#endif
             cudaError_t err = cudaGetLastError();
             if (err != cudaSuccess) {
                 throw std::runtime_error(std::string("CUDA error in std_kernel: ") + cudaGetErrorString(err));
@@ -3032,8 +3041,9 @@ auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
             auto* output_data = output.data<double>();
             sum_reduce_sqrt_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(var_data, output_data, 1);
 
+#ifndef NDEBUG
             cudaStreamSynchronize(stream);
-
+#endif
             cudaError_t err = cudaGetLastError();
             if (err != cudaSuccess) {
                 throw std::runtime_error(std::string("CUDA error in std_kernel: ") + cudaGetErrorString(err));

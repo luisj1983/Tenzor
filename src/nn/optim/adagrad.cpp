@@ -116,7 +116,25 @@ auto Adagrad::step() -> void {
             continue;
         }
 
-        // Move all tensors to CPU for data access
+        // CUDA fast path: fused kernel avoids GPU→CPU→GPU round-trip
+        if (original_device.type == Device::Type::CUDA &&
+            grad_orig.device().type == Device::Type::CUDA) {
+
+            // CUDA registry expects: [param, grad, sum_sq]
+            std::vector<Tensor> inputs = {param->tensor(), grad_orig, sum_[i]};
+
+            OpAttributes attrs;
+            attrs["lr"] = std::to_string(static_cast<float>(current_lr));
+            attrs["lr_decay"] = std::to_string(static_cast<float>(lr_decay_));
+            attrs["eps"] = std::to_string(static_cast<float>(eps_));
+            attrs["weight_decay"] = std::to_string(static_cast<float>(weight_decay_));
+            attrs["step"] = std::to_string(step_count_);
+
+            dispatch(OpId::FusedAdagradStep, inputs, attrs);
+            continue;
+        }
+
+        // CPU fallback: move all tensors to CPU for data access
         Tensor grad = grad_orig.to(Device::cpu());
         Tensor param_data = param_data_orig.to(Device::cpu());
         Tensor sum_cpu = sum_[i].to(Device::cpu());

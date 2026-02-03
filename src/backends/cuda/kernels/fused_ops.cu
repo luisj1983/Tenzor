@@ -35,6 +35,11 @@ inline std::vector<int64_t> to_vector(const std::span<const int64_t>& s) {
     return std::vector<int64_t>(s.begin(), s.end());
 }
 
+// Single-thread kernel to scale a scalar value in device memory
+__global__ void scale_scalar_kernel(float* val, float scale) {
+    *val *= scale;
+}
+
 // Helper for computing (optionally scaled) sum of a 1D tensor on GPU
 // When scale != 1.0f, computes sum * scale (e.g. mean = sum * (1/n))
 // No D2H synchronization needed
@@ -57,12 +62,9 @@ inline Tensor cuda_sum_device(const Tensor& t, float scale = 1.0f) {
     // Run sum
     cub::DeviceReduce::Sum(d_temp_storage, temp_storage_bytes, data, d_out, n);
 
-    // Apply scale on host if needed (single scalar, negligible cost)
+    // Apply scale on device if needed (avoids D2H-compute-H2D round-trip)
     if (scale != 1.0f) {
-        float host_val;
-        cudaMemcpy(&host_val, d_out, sizeof(float), cudaMemcpyDeviceToHost);
-        host_val *= scale;
-        cudaMemcpy(d_out, &host_val, sizeof(float), cudaMemcpyHostToDevice);
+        scale_scalar_kernel<<<1, 1>>>(d_out, scale);
     }
 
     return result;

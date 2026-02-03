@@ -40,9 +40,12 @@ auto AdamAtan2::step() -> void {
 
         auto grad = param.grad()->clone();
 
-        // Track gradient magnitude for statistics
-        auto grad_sq_sum = tenzor::sum(grad * grad).item<float>();
-        total_grad_mag += std::sqrt(grad_sq_sum);
+        // Track gradient magnitude only when statistics tracking is enabled
+        // (.item() forces GPU synchronization per parameter, which is expensive)
+        if (track_statistics_) {
+            auto grad_sq_sum = tenzor::sum(grad * grad).item<float>();
+            total_grad_mag += std::sqrt(grad_sq_sum);
+        }
         total_params++;
 
         // Update biased first moment estimate
@@ -80,13 +83,15 @@ auto AdamAtan2::step() -> void {
         auto ratio = div(m_hat, denom);
         auto update = tenzor::atan(ratio);
 
-        // Track update magnitude
-        auto update_flat = update.view({-1});
-        auto update_sq = update_flat * update_flat;
-        auto update_sq_sum = tenzor::sum(update_sq).template item<float>();
-        double update_mag = std::sqrt(update_sq_sum);
-        total_update_mag += update_mag;
-        max_update_mag = std::max(max_update_mag, update_mag);
+        // Track update magnitude only when statistics tracking is enabled
+        if (track_statistics_) {
+            auto update_flat = update.view({-1});
+            auto update_sq = update_flat * update_flat;
+            auto update_sq_sum = tenzor::sum(update_sq).template item<float>();
+            double update_mag = std::sqrt(update_sq_sum);
+            total_update_mag += update_mag;
+            max_update_mag = std::max(max_update_mag, update_mag);
+        }
 
         // Decoupled weight decay (like AdamW)
         if (weight_decay_ > 0) {
@@ -97,8 +102,8 @@ auto AdamAtan2::step() -> void {
         param.tensor() = param.tensor() - update * static_cast<float>(lr_);
     }
 
-    // Update statistics
-    if (total_params > 0) {
+    // Update statistics (only meaningful when tracking is enabled)
+    if (track_statistics_ && total_params > 0) {
         update_stats_.avg_update_magnitude = total_update_mag / total_params;
         update_stats_.max_update_magnitude = max_update_mag;
         update_stats_.avg_gradient_magnitude = total_grad_mag / total_params;

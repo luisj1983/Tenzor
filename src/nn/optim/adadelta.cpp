@@ -84,7 +84,26 @@ auto Adadelta::step() -> void {
             continue;
         }
 
-        // Move all tensors to CPU for data access
+        // CUDA fast path: fused kernel avoids GPU→CPU→GPU round-trip
+        if (original_device.type == Device::Type::CUDA &&
+            grad_orig.device().type == Device::Type::CUDA) {
+
+            // CUDA registry expects: [param, grad, square_avg, acc_delta]
+            std::vector<Tensor> inputs = {
+                param->tensor(), grad_orig, square_avg_[i], acc_delta_[i]
+            };
+
+            OpAttributes attrs;
+            attrs["rho"] = std::to_string(static_cast<float>(rho_));
+            attrs["eps"] = std::to_string(static_cast<float>(eps_));
+            attrs["lr"] = std::to_string(static_cast<float>(lr_));
+            attrs["weight_decay"] = std::to_string(static_cast<float>(weight_decay_));
+
+            dispatch(OpId::FusedAdadeltaStep, inputs, attrs);
+            continue;
+        }
+
+        // CPU fallback: move all tensors to CPU for data access
         Tensor grad = grad_orig.to(Device::cpu());
         Tensor param_data = param_data_orig.to(Device::cpu());
         Tensor square_avg_cpu = square_avg_[i].to(Device::cpu());

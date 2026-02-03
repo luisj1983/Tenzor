@@ -114,7 +114,19 @@ public:
     auto load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void override;
 
     /**
+     * @brief Enable or disable per-step statistics tracking
+     *
+     * When disabled (default), avoids GPU synchronization overhead from
+     * extracting scalar values during the optimization step.
+     *
+     * @param enable Whether to enable statistics tracking
+     */
+    auto set_track_statistics(bool enable) -> void { track_statistics_ = enable; }
+
+    /**
      * @brief Get statistics about update magnitudes
+     *
+     * Only populated when track_statistics is enabled via set_track_statistics().
      */
     struct UpdateStats {
         double avg_update_magnitude;  ///< Average |update| across all params
@@ -130,6 +142,7 @@ private:
     double eps_;
     double weight_decay_;
     bool amsgrad_;
+    bool track_statistics_{false};
 
     int64_t step_count_{0};
     std::vector<Tensor> exp_avg_;        ///< First moment estimates

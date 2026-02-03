@@ -104,7 +104,32 @@ auto RMSprop::step() -> void {
             continue;
         }
 
-        // Move all tensors to CPU for data access
+        // CUDA fast path: fused kernel avoids GPU→CPU→GPU round-trip
+        if (original_device.type == Device::Type::CUDA &&
+            grad_orig.device().type == Device::Type::CUDA) {
+
+            // CUDA registry expects: [param, grad, square_avg, grad_avg?, momentum_buffer?]
+            std::vector<Tensor> inputs = {param->tensor(), grad_orig, square_avg_[i]};
+            if (centered_ && i < grad_avg_.size()) {
+                inputs.push_back(grad_avg_[i]);
+            }
+            if (momentum_ > 0.0 && i < momentum_buffer_.size()) {
+                inputs.push_back(momentum_buffer_[i]);
+            }
+
+            OpAttributes attrs;
+            attrs["lr"] = std::to_string(static_cast<float>(lr_));
+            attrs["alpha"] = std::to_string(static_cast<float>(alpha_));
+            attrs["eps"] = std::to_string(static_cast<float>(eps_));
+            attrs["weight_decay"] = std::to_string(static_cast<float>(weight_decay_));
+            attrs["momentum"] = std::to_string(static_cast<float>(momentum_));
+            attrs["centered"] = centered_ ? "1" : "0";
+
+            dispatch(OpId::FusedRMSPropStep, inputs, attrs);
+            continue;
+        }
+
+        // CPU fallback: move all tensors to CPU for data access
         Tensor grad = grad_orig.to(Device::cpu());
         Tensor param_data = param_data_orig.to(Device::cpu());
         Tensor square_avg_cpu = square_avg_[i].to(Device::cpu());
