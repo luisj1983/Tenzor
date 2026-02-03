@@ -5,6 +5,7 @@
 
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
+#include "tenzor/backend/caching_allocator.hpp"
 #include <cub/cub.cuh>
 #include <algorithm>
 #include <vector>
@@ -113,8 +114,8 @@ __global__ void nms_kernel(const float* boxes, const int64_t* sorted_indices,
     }
 }
 
-// Device kernel for greedy suppression — runs in a single thread
-// Eliminates D2H copies of sorted_indices and suppression_mask
+// Device kernel for greedy suppression — parallelizes inner chunk-OR loop
+// Thread 0 drives sequential keep/suppress decisions; all threads cooperate on OR
 __global__ void nms_greedy_suppression_kernel(
     const uint64_t* suppression_mask,
     const int64_t* sorted_indices,
@@ -123,35 +124,52 @@ __global__ void nms_greedy_suppression_kernel(
     int64_t num_boxes,
     int64_t num_chunks
 ) {
-    // Single-thread kernel: sequential greedy suppression
-    int64_t keep_count = 0;
-    uint64_t* remv = nullptr;
-
-    // Use dynamic shared memory as scratch for "removed" bitmask
+    // Use dynamic shared memory as scratch for "removed" bitmask + keep_count
     extern __shared__ uint64_t s_remv[];
-    for (int64_t i = 0; i < num_chunks; ++i) {
-        s_remv[i] = 0;
+    // Last int64_t in shared memory is the keep counter
+    int64_t* s_keep_count = reinterpret_cast<int64_t*>(s_remv + num_chunks);
+
+    int tid = threadIdx.x;
+
+    // Initialize removed bitmask (parallel)
+    for (int64_t c = tid; c < num_chunks; c += blockDim.x) {
+        s_remv[c] = 0;
     }
+    if (tid == 0) {
+        *s_keep_count = 0;
+    }
+    __syncthreads();
 
     for (int64_t i = 0; i < num_boxes; ++i) {
-        // Check if box i (in sorted order) is already suppressed
-        int64_t chunk_i = i / 64;
-        int64_t bit_i = i % 64;
-        if (s_remv[chunk_i] & (1ULL << bit_i)) {
-            continue;
+        // Thread 0 checks if box i is suppressed and decides keep/skip
+        __shared__ int s_keep;
+        if (tid == 0) {
+            int64_t chunk_i = i / 64;
+            int64_t bit_i = i % 64;
+            if (s_remv[chunk_i] & (1ULL << bit_i)) {
+                s_keep = 0;
+            } else {
+                // Keep this box
+                keep_indices[*s_keep_count] = sorted_indices[i];
+                (*s_keep_count)++;
+                s_keep = 1;
+            }
         }
+        __syncthreads();
 
-        // Keep this box
-        keep_indices[keep_count++] = sorted_indices[i];
-
-        // OR this box's suppression row into the removed set
-        const uint64_t* row = suppression_mask + i * num_chunks;
-        for (int64_t c = 0; c < num_chunks; ++c) {
-            s_remv[c] |= row[c];
+        if (s_keep) {
+            // All threads cooperate to OR this box's suppression row
+            const uint64_t* row = suppression_mask + i * num_chunks;
+            for (int64_t c = tid; c < num_chunks; c += blockDim.x) {
+                s_remv[c] |= row[c];
+            }
         }
+        __syncthreads();
     }
 
-    *num_keep = keep_count;
+    if (tid == 0) {
+        *num_keep = *s_keep_count;
+    }
 }
 
 // Host function to perform NMS on GPU
@@ -165,12 +183,12 @@ extern "C" void nms_cuda(const float* boxes, const float* scores,
 
     // Sort indices by score on GPU using CUB RadixSort
     // Allocate device memory for sort input/output
-    int64_t* d_indices_in;
-    int64_t* d_sorted_indices;
-    float* d_scores_sorted;
-    CUDA_CHECK(cudaMalloc(&d_indices_in, num_boxes * sizeof(int64_t)));
-    CUDA_CHECK(cudaMalloc(&d_sorted_indices, num_boxes * sizeof(int64_t)));
-    CUDA_CHECK(cudaMalloc(&d_scores_sorted, num_boxes * sizeof(float)));
+    tenzor::backend::CachedMemoryGuard d_indices_in_guard(num_boxes * sizeof(int64_t));
+    int64_t* d_indices_in = static_cast<int64_t*>(d_indices_in_guard.get());
+    tenzor::backend::CachedMemoryGuard d_sorted_indices_guard(num_boxes * sizeof(int64_t));
+    int64_t* d_sorted_indices = static_cast<int64_t*>(d_sorted_indices_guard.get());
+    tenzor::backend::CachedMemoryGuard d_scores_sorted_guard(num_boxes * sizeof(float));
+    float* d_scores_sorted = static_cast<float*>(d_scores_sorted_guard.get());
 
     // Initialize index array [0, 1, 2, ..., num_boxes-1] on device
     {
@@ -187,21 +205,19 @@ extern "C" void nms_cuda(const float* boxes, const float* scores,
         scores, d_scores_sorted,
         d_indices_in, d_sorted_indices,
         static_cast<int>(num_boxes));
-    CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
+    tenzor::backend::CachedMemoryGuard d_temp_storage_guard(temp_storage_bytes);
+    d_temp_storage = d_temp_storage_guard.get();
     cub::DeviceRadixSort::SortPairsDescending(
         d_temp_storage, temp_storage_bytes,
         scores, d_scores_sorted,
         d_indices_in, d_sorted_indices,
         static_cast<int>(num_boxes));
     CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaFree(d_temp_storage));
-    CUDA_CHECK(cudaFree(d_indices_in));
-    CUDA_CHECK(cudaFree(d_scores_sorted));
 
     // Allocate suppression mask
     const int64_t num_chunks = (num_boxes + 63) / 64;
-    uint64_t* d_suppression_mask;
-    CUDA_CHECK(cudaMalloc(&d_suppression_mask, num_boxes * num_chunks * sizeof(uint64_t)));
+    tenzor::backend::CachedMemoryGuard d_suppression_mask_guard(num_boxes * num_chunks * sizeof(uint64_t));
+    uint64_t* d_suppression_mask = static_cast<uint64_t*>(d_suppression_mask_guard.get());
     CUDA_CHECK(cudaMemset(d_suppression_mask, 0, num_boxes * num_chunks * sizeof(uint64_t)));
 
     // Launch NMS IoU kernel — one block per reference box
@@ -210,12 +226,12 @@ extern "C" void nms_cuda(const float* boxes, const float* scores,
         boxes, d_sorted_indices, d_suppression_mask, num_boxes, iou_threshold);
 
     // Allocate device-side num_keep scalar
-    int64_t* d_num_keep;
-    CUDA_CHECK(cudaMalloc(&d_num_keep, sizeof(int64_t)));
+    tenzor::backend::CachedMemoryGuard d_num_keep_guard(sizeof(int64_t));
+    int64_t* d_num_keep = static_cast<int64_t*>(d_num_keep_guard.get());
 
-    // Launch greedy suppression on device (single thread, shared memory for bitmask)
-    size_t shared_bytes = num_chunks * sizeof(uint64_t);
-    nms_greedy_suppression_kernel<<<1, 1, shared_bytes>>>(
+    // Launch greedy suppression — 256 threads cooperate on inner chunk-OR loop
+    size_t shared_bytes = num_chunks * sizeof(uint64_t) + sizeof(int64_t);
+    nms_greedy_suppression_kernel<<<1, 256, shared_bytes>>>(
         d_suppression_mask, d_sorted_indices, keep_indices, d_num_keep,
         num_boxes, num_chunks);
     CUDA_CHECK(cudaGetLastError());
@@ -224,10 +240,7 @@ extern "C" void nms_cuda(const float* boxes, const float* scores,
     CUDA_CHECK(cudaMemcpyAsync(num_keep, d_num_keep, sizeof(int64_t), cudaMemcpyDeviceToHost, nullptr));
     CUDA_CHECK(cudaStreamSynchronize(nullptr));
 
-    // Cleanup
-    CUDA_CHECK(cudaFree(d_num_keep));
-    CUDA_CHECK(cudaFree(d_sorted_indices));
-    CUDA_CHECK(cudaFree(d_suppression_mask));
+    // Memory automatically freed by CachedMemoryGuard destructors
 }
 
 } // namespace cuda

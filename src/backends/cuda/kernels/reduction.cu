@@ -1,4 +1,5 @@
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/backend/caching_allocator.hpp"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <device_launch_parameters.h>
@@ -48,27 +49,13 @@ __device__ __forceinline__ T cuda_add(T a, T b) { return a + b; }
 template<>
 __device__ __forceinline__ __half cuda_add<__half>(__half a, __half b) { return __hadd(a, b); }
 
-// Host-side helpers
+// GPU-side scalar fill (replaces host_zero + cudaMemcpyAsync H2D pattern to avoid UB)
 template<typename T>
-inline T host_zero() { return T(0); }
-
-template<>
-inline __half host_zero<__half>() { return __float2half(0.0f); }
-
+__global__ void fill_scalar_kernel(T* dst, T value) { dst[0] = value; }
 
 // ============================================================================
 // Helper kernels for GPU-side scalar operations (avoids D2H transfers)
 // ============================================================================
-
-template<typename T>
-__global__ void divide_scalar_kernel(T* val, T divisor) {
-    *val = *val / divisor;
-}
-
-template<typename T>
-__global__ void pow_scalar_kernel(T* val, T exponent) {
-    *val = pow(*val, exponent);
-}
 
 // Convert __half array to float array (for sorting/reduction on types CUB doesn't support)
 __global__ void half_to_float_kernel(const __half* src, float* dst, int64_t n) {
@@ -855,8 +842,7 @@ static auto compute_reduction_shape(
 template<typename T>
 static void launch_full_reduction_sum(const T* d_input, T* d_output, int64_t n, cudaStream_t stream = nullptr) {
     if (n == 0) {
-        T zero = host_zero<T>();
-        cudaMemcpyAsync(d_output, &zero, sizeof(T), cudaMemcpyHostToDevice, stream);
+        fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, T(0));
         return;
     }
 
@@ -877,8 +863,8 @@ static void launch_full_reduction_sum(const T* d_input, T* d_output, int64_t n, 
         }
     } else {
         // Phase 1: Reduce to num_blocks intermediate results
-        T* d_temp;
-        cudaMalloc(&d_temp, num_blocks * sizeof(T));
+        backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(T));
+        auto* d_temp = static_cast<T*>(d_temp_guard.get());
         sum_reduce_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
         // Check for kernel launch errors
         cudaError_t err = cudaGetLastError();
@@ -892,13 +878,6 @@ static void launch_full_reduction_sum(const T* d_input, T* d_output, int64_t n, 
         if (err != cudaSuccess) {
             throw std::runtime_error(std::string("CUDA kernel launch failed in sum_reduce_kernel phase 2: ") + cudaGetErrorString(err));
         }
-
-#if CUDART_VERSION >= 11020
-        cudaFreeAsync(d_temp, stream);
-#else
-        cudaStreamSynchronize(stream);
-        cudaFree(d_temp);
-#endif
     }
     // Check for any errors during synchronization
     cudaError_t err = cudaGetLastError();
@@ -923,17 +902,10 @@ static void launch_full_reduction_max(const T* d_input, T* d_output, int64_t n, 
     if (num_blocks == 1) {
         max_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
     } else {
-        T* d_temp;
-        cudaMalloc(&d_temp, num_blocks * sizeof(T));
+        backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(T));
+        auto* d_temp = static_cast<T*>(d_temp_guard.get());
         max_reduce_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
         max_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
-
-#if CUDART_VERSION >= 11020
-        cudaFreeAsync(d_temp, stream);
-#else
-        cudaStreamSynchronize(stream);
-        cudaFree(d_temp);
-#endif
     }
 }
 
@@ -953,17 +925,10 @@ static void launch_full_reduction_min(const T* d_input, T* d_output, int64_t n, 
     if (num_blocks == 1) {
         min_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
     } else {
-        T* d_temp;
-        cudaMalloc(&d_temp, num_blocks * sizeof(T));
+        backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(T));
+        auto* d_temp = static_cast<T*>(d_temp_guard.get());
         min_reduce_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
         min_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
-
-#if CUDART_VERSION >= 11020
-        cudaFreeAsync(d_temp, stream);
-#else
-        cudaStreamSynchronize(stream);
-        cudaFree(d_temp);
-#endif
     }
 }
 
@@ -1078,17 +1043,10 @@ static void launch_full_reduction_max_half(const __half* d_input, __half* d_outp
     if (num_blocks == 1) {
         max_reduce_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
     } else {
-        __half* d_temp;
-        cudaMalloc(&d_temp, num_blocks * sizeof(__half));
+        backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(__half));
+        auto* d_temp = static_cast<__half*>(d_temp_guard.get());
         max_reduce_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
         max_reduce_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
-
-#if CUDART_VERSION >= 11020
-        cudaFreeAsync(d_temp, stream);
-#else
-        cudaStreamSynchronize(stream);
-        cudaFree(d_temp);
-#endif
     }
 }
 
@@ -1107,17 +1065,10 @@ static void launch_full_reduction_min_half(const __half* d_input, __half* d_outp
     if (num_blocks == 1) {
         min_reduce_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
     } else {
-        __half* d_temp;
-        cudaMalloc(&d_temp, num_blocks * sizeof(__half));
+        backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(__half));
+        auto* d_temp = static_cast<__half*>(d_temp_guard.get());
         min_reduce_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
         min_reduce_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
-
-#if CUDART_VERSION >= 11020
-        cudaFreeAsync(d_temp, stream);
-#else
-        cudaStreamSynchronize(stream);
-        cudaFree(d_temp);
-#endif
     }
 }
 
@@ -2052,8 +2003,7 @@ static void launch_full_argmax(const T* d_input, int64_t* d_output, int64_t n, c
     }
 
     if (n == 1) {
-        int64_t zero = 0;
-        cudaMemcpyAsync(d_output, &zero, sizeof(int64_t), cudaMemcpyHostToDevice, stream);
+        fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, int64_t(0));
         return;
     }
 
@@ -2063,13 +2013,12 @@ static void launch_full_argmax(const T* d_input, int64_t* d_output, int64_t n, c
         argmax_full_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
     } else {
         // Two-phase GPU-only reduction
-        int64_t* d_temp;
-        cudaMalloc(&d_temp, num_blocks * sizeof(int64_t));
+        backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(int64_t));
+        auto* d_temp = static_cast<int64_t*>(d_temp_guard.get());
         argmax_full_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
 
         // Phase 2: compare block results entirely on GPU
         argmax_final_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, d_output, num_blocks);
-        cudaFree(d_temp);
     }
 }
 // Helper function to launch argmin reduction
@@ -2080,8 +2029,7 @@ static void launch_full_argmin(const T* d_input, int64_t* d_output, int64_t n, c
     }
 
     if (n == 1) {
-        int64_t zero = 0;
-        cudaMemcpyAsync(d_output, &zero, sizeof(int64_t), cudaMemcpyHostToDevice, stream);
+        fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, int64_t(0));
         return;
     }
 
@@ -2091,13 +2039,12 @@ static void launch_full_argmin(const T* d_input, int64_t* d_output, int64_t n, c
         argmin_full_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
     } else {
         // Two-phase GPU-only reduction
-        int64_t* d_temp;
-        cudaMalloc(&d_temp, num_blocks * sizeof(int64_t));
+        backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(int64_t));
+        auto* d_temp = static_cast<int64_t*>(d_temp_guard.get());
         argmin_full_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
 
         // Phase 2: compare block results entirely on GPU
         argmin_final_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, d_output, num_blocks);
-        cudaFree(d_temp);
     }
 }
 
@@ -2174,8 +2121,7 @@ static void launch_full_argmax_half(const __half* d_input, int64_t* d_output, in
     }
 
     if (n == 1) {
-        int64_t zero = 0;
-        cudaMemcpyAsync(d_output, &zero, sizeof(int64_t), cudaMemcpyHostToDevice, stream);
+        fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, int64_t(0));
         return;
     }
 
@@ -2185,13 +2131,12 @@ static void launch_full_argmax_half(const __half* d_input, int64_t* d_output, in
         argmax_full_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
     } else {
         // Two-phase GPU-only reduction
-        int64_t* d_temp;
-        cudaMalloc(&d_temp, num_blocks * sizeof(int64_t));
+        backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(int64_t));
+        auto* d_temp = static_cast<int64_t*>(d_temp_guard.get());
         argmax_full_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
 
         // Phase 2: compare block results entirely on GPU
         argmax_final_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, d_output, num_blocks);
-        cudaFree(d_temp);
     }
 }
 
@@ -2201,8 +2146,7 @@ static void launch_full_argmin_half(const __half* d_input, int64_t* d_output, in
     }
 
     if (n == 1) {
-        int64_t zero = 0;
-        cudaMemcpyAsync(d_output, &zero, sizeof(int64_t), cudaMemcpyHostToDevice, stream);
+        fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, int64_t(0));
         return;
     }
 
@@ -2212,13 +2156,12 @@ static void launch_full_argmin_half(const __half* d_input, int64_t* d_output, in
         argmin_full_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
     } else {
         // Two-phase GPU-only reduction
-        int64_t* d_temp;
-        cudaMalloc(&d_temp, num_blocks * sizeof(int64_t));
+        backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(int64_t));
+        auto* d_temp = static_cast<int64_t*>(d_temp_guard.get());
         argmin_full_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
 
         // Phase 2: compare block results entirely on GPU
         argmin_final_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, d_output, num_blocks);
-        cudaFree(d_temp);
     }
 }
 
@@ -2614,8 +2557,7 @@ __global__ void prod_along_dim_kernel(
 template<typename T>
 static void launch_full_reduction_prod(const T* d_input, T* d_output, int64_t n, cudaStream_t stream = nullptr) {
     if (n == 0) {
-        T one = 1;
-        cudaMemcpyAsync(d_output, &one, sizeof(T), cudaMemcpyHostToDevice, stream);
+        fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, T(1));
         return;
     }
 
@@ -2631,19 +2573,12 @@ static void launch_full_reduction_prod(const T* d_input, T* d_output, int64_t n,
         prod_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
     } else {
         // Phase 1: Reduce to num_blocks intermediate results
-        T* d_temp;
-        cudaMalloc(&d_temp, num_blocks * sizeof(T));
+        backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(T));
+        auto* d_temp = static_cast<T*>(d_temp_guard.get());
         prod_reduce_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
 
         // Phase 2: Final reduction
         prod_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
-
-#if CUDART_VERSION >= 11020
-        cudaFreeAsync(d_temp, stream);
-#else
-        cudaStreamSynchronize(stream);
-        cudaFree(d_temp);
-#endif
     }
 }
 
@@ -2852,6 +2787,7 @@ __global__ void welford_variance_kernel(
 }
 
 // Final merge kernel: combines per-block Welford results into a single variance
+// Uses parallel shared-memory tree reduction with 256 threads
 template<typename T>
 __global__ void welford_finalize_kernel(
     const T* block_means,
@@ -2861,62 +2797,83 @@ __global__ void welford_finalize_kernel(
     int num_blocks,
     int64_t correction
 ) {
-    T mean = block_means[0];
-    T m2 = block_m2s[0];
-    int64_t count = block_counts[0];
+    // Shared memory for tree reduction: mean, m2, count per thread
+    extern __shared__ char smem_raw[];
+    T* s_mean = reinterpret_cast<T*>(smem_raw);
+    T* s_m2 = s_mean + blockDim.x;
+    int64_t* s_count = reinterpret_cast<int64_t*>(s_m2 + blockDim.x);
 
-    for (int i = 1; i < num_blocks; ++i) {
-        welford_combine(mean, m2, count, block_means[i], block_m2s[i], block_counts[i]);
+    int tid = threadIdx.x;
+
+    // Each thread loads one or more block states via grid-stride
+    T t_mean = T(0);
+    T t_m2 = T(0);
+    int64_t t_count = 0;
+
+    if (tid < num_blocks) {
+        t_mean = block_means[tid];
+        t_m2 = block_m2s[tid];
+        t_count = block_counts[tid];
+    }
+    // Grid-stride for blocks > blockDim.x
+    for (int i = tid + blockDim.x; i < num_blocks; i += blockDim.x) {
+        welford_combine(t_mean, t_m2, t_count,
+                        block_means[i], block_m2s[i], block_counts[i]);
     }
 
-    int64_t divisor = count - correction;
-    if (divisor <= 0) divisor = 1;
-    output[0] = m2 / static_cast<T>(divisor);
+    s_mean[tid] = t_mean;
+    s_m2[tid] = t_m2;
+    s_count[tid] = t_count;
+    __syncthreads();
+
+    // Tree reduction in shared memory
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride && (tid + stride) < num_blocks) {
+            welford_combine(s_mean[tid], s_m2[tid], s_count[tid],
+                            s_mean[tid + stride], s_m2[tid + stride], s_count[tid + stride]);
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        int64_t divisor = s_count[0] - correction;
+        if (divisor <= 0) divisor = 1;
+        output[0] = s_m2[0] / static_cast<T>(divisor);
+    }
 }
 
 // Helper function to compute variance — single-pass Welford, zero D2H transfers
 template<typename T>
 static void launch_variance_computation(const T* d_input, T* d_output, int64_t n, int64_t correction, cudaStream_t stream = nullptr) {
     if (n == 0) {
-        T zero = 0;
-        cudaMemcpyAsync(d_output, &zero, sizeof(T), cudaMemcpyHostToDevice, stream);
+        fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, T(0));
         return;
     }
 
     if (n == 1) {
-        T zero = 0;
-        cudaMemcpyAsync(d_output, &zero, sizeof(T), cudaMemcpyHostToDevice, stream);
+        fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, T(0));
         return;
     }
 
     int num_blocks = std::min<int>((n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE, 1024);
 
     // Allocate per-block Welford accumulators
-    T* d_block_means;
-    T* d_block_m2s;
-    int64_t* d_block_counts;
-    cudaMalloc(&d_block_means, num_blocks * sizeof(T));
-    cudaMalloc(&d_block_m2s, num_blocks * sizeof(T));
-    cudaMalloc(&d_block_counts, num_blocks * sizeof(int64_t));
+    backend::CachedMemoryGuard d_block_means_guard(num_blocks * sizeof(T));
+    backend::CachedMemoryGuard d_block_m2s_guard(num_blocks * sizeof(T));
+    backend::CachedMemoryGuard d_block_counts_guard(num_blocks * sizeof(int64_t));
+    auto* d_block_means = static_cast<T*>(d_block_means_guard.get());
+    auto* d_block_m2s = static_cast<T*>(d_block_m2s_guard.get());
+    auto* d_block_counts = static_cast<int64_t*>(d_block_counts_guard.get());
 
     // Phase 1: Per-block Welford reduction
     welford_variance_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_block_means, d_block_m2s, d_block_counts, n);
 
-    // Phase 2: Merge block results and compute final variance (single thread)
-    welford_finalize_kernel<<<1, 1, 0, stream>>>(
+    // Phase 2: Merge block results — parallel tree reduction with 256 threads
+    constexpr int FINALIZE_THREADS = 256;
+    size_t welford_smem = FINALIZE_THREADS * (2 * sizeof(T) + sizeof(int64_t));
+    welford_finalize_kernel<<<1, FINALIZE_THREADS, welford_smem, stream>>>(
         d_block_means, d_block_m2s, d_block_counts, d_output, num_blocks, correction);
-
-#if CUDART_VERSION >= 11020
-    cudaFreeAsync(d_block_means, stream);
-    cudaFreeAsync(d_block_m2s, stream);
-    cudaFreeAsync(d_block_counts, stream);
-#else
-    cudaStreamSynchronize(stream);
-    cudaFree(d_block_means);
-    cudaFree(d_block_m2s);
-    cudaFree(d_block_counts);
-#endif
 }
 
 // Public API for variance
@@ -2968,12 +2925,57 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
     return output;
 }
 
-// Simple sqrt kernel
+// Fused sum-reduce with sqrt finalization for L2 norm
+// Reduces input[0..n-1] and writes sqrt(sum) to output[0]
 template<typename T>
-__global__ void sqrt_elementwise_kernel(const T* input, T* output, int64_t n) {
+__global__ void sum_reduce_sqrt_kernel(const T* input, T* output, int64_t n) {
+    __shared__ T shared[REDUCTION_BLOCK_SIZE];
+    int tid = threadIdx.x;
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
-        output[idx] = sqrt(input[idx]);
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    T thread_sum = cuda_zero<T>();
+    for (int64_t i = idx; i < n; i += grid_size) {
+        thread_sum = cuda_add(thread_sum, input[i]);
+    }
+    shared[tid] = thread_sum;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride >= WARP_SIZE; stride >>= 1) {
+        if (tid < stride) shared[tid] = cuda_add(shared[tid], shared[tid + stride]);
+        __syncthreads();
+    }
+    if (tid < WARP_SIZE) {
+        T val = shared[tid];
+        val = warp_reduce_sum(val);
+        if (tid == 0) output[blockIdx.x] = sqrt(val);
+    }
+}
+
+// Fused sum-reduce with pow finalization for Lp norm
+// Reduces input[0..n-1] and writes pow(sum, exponent) to output[0]
+template<typename T>
+__global__ void sum_reduce_pow_kernel(const T* input, T* output, int64_t n, T exponent) {
+    __shared__ T shared[REDUCTION_BLOCK_SIZE];
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    T thread_sum = cuda_zero<T>();
+    for (int64_t i = idx; i < n; i += grid_size) {
+        thread_sum = cuda_add(thread_sum, input[i]);
+    }
+    shared[tid] = thread_sum;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride >= WARP_SIZE; stride >>= 1) {
+        if (tid < stride) shared[tid] = cuda_add(shared[tid], shared[tid + stride]);
+        __syncthreads();
+    }
+    if (tid < WARP_SIZE) {
+        T val = shared[tid];
+        val = warp_reduce_sum(val);
+        if (tid == 0) output[blockIdx.x] = pow(val, exponent);
     }
 }
 
@@ -2997,7 +2999,7 @@ auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
         output_shape = {};  // Scalar
     }
 
-    // First compute variance
+    // First compute variance, then sqrt in-place for std deviation
     Tensor var_result(output_shape, dtype, device);
 
     switch (dtype) {
@@ -3006,14 +3008,10 @@ auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
             auto* var_data = var_result.data<float>();
             launch_variance_computation(input_data, var_data, input.numel(), correction, stream);
 
-            // Now compute sqrt of variance
+            // Compute sqrt of variance — fused into single-element reduce+sqrt
             Tensor output(output_shape, dtype, device);
             auto* output_data = output.data<float>();
-
-            int64_t n = var_result.numel();
-            int block_size = 256;
-            int grid_size = (n + block_size - 1) / block_size;
-            sqrt_elementwise_kernel<<<grid_size, block_size, 0, stream>>>(var_data, output_data, n);
+            sum_reduce_sqrt_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(var_data, output_data, 1);
 
             cudaStreamSynchronize(stream);
 
@@ -3029,14 +3027,10 @@ auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
             auto* var_data = var_result.data<double>();
             launch_variance_computation(input_data, var_data, input.numel(), correction, stream);
 
-            // Now compute sqrt of variance
+            // Compute sqrt of variance — fused into single-element reduce+sqrt
             Tensor output(output_shape, dtype, device);
             auto* output_data = output.data<double>();
-
-            int64_t n = var_result.numel();
-            int block_size = 256;
-            int grid_size = (n + block_size - 1) / block_size;
-            sqrt_elementwise_kernel<<<grid_size, block_size, 0, stream>>>(var_data, output_data, n);
+            sum_reduce_sqrt_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(var_data, output_data, 1);
 
             cudaStreamSynchronize(stream);
 
@@ -3196,55 +3190,43 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, cudaSt
             auto* input_data = input.data<float>();
             auto* output_data = output.data<float>();
 
-            float result;
-
             if (p == 1.0f) {
                 // L1 norm
                 if (num_blocks == 1) {
                     l1_norm_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, output_data, n);
                 } else {
-                    float* d_temp;
-                    cudaMalloc(&d_temp, num_blocks * sizeof(float));
+                    backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(float));
+                    auto* d_temp = static_cast<float*>(d_temp_guard.get());
                     l1_norm_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n);
                     sum_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, num_blocks);
-                    cudaFree(d_temp);
                 }
             } else if (p == 2.0f) {
-                // L2 norm
-                float* d_temp;
-                cudaMalloc(&d_temp, sizeof(float));
-
+                // L2 norm — fused sqrt into final reduction
                 if (num_blocks == 1) {
+                    // Single block: reduce and sqrt in one kernel
+                    backend::CachedMemoryGuard d_temp_guard(sizeof(float));
+                    auto* d_temp = static_cast<float*>(d_temp_guard.get());
                     l2_norm_squared_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n);
+                    sum_reduce_sqrt_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, 1);
                 } else {
-                    float* d_temp2;
-                    cudaMalloc(&d_temp2, num_blocks * sizeof(float));
-                    l2_norm_squared_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp2, n);
-                    sum_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp2, d_temp, num_blocks);
-                    cudaFree(d_temp2);
+                    backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(float));
+                    auto* d_temp = static_cast<float*>(d_temp_guard.get());
+                    l2_norm_squared_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n);
+                    sum_reduce_sqrt_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, num_blocks);
                 }
-
-                sqrt_elementwise_kernel<<<1, 1, 0, stream>>>(d_temp, output_data, 1);
-                cudaFree(d_temp);
             } else {
-                // General Lp norm
-                float* d_temp;
-                cudaMalloc(&d_temp, sizeof(float));
-
+                // General Lp norm — fused pow into final reduction
                 if (num_blocks == 1) {
+                    backend::CachedMemoryGuard d_temp_guard(sizeof(float));
+                    auto* d_temp = static_cast<float*>(d_temp_guard.get());
                     lp_norm_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n, p);
+                    sum_reduce_pow_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, 1, 1.0f / p);
                 } else {
-                    float* d_temp2;
-                    cudaMalloc(&d_temp2, num_blocks * sizeof(float));
-                    lp_norm_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp2, n, p);
-                    sum_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp2, d_temp, num_blocks);
-                    cudaFree(d_temp2);
+                    backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(float));
+                    auto* d_temp = static_cast<float*>(d_temp_guard.get());
+                    lp_norm_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n, p);
+                    sum_reduce_pow_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, num_blocks, 1.0f / p);
                 }
-
-                // Take p-th root on GPU
-                pow_scalar_kernel<<<1, 1, 0, stream>>>(d_temp, 1.0f / p);
-                cudaMemcpyAsync(output_data, d_temp, sizeof(float), cudaMemcpyDeviceToDevice, stream);
-                cudaFree(d_temp);
             }
 
             cudaStreamSynchronize(stream);
@@ -3254,55 +3236,42 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, cudaSt
             auto* input_data = input.data<double>();
             auto* output_data = output.data<double>();
 
-            double result;
-
             if (p == 1.0f) {
                 // L1 norm
                 if (num_blocks == 1) {
                     l1_norm_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, output_data, n);
                 } else {
-                    double* d_temp;
-                    cudaMalloc(&d_temp, num_blocks * sizeof(double));
+                    backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(double));
+                    auto* d_temp = static_cast<double*>(d_temp_guard.get());
                     l1_norm_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n);
                     sum_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, num_blocks);
-                    cudaFree(d_temp);
                 }
             } else if (p == 2.0f) {
-                // L2 norm
-                double* d_temp;
-                cudaMalloc(&d_temp, sizeof(double));
-
+                // L2 norm — fused sqrt into final reduction
                 if (num_blocks == 1) {
+                    backend::CachedMemoryGuard d_temp_guard(sizeof(double));
+                    auto* d_temp = static_cast<double*>(d_temp_guard.get());
                     l2_norm_squared_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n);
+                    sum_reduce_sqrt_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, 1);
                 } else {
-                    double* d_temp2;
-                    cudaMalloc(&d_temp2, num_blocks * sizeof(double));
-                    l2_norm_squared_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp2, n);
-                    sum_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp2, d_temp, num_blocks);
-                    cudaFree(d_temp2);
+                    backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(double));
+                    auto* d_temp = static_cast<double*>(d_temp_guard.get());
+                    l2_norm_squared_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n);
+                    sum_reduce_sqrt_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, num_blocks);
                 }
-
-                sqrt_elementwise_kernel<<<1, 1, 0, stream>>>(d_temp, output_data, 1);
-                cudaFree(d_temp);
             } else {
-                // General Lp norm
-                double* d_temp;
-                cudaMalloc(&d_temp, sizeof(double));
-
+                // General Lp norm — fused pow into final reduction
                 if (num_blocks == 1) {
+                    backend::CachedMemoryGuard d_temp_guard(sizeof(double));
+                    auto* d_temp = static_cast<double*>(d_temp_guard.get());
                     lp_norm_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n, p);
+                    sum_reduce_pow_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, 1, static_cast<double>(1.0 / p));
                 } else {
-                    double* d_temp2;
-                    cudaMalloc(&d_temp2, num_blocks * sizeof(double));
-                    lp_norm_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp2, n, p);
-                    sum_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp2, d_temp, num_blocks);
-                    cudaFree(d_temp2);
+                    backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(double));
+                    auto* d_temp = static_cast<double*>(d_temp_guard.get());
+                    lp_norm_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n, p);
+                    sum_reduce_pow_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, num_blocks, static_cast<double>(1.0 / p));
                 }
-
-                // Take p-th root on GPU
-                pow_scalar_kernel<<<1, 1, 0, stream>>>(d_temp, 1.0 / p);
-                cudaMemcpyAsync(output_data, d_temp, sizeof(double), cudaMemcpyDeviceToDevice, stream);
-                cudaFree(d_temp);
             }
 
             cudaStreamSynchronize(stream);
@@ -3382,8 +3351,7 @@ static void launch_argsort(const T* d_input, int64_t* d_output, int64_t n, bool 
     if (n == 0) return;
 
     if (n == 1) {
-        int64_t zero = 0;
-        cudaMemcpyAsync(d_output, &zero, sizeof(int64_t), cudaMemcpyHostToDevice, stream);
+        fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, int64_t(0));
         return;
     }
 
@@ -3397,16 +3365,16 @@ static void launch_argsort(const T* d_input, int64_t* d_output, int64_t n, bool 
     }
 
     // For larger arrays, use CUB DeviceRadixSort with key-value pairs
-    int64_t* d_indices_in;
-    cudaMalloc(&d_indices_in, n * sizeof(int64_t));
+    backend::CachedMemoryGuard d_indices_in_guard(n * sizeof(int64_t));
+    auto* d_indices_in = static_cast<int64_t*>(d_indices_in_guard.get());
 
     // Initialize indices 0..n-1
     int init_blocks = (n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
     iota_kernel<<<init_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_indices_in, n);
 
     // Allocate output keys buffer
-    T* d_keys_out;
-    cudaMalloc(&d_keys_out, n * sizeof(T));
+    backend::CachedMemoryGuard d_keys_out_guard(n * sizeof(T));
+    auto* d_keys_out = static_cast<T*>(d_keys_out_guard.get());
 
     void* d_temp_storage = nullptr;
     size_t temp_storage_bytes = 0;
@@ -3414,20 +3382,18 @@ static void launch_argsort(const T* d_input, int64_t* d_output, int64_t n, bool 
     if (descending) {
         cub::DeviceRadixSort::SortPairsDescending(d_temp_storage, temp_storage_bytes,
             d_input, d_keys_out, d_indices_in, d_output, n, 0, sizeof(T) * 8, stream);
-        cudaMalloc(&d_temp_storage, temp_storage_bytes);
+        backend::CachedMemoryGuard d_temp_storage_guard(temp_storage_bytes);
+        d_temp_storage = d_temp_storage_guard.get();
         cub::DeviceRadixSort::SortPairsDescending(d_temp_storage, temp_storage_bytes,
             d_input, d_keys_out, d_indices_in, d_output, n, 0, sizeof(T) * 8, stream);
     } else {
         cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,
             d_input, d_keys_out, d_indices_in, d_output, n, 0, sizeof(T) * 8, stream);
-        cudaMalloc(&d_temp_storage, temp_storage_bytes);
+        backend::CachedMemoryGuard d_temp_storage_guard(temp_storage_bytes);
+        d_temp_storage = d_temp_storage_guard.get();
         cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,
             d_input, d_keys_out, d_indices_in, d_output, n, 0, sizeof(T) * 8, stream);
     }
-
-    cudaFree(d_temp_storage);
-    cudaFree(d_keys_out);
-    cudaFree(d_indices_in);
 }
 
 
@@ -3450,13 +3416,12 @@ auto argsort_kernel(const Tensor& input, int64_t dim, bool descending, cudaStrea
             break;
         case DType::Float16: {
             // CUB RadixSort doesn't support __half, so convert to float32 and sort that
-            float* d_float_buf;
-            cudaMalloc(&d_float_buf, n * sizeof(float));
+            backend::CachedMemoryGuard d_float_buf_guard(n * sizeof(float));
+            auto* d_float_buf = static_cast<float*>(d_float_buf_guard.get());
             const __half* d_half = reinterpret_cast<const __half*>(input.data_ptr());
             int blocks = (n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
             half_to_float_kernel<<<blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_half, d_float_buf, n);
             launch_argsort(d_float_buf, output.data<int64_t>(), n, descending, stream);
-            cudaFree(d_float_buf);
             break;
         }
         default:

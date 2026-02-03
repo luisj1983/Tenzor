@@ -14,10 +14,20 @@
 #include "tenzor/backend/cudnn_wrapper.hpp"
 #include "tenzor/core/tensor.hpp"
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 #include <vector>
 
 namespace tenzor {
 namespace cuda {
+
+// Direct FP32->FP16 copy kernel — avoids intermediate tensor allocation
+__global__ void f32_to_half_kernel(const float* src, __half* dst, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t stride = blockDim.x * gridDim.x;
+    for (int64_t i = idx; i < n; i += stride) {
+        dst[i] = __float2half(src[i]);
+    }
+}
 
 // ============================================================================
 // cuDNN Batch Normalization Inference (Optimized)
@@ -325,13 +335,18 @@ auto cudnn_batchnorm2d_forward_training(
             saved_inv_var.data<float>()
         ));
 
-        // Copy updated running stats back to original Float16 tensors
-        auto rm_f16 = running_mean_f32.to(DType::Float16);
-        auto rv_f16 = running_var_f32.to(DType::Float16);
-        cudaMemcpyAsync(running_mean.data_ptr(), rm_f16.data_ptr(),
-                        running_mean.numel() * sizeof(Float16), cudaMemcpyDeviceToDevice, stream);
-        cudaMemcpyAsync(running_var.data_ptr(), rv_f16.data_ptr(),
-                        running_var.numel() * sizeof(Float16), cudaMemcpyDeviceToDevice, stream);
+        // Copy updated running stats directly from FP32 to FP16 — no intermediate tensors
+        int64_t stat_n = running_mean.numel();
+        int block = 256;
+        int grid = (stat_n + block - 1) / block;
+        f32_to_half_kernel<<<grid, block, 0, stream>>>(
+            running_mean_f32.data<float>(),
+            reinterpret_cast<__half*>(running_mean.data_ptr()),
+            stat_n);
+        f32_to_half_kernel<<<grid, block, 0, stream>>>(
+            running_var_f32.data<float>(),
+            reinterpret_cast<__half*>(running_var.data_ptr()),
+            stat_n);
     }
 
     cudnnDestroyTensorDescriptor(bn_desc);

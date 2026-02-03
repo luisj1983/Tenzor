@@ -1,6 +1,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/backend/caching_allocator.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/shape.hpp"
 #include <stdexcept>
@@ -431,9 +432,9 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, cudaStream_t strea
         }
     }
 
-    // Single device allocation and transfer
-    char* d_meta;
-    CUDA_CHECK(cudaMalloc(&d_meta, total_meta_bytes));
+    // Single device allocation and transfer (RAII guard handles cleanup)
+    backend::CachedMemoryGuard meta_guard(total_meta_bytes);
+    auto* d_meta = static_cast<char*>(meta_guard.get());
     CUDA_CHECK(cudaMemcpyAsync(d_meta, host_meta.data(), total_meta_bytes, cudaMemcpyHostToDevice, stream));
 
     // Compute sub-pointers as offsets into the packed buffer
@@ -445,11 +446,6 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, cudaStream_t strea
 
     // Handle empty output case - don't launch kernel with 0 blocks
     if (total_elements == 0) {
-#if CUDART_VERSION >= 11020
-        cudaFreeAsync(d_meta, stream);
-#else
-        cudaFree(d_meta);
-#endif
         return output;
     }
 
@@ -497,23 +493,10 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, cudaStream_t strea
             d_input_shapes, d_output_shape, d_output_strides, d_offsets,
             num_tensors, ndim, dim, total_elements);
     } else {
-#if CUDART_VERSION >= 11020
-        cudaFreeAsync(d_meta, stream);
-#else
-        cudaFree(d_meta);
-#endif
         throw std::runtime_error("Concatenation: unsupported dtype");
     }
 
     CUDA_CHECK(cudaGetLastError());
-
-    // Free device memory asynchronously
-#if CUDART_VERSION >= 11020
-    cudaFreeAsync(d_meta, stream);
-#else
-    cudaStreamSynchronize(stream);
-    cudaFree(d_meta);
-#endif
 
     return output;
 }
@@ -580,8 +563,8 @@ auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, cud
     std::memcpy(host_meta.data() + array_bytes, input_strides.data(), array_bytes);
     std::memcpy(host_meta.data() + 2 * array_bytes, repeats.data(), array_bytes);
 
-    char* d_meta;
-    CUDA_CHECK(cudaMalloc(&d_meta, total_meta_bytes));
+    backend::CachedMemoryGuard meta_guard(total_meta_bytes);
+    auto* d_meta = static_cast<char*>(meta_guard.get());
     CUDA_CHECK(cudaMemcpyAsync(d_meta, host_meta.data(), total_meta_bytes, cudaMemcpyHostToDevice, stream));
 
     int64_t* d_input_shape   = reinterpret_cast<int64_t*>(d_meta);
@@ -605,23 +588,13 @@ auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, cud
             input.data<Float16>(), output.data<Float16>(),
             d_input_shape, d_input_strides, d_repeats, ndim, n);
     } else {
-        cudaFree(d_meta);
         throw std::runtime_error("repeat operation only supports Float32, Float64, and Float16 dtypes");
     }
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
-        cudaFree(d_meta);
         throw std::runtime_error(std::string("CUDA error in repeat_kernel: ") + cudaGetErrorString(err));
     }
-
-    // Free device memory after kernel completion
-#if CUDART_VERSION >= 11020
-    cudaFreeAsync(d_meta, stream);
-#else
-    cudaStreamSynchronize(stream);
-    cudaFree(d_meta);
-#endif
 
     return output;
 }
@@ -660,15 +633,20 @@ auto flatten_kernel(const Tensor& input, int64_t start_dim, int64_t end_dim, cud
 // Slice
 // ============================================================================
 
+// Metadata struct passed by value to slice kernel (avoids 5x cudaMalloc for shape/stride arrays)
+struct SliceMeta {
+    int64_t input_strides[8];
+    int64_t output_shape[8];
+    int64_t output_strides[8];
+    int64_t starts[8];
+    int64_t steps[8];
+};
+
 template<typename T>
 __global__ void slice_kernel_impl(
     const T* __restrict__ input,
     T* __restrict__ output,
-    const int64_t* __restrict__ input_strides,
-    const int64_t* __restrict__ output_shape,
-    const int64_t* __restrict__ output_strides,
-    const int64_t* __restrict__ starts,
-    const int64_t* __restrict__ steps,
+    SliceMeta meta,
     int64_t ndim,
     int64_t total_elements) {
 
@@ -679,11 +657,11 @@ __global__ void slice_kernel_impl(
     int64_t input_offset = 0;
     int64_t remaining = idx;
     for (int64_t d = 0; d < ndim; ++d) {
-        int64_t dim_idx = remaining / output_strides[d];
-        remaining %= output_strides[d];
+        int64_t dim_idx = remaining / meta.output_strides[d];
+        remaining %= meta.output_strides[d];
         // Map output index to input index: input_idx = start + output_idx * step
-        int64_t input_dim_idx = starts[d] + dim_idx * steps[d];
-        input_offset += input_dim_idx * input_strides[d];
+        int64_t input_dim_idx = meta.starts[d] + dim_idx * meta.steps[d];
+        input_offset += input_dim_idx * meta.input_strides[d];
     }
 
     output[idx] = input[input_offset];
@@ -744,58 +722,40 @@ auto slice_kernel(
         }
     }
 
-    // Copy metadata to device
-    int64_t* d_input_strides;
-    int64_t* d_output_shape;
-    int64_t* d_output_strides;
-    int64_t* d_starts;
-    int64_t* d_steps;
-    size_t meta_bytes = ndim * sizeof(int64_t);
-    cudaMalloc(&d_input_strides, meta_bytes);
-    cudaMalloc(&d_output_shape, meta_bytes);
-    cudaMalloc(&d_output_strides, meta_bytes);
-    cudaMalloc(&d_starts, meta_bytes);
-    cudaMalloc(&d_steps, meta_bytes);
-    cudaMemcpyAsync(d_input_strides, input_strides.data(), meta_bytes, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_output_shape, output_shape.data(), meta_bytes, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_output_strides, output_strides.data(), meta_bytes, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_starts, padded_starts.data(), meta_bytes, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_steps, padded_steps.data(), meta_bytes, cudaMemcpyHostToDevice, stream);
+    // Build metadata struct passed by value (avoids 5x cudaMalloc)
+    SliceMeta meta{};
+    for (int64_t d = 0; d < ndim && d < 8; ++d) {
+        meta.input_strides[d] = input_strides[d];
+        meta.output_shape[d] = output_shape[d];
+        meta.output_strides[d] = output_strides[d];
+        meta.starts[d] = padded_starts[d];
+        meta.steps[d] = padded_steps[d];
+    }
 
     int block_size = 256;
     int num_blocks = (total + block_size - 1) / block_size;
 
     if (input.dtype() == DType::Float32) {
         slice_kernel_impl<float><<<num_blocks, block_size, 0, stream>>>(
-            input.data<float>(), output.data<float>(),
-            d_input_strides, d_output_shape, d_output_strides, d_starts, d_steps, ndim, total);
+            input.data<float>(), output.data<float>(), meta, ndim, total);
     } else if (input.dtype() == DType::Float64) {
         slice_kernel_impl<double><<<num_blocks, block_size, 0, stream>>>(
-            input.data<double>(), output.data<double>(),
-            d_input_strides, d_output_shape, d_output_strides, d_starts, d_steps, ndim, total);
+            input.data<double>(), output.data<double>(), meta, ndim, total);
     } else if (input.dtype() == DType::Float16) {
         slice_kernel_impl<__half><<<num_blocks, block_size, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data_ptr()),
-            reinterpret_cast<__half*>(output.data_ptr()),
-            d_input_strides, d_output_shape, d_output_strides, d_starts, d_steps, ndim, total);
+            reinterpret_cast<__half*>(output.data_ptr()), meta, ndim, total);
     } else if (input.dtype() == DType::Int32) {
         slice_kernel_impl<int32_t><<<num_blocks, block_size, 0, stream>>>(
-            input.data<int32_t>(), output.data<int32_t>(),
-            d_input_strides, d_output_shape, d_output_strides, d_starts, d_steps, ndim, total);
+            input.data<int32_t>(), output.data<int32_t>(), meta, ndim, total);
     } else if (input.dtype() == DType::Int64) {
         slice_kernel_impl<int64_t><<<num_blocks, block_size, 0, stream>>>(
-            input.data<int64_t>(), output.data<int64_t>(),
-            d_input_strides, d_output_shape, d_output_strides, d_starts, d_steps, ndim, total);
+            input.data<int64_t>(), output.data<int64_t>(), meta, ndim, total);
     } else {
-        cudaFree(d_input_strides); cudaFree(d_output_shape); cudaFree(d_output_strides);
-        cudaFree(d_starts); cudaFree(d_steps);
         throw std::runtime_error("slice: unsupported dtype");
     }
 
     cudaError_t err = cudaGetLastError();
-    cudaFree(d_input_strides); cudaFree(d_output_shape); cudaFree(d_output_strides);
-    cudaFree(d_starts); cudaFree(d_steps);
-
     if (err != cudaSuccess) {
         throw std::runtime_error(std::string("CUDA error in slice_kernel: ") + cudaGetErrorString(err));
     }

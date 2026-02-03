@@ -1,5 +1,6 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/backend/caching_allocator.hpp"
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <cuda_fp16.h>  // For __half
@@ -700,8 +701,8 @@ auto conv2d_forward_f16(
         // Allocate im2col buffer for FP16
         int64_t col_rows = batch * out_h * out_w;
         int64_t col_cols = in_channels_per_group * kernel_h * kernel_w;
-        __half* col_buffer;
-        CUDA_CHECK(cudaMalloc(&col_buffer, col_rows * col_cols * sizeof(__half)));
+        backend::CachedMemoryGuard col_buffer_guard(col_rows * col_cols * sizeof(__half));
+        auto* col_buffer = static_cast<__half*>(col_buffer_guard.get());
 
         // Apply im2col transformation for FP16
         dim3 grid, block;
@@ -757,8 +758,6 @@ auto conv2d_forward_f16(
         // This gives us (M, N) directly
         matmul_f16(weight_ptr, col_buffer, output_ptr, M, N, K, stream);
 
-        // Free col buffer
-        CUDA_CHECK(cudaFree(col_buffer));
     }
 
     // Add bias if present
@@ -863,8 +862,8 @@ auto conv2d_forward_kernel(
         // Shape: (batch * out_h * out_w, in_channels_per_group * kernel_h * kernel_w)
         int64_t col_rows = batch * out_h * out_w;
         int64_t col_cols = in_channels_per_group * kernel_h * kernel_w;
-        float* col_buffer;
-        CUDA_CHECK(cudaMalloc(&col_buffer, col_rows * col_cols * sizeof(float)));
+        backend::CachedMemoryGuard col_buffer_guard(col_rows * col_cols * sizeof(float));
+        auto* col_buffer = static_cast<float*>(col_buffer_guard.get());
 
         // Apply im2col transformation for this group's input channels
         dim3 grid, block;
@@ -911,8 +910,8 @@ auto conv2d_forward_kernel(
 
         // Allocate temporary buffer for cuBLAS output (NHWC layout)
         // cuBLAS will write (M, N) = (batch*out_h*out_w, out_channels_per_group) in row-major
-        float* temp_output;
-        CUDA_CHECK(cudaMalloc(&temp_output, M * N * sizeof(float)));
+        backend::CachedMemoryGuard temp_output_guard(M * N * sizeof(float));
+        auto* temp_output = static_cast<float*>(temp_output_guard.get());
 
         // cuBLAS uses column-major ordering
         // We want: C = A @ B^T where A is row-major (M, K), B is row-major (N, K)
@@ -952,9 +951,6 @@ auto conv2d_forward_kernel(
         );
         CUDA_CHECK(cudaGetLastError());
 
-        // Free buffers
-        CUDA_CHECK(cudaFree(temp_output));
-        CUDA_CHECK(cudaFree(col_buffer));
     }
 
     // Add bias if present
@@ -1051,8 +1047,8 @@ auto conv2d_backward_f16(
         // Gradient w.r.t input
         if (compute_grad_input) {
             // Allocate col buffer
-            __half* grad_col;
-            CUDA_CHECK(cudaMalloc(&grad_col, col_rows * col_cols * sizeof(__half)));
+            backend::CachedMemoryGuard grad_col_guard(col_rows * col_cols * sizeof(__half));
+            auto* grad_col = static_cast<__half*>(grad_col_guard.get());
 
             // Compute grad_col = grad_output @ weight
             // grad_output: (batch * out_h * out_w, out_channels_per_group)
@@ -1102,15 +1098,13 @@ auto conv2d_backward_f16(
                 out_w
             );
             CUDA_CHECK(cudaGetLastError());
-
-            CUDA_CHECK(cudaFree(grad_col));
         }
 
         // Gradient w.r.t weight
         if (compute_grad_weight) {
             // Apply im2col to input
-            __half* input_col;
-            CUDA_CHECK(cudaMalloc(&input_col, col_rows * col_cols * sizeof(__half)));
+            backend::CachedMemoryGuard input_col_guard(col_rows * col_cols * sizeof(__half));
+            auto* input_col = static_cast<__half*>(input_col_guard.get());
 
             dim3 grid, block;
             int64_t total_elements = batch * out_h * out_w * in_channels_per_group * kernel_h * kernel_w;
@@ -1155,8 +1149,6 @@ auto conv2d_backward_f16(
 
             // Compute: grad_weight = grad_output^T @ input_col
             matmul_f16(grad_out_ptr, input_col, grad_weight_ptr, M, N, K, stream);
-
-            CUDA_CHECK(cudaFree(input_col));
         }
     }
 
@@ -1267,8 +1259,8 @@ auto conv2d_backward_kernel(
         // Gradient w.r.t input
         if (compute_grad_input) {
             // Allocate col buffer
-            float* grad_col;
-            CUDA_CHECK(cudaMalloc(&grad_col, col_rows * col_cols * sizeof(float)));
+            backend::CachedMemoryGuard grad_col_guard(col_rows * col_cols * sizeof(float));
+            auto* grad_col = static_cast<float*>(grad_col_guard.get());
 
             // Compute grad_col = grad_output @ weight
             // grad_output: (batch * out_h * out_w, out_channels_per_group)
@@ -1324,15 +1316,13 @@ auto conv2d_backward_kernel(
                 out_w
             );
             CUDA_CHECK(cudaGetLastError());
-
-            CUDA_CHECK(cudaFree(grad_col));
         }
 
         // Gradient w.r.t weight
         if (compute_grad_weight) {
             // Apply im2col to input
-            float* input_col;
-            CUDA_CHECK(cudaMalloc(&input_col, col_rows * col_cols * sizeof(float)));
+            backend::CachedMemoryGuard input_col_guard(col_rows * col_cols * sizeof(float));
+            auto* input_col = static_cast<float*>(input_col_guard.get());
 
             dim3 grid, block;
             int64_t total_elements = batch * out_h * out_w * in_channels_per_group * kernel_h * kernel_w;
@@ -1388,7 +1378,6 @@ auto conv2d_backward_kernel(
                 N               // leading dim
             ));
 
-            CUDA_CHECK(cudaFree(input_col));
         }
     }
 

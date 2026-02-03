@@ -1,5 +1,6 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/backend/caching_allocator.hpp"
 #include "tenzor/backend/backend.hpp"  // For OpAttributes (dispatch wrappers)
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -99,10 +100,10 @@ __global__ void check_for_zeros_kernel(const T* data, int64_t n, int* has_zero) 
 template<typename T>
 inline void check_integer_divisor_for_zeros(const T* data, int64_t n, cudaStream_t stream) {
 #ifndef NDEBUG
-    int* d_has_zero;
+    backend::CachedMemoryGuard d_has_zero_guard(sizeof(int));
+    auto* d_has_zero = static_cast<int*>(d_has_zero_guard.get());
     int h_has_zero = 0;
 
-    CUDA_CHECK(cudaMalloc(&d_has_zero, sizeof(int)));
     CUDA_CHECK(cudaMemsetAsync(d_has_zero, 0, sizeof(int), stream));
 
     dim3 grid, block;
@@ -111,7 +112,6 @@ inline void check_integer_divisor_for_zeros(const T* data, int64_t n, cudaStream
 
     CUDA_CHECK(cudaMemcpyAsync(&h_has_zero, d_has_zero, sizeof(int), cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK(cudaStreamSynchronize(stream));
-    CUDA_CHECK(cudaFree(d_has_zero));
 
     if (h_has_zero) {
         throw std::runtime_error("Integer division by zero");
@@ -2000,12 +2000,18 @@ auto div_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream)
     return inout;
 }
 
+// Metadata struct passed by value to expand kernel (avoids cudaMalloc for shape/stride arrays)
+struct ExpandMeta {
+    int64_t input_shape[8];
+    int64_t input_strides[8];
+    int64_t output_shape[8];
+};
+
 // Expand kernel - replicate tensor along specified dimensions
 template<typename T>
 __global__ void expand_kernel_device(
     const T* input, T* output,
-    const int64_t* input_shape, const int64_t* input_strides,
-    const int64_t* output_shape, int64_t input_ndim, int64_t output_ndim, int64_t n) {
+    ExpandMeta meta, int64_t input_ndim, int64_t output_ndim, int64_t n) {
 
     CUDA_KERNEL_LOOP(out_idx, n) {
         int64_t temp = out_idx;
@@ -2016,14 +2022,14 @@ __global__ void expand_kernel_device(
 
         // Convert output flat index to multi-dimensional coordinates
         for (int64_t i = output_ndim - 1; i >= 0; --i) {
-            int64_t coord = temp % output_shape[i];
-            temp /= output_shape[i];
+            int64_t coord = temp % meta.output_shape[i];
+            temp /= meta.output_shape[i];
 
             int64_t input_dim = i - input_dim_offset;
             if (input_dim >= 0 && input_dim < input_ndim) {
                 // For dimensions of size 1, we don't advance the index (broadcast)
-                if (input_shape[input_dim] != 1) {
-                    in_idx += coord * input_strides[input_dim];
+                if (meta.input_shape[input_dim] != 1) {
+                    in_idx += coord * meta.input_strides[input_dim];
                 }
                 // If input_shape[input_dim] == 1, stride is effectively 0 (broadcast)
             }
@@ -2080,24 +2086,15 @@ auto expand_kernel(const Tensor& input, const std::vector<int64_t>& shape, void*
         input_stride *= input_shape_vec[i];
     }
 
-    // Pack 3 metadata arrays into single contiguous device buffer
-    const size_t ishape_bytes  = input_shape_vec.size() * sizeof(int64_t);
-    const size_t istride_bytes = input_strides.size() * sizeof(int64_t);
-    const size_t oshape_bytes  = shape.size() * sizeof(int64_t);
-    const size_t total_meta_bytes = ishape_bytes + istride_bytes + oshape_bytes;
-
-    std::vector<char> host_meta(total_meta_bytes);
-    std::memcpy(host_meta.data(), input_shape_vec.data(), ishape_bytes);
-    std::memcpy(host_meta.data() + ishape_bytes, input_strides.data(), istride_bytes);
-    std::memcpy(host_meta.data() + ishape_bytes + istride_bytes, shape.data(), oshape_bytes);
-
-    char* d_meta;
-    CUDA_CHECK(cudaMalloc(&d_meta, total_meta_bytes));
-    CUDA_CHECK(cudaMemcpyAsync(d_meta, host_meta.data(), total_meta_bytes, cudaMemcpyHostToDevice, stream));
-
-    int64_t* d_input_shape   = reinterpret_cast<int64_t*>(d_meta);
-    int64_t* d_input_strides = reinterpret_cast<int64_t*>(d_meta + ishape_bytes);
-    int64_t* d_output_shape  = reinterpret_cast<int64_t*>(d_meta + ishape_bytes + istride_bytes);
+    // Build metadata struct passed by value (avoids cudaMalloc)
+    ExpandMeta meta{};
+    for (size_t i = 0; i < input_shape_vec.size() && i < 8; ++i) {
+        meta.input_shape[i] = input_shape_vec[i];
+        meta.input_strides[i] = input_strides[i];
+    }
+    for (size_t i = 0; i < shape.size() && i < 8; ++i) {
+        meta.output_shape[i] = shape[i];
+    }
 
     int64_t n = result.numel();
     int64_t input_ndim = input_shape_vec.size();
@@ -2108,47 +2105,34 @@ auto expand_kernel(const Tensor& input, const std::vector<int64_t>& shape, void*
     if (input.dtype() == DType::Float32) {
         expand_kernel_device<<<grid, block, 0, stream>>>(
             input.data<float>(), result.data<float>(),
-            d_input_shape, d_input_strides, d_output_shape,
-            input_ndim, output_ndim, n);
+            meta, input_ndim, output_ndim, n);
     } else if (input.dtype() == DType::Float64) {
         expand_kernel_device<<<grid, block, 0, stream>>>(
             input.data<double>(), result.data<double>(),
-            d_input_shape, d_input_strides, d_output_shape,
-            input_ndim, output_ndim, n);
+            meta, input_ndim, output_ndim, n);
     } else if (input.dtype() == DType::Int32) {
         expand_kernel_device<<<grid, block, 0, stream>>>(
             input.data<int32_t>(), result.data<int32_t>(),
-            d_input_shape, d_input_strides, d_output_shape,
-            input_ndim, output_ndim, n);
+            meta, input_ndim, output_ndim, n);
     } else if (input.dtype() == DType::Int64) {
         expand_kernel_device<<<grid, block, 0, stream>>>(
             input.data<int64_t>(), result.data<int64_t>(),
-            d_input_shape, d_input_strides, d_output_shape,
-            input_ndim, output_ndim, n);
+            meta, input_ndim, output_ndim, n);
     } else if (input.dtype() == DType::Float16) {
         expand_kernel_device<<<grid, block, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()),
-            d_input_shape, d_input_strides, d_output_shape,
-            input_ndim, output_ndim, n);
+            meta, input_ndim, output_ndim, n);
     } else if (input.dtype() == DType::BFloat16) {
         expand_kernel_device<<<grid, block, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()),
-            d_input_shape, d_input_strides, d_output_shape,
-            input_ndim, output_ndim, n);
+            meta, input_ndim, output_ndim, n);
     } else {
-        cudaFree(d_meta);
         throw std::runtime_error("Unsupported dtype for expand operation");
     }
 
-    // Cleanup — single free for packed metadata buffer
     CUDA_CHECK(cudaGetLastError());
-#if CUDART_VERSION >= 11020
-    cudaFreeAsync(d_meta, stream);
-#else
-    CUDA_CHECK(cudaFree(d_meta));
-#endif
     return result;
 }
 
@@ -2476,8 +2460,8 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
     compute_launch_config_1d(n, grid, block);
 
     // Allocate cuRAND states
-    curandState* d_states;
-    CUDA_CHECK(cudaMalloc(&d_states, n * sizeof(curandState)));
+    backend::CachedMemoryGuard d_states_guard(n * sizeof(curandState));
+    auto* d_states = static_cast<curandState*>(d_states_guard.get());
 
     // Thread-safe seed generation with better entropy
     // Mix: high-res time + thread ID + random_device + atomicincrement counter
@@ -2500,8 +2484,8 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
         CUDA_CHECK(cudaGetLastError());
     } else if (dtype == DType::Float64) {
         // For Float64, generate as float then convert properly
-        float* temp_float;
-        CUDA_CHECK(cudaMalloc(&temp_float, n * sizeof(float)));
+        backend::CachedMemoryGuard temp_float_guard(n * sizeof(float));
+        auto* temp_float = static_cast<float*>(temp_float_guard.get());
         rand_kernel_device<<<grid, block, 0, stream>>>(temp_float, d_states, n);
         CUDA_CHECK(cudaGetLastError());
 
@@ -2509,7 +2493,6 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
         double* output_double = result.data<double>();
         convert_float_to_double_kernel<<<grid, block, 0, stream>>>(temp_float, output_double, n);
         CUDA_CHECK(cudaGetLastError());
-        CUDA_CHECK(cudaFree(temp_float));
     } else if (dtype == DType::Float16) {
         rand_kernel_f16<<<grid, block, 0, stream>>>(
             reinterpret_cast<__half*>(result.data<Float16>()), d_states, n);
@@ -2519,9 +2502,6 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), d_states, n);
         CUDA_CHECK(cudaGetLastError());
     }
-
-    // Cleanup
-    CUDA_CHECK(cudaFree(d_states));
 
     return result;
 }
@@ -2550,8 +2530,8 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
 
     // Allocate cuRAND states
     //printf("[DEBUG randn_kernel] Allocating cuRAND states...\n");
-    curandState* d_states;
-    CUDA_CHECK(cudaMalloc(&d_states, n * sizeof(curandState)));
+    backend::CachedMemoryGuard d_states_guard(n * sizeof(curandState));
+    auto* d_states = static_cast<curandState*>(d_states_guard.get());
     //printf("[DEBUG randn_kernel] cuRAND states allocated\n");
 
     // Thread-safe seed generation with better entropy
@@ -2587,8 +2567,8 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
     } else if (dtype == DType::Float64) {
         //printf("[DEBUG randn_kernel] Generating Float64 random numbers...\n");
         // For Float64, generate as float then convert properly
-        float* temp_float;
-        CUDA_CHECK(cudaMalloc(&temp_float, n * sizeof(float)));
+        backend::CachedMemoryGuard temp_float_guard(n * sizeof(float));
+        auto* temp_float = static_cast<float*>(temp_float_guard.get());
         randn_kernel_device<<<grid, block, 0, stream>>>(temp_float, d_states, n);
         CUDA_CHECK(cudaGetLastError());
 
@@ -2596,7 +2576,6 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
         double* output_double = result.data<double>();
         convert_float_to_double_kernel<<<grid, block, 0, stream>>>(temp_float, output_double, n);
         CUDA_CHECK(cudaGetLastError());
-        CUDA_CHECK(cudaFree(temp_float));
         //printf("[DEBUG randn_kernel] Float64 generation complete\n");
     } else if (dtype == DType::Float16) {
         //printf("[DEBUG randn_kernel] Generating Float16 random numbers...\n");
@@ -2612,9 +2591,6 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
         //printf("[DEBUG randn_kernel] BFloat16 generation complete\n");
     }
 
-    // Cleanup
-    //printf("[DEBUG randn_kernel] Cleaning up...\n");
-    CUDA_CHECK(cudaFree(d_states));
     //printf("[DEBUG randn_kernel] Cleanup complete, returning result\n");
 
     return result;
@@ -2934,11 +2910,10 @@ auto dot_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
                 dot_product_kernel<<<1, block_size, 0, stream>>>(a_data, b_data, output_data, n);
             } else {
                 // Two-phase reduction for large arrays
-                float* d_temp;
-                cudaMalloc(&d_temp, num_blocks * sizeof(float));
+                backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(float));
+                auto* d_temp = static_cast<float*>(d_temp_guard.get());
                 dot_product_kernel<<<num_blocks, block_size, 0, stream>>>(a_data, b_data, d_temp, n);
                 dot_product_kernel<<<1, block_size, 0, stream>>>(d_temp, d_temp, output_data, num_blocks);
-                cudaFree(d_temp);
             }
             break;
         }
@@ -2951,11 +2926,10 @@ auto dot_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
                 dot_product_kernel<<<1, block_size, 0, stream>>>(a_data, b_data, output_data, n);
             } else {
                 // Two-phase reduction for large arrays
-                double* d_temp;
-                cudaMalloc(&d_temp, num_blocks * sizeof(double));
+                backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(double));
+                auto* d_temp = static_cast<double*>(d_temp_guard.get());
                 dot_product_kernel<<<num_blocks, block_size, 0, stream>>>(a_data, b_data, d_temp, n);
                 dot_product_kernel<<<1, block_size, 0, stream>>>(d_temp, d_temp, output_data, num_blocks);
-                cudaFree(d_temp);
             }
             break;
         }
@@ -2963,7 +2937,7 @@ auto dot_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
             throw std::runtime_error("dot: only Float32 and Float64 are supported");
     }
 
-    // NOTE: Removed cudaStreamSynchronize - cudaFree in the switch cases is already synchronous
+    // NOTE: CachedMemoryGuard handles cleanup via RAII
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {

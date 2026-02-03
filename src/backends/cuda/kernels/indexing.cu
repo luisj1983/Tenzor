@@ -15,6 +15,7 @@
 #include <cuda_fp16.h>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/backend/caching_allocator.hpp"
 #include <stdexcept>
 #include <vector>
 #include <cub/cub.cuh>
@@ -479,8 +480,8 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask,
     }
 
     // Count true elements
-    int64_t* d_count;
-    CUDA_CHECK(cudaMalloc(&d_count, sizeof(int64_t)));
+    backend::CachedMemoryGuard d_count_guard(sizeof(int64_t));
+    auto* d_count = static_cast<int64_t*>(d_count_guard.get());
     CUDA_CHECK(cudaMemset(d_count, 0, sizeof(int64_t)));
 
     int num_blocks = get_num_blocks(n);
@@ -490,32 +491,30 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask,
     int64_t h_count;
     CUDA_CHECK(cudaMemcpyAsync(&h_count, d_count, sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK(cudaStreamSynchronize(stream));
-    CUDA_CHECK(cudaFree(d_count));
 
     if (h_count == 0) {
         return Tensor({0}, input.dtype(), input.device());
     }
 
     // Compute prefix sum using CUB
-    int64_t* d_positions;
-    int64_t* d_prefix_sum;
-    CUDA_CHECK(cudaMalloc(&d_positions, n * sizeof(int64_t)));
-    CUDA_CHECK(cudaMalloc(&d_prefix_sum, n * sizeof(int64_t)));
+    backend::CachedMemoryGuard d_positions_guard(n * sizeof(int64_t));
+    auto* d_positions = static_cast<int64_t*>(d_positions_guard.get());
+    backend::CachedMemoryGuard d_prefix_sum_guard(n * sizeof(int64_t));
+    auto* d_prefix_sum = static_cast<int64_t*>(d_prefix_sum_guard.get());
 
     // Initialize positions
     compute_positions_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
         reinterpret_cast<const bool*>(bool_mask.data_ptr()), d_positions, n);
 
     // Run exclusive prefix sum
-    void* d_temp_storage = nullptr;
+    void* d_temp_storage_query = nullptr;
     size_t temp_storage_bytes = 0;
+    cub::DeviceScan::InclusiveSum(d_temp_storage_query, temp_storage_bytes,
+                                   d_positions, d_prefix_sum, n, stream);
+    backend::CachedMemoryGuard d_temp_storage_guard(temp_storage_bytes);
+    auto* d_temp_storage = d_temp_storage_guard.get();
     cub::DeviceScan::InclusiveSum(d_temp_storage, temp_storage_bytes,
                                    d_positions, d_prefix_sum, n, stream);
-    CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
-    cub::DeviceScan::InclusiveSum(d_temp_storage, temp_storage_bytes,
-                                   d_positions, d_prefix_sum, n, stream);
-    CUDA_CHECK(cudaFree(d_temp_storage));
-    CUDA_CHECK(cudaFree(d_positions));
 
     // Create output tensor
     Tensor output({h_count}, input.dtype(), input.device());
@@ -541,13 +540,11 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask,
                 reinterpret_cast<__half*>(output.data_ptr()), n);
             break;
         default:
-            CUDA_CHECK(cudaFree(d_prefix_sum));
             throw std::runtime_error("masked_select: unsupported dtype");
     }
 
     #undef LAUNCH_MASKED_SELECT
 
-    CUDA_CHECK(cudaFree(d_prefix_sum));
     CUDA_CHECK(cudaGetLastError());
     return output;
 }
@@ -960,8 +957,8 @@ auto nonzero_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     }
 
     // Allocate flags array
-    int64_t* d_flags;
-    CUDA_CHECK(cudaMalloc(&d_flags, n * sizeof(int64_t)));
+    backend::CachedMemoryGuard d_flags_guard(n * sizeof(int64_t));
+    auto* d_flags = static_cast<int64_t*>(d_flags_guard.get());
 
     int num_blocks = get_num_blocks(n);
 
@@ -983,24 +980,23 @@ auto nonzero_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
                 reinterpret_cast<const __half*>(input.data_ptr()), d_flags, n);
             break;
         default:
-            CUDA_CHECK(cudaFree(d_flags));
             throw std::runtime_error("nonzero: unsupported dtype");
     }
 
     #undef LAUNCH_NONZERO_FLAG
 
     // Compute prefix sum using CUB
-    int64_t* d_prefix_sum;
-    CUDA_CHECK(cudaMalloc(&d_prefix_sum, n * sizeof(int64_t)));
+    backend::CachedMemoryGuard d_prefix_sum_guard(n * sizeof(int64_t));
+    auto* d_prefix_sum = static_cast<int64_t*>(d_prefix_sum_guard.get());
 
-    void* d_temp_storage = nullptr;
+    void* d_temp_storage_query = nullptr;
     size_t temp_storage_bytes = 0;
+    cub::DeviceScan::InclusiveSum(d_temp_storage_query, temp_storage_bytes,
+                                   d_flags, d_prefix_sum, n, stream);
+    backend::CachedMemoryGuard d_temp_storage_guard(temp_storage_bytes);
+    auto* d_temp_storage = d_temp_storage_guard.get();
     cub::DeviceScan::InclusiveSum(d_temp_storage, temp_storage_bytes,
                                    d_flags, d_prefix_sum, n, stream);
-    CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
-    cub::DeviceScan::InclusiveSum(d_temp_storage, temp_storage_bytes,
-                                   d_flags, d_prefix_sum, n, stream);
-    CUDA_CHECK(cudaFree(d_temp_storage));
 
     // Read total count from last element of prefix sum
     int64_t total_nonzero;
@@ -1009,8 +1005,6 @@ auto nonzero_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
     if (total_nonzero == 0) {
-        CUDA_CHECK(cudaFree(d_flags));
-        CUDA_CHECK(cudaFree(d_prefix_sum));
         return Tensor({0, ndim}, DType::Int64, input.device());
     }
 
@@ -1018,8 +1012,8 @@ auto nonzero_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     Tensor output({total_nonzero, ndim}, DType::Int64, input.device());
 
     // Copy shape to device
-    int64_t* d_shape;
-    CUDA_CHECK(cudaMalloc(&d_shape, ndim * sizeof(int64_t)));
+    backend::CachedMemoryGuard d_shape_guard(ndim * sizeof(int64_t));
+    auto* d_shape = static_cast<int64_t*>(d_shape_guard.get());
     CUDA_CHECK(cudaMemcpyAsync(d_shape, input.shape().data(),
                                 ndim * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
 
@@ -1029,10 +1023,6 @@ auto nonzero_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
 
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaStreamSynchronize(stream));
-
-    CUDA_CHECK(cudaFree(d_flags));
-    CUDA_CHECK(cudaFree(d_prefix_sum));
-    CUDA_CHECK(cudaFree(d_shape));
 
     return output;
 }

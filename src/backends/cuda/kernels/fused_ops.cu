@@ -4,6 +4,7 @@
 #include <cuda_fp16.h>
 #include <cub/cub.cuh>
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/backend/caching_allocator.hpp"
 #include <stdexcept>
 #include <cmath>
 #include <algorithm>
@@ -34,9 +35,10 @@ inline std::vector<int64_t> to_vector(const std::span<const int64_t>& s) {
     return std::vector<int64_t>(s.begin(), s.end());
 }
 
-// Helper for computing sum of a 1D tensor on GPU — returns a scalar device Tensor
+// Helper for computing (optionally scaled) sum of a 1D tensor on GPU
+// When scale != 1.0f, computes sum * scale (e.g. mean = sum * (1/n))
 // No D2H synchronization needed
-inline Tensor cuda_sum_device(const Tensor& t) {
+inline Tensor cuda_sum_device(const Tensor& t, float scale = 1.0f) {
     int64_t n = t.numel();
     const float* data = t.data<float>();
 
@@ -49,31 +51,28 @@ inline Tensor cuda_sum_device(const Tensor& t) {
 
     // Determine temp storage requirements
     cub::DeviceReduce::Sum(d_temp_storage, temp_storage_bytes, data, d_out, n);
-    cudaMalloc(&d_temp_storage, temp_storage_bytes);
+    backend::CachedMemoryGuard temp_guard(temp_storage_bytes);
+    d_temp_storage = temp_guard.get();
 
     // Run sum
     cub::DeviceReduce::Sum(d_temp_storage, temp_storage_bytes, data, d_out, n);
 
-    cudaFree(d_temp_storage);
+    // Apply scale on host if needed (single scalar, negligible cost)
+    if (scale != 1.0f) {
+        float host_val;
+        cudaMemcpy(&host_val, d_out, sizeof(float), cudaMemcpyDeviceToHost);
+        host_val *= scale;
+        cudaMemcpy(d_out, &host_val, sizeof(float), cudaMemcpyHostToDevice);
+    }
 
     return result;
 }
 
-// Device kernel to set a single scalar value
-__global__ void set_scalar_kernel(float* data, float value) {
-    data[0] = value;
-}
-
-// Helper to create scalar tensor on device
+// Helper to create scalar tensor on device — uses cudaMemcpy instead of <<<1,1>>> kernel
 inline Tensor create_scalar_tensor(float value, DType dtype, Device device) {
     Tensor t({1}, dtype, device);
-    set_scalar_kernel<<<1, 1>>>(static_cast<float*>(t.data_ptr()), value);
+    cudaMemcpy(t.data_ptr(), &value, sizeof(float), cudaMemcpyHostToDevice);
     return t;
-}
-
-// Device kernel to scale a single float in-place
-__global__ void scale_scalar_kernel(float* data, float scale) {
-    data[0] *= scale;
 }
 
 // Error checking macro
@@ -422,9 +421,7 @@ auto fused_softmax_cross_entropy_cuda(
 
     // Apply reduction — stays on device, no D2H transfer
     if (reduction == "mean") {
-        Tensor sum_tensor = cuda_sum_device(losses);
-        scale_scalar_kernel<<<1, 1>>>(sum_tensor.data<float>(), 1.0f / batch_size);
-        return sum_tensor;
+        return cuda_sum_device(losses, 1.0f / batch_size);
     } else if (reduction == "sum") {
         return cuda_sum_device(losses);
     } else {
