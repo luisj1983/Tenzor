@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <vector>
+#include <cstring>
 #include <chrono>
 #include <thread>
 #include <atomic>
@@ -2079,16 +2080,24 @@ auto expand_kernel(const Tensor& input, const std::vector<int64_t>& shape, void*
         input_stride *= input_shape_vec[i];
     }
 
-    // Copy metadata to device
-    int64_t* d_input_shape;
-    int64_t* d_input_strides;
-    int64_t* d_output_shape;
-    CUDA_CHECK(cudaMalloc(&d_input_shape, input_shape_vec.size() * sizeof(int64_t)));
-    CUDA_CHECK(cudaMalloc(&d_input_strides, input_strides.size() * sizeof(int64_t)));
-    CUDA_CHECK(cudaMalloc(&d_output_shape, shape.size() * sizeof(int64_t)));
-    CUDA_CHECK(cudaMemcpy(d_input_shape, input_shape_vec.data(), input_shape_vec.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_input_strides, input_strides.data(), input_strides.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_output_shape, shape.data(), shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
+    // Pack 3 metadata arrays into single contiguous device buffer
+    const size_t ishape_bytes  = input_shape_vec.size() * sizeof(int64_t);
+    const size_t istride_bytes = input_strides.size() * sizeof(int64_t);
+    const size_t oshape_bytes  = shape.size() * sizeof(int64_t);
+    const size_t total_meta_bytes = ishape_bytes + istride_bytes + oshape_bytes;
+
+    std::vector<char> host_meta(total_meta_bytes);
+    std::memcpy(host_meta.data(), input_shape_vec.data(), ishape_bytes);
+    std::memcpy(host_meta.data() + ishape_bytes, input_strides.data(), istride_bytes);
+    std::memcpy(host_meta.data() + ishape_bytes + istride_bytes, shape.data(), oshape_bytes);
+
+    char* d_meta;
+    CUDA_CHECK(cudaMalloc(&d_meta, total_meta_bytes));
+    CUDA_CHECK(cudaMemcpyAsync(d_meta, host_meta.data(), total_meta_bytes, cudaMemcpyHostToDevice, stream));
+
+    int64_t* d_input_shape   = reinterpret_cast<int64_t*>(d_meta);
+    int64_t* d_input_strides = reinterpret_cast<int64_t*>(d_meta + ishape_bytes);
+    int64_t* d_output_shape  = reinterpret_cast<int64_t*>(d_meta + ishape_bytes + istride_bytes);
 
     int64_t n = result.numel();
     int64_t input_ndim = input_shape_vec.size();
@@ -2129,15 +2138,17 @@ auto expand_kernel(const Tensor& input, const std::vector<int64_t>& shape, void*
             d_input_shape, d_input_strides, d_output_shape,
             input_ndim, output_ndim, n);
     } else {
+        cudaFree(d_meta);
         throw std::runtime_error("Unsupported dtype for expand operation");
     }
 
-    // Cleanup
-    CUDA_CHECK(cudaFree(d_input_shape));
-    CUDA_CHECK(cudaFree(d_input_strides));
-    CUDA_CHECK(cudaFree(d_output_shape));
+    // Cleanup — single free for packed metadata buffer
     CUDA_CHECK(cudaGetLastError());
-    // NOTE: Removed cudaStreamSynchronize - async execution for performance
+#if CUDART_VERSION >= 11020
+    cudaFreeAsync(d_meta, stream);
+#else
+    CUDA_CHECK(cudaFree(d_meta));
+#endif
     return result;
 }
 

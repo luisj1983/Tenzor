@@ -5,6 +5,7 @@
 #include "tenzor/core/shape.hpp"
 #include <stdexcept>
 #include <vector>
+#include <cstring>
 
 namespace tenzor {
 namespace cuda {
@@ -375,74 +376,79 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, cudaStream_t strea
         return output;  // Empty output
     }
 
-    // Allocate device memory for metadata
+    // Allocate device memory for metadata — packed into single contiguous buffer
     const int64_t num_tensors = contiguous_tensors.size();
 
-    // Prepare input pointers
-    std::vector<void*> host_input_ptrs(num_tensors);
-    for (size_t i = 0; i < num_tensors; ++i) {
-        host_input_ptrs[i] = contiguous_tensors[i].data_ptr();
+    // Compute sizes for each metadata section
+    const size_t ptrs_bytes    = num_tensors * sizeof(void*);
+    const size_t shapes_bytes  = num_tensors * ndim * sizeof(int64_t);
+    const size_t oshape_bytes  = ndim * sizeof(int64_t);
+    const size_t ostride_bytes = ndim * sizeof(int64_t);
+    const size_t offsets_bytes = num_tensors * sizeof(int64_t);
+    const size_t total_meta_bytes = ptrs_bytes + shapes_bytes + oshape_bytes + ostride_bytes + offsets_bytes;
+
+    // Build packed host buffer
+    std::vector<char> host_meta(total_meta_bytes);
+    size_t meta_offset = 0;
+
+    // Section 1: input pointers
+    {
+        void** dst = reinterpret_cast<void**>(host_meta.data() + meta_offset);
+        for (size_t i = 0; i < num_tensors; ++i) {
+            dst[i] = contiguous_tensors[i].data_ptr();
+        }
+        meta_offset += ptrs_bytes;
     }
 
-    void** d_input_ptrs;
-    CUDA_CHECK(cudaMalloc(&d_input_ptrs, num_tensors * sizeof(void*)));
-    CUDA_CHECK(cudaMemcpyAsync(d_input_ptrs, host_input_ptrs.data(),
-                          num_tensors * sizeof(void*), cudaMemcpyHostToDevice, stream));
+    // Section 2: input shapes
+    {
+        int64_t* dst = reinterpret_cast<int64_t*>(host_meta.data() + meta_offset);
+        for (size_t t = 0; t < num_tensors; ++t) {
+            auto shape = contiguous_tensors[t].shape();
+            for (int64_t d = 0; d < ndim; ++d) {
+                dst[t * ndim + d] = shape[d];
+            }
+        }
+        meta_offset += shapes_bytes;
+    }
 
-    // Prepare shapes
-    std::vector<int64_t> host_input_shapes(num_tensors * ndim);
-    for (size_t t = 0; t < num_tensors; ++t) {
-        auto shape = contiguous_tensors[t].shape();
-        for (int64_t d = 0; d < ndim; ++d) {
-            host_input_shapes[t * ndim + d] = shape[d];
+    // Section 3: output shape
+    std::memcpy(host_meta.data() + meta_offset, output_shape.data(), oshape_bytes);
+    meta_offset += oshape_bytes;
+
+    // Section 4: output strides
+    std::vector<int64_t> output_strides = compute_strides(output_shape);
+    std::memcpy(host_meta.data() + meta_offset, output_strides.data(), ostride_bytes);
+    meta_offset += ostride_bytes;
+
+    // Section 5: offsets
+    {
+        int64_t* dst = reinterpret_cast<int64_t*>(host_meta.data() + meta_offset);
+        int64_t off = 0;
+        for (size_t t = 0; t < num_tensors; ++t) {
+            dst[t] = off;
+            off += contiguous_tensors[t].shape()[dim];
         }
     }
 
-    int64_t* d_input_shapes;
-    CUDA_CHECK(cudaMalloc(&d_input_shapes, num_tensors * ndim * sizeof(int64_t)));
-    CUDA_CHECK(cudaMemcpyAsync(d_input_shapes, host_input_shapes.data(),
-                          num_tensors * ndim * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
+    // Single device allocation and transfer
+    char* d_meta;
+    CUDA_CHECK(cudaMalloc(&d_meta, total_meta_bytes));
+    CUDA_CHECK(cudaMemcpyAsync(d_meta, host_meta.data(), total_meta_bytes, cudaMemcpyHostToDevice, stream));
 
-    // Prepare output shape
-    int64_t* d_output_shape;
-    CUDA_CHECK(cudaMalloc(&d_output_shape, ndim * sizeof(int64_t)));
-    CUDA_CHECK(cudaMemcpyAsync(d_output_shape, output_shape.data(),
-                          ndim * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
-
-    // Prepare output strides
-    std::vector<int64_t> output_strides = compute_strides(output_shape);
-    int64_t* d_output_strides;
-    CUDA_CHECK(cudaMalloc(&d_output_strides, ndim * sizeof(int64_t)));
-    CUDA_CHECK(cudaMemcpyAsync(d_output_strides, output_strides.data(),
-                          ndim * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
-
-    // Prepare offsets at concat dimension (for optimization, not used in current impl)
-    std::vector<int64_t> host_offsets(num_tensors);
-    int64_t offset = 0;
-    for (size_t t = 0; t < num_tensors; ++t) {
-        host_offsets[t] = offset;
-        offset += contiguous_tensors[t].shape()[dim];
-    }
-
-    int64_t* d_offsets;
-    CUDA_CHECK(cudaMalloc(&d_offsets, num_tensors * sizeof(int64_t)));
-    CUDA_CHECK(cudaMemcpyAsync(d_offsets, host_offsets.data(),
-                          num_tensors * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
+    // Compute sub-pointers as offsets into the packed buffer
+    void** d_input_ptrs       = reinterpret_cast<void**>(d_meta);
+    int64_t* d_input_shapes   = reinterpret_cast<int64_t*>(d_meta + ptrs_bytes);
+    int64_t* d_output_shape   = reinterpret_cast<int64_t*>(d_meta + ptrs_bytes + shapes_bytes);
+    int64_t* d_output_strides = reinterpret_cast<int64_t*>(d_meta + ptrs_bytes + shapes_bytes + oshape_bytes);
+    int64_t* d_offsets        = reinterpret_cast<int64_t*>(d_meta + ptrs_bytes + shapes_bytes + oshape_bytes + ostride_bytes);
 
     // Handle empty output case - don't launch kernel with 0 blocks
     if (total_elements == 0) {
 #if CUDART_VERSION >= 11020
-        cudaFreeAsync(d_input_ptrs, stream);
-        cudaFreeAsync(d_input_shapes, stream);
-        cudaFreeAsync(d_output_shape, stream);
-        cudaFreeAsync(d_output_strides, stream);
-        cudaFreeAsync(d_offsets, stream);
+        cudaFreeAsync(d_meta, stream);
 #else
-        cudaFree(d_input_ptrs);
-        cudaFree(d_input_shapes);
-        cudaFree(d_output_shape);
-        cudaFree(d_output_strides);
-        cudaFree(d_offsets);
+        cudaFree(d_meta);
 #endif
         return output;
     }
@@ -492,17 +498,9 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, cudaStream_t strea
             num_tensors, ndim, dim, total_elements);
     } else {
 #if CUDART_VERSION >= 11020
-        cudaFreeAsync(d_input_ptrs, stream);
-        cudaFreeAsync(d_input_shapes, stream);
-        cudaFreeAsync(d_output_shape, stream);
-        cudaFreeAsync(d_output_strides, stream);
-        cudaFreeAsync(d_offsets, stream);
+        cudaFreeAsync(d_meta, stream);
 #else
-        cudaFree(d_input_ptrs);
-        cudaFree(d_input_shapes);
-        cudaFree(d_output_shape);
-        cudaFree(d_output_strides);
-        cudaFree(d_offsets);
+        cudaFree(d_meta);
 #endif
         throw std::runtime_error("Concatenation: unsupported dtype");
     }
@@ -511,18 +509,10 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, cudaStream_t strea
 
     // Free device memory asynchronously
 #if CUDART_VERSION >= 11020
-    cudaFreeAsync(d_input_ptrs, stream);
-    cudaFreeAsync(d_input_shapes, stream);
-    cudaFreeAsync(d_output_shape, stream);
-    cudaFreeAsync(d_output_strides, stream);
-    cudaFreeAsync(d_offsets, stream);
+    cudaFreeAsync(d_meta, stream);
 #else
     cudaStreamSynchronize(stream);
-    cudaFree(d_input_ptrs);
-    cudaFree(d_input_shapes);
-    cudaFree(d_output_shape);
-    cudaFree(d_output_strides);
-    cudaFree(d_offsets);
+    cudaFree(d_meta);
 #endif
 
     return output;
@@ -581,18 +571,22 @@ auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, cud
         stride *= input_shape[i];
     }
 
-    // Copy data to device
-    int64_t* d_input_shape;
-    int64_t* d_input_strides;
-    int64_t* d_repeats;
+    // Pack 3 metadata arrays into single contiguous buffer
+    const size_t array_bytes = ndim * sizeof(int64_t);
+    const size_t total_meta_bytes = 3 * array_bytes;
 
-    cudaMalloc(&d_input_shape, ndim * sizeof(int64_t));
-    cudaMalloc(&d_input_strides, ndim * sizeof(int64_t));
-    cudaMalloc(&d_repeats, ndim * sizeof(int64_t));
+    std::vector<char> host_meta(total_meta_bytes);
+    std::memcpy(host_meta.data(), input_shape.data(), array_bytes);
+    std::memcpy(host_meta.data() + array_bytes, input_strides.data(), array_bytes);
+    std::memcpy(host_meta.data() + 2 * array_bytes, repeats.data(), array_bytes);
 
-    cudaMemcpy(d_input_shape, input_shape.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_input_strides, input_strides.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_repeats, repeats.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
+    char* d_meta;
+    CUDA_CHECK(cudaMalloc(&d_meta, total_meta_bytes));
+    CUDA_CHECK(cudaMemcpyAsync(d_meta, host_meta.data(), total_meta_bytes, cudaMemcpyHostToDevice, stream));
+
+    int64_t* d_input_shape   = reinterpret_cast<int64_t*>(d_meta);
+    int64_t* d_input_strides = reinterpret_cast<int64_t*>(d_meta + array_bytes);
+    int64_t* d_repeats       = reinterpret_cast<int64_t*>(d_meta + 2 * array_bytes);
 
     // Launch kernel
     dim3 grid, block;
@@ -611,26 +605,23 @@ auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, cud
             input.data<Float16>(), output.data<Float16>(),
             d_input_shape, d_input_strides, d_repeats, ndim, n);
     } else {
-        cudaFree(d_input_shape);
-        cudaFree(d_input_strides);
-        cudaFree(d_repeats);
+        cudaFree(d_meta);
         throw std::runtime_error("repeat operation only supports Float32, Float64, and Float16 dtypes");
     }
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
-        cudaFree(d_input_shape);
-        cudaFree(d_input_strides);
-        cudaFree(d_repeats);
+        cudaFree(d_meta);
         throw std::runtime_error(std::string("CUDA error in repeat_kernel: ") + cudaGetErrorString(err));
     }
 
+    // Free device memory after kernel completion
+#if CUDART_VERSION >= 11020
+    cudaFreeAsync(d_meta, stream);
+#else
     cudaStreamSynchronize(stream);
-
-    // Free device memory
-    cudaFree(d_input_shape);
-    cudaFree(d_input_strides);
-    cudaFree(d_repeats);
+    cudaFree(d_meta);
+#endif
 
     return output;
 }

@@ -9,6 +9,15 @@
 #include <algorithm>
 #include <vector>
 #include <cstdint>
+#include <stdexcept>
+#include <string>
+
+#define CUDA_CHECK(call) do { \
+    cudaError_t err = call; \
+    if (err != cudaSuccess) { \
+        throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(err)); \
+    } \
+} while(0)
 
 namespace tenzor {
 namespace cuda {
@@ -159,9 +168,9 @@ extern "C" void nms_cuda(const float* boxes, const float* scores,
     int64_t* d_indices_in;
     int64_t* d_sorted_indices;
     float* d_scores_sorted;
-    cudaMalloc(&d_indices_in, num_boxes * sizeof(int64_t));
-    cudaMalloc(&d_sorted_indices, num_boxes * sizeof(int64_t));
-    cudaMalloc(&d_scores_sorted, num_boxes * sizeof(float));
+    CUDA_CHECK(cudaMalloc(&d_indices_in, num_boxes * sizeof(int64_t)));
+    CUDA_CHECK(cudaMalloc(&d_sorted_indices, num_boxes * sizeof(int64_t)));
+    CUDA_CHECK(cudaMalloc(&d_scores_sorted, num_boxes * sizeof(float)));
 
     // Initialize index array [0, 1, 2, ..., num_boxes-1] on device
     {
@@ -178,21 +187,22 @@ extern "C" void nms_cuda(const float* boxes, const float* scores,
         scores, d_scores_sorted,
         d_indices_in, d_sorted_indices,
         static_cast<int>(num_boxes));
-    cudaMalloc(&d_temp_storage, temp_storage_bytes);
+    CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
     cub::DeviceRadixSort::SortPairsDescending(
         d_temp_storage, temp_storage_bytes,
         scores, d_scores_sorted,
         d_indices_in, d_sorted_indices,
         static_cast<int>(num_boxes));
-    cudaFree(d_temp_storage);
-    cudaFree(d_indices_in);
-    cudaFree(d_scores_sorted);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaFree(d_temp_storage));
+    CUDA_CHECK(cudaFree(d_indices_in));
+    CUDA_CHECK(cudaFree(d_scores_sorted));
 
     // Allocate suppression mask
     const int64_t num_chunks = (num_boxes + 63) / 64;
     uint64_t* d_suppression_mask;
-    cudaMalloc(&d_suppression_mask, num_boxes * num_chunks * sizeof(uint64_t));
-    cudaMemset(d_suppression_mask, 0, num_boxes * num_chunks * sizeof(uint64_t));
+    CUDA_CHECK(cudaMalloc(&d_suppression_mask, num_boxes * num_chunks * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMemset(d_suppression_mask, 0, num_boxes * num_chunks * sizeof(uint64_t)));
 
     // Launch NMS IoU kernel — one block per reference box
     const int threads_per_block = 256;
@@ -201,21 +211,23 @@ extern "C" void nms_cuda(const float* boxes, const float* scores,
 
     // Allocate device-side num_keep scalar
     int64_t* d_num_keep;
-    cudaMalloc(&d_num_keep, sizeof(int64_t));
+    CUDA_CHECK(cudaMalloc(&d_num_keep, sizeof(int64_t)));
 
     // Launch greedy suppression on device (single thread, shared memory for bitmask)
     size_t shared_bytes = num_chunks * sizeof(uint64_t);
     nms_greedy_suppression_kernel<<<1, 1, shared_bytes>>>(
         d_suppression_mask, d_sorted_indices, keep_indices, d_num_keep,
         num_boxes, num_chunks);
+    CUDA_CHECK(cudaGetLastError());
 
-    // Only D2H transfer: the scalar num_keep
-    cudaMemcpy(num_keep, d_num_keep, sizeof(int64_t), cudaMemcpyDeviceToHost);
+    // Only D2H transfer: the scalar num_keep (stream-scoped async + sync)
+    CUDA_CHECK(cudaMemcpyAsync(num_keep, d_num_keep, sizeof(int64_t), cudaMemcpyDeviceToHost, nullptr));
+    CUDA_CHECK(cudaStreamSynchronize(nullptr));
 
     // Cleanup
-    cudaFree(d_num_keep);
-    cudaFree(d_sorted_indices);
-    cudaFree(d_suppression_mask);
+    CUDA_CHECK(cudaFree(d_num_keep));
+    CUDA_CHECK(cudaFree(d_sorted_indices));
+    CUDA_CHECK(cudaFree(d_suppression_mask));
 }
 
 } // namespace cuda

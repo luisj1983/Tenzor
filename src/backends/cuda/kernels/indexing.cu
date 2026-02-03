@@ -488,7 +488,8 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask,
         reinterpret_cast<const bool*>(bool_mask.data_ptr()), n, d_count);
 
     int64_t h_count;
-    CUDA_CHECK(cudaMemcpy(&h_count, d_count, sizeof(int64_t), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpyAsync(&h_count, d_count, sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     CUDA_CHECK(cudaFree(d_count));
 
     if (h_count == 0) {

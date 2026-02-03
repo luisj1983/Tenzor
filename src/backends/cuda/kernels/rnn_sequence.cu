@@ -168,14 +168,14 @@ auto lstm_forward_cuda(
         }
     }
 
+    // Reshape to (seq_len, batch, gate_size) for zero-copy per-timestep slicing
+    Tensor all_gates_ih_3d = all_gates_ih.reshape({seq_len, batch, gate_size});
+
+    size_t hidden_step_bytes = batch * hidden * dtype_size(input.dtype());
+
     for (int64_t t = 0; t < seq_len; ++t) {
-        // Slice pre-computed input gates for this timestep: (batch, 4*hidden)
-        Tensor gates_ih_t({batch, gate_size}, input.dtype(), input.device());
-        cudaMemcpyAsync(
-            gates_ih_t.data_ptr(),
-            static_cast<const char*>(all_gates_ih.data_ptr()) + t * batch * gate_size * dtype_size(input.dtype()),
-            batch * gate_size * dtype_size(input.dtype()),
-            cudaMemcpyDeviceToDevice, stream);
+        // Zero-copy view into pre-computed input gates for this timestep: (batch, 4*hidden)
+        Tensor gates_ih_t = all_gates_ih_3d.slice(0, t, t + 1).squeeze(0);
 
         // Hidden-to-hidden: h_prev @ W_hh_t (pre-transposed)
         Tensor gates_hh = cublas_matmul(h_prev, W_hh_t);
@@ -196,9 +196,9 @@ auto lstm_forward_cuda(
 
         // Copy h_out to output[t]
         cudaMemcpyAsync(
-            static_cast<char*>(output.data_ptr()) + t * batch * hidden * dtype_size(input.dtype()),
+            static_cast<char*>(output.data_ptr()) + t * hidden_step_bytes,
             h_out.data_ptr(),
-            batch * hidden * dtype_size(input.dtype()),
+            hidden_step_bytes,
             cudaMemcpyDeviceToDevice,
             stream);
 
@@ -251,25 +251,26 @@ auto gru_forward_cuda(
         }
     }
 
+    // Reshape to (seq_len, batch, gate_size) for zero-copy per-timestep slicing
+    Tensor all_gates_ih_3d = all_gates_ih.reshape({seq_len, batch, gate_size});
+
+    // Pre-allocate reusable h_out buffer (avoids per-timestep allocation)
+    Tensor h_out({batch, hidden}, input.dtype(), input.device());
+    size_t hidden_step_bytes = batch * hidden * dtype_size(input.dtype());
+
+    // Pre-compute GRU cell launch config (constant across timesteps)
+    int64_t total = batch * hidden;
+    int block = 256;
+    int grid = (total + block - 1) / block;
+
     for (int64_t t = 0; t < seq_len; ++t) {
-        // Slice pre-computed input gates for this timestep
-        Tensor gates_ih_t({batch, gate_size}, input.dtype(), input.device());
-        cudaMemcpyAsync(
-            gates_ih_t.data_ptr(),
-            static_cast<const char*>(all_gates_ih.data_ptr()) + t * batch * gate_size * dtype_size(input.dtype()),
-            batch * gate_size * dtype_size(input.dtype()),
-            cudaMemcpyDeviceToDevice, stream);
+        // Zero-copy view into pre-computed input gates for this timestep
+        Tensor gates_ih_t = all_gates_ih_3d.slice(0, t, t + 1).squeeze(0);
 
         // Hidden-to-hidden: h_prev @ W_hh_t (pre-transposed)
         Tensor gates_hh = cublas_matmul(h_prev, W_hh_t);
 
-        // GRU cell
-        int64_t total = batch * hidden;
-        int block = 256;
-        int grid = (total + block - 1) / block;
-
-        Tensor h_out({batch, hidden}, input.dtype(), input.device());
-
+        // GRU cell — write into pre-allocated h_out buffer
         if (input.dtype() == DType::Float32) {
             gru_cell_fused_kernel<float><<<grid, block, 0, stream>>>(
                 gates_ih_t.data<float>(), gates_hh.data<float>(),
@@ -283,14 +284,20 @@ auto gru_forward_cuda(
         }
 
         cudaMemcpyAsync(
-            static_cast<char*>(output.data_ptr()) + t * batch * hidden * dtype_size(input.dtype()),
+            static_cast<char*>(output.data_ptr()) + t * hidden_step_bytes,
             h_out.data_ptr(),
-            batch * hidden * dtype_size(input.dtype()),
+            hidden_step_bytes,
             cudaMemcpyDeviceToDevice,
             stream);
 
-        h_prev = h_out;
+        // Swap: h_prev now points to current output, h_out gets a fresh buffer for next step
+        std::swap(h_prev, h_out);
     }
+
+    // After the loop, h_prev holds the final hidden state (due to the swap at end of last iteration)
+    // But we need to return the actual last h — which was written to output and also to h_out before swap
+    // After last iteration's swap, h_prev = last h_out (the result), h_out = previous h_prev
+    // So h_prev is correct.
 
     return {output, h_prev};
 }
