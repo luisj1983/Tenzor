@@ -51,10 +51,10 @@ inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
 // index_select kernel
 // ============================================================================
 
-template<typename T>
+template<typename T, typename IndexT>
 __global__ void index_select_kernel_impl(
     const T* input,
-    const int64_t* indices,
+    const IndexT* indices,
     T* output,
     int64_t num_indices,
     int64_t dim_size,
@@ -70,7 +70,7 @@ __global__ void index_select_kernel_impl(
         int64_t outer_idx = temp / num_indices;
 
         // Get the actual index value
-        int64_t selected_idx = indices[index_pos];
+        int64_t selected_idx = static_cast<int64_t>(indices[index_pos]);
 
         // Compute input offset
         int64_t input_offset = outer_idx * dim_size * inner_size +
@@ -116,13 +116,21 @@ auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index,
 
     int num_blocks = get_num_blocks(total_output);
 
-    // Ensure index is int64
-    Tensor index_int64 = (index.dtype() == DType::Int64) ? index : index.to(DType::Int64);
+    bool idx_is_int32 = (index.dtype() == DType::Int32);
+    bool idx_is_int64 = (index.dtype() == DType::Int64);
+    if (!idx_is_int32 && !idx_is_int64) {
+        throw std::invalid_argument("index_select: index must be Int32 or Int64");
+    }
 
     #define LAUNCH_INDEX_SELECT(T) \
-        index_select_kernel_impl<T><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
-            input.data<T>(), index_int64.data<int64_t>(), output.data<T>(), \
-            num_indices, dim_size, outer_size, inner_size, total_output)
+        if (idx_is_int32) \
+            index_select_kernel_impl<T, int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
+                input.data<T>(), index.data<int32_t>(), output.data<T>(), \
+                num_indices, dim_size, outer_size, inner_size, total_output); \
+        else \
+            index_select_kernel_impl<T, int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
+                input.data<T>(), index.data<int64_t>(), output.data<T>(), \
+                num_indices, dim_size, outer_size, inner_size, total_output)
 
     switch (input.dtype()) {
         case DType::Float32: LAUNCH_INDEX_SELECT(float); break;
@@ -132,11 +140,18 @@ auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index,
         case DType::Int8:    LAUNCH_INDEX_SELECT(int8_t); break;
         case DType::UInt8:   LAUNCH_INDEX_SELECT(uint8_t); break;
         case DType::Float16:
-            index_select_kernel_impl<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-                reinterpret_cast<const __half*>(input.data_ptr()),
-                index_int64.data<int64_t>(),
-                reinterpret_cast<__half*>(output.data_ptr()),
-                num_indices, dim_size, outer_size, inner_size, total_output);
+            if (idx_is_int32)
+                index_select_kernel_impl<__half, int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const __half*>(input.data_ptr()),
+                    index.data<int32_t>(),
+                    reinterpret_cast<__half*>(output.data_ptr()),
+                    num_indices, dim_size, outer_size, inner_size, total_output);
+            else
+                index_select_kernel_impl<__half, int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const __half*>(input.data_ptr()),
+                    index.data<int64_t>(),
+                    reinterpret_cast<__half*>(output.data_ptr()),
+                    num_indices, dim_size, outer_size, inner_size, total_output);
             break;
         default:
             throw std::runtime_error("index_select: unsupported dtype");
@@ -152,10 +167,10 @@ auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index,
 // gather kernel
 // ============================================================================
 
-template<typename T>
+template<typename T, typename IndexT>
 __global__ void gather_kernel_impl(
     const T* input,
-    const int64_t* indices,
+    const IndexT* indices,
     T* output,
     int64_t outer_size,
     int64_t dim_size,
@@ -173,7 +188,7 @@ __global__ void gather_kernel_impl(
         // Get the index value at this position
         int64_t index_offset = outer_idx * index_dim_size * inner_size +
                                index_pos * inner_size + inner_idx;
-        int64_t gather_idx = indices[index_offset];
+        int64_t gather_idx = static_cast<int64_t>(indices[index_offset]);
 
         // Compute input offset
         int64_t input_offset = outer_idx * dim_size * inner_size +
@@ -217,13 +232,21 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index,
 
     int num_blocks = get_num_blocks(total_output);
 
-    // Ensure index is int64
-    Tensor index_int64 = (index.dtype() == DType::Int64) ? index : index.to(DType::Int64);
+    bool idx_is_int32 = (index.dtype() == DType::Int32);
+    bool idx_is_int64 = (index.dtype() == DType::Int64);
+    if (!idx_is_int32 && !idx_is_int64) {
+        throw std::invalid_argument("gather: index must be Int32 or Int64");
+    }
 
     #define LAUNCH_GATHER(T) \
-        gather_kernel_impl<T><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
-            input.data<T>(), index_int64.data<int64_t>(), output.data<T>(), \
-            outer_size, dim_size, inner_size, index_dim_size, total_output)
+        if (idx_is_int32) \
+            gather_kernel_impl<T, int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
+                input.data<T>(), index.data<int32_t>(), output.data<T>(), \
+                outer_size, dim_size, inner_size, index_dim_size, total_output); \
+        else \
+            gather_kernel_impl<T, int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
+                input.data<T>(), index.data<int64_t>(), output.data<T>(), \
+                outer_size, dim_size, inner_size, index_dim_size, total_output)
 
     switch (input.dtype()) {
         case DType::Float32: LAUNCH_GATHER(float); break;
@@ -233,11 +256,18 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index,
         case DType::Int8:    LAUNCH_GATHER(int8_t); break;
         case DType::UInt8:   LAUNCH_GATHER(uint8_t); break;
         case DType::Float16:
-            gather_kernel_impl<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-                reinterpret_cast<const __half*>(input.data_ptr()),
-                index_int64.data<int64_t>(),
-                reinterpret_cast<__half*>(output.data_ptr()),
-                outer_size, dim_size, inner_size, index_dim_size, total_output);
+            if (idx_is_int32)
+                gather_kernel_impl<__half, int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const __half*>(input.data_ptr()),
+                    index.data<int32_t>(),
+                    reinterpret_cast<__half*>(output.data_ptr()),
+                    outer_size, dim_size, inner_size, index_dim_size, total_output);
+            else
+                gather_kernel_impl<__half, int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const __half*>(input.data_ptr()),
+                    index.data<int64_t>(),
+                    reinterpret_cast<__half*>(output.data_ptr()),
+                    outer_size, dim_size, inner_size, index_dim_size, total_output);
             break;
         default:
             throw std::runtime_error("gather: unsupported dtype");
@@ -253,10 +283,10 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index,
 // scatter kernel
 // ============================================================================
 
-template<typename T>
+template<typename T, typename IndexT>
 __global__ void scatter_kernel_impl(
     const T* input,
-    const int64_t* indices,
+    const IndexT* indices,
     const T* src,
     T* output,
     int64_t outer_size,
@@ -283,7 +313,7 @@ __global__ void scatter_kernel_impl(
         // Get the index value at this position
         int64_t index_offset = outer_idx * index_dim_size * inner_size +
                                index_pos * inner_size + inner_idx;
-        int64_t scatter_idx = indices[index_offset];
+        int64_t scatter_idx = static_cast<int64_t>(indices[index_offset]);
 
         // Compute output offset
         int64_t output_offset = outer_idx * dim_size * inner_size +
@@ -303,9 +333,9 @@ __global__ void copy_kernel_impl(const T* input, T* output, int64_t n) {
 }
 
 // Separate kernel for scatter phase
-template<typename T>
+template<typename T, typename IndexT>
 __global__ void scatter_values_kernel_impl(
-    const int64_t* indices,
+    const IndexT* indices,
     const T* src,
     T* output,
     int64_t outer_size,
@@ -322,7 +352,7 @@ __global__ void scatter_values_kernel_impl(
 
         int64_t index_offset = outer_idx * index_dim_size * inner_size +
                                index_pos * inner_size + inner_idx;
-        int64_t scatter_idx = indices[index_offset];
+        int64_t scatter_idx = static_cast<int64_t>(indices[index_offset]);
 
         int64_t output_offset = outer_idx * dim_size * inner_size +
                                 scatter_idx * inner_size +
@@ -365,8 +395,11 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
         inner_size *= input.shape()[i];
     }
 
-    // Ensure index is int64
-    Tensor index_int64 = (index.dtype() == DType::Int64) ? index : index.to(DType::Int64);
+    bool idx_is_int32 = (index.dtype() == DType::Int32);
+    bool idx_is_int64 = (index.dtype() == DType::Int64);
+    if (!idx_is_int32 && !idx_is_int64) {
+        throw std::invalid_argument("scatter: index must be Int32 or Int64");
+    }
 
     int num_blocks_copy = get_num_blocks(total_input);
     int num_blocks_scatter = get_num_blocks(total_scatter);
@@ -374,9 +407,14 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
     #define LAUNCH_SCATTER(T) \
         copy_kernel_impl<T><<<num_blocks_copy, BLOCK_SIZE, 0, stream>>>( \
             input.data<T>(), output.data<T>(), total_input); \
-        scatter_values_kernel_impl<T><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>( \
-            index_int64.data<int64_t>(), src.data<T>(), output.data<T>(), \
-            outer_size, dim_size, inner_size, index_dim_size, total_scatter)
+        if (idx_is_int32) \
+            scatter_values_kernel_impl<T, int32_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>( \
+                index.data<int32_t>(), src.data<T>(), output.data<T>(), \
+                outer_size, dim_size, inner_size, index_dim_size, total_scatter); \
+        else \
+            scatter_values_kernel_impl<T, int64_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>( \
+                index.data<int64_t>(), src.data<T>(), output.data<T>(), \
+                outer_size, dim_size, inner_size, index_dim_size, total_scatter)
 
     switch (input.dtype()) {
         case DType::Float32: LAUNCH_SCATTER(float); break;
@@ -389,11 +427,18 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
             copy_kernel_impl<__half><<<num_blocks_copy, BLOCK_SIZE, 0, stream>>>(
                 reinterpret_cast<const __half*>(input.data_ptr()),
                 reinterpret_cast<__half*>(output.data_ptr()), total_input);
-            scatter_values_kernel_impl<__half><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>(
-                index_int64.data<int64_t>(),
-                reinterpret_cast<const __half*>(src.data_ptr()),
-                reinterpret_cast<__half*>(output.data_ptr()),
-                outer_size, dim_size, inner_size, index_dim_size, total_scatter);
+            if (idx_is_int32)
+                scatter_values_kernel_impl<__half, int32_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>(
+                    index.data<int32_t>(),
+                    reinterpret_cast<const __half*>(src.data_ptr()),
+                    reinterpret_cast<__half*>(output.data_ptr()),
+                    outer_size, dim_size, inner_size, index_dim_size, total_scatter);
+            else
+                scatter_values_kernel_impl<__half, int64_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>(
+                    index.data<int64_t>(),
+                    reinterpret_cast<const __half*>(src.data_ptr()),
+                    reinterpret_cast<__half*>(output.data_ptr()),
+                    outer_size, dim_size, inner_size, index_dim_size, total_scatter);
             break;
         default:
             throw std::runtime_error("scatter: unsupported dtype");
@@ -605,10 +650,10 @@ auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y,
 // embedding kernel (lookup table for token IDs)
 // ============================================================================
 
-template<typename T>
+template<typename T, typename IndexT>
 __global__ void embedding_kernel_impl(
     const T* weight,           // [num_embeddings, embedding_dim]
-    const int64_t* indices,    // [*] (any shape of int64 indices)
+    const IndexT* indices,     // [*] (any shape of indices)
     T* output,                 // [*, embedding_dim]
     int64_t num_indices,
     int64_t embedding_dim) {
@@ -619,7 +664,7 @@ __global__ void embedding_kernel_impl(
         int64_t i = idx / embedding_dim;  // which index
         int64_t j = idx % embedding_dim;  // which embedding dimension
 
-        int64_t token_idx = indices[i];
+        int64_t token_idx = static_cast<int64_t>(indices[i]);
         output[idx] = weight[token_idx * embedding_dim + j];
     }
 }
@@ -647,23 +692,38 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
     int64_t total_elements = num_indices * embedding_dim;
     int num_blocks = get_num_blocks(total_elements);
 
-    // Ensure indices are int64
-    Tensor indices_int64 = (indices.dtype() == DType::Int64) ? indices : indices.to(DType::Int64);
+    bool idx_is_int32 = (indices.dtype() == DType::Int32);
+    bool idx_is_int64 = (indices.dtype() == DType::Int64);
+    if (!idx_is_int32 && !idx_is_int64) {
+        throw std::invalid_argument("embedding: indices must be Int32 or Int64");
+    }
 
     #define LAUNCH_EMBEDDING(T) \
-        embedding_kernel_impl<T><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
-            weight.data<T>(), indices_int64.data<int64_t>(), output.data<T>(), \
-            num_indices, embedding_dim)
+        if (idx_is_int32) \
+            embedding_kernel_impl<T, int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
+                weight.data<T>(), indices.data<int32_t>(), output.data<T>(), \
+                num_indices, embedding_dim); \
+        else \
+            embedding_kernel_impl<T, int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
+                weight.data<T>(), indices.data<int64_t>(), output.data<T>(), \
+                num_indices, embedding_dim)
 
     switch (weight.dtype()) {
         case DType::Float32: LAUNCH_EMBEDDING(float); break;
         case DType::Float64: LAUNCH_EMBEDDING(double); break;
         case DType::Float16:
-            embedding_kernel_impl<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-                reinterpret_cast<const __half*>(weight.data_ptr()),
-                indices_int64.data<int64_t>(),
-                reinterpret_cast<__half*>(output.data_ptr()),
-                num_indices, embedding_dim);
+            if (idx_is_int32)
+                embedding_kernel_impl<__half, int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const __half*>(weight.data_ptr()),
+                    indices.data<int32_t>(),
+                    reinterpret_cast<__half*>(output.data_ptr()),
+                    num_indices, embedding_dim);
+            else
+                embedding_kernel_impl<__half, int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const __half*>(weight.data_ptr()),
+                    indices.data<int64_t>(),
+                    reinterpret_cast<__half*>(output.data_ptr()),
+                    num_indices, embedding_dim);
             break;
         default:
             throw std::runtime_error("embedding: unsupported dtype");
@@ -679,10 +739,10 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
 // embedding_backward kernel (gradient accumulation)
 // ============================================================================
 
-template<typename T>
+template<typename T, typename IndexT>
 __global__ void embedding_backward_kernel_impl(
     const T* grad_output,      // [*, embedding_dim]
-    const int64_t* indices,    // [*]
+    const IndexT* indices,     // [*]
     T* grad_weight,            // [num_embeddings, embedding_dim]
     int64_t num_indices,
     int64_t embedding_dim) {
@@ -693,17 +753,17 @@ __global__ void embedding_backward_kernel_impl(
         int64_t i = idx / embedding_dim;  // which index
         int64_t j = idx % embedding_dim;  // which embedding dimension
 
-        int64_t token_idx = indices[i];
+        int64_t token_idx = static_cast<int64_t>(indices[i]);
         // Use atomicAdd for thread-safe accumulation
         atomicAdd(&grad_weight[token_idx * embedding_dim + j], grad_output[idx]);
     }
 }
 
-// Specialization for float16 using atomicAdd for __half
-template<>
-__global__ void embedding_backward_kernel_impl<__half>(
+// Separate FP16 backward kernel (cannot partially specialize function templates)
+template<typename IndexT>
+__global__ void embedding_backward_fp16_kernel_impl(
     const __half* grad_output,
-    const int64_t* indices,
+    const IndexT* indices,
     __half* grad_weight,
     int64_t num_indices,
     int64_t embedding_dim) {
@@ -714,15 +774,12 @@ __global__ void embedding_backward_kernel_impl<__half>(
         int64_t i = idx / embedding_dim;
         int64_t j = idx % embedding_dim;
 
-        int64_t token_idx = indices[i];
-        // Convert to float for atomic add, then convert back
-        // Note: CUDA provides atomicAdd for __half on compute capability >= 7.0
+        int64_t token_idx = static_cast<int64_t>(indices[i]);
 #if __CUDA_ARCH__ >= 700
         atomicAdd(&grad_weight[token_idx * embedding_dim + j], grad_output[idx]);
 #else
-        // Fallback for older architectures: convert to float
+        // Fallback for older architectures: compare-and-swap based atomic add
         float val = __half2float(grad_output[idx]);
-        // Use compare-and-swap based atomic add for half
         unsigned int* addr = reinterpret_cast<unsigned int*>(&grad_weight[(token_idx * embedding_dim + j) & ~1]);
         unsigned int old_val, new_val;
         do {
@@ -758,23 +815,38 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
     int64_t total_elements = num_indices * embedding_dim;
     int num_blocks = get_num_blocks(total_elements);
 
-    // Ensure indices are int64
-    Tensor indices_int64 = (indices.dtype() == DType::Int64) ? indices : indices.to(DType::Int64);
+    bool idx_is_int32 = (indices.dtype() == DType::Int32);
+    bool idx_is_int64 = (indices.dtype() == DType::Int64);
+    if (!idx_is_int32 && !idx_is_int64) {
+        throw std::invalid_argument("embedding_backward: indices must be Int32 or Int64");
+    }
 
     #define LAUNCH_EMBEDDING_BWD(T) \
-        embedding_backward_kernel_impl<T><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
-            grad_output.data<T>(), indices_int64.data<int64_t>(), grad_weight.data<T>(), \
-            num_indices, embedding_dim)
+        if (idx_is_int32) \
+            embedding_backward_kernel_impl<T, int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
+                grad_output.data<T>(), indices.data<int32_t>(), grad_weight.data<T>(), \
+                num_indices, embedding_dim); \
+        else \
+            embedding_backward_kernel_impl<T, int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
+                grad_output.data<T>(), indices.data<int64_t>(), grad_weight.data<T>(), \
+                num_indices, embedding_dim)
 
     switch (grad_output.dtype()) {
         case DType::Float32: LAUNCH_EMBEDDING_BWD(float); break;
         case DType::Float64: LAUNCH_EMBEDDING_BWD(double); break;
         case DType::Float16:
-            embedding_backward_kernel_impl<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-                reinterpret_cast<const __half*>(grad_output.data_ptr()),
-                indices_int64.data<int64_t>(),
-                reinterpret_cast<__half*>(grad_weight.data_ptr()),
-                num_indices, embedding_dim);
+            if (idx_is_int32)
+                embedding_backward_fp16_kernel_impl<int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const __half*>(grad_output.data_ptr()),
+                    indices.data<int32_t>(),
+                    reinterpret_cast<__half*>(grad_weight.data_ptr()),
+                    num_indices, embedding_dim);
+            else
+                embedding_backward_fp16_kernel_impl<int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const __half*>(grad_output.data_ptr()),
+                    indices.data<int64_t>(),
+                    reinterpret_cast<__half*>(grad_weight.data_ptr()),
+                    num_indices, embedding_dim);
             break;
         default:
             throw std::runtime_error("embedding_backward: unsupported dtype");

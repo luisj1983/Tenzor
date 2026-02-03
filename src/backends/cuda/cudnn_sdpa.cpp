@@ -363,30 +363,14 @@ auto cudnn_sdpa_forward(
     // Get workspace
     void* workspace = SDPAWorkspace::get(cache_entry.workspace_size);
 
-    // cuDNN SDPA is optimized for FP16 - use tensors directly if already FP16
-    // For FP32 inputs, this path should be avoided (caller should check dtype)
-    bool is_fp16_input = (Q.dtype() == DType::Float16);
+    // Only FP16 reaches here (FP32 is handled by fused_attention_cuda above)
+    Tensor o_output(q_shape_vec, DType::Float16, Q.device());
 
-    Tensor q_input, k_input, v_input, o_output;
-    if (is_fp16_input) {
-        // No conversion needed - use tensors directly
-        q_input = Q;
-        k_input = K;
-        v_input = V;
-        o_output = Tensor(q_shape_vec, DType::Float16, Q.device());
-    } else {
-        // Convert FP32 to FP16 (expensive, should be avoided if possible)
-        q_input = Q.to(DType::Float16);
-        k_input = K.to(DType::Float16);
-        v_input = V.to(DType::Float16);
-        o_output = Tensor(q_shape_vec, DType::Float16, Q.device());
-    }
-
-    // Create variant pack
+    // Create variant pack (const_cast needed: cuDNN FE takes void* but does not modify inputs)
     std::unordered_map<int64_t, void*> variant_pack;
-    variant_pack[static_cast<int64_t>(TensorUID::Q)] = q_input.data_ptr();
-    variant_pack[static_cast<int64_t>(TensorUID::K)] = k_input.data_ptr();
-    variant_pack[static_cast<int64_t>(TensorUID::V)] = v_input.data_ptr();
+    variant_pack[static_cast<int64_t>(TensorUID::Q)] = const_cast<void*>(Q.data_ptr());
+    variant_pack[static_cast<int64_t>(TensorUID::K)] = const_cast<void*>(K.data_ptr());
+    variant_pack[static_cast<int64_t>(TensorUID::V)] = const_cast<void*>(V.data_ptr());
     variant_pack[static_cast<int64_t>(TensorUID::O)] = o_output.data_ptr();
 
     // Execute
@@ -396,10 +380,6 @@ auto cudnn_sdpa_forward(
                                  status.get_message());
     }
 
-    // Convert back to original dtype if needed
-    if (!is_fp16_input) {
-        return o_output.to(Q.dtype());
-    }
     return o_output;
 }
 
