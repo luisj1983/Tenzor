@@ -39,13 +39,13 @@ auto Adam::step() -> void {
                 inputs.push_back(max_exp_avg_sq_[i]);
             }
 
-            // Prepare attributes
+            // Prepare attributes (use double precision for Float64 accuracy)
             OpAttributes attrs;
-            attrs["lr"] = std::to_string(static_cast<float>(lr_));
-            attrs["beta1"] = std::to_string(static_cast<float>(beta1_));
-            attrs["beta2"] = std::to_string(static_cast<float>(beta2_));
-            attrs["eps"] = std::to_string(static_cast<float>(eps_));
-            attrs["weight_decay"] = std::to_string(static_cast<float>(weight_decay_));
+            attrs["lr"] = std::to_string(lr_);
+            attrs["beta1"] = std::to_string(beta1_);
+            attrs["beta2"] = std::to_string(beta2_);
+            attrs["eps"] = std::to_string(eps_);
+            attrs["weight_decay"] = std::to_string(weight_decay_);
             attrs["step"] = std::to_string(step_count_);
             attrs["decoupled"] = "false";  // L2 regularization for Adam
             attrs["amsgrad"] = amsgrad_ ? "true" : "false";
@@ -214,13 +214,13 @@ auto AdamW::step() -> void {
                 inputs.push_back(max_exp_avg_sq_[i]);
             }
 
-            // Prepare attributes
+            // Prepare attributes (use double precision for Float64 accuracy)
             OpAttributes attrs;
-            attrs["lr"] = std::to_string(static_cast<float>(lr_));
-            attrs["beta1"] = std::to_string(static_cast<float>(beta1_));
-            attrs["beta2"] = std::to_string(static_cast<float>(beta2_));
-            attrs["eps"] = std::to_string(static_cast<float>(eps_));
-            attrs["weight_decay"] = std::to_string(static_cast<float>(weight_decay_));
+            attrs["lr"] = std::to_string(lr_);
+            attrs["beta1"] = std::to_string(beta1_);
+            attrs["beta2"] = std::to_string(beta2_);
+            attrs["eps"] = std::to_string(eps_);
+            attrs["weight_decay"] = std::to_string(weight_decay_);
             attrs["step"] = std::to_string(step_count_);
             attrs["decoupled"] = "true";  // Decoupled weight decay for AdamW
             attrs["amsgrad"] = amsgrad_ ? "true" : "false";

@@ -2099,13 +2099,13 @@ __global__ void fused_adam_kernel(
     T* __restrict__ exp_avg_sq,        // Second moment (v) - modified in-place
     T* __restrict__ max_exp_avg_sq,    // Max second moment (AMSGrad) - nullptr if disabled
     int64_t numel,
-    float lr,
-    float beta1,
-    float beta2,
-    float eps,
-    float weight_decay,
-    float bias_correction1,    // 1 - beta1^step
-    float bias_correction2,    // 1 - beta2^step
+    double lr,
+    double beta1,
+    double beta2,
+    double eps,
+    double weight_decay,
+    double bias_correction1,    // 1 - beta1^step
+    double bias_correction2,    // 1 - beta2^step
     bool amsgrad,
     bool decoupled_weight_decay  // True for AdamW, false for L2 regularization
 ) {
@@ -2118,15 +2118,15 @@ __global__ void fused_adam_kernel(
     T v = exp_avg_sq[idx];
 
     // Apply L2 regularization to gradient (Adam style) if not decoupled
-    if (weight_decay > 0.0f && !decoupled_weight_decay) {
+    if (weight_decay > 0.0 && !decoupled_weight_decay) {
         g = g + T(weight_decay) * p;
     }
 
     // Update biased first moment estimate
-    m = T(beta1) * m + T(1.0f - beta1) * g;
+    m = T(beta1) * m + T(1.0 - beta1) * g;
 
     // Update biased second raw moment estimate
-    v = T(beta2) * v + T(1.0f - beta2) * g * g;
+    v = T(beta2) * v + T(1.0 - beta2) * g * g;
 
     // Compute step size with bias correction
     T step_size = T(lr) / T(bias_correction1);
@@ -2146,7 +2146,7 @@ __global__ void fused_adam_kernel(
     T denom = sqrt(v_hat) + T(eps);
 
     // Apply decoupled weight decay (AdamW style) before update
-    if (weight_decay > 0.0f && decoupled_weight_decay) {
+    if (weight_decay > 0.0 && decoupled_weight_decay) {
         p = p * (T(1) - T(lr) * T(weight_decay));
     }
 
@@ -2237,13 +2237,13 @@ __global__ void fused_adam_kernel_vec2(
     double2* __restrict__ exp_avg_sq,
     double2* __restrict__ max_exp_avg_sq,
     int64_t numel_vec2,
-    float lr,
-    float beta1,
-    float beta2,
-    float eps,
-    float weight_decay,
-    float bias_correction1,
-    float bias_correction2,
+    double lr,
+    double beta1,
+    double beta2,
+    double eps,
+    double weight_decay,
+    double bias_correction1,
+    double bias_correction2,
     bool amsgrad,
     bool decoupled_weight_decay
 ) {
@@ -2257,24 +2257,24 @@ __global__ void fused_adam_kernel_vec2(
     double2 mv;
     if (amsgrad && max_exp_avg_sq) mv = max_exp_avg_sq[idx];
 
-    double step_size = double(lr) / double(bias_correction1);
-    double bc2_inv = 1.0 / double(bias_correction2);
+    double step_size = lr / bias_correction1;
+    double bc2_inv = 1.0 / bias_correction2;
 
     #define ADAM_UPDATE_D(comp) \
-        if (weight_decay > 0.0f && !decoupled_weight_decay) { \
-            g.comp = g.comp + double(weight_decay) * p.comp; \
+        if (weight_decay > 0.0 && !decoupled_weight_decay) { \
+            g.comp = g.comp + weight_decay * p.comp; \
         } \
-        m.comp = double(beta1) * m.comp + (1.0 - double(beta1)) * g.comp; \
-        v.comp = double(beta2) * v.comp + (1.0 - double(beta2)) * g.comp * g.comp; \
+        m.comp = beta1 * m.comp + (1.0 - beta1) * g.comp; \
+        v.comp = beta2 * v.comp + (1.0 - beta2) * g.comp * g.comp; \
         { double v_hat = v.comp * bc2_inv; \
           if (amsgrad && max_exp_avg_sq) { \
               if (v_hat > mv.comp) mv.comp = v_hat; \
               v_hat = mv.comp; \
           } \
-          if (weight_decay > 0.0f && decoupled_weight_decay) { \
-              p.comp = p.comp * (1.0 - double(lr) * double(weight_decay)); \
+          if (weight_decay > 0.0 && decoupled_weight_decay) { \
+              p.comp = p.comp * (1.0 - lr * weight_decay); \
           } \
-          p.comp = p.comp - step_size * m.comp / (sqrt(v_hat) + double(eps)); \
+          p.comp = p.comp - step_size * m.comp / (sqrt(v_hat) + eps); \
         }
 
     ADAM_UPDATE_D(x)
@@ -2308,11 +2308,11 @@ auto fused_adam_step_cuda(
     const Tensor& grad,
     Tensor& exp_avg,
     Tensor& exp_avg_sq,
-    float lr,
-    float beta1,
-    float beta2,
-    float eps,
-    float weight_decay,
+    double lr,
+    double beta1,
+    double beta2,
+    double eps,
+    double weight_decay,
     int64_t step,
     bool decoupled_weight_decay,
     cudaStream_t stream,
@@ -2321,9 +2321,9 @@ auto fused_adam_step_cuda(
 ) -> void {
     int64_t numel = param.numel();
 
-    // Compute bias corrections using double precision to avoid loss for Float64 params
-    float bias_correction1 = static_cast<float>(1.0 - std::pow(static_cast<double>(beta1), static_cast<double>(step)));
-    float bias_correction2 = static_cast<float>(1.0 - std::pow(static_cast<double>(beta2), static_cast<double>(step)));
+    // Compute bias corrections in double precision for accuracy
+    double bias_correction1 = 1.0 - std::pow(static_cast<double>(beta1), static_cast<double>(step));
+    double bias_correction2 = 1.0 - std::pow(static_cast<double>(beta2), static_cast<double>(step));
 
     constexpr int BLOCK_SIZE = 256;
 

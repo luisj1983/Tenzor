@@ -261,11 +261,11 @@ namespace cuda {
         const Tensor& grad,
         Tensor& exp_avg,
         Tensor& exp_avg_sq,
-        float lr,
-        float beta1,
-        float beta2,
-        float eps,
-        float weight_decay,
+        double lr,
+        double beta1,
+        double beta2,
+        double eps,
+        double weight_decay,
         int64_t step,
         bool decoupled_weight_decay,
         cudaStream_t stream,
@@ -1049,11 +1049,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::FusedAdamStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [param, grad, exp_avg, exp_avg_sq, max_exp_avg_sq (optional)]
         // attrs: lr, beta1, beta2, eps, weight_decay, step, decoupled, amsgrad
-        float lr = parse_attr<float>(attrs, "lr", 0.001f);
-        float beta1 = parse_attr<float>(attrs, "beta1", 0.9f);
-        float beta2 = parse_attr<float>(attrs, "beta2", 0.999f);
-        float eps = parse_attr<float>(attrs, "eps", 1e-8f);
-        float weight_decay = parse_attr<float>(attrs, "weight_decay", 0.0f);
+        double lr = parse_attr<double>(attrs, "lr", 0.001);
+        double beta1 = parse_attr<double>(attrs, "beta1", 0.9);
+        double beta2 = parse_attr<double>(attrs, "beta2", 0.999);
+        double eps = parse_attr<double>(attrs, "eps", 1e-8);
+        double weight_decay = parse_attr<double>(attrs, "weight_decay", 0.0);
         int64_t step = parse_attr<int64_t>(attrs, "step", 1);
         bool decoupled = parse_attr<bool>(attrs, "decoupled", false);
         bool amsgrad = parse_attr<bool>(attrs, "amsgrad", false);
