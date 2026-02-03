@@ -5,6 +5,7 @@
 
 #include <tenzor/nn/training.hpp>
 #include <tenzor/autograd/variable.hpp>
+#include <tenzor/ops/reduction.hpp>
 #include <stdexcept>
 #include <iostream>
 #include <iomanip>
@@ -57,14 +58,10 @@ auto NeuralNetwork::train_step(const Variable& input, const Variable& target) ->
         // Scalar loss - extract directly
         return loss_tensor.item<float>();
     } else {
-        // Multi-element loss - compute mean
-        // This handles cases where reduction=None in loss function
-        auto sum = 0.0f;
-        auto* data = static_cast<const float*>(loss_tensor.data_ptr());
-        for (size_t i = 0; i < loss_tensor.numel(); ++i) {
-            sum += data[i];
-        }
-        return sum / static_cast<float>(loss_tensor.numel());
+        // Multi-element loss - compute mean using dispatched reduction
+        // (safe for GPU tensors — avoids invalid data_ptr() access on device memory)
+        auto mean_tensor = tenzor::mean(loss_tensor);
+        return mean_tensor.item<float>();
     }
 }
 
@@ -87,13 +84,9 @@ auto NeuralNetwork::eval_step(const Variable& input, const Variable& target) -> 
         // Scalar loss - extract directly
         return loss_tensor.item<float>();
     } else {
-        // Multi-element loss - compute mean
-        auto sum = 0.0f;
-        auto* data = static_cast<const float*>(loss_tensor.data_ptr());
-        for (size_t i = 0; i < loss_tensor.numel(); ++i) {
-            sum += data[i];
-        }
-        return sum / static_cast<float>(loss_tensor.numel());
+        // Multi-element loss - compute mean using dispatched reduction
+        auto mean_tensor = tenzor::mean(loss_tensor);
+        return mean_tensor.item<float>();
     }
 }
 

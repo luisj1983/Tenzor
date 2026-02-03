@@ -201,6 +201,13 @@ namespace cuda {
     auto fold_cuda(const Tensor& input, const std::vector<int64_t>& output_size, int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation) -> Tensor;
     auto box_iou_cuda(const Tensor& boxes1, const Tensor& boxes2, int iou_type) -> Tensor;
 
+    // Advanced operations (topk, sort, cumsum, cumprod, unique)
+    auto topk_kernel(const Tensor& input, int64_t k, int64_t dim, bool largest, bool sorted, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
+    auto sort_kernel(const Tensor& input, int64_t dim, bool descending, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
+    auto cumsum_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tensor;
+    auto cumprod_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tensor;
+    auto unique_kernel(const Tensor& input, bool sorted_output, bool return_inverse, bool return_counts, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
+
     // ROI Align operations
     auto roi_align_forward(const Tensor& features, const Tensor& rois,
                            int64_t output_h, int64_t output_w,
@@ -1776,6 +1783,39 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::BoxIoU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int iou_type = static_cast<int>(parse_attr<int64_t>(attrs, "iou_type", 0));
         return cuda::box_iou_cuda(inputs[0], inputs[1], iou_type);
+    });
+
+    // =========================================================================
+    // Advanced Operations (topk, sort, cumsum, cumprod, unique)
+    // =========================================================================
+    table.register_kernel(OpId::TopK, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t k = parse_attr<int64_t>(attrs, "k", 1);
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+        bool largest = parse_attr<bool>(attrs, "largest", true);
+        bool sorted = parse_attr<bool>(attrs, "sorted", true);
+        auto [values, indices] = cuda::topk_kernel(inputs[0], k, dim, largest, sorted, get_cuda_stream(attrs));
+        return std::vector<Tensor>{values, indices};
+    });
+    table.register_kernel(OpId::Sort, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+        bool descending = parse_attr<bool>(attrs, "descending", false);
+        auto [values, indices] = cuda::sort_kernel(inputs[0], dim, descending, get_cuda_stream(attrs));
+        return std::vector<Tensor>{values, indices};
+    });
+    table.register_single_output_kernel(OpId::CumSum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+        return cuda::cumsum_kernel(inputs[0], dim, get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::CumProd, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+        return cuda::cumprod_kernel(inputs[0], dim, get_cuda_stream(attrs));
+    });
+    table.register_kernel(OpId::Unique, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        bool sorted = parse_attr<bool>(attrs, "sorted", true);
+        bool return_inverse = parse_attr<bool>(attrs, "return_inverse", false);
+        bool return_counts = parse_attr<bool>(attrs, "return_counts", false);
+        auto [unique_vals, inverse, counts] = cuda::unique_kernel(inputs[0], sorted, return_inverse, return_counts, get_cuda_stream(attrs));
+        return std::vector<Tensor>{unique_vals, inverse, counts};
     });
 }
 

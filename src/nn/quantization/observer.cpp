@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/nn/quantization/observer.hpp"
+#include "tenzor/ops/reduction.hpp"
 #include <algorithm>
 #include <limits>
 #include <cmath>
@@ -20,116 +21,64 @@ MinMaxObserver::MinMaxObserver(bool per_channel, int64_t axis)
     : per_channel_(per_channel), axis_(axis) {}
 
 auto MinMaxObserver::observe(const Tensor& tensor) -> void {
-    // Convert to Float32 for data access if necessary
+    // Convert to Float32 for reduction (device-agnostic, dispatches to GPU kernel)
     Tensor tensor_f32 = tensor;
     if (tensor.dtype() != DType::Float32) {
         tensor_f32 = tensor.to(DType::Float32);
     }
-    if (tensor_f32.device() != Device::cpu()) {
-        tensor_f32 = tensor_f32.to(Device::cpu());
-    }
-    const float* data = tensor_f32.data<const float>();
-    int64_t n = tensor_f32.numel();
 
-    // Track original device for later
-    auto original_device = tensor.device();
+    // Helper: reshape to [num_channels, -1] for per-channel reduction
+    auto per_channel_reduce = [&](const Tensor& t, bool is_min) -> Tensor {
+        auto shape = t.shape();
+        int64_t num_channels = shape[axis_];
+        int64_t rest = t.numel() / num_channels;
+        Tensor reshaped;
+        if (axis_ == 0) {
+            reshaped = t.reshape({num_channels, rest});
+        } else {
+            reshaped = t.transpose(0, axis_).contiguous().reshape({num_channels, rest});
+        }
+        return is_min ? tenzor::min(reshaped, 1, false) : tenzor::max(reshaped, 1, false);
+    };
 
     if (!has_data_) {
-        // First observation - initialize min/max on CPU
+        // First observation - compute min/max using dispatched reductions
         if (per_channel_) {
-            auto shape = tensor.shape();
-            int64_t num_channels = shape[axis_];
-            min_val_ = Tensor({num_channels}, DType::Float32, Device::cpu());
-            max_val_ = Tensor({num_channels}, DType::Float32, Device::cpu());
-
-            float* min_data = min_val_.data<float>();
-            float* max_data = max_val_.data<float>();
-
-            int64_t channel_size = n / num_channels;
-
-            for (int64_t c = 0; c < num_channels; ++c) {
-                float ch_min = data[c * channel_size];
-                float ch_max = data[c * channel_size];
-
-                for (int64_t i = 0; i < channel_size; ++i) {
-                    float val = data[c * channel_size + i];
-                    ch_min = std::min(ch_min, val);
-                    ch_max = std::max(ch_max, val);
-                }
-
-                min_data[c] = ch_min;
-                max_data[c] = ch_max;
-            }
-
-            // Keep on CPU (small scalars, accessed from CPU)
+            // Per-channel: reduce all non-channel dims
+            min_val_ = per_channel_reduce(tensor_f32, true).to(Device::cpu());
+            max_val_ = per_channel_reduce(tensor_f32, false).to(Device::cpu());
         } else {
-            min_val_ = Tensor({1}, DType::Float32, Device::cpu());
-            max_val_ = Tensor({1}, DType::Float32, Device::cpu());
-
-            float min_v = data[0];
-            float max_v = data[0];
-            for (int64_t i = 1; i < n; ++i) {
-                min_v = std::min(min_v, data[i]);
-                max_v = std::max(max_v, data[i]);
-            }
-
-            min_val_.fill_(min_v);
-            max_val_.fill_(max_v);
+            // Global min/max
+            min_val_ = tenzor::min(tensor_f32).to(Device::cpu());
+            max_val_ = tenzor::max(tensor_f32).to(Device::cpu());
         }
         has_data_ = true;
     } else {
         // Update existing min/max
         if (per_channel_) {
-            auto shape = tensor.shape();
-            int64_t num_channels = shape[axis_];
-            int64_t channel_size = n / num_channels;
+            auto new_min = per_channel_reduce(tensor_f32, true).to(Device::cpu());
+            auto new_max = per_channel_reduce(tensor_f32, false).to(Device::cpu());
 
-            // Move to CPU for data access
-            Tensor min_cpu = min_val_;
-            Tensor max_cpu = max_val_;
-            if (min_cpu.device() != Device::cpu()) {
-                min_cpu = min_cpu.to(Device::cpu());
-            }
-            if (max_cpu.device() != Device::cpu()) {
-                max_cpu = max_cpu.to(Device::cpu());
-            }
-
-            float* min_data = min_cpu.data<float>();
-            float* max_data = max_cpu.data<float>();
+            // Element-wise min/max with existing values
+            auto shape = min_val_.shape();
+            int64_t num_channels = shape[0];
+            float* min_data = min_val_.data<float>();
+            float* max_data = max_val_.data<float>();
+            const float* new_min_data = new_min.data<float>();
+            const float* new_max_data = new_max.data<float>();
 
             for (int64_t c = 0; c < num_channels; ++c) {
-                for (int64_t i = 0; i < channel_size; ++i) {
-                    float val = data[c * channel_size + i];
-                    min_data[c] = std::min(min_data[c], val);
-                    max_data[c] = std::max(max_data[c], val);
-                }
+                min_data[c] = std::min(min_data[c], new_min_data[c]);
+                max_data[c] = std::max(max_data[c], new_max_data[c]);
             }
-
-            // Keep on CPU (small scalars, accessed from CPU)
-            min_val_ = min_cpu;
-            max_val_ = max_cpu;
         } else {
-            // Move to CPU for data access
-            Tensor min_cpu = min_val_;
-            Tensor max_cpu = max_val_;
-            if (min_cpu.device() != Device::cpu()) {
-                min_cpu = min_cpu.to(Device::cpu());
-            }
-            if (max_cpu.device() != Device::cpu()) {
-                max_cpu = max_cpu.to(Device::cpu());
-            }
+            auto new_min = tenzor::min(tensor_f32).to(Device::cpu());
+            auto new_max = tenzor::max(tensor_f32).to(Device::cpu());
 
-            float* min_data = min_cpu.data<float>();
-            float* max_data = max_cpu.data<float>();
-
-            for (int64_t i = 0; i < n; ++i) {
-                min_data[0] = std::min(min_data[0], data[i]);
-                max_data[0] = std::max(max_data[0], data[i]);
-            }
-
-            // Keep on CPU (small scalars, accessed from CPU)
-            min_val_ = min_cpu;
-            max_val_ = max_cpu;
+            float* min_data = min_val_.data<float>();
+            float* max_data = max_val_.data<float>();
+            min_data[0] = std::min(min_data[0], new_min.item<float>());
+            max_data[0] = std::max(max_data[0], new_max.item<float>());
         }
     }
 }
@@ -163,127 +112,63 @@ MovingAverageMinMaxObserver::MovingAverageMinMaxObserver(float momentum,
 }
 
 auto MovingAverageMinMaxObserver::observe(const Tensor& tensor) -> void {
-    // Convert to Float32 for data access if necessary
+    // Convert to Float32 for reduction (device-agnostic)
     Tensor tensor_f32 = tensor;
     if (tensor.dtype() != DType::Float32) {
         tensor_f32 = tensor.to(DType::Float32);
     }
-    if (tensor_f32.device() != Device::cpu()) {
-        tensor_f32 = tensor_f32.to(Device::cpu());
-    }
-    const float* data = tensor_f32.data<const float>();
-    int64_t n = tensor_f32.numel();
 
-    // Track original device for later
-    auto original_device = tensor.device();
+    // Helper: reshape to [num_channels, -1] for per-channel reduction
+    auto per_channel_reduce = [&](const Tensor& t, bool is_min) -> Tensor {
+        auto shape = t.shape();
+        int64_t num_channels = shape[axis_];
+        int64_t rest = t.numel() / num_channels;
+        Tensor reshaped;
+        if (axis_ == 0) {
+            reshaped = t.reshape({num_channels, rest});
+        } else {
+            reshaped = t.transpose(0, axis_).contiguous().reshape({num_channels, rest});
+        }
+        return is_min ? tenzor::min(reshaped, 1, false) : tenzor::max(reshaped, 1, false);
+    };
 
     if (!has_data_) {
-        // Initialize with first observation on CPU
+        // First observation - compute min/max using dispatched reductions
         if (per_channel_) {
-            auto shape = tensor.shape();
-            int64_t num_channels = shape[axis_];
-            min_val_ = Tensor({num_channels}, DType::Float32, Device::cpu());
-            max_val_ = Tensor({num_channels}, DType::Float32, Device::cpu());
-
-            float* min_data = min_val_.data<float>();
-            float* max_data = max_val_.data<float>();
-
-            int64_t channel_size = n / num_channels;
-
-            for (int64_t c = 0; c < num_channels; ++c) {
-                float ch_min = data[c * channel_size];
-                float ch_max = data[c * channel_size];
-
-                for (int64_t i = 0; i < channel_size; ++i) {
-                    float val = data[c * channel_size + i];
-                    ch_min = std::min(ch_min, val);
-                    ch_max = std::max(ch_max, val);
-                }
-
-                min_data[c] = ch_min;
-                max_data[c] = ch_max;
-            }
-
-            // Keep on CPU (small scalars, accessed from CPU)
+            min_val_ = per_channel_reduce(tensor_f32, true).to(Device::cpu());
+            max_val_ = per_channel_reduce(tensor_f32, false).to(Device::cpu());
         } else {
-            min_val_ = Tensor({1}, DType::Float32, Device::cpu());
-            max_val_ = Tensor({1}, DType::Float32, Device::cpu());
-
-            float min_v = data[0];
-            float max_v = data[0];
-            for (int64_t i = 1; i < n; ++i) {
-                min_v = std::min(min_v, data[i]);
-                max_v = std::max(max_v, data[i]);
-            }
-
-            min_val_.fill_(min_v);
-            max_val_.fill_(max_v);
+            min_val_ = tenzor::min(tensor_f32).to(Device::cpu());
+            max_val_ = tenzor::max(tensor_f32).to(Device::cpu());
         }
         has_data_ = true;
     } else {
         // Update with exponential moving average
         if (per_channel_) {
-            auto shape = tensor.shape();
-            int64_t num_channels = shape[axis_];
-            int64_t channel_size = n / num_channels;
+            auto new_min = per_channel_reduce(tensor_f32, true).to(Device::cpu());
+            auto new_max = per_channel_reduce(tensor_f32, false).to(Device::cpu());
 
-            // Move to CPU for data access
-            Tensor min_cpu = min_val_;
-            Tensor max_cpu = max_val_;
-            if (min_cpu.device() != Device::cpu()) {
-                min_cpu = min_cpu.to(Device::cpu());
-            }
-            if (max_cpu.device() != Device::cpu()) {
-                max_cpu = max_cpu.to(Device::cpu());
-            }
-
-            float* min_data = min_cpu.data<float>();
-            float* max_data = max_cpu.data<float>();
+            // EMA update on CPU (small per-channel vectors)
+            auto shape = min_val_.shape();
+            int64_t num_channels = shape[0];
+            float* min_data = min_val_.data<float>();
+            float* max_data = max_val_.data<float>();
+            const float* new_min_data = new_min.data<float>();
+            const float* new_max_data = new_max.data<float>();
 
             for (int64_t c = 0; c < num_channels; ++c) {
-                float ch_min = data[c * channel_size];
-                float ch_max = data[c * channel_size];
-
-                for (int64_t i = 0; i < channel_size; ++i) {
-                    float val = data[c * channel_size + i];
-                    ch_min = std::min(ch_min, val);
-                    ch_max = std::max(ch_max, val);
-                }
-
-                min_data[c] = momentum_ * min_data[c] + (1.0f - momentum_) * ch_min;
-                max_data[c] = momentum_ * max_data[c] + (1.0f - momentum_) * ch_max;
+                min_data[c] = momentum_ * min_data[c] + (1.0f - momentum_) * new_min_data[c];
+                max_data[c] = momentum_ * max_data[c] + (1.0f - momentum_) * new_max_data[c];
             }
-
-            // Keep on CPU (small scalars, accessed from CPU)
-            min_val_ = min_cpu;
-            max_val_ = max_cpu;
         } else {
-            float min_v = data[0];
-            float max_v = data[0];
-            for (int64_t i = 1; i < n; ++i) {
-                min_v = std::min(min_v, data[i]);
-                max_v = std::max(max_v, data[i]);
-            }
+            float new_min_v = tenzor::min(tensor_f32).to(Device::cpu()).item<float>();
+            float new_max_v = tenzor::max(tensor_f32).to(Device::cpu()).item<float>();
 
-            // Move to CPU for data access
-            Tensor min_cpu = min_val_;
-            Tensor max_cpu = max_val_;
-            if (min_cpu.device() != Device::cpu()) {
-                min_cpu = min_cpu.to(Device::cpu());
-            }
-            if (max_cpu.device() != Device::cpu()) {
-                max_cpu = max_cpu.to(Device::cpu());
-            }
+            float* min_data = min_val_.data<float>();
+            float* max_data = max_val_.data<float>();
 
-            float* min_data = min_cpu.data<float>();
-            float* max_data = max_cpu.data<float>();
-
-            min_data[0] = momentum_ * min_data[0] + (1.0f - momentum_) * min_v;
-            max_data[0] = momentum_ * max_data[0] + (1.0f - momentum_) * max_v;
-
-            // Keep on CPU (small scalars, accessed from CPU)
-            min_val_ = min_cpu;
-            max_val_ = max_cpu;
+            min_data[0] = momentum_ * min_data[0] + (1.0f - momentum_) * new_min_v;
+            max_data[0] = momentum_ * max_data[0] + (1.0f - momentum_) * new_max_v;
         }
     }
 }
@@ -317,31 +202,29 @@ HistogramObserver::HistogramObserver(int64_t num_bins,
 }
 
 auto HistogramObserver::update_histogram(const Tensor& tensor) -> void {
-    // Convert to Float32 for data access if necessary
+    // Convert to Float32 for histogram binning
     Tensor tensor_f32 = tensor;
     if (tensor.dtype() != DType::Float32) {
         tensor_f32 = tensor.to(DType::Float32);
     }
-    if (tensor_f32.device() != Device::cpu()) {
-        tensor_f32 = tensor_f32.to(Device::cpu());
-    }
-    const float* data = tensor_f32.data<const float>();
-    int64_t n = tensor_f32.numel();
 
     if (total_count_ == 0) {
-        // First update - find initial range
-        min_val_ = data[0];
-        max_val_ = data[0];
-        for (int64_t i = 1; i < n; ++i) {
-            min_val_ = std::min(min_val_, data[i]);
-            max_val_ = std::max(max_val_, data[i]);
-        }
+        // First update - find initial range using dispatched reductions (GPU-safe)
+        min_val_ = tenzor::min(tensor_f32).to(Device::cpu()).item<float>();
+        max_val_ = tenzor::max(tensor_f32).to(Device::cpu()).item<float>();
 
         // Expand range slightly to avoid edge cases
         float range = max_val_ - min_val_;
         min_val_ -= range * 0.01f;
         max_val_ += range * 0.01f;
     }
+
+    // Transfer to CPU for histogram binning (per-element access required)
+    if (tensor_f32.device() != Device::cpu()) {
+        tensor_f32 = tensor_f32.to(Device::cpu());
+    }
+    const float* data = tensor_f32.data<const float>();
+    int64_t n = tensor_f32.numel();
 
     // Update histogram
     float bin_width = (max_val_ - min_val_) / num_bins_;

@@ -37,6 +37,18 @@ public:
 
         const auto& weight = inputs[0];
         const auto& weight_tensor = weight.tensor();
+
+        // GPU fast path: dispatch to backend kernel
+        if (weight_tensor.device().type != Device::Type::CPU) {
+            Tensor indices_dev = (indices_.device() == weight_tensor.device())
+                               ? indices_ : indices_.to(weight_tensor.device());
+
+            std::vector<Tensor> inputs_vec = {weight_tensor, indices_dev};
+            auto results = dispatch<OpId::Embedding>(inputs_vec, {});
+            return {Variable(results[0], weight.requires_grad())};
+        }
+
+        // CPU path: pointer-based lookup
         auto input_ptr = indices_.data<int64_t>();
 
         // Calculate output shape: indices.shape() + [embedding_dim]
@@ -70,19 +82,9 @@ public:
                 }
             }
         } else if (weight_dtype == DType::Float16) {
-            std::cerr << "[EMBED_FWD_F16] Starting Float16 forward, num_indices=" << num_indices
-                      << ", embedding_dim=" << embedding_dim_ << std::endl;
-
             // Convert to Float32 for computation
             auto weight_f32 = weight_tensor.to(DType::Float32);
-            std::cerr << "[EMBED_FWD_F16] Converted weight to Float32" << std::endl;
-
             auto output_f32 = zeros(output_shape, DType::Float32);
-            std::cerr << "[EMBED_FWD_F16] Created output_f32 with shape [";
-            for (size_t i = 0; i < output_shape.size(); ++i) {
-                std::cerr << output_shape[i] << (i < output_shape.size()-1 ? "," : "");
-            }
-            std::cerr << "]" << std::endl;
 
             auto weight_ptr = weight_f32.data<float>();
             auto output_ptr = output_f32.data<float>();
@@ -92,11 +94,9 @@ public:
                     output_ptr[i * embedding_dim_ + j] = weight_ptr[idx * embedding_dim_ + j];
                 }
             }
-            std::cerr << "[EMBED_FWD_F16] Completed lookup loop" << std::endl;
 
             // Convert back to Float16
             output = output_f32.to(DType::Float16);
-            std::cerr << "[EMBED_FWD_F16] Converted output back to Float16" << std::endl;
         } else {
             throw std::runtime_error("EmbeddingBackward: Unsupported weight dtype");
         }
@@ -115,24 +115,20 @@ public:
 
         const auto& grad_output = grad_outputs[0];
 
-        // Vulkan GPU fast path: dispatch to GPU embedding backward shader
-        if (grad_output.device().type == Device::Type::Vulkan) {
+        // GPU fast path: dispatch to backend kernel (CUDA, Vulkan, ROCm, etc.)
+        if (grad_output.device().type != Device::Type::CPU) {
             // Ensure indices are on the same device
-            Tensor indices_vk = (indices_.device() == grad_output.device())
+            Tensor indices_dev = (indices_.device() == grad_output.device())
                                ? indices_ : indices_.to(grad_output.device());
 
             OpAttributes attrs;
             attrs["num_embeddings"] = std::to_string(num_embeddings_);
-            std::vector<Tensor> inputs_vec = {grad_output, indices_vk};
+            std::vector<Tensor> inputs_vec = {grad_output, indices_dev};
             auto results = dispatch<OpId::EmbeddingBackward>(inputs_vec, attrs);
             return results;
         }
 
-        // Save original device and transfer to CPU for computation
-        Device original_device = grad_output.device();
-        Tensor grad_output_cpu = (original_device == Device::cpu()) ?
-                                  grad_output : grad_output.to(Device::cpu());
-
+        // CPU path: pointer-based gradient accumulation
         auto input_ptr = indices_.data<int64_t>();
         int64_t num_indices = indices_.numel();
 
@@ -142,7 +138,7 @@ public:
 
         // Accumulate gradients for each embedding
         if (grad_dtype == DType::Float32) {
-            auto grad_output_ptr = grad_output_cpu.data<float>();
+            auto grad_output_ptr = grad_output.data<float>();
             auto grad_weight_ptr = grad_weight.data<float>();
             for (int64_t i = 0; i < num_indices; ++i) {
                 auto idx = input_ptr[i];
@@ -151,7 +147,7 @@ public:
                 }
             }
         } else if (grad_dtype == DType::Float64) {
-            auto grad_output_ptr = grad_output_cpu.data<double>();
+            auto grad_output_ptr = grad_output.data<double>();
             auto grad_weight_ptr = grad_weight.data<double>();
             for (int64_t i = 0; i < num_indices; ++i) {
                 auto idx = input_ptr[i];
@@ -160,17 +156,9 @@ public:
                 }
             }
         } else if (grad_dtype == DType::Float16) {
-            std::cerr << "[EMBED_BWD_F16] Starting Float16 backward, num_indices=" << num_indices
-                      << ", num_embeddings=" << num_embeddings_
-                      << ", embedding_dim=" << embedding_dim_ << std::endl;
-
             // Convert to Float32 for computation
-            auto grad_output_f32 = grad_output_cpu.to(DType::Float32);
-            std::cerr << "[EMBED_BWD_F16] Converted grad_output to Float32" << std::endl;
-
+            auto grad_output_f32 = grad_output.to(DType::Float32);
             auto grad_weight_f32 = zeros({num_embeddings_, embedding_dim_}, DType::Float32);
-            std::cerr << "[EMBED_BWD_F16] Created grad_weight_f32 with shape ["
-                      << num_embeddings_ << "," << embedding_dim_ << "]" << std::endl;
 
             auto grad_weight_ptr = grad_weight_f32.data<float>();
             auto grad_output_ptr = grad_output_f32.data<float>();
@@ -180,18 +168,11 @@ public:
                     grad_weight_ptr[idx * embedding_dim_ + j] += grad_output_ptr[i * embedding_dim_ + j];
                 }
             }
-            std::cerr << "[EMBED_BWD_F16] Completed gradient accumulation loop" << std::endl;
 
             // Convert back to Float16
             grad_weight = grad_weight_f32.to(DType::Float16);
-            std::cerr << "[EMBED_BWD_F16] Converted grad_weight back to Float16" << std::endl;
         } else {
             throw std::runtime_error("EmbeddingBackward: Unsupported gradient dtype");
-        }
-
-        // Transfer gradient back to original device if needed
-        if (original_device != Device::cpu()) {
-            grad_weight = grad_weight.to(original_device);
         }
 
         return {grad_weight};
@@ -258,12 +239,54 @@ auto Embedding::forward_impl(const Variable& input) -> Variable {
     const auto& input_tensor = input.tensor();
     auto input_shape = input_tensor.shape();
     auto target_device = input_tensor.device();
-
-    // For device tensors (OneAPI, CUDA, Vulkan), transfer to CPU for lookup
-    // This is a simple implementation; optimized version would use backend dispatch
     bool is_device_tensor = (target_device.type != Device::Type::CPU);
 
-    Tensor input_cpu = is_device_tensor ? input_tensor.to(Device::cpu()) : input_tensor;
+    // Get weight from parameters_ map to respect offload hooks
+    Tensor weight_tensor = parameters_["weight"]->tensor();
+
+    // GPU fast path: dispatch embedding lookup to backend kernel
+    if (is_device_tensor) {
+        // Ensure weight is on same device as input
+        Tensor weight_dev = (weight_tensor.device() == target_device)
+                           ? weight_tensor : weight_tensor.to(target_device);
+        Tensor indices_dev = input_tensor;
+
+        // Apply max_norm if specified (requires CPU for now)
+        if (max_norm_ > 0.0) {
+            Tensor input_cpu = input_tensor.to(Device::cpu());
+            renorm_embeddings(input_cpu);
+            weight_dev = parameters_["weight"]->tensor();
+            if (weight_dev.device() != target_device) {
+                weight_dev = weight_dev.to(target_device);
+            }
+        }
+
+        std::vector<Tensor> inputs_vec = {weight_dev, indices_dev};
+        auto results = dispatch<OpId::Embedding>(inputs_vec, {});
+        Tensor output = results[0];
+
+        if (!parameters_["weight"]->requires_grad() || !is_grad_enabled()) {
+            return Variable(output, false);
+        }
+
+        // Set up autograd for GPU path
+        Tensor indices_for_grad = input_tensor;
+        auto grad_fn = std::make_shared<EmbeddingBackward>(indices_for_grad, num_embeddings_, embedding_dim_);
+
+        auto result = Variable(output, true);
+
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        next_funcs.push_back(parameters_["weight"]->grad_fn());
+
+        grad_fn->set_next_functions(next_funcs);
+        grad_fn->set_input_variables({*parameters_["weight"]});
+
+        result.set_grad_fn(grad_fn);
+        return result;
+    }
+
+    // CPU path: pointer-based lookup
+    Tensor input_cpu = input_tensor;
     auto input_ptr = input_cpu.data<int64_t>();
 
     // Calculate total number of indices
@@ -285,10 +308,6 @@ auto Embedding::forward_impl(const Variable& input) -> Variable {
         renorm_embeddings(input_cpu);
     }
 
-    // Get weight from parameters_ map to respect offload hooks
-    // Note: hooks modify parameters_["weight"]->tensor(), not the member weight_
-    Tensor weight_tensor = parameters_["weight"]->tensor();
-
     // Ensure weights are on CPU for lookup
     auto weight_cpu = weight_tensor.device().type == Device::Type::CPU ?
                       weight_tensor : weight_tensor.to(Device::cpu());
@@ -299,11 +318,9 @@ auto Embedding::forward_impl(const Variable& input) -> Variable {
         std::vector<int64_t> output_shape(input_shape.begin(), input_shape.end());
         output_shape.push_back(embedding_dim_);
 
-        // Use weight's dtype for output (not Float32 hardcoded)
         DType weight_dtype = weight_cpu.dtype();
         Tensor output(output_shape, weight_dtype, weight_cpu.device());
 
-        // Perform lookup using weight's dtype
         if (weight_dtype == DType::Float32) {
             auto output_ptr = output.data<float>();
             auto weight_ptr = weight_cpu.data<float>();
@@ -323,7 +340,6 @@ auto Embedding::forward_impl(const Variable& input) -> Variable {
                 }
             }
         } else if (weight_dtype == DType::Float16) {
-            // Convert to Float32 for computation
             auto weight_f32 = weight_cpu.to(DType::Float32);
             auto output_f32 = zeros(output_shape, DType::Float32);
 
@@ -336,30 +352,19 @@ auto Embedding::forward_impl(const Variable& input) -> Variable {
                 }
             }
 
-            // Convert back to Float16
             output = output_f32.to(DType::Float16);
         } else {
             throw std::runtime_error("Embedding: Unsupported weight dtype");
-        }
-
-        // Transfer back to target device if needed
-        if (is_device_tensor) {
-            output = output.to(target_device);
         }
 
         return Variable(output, false);
     }
 
     // Use EmbeddingBackward function to preserve gradient graph
-    // Note: For device tensors, this uses CPU tensors internally
     auto grad_fn = std::make_shared<EmbeddingBackward>(input_cpu, num_embeddings_, embedding_dim_);
 
-    // Create temporary weight variable on CPU if needed
-    Variable weight_for_lookup = weight_tensor.device().type == Device::Type::CPU ?
-                                 *parameters_["weight"] : Variable(weight_cpu, parameters_["weight"]->requires_grad());
-
-    // Perform forward pass
-    auto outputs = grad_fn->forward({weight_for_lookup});
+    // Perform forward pass (CPU path)
+    auto outputs = grad_fn->forward({*parameters_["weight"]});
 
     if (outputs.empty()) {
         throw std::runtime_error("EmbeddingBackward returned no outputs");
@@ -367,15 +372,9 @@ auto Embedding::forward_impl(const Variable& input) -> Variable {
 
     auto& result = outputs[0];
 
-    // Transfer result back to target device if needed
-    if (is_device_tensor) {
-        Tensor result_device = result.tensor().to(target_device);
-        result = Variable(result_device, result.requires_grad());
-    }
-
     // Set up backward graph
     std::vector<std::shared_ptr<Function>> next_funcs;
-    next_funcs.push_back(parameters_["weight"]->grad_fn());  // nullptr if weight is leaf
+    next_funcs.push_back(parameters_["weight"]->grad_fn());
 
     grad_fn->set_next_functions(next_funcs);
     grad_fn->set_input_variables({*parameters_["weight"]});

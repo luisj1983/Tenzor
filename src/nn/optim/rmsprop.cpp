@@ -6,9 +6,11 @@
 #include "tenzor/nn/optim/rmsprop.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/math.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include <cmath>
+#include <cstring>
 #include <stdexcept>
 
 namespace tenzor {
@@ -129,153 +131,51 @@ auto RMSprop::step() -> void {
             continue;
         }
 
-        // CPU fallback: move all tensors to CPU for data access
-        Tensor grad = grad_orig.to(Device::cpu());
-        Tensor param_data = param_data_orig.to(Device::cpu());
-        Tensor square_avg_cpu = square_avg_[i].to(Device::cpu());
-        Tensor grad_avg_cpu;
+        // Generic fallback using tensor-level ops (device-agnostic)
+        Tensor grad = grad_orig;
+        Tensor param_data = param_data_orig;
+        float alpha = static_cast<float>(alpha_);
+        float eps = static_cast<float>(eps_);
+        float lr = static_cast<float>(lr_);
+
+        // Apply weight decay: g = g + weight_decay * param
+        if (weight_decay_ > 0.0) {
+            grad = grad + param_data * static_cast<float>(weight_decay_);
+        }
+
+        // Update square_avg: v_t = alpha * v_{t-1} + (1 - alpha) * g_t^2
+        square_avg_[i] = square_avg_[i] * alpha + grad * grad * (1.0f - alpha);
+
+        // Compute denominator
+        Tensor denom;
         if (centered_) {
-            grad_avg_cpu = grad_avg_[i].to(Device::cpu());
-        }
-        Tensor momentum_buffer_cpu;
-        if (momentum_ > 0.0) {
-            momentum_buffer_cpu = momentum_buffer_[i].to(Device::cpu());
-        }
-
-        int64_t numel = param_data.numel();
-        DType dtype = param_data.dtype();
-
-        // Handle different dtypes
-        if (dtype == DType::Float64) {
-            auto grad_ptr = const_cast<double*>(grad.data<double>());
-            auto param_ptr = const_cast<double*>(param_data.data<double>());
-            auto square_avg_ptr = square_avg_cpu.data<double>();
-
-            // Apply weight decay if specified
-            if (weight_decay_ > 0.0) {
-                for (int64_t j = 0; j < numel; ++j) {
-                    grad_ptr[j] += weight_decay_ * param_ptr[j];
-                }
-            }
-
-            // Update square_avg: v_t = alpha * v_{t-1} + (1 - alpha) * g_t^2
-            for (int64_t j = 0; j < numel; ++j) {
-                square_avg_ptr[j] = alpha_ * square_avg_ptr[j] +
-                                    (1.0 - alpha_) * grad_ptr[j] * grad_ptr[j];
-            }
-
-            double* avg_ptr = nullptr;
-
-            if (centered_) {
-                // Update grad_avg: m_t = alpha * m_{t-1} + (1 - alpha) * g_t
-                avg_ptr = grad_avg_cpu.data<double>();
-                for (int64_t j = 0; j < numel; ++j) {
-                    avg_ptr[j] = alpha_ * avg_ptr[j] + (1.0 - alpha_) * grad_ptr[j];
-                }
-            }
-
-            if (momentum_ > 0.0) {
-                // With momentum: buf_t = momentum * buf_{t-1} + g_t / (sqrt(v_t) + eps)
-                auto buf_ptr = momentum_buffer_cpu.data<double>();
-
-                for (int64_t j = 0; j < numel; ++j) {
-                    double denom;
-                    if (centered_) {
-                        double centered_var = square_avg_ptr[j] - avg_ptr[j] * avg_ptr[j];
-                        denom = std::sqrt(centered_var + eps_);
-                    } else {
-                        denom = std::sqrt(square_avg_ptr[j] + eps_);
-                    }
-
-                    buf_ptr[j] = momentum_ * buf_ptr[j] + grad_ptr[j] / denom;
-                    param_ptr[j] -= lr_ * buf_ptr[j];
-                }
-            } else {
-                // Without momentum: theta_t = theta_{t-1} - lr * g_t / (sqrt(v_t) + eps)
-                for (int64_t j = 0; j < numel; ++j) {
-                    double denom;
-                    if (centered_) {
-                        double centered_var = square_avg_ptr[j] - avg_ptr[j] * avg_ptr[j];
-                        denom = std::sqrt(centered_var + eps_);
-                    } else {
-                        denom = std::sqrt(square_avg_ptr[j] + eps_);
-                    }
-
-                    param_ptr[j] -= lr_ * grad_ptr[j] / denom;
-                }
-            }
+            // Update grad_avg: m_t = alpha * m_{t-1} + (1 - alpha) * g_t
+            grad_avg_[i] = grad_avg_[i] * alpha + grad * (1.0f - alpha);
+            // denom = sqrt(v - m^2 + eps)
+            denom = sqrt(square_avg_[i] - grad_avg_[i] * grad_avg_[i] + eps);
         } else {
-            // Float32 path (default)
-            auto grad_ptr = const_cast<float*>(grad.data<float>());
-            auto param_ptr = const_cast<float*>(param_data.data<float>());
-            auto square_avg_ptr = square_avg_cpu.data<float>();
-
-            // Apply weight decay if specified
-            if (weight_decay_ > 0.0) {
-                for (int64_t j = 0; j < numel; ++j) {
-                    grad_ptr[j] += weight_decay_ * param_ptr[j];
-                }
-            }
-
-            // Update square_avg: v_t = alpha * v_{t-1} + (1 - alpha) * g_t^2
-            for (int64_t j = 0; j < numel; ++j) {
-                square_avg_ptr[j] = alpha_ * square_avg_ptr[j] +
-                                    (1.0f - alpha_) * grad_ptr[j] * grad_ptr[j];
-            }
-
-            float* avg_ptr = nullptr;
-
-            if (centered_) {
-                // Update grad_avg: m_t = alpha * m_{t-1} + (1 - alpha) * g_t
-                avg_ptr = grad_avg_cpu.data<float>();
-                for (int64_t j = 0; j < numel; ++j) {
-                    avg_ptr[j] = alpha_ * avg_ptr[j] + (1.0f - alpha_) * grad_ptr[j];
-                }
-            }
-
-            if (momentum_ > 0.0) {
-                // With momentum: buf_t = momentum * buf_{t-1} + g_t / (sqrt(v_t) + eps)
-                auto buf_ptr = momentum_buffer_cpu.data<float>();
-
-                for (int64_t j = 0; j < numel; ++j) {
-                    float denom;
-                    if (centered_) {
-                        float centered_var = square_avg_ptr[j] - avg_ptr[j] * avg_ptr[j];
-                        denom = std::sqrt(centered_var + eps_);
-                    } else {
-                        denom = std::sqrt(square_avg_ptr[j] + eps_);
-                    }
-
-                    buf_ptr[j] = momentum_ * buf_ptr[j] + grad_ptr[j] / denom;
-                    param_ptr[j] -= lr_ * buf_ptr[j];
-                }
-            } else {
-                // Without momentum: theta_t = theta_{t-1} - lr * g_t / (sqrt(v_t) + eps)
-                for (int64_t j = 0; j < numel; ++j) {
-                    float denom;
-                    if (centered_) {
-                        float centered_var = square_avg_ptr[j] - avg_ptr[j] * avg_ptr[j];
-                        denom = std::sqrt(centered_var + eps_);
-                    } else {
-                        denom = std::sqrt(square_avg_ptr[j] + eps_);
-                    }
-
-                    param_ptr[j] -= lr_ * grad_ptr[j] / denom;
-                }
-            }
+            denom = sqrt(square_avg_[i] + eps);
         }
 
-        // Copy updated values back to original device
-        // Update param data by assigning new tensor
-        param->tensor() = param_data.to(original_device);
-
-        // Update state buffers
-        square_avg_[i] = square_avg_cpu.to(original_device);
-        if (centered_) {
-            grad_avg_[i] = grad_avg_cpu.to(original_device);
-        }
+        Tensor new_param;
         if (momentum_ > 0.0) {
-            momentum_buffer_[i] = momentum_buffer_cpu.to(original_device);
+            float mom = static_cast<float>(momentum_);
+            // buf = momentum * buf + g / denom
+            momentum_buffer_[i] = momentum_buffer_[i] * mom + grad / denom;
+            // param -= lr * buf
+            new_param = param_data - momentum_buffer_[i] * lr;
+        } else {
+            // param -= lr * g / denom
+            new_param = param_data - grad / denom * lr;
+        }
+
+        // Copy result into existing tensor storage (preserves pointer stability on CPU)
+        if (original_device.type == Device::Type::CPU) {
+            auto src = new_param.contiguous();
+            std::memcpy(param->tensor().data_ptr(), src.data_ptr(),
+                        src.numel() * dtype_size(src.dtype()));
+        } else {
+            param->tensor() = new_param;
         }
     }
 }

@@ -5,6 +5,7 @@
 
 #include "tenzor/nn/quantization/quantize.hpp"
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/ops/reduction.hpp"
 #include <cmath>
 #include <algorithm>
 #include <stdexcept>
@@ -251,28 +252,14 @@ auto quantize_tensor(const Tensor& input, const QuantizationParams& params)
 
 auto quantize_per_tensor_symmetric(const Tensor& input, QuantDType dtype)
     -> QuantizedTensor {
-    // Convert to Float32 and CPU for data access
+    // Use dispatched min/max reductions (GPU-safe)
     Tensor input_f32 = input;
     if (input.dtype() != DType::Float32) {
         input_f32 = input.to(DType::Float32);
     }
-    if (input_f32.device() != Device::cpu()) {
-        input_f32 = input_f32.to(Device::cpu());
-    }
-    const float* data = input_f32.data<const float>();
-    int64_t n = input.numel();
 
-    float min_val = data[0];
-    float max_val = data[0];
-    for (int64_t i = 1; i < n; ++i) {
-        min_val = std::min(min_val, data[i]);
-        max_val = std::max(max_val, data[i]);
-    }
-
-    Tensor min({1}, DType::Float32, input.device());
-    Tensor max({1}, DType::Float32, input.device());
-    min.fill_(min_val);
-    max.fill_(max_val);
+    Tensor min = tenzor::min(input_f32);
+    Tensor max = tenzor::max(input_f32);
 
     auto params = compute_quantization_params(min, max, dtype,
                                              QuantizationScheme::PerTensorSymmetric);
@@ -281,28 +268,14 @@ auto quantize_per_tensor_symmetric(const Tensor& input, QuantDType dtype)
 
 auto quantize_per_tensor_asymmetric(const Tensor& input, QuantDType dtype)
     -> QuantizedTensor {
-    // Convert to Float32 and CPU for data access
+    // Use dispatched min/max reductions (GPU-safe)
     Tensor input_f32 = input;
     if (input.dtype() != DType::Float32) {
         input_f32 = input.to(DType::Float32);
     }
-    if (input_f32.device() != Device::cpu()) {
-        input_f32 = input_f32.to(Device::cpu());
-    }
-    const float* data = input_f32.data<const float>();
-    int64_t n = input.numel();
 
-    float min_val = data[0];
-    float max_val = data[0];
-    for (int64_t i = 1; i < n; ++i) {
-        min_val = std::min(min_val, data[i]);
-        max_val = std::max(max_val, data[i]);
-    }
-
-    Tensor min({1}, DType::Float32, input.device());
-    Tensor max({1}, DType::Float32, input.device());
-    min.fill_(min_val);
-    max.fill_(max_val);
+    Tensor min = tenzor::min(input_f32);
+    Tensor max = tenzor::max(input_f32);
 
     auto params = compute_quantization_params(min, max, dtype,
                                              QuantizationScheme::PerTensorAsymmetric);
@@ -311,42 +284,29 @@ auto quantize_per_tensor_asymmetric(const Tensor& input, QuantDType dtype)
 
 auto quantize_per_channel_symmetric(const Tensor& input, int64_t axis, QuantDType dtype)
     -> QuantizedTensor {
-    auto shape = input.shape();
-    int64_t num_channels = shape[axis];
-    int64_t channel_size = input.numel() / num_channels;
-
-    // Create min/max on CPU for data access
-    Tensor min({num_channels}, DType::Float32, Device::cpu());
-    Tensor max({num_channels}, DType::Float32, Device::cpu());
-
-    // Convert input to Float32 and CPU for data access
+    // Use dispatched reductions (GPU-safe)
+    // Reshape to [num_channels, -1] to reduce all non-channel dims
     Tensor input_f32 = input;
     if (input.dtype() != DType::Float32) {
         input_f32 = input.to(DType::Float32);
     }
-    if (input_f32.device() != Device::cpu()) {
-        input_f32 = input_f32.to(Device::cpu());
-    }
-    const float* input_data = input_f32.data<const float>();
-    float* min_data = min.data<float>();
-    float* max_data = max.data<float>();
 
-    // Compute per-channel min/max
-    for (int64_t c = 0; c < num_channels; ++c) {
-        float ch_min = input_data[c * channel_size];
-        float ch_max = input_data[c * channel_size];
+    auto shape = input_f32.shape();
+    int64_t num_channels = shape[axis];
+    int64_t rest = input_f32.numel() / num_channels;
 
-        for (int64_t i = 0; i < channel_size; ++i) {
-            float val = input_data[c * channel_size + i];
-            ch_min = std::min(ch_min, val);
-            ch_max = std::max(ch_max, val);
-        }
-
-        min_data[c] = ch_min;
-        max_data[c] = ch_max;
+    // Move channel dim to front if needed, then reshape to [C, rest]
+    Tensor reshaped;
+    if (axis == 0) {
+        reshaped = input_f32.reshape({num_channels, rest});
+    } else {
+        reshaped = input_f32.transpose(0, axis).contiguous().reshape({num_channels, rest});
     }
 
-    // Keep min/max on CPU for compute_quantization_params (params stay on CPU)
+    // Reduce along dim 1 to get per-channel min/max
+    Tensor min = tenzor::min(reshaped, 1, /*keepdim=*/false);
+    Tensor max = tenzor::max(reshaped, 1, /*keepdim=*/false);
+
     auto params = compute_quantization_params(min, max, dtype,
                                              QuantizationScheme::PerChannelSymmetric);
     params.axis = axis;
@@ -355,41 +315,29 @@ auto quantize_per_channel_symmetric(const Tensor& input, int64_t axis, QuantDTyp
 
 auto quantize_per_channel_asymmetric(const Tensor& input, int64_t axis, QuantDType dtype)
     -> QuantizedTensor {
-    auto shape = input.shape();
-    int64_t num_channels = shape[axis];
-    int64_t channel_size = input.numel() / num_channels;
-
-    // Create min/max on CPU for data access
-    Tensor min({num_channels}, DType::Float32, Device::cpu());
-    Tensor max({num_channels}, DType::Float32, Device::cpu());
-
-    // Convert input to Float32 and CPU for data access
+    // Use dispatched reductions (GPU-safe)
+    // Reshape to [num_channels, -1] to reduce all non-channel dims
     Tensor input_f32 = input;
     if (input.dtype() != DType::Float32) {
         input_f32 = input.to(DType::Float32);
     }
-    if (input_f32.device() != Device::cpu()) {
-        input_f32 = input_f32.to(Device::cpu());
-    }
-    const float* input_data = input_f32.data<const float>();
-    float* min_data = min.data<float>();
-    float* max_data = max.data<float>();
 
-    for (int64_t c = 0; c < num_channels; ++c) {
-        float ch_min = input_data[c * channel_size];
-        float ch_max = input_data[c * channel_size];
+    auto shape = input_f32.shape();
+    int64_t num_channels = shape[axis];
+    int64_t rest = input_f32.numel() / num_channels;
 
-        for (int64_t i = 0; i < channel_size; ++i) {
-            float val = input_data[c * channel_size + i];
-            ch_min = std::min(ch_min, val);
-            ch_max = std::max(ch_max, val);
-        }
-
-        min_data[c] = ch_min;
-        max_data[c] = ch_max;
+    // Move channel dim to front if needed, then reshape to [C, rest]
+    Tensor reshaped;
+    if (axis == 0) {
+        reshaped = input_f32.reshape({num_channels, rest});
+    } else {
+        reshaped = input_f32.transpose(0, axis).contiguous().reshape({num_channels, rest});
     }
 
-    // Keep min/max on CPU for compute_quantization_params (params stay on CPU)
+    // Reduce along dim 1 to get per-channel min/max
+    Tensor min = tenzor::min(reshaped, 1, /*keepdim=*/false);
+    Tensor max = tenzor::max(reshaped, 1, /*keepdim=*/false);
+
     auto params = compute_quantization_params(min, max, dtype,
                                              QuantizationScheme::PerChannelAsymmetric);
     params.axis = axis;

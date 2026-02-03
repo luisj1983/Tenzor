@@ -1157,8 +1157,8 @@ public:
         auto original_device = grad_output_orig.device();
         auto original_dtype = grad_output_orig.dtype();
 
-        // Vulkan GPU fast path: dispatch to GPU backward shader
-        if (original_device.type == Device::Type::Vulkan) {
+        // GPU fast path: dispatch to backend kernel (CUDA, Vulkan, ROCm, etc.)
+        if (original_device.type != Device::Type::CPU) {
             auto go = grad_output_orig.contiguous();
             auto inp = input_orig.contiguous();
             auto mn = mean_orig.contiguous();
@@ -1172,7 +1172,7 @@ public:
             return results;
         }
 
-        // CPU path: transfer to CPU for pointer-based access
+        // CPU path: pointer-based access
         auto grad_output = grad_output_orig.to(Device::cpu()).to(DType::Float32).contiguous();
         auto input = input_orig.to(Device::cpu()).to(DType::Float32).contiguous();
         auto mean = mean_orig.to(Device::cpu()).to(DType::Float32).contiguous();
@@ -1309,16 +1309,83 @@ auto GroupNorm::forward_impl(const Variable& input) -> Variable {
 
     int64_t group_size = num_channels_ / num_groups_;
 
-    // Save original device and dtype, move to CPU for computation
+    // Save original device and dtype
     auto original_device = input.tensor().device();
     auto original_dtype = input.tensor().dtype();
 
-    // For Float16 and Float64, convert to Float32 for CPU computation
-    // (CPU computation uses float pointers for efficiency)
-    Tensor input_tensor_cpu = input.tensor();
+    // GPU fast path: dispatch to backend kernel (CUDA, Vulkan, ROCm, etc.)
     if (original_device.type != Device::Type::CPU) {
-        input_tensor_cpu = input_tensor_cpu.cpu();
+        Tensor weight_tensor = affine_ ? parameters_["weight"]->tensor() : ones({C}, input.tensor().dtype(), input.tensor().device());
+        Tensor bias_tensor = affine_ ? parameters_["bias"]->tensor() : zeros({C}, input.tensor().dtype(), input.tensor().device());
+
+        OpAttributes attrs;
+        attrs["num_groups"] = std::to_string(num_groups_);
+        attrs["eps"] = std::to_string(static_cast<float>(eps_));
+        std::vector<Tensor> inputs_vec = {input.tensor(), weight_tensor, bias_tensor};
+        auto results = dispatch<OpId::GroupNorm>(inputs_vec, attrs);
+
+        Tensor output = results[0];
+        Tensor saved_mean = results[1];
+        Tensor saved_rstd = results[2];
+
+        if (input.requires_grad() || (affine_ && parameters_["weight"]->requires_grad())) {
+            auto result = Variable(output, true);
+
+            std::vector<Tensor> tensors_to_save = {
+                input.tensor(), saved_mean, saved_rstd, weight_tensor
+            };
+
+            auto grad_fn = std::make_shared<GroupNormBackward>(
+                affine_, eps_, num_groups_, num_channels_, group_size,
+                std::move(tensors_to_save)
+            );
+
+            result.set_grad_fn(grad_fn);
+
+            std::vector<std::shared_ptr<Function>> next_funcs;
+            if (auto input_grad_fn = input.grad_fn()) {
+                next_funcs.push_back(input_grad_fn);
+            }
+            if (affine_) {
+                auto weight_it = parameters_.find("weight");
+                auto bias_it = parameters_.find("bias");
+                if (weight_it != parameters_.end() && weight_it->second->requires_grad()) {
+                    if (auto weight_grad_fn = weight_it->second->grad_fn()) {
+                        next_funcs.push_back(weight_grad_fn);
+                    }
+                }
+                if (bias_it != parameters_.end() && bias_it->second->requires_grad()) {
+                    if (auto bias_grad_fn = bias_it->second->grad_fn()) {
+                        next_funcs.push_back(bias_grad_fn);
+                    }
+                }
+            }
+            grad_fn->set_next_functions(next_funcs);
+
+            std::vector<Variable> input_vars;
+            if (input.requires_grad()) {
+                input_vars.push_back(input);
+            }
+            if (affine_) {
+                auto weight_it = parameters_.find("weight");
+                auto bias_it = parameters_.find("bias");
+                if (weight_it != parameters_.end() && weight_it->second->requires_grad()) {
+                    input_vars.push_back(*weight_it->second);
+                }
+                if (bias_it != parameters_.end() && bias_it->second->requires_grad()) {
+                    input_vars.push_back(*bias_it->second);
+                }
+            }
+            grad_fn->set_input_variables(input_vars);
+
+            return result;
+        }
+
+        return Variable(output, false);
     }
+
+    // CPU path: pointer-based computation
+    Tensor input_tensor_cpu = input.tensor();
     if (original_dtype == DType::Float16 || original_dtype == DType::Float64) {
         input_tensor_cpu = input_tensor_cpu.to(DType::Float32);
     }
@@ -1548,8 +1615,8 @@ public:
         Device original_device = input_orig.device();
         DType original_dtype = grad_output_orig.dtype();
 
-        // Vulkan GPU fast path: dispatch to GPU backward shader
-        if (original_device.type == Device::Type::Vulkan) {
+        // GPU fast path: dispatch to backend kernel (CUDA, Vulkan, ROCm, etc.)
+        if (original_device.type != Device::Type::CPU) {
             auto go = grad_output_orig.contiguous();
             auto inp = input_orig.contiguous();
             auto rm = rrms_orig.contiguous();
@@ -1562,7 +1629,7 @@ public:
             return results;
         }
 
-        // CPU path: transfer to CPU for pointer-based access
+        // CPU path: pointer-based access
         auto grad_output = (grad_output_orig.device() == Device::cpu())
                           ? grad_output_orig.contiguous().to(DType::Float32)
                           : grad_output_orig.contiguous().to(Device::cpu()).to(DType::Float32);
@@ -1774,12 +1841,72 @@ auto RMSNorm::forward_impl(const Variable& input) -> Variable {
     }
 
     // ============================================================================
-    // STANDARD PATH: Full autograd support with device transfers
+    // STANDARD PATH: Full autograd support
     // ============================================================================
 
-    // Save original device and move input to CPU for pointer-based computation
     Device original_device = input.tensor().device();
-    Tensor input_cpu = (original_device == Device::cpu()) ? input.tensor() : input.tensor().to(Device::cpu());
+
+    // GPU training path: use fused kernel and set up autograd
+    if (original_device.type != Device::Type::CPU) {
+        const Tensor& x = input.tensor();
+
+        Tensor weight_dev = cached_weight_ ? cached_weight_->tensor() : weight_.tensor();
+        if (weight_dev.device() != original_device) {
+            weight_dev = weight_dev.to(original_device);
+        }
+
+        OpAttributes attrs;
+        attrs["eps"] = std::to_string(eps_);
+
+        std::vector<Tensor> inputs_vec = {x, weight_dev};
+        auto results = dispatch<OpId::FusedRMSNorm>(inputs_vec, attrs);
+
+        Tensor output = results[0];
+        Tensor saved_rrms = results.size() > 1 ? results[1] : Tensor();
+
+        if (needs_grad) {
+            auto result = Variable(output, true);
+
+            std::vector<Tensor> tensors_to_save = {
+                input.tensor(),
+                saved_rrms,
+                cached_weight_ ? cached_weight_->tensor() : weight_.tensor()
+            };
+
+            auto grad_fn = std::make_shared<RMSNormBackward>(
+                eps_, N, std::move(tensors_to_save)
+            );
+
+            result.set_grad_fn(grad_fn);
+
+            std::vector<std::shared_ptr<Function>> next_funcs;
+            if (auto input_grad_fn = input.grad_fn()) {
+                next_funcs.push_back(input_grad_fn);
+            }
+            if (cached_weight_ && cached_weight_->requires_grad()) {
+                if (auto weight_grad_fn = cached_weight_->grad_fn()) {
+                    next_funcs.push_back(weight_grad_fn);
+                }
+            }
+            grad_fn->set_next_functions(next_funcs);
+
+            std::vector<Variable> input_vars;
+            if (input.requires_grad()) {
+                input_vars.push_back(input);
+            }
+            if (cached_weight_ && cached_weight_->requires_grad()) {
+                input_vars.push_back(*cached_weight_);
+            }
+            grad_fn->set_input_variables(input_vars);
+
+            return result;
+        }
+
+        return Variable(output, false);
+    }
+
+    // CPU path: pointer-based computation
+    Tensor input_cpu = input.tensor();
 
     // Get weight from cached pointer (faster) or fallback to parameters_ for hooks
     Tensor weight_cpu = cached_weight_ ? cached_weight_->tensor() : parameters_["weight"]->tensor();

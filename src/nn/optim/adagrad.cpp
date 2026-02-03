@@ -6,9 +6,11 @@
 #include "tenzor/nn/optim/adagrad.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/math.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include <cmath>
+#include <cstring>
 #include <stdexcept>
 
 namespace tenzor {
@@ -134,59 +136,30 @@ auto Adagrad::step() -> void {
             continue;
         }
 
-        // CPU fallback: move all tensors to CPU for data access
-        Tensor grad = grad_orig.to(Device::cpu());
-        Tensor param_data = param_data_orig.to(Device::cpu());
-        Tensor sum_cpu = sum_[i].to(Device::cpu());
+        // Generic fallback using tensor-level ops (device-agnostic)
+        Tensor grad = grad_orig;
+        Tensor param_data = param_data_orig;
 
-        int64_t numel = param_data.numel();
-        DType dtype = param_data.dtype();
-
-        // Handle different dtypes
-        if (dtype == DType::Float64) {
-            auto grad_ptr = const_cast<double*>(grad.data<double>());
-            auto param_ptr = const_cast<double*>(param_data.data<double>());
-            auto sum_ptr = sum_cpu.data<double>();
-
-            // Apply weight decay if specified
-            if (weight_decay_ > 0.0) {
-                for (int64_t j = 0; j < numel; ++j) {
-                    grad_ptr[j] += weight_decay_ * param_ptr[j];
-                }
-            }
-
-            // Update accumulator: G_t = G_{t-1} + g_t^2
-            // Update parameters: theta_t = theta_{t-1} - lr / (sqrt(G_t) + eps) * g_t
-            for (int64_t j = 0; j < numel; ++j) {
-                sum_ptr[j] += grad_ptr[j] * grad_ptr[j];
-                double std_dev = std::sqrt(sum_ptr[j]) + eps_;
-                param_ptr[j] -= current_lr * grad_ptr[j] / std_dev;
-            }
-        } else {
-            // Float32 path (default)
-            auto grad_ptr = const_cast<float*>(grad.data<float>());
-            auto param_ptr = const_cast<float*>(param_data.data<float>());
-            auto sum_ptr = sum_cpu.data<float>();
-
-            // Apply weight decay if specified
-            if (weight_decay_ > 0.0) {
-                for (int64_t j = 0; j < numel; ++j) {
-                    grad_ptr[j] += weight_decay_ * param_ptr[j];
-                }
-            }
-
-            // Update accumulator: G_t = G_{t-1} + g_t^2
-            // Update parameters: theta_t = theta_{t-1} - lr / (sqrt(G_t) + eps) * g_t
-            for (int64_t j = 0; j < numel; ++j) {
-                sum_ptr[j] += grad_ptr[j] * grad_ptr[j];
-                float std_dev = std::sqrt(sum_ptr[j]) + static_cast<float>(eps_);
-                param_ptr[j] -= static_cast<float>(current_lr) * grad_ptr[j] / std_dev;
-            }
+        // Apply weight decay: g = g + weight_decay * param
+        if (weight_decay_ > 0.0) {
+            grad = grad + param_data * static_cast<float>(weight_decay_);
         }
 
-        // Copy updated values back to original device
-        param->tensor() = param_data.to(original_device);
-        sum_[i] = sum_cpu.to(original_device);
+        // Update accumulator: G_t = G_{t-1} + g_t^2
+        sum_[i] = sum_[i] + grad * grad;
+
+        // Update parameters: theta = theta - lr * g / (sqrt(G) + eps)
+        auto std_dev = sqrt(sum_[i]) + static_cast<float>(eps_);
+        auto new_param = param_data - grad * static_cast<float>(current_lr) / std_dev;
+
+        // Copy result into existing tensor storage (preserves pointer stability on CPU)
+        if (original_device.type == Device::Type::CPU) {
+            auto src = new_param.contiguous();
+            std::memcpy(param->tensor().data_ptr(), src.data_ptr(),
+                        src.numel() * dtype_size(src.dtype()));
+        } else {
+            param->tensor() = new_param;
+        }
     }
 }
 

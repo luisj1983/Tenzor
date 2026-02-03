@@ -17,6 +17,12 @@
 #include <limits>
 #include <iostream>
 
+#ifdef TENZOR_CUDA_ENABLED
+extern "C" void nms_cuda(const float* boxes, const float* scores,
+                         int64_t num_boxes, float iou_threshold,
+                         int64_t* keep_indices, int64_t* num_keep);
+#endif
+
 namespace tenzor {
 namespace ops {
 
@@ -91,8 +97,10 @@ auto box_iou(const Tensor& boxes1, const Tensor& boxes2, IoUType iou_type) -> Te
         return result_f32.to(boxes1.dtype());
     }
 
-    // For Vulkan device, dispatch to GPU box_iou shader
-    if (boxes1.device().type == Device::Type::Vulkan) {
+    // For devices with registered BoxIoU kernels (Vulkan, CUDA, ROCm), dispatch directly
+    if (boxes1.device().type == Device::Type::Vulkan ||
+        boxes1.device().type == Device::Type::CUDA ||
+        boxes1.device().type == Device::Type::ROCm) {
         OpAttributes attrs;
         attrs["iou_type"] = std::to_string(static_cast<int>(iou_type));
         std::vector<Tensor> inputs_vec = {boxes1, boxes2};
@@ -291,57 +299,24 @@ auto box_iou(const Tensor& boxes1, const Tensor& boxes2, IoUType iou_type) -> Te
     auto w2 = (x2_2 - x1_2).squeeze(1);  // (M,)
     auto h2 = (y2_2 - y1_2).squeeze(1);
 
-    // For now, use CPU implementation of atan for aspect ratio calculation
-    // Create result tensors on CPU for computation
+    // Compute aspect ratio penalty using tensor-level atan() which dispatches
+    // to the correct backend (CUDA device-side atan, CPU std::atan, etc.)
     constexpr float pi = 3.14159265358979323846f;
     constexpr float four_over_pi_sq = 4.0f / (pi * pi);
 
-    // Move tensors to CPU for atan computation
-    auto w1_cpu = w1.to(Device::cpu());
-    auto h1_cpu = h1.to(Device::cpu());
-    auto w2_cpu = w2.to(Device::cpu());
-    auto h2_cpu = h2.to(Device::cpu());
-    auto iou_cpu = iou.to(Device::cpu());
-    auto center_dist_sq_cpu = center_dist_sq.to(Device::cpu());
-    auto diag_dist_sq_cpu = diag_dist_sq.to(Device::cpu());
+    // atan(w/h) for each set of boxes — uses device-native atan kernel
+    auto ar1 = atan(w1 / (h1 + 1e-7f));  // (N,)
+    auto ar2 = atan(w2 / (h2 + 1e-7f));  // (M,)
 
-    const int64_t num_boxes1 = w1_cpu.shape()[0];
-    const int64_t num_boxes2 = w2_cpu.shape()[0];
+    // Pairwise aspect ratio difference: (N,1) - (1,M) -> (N,M)
+    auto ar_diff = ar1.unsqueeze(1) - ar2.unsqueeze(0);
+    auto v = pow(ar_diff, 2.0f) * four_over_pi_sq;
 
-    // Create output tensor for v (aspect ratio penalty)
-    Tensor v({num_boxes1, num_boxes2}, DType::Float32, Device::cpu());
-    Tensor alpha({num_boxes1, num_boxes2}, DType::Float32, Device::cpu());
+    // alpha = v / (1 - IoU + v + eps)
+    auto alpha = v / (iou * (-1.0f) + 1.0f + v + 1e-7f);
 
-    const float* w1_data = static_cast<const float*>(w1_cpu.data_ptr());
-    const float* h1_data = static_cast<const float*>(h1_cpu.data_ptr());
-    const float* w2_data = static_cast<const float*>(w2_cpu.data_ptr());
-    const float* h2_data = static_cast<const float*>(h2_cpu.data_ptr());
-    const float* iou_data = static_cast<const float*>(iou_cpu.data_ptr());
-    float* v_data = static_cast<float*>(v.data_ptr());
-    float* alpha_data = static_cast<float*>(alpha.data_ptr());
-
-    // Compute aspect ratio penalty element-wise
-    for (int64_t i = 0; i < num_boxes1; ++i) {
-        float ar1 = std::atan(w1_data[i] / (h1_data[i] + 1e-7f));
-        for (int64_t j = 0; j < num_boxes2; ++j) {
-            float ar2 = std::atan(w2_data[j] / (h2_data[j] + 1e-7f));
-            float ar_diff = ar1 - ar2;
-            float v_ij = four_over_pi_sq * ar_diff * ar_diff;
-            v_data[i * num_boxes2 + j] = v_ij;
-
-            // Compute alpha weighting factor
-            float iou_ij = iou_data[i * num_boxes2 + j];
-            alpha_data[i * num_boxes2 + j] = v_ij / (1.0f - iou_ij + v_ij + 1e-7f);
-        }
-    }
-
-    // Complete IoU
     // CIoU = IoU - center_dist^2 / diag_dist^2 - alpha * v
-
-    auto ciou_cpu = iou_cpu - center_dist_sq_cpu / (diag_dist_sq_cpu + 1e-7f) - alpha * v;
-
-    // Move result back to original device
-    return ciou_cpu.to(boxes1.device());
+    return iou - center_dist_sq / (diag_dist_sq + 1e-7f) - alpha * v;
 }
 
 auto nms(const Tensor& boxes, const Tensor& scores, double iou_threshold) -> Tensor {
@@ -359,6 +334,33 @@ auto nms(const Tensor& boxes, const Tensor& scores, double iou_threshold) -> Ten
     if (N == 0) {
         return tenzor::empty({0}, DType::Int64, boxes.device());
     }
+
+#ifdef TENZOR_CUDA_ENABLED
+    // CUDA fast path: run NMS entirely on GPU using CUB sort + custom kernels
+    if (boxes.device().type == Device::Type::CUDA) {
+        auto boxes_f32 = boxes.to(DType::Float32).contiguous();
+        auto scores_f32 = scores.to(DType::Float32).contiguous();
+
+        // Allocate output tensor on device for keep indices
+        auto keep_device = zeros({N}, DType::Int64, boxes.device());
+
+        int64_t num_keep = 0;
+        nms_cuda(
+            static_cast<const float*>(boxes_f32.data_ptr()),
+            static_cast<const float*>(scores_f32.data_ptr()),
+            N,
+            static_cast<float>(iou_threshold),
+            static_cast<int64_t*>(keep_device.data_ptr()),
+            &num_keep
+        );
+
+        // Slice to actual number of kept boxes
+        if (num_keep < N) {
+            keep_device = keep_device.slice(0, 0, num_keep);
+        }
+        return keep_device;
+    }
+#endif
 
     // Move to CPU and convert to Float32 for processing
     auto boxes_cpu = boxes.to(Device::cpu()).to(DType::Float32);

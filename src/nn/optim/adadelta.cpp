@@ -6,9 +6,11 @@
 #include "tenzor/nn/optim/adadelta.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/math.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include <cmath>
+#include <cstring>
 #include <stdexcept>
 
 namespace tenzor {
@@ -103,93 +105,42 @@ auto Adadelta::step() -> void {
             continue;
         }
 
-        // CPU fallback: move all tensors to CPU for data access
-        Tensor grad = grad_orig.to(Device::cpu());
-        Tensor param_data = param_data_orig.to(Device::cpu());
-        Tensor square_avg_cpu = square_avg_[i].to(Device::cpu());
-        Tensor acc_delta_cpu = acc_delta_[i].to(Device::cpu());
+        // Generic fallback using tensor-level ops (device-agnostic)
+        Tensor grad = grad_orig;
+        Tensor param_data = param_data_orig;
+        float rho = static_cast<float>(rho_);
+        float eps = static_cast<float>(eps_);
+        float lr = static_cast<float>(lr_);
 
-        int64_t numel = param_data.numel();
-        DType dtype = param_data.dtype();
-
-        // Handle different dtypes
-        if (dtype == DType::Float64) {
-            auto grad_ptr = const_cast<double*>(grad.data<double>());
-            auto param_ptr = const_cast<double*>(param_data.data<double>());
-            auto square_avg_ptr = square_avg_cpu.data<double>();
-            auto acc_delta_ptr = acc_delta_cpu.data<double>();
-
-            // Apply weight decay if specified
-            if (weight_decay_ > 0.0) {
-                for (int64_t j = 0; j < numel; ++j) {
-                    grad_ptr[j] += weight_decay_ * param_ptr[j];
-                }
-            }
-
-            // Adadelta update
-            for (int64_t j = 0; j < numel; ++j) {
-                // Accumulate squared gradient
-                square_avg_ptr[j] = rho_ * square_avg_ptr[j] +
-                                    (1.0 - rho_) * grad_ptr[j] * grad_ptr[j];
-
-                // Compute std of gradients
-                double std_grad = std::sqrt(square_avg_ptr[j] + eps_);
-
-                // Compute std of updates (using previous accumulator)
-                double std_delta = std::sqrt(acc_delta_ptr[j] + eps_);
-
-                // Compute parameter update
-                double delta = -(std_delta / std_grad) * grad_ptr[j];
-
-                // Apply update to parameter
-                param_ptr[j] += lr_ * delta;
-
-                // Accumulate squared update (after applying delta)
-                acc_delta_ptr[j] = rho_ * acc_delta_ptr[j] +
-                                   (1.0 - rho_) * delta * delta;
-            }
-        } else {
-            // Float32 path (default)
-            auto grad_ptr = const_cast<float*>(grad.data<float>());
-            auto param_ptr = const_cast<float*>(param_data.data<float>());
-            auto square_avg_ptr = square_avg_cpu.data<float>();
-            auto acc_delta_ptr = acc_delta_cpu.data<float>();
-
-            // Apply weight decay if specified
-            if (weight_decay_ > 0.0) {
-                for (int64_t j = 0; j < numel; ++j) {
-                    grad_ptr[j] += weight_decay_ * param_ptr[j];
-                }
-            }
-
-            // Adadelta update
-            for (int64_t j = 0; j < numel; ++j) {
-                // Accumulate squared gradient
-                square_avg_ptr[j] = rho_ * square_avg_ptr[j] +
-                                    (1.0f - rho_) * grad_ptr[j] * grad_ptr[j];
-
-                // Compute std of gradients
-                float std_grad = std::sqrt(square_avg_ptr[j] + eps_);
-
-                // Compute std of updates (using previous accumulator)
-                float std_delta = std::sqrt(acc_delta_ptr[j] + eps_);
-
-                // Compute parameter update
-                float delta = -(std_delta / std_grad) * grad_ptr[j];
-
-                // Apply update to parameter
-                param_ptr[j] += lr_ * delta;
-
-                // Accumulate squared update (after applying delta)
-                acc_delta_ptr[j] = rho_ * acc_delta_ptr[j] +
-                                   (1.0f - rho_) * delta * delta;
-            }
+        // Apply weight decay: g = g + weight_decay * param
+        if (weight_decay_ > 0.0) {
+            grad = grad + param_data * static_cast<float>(weight_decay_);
         }
 
-        // Copy updated values back to original device
-        param->tensor() = param_data.to(original_device);
-        square_avg_[i] = square_avg_cpu.to(original_device);
-        acc_delta_[i] = acc_delta_cpu.to(original_device);
+        // Accumulate squared gradient: v = rho * v + (1 - rho) * g^2
+        square_avg_[i] = square_avg_[i] * rho + grad * grad * (1.0f - rho);
+
+        // Compute RMS of gradients and updates
+        auto std_grad = sqrt(square_avg_[i] + eps);
+        auto std_delta = sqrt(acc_delta_[i] + eps);
+
+        // Compute parameter update: delta = -(std_delta / std_grad) * g
+        auto delta = (std_delta / std_grad) * grad * (-1.0f);
+
+        // Apply update: param += lr * delta
+        auto new_param = param_data + delta * lr;
+
+        // Copy result into existing tensor storage (preserves pointer stability on CPU)
+        if (original_device.type == Device::Type::CPU) {
+            auto src = new_param.contiguous();
+            std::memcpy(param->tensor().data_ptr(), src.data_ptr(),
+                        src.numel() * dtype_size(src.dtype()));
+        } else {
+            param->tensor() = new_param;
+        }
+
+        // Accumulate squared update: acc = rho * acc + (1 - rho) * delta^2
+        acc_delta_[i] = acc_delta_[i] * rho + delta * delta * (1.0f - rho);
     }
 }
 

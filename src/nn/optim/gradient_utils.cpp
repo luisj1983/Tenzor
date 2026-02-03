@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/nn/optim/gradient_utils.hpp"
+#include "tenzor/ops/transform.hpp"
 #include <algorithm>
 #include <numeric>
 #include <stdexcept>
@@ -87,25 +88,14 @@ void copy_from_flat(const void* src, Tensor& dst, size_t offset_bytes) {
 auto flatten_tensors(const std::vector<Tensor>& tensors) -> Tensor {
     validate_tensors_for_flattening(tensors);
 
-    // Calculate total size
-    const size_t total_elements = calculate_total_elements(tensors);
-    const auto dtype = tensors[0].dtype();
-    const auto device = tensors[0].device();
-
-    // Create flat tensor
-    Tensor flat({static_cast<int64_t>(total_elements)}, dtype, device);
-
-    // Copy data from each tensor
-    size_t offset_bytes = 0;
+    // Flatten each tensor to 1D and concatenate using cat() which is device-safe
+    // (dispatches to GPU kernel for CUDA tensors, avoids raw data_ptr() access)
+    std::vector<Tensor> flat_parts;
+    flat_parts.reserve(tensors.size());
     for (const auto& t : tensors) {
-        // Ensure tensor is contiguous
-        Tensor contiguous_t = t.is_contiguous() ? t : t.contiguous();
-
-        copy_tensor_data(contiguous_t, flat.data_ptr(), offset_bytes);
-        offset_bytes += contiguous_t.numel() * dtype_size(dtype);
+        flat_parts.push_back(t.flatten().contiguous());
     }
-
-    return flat;
+    return tenzor::cat(flat_parts, 0);
 }
 
 auto flatten_tensors(const std::vector<std::shared_ptr<Variable>>& variables) -> Tensor {
@@ -156,24 +146,18 @@ auto unflatten_into(const Tensor& flat_tensor,
         );
     }
 
-    // Create output tensors
+    // Slice the flat tensor and reshape — device-safe (no raw data_ptr() access)
     std::vector<Tensor> result;
     result.reserve(shapes.size());
 
-    const auto dtype = flat_tensor.dtype();
-    const auto device = flat_tensor.device();
-    const void* flat_ptr = flat_tensor.data_ptr();
-    size_t offset_bytes = 0;
-
+    int64_t offset = 0;
     for (const auto& shape : shapes) {
-        // Create tensor with target shape
-        Tensor t(shape, dtype, device);
+        int64_t numel = 1;
+        for (auto dim : shape) numel *= dim;
 
-        // Copy data from flat tensor
-        copy_from_flat(flat_ptr, t, offset_bytes);
-
-        offset_bytes += t.numel() * dtype_size(dtype);
-        result.push_back(std::move(t));
+        auto slice = flat_tensor.slice(0, offset, offset + numel).contiguous();
+        result.push_back(slice.reshape(shape));
+        offset += numel;
     }
 
     return result;
@@ -206,13 +190,15 @@ auto unflatten_into(const Tensor& flat_tensor,
         }
     }
 
-    // Copy data into each output tensor
-    const void* flat_ptr = flat_tensor.data_ptr();
-    size_t offset_bytes = 0;
-
+    // Slice flat tensor and reshape into each output — device-safe
+    int64_t offset = 0;
     for (auto& t : output_tensors) {
-        copy_from_flat(flat_ptr, t, offset_bytes);
-        offset_bytes += t.numel() * dtype_size(dtype);
+        int64_t numel = t.numel();
+        auto slice = flat_tensor.slice(0, offset, offset + numel).contiguous();
+        auto shape_span = t.shape();
+        std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+        t = slice.reshape(shape);
+        offset += numel;
     }
 }
 

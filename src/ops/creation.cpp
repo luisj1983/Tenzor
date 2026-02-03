@@ -534,10 +534,21 @@ auto arange(float start, float end, float step, DType dtype, Device device) -> T
         throw std::invalid_argument("Invalid start, end, step combination");
     }
 
-    // For non-CPU devices, create on CPU first then transfer
+    // Use backend directly for non-CPU devices
     if (device.type != Device::Type::CPU) {
-        auto cpu_tensor = arange(start, end, step, dtype, Device::cpu());
-        return cpu_tensor.to(device);
+        auto backend = backend_registry().get_backend(device.type);
+        if (!backend) {
+            throw std::runtime_error("Backend not available for device type");
+        }
+
+        OpAttributes attrs;
+        attrs["start"] = std::to_string(start);
+        attrs["end"] = std::to_string(end);
+        attrs["step"] = std::to_string(step);
+        attrs["dtype"] = dtype_to_string(dtype);
+        attrs["device_id"] = std::to_string(device.index);
+
+        return backend->dispatch("arange", {}, attrs)[0];
     }
 
     // Calculate number of elements
@@ -620,10 +631,21 @@ auto linspace(float start, float end, int64_t steps, DType dtype, Device device)
         throw std::invalid_argument("steps must be positive");
     }
 
-    // For non-CPU devices, create on CPU first then transfer
+    // Use backend directly for non-CPU devices
     if (device.type != Device::Type::CPU) {
-        auto cpu_tensor = linspace(start, end, steps, dtype, Device::cpu());
-        return cpu_tensor.to(device);
+        auto backend = backend_registry().get_backend(device.type);
+        if (!backend) {
+            throw std::runtime_error("Backend not available for device type");
+        }
+
+        OpAttributes attrs;
+        attrs["start"] = std::to_string(start);
+        attrs["end"] = std::to_string(end);
+        attrs["steps"] = std::to_string(steps);
+        attrs["dtype"] = dtype_to_string(dtype);
+        attrs["device_id"] = std::to_string(device.index);
+
+        return backend->dispatch("linspace", {}, attrs)[0];
     }
 
     // Use uninitialized allocation (avoid wasteful zeroing before fill)
@@ -698,10 +720,20 @@ auto linspace(float start, float end, int64_t steps, DType dtype, Device device)
 auto eye(int64_t n, std::optional<int64_t> m, DType dtype, Device device) -> Tensor {
     int64_t cols = m.value_or(n);
 
-    // For non-CPU devices, create on CPU first then transfer
+    // Use backend directly for non-CPU devices
     if (device.type != Device::Type::CPU) {
-        auto cpu_tensor = eye(n, m, dtype, Device::cpu());
-        return cpu_tensor.to(device);
+        auto backend = backend_registry().get_backend(device.type);
+        if (!backend) {
+            throw std::runtime_error("Backend not available for device type");
+        }
+
+        OpAttributes attrs;
+        attrs["n"] = std::to_string(n);
+        attrs["m"] = std::to_string(cols);
+        attrs["dtype"] = dtype_to_string(dtype);
+        attrs["device_id"] = std::to_string(device.index);
+
+        return backend->dispatch("eye", {}, attrs)[0];
     }
 
     // Start with zeros (now safe since we're on CPU)

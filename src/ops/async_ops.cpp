@@ -7,8 +7,6 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/ops/creation.hpp"
-#include <algorithm>
-#include <cmath>
 
 #ifdef TENZOR_CUDA_ENABLED
 #include <cuda_runtime.h>
@@ -22,71 +20,19 @@ namespace {
 
 // Simple tensor-based activation implementations
 auto tensor_relu(const Tensor& input) -> Tensor {
-    // Remember original device
-    auto original_device = input.device();
-
-    // Move to CPU for data access
-    Tensor input_cpu = input;
-    if (input_cpu.device() != Device::cpu()) {
-        input_cpu = input_cpu.to(Device::cpu());
+    // For Float16/BFloat16, promote to Float32, apply ReLU, then convert back
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = clamp_min(input_f32, 0.0f);
+        return result_f32.to(input.dtype());
     }
-
-    auto result = input_cpu.clone();
-    int64_t size = result.numel();
-
-    if (input.dtype() == DType::Float32) {
-        float* data = static_cast<float*>(result.data_ptr());
-        for (int64_t i = 0; i < size; ++i) {
-            data[i] = std::max(0.0f, data[i]);
-        }
-    } else if (input.dtype() == DType::Float64) {
-        double* data = static_cast<double*>(result.data_ptr());
-        for (int64_t i = 0; i < size; ++i) {
-            data[i] = std::max(0.0, data[i]);
-        }
-    } else {
-        // For Float16 and other types, convert to Float32, process, convert back
-        Tensor input_f32 = input_cpu.to(DType::Float32);
-        auto result_f32 = tensor_relu(input_f32);
-        result = result_f32.to(input.dtype());
-    }
-
-    // Move back to original device
-    return result.to(original_device);
+    // Use clamp_min which dispatches to the correct backend (CPU/CUDA/etc.)
+    return clamp_min(input, 0.0f);
 }
 
 auto tensor_sigmoid(const Tensor& input) -> Tensor {
-    // Remember original device
-    auto original_device = input.device();
-
-    // Move to CPU for data access
-    Tensor input_cpu = input;
-    if (input_cpu.device() != Device::cpu()) {
-        input_cpu = input_cpu.to(Device::cpu());
-    }
-
-    auto result = input_cpu.clone();
-    int64_t size = result.numel();
-
-    if (input.dtype() == DType::Float32) {
-        float* data = static_cast<float*>(result.data_ptr());
-        for (int64_t i = 0; i < size; ++i) {
-            data[i] = 1.0f / (1.0f + std::exp(-data[i]));
-        }
-    } else if (input.dtype() == DType::Float64) {
-        double* data = static_cast<double*>(result.data_ptr());
-        for (int64_t i = 0; i < size; ++i) {
-            data[i] = 1.0 / (1.0 + std::exp(-data[i]));
-        }
-    } else {
-        // For Float16 and other types, convert to Float32, process, convert back
-        Tensor input_f32 = input_cpu.to(DType::Float32);
-        auto result_f32 = tensor_sigmoid(input_f32);
-        result = result_f32.to(input.dtype());
-    }
-
-    // Move back to original device
-    return result.to(original_device);
+    // Use sigmoid() which dispatches to the correct backend (CPU/CUDA/etc.)
+    return sigmoid(input);
 }
 
 auto tensor_softmax(const Tensor& input, int64_t dim) -> Tensor {

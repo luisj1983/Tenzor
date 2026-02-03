@@ -8,6 +8,8 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/backend/dispatch.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include "tenzor/core/shape.hpp"
 #include <algorithm>
 #include <numeric>
@@ -41,9 +43,16 @@ auto topk(const Tensor& input,
         throw std::runtime_error("k must be between 1 and dimension size");
     }
 
-    // For CPU tensors, implement directly
+    // For non-CPU tensors, dispatch to backend kernel
     if (input.device().type != Device::Type::CPU) {
-        throw std::runtime_error("topk currently only implemented for CPU tensors");
+        OpAttributes attrs;
+        attrs["k"] = std::to_string(k);
+        attrs["dim"] = std::to_string(dim);
+        attrs["largest"] = largest ? "1" : "0";
+        attrs["sorted"] = sorted ? "1" : "0";
+        std::vector<Tensor> inputs = {input};
+        auto results = dispatch<OpId::TopK>(inputs, attrs);
+        return {results[0], results[1]};
     }
 
     // Get contiguous input
@@ -153,9 +162,14 @@ auto sort(const Tensor& input,
         throw std::runtime_error("Dimension out of range for sort");
     }
 
-    // For CPU tensors, implement directly
+    // For non-CPU tensors, dispatch to backend kernel
     if (input.device().type != Device::Type::CPU) {
-        throw std::runtime_error("sort currently only implemented for CPU tensors");
+        OpAttributes attrs;
+        attrs["dim"] = std::to_string(dim);
+        attrs["descending"] = descending ? "1" : "0";
+        std::vector<Tensor> inputs = {input};
+        auto results = dispatch<OpId::Sort>(inputs, attrs);
+        return {results[0], results[1]};
     }
 
     // Get contiguous input
@@ -242,9 +256,15 @@ auto unique(const Tensor& input,
             bool return_inverse,
             bool return_counts) -> std::tuple<Tensor, Tensor, Tensor> {
 
-    // Only CPU implementation for now
+    // For non-CPU tensors, dispatch to backend kernel
     if (input.device().type != Device::Type::CPU) {
-        throw std::runtime_error("unique currently only implemented for CPU tensors");
+        OpAttributes attrs;
+        attrs["sorted"] = sorted_output ? "1" : "0";
+        attrs["return_inverse"] = return_inverse ? "1" : "0";
+        attrs["return_counts"] = return_counts ? "1" : "0";
+        std::vector<Tensor> inputs = {input};
+        auto results = dispatch<OpId::Unique>(inputs, attrs);
+        return {results[0], results[1], results[2]};
     }
 
     // Get contiguous flattened input
@@ -349,9 +369,12 @@ auto cumsum(const Tensor& input, int64_t dim) -> Tensor {
         throw std::runtime_error("Dimension out of range for cumsum");
     }
 
-    // For CPU tensors
+    // For non-CPU tensors, dispatch to backend kernel
     if (input.device().type != Device::Type::CPU) {
-        throw std::runtime_error("cumsum currently only implemented for CPU tensors");
+        OpAttributes attrs;
+        attrs["dim"] = std::to_string(dim);
+        std::vector<Tensor> inputs = {input};
+        return dispatch<OpId::CumSum>(inputs, attrs)[0];
     }
 
     // Get contiguous input
@@ -427,9 +450,12 @@ auto cumprod(const Tensor& input, int64_t dim) -> Tensor {
         throw std::runtime_error("Dimension out of range for cumprod");
     }
 
-    // For CPU tensors
+    // For non-CPU tensors, dispatch to backend kernel
     if (input.device().type != Device::Type::CPU) {
-        throw std::runtime_error("cumprod currently only implemented for CPU tensors");
+        OpAttributes attrs;
+        attrs["dim"] = std::to_string(dim);
+        std::vector<Tensor> inputs = {input};
+        return dispatch<OpId::CumProd>(inputs, attrs)[0];
     }
 
     // Get contiguous input

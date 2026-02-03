@@ -237,6 +237,13 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::Input)] = "input";
     names[static_cast<size_t>(OpId::Output)] = "output";
 
+    // Advanced operations
+    names[static_cast<size_t>(OpId::TopK)] = "topk";
+    names[static_cast<size_t>(OpId::Sort)] = "sort";
+    names[static_cast<size_t>(OpId::CumSum)] = "cumsum";
+    names[static_cast<size_t>(OpId::CumProd)] = "cumprod";
+    names[static_cast<size_t>(OpId::Unique)] = "unique";
+
     return names;
 }();
 

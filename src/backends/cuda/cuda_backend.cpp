@@ -167,6 +167,11 @@ namespace cuda {
     auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor;
     auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor;
 
+    // Sequence/identity creation operations
+    auto arange_kernel(float start, float end, float step, DType dtype, Device device, cudaStream_t stream) -> Tensor;
+    auto linspace_kernel(float start, float end, int64_t steps, DType dtype, Device device, cudaStream_t stream) -> Tensor;
+    auto eye_kernel(int64_t n, int64_t m, DType dtype, Device device, cudaStream_t stream) -> Tensor;
+
     // Comparison operations
     auto eq_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
     auto ne_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
@@ -407,7 +412,8 @@ public:
                  const OpAttributes& attrs) -> std::vector<Tensor> override {
         // Allow empty inputs for creation operations
         bool is_creation_op = (op_name == "zeros" || op_name == "ones" || op_name == "full" ||
-                               op_name == "rand" || op_name == "randn");
+                               op_name == "rand" || op_name == "randn" ||
+                               op_name == "arange" || op_name == "linspace" || op_name == "eye");
 
         // Validate we have inputs (except for creation operations)
         if (inputs.empty() && !is_creation_op) {
@@ -1240,6 +1246,74 @@ public:
 
                 Device device = inputs.empty() ? Device::cuda(0) : inputs[0].device();
                 return {cuda::randn_kernel(shape, dtype, device, stream)};
+            }
+            else if (op_name == "arange") {
+                float start = 0.0f, end = 0.0f, step = 1.0f;
+                if (attrs.contains("start")) start = std::stof(attrs.at("start"));
+                if (attrs.contains("end")) end = std::stof(attrs.at("end"));
+                if (attrs.contains("step")) step = std::stof(attrs.at("step"));
+
+                DType dtype = DType::Float32;
+                if (attrs.contains("dtype")) {
+                    auto dtype_str = attrs.at("dtype");
+                    if (dtype_str == "float32") dtype = DType::Float32;
+                    else if (dtype_str == "float64") dtype = DType::Float64;
+                    else if (dtype_str == "float16") dtype = DType::Float16;
+                    else if (dtype_str == "bfloat16") dtype = DType::BFloat16;
+                    else if (dtype_str == "int8") dtype = DType::Int8;
+                    else if (dtype_str == "int32") dtype = DType::Int32;
+                    else if (dtype_str == "int64") dtype = DType::Int64;
+                }
+
+                int device_idx = 0;
+                if (attrs.contains("device_id")) device_idx = std::stoi(attrs.at("device_id"));
+                Device device = Device::cuda(device_idx);
+                return {cuda::arange_kernel(start, end, step, dtype, device, stream)};
+            }
+            else if (op_name == "linspace") {
+                float start = 0.0f, end = 1.0f;
+                int64_t steps = 100;
+                if (attrs.contains("start")) start = std::stof(attrs.at("start"));
+                if (attrs.contains("end")) end = std::stof(attrs.at("end"));
+                if (attrs.contains("steps")) steps = std::stoll(attrs.at("steps"));
+
+                DType dtype = DType::Float32;
+                if (attrs.contains("dtype")) {
+                    auto dtype_str = attrs.at("dtype");
+                    if (dtype_str == "float32") dtype = DType::Float32;
+                    else if (dtype_str == "float64") dtype = DType::Float64;
+                    else if (dtype_str == "float16") dtype = DType::Float16;
+                    else if (dtype_str == "bfloat16") dtype = DType::BFloat16;
+                }
+
+                int device_idx = 0;
+                if (attrs.contains("device_id")) device_idx = std::stoi(attrs.at("device_id"));
+                Device device = Device::cuda(device_idx);
+                return {cuda::linspace_kernel(start, end, steps, dtype, device, stream)};
+            }
+            else if (op_name == "eye") {
+                int64_t n = 0, m = -1;
+                if (attrs.contains("n")) n = std::stoll(attrs.at("n"));
+                if (attrs.contains("m")) m = std::stoll(attrs.at("m"));
+
+                DType dtype = DType::Float32;
+                if (attrs.contains("dtype")) {
+                    auto dtype_str = attrs.at("dtype");
+                    if (dtype_str == "float32") dtype = DType::Float32;
+                    else if (dtype_str == "float64") dtype = DType::Float64;
+                    else if (dtype_str == "float16") dtype = DType::Float16;
+                    else if (dtype_str == "bfloat16") dtype = DType::BFloat16;
+                    else if (dtype_str == "int32") dtype = DType::Int32;
+                    else if (dtype_str == "int64") dtype = DType::Int64;
+                    else if (dtype_str == "uint8") dtype = DType::UInt8;
+                    else if (dtype_str == "int8") dtype = DType::Int8;
+                    else if (dtype_str == "bool") dtype = DType::Bool;
+                }
+
+                int device_idx = 0;
+                if (attrs.contains("device_id")) device_idx = std::stoi(attrs.at("device_id"));
+                Device device = Device::cuda(device_idx);
+                return {cuda::eye_kernel(n, m, dtype, device, stream)};
             }
             else if (op_name == "contiguous") {
                 if (inputs.size() != 1) {
