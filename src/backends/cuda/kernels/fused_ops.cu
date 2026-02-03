@@ -59,10 +59,15 @@ inline Tensor cuda_sum_device(const Tensor& t) {
     return result;
 }
 
+// Device kernel to set a single scalar value
+__global__ void set_scalar_kernel(float* data, float value) {
+    data[0] = value;
+}
+
 // Helper to create scalar tensor on device
 inline Tensor create_scalar_tensor(float value, DType dtype, Device device) {
     Tensor t({1}, dtype, device);
-    cudaMemcpy(t.data_ptr(), &value, sizeof(float), cudaMemcpyHostToDevice);
+    set_scalar_kernel<<<1, 1>>>(static_cast<float*>(t.data_ptr()), value);
     return t;
 }
 

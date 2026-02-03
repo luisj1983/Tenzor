@@ -136,7 +136,9 @@ auto lstm_forward_cuda(
     auto shape = input.shape();
     int64_t seq_len = shape[0];
     int64_t batch = shape[1];
+    int64_t input_size = shape[2];
     int64_t hidden = h0.shape()[1];
+    int64_t gate_size = 4 * hidden;
 
     cudaStream_t stream = nullptr;
 
@@ -149,29 +151,44 @@ auto lstm_forward_cuda(
     bool has_bias_ih = bias_ih.numel() > 0;
     bool has_bias_hh = bias_hh.numel() > 0;
 
+    // Pre-transpose weights once (avoids per-timestep transpose)
+    Tensor W_ih_t = W_ih.transpose(0, 1).contiguous();  // (input_size, 4*hidden)
+    Tensor W_hh_t = W_hh.transpose(0, 1).contiguous();  // (hidden, 4*hidden)
+
+    // Pre-compute all input gates: (seq_len*batch, input_size) @ (input_size, 4*hidden) -> (seq_len*batch, 4*hidden)
+    Tensor input_2d = input.reshape({seq_len * batch, input_size});
+    Tensor all_gates_ih = cublas_matmul(input_2d, W_ih_t);  // (seq_len*batch, 4*hidden)
+
+    // Add input bias to all gates at once
+    if (has_bias_ih) {
+        if (input.dtype() == DType::Float32) {
+            launch_add_bias(all_gates_ih.data<float>(), bias_ih.data<float>(), seq_len * batch, gate_size, stream);
+        } else if (input.dtype() == DType::Float64) {
+            launch_add_bias(all_gates_ih.data<double>(), bias_ih.data<double>(), seq_len * batch, gate_size, stream);
+        }
+    }
+
     for (int64_t t = 0; t < seq_len; ++t) {
-        // x_t: (batch, input_size) — slice from input
-        Tensor x_t = input.slice(0, t, t + 1).squeeze(0).contiguous();
+        // Slice pre-computed input gates for this timestep: (batch, 4*hidden)
+        Tensor gates_ih_t({batch, gate_size}, input.dtype(), input.device());
+        cudaMemcpyAsync(
+            gates_ih_t.data_ptr(),
+            static_cast<const char*>(all_gates_ih.data_ptr()) + t * batch * gate_size * dtype_size(input.dtype()),
+            batch * gate_size * dtype_size(input.dtype()),
+            cudaMemcpyDeviceToDevice, stream);
 
-        // gates = x_t @ W_ih^T + h_prev @ W_hh^T + bias
-        Tensor gates = matmul_weight_t(x_t, W_ih, stream);
-        Tensor gates_h = matmul_weight_t(h_prev, W_hh, stream);
+        // Hidden-to-hidden: h_prev @ W_hh_t (pre-transposed)
+        Tensor gates_hh = cublas_matmul(h_prev, W_hh_t);
 
-        // Add gates_h to gates (in-place would be better, but using add for correctness)
-        gates = add_kernel(gates, gates_h, stream);
+        // Combine input and hidden gates
+        Tensor gates = add_kernel(gates_ih_t, gates_hh, stream);
 
-        // Add biases
-        if (has_bias_ih && input.dtype() == DType::Float32) {
-            launch_add_bias(gates.data<float>(), bias_ih.data<float>(), batch, 4 * hidden, stream);
-        }
+        // Add hidden bias
         if (has_bias_hh && input.dtype() == DType::Float32) {
-            launch_add_bias(gates.data<float>(), bias_hh.data<float>(), batch, 4 * hidden, stream);
-        }
-        if (has_bias_ih && input.dtype() == DType::Float64) {
-            launch_add_bias(gates.data<double>(), bias_ih.data<double>(), batch, 4 * hidden, stream);
+            launch_add_bias(gates.data<float>(), bias_hh.data<float>(), batch, gate_size, stream);
         }
         if (has_bias_hh && input.dtype() == DType::Float64) {
-            launch_add_bias(gates.data<double>(), bias_hh.data<double>(), batch, 4 * hidden, stream);
+            launch_add_bias(gates.data<double>(), bias_hh.data<double>(), batch, gate_size, stream);
         }
 
         // LSTM cell: apply activations and compute h, c
@@ -206,7 +223,9 @@ auto gru_forward_cuda(
     auto shape = input.shape();
     int64_t seq_len = shape[0];
     int64_t batch = shape[1];
+    int64_t input_size = shape[2];
     int64_t hidden = h0.shape()[1];
+    int64_t gate_size = 3 * hidden;
 
     cudaStream_t stream = nullptr;
 
@@ -215,20 +234,34 @@ auto gru_forward_cuda(
 
     bool has_bias = bias.numel() > 0;
 
-    for (int64_t t = 0; t < seq_len; ++t) {
-        Tensor x_t = input.slice(0, t, t + 1).squeeze(0).contiguous();
+    // Pre-transpose weights once
+    Tensor W_ih_t = W_ih.transpose(0, 1).contiguous();  // (input_size, 3*hidden)
+    Tensor W_hh_t = W_hh.transpose(0, 1).contiguous();  // (hidden, 3*hidden)
 
-        // gates_ih = x_t @ W_ih^T
-        Tensor gates_ih = matmul_weight_t(x_t, W_ih, stream);
-        // gates_hh = h_prev @ W_hh^T
-        Tensor gates_hh = matmul_weight_t(h_prev, W_hh, stream);
+    // Pre-compute all input gates: (seq_len*batch, input_size) @ (input_size, 3*hidden)
+    Tensor input_2d = input.reshape({seq_len * batch, input_size});
+    Tensor all_gates_ih = cublas_matmul(input_2d, W_ih_t);  // (seq_len*batch, 3*hidden)
 
-        // Add bias to both (split evenly if combined)
-        if (has_bias && input.dtype() == DType::Float32) {
-            launch_add_bias(gates_ih.data<float>(), bias.data<float>(), batch, 3 * hidden, stream);
-        } else if (has_bias && input.dtype() == DType::Float64) {
-            launch_add_bias(gates_ih.data<double>(), bias.data<double>(), batch, 3 * hidden, stream);
+    // Add bias to all input gates at once
+    if (has_bias) {
+        if (input.dtype() == DType::Float32) {
+            launch_add_bias(all_gates_ih.data<float>(), bias.data<float>(), seq_len * batch, gate_size, stream);
+        } else if (input.dtype() == DType::Float64) {
+            launch_add_bias(all_gates_ih.data<double>(), bias.data<double>(), seq_len * batch, gate_size, stream);
         }
+    }
+
+    for (int64_t t = 0; t < seq_len; ++t) {
+        // Slice pre-computed input gates for this timestep
+        Tensor gates_ih_t({batch, gate_size}, input.dtype(), input.device());
+        cudaMemcpyAsync(
+            gates_ih_t.data_ptr(),
+            static_cast<const char*>(all_gates_ih.data_ptr()) + t * batch * gate_size * dtype_size(input.dtype()),
+            batch * gate_size * dtype_size(input.dtype()),
+            cudaMemcpyDeviceToDevice, stream);
+
+        // Hidden-to-hidden: h_prev @ W_hh_t (pre-transposed)
+        Tensor gates_hh = cublas_matmul(h_prev, W_hh_t);
 
         // GRU cell
         int64_t total = batch * hidden;
@@ -239,12 +272,12 @@ auto gru_forward_cuda(
 
         if (input.dtype() == DType::Float32) {
             gru_cell_fused_kernel<float><<<grid, block, 0, stream>>>(
-                gates_ih.data<float>(), gates_hh.data<float>(),
+                gates_ih_t.data<float>(), gates_hh.data<float>(),
                 h_prev.data<float>(), h_out.data<float>(),
                 batch, hidden);
         } else if (input.dtype() == DType::Float64) {
             gru_cell_fused_kernel<double><<<grid, block, 0, stream>>>(
-                gates_ih.data<double>(), gates_hh.data<double>(),
+                gates_ih_t.data<double>(), gates_hh.data<double>(),
                 h_prev.data<double>(), h_out.data<double>(),
                 batch, hidden);
         }
@@ -364,6 +397,32 @@ auto gru_multi_layer_forward_cuda(
 // Bidirectional LSTM Forward
 // ============================================================================
 
+// Kernel to concatenate forward and backward LSTM outputs along the hidden dimension
+template<typename T>
+__global__ void bilstm_concat_kernel(
+    const T* __restrict__ fwd_output,   // (seq_len, batch, hidden)
+    const T* __restrict__ bwd_output,   // (seq_len, batch, hidden)
+    T* __restrict__ output,             // (seq_len, batch, 2*hidden)
+    int64_t seq_len,
+    int64_t batch,
+    int64_t hidden
+) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = seq_len * batch * hidden;
+    if (idx >= total) return;
+
+    int64_t h = idx % hidden;
+    int64_t rem = idx / hidden;
+    int64_t b = rem % batch;
+    int64_t t = rem / batch;
+
+    int64_t src_offset = (t * batch + b) * hidden + h;
+    int64_t dst_base = (t * batch + b) * 2 * hidden;
+
+    output[dst_base + h] = fwd_output[src_offset];
+    output[dst_base + hidden + h] = bwd_output[src_offset];
+}
+
 // Kernel to reverse a sequence along dim 0: output[t] = input[seq_len-1-t]
 template<typename T>
 __global__ void reverse_sequence_kernel(
@@ -445,22 +504,20 @@ auto bilstm_forward_cuda(
 
     // Concatenate forward and backward outputs along hidden dim: (seq_len, batch, 2*hidden)
     Tensor output({seq_len, batch, 2 * hidden}, input.dtype(), input.device());
-    size_t half_bytes = hidden * dtype_size(input.dtype());
 
-    for (int64_t t = 0; t < seq_len; ++t) {
-        for (int64_t b = 0; b < batch; ++b) {
-            size_t out_offset = (t * batch + b) * 2 * hidden * dtype_size(input.dtype());
-            size_t fwd_offset = (t * batch + b) * hidden * dtype_size(input.dtype());
-            size_t bwd_offset = (t * batch + b) * hidden * dtype_size(input.dtype());
+    {
+        int64_t concat_total = seq_len * batch * hidden;
+        int concat_block = 256;
+        int concat_grid = (concat_total + concat_block - 1) / concat_block;
 
-            cudaMemcpyAsync(
-                static_cast<char*>(output.data_ptr()) + out_offset,
-                static_cast<const char*>(fwd_result[0].data_ptr()) + fwd_offset,
-                half_bytes, cudaMemcpyDeviceToDevice, stream);
-            cudaMemcpyAsync(
-                static_cast<char*>(output.data_ptr()) + out_offset + half_bytes,
-                static_cast<const char*>(bwd_output_rev.data_ptr()) + bwd_offset,
-                half_bytes, cudaMemcpyDeviceToDevice, stream);
+        if (input.dtype() == DType::Float32) {
+            bilstm_concat_kernel<float><<<concat_grid, concat_block, 0, stream>>>(
+                fwd_result[0].data<float>(), bwd_output_rev.data<float>(),
+                output.data<float>(), seq_len, batch, hidden);
+        } else if (input.dtype() == DType::Float64) {
+            bilstm_concat_kernel<double><<<concat_grid, concat_block, 0, stream>>>(
+                fwd_result[0].data<double>(), bwd_output_rev.data<double>(),
+                output.data<double>(), seq_len, batch, hidden);
         }
     }
 

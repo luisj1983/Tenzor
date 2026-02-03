@@ -1036,5 +1036,199 @@ auto nonzero_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     return output;
 }
 
+// ============================================================================
+// Take kernel — gather from flattened input
+// ============================================================================
+
+template<typename T>
+__global__ void take_kernel_impl(
+    const T* __restrict__ input,
+    const int64_t* __restrict__ indices,
+    T* __restrict__ output,
+    int64_t input_size,
+    int64_t indices_size
+) {
+    CUDA_GRID_STRIDE_LOOP(idx, indices_size) {
+        int64_t index = indices[idx];
+        // Handle negative indices
+        if (index < 0) {
+            index += input_size;
+        }
+        // Bounds checking
+        if (index >= 0 && index < input_size) {
+            output[idx] = input[index];
+        }
+    }
+}
+
+auto take_kernel(const Tensor& input, const Tensor& indices, cudaStream_t stream) -> Tensor {
+    int64_t input_size = input.numel();
+    int64_t indices_size = indices.numel();
+
+    Tensor output({indices_size}, input.dtype(), input.device());
+
+    if (indices_size == 0) return output;
+
+    int blocks = get_num_blocks(indices_size);
+
+    switch (input.dtype()) {
+        case DType::Float32:
+            take_kernel_impl<float><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                input.data<float>(), indices.data<int64_t>(), output.data<float>(),
+                input_size, indices_size);
+            break;
+        case DType::Float64:
+            take_kernel_impl<double><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                input.data<double>(), indices.data<int64_t>(), output.data<double>(),
+                input_size, indices_size);
+            break;
+        case DType::Int32:
+            take_kernel_impl<int32_t><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                input.data<int32_t>(), indices.data<int64_t>(), output.data<int32_t>(),
+                input_size, indices_size);
+            break;
+        case DType::Int64:
+            take_kernel_impl<int64_t><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                input.data<int64_t>(), indices.data<int64_t>(), output.data<int64_t>(),
+                input_size, indices_size);
+            break;
+        default:
+            throw std::runtime_error("take_kernel: unsupported dtype");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return output;
+}
+
+// ============================================================================
+// Put kernel — scatter into flattened output
+// ============================================================================
+
+template<typename T>
+__global__ void put_kernel_impl(
+    T* __restrict__ output,
+    const int64_t* __restrict__ indices,
+    const T* __restrict__ source,
+    int64_t num_indices,
+    int64_t total_size,
+    bool accumulate
+) {
+    CUDA_GRID_STRIDE_LOOP(idx, num_indices) {
+        int64_t target_idx = indices[idx];
+        // Handle negative indices
+        if (target_idx < 0) {
+            target_idx += total_size;
+        }
+        // Bounds checking
+        if (target_idx >= 0 && target_idx < total_size) {
+            if (accumulate) {
+                atomicAdd(&output[target_idx], source[idx]);
+            } else {
+                output[target_idx] = source[idx];
+            }
+        }
+    }
+}
+
+// Specialization for int32_t atomicAdd (not natively supported on all archs)
+template<>
+__global__ void put_kernel_impl<int32_t>(
+    int32_t* __restrict__ output,
+    const int64_t* __restrict__ indices,
+    const int32_t* __restrict__ source,
+    int64_t num_indices,
+    int64_t total_size,
+    bool accumulate
+) {
+    CUDA_GRID_STRIDE_LOOP(idx, num_indices) {
+        int64_t target_idx = indices[idx];
+        if (target_idx < 0) {
+            target_idx += total_size;
+        }
+        if (target_idx >= 0 && target_idx < total_size) {
+            if (accumulate) {
+                atomicAdd(reinterpret_cast<int*>(&output[target_idx]), static_cast<int>(source[idx]));
+            } else {
+                output[target_idx] = source[idx];
+            }
+        }
+    }
+}
+
+// Specialization for int64_t atomicAdd via CAS
+__device__ inline int64_t atomicAdd_int64(int64_t* address, int64_t val) {
+    unsigned long long* addr_ull = reinterpret_cast<unsigned long long*>(address);
+    unsigned long long old = *addr_ull, assumed;
+    do {
+        assumed = old;
+        old = atomicCAS(addr_ull, assumed,
+                        static_cast<unsigned long long>(static_cast<int64_t>(assumed) + val));
+    } while (assumed != old);
+    return static_cast<int64_t>(old);
+}
+
+template<>
+__global__ void put_kernel_impl<int64_t>(
+    int64_t* __restrict__ output,
+    const int64_t* __restrict__ indices,
+    const int64_t* __restrict__ source,
+    int64_t num_indices,
+    int64_t total_size,
+    bool accumulate
+) {
+    CUDA_GRID_STRIDE_LOOP(idx, num_indices) {
+        int64_t target_idx = indices[idx];
+        if (target_idx < 0) {
+            target_idx += total_size;
+        }
+        if (target_idx >= 0 && target_idx < total_size) {
+            if (accumulate) {
+                atomicAdd_int64(&output[target_idx], source[idx]);
+            } else {
+                output[target_idx] = source[idx];
+            }
+        }
+    }
+}
+
+auto put_kernel(Tensor& input, const Tensor& indices, const Tensor& source,
+                bool accumulate, cudaStream_t stream) -> Tensor {
+    Tensor output = input.clone();
+    int64_t num_indices = indices.numel();
+    int64_t total_size = input.numel();
+
+    if (num_indices == 0) return output;
+
+    int blocks = get_num_blocks(num_indices);
+
+    switch (input.dtype()) {
+        case DType::Float32:
+            put_kernel_impl<float><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                output.data<float>(), indices.data<int64_t>(), source.data<float>(),
+                num_indices, total_size, accumulate);
+            break;
+        case DType::Float64:
+            put_kernel_impl<double><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                output.data<double>(), indices.data<int64_t>(), source.data<double>(),
+                num_indices, total_size, accumulate);
+            break;
+        case DType::Int32:
+            put_kernel_impl<int32_t><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                output.data<int32_t>(), indices.data<int64_t>(), source.data<int32_t>(),
+                num_indices, total_size, accumulate);
+            break;
+        case DType::Int64:
+            put_kernel_impl<int64_t><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                output.data<int64_t>(), indices.data<int64_t>(), source.data<int64_t>(),
+                num_indices, total_size, accumulate);
+            break;
+        default:
+            throw std::runtime_error("put_kernel: unsupported dtype");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return output;
+}
+
 } // namespace cuda
 } // namespace tenzor

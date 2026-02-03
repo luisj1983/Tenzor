@@ -261,12 +261,31 @@ __global__ void add_kernel_device(const T* a, const T* b, T* c, int64_t n) {
     }
 }
 
+// Metadata struct passed by value to broadcast kernels (avoids cudaMalloc for small arrays)
+struct BroadcastMeta {
+    int64_t strides_a[8];
+    int64_t strides_b[8];
+    int64_t output_shape[8];
+};
+
+static BroadcastMeta make_broadcast_meta(
+    const std::vector<int64_t>& strides_a,
+    const std::vector<int64_t>& strides_b,
+    const std::vector<int64_t>& output_shape) {
+    BroadcastMeta meta{};
+    for (size_t i = 0; i < output_shape.size() && i < 8; ++i) {
+        meta.strides_a[i] = strides_a[i];
+        meta.strides_b[i] = strides_b[i];
+        meta.output_shape[i] = output_shape[i];
+    }
+    return meta;
+}
+
 // Generic broadcast kernel - works for all binary operations
 template<typename T, typename Op>
 __global__ void broadcast_kernel(
     const T* a, const T* b, T* c,
-    const int64_t* strides_a, const int64_t* strides_b,
-    const int64_t* output_shape, int64_t ndim, int64_t n, Op op) {
+    BroadcastMeta meta, int64_t ndim, int64_t n, Op op) {
 
     CUDA_KERNEL_LOOP(out_idx, n) {
         int64_t idx_a = 0;
@@ -276,10 +295,10 @@ __global__ void broadcast_kernel(
         // Convert flat index to multi-dimensional indices
         // Working from rightmost (fastest-varying) dimension
         for (int64_t i = ndim - 1; i >= 0; --i) {
-            int64_t coord = tmp % output_shape[i];
-            tmp /= output_shape[i];
-            idx_a += coord * strides_a[i];
-            idx_b += coord * strides_b[i];
+            int64_t coord = tmp % meta.output_shape[i];
+            tmp /= meta.output_shape[i];
+            idx_a += coord * meta.strides_a[i];
+            idx_b += coord * meta.strides_b[i];
         }
 
         c[out_idx] = op(a[idx_a], b[idx_b]);
@@ -317,8 +336,7 @@ struct DivOp {
 template<typename T, typename Op>
 __global__ void broadcast_inplace_kernel(
     T* a, const T* b,
-    const int64_t* strides_b,
-    const int64_t* output_shape, int64_t ndim, int64_t n, Op op) {
+    BroadcastMeta meta, int64_t ndim, int64_t n, Op op) {
 
     CUDA_KERNEL_LOOP(out_idx, n) {
         int64_t idx_b = 0;
@@ -327,9 +345,9 @@ __global__ void broadcast_inplace_kernel(
         // Convert flat index to multi-dimensional indices
         // Working from rightmost (fastest-varying) dimension
         for (int64_t i = ndim - 1; i >= 0; --i) {
-            int64_t coord = tmp % output_shape[i];
-            tmp /= output_shape[i];
-            idx_b += coord * strides_b[i];
+            int64_t coord = tmp % meta.output_shape[i];
+            tmp /= meta.output_shape[i];
+            idx_b += coord * meta.strides_b[i];
         }
 
         a[out_idx] = op(a[out_idx], b[idx_b]);
@@ -832,16 +850,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
     std::vector<int64_t> strides_a = detail::compute_broadcast_strides(a_shape_vec, output_shape);
     std::vector<int64_t> strides_b = detail::compute_broadcast_strides(b_shape_vec, output_shape);
 
-    // Copy strides to device
-    int64_t* d_strides_a;
-    int64_t* d_strides_b;
-    int64_t* d_output_shape;
-    CUDA_CHECK(cudaMalloc(&d_strides_a, output_shape.size() * sizeof(int64_t)));
-    CUDA_CHECK(cudaMalloc(&d_strides_b, output_shape.size() * sizeof(int64_t)));
-    CUDA_CHECK(cudaMalloc(&d_output_shape, output_shape.size() * sizeof(int64_t)));
-    CUDA_CHECK(cudaMemcpy(d_strides_a, strides_a.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_strides_b, strides_b.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_output_shape, output_shape.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
+    BroadcastMeta meta = make_broadcast_meta(strides_a, strides_b, output_shape);
 
     int64_t ndim = output_shape.size();
     dim3 grid, block;
@@ -850,55 +859,50 @@ auto add_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
     if (a.dtype() == DType::Float32) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<float>(), b.data<float>(), result.data<float>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, AddOp());
+            meta, ndim, n, AddOp());
     } else if (a.dtype() == DType::Float64) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<double>(), b.data<double>(), result.data<double>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, AddOp());
+            meta, ndim, n, AddOp());
     } else if (a.dtype() == DType::Int32) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, AddOp());
+            meta, ndim, n, AddOp());
     } else if (a.dtype() == DType::Int64) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, AddOp());
+            meta, ndim, n, AddOp());
     } else if (a.dtype() == DType::Float16) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             reinterpret_cast<const __half*>(a.data<Float16>()),
             reinterpret_cast<const __half*>(b.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, AddOp());
+            meta, ndim, n, AddOp());
     } else if (a.dtype() == DType::BFloat16) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(a.data<BFloat16>()),
             reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, AddOp());
+            meta, ndim, n, AddOp());
     } else if (a.dtype() == DType::Int8) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, AddOp());
+            meta, ndim, n, AddOp());
     } else if (a.dtype() == DType::UInt8) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<uint8_t>(), b.data<uint8_t>(), result.data<uint8_t>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, AddOp());
+            meta, ndim, n, AddOp());
     } else if (a.dtype() == DType::Int16) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, AddOp());
+            meta, ndim, n, AddOp());
     } else if (a.dtype() == DType::Bool) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<bool>(), b.data<bool>(), result.data<bool>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, AddOp());
+            meta, ndim, n, AddOp());
     } else {
         throw std::runtime_error("Unsupported dtype for add operation");
     }
-
-    // Cleanup - note: cudaFree is synchronous, so no explicit sync needed after it
-    CUDA_CHECK(cudaFree(d_strides_a));
-    CUDA_CHECK(cudaFree(d_strides_b));
-    CUDA_CHECK(cudaFree(d_output_shape));
     CUDA_CHECK(cudaGetLastError());
     // NOTE: Removed cudaStreamSynchronize - cudaFree already synchronizes
     return result;
@@ -978,15 +982,7 @@ auto sub_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
     std::vector<int64_t> strides_a = detail::compute_broadcast_strides(a_shape_vec, output_shape);
     std::vector<int64_t> strides_b = detail::compute_broadcast_strides(b_shape_vec, output_shape);
 
-    int64_t* d_strides_a;
-    int64_t* d_strides_b;
-    int64_t* d_output_shape;
-    CUDA_CHECK(cudaMalloc(&d_strides_a, output_shape.size() * sizeof(int64_t)));
-    CUDA_CHECK(cudaMalloc(&d_strides_b, output_shape.size() * sizeof(int64_t)));
-    CUDA_CHECK(cudaMalloc(&d_output_shape, output_shape.size() * sizeof(int64_t)));
-    CUDA_CHECK(cudaMemcpy(d_strides_a, strides_a.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_strides_b, strides_b.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_output_shape, output_shape.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
+    BroadcastMeta meta = make_broadcast_meta(strides_a, strides_b, output_shape);
 
     int64_t ndim = output_shape.size();
     dim3 grid, block;
@@ -995,62 +991,58 @@ auto sub_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
     if (a.dtype() == DType::Float32) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<float>(), b.data<float>(), result.data<float>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, SubOp());
+            meta, ndim, n, SubOp());
     } else if (a.dtype() == DType::Float64) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<double>(), b.data<double>(), result.data<double>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, SubOp());
+            meta, ndim, n, SubOp());
     } else if (a.dtype() == DType::Int32) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, SubOp());
+            meta, ndim, n, SubOp());
     } else if (a.dtype() == DType::Int64) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, SubOp());
+            meta, ndim, n, SubOp());
     } else if (a.dtype() == DType::Float16) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             reinterpret_cast<const __half*>(a.data<Float16>()),
             reinterpret_cast<const __half*>(b.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, SubOp());
+            meta, ndim, n, SubOp());
     } else if (a.dtype() == DType::BFloat16) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(a.data<BFloat16>()),
             reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, SubOp());
+            meta, ndim, n, SubOp());
     } else if (a.dtype() == DType::Int8) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, SubOp());
+            meta, ndim, n, SubOp());
     } else if (a.dtype() == DType::UInt8) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<uint8_t>(), b.data<uint8_t>(), result.data<uint8_t>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, SubOp());
+            meta, ndim, n, SubOp());
     } else if (a.dtype() == DType::Int16) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, SubOp());
+            meta, ndim, n, SubOp());
     } else if (a.dtype() == DType::UInt16) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<uint16_t>(), b.data<uint16_t>(), result.data<uint16_t>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, SubOp());
+            meta, ndim, n, SubOp());
     } else if (a.dtype() == DType::UInt32) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<uint32_t>(), b.data<uint32_t>(), result.data<uint32_t>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, SubOp());
+            meta, ndim, n, SubOp());
     } else if (a.dtype() == DType::UInt64) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<uint64_t>(), b.data<uint64_t>(), result.data<uint64_t>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, SubOp());
+            meta, ndim, n, SubOp());
     } else {
         throw std::runtime_error("Unsupported dtype for sub operation");
     }
-
-    CUDA_CHECK(cudaFree(d_strides_a));
-    CUDA_CHECK(cudaFree(d_strides_b));
-    CUDA_CHECK(cudaFree(d_output_shape));
     CUDA_CHECK(cudaGetLastError());
     // NOTE: Removed cudaStreamSynchronize - async execution for performance
     return result;
@@ -1120,15 +1112,7 @@ auto mul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
     std::vector<int64_t> strides_a = detail::compute_broadcast_strides(a_shape_vec, output_shape);
     std::vector<int64_t> strides_b = detail::compute_broadcast_strides(b_shape_vec, output_shape);
 
-    int64_t* d_strides_a;
-    int64_t* d_strides_b;
-    int64_t* d_output_shape;
-    CUDA_CHECK(cudaMalloc(&d_strides_a, output_shape.size() * sizeof(int64_t)));
-    CUDA_CHECK(cudaMalloc(&d_strides_b, output_shape.size() * sizeof(int64_t)));
-    CUDA_CHECK(cudaMalloc(&d_output_shape, output_shape.size() * sizeof(int64_t)));
-    CUDA_CHECK(cudaMemcpy(d_strides_a, strides_a.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_strides_b, strides_b.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_output_shape, output_shape.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
+    BroadcastMeta meta = make_broadcast_meta(strides_a, strides_b, output_shape);
 
     int64_t ndim = output_shape.size();
     dim3 grid, block;
@@ -1137,42 +1121,38 @@ auto mul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
     if (a.dtype() == DType::Float32) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<float>(), b.data<float>(), result.data<float>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, MulOp());
+            meta, ndim, n, MulOp());
     } else if (a.dtype() == DType::Float64) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<double>(), b.data<double>(), result.data<double>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, MulOp());
+            meta, ndim, n, MulOp());
     } else if (a.dtype() == DType::Int32) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, MulOp());
+            meta, ndim, n, MulOp());
     } else if (a.dtype() == DType::Int64) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, MulOp());
+            meta, ndim, n, MulOp());
     } else if (a.dtype() == DType::Float16) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             reinterpret_cast<const __half*>(a.data<Float16>()),
             reinterpret_cast<const __half*>(b.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, MulOp());
+            meta, ndim, n, MulOp());
     } else if (a.dtype() == DType::BFloat16) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(a.data<BFloat16>()),
             reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, MulOp());
+            meta, ndim, n, MulOp());
     } else if (a.dtype() == DType::Bool) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<bool>(), b.data<bool>(), result.data<bool>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, MulOp());
+            meta, ndim, n, MulOp());
     } else {
         throw std::runtime_error("Unsupported dtype for mul operation");
     }
-
-    CUDA_CHECK(cudaFree(d_strides_a));
-    CUDA_CHECK(cudaFree(d_strides_b));
-    CUDA_CHECK(cudaFree(d_output_shape));
     CUDA_CHECK(cudaGetLastError());
     // NOTE: Removed cudaStreamSynchronize - async execution for performance
     return result;
@@ -1242,15 +1222,7 @@ auto div_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
     std::vector<int64_t> strides_a = detail::compute_broadcast_strides(a_shape_vec, output_shape);
     std::vector<int64_t> strides_b = detail::compute_broadcast_strides(b_shape_vec, output_shape);
 
-    int64_t* d_strides_a;
-    int64_t* d_strides_b;
-    int64_t* d_output_shape;
-    CUDA_CHECK(cudaMalloc(&d_strides_a, output_shape.size() * sizeof(int64_t)));
-    CUDA_CHECK(cudaMalloc(&d_strides_b, output_shape.size() * sizeof(int64_t)));
-    CUDA_CHECK(cudaMalloc(&d_output_shape, output_shape.size() * sizeof(int64_t)));
-    CUDA_CHECK(cudaMemcpy(d_strides_a, strides_a.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_strides_b, strides_b.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_output_shape, output_shape.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
+    BroadcastMeta meta = make_broadcast_meta(strides_a, strides_b, output_shape);
 
     int64_t ndim = output_shape.size();
     dim3 grid, block;
@@ -1259,40 +1231,36 @@ auto div_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
     if (a.dtype() == DType::Float32) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<float>(), b.data<float>(), result.data<float>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, DivOp());
+            meta, ndim, n, DivOp());
     } else if (a.dtype() == DType::Float64) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<double>(), b.data<double>(), result.data<double>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, DivOp());
+            meta, ndim, n, DivOp());
     } else if (a.dtype() == DType::Int32) {
         check_integer_divisor_for_zeros(b.data<int32_t>(), b.numel(), stream);
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, DivOp());
+            meta, ndim, n, DivOp());
     } else if (a.dtype() == DType::Int64) {
         check_integer_divisor_for_zeros(b.data<int64_t>(), b.numel(), stream);
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, DivOp());
+            meta, ndim, n, DivOp());
     } else if (a.dtype() == DType::Float16) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             reinterpret_cast<const __half*>(a.data<Float16>()),
             reinterpret_cast<const __half*>(b.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, DivOp());
+            meta, ndim, n, DivOp());
     } else if (a.dtype() == DType::BFloat16) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(a.data<BFloat16>()),
             reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, DivOp());
+            meta, ndim, n, DivOp());
     } else {
         throw std::runtime_error("Unsupported dtype for div operation");
     }
-
-    CUDA_CHECK(cudaFree(d_strides_a));
-    CUDA_CHECK(cudaFree(d_strides_b));
-    CUDA_CHECK(cudaFree(d_output_shape));
     CUDA_CHECK(cudaGetLastError());
     // NOTE: Removed cudaStreamSynchronize - async execution for performance
     return result;
@@ -1827,36 +1795,26 @@ auto add_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream)
         // For in-place, output shape is always inout's shape
         std::vector<int64_t> strides_b = detail::compute_broadcast_strides(other_shape_vec, inout_shape_vec);
 
-        // Copy shapes/strides to device
         int64_t ndim = inout_shape_vec.size();
-        int64_t* d_strides_b = nullptr;
-        int64_t* d_output_shape = nullptr;
-        CUDA_CHECK(cudaMalloc(&d_strides_b, ndim * sizeof(int64_t)));
-        CUDA_CHECK(cudaMalloc(&d_output_shape, ndim * sizeof(int64_t)));
-        CUDA_CHECK(cudaMemcpyAsync(d_strides_b, strides_b.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
-        CUDA_CHECK(cudaMemcpyAsync(d_output_shape, inout_shape_vec.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
+        std::vector<int64_t> strides_a_zeros(ndim, 0);
+        BroadcastMeta meta = make_broadcast_meta(strides_a_zeros, strides_b, inout_shape_vec);
 
         if (inout.dtype() == DType::Float32) {
             broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
                 inout.data<float>(), other.data<float>(),
-                d_strides_b, d_output_shape, ndim, n, AddOp{});
+                meta, ndim, n, AddOp{});
         } else if (inout.dtype() == DType::Float64) {
             broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
                 inout.data<double>(), other.data<double>(),
-                d_strides_b, d_output_shape, ndim, n, AddOp{});
+                meta, ndim, n, AddOp{});
         } else if (inout.dtype() == DType::Float16) {
             broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
                 reinterpret_cast<__half*>(inout.data<Float16>()),
                 reinterpret_cast<const __half*>(other.data<Float16>()),
-                d_strides_b, d_output_shape, ndim, n, AddOp{});
+                meta, ndim, n, AddOp{});
         } else {
-            CUDA_CHECK(cudaFree(d_strides_b));
-            CUDA_CHECK(cudaFree(d_output_shape));
             throw std::runtime_error("add_inplace operation only supports Float32, Float64, and Float16 dtypes");
         }
-
-        CUDA_CHECK(cudaFree(d_strides_b));
-        CUDA_CHECK(cudaFree(d_output_shape));
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -1897,34 +1855,25 @@ auto sub_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream)
         std::vector<int64_t> strides_b = detail::compute_broadcast_strides(other_shape_vec, inout_shape_vec);
 
         int64_t ndim = inout_shape_vec.size();
-        int64_t* d_strides_b = nullptr;
-        int64_t* d_output_shape = nullptr;
-        CUDA_CHECK(cudaMalloc(&d_strides_b, ndim * sizeof(int64_t)));
-        CUDA_CHECK(cudaMalloc(&d_output_shape, ndim * sizeof(int64_t)));
-        CUDA_CHECK(cudaMemcpyAsync(d_strides_b, strides_b.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
-        CUDA_CHECK(cudaMemcpyAsync(d_output_shape, inout_shape_vec.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
+        std::vector<int64_t> strides_a_zeros(ndim, 0);
+        BroadcastMeta meta = make_broadcast_meta(strides_a_zeros, strides_b, inout_shape_vec);
 
         if (inout.dtype() == DType::Float32) {
             broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
                 inout.data<float>(), other.data<float>(),
-                d_strides_b, d_output_shape, ndim, n, SubOp{});
+                meta, ndim, n, SubOp{});
         } else if (inout.dtype() == DType::Float64) {
             broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
                 inout.data<double>(), other.data<double>(),
-                d_strides_b, d_output_shape, ndim, n, SubOp{});
+                meta, ndim, n, SubOp{});
         } else if (inout.dtype() == DType::Float16) {
             broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
                 reinterpret_cast<__half*>(inout.data<Float16>()),
                 reinterpret_cast<const __half*>(other.data<Float16>()),
-                d_strides_b, d_output_shape, ndim, n, SubOp{});
+                meta, ndim, n, SubOp{});
         } else {
-            CUDA_CHECK(cudaFree(d_strides_b));
-            CUDA_CHECK(cudaFree(d_output_shape));
             throw std::runtime_error("sub_inplace operation only supports Float32, Float64, and Float16 dtypes");
         }
-
-        CUDA_CHECK(cudaFree(d_strides_b));
-        CUDA_CHECK(cudaFree(d_output_shape));
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -1965,34 +1914,25 @@ auto mul_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream)
         std::vector<int64_t> strides_b = detail::compute_broadcast_strides(other_shape_vec, inout_shape_vec);
 
         int64_t ndim = inout_shape_vec.size();
-        int64_t* d_strides_b = nullptr;
-        int64_t* d_output_shape = nullptr;
-        CUDA_CHECK(cudaMalloc(&d_strides_b, ndim * sizeof(int64_t)));
-        CUDA_CHECK(cudaMalloc(&d_output_shape, ndim * sizeof(int64_t)));
-        CUDA_CHECK(cudaMemcpyAsync(d_strides_b, strides_b.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
-        CUDA_CHECK(cudaMemcpyAsync(d_output_shape, inout_shape_vec.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
+        std::vector<int64_t> strides_a_zeros(ndim, 0);
+        BroadcastMeta meta = make_broadcast_meta(strides_a_zeros, strides_b, inout_shape_vec);
 
         if (inout.dtype() == DType::Float32) {
             broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
                 inout.data<float>(), other.data<float>(),
-                d_strides_b, d_output_shape, ndim, n, MulOp{});
+                meta, ndim, n, MulOp{});
         } else if (inout.dtype() == DType::Float64) {
             broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
                 inout.data<double>(), other.data<double>(),
-                d_strides_b, d_output_shape, ndim, n, MulOp{});
+                meta, ndim, n, MulOp{});
         } else if (inout.dtype() == DType::Float16) {
             broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
                 reinterpret_cast<__half*>(inout.data<Float16>()),
                 reinterpret_cast<const __half*>(other.data<Float16>()),
-                d_strides_b, d_output_shape, ndim, n, MulOp{});
+                meta, ndim, n, MulOp{});
         } else {
-            CUDA_CHECK(cudaFree(d_strides_b));
-            CUDA_CHECK(cudaFree(d_output_shape));
             throw std::runtime_error("mul_inplace operation only supports Float32, Float64, and Float16 dtypes");
         }
-
-        CUDA_CHECK(cudaFree(d_strides_b));
-        CUDA_CHECK(cudaFree(d_output_shape));
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -2033,34 +1973,25 @@ auto div_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream)
         std::vector<int64_t> strides_b = detail::compute_broadcast_strides(other_shape_vec, inout_shape_vec);
 
         int64_t ndim = inout_shape_vec.size();
-        int64_t* d_strides_b = nullptr;
-        int64_t* d_output_shape = nullptr;
-        CUDA_CHECK(cudaMalloc(&d_strides_b, ndim * sizeof(int64_t)));
-        CUDA_CHECK(cudaMalloc(&d_output_shape, ndim * sizeof(int64_t)));
-        CUDA_CHECK(cudaMemcpyAsync(d_strides_b, strides_b.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
-        CUDA_CHECK(cudaMemcpyAsync(d_output_shape, inout_shape_vec.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
+        std::vector<int64_t> strides_a_zeros(ndim, 0);
+        BroadcastMeta meta = make_broadcast_meta(strides_a_zeros, strides_b, inout_shape_vec);
 
         if (inout.dtype() == DType::Float32) {
             broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
                 inout.data<float>(), other.data<float>(),
-                d_strides_b, d_output_shape, ndim, n, DivOp{});
+                meta, ndim, n, DivOp{});
         } else if (inout.dtype() == DType::Float64) {
             broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
                 inout.data<double>(), other.data<double>(),
-                d_strides_b, d_output_shape, ndim, n, DivOp{});
+                meta, ndim, n, DivOp{});
         } else if (inout.dtype() == DType::Float16) {
             broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
                 reinterpret_cast<__half*>(inout.data<Float16>()),
                 reinterpret_cast<const __half*>(other.data<Float16>()),
-                d_strides_b, d_output_shape, ndim, n, DivOp{});
+                meta, ndim, n, DivOp{});
         } else {
-            CUDA_CHECK(cudaFree(d_strides_b));
-            CUDA_CHECK(cudaFree(d_output_shape));
             throw std::runtime_error("div_inplace operation only supports Float32, Float64, and Float16 dtypes");
         }
-
-        CUDA_CHECK(cudaFree(d_strides_b));
-        CUDA_CHECK(cudaFree(d_output_shape));
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -2756,8 +2687,7 @@ __global__ void compare_kernel_device(const T* a, const T* b, bool* c, int64_t n
 template<typename T, typename Op>
 __global__ void broadcast_compare_kernel(
     const T* a, const T* b, bool* c,
-    const int64_t* strides_a, const int64_t* strides_b,
-    const int64_t* output_shape, int64_t ndim, int64_t n, Op op) {
+    BroadcastMeta meta, int64_t ndim, int64_t n, Op op) {
 
     CUDA_KERNEL_LOOP(out_idx, n) {
         int64_t idx_a = 0;
@@ -2766,10 +2696,10 @@ __global__ void broadcast_compare_kernel(
 
         // Convert flat index to multi-dimensional indices
         for (int64_t i = ndim - 1; i >= 0; --i) {
-            int64_t coord = tmp % output_shape[i];
-            tmp /= output_shape[i];
-            idx_a += coord * strides_a[i];
-            idx_b += coord * strides_b[i];
+            int64_t coord = tmp % meta.output_shape[i];
+            tmp /= meta.output_shape[i];
+            idx_a += coord * meta.strides_a[i];
+            idx_b += coord * meta.strides_b[i];
         }
 
         c[out_idx] = op(a[idx_a], b[idx_b]);
@@ -2848,16 +2778,7 @@ auto compare_kernel_launcher(const Tensor& a, const Tensor& b, cudaStream_t stre
     std::vector<int64_t> strides_a = detail::compute_broadcast_strides(a_shape_vec, output_shape);
     std::vector<int64_t> strides_b = detail::compute_broadcast_strides(b_shape_vec, output_shape);
 
-    // Copy strides to device
-    int64_t* d_strides_a;
-    int64_t* d_strides_b;
-    int64_t* d_output_shape;
-    CUDA_CHECK(cudaMalloc(&d_strides_a, output_shape.size() * sizeof(int64_t)));
-    CUDA_CHECK(cudaMalloc(&d_strides_b, output_shape.size() * sizeof(int64_t)));
-    CUDA_CHECK(cudaMalloc(&d_output_shape, output_shape.size() * sizeof(int64_t)));
-    CUDA_CHECK(cudaMemcpy(d_strides_a, strides_a.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_strides_b, strides_b.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_output_shape, output_shape.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
+    BroadcastMeta meta = make_broadcast_meta(strides_a, strides_b, output_shape);
 
     int64_t ndim = output_shape.size();
     dim3 grid, block;
@@ -2866,37 +2787,32 @@ auto compare_kernel_launcher(const Tensor& a, const Tensor& b, cudaStream_t stre
     if (a.dtype() == DType::Float32) {
         broadcast_compare_kernel<<<grid, block, 0, stream>>>(
             a.data<float>(), b.data<float>(), result.data<bool>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, op);
+            meta, ndim, n, op);
     } else if (a.dtype() == DType::Float64) {
         broadcast_compare_kernel<<<grid, block, 0, stream>>>(
             a.data<double>(), b.data<double>(), result.data<bool>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, op);
+            meta, ndim, n, op);
     } else if (a.dtype() == DType::Int32) {
         broadcast_compare_kernel<<<grid, block, 0, stream>>>(
             a.data<int32_t>(), b.data<int32_t>(), result.data<bool>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, op);
+            meta, ndim, n, op);
     } else if (a.dtype() == DType::Int64) {
         broadcast_compare_kernel<<<grid, block, 0, stream>>>(
             a.data<int64_t>(), b.data<int64_t>(), result.data<bool>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, op);
+            meta, ndim, n, op);
     } else if (a.dtype() == DType::Float16) {
         broadcast_compare_kernel<<<grid, block, 0, stream>>>(
             reinterpret_cast<const __half*>(a.data_ptr()),
             reinterpret_cast<const __half*>(b.data_ptr()),
             result.data<bool>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, op);
+            meta, ndim, n, op);
     } else if (a.dtype() == DType::Bool) {
         broadcast_compare_kernel<<<grid, block, 0, stream>>>(
             a.data<bool>(), b.data<bool>(), result.data<bool>(),
-            d_strides_a, d_strides_b, d_output_shape, ndim, n, op);
+            meta, ndim, n, op);
     } else {
         throw std::runtime_error("Unsupported dtype for comparison operation");
     }
-
-    // Cleanup - note: cudaFree is synchronous, so no explicit sync needed after it
-    CUDA_CHECK(cudaFree(d_strides_a));
-    CUDA_CHECK(cudaFree(d_strides_b));
-    CUDA_CHECK(cudaFree(d_output_shape));
     CUDA_CHECK(cudaGetLastError());
     // NOTE: Removed cudaStreamSynchronize - cudaFree already synchronizes
     return result;
@@ -3904,25 +3820,14 @@ auto linspace_kernel(float start, float end, int64_t steps, DType dtype, Device 
     if (steps <= 0) return Tensor({0}, dtype, device);
     Tensor output({steps}, dtype, device);
 
-    if (steps == 1) {
-        // Single element: just the start value
-        if (dtype == DType::Float32) {
-            cudaMemcpyAsync(output.data<float>(), &start, sizeof(float), cudaMemcpyHostToDevice, stream);
-        } else if (dtype == DType::Float64) {
-            double start_d = static_cast<double>(start);
-            cudaMemcpyAsync(output.data<double>(), &start_d, sizeof(double), cudaMemcpyHostToDevice, stream);
-        }
-        return output;
-    }
-
     int block_size = 256;
     int num_blocks = (steps + block_size - 1) / block_size;
 
     if (dtype == DType::Float32) {
-        float step_val = (end - start) / static_cast<float>(steps - 1);
+        float step_val = (steps > 1) ? (end - start) / static_cast<float>(steps - 1) : 0.0f;
         linspace_kernel_impl<float><<<num_blocks, block_size, 0, stream>>>(output.data<float>(), start, step_val, steps);
     } else if (dtype == DType::Float64) {
-        double step_val = (static_cast<double>(end) - static_cast<double>(start)) / static_cast<double>(steps - 1);
+        double step_val = (steps > 1) ? (static_cast<double>(end) - static_cast<double>(start)) / static_cast<double>(steps - 1) : 0.0;
         linspace_kernel_impl<double><<<num_blocks, block_size, 0, stream>>>(output.data<double>(), static_cast<double>(start), step_val, steps);
     } else {
         throw std::runtime_error("linspace: unsupported dtype");

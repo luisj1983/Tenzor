@@ -16,6 +16,21 @@ constexpr int WARP_SIZE = 32;
 constexpr int MAX_BLOCK_SIZE = 1024;
 constexpr int REDUCTION_BLOCK_SIZE = 256;
 
+// Metadata struct passed by value to kernels (avoids cudaMalloc for shape/stride arrays)
+struct DimMeta {
+    int64_t shape[8];
+    int64_t strides[8];
+};
+
+static DimMeta make_dim_meta(const std::vector<int64_t>& shape, const std::vector<int64_t>& strides) {
+    DimMeta meta{};
+    for (size_t i = 0; i < shape.size() && i < 8; ++i) {
+        meta.shape[i] = shape[i];
+        meta.strides[i] = strides[i];
+    }
+    return meta;
+}
+
 // ============================================================================
 // Type helpers for __half support
 // ============================================================================
@@ -567,8 +582,7 @@ template<typename T>
 __global__ void sum_along_dim_kernel(
     const T* input,
     T* output,
-    const int64_t* input_shape,
-    const int64_t* input_strides,
+    DimMeta meta,
     int64_t ndim,
     int64_t dim,
     int64_t output_size,
@@ -587,8 +601,8 @@ __global__ void sum_along_dim_kernel(
             indices[d] = 0;
             continue;
         }
-        indices[d] = tmp % input_shape[d];
-        tmp /= input_shape[d];
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
     }
 
     // Sum along the reduction dimension
@@ -599,7 +613,7 @@ __global__ void sum_along_dim_kernel(
         // Compute flat index
         int64_t in_idx = 0;
         for (int64_t d = 0; d < ndim; d++) {
-            in_idx += indices[d] * input_strides[d];
+            in_idx += indices[d] * meta.strides[d];
         }
 
         sum = cuda_add(sum, input[in_idx]);
@@ -613,8 +627,7 @@ template<typename T>
 __global__ void max_along_dim_kernel(
     const T* input,
     T* output,
-    const int64_t* input_shape,
-    const int64_t* input_strides,
+    DimMeta meta,
     int64_t ndim,
     int64_t dim,
     int64_t output_size,
@@ -633,15 +646,15 @@ __global__ void max_along_dim_kernel(
             indices[d] = 0;
             continue;
         }
-        indices[d] = tmp % input_shape[d];
-        tmp /= input_shape[d];
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
     }
 
     // Find max along the reduction dimension
     indices[dim] = 0;
     int64_t in_idx = 0;
     for (int64_t d = 0; d < ndim; d++) {
-        in_idx += indices[d] * input_strides[d];
+        in_idx += indices[d] * meta.strides[d];
     }
     T max_val = input[in_idx];
 
@@ -649,7 +662,7 @@ __global__ void max_along_dim_kernel(
         indices[dim] = i;
         in_idx = 0;
         for (int64_t d = 0; d < ndim; d++) {
-            in_idx += indices[d] * input_strides[d];
+            in_idx += indices[d] * meta.strides[d];
         }
         T val = input[in_idx];
         max_val = (val > max_val) ? val : max_val;
@@ -663,8 +676,7 @@ template<typename T>
 __global__ void min_along_dim_kernel(
     const T* input,
     T* output,
-    const int64_t* input_shape,
-    const int64_t* input_strides,
+    DimMeta meta,
     int64_t ndim,
     int64_t dim,
     int64_t output_size,
@@ -683,15 +695,15 @@ __global__ void min_along_dim_kernel(
             indices[d] = 0;
             continue;
         }
-        indices[d] = tmp % input_shape[d];
-        tmp /= input_shape[d];
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
     }
 
     // Find min along the reduction dimension
     indices[dim] = 0;
     int64_t in_idx = 0;
     for (int64_t d = 0; d < ndim; d++) {
-        in_idx += indices[d] * input_strides[d];
+        in_idx += indices[d] * meta.strides[d];
     }
     T min_val = input[in_idx];
 
@@ -699,7 +711,7 @@ __global__ void min_along_dim_kernel(
         indices[dim] = i;
         in_idx = 0;
         for (int64_t d = 0; d < ndim; d++) {
-            in_idx += indices[d] * input_strides[d];
+            in_idx += indices[d] * meta.strides[d];
         }
         T val = input[in_idx];
         min_val = (val < min_val) ? val : min_val;
@@ -712,8 +724,7 @@ __global__ void min_along_dim_kernel(
 __global__ void max_along_dim_kernel_half(
     const __half* input,
     __half* output,
-    const int64_t* input_shape,
-    const int64_t* input_strides,
+    DimMeta meta,
     int64_t ndim,
     int64_t dim,
     int64_t output_size,
@@ -732,15 +743,15 @@ __global__ void max_along_dim_kernel_half(
             indices[d] = 0;
             continue;
         }
-        indices[d] = tmp % input_shape[d];
-        tmp /= input_shape[d];
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
     }
 
     // Find max along the reduction dimension
     indices[dim] = 0;
     int64_t in_idx = 0;
     for (int64_t d = 0; d < ndim; d++) {
-        in_idx += indices[d] * input_strides[d];
+        in_idx += indices[d] * meta.strides[d];
     }
     __half max_val = input[in_idx];
 
@@ -748,7 +759,7 @@ __global__ void max_along_dim_kernel_half(
         indices[dim] = i;
         in_idx = 0;
         for (int64_t d = 0; d < ndim; d++) {
-            in_idx += indices[d] * input_strides[d];
+            in_idx += indices[d] * meta.strides[d];
         }
         __half val = input[in_idx];
         max_val = cuda_max_val(val, max_val);
@@ -761,8 +772,7 @@ __global__ void max_along_dim_kernel_half(
 __global__ void min_along_dim_kernel_half(
     const __half* input,
     __half* output,
-    const int64_t* input_shape,
-    const int64_t* input_strides,
+    DimMeta meta,
     int64_t ndim,
     int64_t dim,
     int64_t output_size,
@@ -781,15 +791,15 @@ __global__ void min_along_dim_kernel_half(
             indices[d] = 0;
             continue;
         }
-        indices[d] = tmp % input_shape[d];
-        tmp /= input_shape[d];
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
     }
 
     // Find min along the reduction dimension
     indices[dim] = 0;
     int64_t in_idx = 0;
     for (int64_t d = 0; d < ndim; d++) {
-        in_idx += indices[d] * input_strides[d];
+        in_idx += indices[d] * meta.strides[d];
     }
     __half min_val = input[in_idx];
 
@@ -797,7 +807,7 @@ __global__ void min_along_dim_kernel_half(
         indices[dim] = i;
         in_idx = 0;
         for (int64_t d = 0; d < ndim; d++) {
-            in_idx += indices[d] * input_strides[d];
+            in_idx += indices[d] * meta.strides[d];
         }
         __half val = input[in_idx];
         min_val = cuda_min_val(val, min_val);
@@ -980,28 +990,13 @@ static void launch_dim_reduction_sum(
         return;
     }
 
-    // Copy shape and strides to device
-    int64_t* d_shape;
-    int64_t* d_strides;
-    cudaMalloc(&d_shape, ndim * sizeof(int64_t));
-    cudaMalloc(&d_strides, ndim * sizeof(int64_t));
-    cudaMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
+    DimMeta meta = make_dim_meta(input_shape, input_strides);
 
     // Launch kernel
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
     sum_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
-        d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
+        d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
-
-#if CUDART_VERSION >= 11020
-    cudaFreeAsync(d_shape, nullptr);
-    cudaFreeAsync(d_strides, nullptr);
-#else
-    cudaDeviceSynchronize();
-    cudaFree(d_shape);
-    cudaFree(d_strides);
-#endif
 }
 
 template<typename T>
@@ -1026,26 +1021,12 @@ static void launch_dim_reduction_max(
         return;
     }
 
-    int64_t* d_shape;
-    int64_t* d_strides;
-    cudaMalloc(&d_shape, ndim * sizeof(int64_t));
-    cudaMalloc(&d_strides, ndim * sizeof(int64_t));
-    cudaMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
+    DimMeta meta = make_dim_meta(input_shape, input_strides);
 
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
     max_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
-        d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
+        d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
-
-#if CUDART_VERSION >= 11020
-    cudaFreeAsync(d_shape, nullptr);
-    cudaFreeAsync(d_strides, nullptr);
-#else
-    cudaDeviceSynchronize();
-    cudaFree(d_shape);
-    cudaFree(d_strides);
-#endif
 }
 
 template<typename T>
@@ -1070,26 +1051,12 @@ static void launch_dim_reduction_min(
         return;
     }
 
-    int64_t* d_shape;
-    int64_t* d_strides;
-    cudaMalloc(&d_shape, ndim * sizeof(int64_t));
-    cudaMalloc(&d_strides, ndim * sizeof(int64_t));
-    cudaMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
+    DimMeta meta = make_dim_meta(input_shape, input_strides);
 
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
     min_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
-        d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
+        d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
-
-#if CUDART_VERSION >= 11020
-    cudaFreeAsync(d_shape, nullptr);
-    cudaFreeAsync(d_strides, nullptr);
-#else
-    cudaDeviceSynchronize();
-    cudaFree(d_shape);
-    cudaFree(d_strides);
-#endif
 }
 
 // ============================================================================
@@ -1175,26 +1142,12 @@ static void launch_dim_reduction_max_half(
         return;
     }
 
-    int64_t* d_shape;
-    int64_t* d_strides;
-    cudaMalloc(&d_shape, ndim * sizeof(int64_t));
-    cudaMalloc(&d_strides, ndim * sizeof(int64_t));
-    cudaMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
+    DimMeta meta = make_dim_meta(input_shape, input_strides);
 
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
     max_along_dim_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
-        d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
+        d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
-
-#if CUDART_VERSION >= 11020
-    cudaFreeAsync(d_shape, nullptr);
-    cudaFreeAsync(d_strides, nullptr);
-#else
-    cudaDeviceSynchronize();
-    cudaFree(d_shape);
-    cudaFree(d_strides);
-#endif
 }
 
 static void launch_dim_reduction_min_half(
@@ -1218,26 +1171,12 @@ static void launch_dim_reduction_min_half(
         return;
     }
 
-    int64_t* d_shape;
-    int64_t* d_strides;
-    cudaMalloc(&d_shape, ndim * sizeof(int64_t));
-    cudaMalloc(&d_strides, ndim * sizeof(int64_t));
-    cudaMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
+    DimMeta meta = make_dim_meta(input_shape, input_strides);
 
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
     min_along_dim_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
-        d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
+        d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
-
-#if CUDART_VERSION >= 11020
-    cudaFreeAsync(d_shape, nullptr);
-    cudaFreeAsync(d_strides, nullptr);
-#else
-    cudaDeviceSynchronize();
-    cudaFree(d_shape);
-    cudaFree(d_strides);
-#endif
 }
 
 // ============================================================================
@@ -1780,8 +1719,7 @@ template<typename T>
 __global__ void argmax_along_dim_kernel(
     const T* input,
     int64_t* output,
-    const int64_t* input_shape,
-    const int64_t* input_strides,
+    DimMeta meta,
     int64_t ndim,
     int64_t dim,
     int64_t output_size,
@@ -1800,15 +1738,15 @@ __global__ void argmax_along_dim_kernel(
             indices[d] = 0;
             continue;
         }
-        indices[d] = tmp % input_shape[d];
-        tmp /= input_shape[d];
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
     }
 
     // Find argmax along the reduction dimension
     indices[dim] = 0;
     int64_t in_idx = 0;
     for (int64_t d = 0; d < ndim; d++) {
-        in_idx += indices[d] * input_strides[d];
+        in_idx += indices[d] * meta.strides[d];
     }
     T max_val = input[in_idx];
     int64_t max_idx = 0;
@@ -1817,7 +1755,7 @@ __global__ void argmax_along_dim_kernel(
         indices[dim] = i;
         in_idx = 0;
         for (int64_t d = 0; d < ndim; d++) {
-            in_idx += indices[d] * input_strides[d];
+            in_idx += indices[d] * meta.strides[d];
         }
         T val = input[in_idx];
         if (val > max_val) {
@@ -1834,8 +1772,7 @@ template<typename T>
 __global__ void argmin_along_dim_kernel(
     const T* input,
     int64_t* output,
-    const int64_t* input_shape,
-    const int64_t* input_strides,
+    DimMeta meta,
     int64_t ndim,
     int64_t dim,
     int64_t output_size,
@@ -1854,15 +1791,15 @@ __global__ void argmin_along_dim_kernel(
             indices[d] = 0;
             continue;
         }
-        indices[d] = tmp % input_shape[d];
-        tmp /= input_shape[d];
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
     }
 
     // Find argmin along the reduction dimension
     indices[dim] = 0;
     int64_t in_idx = 0;
     for (int64_t d = 0; d < ndim; d++) {
-        in_idx += indices[d] * input_strides[d];
+        in_idx += indices[d] * meta.strides[d];
     }
     T min_val = input[in_idx];
     int64_t min_idx = 0;
@@ -1871,7 +1808,7 @@ __global__ void argmin_along_dim_kernel(
         indices[dim] = i;
         in_idx = 0;
         for (int64_t d = 0; d < ndim; d++) {
-            in_idx += indices[d] * input_strides[d];
+            in_idx += indices[d] * meta.strides[d];
         }
         T val = input[in_idx];
         if (val < min_val) {
@@ -2007,8 +1944,7 @@ __global__ void argmin_full_kernel_half(const __half* input, int64_t* output, in
 __global__ void argmax_along_dim_kernel_half(
     const __half* input,
     int64_t* output,
-    const int64_t* input_shape,
-    const int64_t* input_strides,
+    DimMeta meta,
     int64_t ndim,
     int64_t dim,
     int64_t output_size,
@@ -2027,15 +1963,15 @@ __global__ void argmax_along_dim_kernel_half(
             indices[d] = 0;
             continue;
         }
-        indices[d] = tmp % input_shape[d];
-        tmp /= input_shape[d];
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
     }
 
     // Find argmax along the reduction dimension
     indices[dim] = 0;
     int64_t in_idx = 0;
     for (int64_t d = 0; d < ndim; d++) {
-        in_idx += indices[d] * input_strides[d];
+        in_idx += indices[d] * meta.strides[d];
     }
     __half max_val = input[in_idx];
     int64_t max_idx = 0;
@@ -2044,7 +1980,7 @@ __global__ void argmax_along_dim_kernel_half(
         indices[dim] = i;
         in_idx = 0;
         for (int64_t d = 0; d < ndim; d++) {
-            in_idx += indices[d] * input_strides[d];
+            in_idx += indices[d] * meta.strides[d];
         }
         __half val = input[in_idx];
         if (__hgt(val, max_val)) {
@@ -2060,8 +1996,7 @@ __global__ void argmax_along_dim_kernel_half(
 __global__ void argmin_along_dim_kernel_half(
     const __half* input,
     int64_t* output,
-    const int64_t* input_shape,
-    const int64_t* input_strides,
+    DimMeta meta,
     int64_t ndim,
     int64_t dim,
     int64_t output_size,
@@ -2080,15 +2015,15 @@ __global__ void argmin_along_dim_kernel_half(
             indices[d] = 0;
             continue;
         }
-        indices[d] = tmp % input_shape[d];
-        tmp /= input_shape[d];
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
     }
 
     // Find argmin along the reduction dimension
     indices[dim] = 0;
     int64_t in_idx = 0;
     for (int64_t d = 0; d < ndim; d++) {
-        in_idx += indices[d] * input_strides[d];
+        in_idx += indices[d] * meta.strides[d];
     }
     __half min_val = input[in_idx];
     int64_t min_idx = 0;
@@ -2097,7 +2032,7 @@ __global__ void argmin_along_dim_kernel_half(
         indices[dim] = i;
         in_idx = 0;
         for (int64_t d = 0; d < ndim; d++) {
-            in_idx += indices[d] * input_strides[d];
+            in_idx += indices[d] * meta.strides[d];
         }
         __half val = input[in_idx];
         if (__hlt(val, min_val)) {
@@ -2190,27 +2125,12 @@ static void launch_dim_argmax(
         return;
     }
 
-    // Copy shape and strides to device
-    int64_t* d_shape;
-    int64_t* d_strides;
-    cudaMalloc(&d_shape, ndim * sizeof(int64_t));
-    cudaMalloc(&d_strides, ndim * sizeof(int64_t));
-    cudaMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
+    DimMeta meta = make_dim_meta(input_shape, input_strides);
 
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
     argmax_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
-        d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
+        d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
-
-#if CUDART_VERSION >= 11020
-    cudaFreeAsync(d_shape, nullptr);
-    cudaFreeAsync(d_strides, nullptr);
-#else
-    cudaDeviceSynchronize();
-    cudaFree(d_shape);
-    cudaFree(d_strides);
-#endif
 }
 
 // Helper function for dimensional argmin
@@ -2236,27 +2156,12 @@ static void launch_dim_argmin(
         return;
     }
 
-    // Copy shape and strides to device
-    int64_t* d_shape;
-    int64_t* d_strides;
-    cudaMalloc(&d_shape, ndim * sizeof(int64_t));
-    cudaMalloc(&d_strides, ndim * sizeof(int64_t));
-    cudaMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
+    DimMeta meta = make_dim_meta(input_shape, input_strides);
 
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
     argmin_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
-        d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
+        d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
-
-#if CUDART_VERSION >= 11020
-    cudaFreeAsync(d_shape, nullptr);
-    cudaFreeAsync(d_strides, nullptr);
-#else
-    cudaDeviceSynchronize();
-    cudaFree(d_shape);
-    cudaFree(d_strides);
-#endif
 }
 
 // ============================================================================
@@ -2339,27 +2244,12 @@ static void launch_dim_argmax_half(
         return;
     }
 
-    // Copy shape and strides to device
-    int64_t* d_shape;
-    int64_t* d_strides;
-    cudaMalloc(&d_shape, ndim * sizeof(int64_t));
-    cudaMalloc(&d_strides, ndim * sizeof(int64_t));
-    cudaMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
+    DimMeta meta = make_dim_meta(input_shape, input_strides);
 
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
     argmax_along_dim_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
-        d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
+        d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
-
-#if CUDART_VERSION >= 11020
-    cudaFreeAsync(d_shape, nullptr);
-    cudaFreeAsync(d_strides, nullptr);
-#else
-    cudaDeviceSynchronize();
-    cudaFree(d_shape);
-    cudaFree(d_strides);
-#endif
 }
 
 static void launch_dim_argmin_half(
@@ -2383,27 +2273,12 @@ static void launch_dim_argmin_half(
         return;
     }
 
-    // Copy shape and strides to device
-    int64_t* d_shape;
-    int64_t* d_strides;
-    cudaMalloc(&d_shape, ndim * sizeof(int64_t));
-    cudaMalloc(&d_strides, ndim * sizeof(int64_t));
-    cudaMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
+    DimMeta meta = make_dim_meta(input_shape, input_strides);
 
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
     argmin_along_dim_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
-        d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
+        d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
-
-#if CUDART_VERSION >= 11020
-    cudaFreeAsync(d_shape, nullptr);
-    cudaFreeAsync(d_strides, nullptr);
-#else
-    cudaDeviceSynchronize();
-    cudaFree(d_shape);
-    cudaFree(d_strides);
-#endif
 }
 
 // Public API for argmax
@@ -2695,8 +2570,7 @@ template<typename T>
 __global__ void prod_along_dim_kernel(
     const T* input,
     T* output,
-    const int64_t* input_shape,
-    const int64_t* input_strides,
+    DimMeta meta,
     int64_t ndim,
     int64_t dim,
     int64_t output_size,
@@ -2715,8 +2589,8 @@ __global__ void prod_along_dim_kernel(
             indices[d] = 0;
             continue;
         }
-        indices[d] = tmp % input_shape[d];
-        tmp /= input_shape[d];
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
     }
 
     // Product along the reduction dimension
@@ -2727,7 +2601,7 @@ __global__ void prod_along_dim_kernel(
         // Compute flat index
         int64_t in_idx = 0;
         for (int64_t d = 0; d < ndim; d++) {
-            in_idx += indices[d] * input_strides[d];
+            in_idx += indices[d] * meta.strides[d];
         }
 
         prod_val *= input[in_idx];
@@ -2796,27 +2670,12 @@ static void launch_dim_reduction_prod(
         return;
     }
 
-    // Copy shape and strides to device
-    int64_t* d_shape;
-    int64_t* d_strides;
-    cudaMalloc(&d_shape, ndim * sizeof(int64_t));
-    cudaMalloc(&d_strides, ndim * sizeof(int64_t));
-    cudaMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
+    DimMeta meta = make_dim_meta(input_shape, input_strides);
 
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
     prod_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
-        d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
+        d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
-
-#if CUDART_VERSION >= 11020
-    cudaFreeAsync(d_shape, nullptr);
-    cudaFreeAsync(d_strides, nullptr);
-#else
-    cudaDeviceSynchronize();
-    cudaFree(d_shape);
-    cudaFree(d_strides);
-#endif
 }
 
 // Public API for prod (product reduction)

@@ -157,6 +157,9 @@ namespace cuda {
     auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y, cudaStream_t stream) -> Tensor;
     auto nonzero_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
     auto one_hot_kernel(const Tensor& indices, int64_t num_classes, cudaStream_t stream) -> Tensor;
+    auto take_kernel(const Tensor& input, const Tensor& indices, cudaStream_t stream) -> Tensor;
+    auto put_kernel(Tensor& input, const Tensor& indices, const Tensor& source,
+                    bool accumulate, cudaStream_t stream) -> Tensor;
 
     // Embedding operations
     auto embedding_kernel(const Tensor& weight, const Tensor& indices, cudaStream_t stream) -> Tensor;
@@ -194,6 +197,9 @@ namespace cuda {
 
     // Vision/Interpolation operations
     auto interpolate_cuda(const Tensor& input, const std::vector<int64_t>& size, const std::string& mode, bool align_corners) -> Tensor;
+    auto unfold_cuda(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation) -> Tensor;
+    auto fold_cuda(const Tensor& input, const std::vector<int64_t>& output_size, int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation) -> Tensor;
+    auto box_iou_cuda(const Tensor& boxes1, const Tensor& boxes2, int iou_type) -> Tensor;
 
     // ROI Align operations
     auto roi_align_forward(const Tensor& features, const Tensor& rois,
@@ -1642,6 +1648,59 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             inputs[7], inputs[8], inputs[9], inputs[10],
             inputs[1], inputs[2]
         );
+    });
+
+    // =========================================================================
+    // Take / Put Operations
+    // =========================================================================
+
+    // inputs: [input, indices]
+    table.register_single_output_kernel(OpId::Take, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return cuda::take_kernel(inputs[0], inputs[1], get_cuda_stream(attrs));
+    });
+
+    // inputs: [input, indices, source]
+    // attrs: accumulate (bool)
+    table.register_single_output_kernel(OpId::Put, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        bool accumulate = parse_attr<bool>(attrs, "accumulate", false);
+        Tensor input = inputs[0];
+        return cuda::put_kernel(input, inputs[1], inputs[2], accumulate, get_cuda_stream(attrs));
+    });
+
+    // =========================================================================
+    // Unfold / Fold Operations
+    // =========================================================================
+
+    // inputs: [input]
+    // attrs: kernel_size, stride, padding, dilation
+    table.register_single_output_kernel(OpId::Unfold, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t kernel_size = parse_attr<int64_t>(attrs, "kernel_size", 3);
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        return cuda::unfold_cuda(inputs[0], kernel_size, stride, padding, dilation);
+    });
+
+    // inputs: [input]
+    // attrs: output_size, kernel_size, stride, padding, dilation
+    table.register_single_output_kernel(OpId::Fold, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto output_size = parse_int_list(attrs, "output_size");
+        int64_t kernel_size = parse_attr<int64_t>(attrs, "kernel_size", 3);
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        return cuda::fold_cuda(inputs[0], output_size, kernel_size, stride, padding, dilation);
+    });
+
+    // =========================================================================
+    // BoxIoU Operation
+    // =========================================================================
+
+    // inputs: [boxes1, boxes2]
+    // attrs: iou_type (0=IoU, 1=GIoU)
+    table.register_single_output_kernel(OpId::BoxIoU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int iou_type = static_cast<int>(parse_attr<int64_t>(attrs, "iou_type", 0));
+        return cuda::box_iou_cuda(inputs[0], inputs[1], iou_type);
     });
 }
 

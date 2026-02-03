@@ -568,5 +568,94 @@ auto interpolate_cuda(const Tensor& input,
     return output;
 }
 
+// ============================================================================
+// BoxIoU CUDA Kernel — pairwise IoU matrix
+// ============================================================================
+
+template<typename T>
+__global__ void box_iou_kernel(
+    const T* __restrict__ boxes1,  // [N, 4]
+    const T* __restrict__ boxes2,  // [M, 4]
+    T* __restrict__ output,        // [N, M]
+    int64_t N,
+    int64_t M,
+    int iou_type  // 0 = IoU, 1 = GIoU
+) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = N * M;
+    if (idx >= total) return;
+
+    int64_t i = idx / M;
+    int64_t j = idx % M;
+
+    // Box format: [x1, y1, x2, y2]
+    T x1_1 = boxes1[i * 4 + 0];
+    T y1_1 = boxes1[i * 4 + 1];
+    T x2_1 = boxes1[i * 4 + 2];
+    T y2_1 = boxes1[i * 4 + 3];
+
+    T x1_2 = boxes2[j * 4 + 0];
+    T y1_2 = boxes2[j * 4 + 1];
+    T x2_2 = boxes2[j * 4 + 2];
+    T y2_2 = boxes2[j * 4 + 3];
+
+    // Intersection
+    T inter_x1 = max(x1_1, x1_2);
+    T inter_y1 = max(y1_1, y1_2);
+    T inter_x2 = min(x2_1, x2_2);
+    T inter_y2 = min(y2_1, y2_2);
+
+    T inter_w = max(static_cast<T>(0), inter_x2 - inter_x1);
+    T inter_h = max(static_cast<T>(0), inter_y2 - inter_y1);
+    T inter_area = inter_w * inter_h;
+
+    // Areas
+    T area1 = (x2_1 - x1_1) * (y2_1 - y1_1);
+    T area2 = (x2_2 - x1_2) * (y2_2 - y1_2);
+    T union_area = area1 + area2 - inter_area;
+
+    T iou = inter_area / (union_area + static_cast<T>(1e-7));
+
+    if (iou_type == 1) {
+        // GIoU: IoU - (enclosing_area - union_area) / enclosing_area
+        T enc_x1 = min(x1_1, x1_2);
+        T enc_y1 = min(y1_1, y1_2);
+        T enc_x2 = max(x2_1, x2_2);
+        T enc_y2 = max(y2_1, y2_2);
+        T enc_area = (enc_x2 - enc_x1) * (enc_y2 - enc_y1);
+        iou = iou - (enc_area - union_area) / (enc_area + static_cast<T>(1e-7));
+    }
+
+    output[i * M + j] = iou;
+}
+
+auto box_iou_cuda(const Tensor& boxes1, const Tensor& boxes2, int iou_type) -> Tensor {
+    int64_t N = boxes1.shape()[0];
+    int64_t M = boxes2.shape()[0];
+
+    Tensor output({N, M}, boxes1.dtype(), boxes1.device());
+
+    int64_t total = N * M;
+    if (total == 0) return output;
+
+    dim3 grid, block;
+    compute_launch_config_1d(total, grid, block);
+
+    if (boxes1.dtype() == DType::Float32) {
+        box_iou_kernel<float><<<grid, block>>>(
+            boxes1.data<float>(), boxes2.data<float>(), output.data<float>(),
+            N, M, iou_type);
+    } else if (boxes1.dtype() == DType::Float64) {
+        box_iou_kernel<double><<<grid, block>>>(
+            boxes1.data<double>(), boxes2.data<double>(), output.data<double>(),
+            N, M, iou_type);
+    } else {
+        throw std::runtime_error("box_iou_cuda: unsupported dtype");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return output;
+}
+
 } // namespace cuda
 } // namespace tenzor

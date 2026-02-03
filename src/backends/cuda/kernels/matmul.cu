@@ -663,6 +663,72 @@ __global__ void matmul_tiled_f16_kernel(
 }
 
 /**
+ * Batched FP16 tiled matmul (non-Tensor Core path)
+ * Uses blockIdx.z for batch indexing to avoid host-side per-batch loop
+ */
+template<int TILE_M, int TILE_N, int TILE_K>
+__global__ void batched_matmul_tiled_f16_kernel(
+    const __half* __restrict__ A,
+    const __half* __restrict__ B,
+    __half* __restrict__ C,
+    int64_t M, int64_t N, int64_t K,
+    int64_t lda, int64_t ldb, int64_t ldc,
+    int64_t stride_a, int64_t stride_b, int64_t stride_c) {
+
+    int batch = blockIdx.z;
+    const __half* A_batch = A + batch * stride_a;
+    const __half* B_batch = B + batch * stride_b;
+    __half* C_batch = C + batch * stride_c;
+
+    __shared__ __half As[TILE_M][TILE_K];
+    __shared__ __half Bs[TILE_K][TILE_N];
+
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+
+    int row = by * TILE_M + ty;
+    int col = bx * TILE_N + tx;
+
+    float sum = 0.0f;
+    int num_tiles = (K + TILE_K - 1) / TILE_K;
+
+    for (int t = 0; t < num_tiles; ++t) {
+        if (tx < TILE_K) {
+            int a_col = t * TILE_K + tx;
+            if (row < M && a_col < K) {
+                As[ty][tx] = A_batch[row * lda + a_col];
+            } else {
+                As[ty][tx] = __float2half(0.0f);
+            }
+        }
+
+        if (ty < TILE_K) {
+            int b_row = t * TILE_K + ty;
+            if (b_row < K && col < N) {
+                Bs[ty][tx] = B_batch[b_row * ldb + col];
+            } else {
+                Bs[ty][tx] = __float2half(0.0f);
+            }
+        }
+
+        __syncthreads();
+
+        #pragma unroll
+        for (int k = 0; k < TILE_K; ++k) {
+            sum += __half2float(As[ty][k]) * __half2float(Bs[k][tx]);
+        }
+
+        __syncthreads();
+    }
+
+    if (row < M && col < N) {
+        C_batch[row * ldc + col] = __float2half(sum);
+    }
+}
+
+/**
  * Batched FP16 Tensor Core matmul
  */
 __global__ void batched_matmul_tensor_core_f16_kernel(
@@ -1100,24 +1166,18 @@ void batched_matmul_f16(
             A, B, C, batch_size, M, N, K,
             stride_a, stride_b, stride_c);
     } else {
-        // Fall back to tiled F16 kernel for each batch element
-        // Using smaller tile size for F16 to reduce register pressure
+        // Batched tiled F16 kernel using blockIdx.z for batch indexing
         dim3 block(TILE_SIZE_F16, TILE_SIZE_F16);
         dim3 grid((N + TILE_SIZE_F16 - 1) / TILE_SIZE_F16,
-                  (M + TILE_SIZE_F16 - 1) / TILE_SIZE_F16);
+                  (M + TILE_SIZE_F16 - 1) / TILE_SIZE_F16,
+                  batch_size);
 
-        // Launch kernel for each batch element
-        for (int64_t b = 0; b < batch_size; ++b) {
-            const __half* A_batch = A + b * stride_a;
-            const __half* B_batch = B + b * stride_b;
-            __half* C_batch = C + b * stride_c;
-
-            matmul_tiled_f16_kernel<TILE_SIZE_F16, TILE_SIZE_F16, TILE_SIZE_F16>
-                <<<grid, block, 0, stream>>>(
-                    A_batch, B_batch, C_batch,
-                    M, N, K,
-                    K, N, N);  // lda, ldb, ldc for row-major
-        }
+        batched_matmul_tiled_f16_kernel<TILE_SIZE_F16, TILE_SIZE_F16, TILE_SIZE_F16>
+            <<<grid, block, 0, stream>>>(
+                A, B, C,
+                M, N, K,
+                K, N, N,  // lda, ldb, ldc for row-major
+                stride_a, stride_b, stride_c);
     }
 
     CUDA_CHECK(cudaGetLastError());

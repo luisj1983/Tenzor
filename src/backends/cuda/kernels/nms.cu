@@ -13,6 +13,12 @@
 namespace tenzor {
 namespace cuda {
 
+// Device-side iota: fills output[i] = i
+__global__ void nms_iota_kernel(int64_t* output, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) output[idx] = idx;
+}
+
 // CUDA kernel for computing IoU between box pairs
 __device__ inline float box_iou_cuda(const float* box1, const float* box2) {
     const float x1_1 = box1[0];
@@ -157,12 +163,11 @@ extern "C" void nms_cuda(const float* boxes, const float* scores,
     cudaMalloc(&d_sorted_indices, num_boxes * sizeof(int64_t));
     cudaMalloc(&d_scores_sorted, num_boxes * sizeof(float));
 
-    // Initialize index array [0, 1, 2, ..., num_boxes-1] on host and copy to device
+    // Initialize index array [0, 1, 2, ..., num_boxes-1] on device
     {
-        std::vector<int64_t> h_indices(num_boxes);
-        for (int64_t i = 0; i < num_boxes; ++i) h_indices[i] = i;
-        cudaMemcpy(d_indices_in, h_indices.data(),
-                   num_boxes * sizeof(int64_t), cudaMemcpyHostToDevice);
+        int iota_block = 256;
+        int iota_grid = (num_boxes + iota_block - 1) / iota_block;
+        nms_iota_kernel<<<iota_grid, iota_block>>>(d_indices_in, num_boxes);
     }
 
     // Sort descending (highest score first) using CUB DeviceRadixSort
