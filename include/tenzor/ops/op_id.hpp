@@ -233,6 +233,7 @@ enum class OpId : uint16_t {
     FusedRMSPropStep,
     FusedAdadeltaStep,
     FusedAdagradStep,
+    FusedAdamAtan2Step,
 
     // =========================================================================
     // Creation Operations (230-249)

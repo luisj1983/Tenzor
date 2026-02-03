@@ -268,6 +268,24 @@ namespace cuda {
         float weight_decay,
         int64_t step,
         bool decoupled_weight_decay,
+        cudaStream_t stream,
+        Tensor* max_exp_avg_sq,
+        bool amsgrad
+    ) -> void;
+
+    auto fused_adam_atan2_step_cuda(
+        Tensor& param,
+        const Tensor& grad,
+        Tensor& exp_avg,
+        Tensor& exp_avg_sq,
+        Tensor* max_exp_avg_sq,
+        float lr,
+        float beta1,
+        float beta2,
+        float eps,
+        float weight_decay,
+        int64_t step,
+        bool amsgrad,
         cudaStream_t stream
     ) -> void;
 
@@ -1029,8 +1047,8 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // Fused Adam Optimizer Step (single kernel launch for all Adam operations)
     // =========================================================================
     table.register_kernel(OpId::FusedAdamStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // inputs: [param, grad, exp_avg, exp_avg_sq]
-        // attrs: lr, beta1, beta2, eps, weight_decay, step, decoupled
+        // inputs: [param, grad, exp_avg, exp_avg_sq, max_exp_avg_sq (optional)]
+        // attrs: lr, beta1, beta2, eps, weight_decay, step, decoupled, amsgrad
         float lr = parse_attr<float>(attrs, "lr", 0.001f);
         float beta1 = parse_attr<float>(attrs, "beta1", 0.9f);
         float beta2 = parse_attr<float>(attrs, "beta2", 0.999f);
@@ -1038,16 +1056,19 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         float weight_decay = parse_attr<float>(attrs, "weight_decay", 0.0f);
         int64_t step = parse_attr<int64_t>(attrs, "step", 1);
         bool decoupled = parse_attr<bool>(attrs, "decoupled", false);
+        bool amsgrad = parse_attr<bool>(attrs, "amsgrad", false);
 
         // Cast away const for in-place modification
         Tensor& param = const_cast<Tensor&>(inputs[0]);
         Tensor& exp_avg = const_cast<Tensor&>(inputs[2]);
         Tensor& exp_avg_sq = const_cast<Tensor&>(inputs[3]);
+        Tensor* max_exp_avg_sq = (amsgrad && inputs.size() > 4)
+            ? &const_cast<Tensor&>(inputs[4]) : nullptr;
 
         cuda::fused_adam_step_cuda(
             param, inputs[1], exp_avg, exp_avg_sq,
             lr, beta1, beta2, eps, weight_decay, step, decoupled,
-            get_cuda_stream(attrs)
+            get_cuda_stream(attrs), max_exp_avg_sq, amsgrad
         );
         return std::vector<Tensor>{param};  // Return modified param
     });
@@ -1583,6 +1604,34 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 
         cuda::fused_adagrad_step_cuda(param, inputs[1], sum_sq,
             lr, lr_decay, eps, weight_decay, step, get_cuda_stream(attrs));
+        return std::vector<Tensor>{param};
+    });
+
+    // =========================================================================
+    // Fused Adam-Atan2 Optimizer Step
+    // =========================================================================
+    table.register_kernel(OpId::FusedAdamAtan2Step, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [param, grad, exp_avg, exp_avg_sq, max_exp_avg_sq (optional)]
+        // attrs: lr, beta1, beta2, eps, weight_decay, step, amsgrad
+        float lr = parse_attr<float>(attrs, "lr", 0.001f);
+        float beta1 = parse_attr<float>(attrs, "beta1", 0.9f);
+        float beta2 = parse_attr<float>(attrs, "beta2", 0.999f);
+        float eps = parse_attr<float>(attrs, "eps", 1e-8f);
+        float weight_decay = parse_attr<float>(attrs, "weight_decay", 0.0f);
+        int64_t step = parse_attr<int64_t>(attrs, "step", 1);
+        bool amsgrad = parse_attr<bool>(attrs, "amsgrad", false);
+
+        Tensor& param = const_cast<Tensor&>(inputs[0]);
+        Tensor& exp_avg = const_cast<Tensor&>(inputs[2]);
+        Tensor& exp_avg_sq = const_cast<Tensor&>(inputs[3]);
+        Tensor* max_exp_avg_sq = (amsgrad && inputs.size() > 4)
+            ? &const_cast<Tensor&>(inputs[4]) : nullptr;
+
+        cuda::fused_adam_atan2_step_cuda(
+            param, inputs[1], exp_avg, exp_avg_sq, max_exp_avg_sq,
+            lr, beta1, beta2, eps, weight_decay, step, amsgrad,
+            get_cuda_stream(attrs)
+        );
         return std::vector<Tensor>{param};
     });
 

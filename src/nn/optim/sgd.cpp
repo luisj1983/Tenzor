@@ -21,9 +21,9 @@ auto SGD::step() -> void {
         Tensor& param_tensor = param.tensor();
         const Tensor& grad_tensor = *param.grad();
 
-        // Use fused CUDA kernel for Float32 CUDA tensors (single kernel launch!)
+        // Use fused CUDA kernel for CUDA tensors (single kernel launch!)
         if (param_tensor.device().type == Device::Type::CUDA &&
-            param_tensor.dtype() == DType::Float32) {
+            (param_tensor.dtype() == DType::Float32 || param_tensor.dtype() == DType::Float64)) {
             // Prepare inputs for dispatch
             std::vector<Tensor> inputs = {param_tensor, grad_tensor};
             if (momentum_ > 0.0) {

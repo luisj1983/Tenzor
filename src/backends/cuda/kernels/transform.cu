@@ -797,6 +797,36 @@ auto split_kernel(const Tensor& input, int64_t split_size, int64_t dim, cudaStre
     std::vector<Tensor> results;
     results.reserve(num_splits);
 
+    // Fast path: when splitting along the outermost dimension of a contiguous tensor,
+    // use cudaMemcpyAsync instead of launching N separate slice kernels
+    if (dim == 0 && input.is_contiguous()) {
+        size_t elem_size = dtype_size(input.dtype());
+        int64_t inner_elements = 1;
+        for (int64_t d = 1; d < ndim; ++d) {
+            inner_elements *= shape[d];
+        }
+        size_t chunk_stride = inner_elements * elem_size;
+
+        for (int64_t i = 0; i < num_splits; ++i) {
+            int64_t start = i * split_size;
+            int64_t actual_size = std::min(split_size, dim_size - start);
+
+            std::vector<int64_t> out_shape(shape.begin(), shape.end());
+            out_shape[0] = actual_size;
+
+            Tensor chunk(out_shape, input.dtype(), input.device());
+            cudaMemcpyAsync(
+                chunk.data_ptr(),
+                static_cast<const char*>(input.data_ptr()) + start * chunk_stride,
+                actual_size * chunk_stride,
+                cudaMemcpyDeviceToDevice,
+                stream);
+            results.push_back(std::move(chunk));
+        }
+        return results;
+    }
+
+    // General path: use slice_kernel for each split
     for (int64_t i = 0; i < num_splits; ++i) {
         int64_t start = i * split_size;
         int64_t end = std::min(start + split_size, dim_size);

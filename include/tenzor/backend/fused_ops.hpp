@@ -191,7 +191,9 @@ auto fused_adam_step_cuda(
     float weight_decay,
     int64_t step,
     bool decoupled_weight_decay,
-    cudaStream_t stream = nullptr
+    cudaStream_t stream = nullptr,
+    Tensor* max_exp_avg_sq = nullptr,
+    bool amsgrad = false
 ) -> void;
 
 /**

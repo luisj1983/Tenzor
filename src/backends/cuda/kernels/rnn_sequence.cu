@@ -173,6 +173,9 @@ auto lstm_forward_cuda(
 
     size_t hidden_step_bytes = batch * hidden * dtype_size(input.dtype());
 
+    // Pre-allocate hidden-to-hidden gate buffer to avoid per-timestep allocation
+    Tensor gates_hh_buf({batch, gate_size}, input.dtype(), input.device());
+
     for (int64_t t = 0; t < seq_len; ++t) {
         // Zero-copy view into pre-computed input gates for this timestep: (batch, 4*hidden)
         Tensor gates_ih_t = all_gates_ih_3d.slice(0, t, t + 1).squeeze(0);
@@ -194,7 +197,7 @@ auto lstm_forward_cuda(
         // LSTM cell: apply activations and compute h, c
         auto [h_out, c_out] = lstm_cell_forward_kernel(gates, c_prev, batch, hidden, stream);
 
-        // Copy h_out to output[t]
+        // Copy h_out to output[t] (async D2D on same stream, no sync needed)
         cudaMemcpyAsync(
             static_cast<char*>(output.data_ptr()) + t * hidden_step_bytes,
             h_out.data_ptr(),

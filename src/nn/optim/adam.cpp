@@ -29,12 +29,15 @@ auto Adam::step() -> void {
         // Use fused CUDA kernel for CUDA tensors (single kernel vs ~15 kernels)
         if (param.tensor().device().type == Device::Type::CUDA &&
             grad.device().type == Device::Type::CUDA &&
-            param.tensor().dtype() == DType::Float32) {
+            (param.tensor().dtype() == DType::Float32 || param.tensor().dtype() == DType::Float64)) {
 
             // Prepare inputs for dispatch
             std::vector<Tensor> inputs = {
                 param.tensor(), grad, exp_avg_[i], exp_avg_sq_[i]
             };
+            if (amsgrad_ && i < max_exp_avg_sq_.size()) {
+                inputs.push_back(max_exp_avg_sq_[i]);
+            }
 
             // Prepare attributes
             OpAttributes attrs;
@@ -45,6 +48,7 @@ auto Adam::step() -> void {
             attrs["weight_decay"] = std::to_string(static_cast<float>(weight_decay_));
             attrs["step"] = std::to_string(step_count_);
             attrs["decoupled"] = "false";  // L2 regularization for Adam
+            attrs["amsgrad"] = amsgrad_ ? "true" : "false";
 
             dispatch(OpId::FusedAdamStep, inputs, attrs);
             continue;
@@ -86,11 +90,15 @@ auto Adam::step() -> void {
 auto Adam::initialize_buffers() -> void {
     exp_avg_.clear();
     exp_avg_sq_.clear();
+    max_exp_avg_sq_.clear();
 
     for (auto& param : parameters_) {
         if (param) {
             exp_avg_.push_back(zeros_like(param->tensor()));
             exp_avg_sq_.push_back(zeros_like(param->tensor()));
+            if (amsgrad_) {
+                max_exp_avg_sq_.push_back(zeros_like(param->tensor()));
+            }
         }
     }
 }
@@ -196,12 +204,15 @@ auto AdamW::step() -> void {
         // Use fused CUDA kernel for CUDA tensors (single kernel vs ~15 kernels)
         if (param.tensor().device().type == Device::Type::CUDA &&
             grad.device().type == Device::Type::CUDA &&
-            param.tensor().dtype() == DType::Float32) {
+            (param.tensor().dtype() == DType::Float32 || param.tensor().dtype() == DType::Float64)) {
 
             // Prepare inputs for dispatch
             std::vector<Tensor> inputs = {
                 param.tensor(), grad, exp_avg_[i], exp_avg_sq_[i]
             };
+            if (amsgrad_ && i < max_exp_avg_sq_.size()) {
+                inputs.push_back(max_exp_avg_sq_[i]);
+            }
 
             // Prepare attributes
             OpAttributes attrs;
@@ -212,6 +223,7 @@ auto AdamW::step() -> void {
             attrs["weight_decay"] = std::to_string(static_cast<float>(weight_decay_));
             attrs["step"] = std::to_string(step_count_);
             attrs["decoupled"] = "true";  // Decoupled weight decay for AdamW
+            attrs["amsgrad"] = amsgrad_ ? "true" : "false";
 
             dispatch(OpId::FusedAdamStep, inputs, attrs);
             continue;
@@ -261,11 +273,15 @@ auto AdamW::get_lr() const -> double {
 auto AdamW::initialize_buffers() -> void {
     exp_avg_.clear();
     exp_avg_sq_.clear();
+    max_exp_avg_sq_.clear();
 
     for (auto& param : parameters_) {
         if (param) {
             exp_avg_.push_back(zeros_like(param->tensor()));
             exp_avg_sq_.push_back(zeros_like(param->tensor()));
+            if (amsgrad_) {
+                max_exp_avg_sq_.push_back(zeros_like(param->tensor()));
+            }
         }
     }
 }

@@ -373,7 +373,6 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
     #define LAUNCH_SCATTER(T) \
         copy_kernel_impl<T><<<num_blocks_copy, BLOCK_SIZE, 0, stream>>>( \
             input.data<T>(), output.data<T>(), total_input); \
-        CUDA_CHECK(cudaStreamSynchronize(stream)); \
         scatter_values_kernel_impl<T><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>( \
             index_int64.data<int64_t>(), src.data<T>(), output.data<T>(), \
             outer_size, dim_size, inner_size, index_dim_size, total_scatter)
@@ -389,7 +388,6 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
             copy_kernel_impl<__half><<<num_blocks_copy, BLOCK_SIZE, 0, stream>>>(
                 reinterpret_cast<const __half*>(input.data_ptr()),
                 reinterpret_cast<__half*>(output.data_ptr()), total_input);
-            CUDA_CHECK(cudaStreamSynchronize(stream));
             scatter_values_kernel_impl<__half><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>(
                 index_int64.data<int64_t>(),
                 reinterpret_cast<const __half*>(src.data_ptr()),

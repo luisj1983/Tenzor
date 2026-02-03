@@ -7,6 +7,8 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include <cmath>
 #include <algorithm>
 
@@ -37,6 +39,35 @@ auto AdamAtan2::step() -> void {
         auto& param_ptr = parameters_[i];
         if (!param_ptr || !param_ptr->has_grad()) continue;
         auto& param = *param_ptr;
+
+        Tensor& param_tensor = param.tensor();
+        const Tensor& grad_tensor = param.grad().value();
+
+        // Use fused CUDA kernel for CUDA tensors
+        if (param_tensor.device().type == Device::Type::CUDA &&
+            grad_tensor.device().type == Device::Type::CUDA &&
+            (param_tensor.dtype() == DType::Float32 || param_tensor.dtype() == DType::Float64)) {
+
+            std::vector<Tensor> inputs = {
+                param_tensor, grad_tensor, exp_avg_[i], exp_avg_sq_[i]
+            };
+            if (amsgrad_ && i < max_exp_avg_sq_.size()) {
+                inputs.push_back(max_exp_avg_sq_[i]);
+            }
+
+            OpAttributes attrs;
+            attrs["lr"] = std::to_string(static_cast<float>(lr_));
+            attrs["beta1"] = std::to_string(static_cast<float>(beta1_));
+            attrs["beta2"] = std::to_string(static_cast<float>(beta2_));
+            attrs["eps"] = std::to_string(static_cast<float>(eps_));
+            attrs["weight_decay"] = std::to_string(static_cast<float>(weight_decay_));
+            attrs["step"] = std::to_string(step_count_);
+            attrs["amsgrad"] = amsgrad_ ? "true" : "false";
+
+            dispatch(OpId::FusedAdamAtan2Step, inputs, attrs);
+            total_params++;
+            continue;
+        }
 
         auto grad = param.grad()->clone();
 

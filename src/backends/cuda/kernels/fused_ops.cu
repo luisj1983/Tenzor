@@ -40,6 +40,11 @@ __global__ void scale_scalar_kernel(float* val, float scale) {
     *val *= scale;
 }
 
+// Single-thread kernel to set a scalar value in device memory (avoids synchronous cudaMemcpy)
+__global__ void set_scalar_kernel(float* dst, float value) {
+    *dst = value;
+}
+
 // Helper for computing (optionally scaled) sum of a 1D tensor on GPU
 // When scale != 1.0f, computes sum * scale (e.g. mean = sum * (1/n))
 // No D2H synchronization needed
@@ -70,10 +75,10 @@ inline Tensor cuda_sum_device(const Tensor& t, float scale = 1.0f) {
     return result;
 }
 
-// Helper to create scalar tensor on device — uses cudaMemcpy instead of <<<1,1>>> kernel
+// Helper to create scalar tensor on device — uses device kernel to avoid pipeline stall
 inline Tensor create_scalar_tensor(float value, DType dtype, Device device) {
     Tensor t({1}, dtype, device);
-    cudaMemcpy(t.data_ptr(), &value, sizeof(float), cudaMemcpyHostToDevice);
+    set_scalar_kernel<<<1, 1>>>(static_cast<float*>(t.data_ptr()), value);
     return t;
 }
 
@@ -2086,11 +2091,13 @@ auto fused_attention_cuda(
  *
  * This eliminates ~15-20 kernel launches per parameter in the naive implementation.
  */
+template<typename T>
 __global__ void fused_adam_kernel(
-    float* __restrict__ param,         // Parameter tensor (modified in-place)
-    const float* __restrict__ grad,    // Gradient tensor
-    float* __restrict__ exp_avg,       // First moment (m) - modified in-place
-    float* __restrict__ exp_avg_sq,    // Second moment (v) - modified in-place
+    T* __restrict__ param,             // Parameter tensor (modified in-place)
+    const T* __restrict__ grad,        // Gradient tensor
+    T* __restrict__ exp_avg,           // First moment (m) - modified in-place
+    T* __restrict__ exp_avg_sq,        // Second moment (v) - modified in-place
+    T* __restrict__ max_exp_avg_sq,    // Max second moment (AMSGrad) - nullptr if disabled
     int64_t numel,
     float lr,
     float beta1,
@@ -2099,38 +2106,48 @@ __global__ void fused_adam_kernel(
     float weight_decay,
     float bias_correction1,    // 1 - beta1^step
     float bias_correction2,    // 1 - beta2^step
-    bool amsgrad,              // Not implemented yet
+    bool amsgrad,
     bool decoupled_weight_decay  // True for AdamW, false for L2 regularization
 ) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numel) return;
 
-    float g = grad[idx];
-    float p = param[idx];
-    float m = exp_avg[idx];
-    float v = exp_avg_sq[idx];
+    T g = grad[idx];
+    T p = param[idx];
+    T m = exp_avg[idx];
+    T v = exp_avg_sq[idx];
 
     // Apply L2 regularization to gradient (Adam style) if not decoupled
     if (weight_decay > 0.0f && !decoupled_weight_decay) {
-        g = g + weight_decay * p;
+        g = g + T(weight_decay) * p;
     }
 
     // Update biased first moment estimate
-    m = beta1 * m + (1.0f - beta1) * g;
+    m = T(beta1) * m + T(1.0f - beta1) * g;
 
     // Update biased second raw moment estimate
-    v = beta2 * v + (1.0f - beta2) * g * g;
+    v = T(beta2) * v + T(1.0f - beta2) * g * g;
 
     // Compute step size with bias correction
-    float step_size = lr / bias_correction1;
+    T step_size = T(lr) / T(bias_correction1);
 
-    // Compute bias-corrected second moment and update parameter
-    // denom = sqrt(v / bias_correction2) + eps
-    float denom = sqrtf(v / bias_correction2) + eps;
+    // Compute bias-corrected second moment
+    T v_hat = v / T(bias_correction2);
+
+    // AMSGrad: use maximum of past bias-corrected second moments
+    if (amsgrad && max_exp_avg_sq != nullptr) {
+        T max_v = max_exp_avg_sq[idx];
+        if (v_hat > max_v) max_v = v_hat;
+        max_exp_avg_sq[idx] = max_v;
+        v_hat = max_v;
+    }
+
+    // denom = sqrt(v_hat) + eps
+    T denom = sqrt(v_hat) + T(eps);
 
     // Apply decoupled weight decay (AdamW style) before update
     if (weight_decay > 0.0f && decoupled_weight_decay) {
-        p = p * (1.0f - lr * weight_decay);
+        p = p * (T(1) - T(lr) * T(weight_decay));
     }
 
     // Update parameter
@@ -2152,6 +2169,7 @@ __global__ void fused_adam_kernel_vec4(
     const float4* __restrict__ grad,
     float4* __restrict__ exp_avg,
     float4* __restrict__ exp_avg_sq,
+    float4* __restrict__ max_exp_avg_sq,
     int64_t numel_vec4,
     float lr,
     float beta1,
@@ -2160,6 +2178,7 @@ __global__ void fused_adam_kernel_vec4(
     float weight_decay,
     float bias_correction1,
     float bias_correction2,
+    bool amsgrad,
     bool decoupled_weight_decay
 ) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2169,6 +2188,8 @@ __global__ void fused_adam_kernel_vec4(
     float4 p = param[idx];
     float4 m = exp_avg[idx];
     float4 v = exp_avg_sq[idx];
+    float4 mv;
+    if (amsgrad && max_exp_avg_sq) mv = max_exp_avg_sq[idx];
 
     float step_size = lr / bias_correction1;
     float bc2_inv = 1.0f / bias_correction2;
@@ -2180,10 +2201,16 @@ __global__ void fused_adam_kernel_vec4(
         } \
         m.comp = beta1 * m.comp + (1.0f - beta1) * g.comp; \
         v.comp = beta2 * v.comp + (1.0f - beta2) * g.comp * g.comp; \
-        if (weight_decay > 0.0f && decoupled_weight_decay) { \
-            p.comp = p.comp * (1.0f - lr * weight_decay); \
-        } \
-        p.comp = p.comp - step_size * m.comp / (sqrtf(v.comp * bc2_inv) + eps);
+        { float v_hat = v.comp * bc2_inv; \
+          if (amsgrad && max_exp_avg_sq) { \
+              if (v_hat > mv.comp) mv.comp = v_hat; \
+              v_hat = mv.comp; \
+          } \
+          if (weight_decay > 0.0f && decoupled_weight_decay) { \
+              p.comp = p.comp * (1.0f - lr * weight_decay); \
+          } \
+          p.comp = p.comp - step_size * m.comp / (sqrtf(v_hat) + eps); \
+        }
 
     ADAM_UPDATE(x)
     ADAM_UPDATE(y)
@@ -2195,6 +2222,70 @@ __global__ void fused_adam_kernel_vec4(
     param[idx] = p;
     exp_avg[idx] = m;
     exp_avg_sq[idx] = v;
+    if (amsgrad && max_exp_avg_sq) max_exp_avg_sq[idx] = mv;
+}
+
+/**
+ * @brief Vectorized fused Adam kernel using double2
+ *
+ * Processes 2 elements per thread for Float64 memory bandwidth utilization.
+ */
+__global__ void fused_adam_kernel_vec2(
+    double2* __restrict__ param,
+    const double2* __restrict__ grad,
+    double2* __restrict__ exp_avg,
+    double2* __restrict__ exp_avg_sq,
+    double2* __restrict__ max_exp_avg_sq,
+    int64_t numel_vec2,
+    float lr,
+    float beta1,
+    float beta2,
+    float eps,
+    float weight_decay,
+    float bias_correction1,
+    float bias_correction2,
+    bool amsgrad,
+    bool decoupled_weight_decay
+) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numel_vec2) return;
+
+    double2 g = grad[idx];
+    double2 p = param[idx];
+    double2 m = exp_avg[idx];
+    double2 v = exp_avg_sq[idx];
+    double2 mv;
+    if (amsgrad && max_exp_avg_sq) mv = max_exp_avg_sq[idx];
+
+    double step_size = double(lr) / double(bias_correction1);
+    double bc2_inv = 1.0 / double(bias_correction2);
+
+    #define ADAM_UPDATE_D(comp) \
+        if (weight_decay > 0.0f && !decoupled_weight_decay) { \
+            g.comp = g.comp + double(weight_decay) * p.comp; \
+        } \
+        m.comp = double(beta1) * m.comp + (1.0 - double(beta1)) * g.comp; \
+        v.comp = double(beta2) * v.comp + (1.0 - double(beta2)) * g.comp * g.comp; \
+        { double v_hat = v.comp * bc2_inv; \
+          if (amsgrad && max_exp_avg_sq) { \
+              if (v_hat > mv.comp) mv.comp = v_hat; \
+              v_hat = mv.comp; \
+          } \
+          if (weight_decay > 0.0f && decoupled_weight_decay) { \
+              p.comp = p.comp * (1.0 - double(lr) * double(weight_decay)); \
+          } \
+          p.comp = p.comp - step_size * m.comp / (sqrt(v_hat) + double(eps)); \
+        }
+
+    ADAM_UPDATE_D(x)
+    ADAM_UPDATE_D(y)
+
+    #undef ADAM_UPDATE_D
+
+    param[idx] = p;
+    exp_avg[idx] = m;
+    exp_avg_sq[idx] = v;
+    if (amsgrad && max_exp_avg_sq) max_exp_avg_sq[idx] = mv;
 }
 
 /**
@@ -2224,67 +2315,104 @@ auto fused_adam_step_cuda(
     float weight_decay,
     int64_t step,
     bool decoupled_weight_decay,
-    cudaStream_t stream
+    cudaStream_t stream,
+    Tensor* max_exp_avg_sq,
+    bool amsgrad
 ) -> void {
-    if (param.dtype() != DType::Float32) {
-        throw std::runtime_error("fused_adam_step_cuda: Only Float32 supported");
-    }
-
     int64_t numel = param.numel();
 
-    // Compute bias corrections
-    float bias_correction1 = 1.0f - std::pow(beta1, static_cast<float>(step));
-    float bias_correction2 = 1.0f - std::pow(beta2, static_cast<float>(step));
-
-    // Check if we can use vectorized kernel
-    bool can_vectorize = (numel % 4 == 0) &&
-                         (reinterpret_cast<uintptr_t>(param.data<float>()) % 16 == 0) &&
-                         (reinterpret_cast<uintptr_t>(grad.data<float>()) % 16 == 0) &&
-                         (reinterpret_cast<uintptr_t>(exp_avg.data<float>()) % 16 == 0) &&
-                         (reinterpret_cast<uintptr_t>(exp_avg_sq.data<float>()) % 16 == 0);
+    // Compute bias corrections using double precision to avoid loss for Float64 params
+    float bias_correction1 = static_cast<float>(1.0 - std::pow(static_cast<double>(beta1), static_cast<double>(step)));
+    float bias_correction2 = static_cast<float>(1.0 - std::pow(static_cast<double>(beta2), static_cast<double>(step)));
 
     constexpr int BLOCK_SIZE = 256;
 
-    if (can_vectorize && numel >= 1024) {
-        int64_t numel_vec4 = numel / 4;
-        int blocks = (numel_vec4 + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        blocks = clamp_blocks(blocks);
+    if (param.dtype() == DType::Float32) {
+        float* max_sq_ptr = (amsgrad && max_exp_avg_sq) ? max_exp_avg_sq->data<float>() : nullptr;
 
-        fused_adam_kernel_vec4<<<blocks, BLOCK_SIZE, 0, stream>>>(
-            reinterpret_cast<float4*>(param.data<float>()),
-            reinterpret_cast<const float4*>(grad.data<float>()),
-            reinterpret_cast<float4*>(exp_avg.data<float>()),
-            reinterpret_cast<float4*>(exp_avg_sq.data<float>()),
-            numel_vec4,
-            lr,
-            beta1,
-            beta2,
-            eps,
-            weight_decay,
-            bias_correction1,
-            bias_correction2,
-            decoupled_weight_decay
-        );
+        // Check if we can use vectorized kernel
+        bool can_vectorize = (numel % 4 == 0) &&
+                             (reinterpret_cast<uintptr_t>(param.data<float>()) % 16 == 0) &&
+                             (reinterpret_cast<uintptr_t>(grad.data<float>()) % 16 == 0) &&
+                             (reinterpret_cast<uintptr_t>(exp_avg.data<float>()) % 16 == 0) &&
+                             (reinterpret_cast<uintptr_t>(exp_avg_sq.data<float>()) % 16 == 0) &&
+                             (!amsgrad || !max_sq_ptr || (reinterpret_cast<uintptr_t>(max_sq_ptr) % 16 == 0));
+
+        if (can_vectorize && numel >= 1024) {
+            int64_t numel_vec4 = numel / 4;
+            int blocks = (numel_vec4 + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            blocks = clamp_blocks(blocks);
+
+            fused_adam_kernel_vec4<<<blocks, BLOCK_SIZE, 0, stream>>>(
+                reinterpret_cast<float4*>(param.data<float>()),
+                reinterpret_cast<const float4*>(grad.data<float>()),
+                reinterpret_cast<float4*>(exp_avg.data<float>()),
+                reinterpret_cast<float4*>(exp_avg_sq.data<float>()),
+                max_sq_ptr ? reinterpret_cast<float4*>(max_sq_ptr) : nullptr,
+                numel_vec4,
+                lr, beta1, beta2, eps, weight_decay,
+                bias_correction1, bias_correction2,
+                amsgrad, decoupled_weight_decay
+            );
+        } else {
+            int blocks = (numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            blocks = clamp_blocks(blocks);
+
+            fused_adam_kernel<float><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                param.data<float>(),
+                grad.data<float>(),
+                exp_avg.data<float>(),
+                exp_avg_sq.data<float>(),
+                max_sq_ptr,
+                numel, lr, beta1, beta2, eps, weight_decay,
+                bias_correction1, bias_correction2,
+                amsgrad, decoupled_weight_decay
+            );
+        }
+    } else if (param.dtype() == DType::Float64) {
+        double* max_sq_ptr = (amsgrad && max_exp_avg_sq) ? max_exp_avg_sq->data<double>() : nullptr;
+
+        // Check if we can use vectorized kernel (double2 = 16 bytes alignment)
+        bool can_vectorize = (numel % 2 == 0) &&
+                             (reinterpret_cast<uintptr_t>(param.data<double>()) % 16 == 0) &&
+                             (reinterpret_cast<uintptr_t>(grad.data<double>()) % 16 == 0) &&
+                             (reinterpret_cast<uintptr_t>(exp_avg.data<double>()) % 16 == 0) &&
+                             (reinterpret_cast<uintptr_t>(exp_avg_sq.data<double>()) % 16 == 0) &&
+                             (!amsgrad || !max_sq_ptr || (reinterpret_cast<uintptr_t>(max_sq_ptr) % 16 == 0));
+
+        if (can_vectorize && numel >= 512) {
+            int64_t numel_vec2 = numel / 2;
+            int blocks = (numel_vec2 + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            blocks = clamp_blocks(blocks);
+
+            fused_adam_kernel_vec2<<<blocks, BLOCK_SIZE, 0, stream>>>(
+                reinterpret_cast<double2*>(param.data<double>()),
+                reinterpret_cast<const double2*>(grad.data<double>()),
+                reinterpret_cast<double2*>(exp_avg.data<double>()),
+                reinterpret_cast<double2*>(exp_avg_sq.data<double>()),
+                max_sq_ptr ? reinterpret_cast<double2*>(max_sq_ptr) : nullptr,
+                numel_vec2,
+                lr, beta1, beta2, eps, weight_decay,
+                bias_correction1, bias_correction2,
+                amsgrad, decoupled_weight_decay
+            );
+        } else {
+            int blocks = (numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            blocks = clamp_blocks(blocks);
+
+            fused_adam_kernel<double><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                param.data<double>(),
+                grad.data<double>(),
+                exp_avg.data<double>(),
+                exp_avg_sq.data<double>(),
+                max_sq_ptr,
+                numel, lr, beta1, beta2, eps, weight_decay,
+                bias_correction1, bias_correction2,
+                amsgrad, decoupled_weight_decay
+            );
+        }
     } else {
-        int blocks = (numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        blocks = clamp_blocks(blocks);
-
-        fused_adam_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(
-            param.data<float>(),
-            grad.data<float>(),
-            exp_avg.data<float>(),
-            exp_avg_sq.data<float>(),
-            numel,
-            lr,
-            beta1,
-            beta2,
-            eps,
-            weight_decay,
-            bias_correction1,
-            bias_correction2,
-            false,  // amsgrad not implemented
-            decoupled_weight_decay
-        );
+        throw std::runtime_error("fused_adam_step_cuda: Only Float32 and Float64 supported");
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -2300,10 +2428,11 @@ auto fused_adam_step_cuda(
  * Nesterov momentum: v = momentum * v + grad; param = param - lr * (grad + momentum * v)
  * Standard momentum: v = momentum * v + grad; param = param - lr * v
  */
+template<typename T>
 __global__ void fused_sgd_kernel(
-    float* __restrict__ param,
-    const float* __restrict__ grad,
-    float* __restrict__ momentum_buffer,
+    T* __restrict__ param,
+    const T* __restrict__ grad,
+    T* __restrict__ momentum_buffer,
     int64_t numel,
     float lr,
     float momentum,
@@ -2315,30 +2444,30 @@ __global__ void fused_sgd_kernel(
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numel) return;
 
-    float g = grad[idx];
-    float p = param[idx];
+    T g = grad[idx];
+    T p = param[idx];
 
     // Apply weight decay
     if (weight_decay > 0.0f) {
-        g = g + weight_decay * p;
+        g = g + T(weight_decay) * p;
     }
 
     if (has_momentum_buffer && momentum > 0.0f) {
-        float v = momentum_buffer[idx];
+        T v = momentum_buffer[idx];
 
         // Update momentum buffer
-        v = momentum * v + (1.0f - dampening) * g;
+        v = T(momentum) * v + T(1.0f - dampening) * g;
         momentum_buffer[idx] = v;
 
         if (nesterov) {
-            g = g + momentum * v;
+            g = g + T(momentum) * v;
         } else {
             g = v;
         }
     }
 
     // Update parameter
-    param[idx] = p - lr * g;
+    param[idx] = p - T(lr) * g;
 }
 
 auto fused_sgd_step_cuda(
@@ -2352,29 +2481,34 @@ auto fused_sgd_step_cuda(
     bool nesterov,
     cudaStream_t stream
 ) -> void {
-    if (param.dtype() != DType::Float32) {
-        throw std::runtime_error("fused_sgd_step_cuda: Only Float32 supported");
-    }
-
     int64_t numel = param.numel();
     constexpr int BLOCK_SIZE = 256;
     int blocks = (numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
     blocks = clamp_blocks(blocks);
 
-    float* momentum_ptr = momentum_buffer ? momentum_buffer->data<float>() : nullptr;
+    if (param.dtype() == DType::Float32) {
+        float* momentum_ptr = momentum_buffer ? momentum_buffer->data<float>() : nullptr;
 
-    fused_sgd_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(
-        param.data<float>(),
-        grad.data<float>(),
-        momentum_ptr,
-        numel,
-        lr,
-        momentum,
-        weight_decay,
-        dampening,
-        nesterov,
-        momentum_buffer != nullptr
-    );
+        fused_sgd_kernel<float><<<blocks, BLOCK_SIZE, 0, stream>>>(
+            param.data<float>(),
+            grad.data<float>(),
+            momentum_ptr,
+            numel, lr, momentum, weight_decay, dampening,
+            nesterov, momentum_buffer != nullptr
+        );
+    } else if (param.dtype() == DType::Float64) {
+        double* momentum_ptr = momentum_buffer ? momentum_buffer->data<double>() : nullptr;
+
+        fused_sgd_kernel<double><<<blocks, BLOCK_SIZE, 0, stream>>>(
+            param.data<double>(),
+            grad.data<double>(),
+            momentum_ptr,
+            numel, lr, momentum, weight_decay, dampening,
+            nesterov, momentum_buffer != nullptr
+        );
+    } else {
+        throw std::runtime_error("fused_sgd_step_cuda: Only Float32 and Float64 supported");
+    }
 
     CUDA_CHECK(cudaGetLastError());
 }
@@ -2701,6 +2835,121 @@ auto fused_adagrad_step_cuda(
     }
     CUDA_CHECK(cudaGetLastError());
 }
+// ============================================================================
+// Fused Adam-Atan2 Optimizer Step
+// ============================================================================
+
+template<typename T>
+__global__ void fused_adam_atan2_kernel(
+    T* __restrict__ param,
+    const T* __restrict__ grad,
+    T* __restrict__ exp_avg,
+    T* __restrict__ exp_avg_sq,
+    T* __restrict__ max_exp_avg_sq,  // nullptr if !amsgrad
+    int64_t numel,
+    float lr,
+    float beta1,
+    float beta2,
+    float eps,
+    float weight_decay,
+    float bias_correction1,
+    float bias_correction2,
+    bool amsgrad
+) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numel) return;
+
+    T g = grad[idx];
+    T p = param[idx];
+    T m = exp_avg[idx];
+    T v = exp_avg_sq[idx];
+
+    // Update biased first moment estimate
+    m = T(beta1) * m + T(1.0f - beta1) * g;
+
+    // Update biased second raw moment estimate
+    v = T(beta2) * v + T(1.0f - beta2) * g * g;
+
+    // Bias-corrected estimates
+    T m_hat = m / T(bias_correction1);
+    T v_hat = v / T(bias_correction2);
+
+    // AMSGrad: use maximum of past bias-corrected second moments
+    if (amsgrad && max_exp_avg_sq != nullptr) {
+        T max_v = max_exp_avg_sq[idx];
+        if (v_hat > max_v) max_v = v_hat;
+        max_exp_avg_sq[idx] = max_v;
+        v_hat = max_v;
+    }
+
+    // Decoupled weight decay (like AdamW) before update
+    if (weight_decay > 0.0f) {
+        p = p * (T(1) - T(lr) * T(weight_decay));
+    }
+
+    // Adam-atan2 update: atan2(m_hat, sqrt(v_hat) + eps)
+    T denom = sqrt(v_hat) + T(eps);
+    T update = atan2(m_hat, denom);
+
+    // Apply update
+    p = p - T(lr) * update;
+
+    // Store updated values
+    param[idx] = p;
+    exp_avg[idx] = m;
+    exp_avg_sq[idx] = v;
+}
+
+auto fused_adam_atan2_step_cuda(
+    Tensor& param,
+    const Tensor& grad,
+    Tensor& exp_avg,
+    Tensor& exp_avg_sq,
+    Tensor* max_exp_avg_sq,
+    float lr,
+    float beta1,
+    float beta2,
+    float eps,
+    float weight_decay,
+    int64_t step,
+    bool amsgrad,
+    cudaStream_t stream
+) -> void {
+    int64_t numel = param.numel();
+    constexpr int BLOCK_SIZE = 256;
+    int blocks = (numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    blocks = clamp_blocks(blocks);
+
+    float bias_correction1 = 1.0f - std::pow(beta1, static_cast<float>(step));
+    float bias_correction2 = 1.0f - std::pow(beta2, static_cast<float>(step));
+
+    if (param.dtype() == DType::Float32) {
+        float* max_sq_ptr = (amsgrad && max_exp_avg_sq) ? max_exp_avg_sq->data<float>() : nullptr;
+
+        fused_adam_atan2_kernel<float><<<blocks, BLOCK_SIZE, 0, stream>>>(
+            param.data<float>(), grad.data<float>(),
+            exp_avg.data<float>(), exp_avg_sq.data<float>(),
+            max_sq_ptr, numel,
+            lr, beta1, beta2, eps, weight_decay,
+            bias_correction1, bias_correction2, amsgrad
+        );
+    } else if (param.dtype() == DType::Float64) {
+        double* max_sq_ptr = (amsgrad && max_exp_avg_sq) ? max_exp_avg_sq->data<double>() : nullptr;
+
+        fused_adam_atan2_kernel<double><<<blocks, BLOCK_SIZE, 0, stream>>>(
+            param.data<double>(), grad.data<double>(),
+            exp_avg.data<double>(), exp_avg_sq.data<double>(),
+            max_sq_ptr, numel,
+            lr, beta1, beta2, eps, weight_decay,
+            bias_correction1, bias_correction2, amsgrad
+        );
+    } else {
+        throw std::runtime_error("fused_adam_atan2_step_cuda: Only Float32 and Float64 supported");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+}
+
 } // namespace cuda
 } // namespace tenzor
 

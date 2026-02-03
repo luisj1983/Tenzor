@@ -3168,11 +3168,136 @@ __global__ void lp_norm_kernel(const T* input, T* output, int64_t n, float p) {
     }
 }
 
+// Per-dimension norm reduction kernel (follows sum_along_dim_kernel pattern)
+template<typename T>
+__global__ void norm_along_dim_kernel(
+    const T* input,
+    T* output,
+    DimMeta meta,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size,
+    float p
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= output_size) return;
+
+    // Compute multi-dimensional indices for output position
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+
+    for (int64_t d = 0; d < ndim; d++) {
+        if (d == dim) {
+            indices[d] = 0;
+            continue;
+        }
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
+    }
+
+    // Accumulate along the reduction dimension
+    T acc = cuda_zero<T>();
+
+    if (p == 1.0f) {
+        // L1 norm: sum of |x|
+        for (int64_t i = 0; i < dim_size; i++) {
+            indices[dim] = i;
+            int64_t in_idx = 0;
+            for (int64_t d = 0; d < ndim; d++) {
+                in_idx += indices[d] * meta.strides[d];
+            }
+            T val = input[in_idx];
+            acc = acc + (val < cuda_zero<T>() ? -val : val);
+        }
+        output[out_idx] = acc;
+    } else if (p == 2.0f) {
+        // L2 norm: sqrt(sum of x^2)
+        for (int64_t i = 0; i < dim_size; i++) {
+            indices[dim] = i;
+            int64_t in_idx = 0;
+            for (int64_t d = 0; d < ndim; d++) {
+                in_idx += indices[d] * meta.strides[d];
+            }
+            T val = input[in_idx];
+            acc = acc + val * val;
+        }
+        output[out_idx] = sqrt(acc);
+    } else {
+        // General Lp norm: (sum of |x|^p)^(1/p)
+        for (int64_t i = 0; i < dim_size; i++) {
+            indices[dim] = i;
+            int64_t in_idx = 0;
+            for (int64_t d = 0; d < ndim; d++) {
+                in_idx += indices[d] * meta.strides[d];
+            }
+            T val = input[in_idx];
+            acc = acc + pow(val < cuda_zero<T>() ? -val : val, T(p));
+        }
+        output[out_idx] = pow(acc, T(1.0f / p));
+    }
+}
+
 // Norm kernel implementation
 auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
     // INT64_MIN is the sentinel for "reduce all dimensions"
     if (dim != INT64_MIN && dim != -1) {
-        throw std::runtime_error("norm: only full reduction is currently supported for CUDA");
+        // Per-dimension norm reduction
+        auto shape_span = input.shape();
+        auto strides_span = input.strides();
+        int64_t ndim = static_cast<int64_t>(shape_span.size());
+
+        // Normalize dim
+        int64_t actual_dim = dim;
+        if (actual_dim < 0) actual_dim += ndim;
+        if (actual_dim < 0 || actual_dim >= ndim) {
+            throw std::runtime_error("norm: dim out of range");
+        }
+
+        int64_t dim_size = shape_span[actual_dim];
+
+        // Compute output shape
+        std::vector<int64_t> output_shape;
+        for (int64_t d = 0; d < ndim; d++) {
+            if (d == actual_dim) {
+                if (keepdim) output_shape.push_back(1);
+            } else {
+                output_shape.push_back(shape_span[d]);
+            }
+        }
+        if (output_shape.empty()) output_shape.push_back(1);
+
+        int64_t output_size = 1;
+        for (auto s : output_shape) output_size *= s;
+
+        Tensor output(output_shape, input.dtype(), input.device());
+
+        // Build DimMeta from input shape/strides
+        std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
+        std::vector<int64_t> strides_vec(strides_span.begin(), strides_span.end());
+        DimMeta meta = make_dim_meta(shape_vec, strides_vec);
+
+        constexpr int BLOCK = 256;
+        int blocks = (output_size + BLOCK - 1) / BLOCK;
+
+        if (input.dtype() == DType::Float32) {
+            norm_along_dim_kernel<float><<<blocks, BLOCK, 0, stream>>>(
+                input.data<float>(), output.data<float>(), meta,
+                ndim, actual_dim, output_size, dim_size, p);
+        } else if (input.dtype() == DType::Float64) {
+            norm_along_dim_kernel<double><<<blocks, BLOCK, 0, stream>>>(
+                input.data<double>(), output.data<double>(), meta,
+                ndim, actual_dim, output_size, dim_size, p);
+        } else {
+            throw std::runtime_error("norm: only Float32 and Float64 are supported");
+        }
+
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            throw std::runtime_error(std::string("CUDA error in norm_along_dim_kernel: ") + cudaGetErrorString(err));
+        }
+
+        return output;
     }
 
     auto shape = input.shape();
@@ -3239,7 +3364,9 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, cudaSt
                 }
             }
 
+#ifndef NDEBUG
             cudaStreamSynchronize(stream);
+#endif
             break;
         }
         case DType::Float64: {
@@ -3284,7 +3411,9 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, cudaSt
                 }
             }
 
+#ifndef NDEBUG
             cudaStreamSynchronize(stream);
+#endif
             break;
         }
         default:

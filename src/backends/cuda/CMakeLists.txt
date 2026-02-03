@@ -150,7 +150,7 @@ if(CUDNN_FOUND)
         message(STATUS "CUDA Backend: cuDNN Frontend requires cuDNN 9.0+, SDPA disabled")
     endif()
 else()
-    message(STATUS "CUDA Backend: cuDNN not found, using built-in convolution kernels")
+    message(WARNING "CUDA Backend: Building without cuDNN. Conv2d, pooling, softmax, batchnorm, and layernorm will use custom CUDA kernels with reduced performance. Install cuDNN for optimal performance.")
 endif()
 
 # CUDA architecture flags

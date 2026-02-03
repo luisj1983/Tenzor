@@ -4,6 +4,8 @@
 #include "tenzor/ops/creation.hpp"
 #ifdef TENZOR_HAS_CUDNN
 #include "tenzor/backend/cudnn_wrapper.hpp"
+#else
+#pragma message("WARNING: Building without cuDNN. Conv2d, pooling, softmax, batchnorm, and layernorm will use custom CUDA kernels with reduced performance.")
 #endif
 #include <cuda_runtime.h>
 #include <stdexcept>
