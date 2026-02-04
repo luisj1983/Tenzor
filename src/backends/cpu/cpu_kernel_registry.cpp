@@ -9,9 +9,11 @@
 #include "tenzor/backend/dispatch_table.hpp"
 #include "tenzor/backend/kernel_registry.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "tenzor/core/tensor.hpp"
 #include <cstdlib>
 #include <charconv>
 #include <climits>
+#include <tuple>
 
 namespace tenzor {
 
@@ -236,6 +238,102 @@ namespace cpu {
     // Vision operations
     auto interpolate_kernel(const Tensor& input, const std::vector<int64_t>& size,
                             const std::string& mode, bool align_corners) -> Tensor;
+    auto roi_align_forward_kernel(const Tensor& features, const Tensor& rois,
+                                   int64_t output_h, int64_t output_w,
+                                   float spatial_scale, int64_t sampling_ratio,
+                                   bool aligned) -> Tensor;
+    auto roi_align_backward_kernel(const Tensor& grad_output, const Tensor& rois,
+                                    int64_t batch_size, int64_t feat_height, int64_t feat_width,
+                                    float spatial_scale, int64_t sampling_ratio,
+                                    bool aligned) -> Tensor;
+    auto box_iou_kernel(const Tensor& boxes1, const Tensor& boxes2, int iou_type) -> Tensor;
+    auto unfold_kernel(const Tensor& input, int64_t kernel_size,
+                       int64_t stride, int64_t padding, int64_t dilation) -> Tensor;
+    auto fold_kernel(const Tensor& input, const std::vector<int64_t>& output_size,
+                     int64_t kernel_size, int64_t stride, int64_t padding,
+                     int64_t dilation) -> Tensor;
+
+    // Transform operations (additional)
+    auto expand_kernel(const Tensor& input, const std::vector<int64_t>& target_shape) -> Tensor;
+    auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats) -> Tensor;
+    auto stack_kernel(const std::vector<Tensor>& tensors, int64_t dim) -> Tensor;
+    auto split_kernel(const Tensor& input, int64_t split_size, int64_t dim) -> std::vector<Tensor>;
+    auto chunk_kernel(const Tensor& input, int64_t chunks, int64_t dim) -> std::vector<Tensor>;
+    auto tile_kernel(const Tensor& input, const std::vector<int64_t>& reps) -> Tensor;
+    auto to_memory_format_kernel(const Tensor& input, MemoryFormat format) -> Tensor;
+
+    // Indexing operations (additional)
+    auto nonzero_kernel(const Tensor& input) -> Tensor;
+    auto one_hot_kernel(const Tensor& indices, int64_t num_classes) -> Tensor;
+    auto take_kernel(const Tensor& input, const Tensor& indices) -> Tensor;
+    auto put_kernel(Tensor& input, const Tensor& indices, const Tensor& source,
+                    bool accumulate) -> Tensor;
+
+    // Advanced operations
+    auto topk_kernel(const Tensor& input, int64_t k, int64_t dim,
+                     bool largest, bool sorted) -> std::pair<Tensor, Tensor>;
+    auto sort_kernel(const Tensor& input, int64_t dim,
+                     bool descending) -> std::pair<Tensor, Tensor>;
+    auto cumsum_kernel(const Tensor& input, int64_t dim) -> Tensor;
+    auto cumprod_kernel(const Tensor& input, int64_t dim) -> Tensor;
+    auto unique_kernel(const Tensor& input, bool sorted_output,
+                       bool return_inverse, bool return_counts)
+        -> std::tuple<Tensor, Tensor, Tensor>;
+
+    // RMSNorm operations
+    auto fused_rms_norm_kernel(const Tensor& input, const Tensor& weight, float eps)
+        -> std::tuple<Tensor, Tensor>;
+    auto rms_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
+                                   const Tensor& weight, const Tensor& rrms)
+        -> std::tuple<Tensor, Tensor>;
+
+    // Fused Attention
+    auto fused_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
+                                float scale) -> Tensor;
+
+    // Fused Conv2d + Activation variants
+    auto fused_conv2d_sigmoid_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                                      int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
+    auto fused_conv2d_tanh_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                                   int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
+    auto fused_conv2d_swish_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                                    int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
+
+    // BatchNorm2d fused training
+    auto batchnorm2d_fused_training_kernel(const Tensor& input, Tensor& running_mean, Tensor& running_var,
+                                            const Tensor& gamma, const Tensor& beta,
+                                            float momentum, float epsilon) -> std::vector<Tensor>;
+
+    // Fused optimizer steps
+    auto fused_sgd_step_kernel(Tensor& param, const Tensor& grad, Tensor* momentum_buffer,
+                               float lr, float momentum, float weight_decay,
+                               float dampening, bool nesterov) -> void;
+    auto fused_adam_step_kernel(Tensor& param, const Tensor& grad,
+                               Tensor& exp_avg, Tensor& exp_avg_sq,
+                               double lr, double beta1, double beta2,
+                               double eps, double weight_decay,
+                               int64_t step, bool decoupled_weight_decay,
+                               Tensor* max_exp_avg_sq, bool amsgrad) -> void;
+    auto fused_adam_atan2_step_kernel(Tensor& param, const Tensor& grad,
+                                      Tensor& exp_avg, Tensor& exp_avg_sq,
+                                      Tensor* max_exp_avg_sq,
+                                      float lr, float beta1, float beta2,
+                                      float eps, float weight_decay,
+                                      int64_t step, bool amsgrad) -> void;
+    auto fused_rmsprop_step_kernel(Tensor& param, const Tensor& grad,
+                                    Tensor& square_avg, Tensor* grad_avg,
+                                    Tensor* momentum_buffer,
+                                    float lr, float alpha, float eps,
+                                    float weight_decay, float momentum,
+                                    bool centered) -> void;
+    auto fused_adadelta_step_kernel(Tensor& param, const Tensor& grad,
+                                     Tensor& square_avg, Tensor& acc_delta,
+                                     float rho, float eps, float lr,
+                                     float weight_decay) -> void;
+    auto fused_adagrad_step_kernel(Tensor& param, const Tensor& grad,
+                                    Tensor& sum_sq, float lr, float lr_decay,
+                                    float eps, float weight_decay,
+                                    int64_t step) -> void;
 } // namespace cpu
 
 /**
@@ -601,15 +699,32 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return cpu::layer_norm_kernel(inputs[0], normalized_shape, inputs[1], inputs[2], eps);
     });
 
+    table.register_kernel(OpId::LayerNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [grad_output, input, weight, mean, rstd]
+        auto normalized_shape = parse_int_list(attrs, "normalized_shape");
+        return cpu::layer_norm_backward_kernel(inputs[0], inputs[1], normalized_shape, inputs[3], inputs[4], inputs[2]);
+    });
+
     table.register_kernel(OpId::GroupNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t num_groups = parse_attr<int64_t>(attrs, "num_groups", 1);
         float eps = parse_attr<float>(attrs, "eps", 1e-5f);
         return std::vector<Tensor>{cpu::group_norm_kernel(inputs[0], num_groups, inputs[1], inputs[2], eps)};
     });
 
+    table.register_kernel(OpId::GroupNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [grad_output, input, weight, mean, rstd]
+        int64_t num_groups = parse_attr<int64_t>(attrs, "num_groups", 1);
+        return cpu::group_norm_backward_kernel(inputs[0], inputs[1], num_groups, inputs[3], inputs[4], inputs[2]);
+    });
+
     table.register_kernel(OpId::InstanceNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         float eps = parse_attr<float>(attrs, "eps", 1e-5f);
         return std::vector<Tensor>{cpu::instance_norm_kernel(inputs[0], inputs[1], inputs[2], eps)};
+    });
+
+    table.register_kernel(OpId::InstanceNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [grad_output, input, weight, mean, rstd]
+        return cpu::instance_norm_backward_kernel(inputs[0], inputs[1], inputs[3], inputs[4], inputs[2]);
     });
 
     // =========================================================================
@@ -798,10 +913,24 @@ void register_cpu_kernels(BackendDispatchTable& table) {
                                               inputs[3], inputs[4], inputs[5], inputs[6]);
     });
 
+    table.register_kernel(OpId::LSTMCellBackward, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        // inputs: [grad_hy, grad_cy, input, hx, cx, hy, cy, weight_ih, weight_hh]
+        return cpu::lstm_cell_backward_kernel(inputs[0], inputs[1],
+                                               inputs[2], inputs[3], inputs[4],
+                                               inputs[5], inputs[6],
+                                               inputs[7], inputs[8]);
+    });
+
     table.register_kernel(OpId::GRUCellForward, [](std::span<const Tensor> inputs, const OpAttributes&) {
         return std::vector<Tensor>{cpu::gru_cell_forward_kernel(inputs[0], inputs[1],
                                                                   inputs[2], inputs[3],
                                                                   inputs[4], inputs[5])};
+    });
+
+    table.register_kernel(OpId::GRUCellBackward, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        // inputs: [grad_hy, input, hx, weight_ih, weight_hh]
+        return cpu::gru_cell_backward_kernel(inputs[0], inputs[1], inputs[2],
+                                              inputs[3], inputs[4]);
     });
 
     // Full-sequence RNN operations (fused, SIMD-optimized)
@@ -894,6 +1023,332 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         std::string mode = parse_attr<std::string>(attrs, "mode", "bilinear");
         bool align_corners = parse_attr<bool>(attrs, "align_corners", false);
         return std::vector<Tensor>{cpu::interpolate_kernel(inputs[0], size, mode, align_corners)};
+    });
+
+    // =========================================================================
+    // ROI Align Operations
+    // =========================================================================
+    table.register_kernel(OpId::ROIAlignForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        int64_t output_h = parse_attr<int64_t>(attrs, "output_h", 7);
+        int64_t output_w = parse_attr<int64_t>(attrs, "output_w", 7);
+        float spatial_scale = parse_attr<float>(attrs, "spatial_scale", 1.0f / 16.0f);
+        int64_t sampling_ratio = parse_attr<int64_t>(attrs, "sampling_ratio", 0);
+        bool aligned = parse_attr<bool>(attrs, "aligned", true);
+        return {cpu::roi_align_forward_kernel(inputs[0], inputs[1], output_h, output_w,
+                                              spatial_scale, sampling_ratio, aligned)};
+    });
+
+    table.register_kernel(OpId::ROIAlignBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        int64_t batch_size = parse_attr<int64_t>(attrs, "batch_size", 1);
+        int64_t feat_height = parse_attr<int64_t>(attrs, "feat_height", 0);
+        int64_t feat_width = parse_attr<int64_t>(attrs, "feat_width", 0);
+        float spatial_scale = parse_attr<float>(attrs, "spatial_scale", 1.0f / 16.0f);
+        int64_t sampling_ratio = parse_attr<int64_t>(attrs, "sampling_ratio", 0);
+        bool aligned = parse_attr<bool>(attrs, "aligned", true);
+        return {cpu::roi_align_backward_kernel(inputs[0], inputs[1], batch_size,
+                                                feat_height, feat_width, spatial_scale,
+                                                sampling_ratio, aligned)};
+    });
+
+    table.register_single_output_kernel(OpId::BoxIoU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int iou_type = static_cast<int>(parse_attr<int64_t>(attrs, "iou_type", 0));
+        return cpu::box_iou_kernel(inputs[0], inputs[1], iou_type);
+    });
+
+    // =========================================================================
+    // Unfold / Fold Operations
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Unfold, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t kernel_size = parse_attr<int64_t>(attrs, "kernel_size", 3);
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        return cpu::unfold_kernel(inputs[0], kernel_size, stride, padding, dilation);
+    });
+
+    table.register_single_output_kernel(OpId::Fold, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto output_size = parse_int_list(attrs, "output_size");
+        int64_t kernel_size = parse_attr<int64_t>(attrs, "kernel_size", 3);
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        return cpu::fold_kernel(inputs[0], output_size, kernel_size, stride, padding, dilation);
+    });
+
+    // =========================================================================
+    // Additional Transform Operations
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Expand, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto shape = parse_int_list(attrs, "shape");
+        return cpu::expand_kernel(inputs[0], shape);
+    });
+
+    table.register_single_output_kernel(OpId::Repeat, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto repeats = parse_int_list(attrs, "repeats");
+        return cpu::repeat_kernel(inputs[0], repeats);
+    });
+
+    table.register_single_output_kernel(OpId::Stack, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+        std::vector<Tensor> tensors(inputs.begin(), inputs.end());
+        return cpu::stack_kernel(tensors, dim);
+    });
+
+    table.register_kernel(OpId::Split, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t split_size = parse_attr<int64_t>(attrs, "split_size", 1);
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+        return cpu::split_kernel(inputs[0], split_size, dim);
+    });
+
+    table.register_kernel(OpId::Chunk, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t chunks = parse_attr<int64_t>(attrs, "chunks", 1);
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+        return cpu::chunk_kernel(inputs[0], chunks, dim);
+    });
+
+    table.register_single_output_kernel(OpId::Tile, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto reps = parse_int_list(attrs, "reps");
+        return cpu::tile_kernel(inputs[0], reps);
+    });
+
+    table.register_single_output_kernel(OpId::ToMemoryFormat, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int format_int = parse_attr<int>(attrs, "memory_format", 0);
+        MemoryFormat format = static_cast<MemoryFormat>(format_int);
+        return cpu::to_memory_format_kernel(inputs[0], format);
+    });
+
+    // =========================================================================
+    // Additional Indexing Operations
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Nonzero, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        return cpu::nonzero_kernel(inputs[0]);
+    });
+
+    table.register_single_output_kernel(OpId::OneHot, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t num_classes = parse_attr<int64_t>(attrs, "num_classes", 0);
+        return cpu::one_hot_kernel(inputs[0], num_classes);
+    });
+
+    table.register_single_output_kernel(OpId::Take, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        return cpu::take_kernel(inputs[0], inputs[1]);
+    });
+
+    table.register_single_output_kernel(OpId::Put, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        bool accumulate = parse_attr<bool>(attrs, "accumulate", false);
+        Tensor input = inputs[0];
+        return cpu::put_kernel(input, inputs[1], inputs[2], accumulate);
+    });
+
+    // =========================================================================
+    // Advanced Operations (TopK, Sort, CumSum, CumProd, Unique)
+    // =========================================================================
+    table.register_kernel(OpId::TopK, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t k = parse_attr<int64_t>(attrs, "k", 1);
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+        bool largest = parse_attr<bool>(attrs, "largest", true);
+        bool sorted = parse_attr<bool>(attrs, "sorted", true);
+        auto [values, indices] = cpu::topk_kernel(inputs[0], k, dim, largest, sorted);
+        return std::vector<Tensor>{values, indices};
+    });
+
+    table.register_kernel(OpId::Sort, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+        bool descending = parse_attr<bool>(attrs, "descending", false);
+        auto [values, indices] = cpu::sort_kernel(inputs[0], dim, descending);
+        return std::vector<Tensor>{values, indices};
+    });
+
+    table.register_single_output_kernel(OpId::CumSum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+        return cpu::cumsum_kernel(inputs[0], dim);
+    });
+
+    table.register_single_output_kernel(OpId::CumProd, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+        return cpu::cumprod_kernel(inputs[0], dim);
+    });
+
+    table.register_kernel(OpId::Unique, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        bool sorted = parse_attr<bool>(attrs, "sorted", true);
+        bool return_inverse = parse_attr<bool>(attrs, "return_inverse", false);
+        bool return_counts = parse_attr<bool>(attrs, "return_counts", false);
+        auto [unique_vals, inverse, counts] = cpu::unique_kernel(inputs[0], sorted, return_inverse, return_counts);
+        return std::vector<Tensor>{unique_vals, inverse, counts};
+    });
+
+    // =========================================================================
+    // RMSNorm Operations
+    // =========================================================================
+    table.register_kernel(OpId::FusedRMSNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float eps = parse_attr<float>(attrs, "eps", 1e-5f);
+        auto [output, rrms] = cpu::fused_rms_norm_kernel(inputs[0], inputs[1], eps);
+        return std::vector<Tensor>{output, rrms};
+    });
+
+    table.register_kernel(OpId::RMSNormBackward, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        // inputs: [grad_output, input, weight, rrms]
+        auto [grad_input, grad_weight] = cpu::rms_norm_backward_kernel(inputs[0], inputs[1], inputs[2], inputs[3]);
+        return std::vector<Tensor>{grad_input, grad_weight};
+    });
+
+    // =========================================================================
+    // Fused Attention
+    // =========================================================================
+    table.register_kernel(OpId::FusedAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float scale = parse_attr<float>(attrs, "scale", 1.0f);
+        return std::vector<Tensor>{cpu::fused_attention_kernel(inputs[0], inputs[1], inputs[2], scale)};
+    });
+
+    // =========================================================================
+    // Fused Conv2d + Activation Variants
+    // =========================================================================
+    table.register_single_output_kernel(OpId::FusedConv2dSigmoid, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        return cpu::fused_conv2d_sigmoid_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups);
+    });
+
+    table.register_single_output_kernel(OpId::FusedConv2dTanh, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        return cpu::fused_conv2d_tanh_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups);
+    });
+
+    table.register_single_output_kernel(OpId::FusedConv2dSwish, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        return cpu::fused_conv2d_swish_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups);
+    });
+
+    // =========================================================================
+    // BatchNorm2d Fused Training
+    // =========================================================================
+    table.register_kernel(OpId::BatchNorm2dFusedTraining, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [input, running_mean, running_var, gamma, beta]
+        float epsilon = parse_attr<float>(attrs, "epsilon", 1e-5f);
+        float momentum = parse_attr<float>(attrs, "momentum", 0.1f);
+        Tensor running_mean = inputs[1];
+        Tensor running_var = inputs[2];
+        return cpu::batchnorm2d_fused_training_kernel(inputs[0], running_mean, running_var,
+                                                       inputs[3], inputs[4], momentum, epsilon);
+    });
+
+    // =========================================================================
+    // Fused Optimizer Steps
+    // =========================================================================
+    table.register_kernel(OpId::FusedSGDStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float lr = parse_attr<float>(attrs, "lr", 0.01f);
+        float momentum = parse_attr<float>(attrs, "momentum", 0.0f);
+        float weight_decay = parse_attr<float>(attrs, "weight_decay", 0.0f);
+        float dampening = parse_attr<float>(attrs, "dampening", 0.0f);
+        bool nesterov = parse_attr<bool>(attrs, "nesterov", false);
+
+        Tensor& param = const_cast<Tensor&>(inputs[0]);
+        Tensor* momentum_buffer = (inputs.size() > 2 && momentum > 0.0f)
+            ? &const_cast<Tensor&>(inputs[2]) : nullptr;
+
+        cpu::fused_sgd_step_kernel(param, inputs[1], momentum_buffer,
+            lr, momentum, weight_decay, dampening, nesterov);
+        return std::vector<Tensor>{param};
+    });
+
+    table.register_kernel(OpId::FusedAdamStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        double lr = parse_attr<double>(attrs, "lr", 0.001);
+        double beta1 = parse_attr<double>(attrs, "beta1", 0.9);
+        double beta2 = parse_attr<double>(attrs, "beta2", 0.999);
+        double eps = parse_attr<double>(attrs, "eps", 1e-8);
+        double weight_decay = parse_attr<double>(attrs, "weight_decay", 0.0);
+        int64_t step = parse_attr<int64_t>(attrs, "step", 1);
+        bool decoupled = parse_attr<bool>(attrs, "decoupled", false);
+        bool amsgrad = parse_attr<bool>(attrs, "amsgrad", false);
+
+        Tensor& param = const_cast<Tensor&>(inputs[0]);
+        Tensor& exp_avg = const_cast<Tensor&>(inputs[2]);
+        Tensor& exp_avg_sq = const_cast<Tensor&>(inputs[3]);
+        Tensor* max_exp_avg_sq = (amsgrad && inputs.size() > 4)
+            ? &const_cast<Tensor&>(inputs[4]) : nullptr;
+
+        cpu::fused_adam_step_kernel(param, inputs[1], exp_avg, exp_avg_sq,
+            lr, beta1, beta2, eps, weight_decay, step, decoupled,
+            max_exp_avg_sq, amsgrad);
+        return std::vector<Tensor>{param};
+    });
+
+    table.register_kernel(OpId::FusedAdamAtan2Step, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float lr = parse_attr<float>(attrs, "lr", 0.001f);
+        float beta1 = parse_attr<float>(attrs, "beta1", 0.9f);
+        float beta2 = parse_attr<float>(attrs, "beta2", 0.999f);
+        float eps = parse_attr<float>(attrs, "eps", 1e-8f);
+        float weight_decay = parse_attr<float>(attrs, "weight_decay", 0.0f);
+        int64_t step = parse_attr<int64_t>(attrs, "step", 1);
+        bool amsgrad = parse_attr<bool>(attrs, "amsgrad", false);
+
+        Tensor& param = const_cast<Tensor&>(inputs[0]);
+        Tensor& exp_avg = const_cast<Tensor&>(inputs[2]);
+        Tensor& exp_avg_sq = const_cast<Tensor&>(inputs[3]);
+        Tensor* max_exp_avg_sq = (amsgrad && inputs.size() > 4)
+            ? &const_cast<Tensor&>(inputs[4]) : nullptr;
+
+        cpu::fused_adam_atan2_step_kernel(param, inputs[1], exp_avg, exp_avg_sq, max_exp_avg_sq,
+            lr, beta1, beta2, eps, weight_decay, step, amsgrad);
+        return std::vector<Tensor>{param};
+    });
+
+    table.register_kernel(OpId::FusedRMSPropStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float lr = parse_attr<float>(attrs, "lr", 0.01f);
+        float alpha = parse_attr<float>(attrs, "alpha", 0.99f);
+        float eps = parse_attr<float>(attrs, "eps", 1e-8f);
+        float weight_decay = parse_attr<float>(attrs, "weight_decay", 0.0f);
+        float momentum = parse_attr<float>(attrs, "momentum", 0.0f);
+        bool centered = parse_attr<bool>(attrs, "centered", false);
+
+        Tensor& param = const_cast<Tensor&>(inputs[0]);
+        Tensor& square_avg = const_cast<Tensor&>(inputs[2]);
+        Tensor* grad_avg = (centered && inputs.size() > 3) ? &const_cast<Tensor&>(inputs[3]) : nullptr;
+        Tensor* momentum_buffer = (momentum > 0.0f && inputs.size() > 4) ? &const_cast<Tensor&>(inputs[4]) : nullptr;
+
+        cpu::fused_rmsprop_step_kernel(param, inputs[1], square_avg, grad_avg, momentum_buffer,
+            lr, alpha, eps, weight_decay, momentum, centered);
+        return std::vector<Tensor>{param};
+    });
+
+    table.register_kernel(OpId::FusedAdadeltaStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float rho = parse_attr<float>(attrs, "rho", 0.9f);
+        float eps = parse_attr<float>(attrs, "eps", 1e-6f);
+        float lr = parse_attr<float>(attrs, "lr", 1.0f);
+        float weight_decay = parse_attr<float>(attrs, "weight_decay", 0.0f);
+
+        Tensor& param = const_cast<Tensor&>(inputs[0]);
+        Tensor& square_avg = const_cast<Tensor&>(inputs[2]);
+        Tensor& acc_delta = const_cast<Tensor&>(inputs[3]);
+
+        cpu::fused_adadelta_step_kernel(param, inputs[1], square_avg, acc_delta,
+            rho, eps, lr, weight_decay);
+        return std::vector<Tensor>{param};
+    });
+
+    table.register_kernel(OpId::FusedAdagradStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float lr = parse_attr<float>(attrs, "lr", 0.01f);
+        float lr_decay = parse_attr<float>(attrs, "lr_decay", 0.0f);
+        float eps = parse_attr<float>(attrs, "eps", 1e-10f);
+        float weight_decay = parse_attr<float>(attrs, "weight_decay", 0.0f);
+        int64_t step = parse_attr<int64_t>(attrs, "step", 1);
+
+        Tensor& param = const_cast<Tensor&>(inputs[0]);
+        Tensor& sum_sq = const_cast<Tensor&>(inputs[2]);
+
+        cpu::fused_adagrad_step_kernel(param, inputs[1], sum_sq,
+            lr, lr_decay, eps, weight_decay, step);
+        return std::vector<Tensor>{param};
     });
 
     // Note: Creation operations (Zeros, Ones, etc.) are handled differently

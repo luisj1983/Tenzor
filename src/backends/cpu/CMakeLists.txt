@@ -34,6 +34,7 @@ set(CPU_BACKEND_SOURCES
     kernels/nn_kernels.cpp
     kernels/rnn_kernels.cpp
     kernels/vision.cpp
+    kernels/advanced.cpp
 )
 
 # Create CPU backend shared library

@@ -920,5 +920,191 @@ auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y) -> 
     return output;
 }
 
+auto nonzero_kernel(const Tensor& input) -> Tensor {
+    const int64_t numel = input.numel();
+    const int64_t ndim = input.ndim();
+
+    // First pass: count nonzero elements
+    std::vector<int64_t> nz_indices;
+    nz_indices.reserve(numel / 4);  // Heuristic
+
+    if (input.dtype() == DType::Float32) {
+        const float* data = input.data<float>();
+        for (int64_t i = 0; i < numel; ++i) {
+            if (data[i] != 0.0f) nz_indices.push_back(i);
+        }
+    } else if (input.dtype() == DType::Float64) {
+        const double* data = input.data<double>();
+        for (int64_t i = 0; i < numel; ++i) {
+            if (data[i] != 0.0) nz_indices.push_back(i);
+        }
+    } else if (input.dtype() == DType::Int32) {
+        const int32_t* data = input.data<int32_t>();
+        for (int64_t i = 0; i < numel; ++i) {
+            if (data[i] != 0) nz_indices.push_back(i);
+        }
+    } else if (input.dtype() == DType::Int64) {
+        const int64_t* data = input.data<int64_t>();
+        for (int64_t i = 0; i < numel; ++i) {
+            if (data[i] != 0) nz_indices.push_back(i);
+        }
+    } else if (input.dtype() == DType::Bool) {
+        const bool* data = input.data<bool>();
+        for (int64_t i = 0; i < numel; ++i) {
+            if (data[i]) nz_indices.push_back(i);
+        }
+    } else {
+        throw std::runtime_error("nonzero: unsupported dtype");
+    }
+
+    int64_t nnz = static_cast<int64_t>(nz_indices.size());
+
+    // Output shape: (nnz, ndim)
+    Tensor output({nnz, ndim}, DType::Int64, input.device());
+    int64_t* out_data = output.data<int64_t>();
+
+    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
+    auto strides = calculate_strides(shape_vec);
+
+    // Convert linear indices to multi-dimensional indices
+    for (int64_t i = 0; i < nnz; ++i) {
+        int64_t linear = nz_indices[i];
+        for (int64_t d = 0; d < ndim; ++d) {
+            out_data[i * ndim + d] = linear / strides[d];
+            linear %= strides[d];
+        }
+    }
+
+    return output;
+}
+
+auto one_hot_kernel(const Tensor& indices, int64_t num_classes) -> Tensor {
+    if (indices.dtype() != DType::Int64 && indices.dtype() != DType::Int32) {
+        throw std::runtime_error("one_hot: indices must be integer type");
+    }
+
+    const int64_t numel = indices.numel();
+
+    // If num_classes not specified, infer from max value
+    if (num_classes <= 0) {
+        if (indices.dtype() == DType::Int64) {
+            const int64_t* data = indices.data<int64_t>();
+            for (int64_t i = 0; i < numel; ++i) {
+                num_classes = std::max(num_classes, data[i] + 1);
+            }
+        } else {
+            const int32_t* data = indices.data<int32_t>();
+            for (int64_t i = 0; i < numel; ++i) {
+                num_classes = std::max(num_classes, static_cast<int64_t>(data[i]) + 1);
+            }
+        }
+    }
+
+    // Output shape: indices_shape + [num_classes]
+    auto idx_shape = indices.shape();
+    std::vector<int64_t> out_shape(idx_shape.begin(), idx_shape.end());
+    out_shape.push_back(num_classes);
+
+    // Create zero-filled output (Float32)
+    Tensor output(out_shape, DType::Float32, indices.device());
+    float* out_data = output.data<float>();
+    std::memset(out_data, 0, output.numel() * sizeof(float));
+
+    // Set the appropriate positions to 1
+    if (indices.dtype() == DType::Int64) {
+        const int64_t* idx_data = indices.data<int64_t>();
+        for (int64_t i = 0; i < numel; ++i) {
+            int64_t cls = idx_data[i];
+            if (cls >= 0 && cls < num_classes) {
+                out_data[i * num_classes + cls] = 1.0f;
+            }
+        }
+    } else {
+        const int32_t* idx_data = indices.data<int32_t>();
+        for (int64_t i = 0; i < numel; ++i) {
+            int64_t cls = static_cast<int64_t>(idx_data[i]);
+            if (cls >= 0 && cls < num_classes) {
+                out_data[i * num_classes + cls] = 1.0f;
+            }
+        }
+    }
+
+    return output;
+}
+
+auto take_kernel(const Tensor& input, const Tensor& indices) -> Tensor {
+    // Take elements from flattened input using indices
+    if (indices.dtype() != DType::Int64) {
+        throw std::runtime_error("take: indices must have dtype Int64");
+    }
+
+    const int64_t num_indices = indices.numel();
+    const int64_t input_numel = input.numel();
+    const int64_t* idx_data = indices.data<int64_t>();
+
+    // Output shape matches indices shape
+    std::vector<int64_t> out_shape(indices.shape().begin(), indices.shape().end());
+    Tensor output(out_shape, input.dtype(), input.device());
+
+    const size_t elem_size = dtype_size(input.dtype());
+    Tensor cont = input.is_contiguous() ? input : input.contiguous();
+    const auto* src = static_cast<const uint8_t*>(cont.data<uint8_t>());
+    auto* dst = output.data<uint8_t>();
+
+    #pragma omp parallel for if(num_indices > 65536)
+    for (int64_t i = 0; i < num_indices; ++i) {
+        int64_t idx = idx_data[i];
+        if (idx < 0) idx += input_numel;
+        if (idx < 0 || idx >= input_numel) {
+            throw std::out_of_range("take: index out of range");
+        }
+        std::memcpy(dst + i * elem_size, src + idx * elem_size, elem_size);
+    }
+
+    return output;
+}
+
+auto put_kernel(Tensor& input, const Tensor& indices, const Tensor& source,
+                bool accumulate) -> Tensor {
+    if (indices.dtype() != DType::Int64) {
+        throw std::runtime_error("put: indices must have dtype Int64");
+    }
+
+    const int64_t num_indices = indices.numel();
+    const int64_t input_numel = input.numel();
+    const int64_t* idx_data = indices.data<int64_t>();
+
+    Tensor result = input.is_contiguous() ? input : input.contiguous();
+    const size_t elem_size = dtype_size(result.dtype());
+    auto* dst = result.data<uint8_t>();
+    const auto* src_data = static_cast<const uint8_t*>(source.data<uint8_t>());
+
+    if (accumulate && result.dtype() == DType::Float32) {
+        float* dst_f = result.data<float>();
+        const float* src_f = source.data<float>();
+        for (int64_t i = 0; i < num_indices; ++i) {
+            int64_t idx = idx_data[i];
+            if (idx < 0) idx += input_numel;
+            dst_f[idx] += src_f[i];
+        }
+    } else if (accumulate && result.dtype() == DType::Float64) {
+        double* dst_d = result.data<double>();
+        const double* src_d = source.data<double>();
+        for (int64_t i = 0; i < num_indices; ++i) {
+            int64_t idx = idx_data[i];
+            if (idx < 0) idx += input_numel;
+            dst_d[idx] += src_d[i];
+        }
+    } else {
+        for (int64_t i = 0; i < num_indices; ++i) {
+            int64_t idx = idx_data[i];
+            if (idx < 0) idx += input_numel;
+            std::memcpy(dst + idx * elem_size, src_data + i * elem_size, elem_size);
+        }
+    }
+
+    return result;
+}
+
 } // namespace cpu
 } // namespace tenzor

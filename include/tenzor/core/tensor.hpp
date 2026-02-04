@@ -57,6 +57,8 @@ namespace cpu {
     auto cat_kernel(const std::vector<tenzor::Tensor>& tensors, int64_t dim) -> tenzor::Tensor;
     auto flatten_kernel(const tenzor::Tensor& input, int64_t start_dim, int64_t end_dim) -> tenzor::Tensor;
     auto slice_kernel(const tenzor::Tensor& input, int64_t dim, int64_t start, int64_t end, int64_t step) -> tenzor::Tensor;
+    auto expand_kernel(const tenzor::Tensor& input, const std::vector<int64_t>& target_shape) -> tenzor::Tensor;
+    auto to_memory_format_kernel(const tenzor::Tensor& input, tenzor::MemoryFormat format) -> tenzor::Tensor;
 }
 namespace cuda {
     class CUDAKernelAccess;  // Forward declaration for friend access
@@ -889,6 +891,8 @@ private:
     friend auto cpu::cat_kernel(const std::vector<Tensor>& tensors, int64_t dim) -> Tensor;
     friend auto cpu::flatten_kernel(const Tensor& input, int64_t start_dim, int64_t end_dim) -> Tensor;
     friend auto cpu::slice_kernel(const Tensor& input, int64_t dim, int64_t start, int64_t end, int64_t step) -> Tensor;
+    friend auto cpu::expand_kernel(const Tensor& input, const std::vector<int64_t>& target_shape) -> Tensor;
+    friend auto cpu::to_memory_format_kernel(const Tensor& input, MemoryFormat format) -> Tensor;
     friend auto cuda::clone_kernel(const Tensor& input) -> Tensor;
     friend auto cuda::reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape) -> Tensor;
     friend auto cuda::transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1) -> Tensor;

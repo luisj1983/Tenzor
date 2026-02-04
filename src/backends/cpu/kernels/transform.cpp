@@ -1,6 +1,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/shape.hpp"
+#include <algorithm>
 #include <cstring>
 #include <iostream>
 #include <omp.h>
@@ -443,6 +444,228 @@ auto slice_kernel(const Tensor& input, int64_t dim, int64_t start, int64_t end, 
     }
 
     return output;
+}
+
+auto expand_kernel(const Tensor& input, const std::vector<int64_t>& target_shape) -> Tensor {
+    // Expand creates a view with stride=0 for broadcast dimensions
+    const auto& in_shape = input.shape();
+    const auto& in_strides = input.strides();
+    int64_t ndim_out = static_cast<int64_t>(target_shape.size());
+    int64_t ndim_in = input.ndim();
+    int64_t dim_diff = ndim_out - ndim_in;
+
+    std::vector<int64_t> new_strides(ndim_out, 0);
+    for (int64_t i = ndim_out - 1; i >= 0; --i) {
+        int64_t in_idx = i - dim_diff;
+        if (in_idx >= 0) {
+            if (in_shape[in_idx] == target_shape[i]) {
+                new_strides[i] = in_strides[in_idx];
+            } else if (in_shape[in_idx] == 1) {
+                new_strides[i] = 0;  // Broadcast
+            } else {
+                throw std::runtime_error("expand: incompatible shapes");
+            }
+        }
+        // else: new leading dimension, stride stays 0
+    }
+
+    Tensor result;
+    result.impl_ = std::make_shared<TensorImpl>(*input.impl_);
+    result.impl_->shape = target_shape;
+    result.impl_->strides = new_strides;
+    return result;
+}
+
+auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats) -> Tensor {
+    const auto& in_shape = input.shape();
+    int64_t ndim = static_cast<int64_t>(repeats.size());
+
+    // Compute output shape
+    std::vector<int64_t> out_shape(ndim);
+    int64_t dim_diff = ndim - input.ndim();
+    for (int64_t i = 0; i < ndim; ++i) {
+        int64_t in_idx = i - dim_diff;
+        int64_t in_dim = (in_idx >= 0) ? in_shape[in_idx] : 1;
+        out_shape[i] = in_dim * repeats[i];
+    }
+
+    Tensor output(out_shape, input.dtype(), input.device());
+    const size_t elem_size = dtype_size(input.dtype());
+    const auto* src = input.data<uint8_t>();
+    auto* dst = output.data<uint8_t>();
+
+    // Simple implementation: iterate over output indices, map back to input
+    int64_t total = output.numel();
+    auto out_strides = compute_strides(out_shape);
+    std::vector<int64_t> effective_in_shape(ndim);
+    for (int64_t i = 0; i < ndim; ++i) {
+        int64_t in_idx = i - dim_diff;
+        effective_in_shape[i] = (in_idx >= 0) ? in_shape[in_idx] : 1;
+    }
+    auto in_strides_full = compute_strides(effective_in_shape);
+
+    #pragma omp parallel for if(total > 65536)
+    for (int64_t idx = 0; idx < total; ++idx) {
+        int64_t src_linear = 0;
+        int64_t remaining = idx;
+        for (int64_t d = 0; d < ndim; ++d) {
+            int64_t coord = remaining / out_strides[d];
+            remaining %= out_strides[d];
+            int64_t in_coord = coord % effective_in_shape[d];
+            src_linear += in_coord * in_strides_full[d];
+        }
+        std::memcpy(dst + idx * elem_size, src + src_linear * elem_size, elem_size);
+    }
+
+    return output;
+}
+
+auto stack_kernel(const std::vector<Tensor>& tensors, int64_t dim) -> Tensor {
+    if (tensors.empty()) {
+        throw std::runtime_error("stack: expected non-empty list of tensors");
+    }
+
+    const auto& first_shape = tensors[0].shape();
+    int64_t ndim = tensors[0].ndim();
+
+    if (dim < 0) dim += ndim + 1;
+    if (dim < 0 || dim > ndim) {
+        throw std::out_of_range("stack: dimension out of range");
+    }
+
+    // Validate all tensors have same shape
+    for (size_t i = 1; i < tensors.size(); ++i) {
+        const auto& s = tensors[i].shape();
+        if (s.size() != first_shape.size() || !std::equal(s.begin(), s.end(), first_shape.begin())) {
+            throw std::runtime_error("stack: all tensors must have same shape");
+        }
+    }
+
+    // Output shape: insert new dim of size=num_tensors at position dim
+    std::vector<int64_t> out_shape;
+    out_shape.reserve(ndim + 1);
+    for (int64_t d = 0; d < dim; ++d) out_shape.push_back(first_shape[d]);
+    out_shape.push_back(static_cast<int64_t>(tensors.size()));
+    for (int64_t d = dim; d < ndim; ++d) out_shape.push_back(first_shape[d]);
+
+    Tensor output(out_shape, tensors[0].dtype(), tensors[0].device());
+    const size_t elem_size = dtype_size(tensors[0].dtype());
+    auto* dst = output.data<uint8_t>();
+
+    // Each tensor contributes a slice along the new dim
+    int64_t outer_size = 1;
+    for (int64_t d = 0; d < dim; ++d) outer_size *= first_shape[d];
+    int64_t inner_size = 1;
+    for (int64_t d = dim; d < ndim; ++d) inner_size *= first_shape[d];
+
+    int64_t num_tensors = static_cast<int64_t>(tensors.size());
+
+    for (int64_t t = 0; t < num_tensors; ++t) {
+        Tensor cont = tensors[t].is_contiguous() ? tensors[t] : contiguous_kernel(tensors[t]);
+        const auto* src = cont.data<uint8_t>();
+        for (int64_t o = 0; o < outer_size; ++o) {
+            int64_t dst_offset = (o * num_tensors + t) * inner_size * elem_size;
+            int64_t src_offset = o * inner_size * elem_size;
+            std::memcpy(dst + dst_offset, src + src_offset, inner_size * elem_size);
+        }
+    }
+
+    return output;
+}
+
+auto split_kernel(const Tensor& input, int64_t split_size, int64_t dim) -> std::vector<Tensor> {
+    const auto& shape = input.shape();
+    int64_t ndim = input.ndim();
+    if (dim < 0) dim += ndim;
+
+    int64_t dim_size = shape[dim];
+    std::vector<Tensor> result;
+
+    const size_t elem_size = dtype_size(input.dtype());
+    Tensor cont = input.is_contiguous() ? input : contiguous_kernel(input);
+    const auto* src = cont.data<uint8_t>();
+
+    int64_t outer_size = 1;
+    for (int64_t d = 0; d < dim; ++d) outer_size *= shape[d];
+    int64_t inner_size = 1;
+    for (int64_t d = dim + 1; d < ndim; ++d) inner_size *= shape[d];
+
+    for (int64_t offset = 0; offset < dim_size; offset += split_size) {
+        int64_t chunk_size = std::min(split_size, dim_size - offset);
+        std::vector<int64_t> out_shape(shape.begin(), shape.end());
+        out_shape[dim] = chunk_size;
+
+        Tensor chunk(out_shape, input.dtype(), input.device());
+        auto* dst = chunk.data<uint8_t>();
+
+        for (int64_t o = 0; o < outer_size; ++o) {
+            int64_t src_off = (o * dim_size + offset) * inner_size * elem_size;
+            int64_t dst_off = o * chunk_size * inner_size * elem_size;
+            std::memcpy(dst + dst_off, src + src_off, chunk_size * inner_size * elem_size);
+        }
+
+        result.push_back(std::move(chunk));
+    }
+
+    return result;
+}
+
+auto chunk_kernel(const Tensor& input, int64_t chunks, int64_t dim) -> std::vector<Tensor> {
+    const auto& shape = input.shape();
+    if (dim < 0) dim += input.ndim();
+    int64_t dim_size = shape[dim];
+    int64_t split_size = (dim_size + chunks - 1) / chunks;
+    return split_kernel(input, split_size, dim);
+}
+
+auto tile_kernel(const Tensor& input, const std::vector<int64_t>& reps) -> Tensor {
+    return repeat_kernel(input, reps);
+}
+
+auto to_memory_format_kernel(const Tensor& input, MemoryFormat format) -> Tensor {
+    if (format == MemoryFormat::Preserve || format == MemoryFormat::Contiguous) {
+        return contiguous_kernel(input);
+    }
+
+    const auto& shape = input.shape();
+    const int64_t ndim = input.ndim();
+
+    if (format == MemoryFormat::ChannelsLast && ndim == 4) {
+        // NCHW -> NHWC: permute dims to (0, 2, 3, 1) then store contiguously
+        // with strides set for NHWC layout
+        int64_t N = shape[0], C = shape[1], H = shape[2], W = shape[3];
+        std::vector<int64_t> out_shape = {N, C, H, W};
+        // NHWC strides: stride order N>H>W>C
+        std::vector<int64_t> nhwc_strides = {C * H * W, 1, W * C, C};
+
+        Tensor output(out_shape, input.dtype(), input.device());
+        const size_t elem_size = dtype_size(input.dtype());
+
+        Tensor cont = input.is_contiguous() ? input : contiguous_kernel(input);
+        const auto* src = static_cast<const uint8_t*>(cont.impl_->storage->data());
+        auto* dst = static_cast<uint8_t*>(output.impl_->storage->data());
+
+        // Reorder data from NCHW to NHWC
+        #pragma omp parallel for collapse(2) if(N * C * H * W > 65536)
+        for (int64_t n = 0; n < N; ++n) {
+            for (int64_t c = 0; c < C; ++c) {
+                for (int64_t h = 0; h < H; ++h) {
+                    for (int64_t w = 0; w < W; ++w) {
+                        int64_t src_idx = ((n * C + c) * H + h) * W + w;
+                        int64_t dst_idx = ((n * H + h) * W + w) * C + c;
+                        std::memcpy(dst + dst_idx * elem_size,
+                                    src + src_idx * elem_size, elem_size);
+                    }
+                }
+            }
+        }
+
+        output.impl_->strides = nhwc_strides;
+        return output;
+    }
+
+    // Fallback: just make contiguous
+    return contiguous_kernel(input);
 }
 
 } // namespace cpu
