@@ -648,6 +648,75 @@ static void matmul_blocked_float16(
     }
 }
 
+// High-performance BFloat16 matrix multiplication
+// Uses scalar conversion BF16→FP32, optimized GEMM, FP32→BF16 conversion back
+static void matmul_blocked_bfloat16(
+    const BFloat16* A, const BFloat16* B, BFloat16* C,
+    int64_t M, int64_t N, int64_t K
+) {
+    // Strategy: Convert blocks to FP32, use optimized GEMM, convert back
+    // BFloat16 has no F16C-equivalent SIMD, so conversion is scalar or AVX512-BF16
+
+    // Block sizes for FP32 workspace (fit in L2 cache)
+    constexpr int64_t TILE_M = 128;
+    constexpr int64_t TILE_N = 128;
+    constexpr int64_t TILE_K = 256;
+
+    // Allocate FP32 workspace
+    alignas(64) float A_fp32[TILE_M * TILE_K];
+    alignas(64) float B_fp32[TILE_K * TILE_N];
+    alignas(64) float C_fp32[TILE_M * TILE_N];
+
+    // Zero-initialize output
+    std::fill_n(C, M * N, BFloat16(0.0f));
+
+    #pragma omp parallel for collapse(2) if(M * N > 4096) private(A_fp32, B_fp32, C_fp32)
+    for (int64_t i0 = 0; i0 < M; i0 += TILE_M) {
+        for (int64_t j0 = 0; j0 < N; j0 += TILE_N) {
+            int64_t tile_m = std::min(TILE_M, M - i0);
+            int64_t tile_n = std::min(TILE_N, N - j0);
+
+            // Zero C tile accumulator
+            std::fill_n(C_fp32, tile_m * tile_n, 0.0f);
+
+            for (int64_t k0 = 0; k0 < K; k0 += TILE_K) {
+                int64_t tile_k = std::min(TILE_K, K - k0);
+
+                // Convert A tile: BFloat16 → Float32
+                // BFloat16 conversion is a simple left-shift of bits by 16
+                for (int64_t i = 0; i < tile_m; ++i) {
+                    const BFloat16* a_row = A + (i0 + i) * K + k0;
+                    float* a32_row = A_fp32 + i * tile_k;
+                    for (int64_t k = 0; k < tile_k; ++k) {
+                        a32_row[k] = static_cast<float>(a_row[k]);
+                    }
+                }
+
+                // Convert B tile: BFloat16 → Float32
+                for (int64_t k = 0; k < tile_k; ++k) {
+                    const BFloat16* b_row = B + (k0 + k) * N + j0;
+                    float* b32_row = B_fp32 + k * tile_n;
+                    for (int64_t j = 0; j < tile_n; ++j) {
+                        b32_row[j] = static_cast<float>(b_row[j]);
+                    }
+                }
+
+                // Compute FP32 GEMM (accumulate into C_fp32)
+                gemm::gemm_optimized(A_fp32, B_fp32, C_fp32, tile_m, tile_n, tile_k, 1.0f, 1.0f);
+            }
+
+            // Convert C tile back: Float32 → BFloat16
+            for (int64_t i = 0; i < tile_m; ++i) {
+                BFloat16* c_row = C + (i0 + i) * N + j0;
+                const float* c32_row = C_fp32 + i * tile_n;
+                for (int64_t j = 0; j < tile_n; ++j) {
+                    c_row[j] = BFloat16(c32_row[j]);
+                }
+            }
+        }
+    }
+}
+
 // ============================================================================
 // Element-wise Operations Helpers
 // ============================================================================
@@ -1809,6 +1878,13 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 
             matmul_blocked_float16(a_data, b_data, c_data, M, K, N);
 
+        } else if (a_contig.dtype() == DType::BFloat16 && b_contig.dtype() == DType::BFloat16) {
+            const BFloat16* a_data = a_contig.data<BFloat16>();
+            const BFloat16* b_data = b_contig.data<BFloat16>();
+            BFloat16* c_data = result.data<BFloat16>();
+
+            matmul_blocked_bfloat16(a_data, b_data, c_data, M, K, N);
+
         } else {
             throw std::runtime_error(
                 "matmul unsupported dtype combination: " +
@@ -1872,6 +1948,13 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         Float16* c_data = result.data<Float16>();
 
         matmul_blocked_float16(a_data, b_data, c_data, M, N, K);
+
+    } else if (a_contig.dtype() == DType::BFloat16 && b_contig.dtype() == DType::BFloat16) {
+        const BFloat16* a_data = a_contig.data<BFloat16>();
+        const BFloat16* b_data = b_contig.data<BFloat16>();
+        BFloat16* c_data = result.data<BFloat16>();
+
+        matmul_blocked_bfloat16(a_data, b_data, c_data, M, N, K);
 
     } else {
         throw std::runtime_error(

@@ -1283,16 +1283,44 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         case DType::Float16: {
             auto* input_data = input.data<Float16>();
             if (dim == REDUCE_ALL) {
-                // Convert to Float32 comparison
+                // Convert to Float32 comparison with OpenMP
                 const int64_t n = input.numel();
                 if (n == 0) throw std::runtime_error("argmax: input tensor is empty");
                 int64_t max_idx = 0;
                 float max_val = static_cast<float>(input_data[0]);
-                for (int64_t i = 1; i < n; i++) {
-                    float val = static_cast<float>(input_data[i]);
-                    if (val > max_val) {
-                        max_val = val;
-                        max_idx = i;
+
+                #ifdef _OPENMP
+                if (n > REDUCTION_OMP_THRESHOLD) {
+                    // Parallel reduction: each thread finds local max, then combine
+                    #pragma omp parallel
+                    {
+                        int64_t local_idx = 0;
+                        float local_max = static_cast<float>(input_data[0]);
+                        #pragma omp for nowait
+                        for (int64_t i = 1; i < n; i++) {
+                            float val = static_cast<float>(input_data[i]);
+                            if (val > local_max) {
+                                local_max = val;
+                                local_idx = i;
+                            }
+                        }
+                        #pragma omp critical
+                        {
+                            if (local_max > max_val || (local_max == max_val && local_idx < max_idx)) {
+                                max_val = local_max;
+                                max_idx = local_idx;
+                            }
+                        }
+                    }
+                } else
+                #endif
+                {
+                    for (int64_t i = 1; i < n; i++) {
+                        float val = static_cast<float>(input_data[i]);
+                        if (val > max_val) {
+                            max_val = val;
+                            max_idx = i;
+                        }
                     }
                 }
                 output_data[0] = max_idx;
@@ -1535,6 +1563,51 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
 }
 
 // Argsort kernel - returns indices that would sort the input
+// Uses parallel merge sort for large arrays via OpenMP task-based parallelism
+
+namespace {
+
+// Parallel merge sort threshold: below this, use std::sort
+constexpr int64_t PARALLEL_SORT_THRESHOLD = 32768;
+
+template<typename T, typename Comp>
+void merge_halves(int64_t* indices, int64_t* buffer, int64_t left, int64_t mid, int64_t right, Comp comp) {
+    int64_t i = left, j = mid, k = left;
+    while (i < mid && j < right) {
+        if (comp(indices[i], indices[j])) {
+            buffer[k++] = indices[i++];
+        } else {
+            buffer[k++] = indices[j++];
+        }
+    }
+    while (i < mid) buffer[k++] = indices[i++];
+    while (j < right) buffer[k++] = indices[j++];
+    std::copy(buffer + left, buffer + right, indices + left);
+}
+
+template<typename T, typename Comp>
+void parallel_merge_sort(int64_t* indices, int64_t* buffer, int64_t left, int64_t right, Comp comp, int depth) {
+    int64_t n = right - left;
+    if (n <= PARALLEL_SORT_THRESHOLD || depth <= 0) {
+        std::sort(indices + left, indices + right, comp);
+        return;
+    }
+
+    int64_t mid = left + n / 2;
+
+    #pragma omp task shared(indices, buffer) if(depth > 0)
+    parallel_merge_sort<T>(indices, buffer, left, mid, comp, depth - 1);
+
+    #pragma omp task shared(indices, buffer) if(depth > 0)
+    parallel_merge_sort<T>(indices, buffer, mid, right, comp, depth - 1);
+
+    #pragma omp taskwait
+
+    merge_halves<T>(indices, buffer, left, mid, right, comp);
+}
+
+} // anonymous namespace
+
 template<typename T>
 auto argsort_impl(const T* data, int64_t n, bool descending) -> std::vector<int64_t> {
     // Create index array
@@ -1543,13 +1616,39 @@ auto argsort_impl(const T* data, int64_t n, bool descending) -> std::vector<int6
         indices[i] = i;
     }
 
-    // Sort indices based on data values
-    if (descending) {
-        std::sort(indices.begin(), indices.end(),
-                 [data](int64_t a, int64_t b) { return data[a] > data[b]; });
+    if (n <= PARALLEL_SORT_THRESHOLD) {
+        // Small array: use standard sort
+        if (descending) {
+            std::sort(indices.begin(), indices.end(),
+                     [data](int64_t a, int64_t b) { return data[a] > data[b]; });
+        } else {
+            std::sort(indices.begin(), indices.end(),
+                     [data](int64_t a, int64_t b) { return data[a] < data[b]; });
+        }
     } else {
-        std::sort(indices.begin(), indices.end(),
-                 [data](int64_t a, int64_t b) { return data[a] < data[b]; });
+        // Large array: use parallel merge sort
+        std::vector<int64_t> buffer(n);
+        // Depth limits parallelism to ~num_threads levels
+        int depth = 0;
+        #ifdef _OPENMP
+        depth = static_cast<int>(std::log2(omp_get_max_threads())) + 1;
+        #endif
+
+        if (descending) {
+            auto comp = [data](int64_t a, int64_t b) { return data[a] > data[b]; };
+            #pragma omp parallel
+            {
+                #pragma omp single
+                parallel_merge_sort<T>(indices.data(), buffer.data(), 0, n, comp, depth);
+            }
+        } else {
+            auto comp = [data](int64_t a, int64_t b) { return data[a] < data[b]; };
+            #pragma omp parallel
+            {
+                #pragma omp single
+                parallel_merge_sort<T>(indices.data(), buffer.data(), 0, n, comp, depth);
+            }
+        }
     }
 
     return indices;
@@ -1781,6 +1880,44 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             }
             break;
         }
+        case DType::Float16: {
+            // Compute product in Float32, store result as Float32
+            // (Float16 product overflows easily, so output stays Float32)
+            auto input_f32 = input.to(DType::Float32);
+            auto* input_data = input_f32.data<float>();
+
+            // Reallocate output as Float32
+            output = Tensor(output_shape, DType::Float32, input.device());
+            auto* output_data = output.data<float>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = prod_impl(input_data, input.numel());
+            } else {
+                auto strides_span = input_f32.strides();
+                std::vector<int64_t> input_strides(strides_span.begin(), strides_span.end());
+                prod_along_dim(input_data, output_data,
+                              std::vector<int64_t>(input_f32.shape().begin(), input_f32.shape().end()),
+                              input_strides, dim);
+            }
+            break;
+        }
+        case DType::BFloat16: {
+            // Compute product in Float32, store result as Float32
+            auto input_f32 = input.to(DType::Float32);
+            auto* input_data = input_f32.data<float>();
+
+            output = Tensor(output_shape, DType::Float32, input.device());
+            auto* output_data = output.data<float>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = prod_impl(input_data, input.numel());
+            } else {
+                auto strides_span = input_f32.strides();
+                std::vector<int64_t> input_strides(strides_span.begin(), strides_span.end());
+                prod_along_dim(input_data, output_data,
+                              std::vector<int64_t>(input_f32.shape().begin(), input_f32.shape().end()),
+                              input_strides, dim);
+            }
+            break;
+        }
         default:
             throw std::runtime_error("prod: unsupported dtype");
     }
@@ -1905,9 +2042,11 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
                 auto* input_data = input.data<Float16>();
                 auto* output_data = output.data<float>();
                 float sum = 0.0f;
+                #pragma omp parallel for reduction(+:sum) if(n > REDUCTION_OMP_THRESHOLD)
                 for (int64_t i = 0; i < n; i++) sum += static_cast<float>(input_data[i]);
                 float mean = sum / static_cast<float>(n);
                 float var_sum = 0.0f;
+                #pragma omp parallel for reduction(+:var_sum) if(n > REDUCTION_OMP_THRESHOLD)
                 for (int64_t i = 0; i < n; i++) {
                     float diff = static_cast<float>(input_data[i]) - mean;
                     var_sum += diff * diff;
@@ -1921,9 +2060,11 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
                 auto* input_data = input.data<BFloat16>();
                 auto* output_data = output.data<float>();
                 float sum = 0.0f;
+                #pragma omp parallel for reduction(+:sum) if(n > REDUCTION_OMP_THRESHOLD)
                 for (int64_t i = 0; i < n; i++) sum += static_cast<float>(input_data[i]);
                 float mean = sum / static_cast<float>(n);
                 float var_sum = 0.0f;
+                #pragma omp parallel for reduction(+:var_sum) if(n > REDUCTION_OMP_THRESHOLD)
                 for (int64_t i = 0; i < n; i++) {
                     float diff = static_cast<float>(input_data[i]) - mean;
                     var_sum += diff * diff;
@@ -2130,9 +2271,9 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Ten
                 }
                 norm_value = std::sqrt(norm_value);
             } else if (std::isinf(p)) {
-                // L-inf norm: max absolute value
-                norm_value = std::abs(input_data[0]);
-                for (int64_t i = 1; i < n; i++) {
+                // L-inf norm: max absolute value (parallelized)
+                #pragma omp parallel for reduction(max:norm_value) if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
                     float abs_val = std::abs(input_data[i]);
                     if (abs_val > norm_value) {
                         norm_value = abs_val;
@@ -2170,9 +2311,9 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Ten
                 }
                 norm_value = std::sqrt(norm_value);
             } else if (std::isinf(p)) {
-                // L-inf norm: max absolute value
-                norm_value = std::abs(input_data[0]);
-                for (int64_t i = 1; i < n; i++) {
+                // L-inf norm: max absolute value (parallelized)
+                #pragma omp parallel for reduction(max:norm_value) if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
                     double abs_val = std::abs(input_data[i]);
                     if (abs_val > norm_value) {
                         norm_value = abs_val;
@@ -2185,6 +2326,84 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Ten
                     norm_value += std::pow(std::abs(input_data[i]), p);
                 }
                 norm_value = std::pow(norm_value, 1.0 / p);
+            }
+
+            output_data[0] = norm_value;
+            break;
+        }
+        case DType::Float16: {
+            // Compute norm in Float32
+            auto* input_data = input.data<Float16>();
+            output = Tensor(output_shape, DType::Float32, input.device());
+            auto* output_data = output.data<float>();
+
+            float norm_value = 0.0f;
+
+            if (p == 1.0f) {
+                #pragma omp parallel for reduction(+:norm_value) if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
+                    norm_value += std::abs(static_cast<float>(input_data[i]));
+                }
+            } else if (p == 2.0f) {
+                #pragma omp parallel for reduction(+:norm_value) if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
+                    float v = static_cast<float>(input_data[i]);
+                    norm_value += v * v;
+                }
+                norm_value = std::sqrt(norm_value);
+            } else if (std::isinf(p)) {
+                #pragma omp parallel for reduction(max:norm_value) if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
+                    float abs_val = std::abs(static_cast<float>(input_data[i]));
+                    if (abs_val > norm_value) {
+                        norm_value = abs_val;
+                    }
+                }
+            } else {
+                #pragma omp parallel for reduction(+:norm_value) if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
+                    norm_value += std::pow(std::abs(static_cast<float>(input_data[i])), p);
+                }
+                norm_value = std::pow(norm_value, 1.0f / p);
+            }
+
+            output_data[0] = norm_value;
+            break;
+        }
+        case DType::BFloat16: {
+            // Compute norm in Float32
+            auto* input_data = input.data<BFloat16>();
+            output = Tensor(output_shape, DType::Float32, input.device());
+            auto* output_data = output.data<float>();
+
+            float norm_value = 0.0f;
+
+            if (p == 1.0f) {
+                #pragma omp parallel for reduction(+:norm_value) if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
+                    norm_value += std::abs(static_cast<float>(input_data[i]));
+                }
+            } else if (p == 2.0f) {
+                #pragma omp parallel for reduction(+:norm_value) if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
+                    float v = static_cast<float>(input_data[i]);
+                    norm_value += v * v;
+                }
+                norm_value = std::sqrt(norm_value);
+            } else if (std::isinf(p)) {
+                #pragma omp parallel for reduction(max:norm_value) if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
+                    float abs_val = std::abs(static_cast<float>(input_data[i]));
+                    if (abs_val > norm_value) {
+                        norm_value = abs_val;
+                    }
+                }
+            } else {
+                #pragma omp parallel for reduction(+:norm_value) if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
+                    norm_value += std::pow(std::abs(static_cast<float>(input_data[i])), p);
+                }
+                norm_value = std::pow(norm_value, 1.0f / p);
             }
 
             output_data[0] = norm_value;

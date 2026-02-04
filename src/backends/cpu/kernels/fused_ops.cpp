@@ -2,9 +2,26 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "buffer_pool.hpp"
 #include <cmath>
+#include <cstring>
 #include <stdexcept>
 #include <algorithm>
+#include <limits>
+
+#if defined(__x86_64__) || defined(_M_X64)
+    #include <immintrin.h>
+    #if defined(__AVX512F__)
+        #define TENZOR_ATTN_AVX512
+    #endif
+    #if defined(__AVX2__)
+        #define TENZOR_ATTN_AVX2
+    #endif
+#endif
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace tenzor {
 namespace cpu {
@@ -741,11 +758,302 @@ auto rms_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
 }
 
 // =========================================================================
-// Fused Attention (Q*K^T*V with scaling)
+// Fused Attention with Online Softmax, SIMD, and Causal Masking
 // =========================================================================
+//
+// Implements a tiled attention kernel inspired by Flash Attention:
+//   output = softmax(Q @ K^T * scale [+ causal_mask]) @ V
+//
+// Key optimizations over the previous naive implementation:
+//   1. Online softmax: processes K/V in tiles, never materializes the full
+//      (seq_q x seq_k) score matrix. Memory is O(seq_q * TILE_K) instead
+//      of O(seq_q * seq_k). This is critical for long sequences.
+//   2. AVX2/AVX-512 SIMD for dot products and weighted accumulation.
+//   3. Causal masking applied during score computation (no separate pass).
+//   4. Float16/Float64 support via convert-compute-convert.
+//
+
+namespace {
+
+// Tile size for K/V dimension. Chosen to keep the tile score buffer
+// (seq_q * TILE_K floats) comfortably in L2 while giving enough work
+// per tile to amortize loop overhead.
+constexpr int64_t ATTN_TILE_K = 64;
+
+// ---- SIMD helpers (local to this TU) ------------------------------------
+
+#ifdef TENZOR_ATTN_AVX2
+
+__attribute__((target("avx2,fma")))
+static inline float attn_hsum_avx2(__m256 v) {
+    __m128 hi = _mm256_extractf128_ps(v, 1);
+    __m128 lo = _mm256_castps256_ps128(v);
+    __m128 s  = _mm_add_ps(hi, lo);
+    s = _mm_hadd_ps(s, s);
+    s = _mm_hadd_ps(s, s);
+    return _mm_cvtss_f32(s);
+}
+
+__attribute__((target("avx2,fma")))
+static inline float attn_hmax_avx2(__m256 v) {
+    __m128 hi = _mm256_extractf128_ps(v, 1);
+    __m128 lo = _mm256_castps256_ps128(v);
+    __m128 m  = _mm_max_ps(hi, lo);
+    m = _mm_max_ps(m, _mm_shuffle_ps(m, m, _MM_SHUFFLE(2, 3, 0, 1)));
+    m = _mm_max_ps(m, _mm_shuffle_ps(m, m, _MM_SHUFFLE(1, 0, 3, 2)));
+    return _mm_cvtss_f32(m);
+}
+
+// SIMD dot product of two float vectors of length `len`.
+__attribute__((target("avx2,fma")))
+static inline float attn_dot_avx2(const float* a, const float* b, int64_t len) {
+    __m256 vsum = _mm256_setzero_ps();
+    int64_t d = 0;
+    for (; d + 8 <= len; d += 8) {
+        __m256 va = _mm256_loadu_ps(a + d);
+        __m256 vb = _mm256_loadu_ps(b + d);
+        vsum = _mm256_fmadd_ps(va, vb, vsum);
+    }
+    float dot = attn_hsum_avx2(vsum);
+    for (; d < len; ++d) {
+        dot += a[d] * b[d];
+    }
+    return dot;
+}
+
+// Weighted accumulation: out[d] += weight * v[d] for d in [0, len).
+__attribute__((target("avx2,fma")))
+static inline void attn_axpy_avx2(float* out, float weight, const float* v, int64_t len) {
+    __m256 vw = _mm256_set1_ps(weight);
+    int64_t d = 0;
+    for (; d + 8 <= len; d += 8) {
+        __m256 vo = _mm256_loadu_ps(out + d);
+        __m256 vv = _mm256_loadu_ps(v + d);
+        vo = _mm256_fmadd_ps(vw, vv, vo);
+        _mm256_storeu_ps(out + d, vo);
+    }
+    for (; d < len; ++d) {
+        out[d] += weight * v[d];
+    }
+}
+
+// Scale a float vector: out[d] *= s for d in [0, len).
+__attribute__((target("avx2,fma")))
+static inline void attn_scale_avx2(float* out, float s, int64_t len) {
+    __m256 vs = _mm256_set1_ps(s);
+    int64_t d = 0;
+    for (; d + 8 <= len; d += 8) {
+        __m256 v = _mm256_loadu_ps(out + d);
+        v = _mm256_mul_ps(v, vs);
+        _mm256_storeu_ps(out + d, v);
+    }
+    for (; d < len; ++d) {
+        out[d] *= s;
+    }
+}
+
+#endif // TENZOR_ATTN_AVX2
+
+#ifdef TENZOR_ATTN_AVX512
+
+__attribute__((target("avx512f")))
+static inline float attn_hsum_avx512(__m512 v) {
+    return _mm512_reduce_add_ps(v);
+}
+
+__attribute__((target("avx512f")))
+static inline float attn_hmax_avx512(__m512 v) {
+    return _mm512_reduce_max_ps(v);
+}
+
+__attribute__((target("avx512f")))
+static inline float attn_dot_avx512(const float* a, const float* b, int64_t len) {
+    __m512 vsum = _mm512_setzero_ps();
+    int64_t d = 0;
+    for (; d + 16 <= len; d += 16) {
+        __m512 va = _mm512_loadu_ps(a + d);
+        __m512 vb = _mm512_loadu_ps(b + d);
+        vsum = _mm512_fmadd_ps(va, vb, vsum);
+    }
+    float dot = attn_hsum_avx512(vsum);
+    // Handle remainder with AVX2 or scalar
+    for (; d < len; ++d) {
+        dot += a[d] * b[d];
+    }
+    return dot;
+}
+
+__attribute__((target("avx512f")))
+static inline void attn_axpy_avx512(float* out, float weight, const float* v, int64_t len) {
+    __m512 vw = _mm512_set1_ps(weight);
+    int64_t d = 0;
+    for (; d + 16 <= len; d += 16) {
+        __m512 vo = _mm512_loadu_ps(out + d);
+        __m512 vv = _mm512_loadu_ps(v + d);
+        vo = _mm512_fmadd_ps(vw, vv, vo);
+        _mm512_storeu_ps(out + d, vo);
+    }
+    for (; d < len; ++d) {
+        out[d] += weight * v[d];
+    }
+}
+
+__attribute__((target("avx512f")))
+static inline void attn_scale_avx512(float* out, float s, int64_t len) {
+    __m512 vs = _mm512_set1_ps(s);
+    int64_t d = 0;
+    for (; d + 16 <= len; d += 16) {
+        __m512 v = _mm512_loadu_ps(out + d);
+        v = _mm512_mul_ps(v, vs);
+        _mm512_storeu_ps(out + d, v);
+    }
+    for (; d < len; ++d) {
+        out[d] *= s;
+    }
+}
+
+#endif // TENZOR_ATTN_AVX512
+
+// ---- Dispatch wrappers --------------------------------------------------
+
+static inline float attn_dot(const float* a, const float* b, int64_t len) {
+#ifdef TENZOR_ATTN_AVX512
+    return attn_dot_avx512(a, b, len);
+#elif defined(TENZOR_ATTN_AVX2)
+    return attn_dot_avx2(a, b, len);
+#else
+    float dot = 0.0f;
+    for (int64_t d = 0; d < len; ++d) dot += a[d] * b[d];
+    return dot;
+#endif
+}
+
+static inline void attn_axpy(float* out, float w, const float* v, int64_t len) {
+#ifdef TENZOR_ATTN_AVX512
+    attn_axpy_avx512(out, w, v, len);
+#elif defined(TENZOR_ATTN_AVX2)
+    attn_axpy_avx2(out, w, v, len);
+#else
+    for (int64_t d = 0; d < len; ++d) out[d] += w * v[d];
+#endif
+}
+
+static inline void attn_scale(float* out, float s, int64_t len) {
+#ifdef TENZOR_ATTN_AVX512
+    attn_scale_avx512(out, s, len);
+#elif defined(TENZOR_ATTN_AVX2)
+    attn_scale_avx2(out, s, len);
+#else
+    for (int64_t d = 0; d < len; ++d) out[d] *= s;
+#endif
+}
+
+// ---- Online-softmax tiled attention for one (batch, head) ---------------
+//
+// For each query row i, we iterate over K/V in tiles of ATTN_TILE_K columns.
+// Per query row we maintain:
+//   m_i  = running max of scores seen so far
+//   l_i  = running sum of exp(scores - m_i)
+//   o_i  = running weighted sum (unnormalized output)
+//
+// When processing a new tile [j0, j1):
+//   1. Compute score[j] = q_i . k_j * scale  for j in [j0, j1)
+//      Apply causal mask: if j > i, score[j] = -inf
+//   2. m_new = max(m_i, max(score[j0..j1)))
+//   3. Rescale previous accumulator:
+//        correction = exp(m_i - m_new)
+//        o_i *= correction
+//        l_i *= correction
+//   4. For each j in [j0, j1):
+//        p_j  = exp(score[j] - m_new)
+//        l_i += p_j
+//        o_i += p_j * v_j
+//   5. m_i = m_new
+// After all tiles: o_i /= l_i
+//
+static void attention_online_f32(
+    const float* __restrict__ q_data,
+    const float* __restrict__ k_data,
+    const float* __restrict__ v_data,
+    float* __restrict__ out_data,
+    int64_t batch_heads,
+    int64_t seq_q,
+    int64_t seq_k,
+    int64_t head_dim,
+    float scale,
+    bool causal
+) {
+    const int64_t q_stride = seq_q * head_dim;
+    const int64_t k_stride = seq_k * head_dim;
+
+    #pragma omp parallel for schedule(dynamic) if(batch_heads > 1)
+    for (int64_t bh = 0; bh < batch_heads; ++bh) {
+        const float* q = q_data + bh * q_stride;
+        const float* k = k_data + bh * k_stride;
+        const float* v = v_data + bh * k_stride;  // V stride == K stride
+        float* o = out_data + bh * q_stride;
+
+        // Per-thread tile score buffer, kept small for L1 residency.
+        alignas(64) float tile_scores[ATTN_TILE_K];
+
+        for (int64_t i = 0; i < seq_q; ++i) {
+            const float* qi = q + i * head_dim;
+            float* oi = o + i * head_dim;
+
+            // Running online-softmax state for query row i.
+            float m_i = -std::numeric_limits<float>::infinity();
+            float l_i = 0.0f;
+            std::memset(oi, 0, head_dim * sizeof(float));
+
+            // Upper bound for j when causal: only attend to positions <= i.
+            const int64_t j_limit = causal ? std::min(i + 1, seq_k) : seq_k;
+
+            for (int64_t j0 = 0; j0 < j_limit; j0 += ATTN_TILE_K) {
+                const int64_t j1 = std::min(j0 + ATTN_TILE_K, j_limit);
+                const int64_t tile_len = j1 - j0;
+
+                // --- Step 1: Compute scores for this tile ---
+                float tile_max = -std::numeric_limits<float>::infinity();
+                for (int64_t t = 0; t < tile_len; ++t) {
+                    tile_scores[t] = attn_dot(qi, k + (j0 + t) * head_dim, head_dim) * scale;
+                    tile_max = std::max(tile_max, tile_scores[t]);
+                }
+
+                // --- Step 2: Compute new running max ---
+                const float m_new = std::max(m_i, tile_max);
+
+                // --- Step 3: Rescale previous accumulator ---
+                if (l_i > 0.0f) {
+                    const float correction = std::exp(m_i - m_new);
+                    attn_scale(oi, correction, head_dim);
+                    l_i *= correction;
+                }
+
+                // --- Step 4: Accumulate this tile ---
+                float tile_sum = 0.0f;
+                for (int64_t t = 0; t < tile_len; ++t) {
+                    const float p = std::exp(tile_scores[t] - m_new);
+                    tile_sum += p;
+                    attn_axpy(oi, p, v + (j0 + t) * head_dim, head_dim);
+                }
+                l_i += tile_sum;
+
+                // --- Step 5: Update running max ---
+                m_i = m_new;
+            }
+
+            // --- Final normalization ---
+            if (l_i > 0.0f) {
+                attn_scale(oi, 1.0f / l_i, head_dim);
+            }
+        }
+    }
+}
+
+} // anonymous namespace
 
 auto fused_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
-                            float scale) -> Tensor {
+                            float scale, bool causal) -> Tensor {
     // Q, K, V: (batch_heads, seq_len, head_dim) for 3D
     //          (batch, num_heads, seq_len, head_dim) for 4D
     const auto& q_shape = Q.shape();
@@ -771,64 +1079,47 @@ auto fused_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
                   Q.dtype(), Q.device());
 
     if (Q.dtype() == DType::Float32) {
-        const float* q_data = Q.data<float>();
-        const float* k_data = K.data<float>();
-        const float* v_data = V.data<float>();
-        float* out_data = output.data<float>();
+        attention_online_f32(
+            Q.data<float>(), K.data<float>(), V.data<float>(),
+            output.data<float>(),
+            batch_heads, seq_len_q, seq_len_k, head_dim,
+            scale, causal
+        );
+    } else if (Q.dtype() == DType::Float64) {
+        // Float64: compute in Float32 for online-softmax numerical range,
+        // then store back. For full Float64 precision the user should cast
+        // Q/K/V to Float32 explicitly. We convert per-tensor here to keep
+        // the kernel simple and still correct.
+        Tensor q32 = Q.to(DType::Float32);
+        Tensor k32 = K.to(DType::Float32);
+        Tensor v32 = V.to(DType::Float32);
+        Tensor out32(std::vector<int64_t>(q_shape.begin(), q_shape.end()),
+                     DType::Float32, Q.device());
 
-        int64_t q_stride = seq_len_q * head_dim;
-        int64_t k_stride = seq_len_k * head_dim;
-        int64_t v_stride = seq_len_k * head_dim;
+        attention_online_f32(
+            q32.data<float>(), k32.data<float>(), v32.data<float>(),
+            out32.data<float>(),
+            batch_heads, seq_len_q, seq_len_k, head_dim,
+            scale, causal
+        );
+        output = out32.to(DType::Float64);
+    } else if (Q.dtype() == DType::Float16) {
+        // Float16: convert to Float32, compute, convert back.
+        Tensor q32 = Q.to(DType::Float32);
+        Tensor k32 = K.to(DType::Float32);
+        Tensor v32 = V.to(DType::Float32);
+        Tensor out32(std::vector<int64_t>(q_shape.begin(), q_shape.end()),
+                     DType::Float32, Q.device());
 
-        #pragma omp parallel for if(batch_heads > 4)
-        for (int64_t bh = 0; bh < batch_heads; ++bh) {
-            const float* q = q_data + bh * q_stride;
-            const float* k = k_data + bh * k_stride;
-            const float* v = v_data + bh * v_stride;
-            float* o = out_data + bh * q_stride;
-
-            // Compute attention scores: Q * K^T * scale
-            std::vector<float> scores(seq_len_q * seq_len_k);
-            for (int64_t i = 0; i < seq_len_q; ++i) {
-                for (int64_t j = 0; j < seq_len_k; ++j) {
-                    float dot = 0.0f;
-                    for (int64_t d = 0; d < head_dim; ++d) {
-                        dot += q[i * head_dim + d] * k[j * head_dim + d];
-                    }
-                    scores[i * seq_len_k + j] = dot * scale;
-                }
-            }
-
-            // Softmax along last dimension
-            for (int64_t i = 0; i < seq_len_q; ++i) {
-                float max_val = scores[i * seq_len_k];
-                for (int64_t j = 1; j < seq_len_k; ++j) {
-                    max_val = std::max(max_val, scores[i * seq_len_k + j]);
-                }
-                float sum = 0.0f;
-                for (int64_t j = 0; j < seq_len_k; ++j) {
-                    scores[i * seq_len_k + j] = std::exp(scores[i * seq_len_k + j] - max_val);
-                    sum += scores[i * seq_len_k + j];
-                }
-                float inv_sum = 1.0f / sum;
-                for (int64_t j = 0; j < seq_len_k; ++j) {
-                    scores[i * seq_len_k + j] *= inv_sum;
-                }
-            }
-
-            // Compute output: scores * V
-            for (int64_t i = 0; i < seq_len_q; ++i) {
-                for (int64_t d = 0; d < head_dim; ++d) {
-                    float val = 0.0f;
-                    for (int64_t j = 0; j < seq_len_k; ++j) {
-                        val += scores[i * seq_len_k + j] * v[j * head_dim + d];
-                    }
-                    o[i * head_dim + d] = val;
-                }
-            }
-        }
+        attention_online_f32(
+            q32.data<float>(), k32.data<float>(), v32.data<float>(),
+            out32.data<float>(),
+            batch_heads, seq_len_q, seq_len_k, head_dim,
+            scale, causal
+        );
+        output = out32.to(DType::Float16);
     } else {
-        throw std::runtime_error("fused_attention: only Float32 supported");
+        throw std::runtime_error("fused_attention: unsupported dtype (expected Float32, Float64, or Float16)");
     }
 
     return output;

@@ -292,7 +292,7 @@ namespace cpu {
 
     // Fused Attention
     auto fused_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
-                                float scale) -> Tensor;
+                                float scale, bool causal) -> Tensor;
 
     // Fused Conv2d + Activation variants
     auto fused_conv2d_sigmoid_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
@@ -1210,7 +1210,8 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     // =========================================================================
     table.register_kernel(OpId::FusedAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         float scale = parse_attr<float>(attrs, "scale", 1.0f);
-        return std::vector<Tensor>{cpu::fused_attention_kernel(inputs[0], inputs[1], inputs[2], scale)};
+        bool causal = parse_attr<bool>(attrs, "causal", false);
+        return std::vector<Tensor>{cpu::fused_attention_kernel(inputs[0], inputs[1], inputs[2], scale, causal)};
     });
 
     // =========================================================================
