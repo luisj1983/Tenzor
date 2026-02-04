@@ -11,6 +11,7 @@ std::string dtype_to_string(DType dtype) {
         case DType::Float32: return "float32";
         case DType::Float64: return "float64";
         case DType::Float16: return "float16";
+        case DType::BFloat16: return "bfloat16";
         default: return "unknown";
     }
 }
@@ -104,7 +105,8 @@ protected:
         switch (dtype) {
             case DType::Float64: return 1e-5;
             case DType::Float32: return 1e-4;
-            case DType::Float16: return 1e-2;
+            case DType::Float16:
+            case DType::BFloat16: return 1e-2;
             default: return 1e-4;
         }
     }
@@ -114,7 +116,7 @@ protected:
             return 1e-4;
         } else if (dtype == DType::Float64) {
             return 1e-5;
-        } else if (dtype == DType::Float16) {
+        } else if (dtype == DType::Float16 || dtype == DType::BFloat16) {
             return 1e-2;
         }
         return 1e-4;
@@ -255,11 +257,12 @@ protected:
         }
     }
 
-    double getTolerance(DType dtype) const {
-        switch (dtype) {
+    double getTolerance(DType dt) const {
+        switch (dt) {
             case DType::Float64: return 1e-5;
             case DType::Float32: return 1e-4;
-            case DType::Float16: return 1e-2;
+            case DType::Float16:
+            case DType::BFloat16: return 1e-2;
             default: return 1e-4;
         }
     }
@@ -269,7 +272,7 @@ protected:
             return 1e-4;
         } else if (dtype == DType::Float64) {
             return 1e-5;
-        } else if (dtype == DType::Float16) {
+        } else if (dtype == DType::Float16 || dtype == DType::BFloat16) {
             return 1e-2;
         }
         return 1e-4;
@@ -599,8 +602,8 @@ TEST_P(GRUMultiDTypeTest, GateOutputRanges) {
 
     // Check dtype-specific ranges
     double max_value = 10.0;
-    if (dtype == DType::Float16) {
-        max_value = 15.0;  // Float16 may have slightly higher variance
+    if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        max_value = 15.0;  // Half precision may have slightly higher variance
     }
 
     bool all_reasonable = true;
@@ -622,7 +625,7 @@ TEST_P(GRUMultiDTypeTest, GateOutputRanges) {
         }
     }
     // Note: Float16 range testing skipped due to limited half type support
-    EXPECT_TRUE(all_reasonable || dtype == DType::Float16) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
+    EXPECT_TRUE(all_reasonable || dtype == DType::Float16 || dtype == DType::BFloat16) << "Failed on " << device.to_string() << " with dtype " << dtype_to_string(dtype);
 }
 
 TEST_P(GRUMultiDTypeTest, BatchFirstBidirectional) {
@@ -763,6 +766,7 @@ std::vector<BackendDTypeParam> GenerateBackendDTypeCombinations() {
         {DType::Float32, "float32"},
         {DType::Float64, "float64"},
         {DType::Float16, "float16"},
+        {DType::BFloat16, "bfloat16"},
     };
 
     std::vector<BackendDTypeParam> combinations;

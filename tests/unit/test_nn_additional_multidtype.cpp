@@ -64,6 +64,7 @@ protected:
         // Set dtype-specific tolerances
         switch(dtype) {
             case DType::Float16:
+            case DType::BFloat16:
                 tolerance = 1e-2f;
                 break;
             case DType::Float32:
@@ -145,7 +146,7 @@ protected:
 
 TEST_P(NNMultiDTypeTest, ReLU_EdgeCases) {
     // Skip non-floating point dtypes for activation functions
-    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16) {
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
         GTEST_SKIP() << "Activation functions only support floating point dtypes";
     }
 
@@ -168,7 +169,7 @@ TEST_P(NNMultiDTypeTest, ReLU_EdgeCases) {
 }
 
 TEST_P(NNMultiDTypeTest, ReLU_Gradient) {
-    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16) {
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
         GTEST_SKIP();
     }
 
@@ -196,7 +197,7 @@ TEST_P(NNMultiDTypeTest, ReLU_Gradient) {
 }
 
 TEST_P(NNMultiDTypeTest, ReLU6_Clipping) {
-    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16) {
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
         GTEST_SKIP();
     }
 
@@ -219,7 +220,7 @@ TEST_P(NNMultiDTypeTest, ReLU6_Clipping) {
 }
 
 TEST_P(NNMultiDTypeTest, LeakyReLU_NegativeSlope) {
-    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16) {
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
         GTEST_SKIP();
     }
 
@@ -243,7 +244,7 @@ TEST_P(NNMultiDTypeTest, LeakyReLU_NegativeSlope) {
 }
 
 TEST_P(NNMultiDTypeTest, Sigmoid_Range) {
-    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16) {
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
         GTEST_SKIP();
     }
 
@@ -270,7 +271,7 @@ TEST_P(NNMultiDTypeTest, Sigmoid_Range) {
 }
 
 TEST_P(NNMultiDTypeTest, Sigmoid_ExtremeValues) {
-    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16) {
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
         GTEST_SKIP();
     }
 
@@ -302,7 +303,7 @@ TEST_P(NNMultiDTypeTest, Sigmoid_ExtremeValues) {
 }
 
 TEST_P(NNMultiDTypeTest, Tanh_Range) {
-    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16) {
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
         GTEST_SKIP();
     }
 
@@ -324,7 +325,7 @@ TEST_P(NNMultiDTypeTest, Tanh_Range) {
 }
 
 TEST_P(NNMultiDTypeTest, Tanh_ZeroCentered) {
-    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16) {
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
         GTEST_SKIP();
     }
 
@@ -337,7 +338,7 @@ TEST_P(NNMultiDTypeTest, Tanh_ZeroCentered) {
 }
 
 TEST_P(NNMultiDTypeTest, Softmax_SumToOne) {
-    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16) {
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
         GTEST_SKIP();
     }
 
@@ -360,7 +361,7 @@ TEST_P(NNMultiDTypeTest, Softmax_SumToOne) {
 }
 
 TEST_P(NNMultiDTypeTest, Softmax_NumericalStability) {
-    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16) {
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
         GTEST_SKIP();
     }
 
@@ -386,7 +387,7 @@ TEST_P(NNMultiDTypeTest, Softmax_NumericalStability) {
 // ============================================================================
 
 TEST_P(NNMultiDTypeTest, MSELoss_ReductionModes) {
-    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16) {
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
         GTEST_SKIP();
     }
 
@@ -420,7 +421,7 @@ TEST_P(NNMultiDTypeTest, MSELoss_ReductionModes) {
 }
 
 TEST_P(NNMultiDTypeTest, MSELoss_PerfectPrediction) {
-    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16) {
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
         GTEST_SKIP();
     }
 
@@ -437,7 +438,7 @@ TEST_P(NNMultiDTypeTest, MSELoss_PerfectPrediction) {
 }
 
 TEST_P(NNMultiDTypeTest, CrossEntropyLoss_Basic) {
-    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16) {
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
         GTEST_SKIP();
     }
 
@@ -463,7 +464,7 @@ TEST_P(NNMultiDTypeTest, CrossEntropyLoss_Basic) {
 // ============================================================================
 
 TEST_P(NNMultiDTypeTest, LayerNorm_SingleDimension) {
-    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16) {
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
         GTEST_SKIP();
     }
 
@@ -494,7 +495,7 @@ TEST_P(NNMultiDTypeTest, LayerNorm_SingleDimension) {
 }
 
 TEST_P(NNMultiDTypeTest, GroupNorm_Basic) {
-    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16) {
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
         GTEST_SKIP();
     }
 
@@ -518,7 +519,7 @@ TEST_P(NNMultiDTypeTest, GroupNorm_Basic) {
 // ============================================================================
 
 TEST_P(NNMultiDTypeTest, MaxPool2d_BasicDownsampling) {
-    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16) {
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
         GTEST_SKIP();
     }
 
@@ -537,7 +538,7 @@ TEST_P(NNMultiDTypeTest, MaxPool2d_BasicDownsampling) {
 }
 
 TEST_P(NNMultiDTypeTest, AvgPool2d_BasicDownsampling) {
-    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16) {
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
         GTEST_SKIP();
     }
 
@@ -553,7 +554,7 @@ TEST_P(NNMultiDTypeTest, AvgPool2d_BasicDownsampling) {
 }
 
 TEST_P(NNMultiDTypeTest, AdaptiveAvgPool2d_FixedOutputSize) {
-    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16) {
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
         GTEST_SKIP();
     }
 
@@ -720,6 +721,7 @@ std::vector<BackendDTypeParam> GenerateNNBackendDTypeCombinations() {
         {DType::Float32, "float32"},
         {DType::Float64, "float64"},
         {DType::Float16, "float16"},
+        {DType::BFloat16, "bfloat16"},
     };
 
     std::vector<BackendDTypeParam> combinations;

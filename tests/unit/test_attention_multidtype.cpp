@@ -31,7 +31,7 @@ protected:
             return 1e-5;
         } else if (dtype() == DType::Float64) {
             return 1e-10;
-        } else if (dtype() == DType::Float16) {
+        } else if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
             return 1e-2;
         }
         return 1e-5;
@@ -306,7 +306,7 @@ protected:
             return 1e-5;
         } else if (dtype() == DType::Float64) {
             return 1e-10;
-        } else if (dtype() == DType::Float16) {
+        } else if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
             return 1e-2;
         }
         return 1e-5;
@@ -407,7 +407,7 @@ protected:
             return 1e-5;
         } else if (dtype() == DType::Float64) {
             return 1e-10;
-        } else if (dtype() == DType::Float16) {
+        } else if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
             return 1e-2;
         }
         return 1e-5;
@@ -475,9 +475,9 @@ TEST_P(AttentionIntegrationMultiDTypeTest, Deterministic) {
 // Test Instantiation
 // ============================================================================
 
-INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(MultiheadAttentionMultiDTypeTest);
-INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(CausalMaskMultiDTypeTest);
-INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(AttentionIntegrationMultiDTypeTest);
+INSTANTIATE_MULTI_BACKEND_ALL_DTYPE_TESTS(MultiheadAttentionMultiDTypeTest);
+INSTANTIATE_MULTI_BACKEND_ALL_DTYPE_TESTS(CausalMaskMultiDTypeTest);
+INSTANTIATE_MULTI_BACKEND_ALL_DTYPE_TESTS(AttentionIntegrationMultiDTypeTest);
 
 /*
  * COVERAGE SUMMARY:

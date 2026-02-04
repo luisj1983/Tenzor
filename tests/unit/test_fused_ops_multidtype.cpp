@@ -540,7 +540,7 @@ TEST_P(FusedOpsMultiDTypeTest, Performance_LinearReLU_Consistency) {
 // Test Instantiation
 // ============================================================================
 
-INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(FusedOpsMultiDTypeTest);
+INSTANTIATE_MULTI_BACKEND_ALL_DTYPE_TESTS(FusedOpsMultiDTypeTest);
 
 /*
  * COVERAGE SUMMARY:

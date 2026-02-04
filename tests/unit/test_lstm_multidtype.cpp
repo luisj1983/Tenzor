@@ -89,7 +89,8 @@ protected:
     // Helper to get tolerance based on dtype
     double get_tolerance() const {
         switch(dtype) {
-            case DType::Float16: return 1e-2;  // Half precision
+            case DType::Float16:
+            case DType::BFloat16: return 1e-2;  // Half precision
             case DType::Float32: return 1e-6;  // Single precision
             case DType::Float64: return 1e-8;  // Double precision
             default: return 1e-6;
@@ -98,7 +99,8 @@ protected:
 
     double get_relaxed_tolerance() const {
         switch(dtype) {
-            case DType::Float16: return 1e-1;  // Half precision
+            case DType::Float16:
+            case DType::BFloat16: return 1e-1;  // Half precision
             case DType::Float32: return 1e-5;  // Single precision
             case DType::Float64: return 1e-7;  // Double precision
             default: return 1e-5;
@@ -582,6 +584,16 @@ TEST_P(LSTMMultiDTypeTest, LSTMCellStateMemory) {
             }
             break;
         }
+        case DType::BFloat16: {
+            auto c_data = c_cpu.data<BFloat16>();
+            for (int64_t i = 0; i < c_cpu.numel(); ++i) {
+                if (std::abs(static_cast<float>(c_data[i])) > get_relaxed_tolerance()) {
+                    has_nonzero = true;
+                    break;
+                }
+            }
+            break;
+        }
         default:
             FAIL() << "Unsupported dtype for cell state memory test";
     }
@@ -612,14 +624,12 @@ TEST_P(LSTMMultiDTypeTest, LSTMBatchFirstBidirectional) {
 std::vector<BackendDTypeParam> GenerateLSTMBackendDTypeCombinations() {
     std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
 
-    // Test with floating-point dtypes only (LSTM requires float operations)
-    // Note: Currently only testing Float32 because LSTM modules don't support
-    // dtype conversion yet (parameters are always initialized as Float32).
-    // TODO: Add Float64 and Float16 support when LSTM constructor accepts dtype parameter
+    // Test with floating-point dtypes (LSTM kernels now support multi-dtype via convert-compute-convert)
     std::vector<std::pair<DType, std::string>> dtypes = {
         {DType::Float32, "float32"},
-        // {DType::Float64, "float64"},  // TODO: Enable when LSTM supports dtype parameter
+        {DType::Float64, "float64"},
         {DType::Float16, "float16"},
+        {DType::BFloat16, "bfloat16"},
     };
 
     std::vector<BackendDTypeParam> combinations;

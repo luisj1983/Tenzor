@@ -1118,8 +1118,23 @@ auto fused_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
             scale, causal
         );
         output = out32.to(DType::Float16);
+    } else if (Q.dtype() == DType::BFloat16) {
+        // BFloat16: convert to Float32, compute, convert back.
+        Tensor q32 = Q.to(DType::Float32);
+        Tensor k32 = K.to(DType::Float32);
+        Tensor v32 = V.to(DType::Float32);
+        Tensor out32(std::vector<int64_t>(q_shape.begin(), q_shape.end()),
+                     DType::Float32, Q.device());
+
+        attention_online_f32(
+            q32.data<float>(), k32.data<float>(), v32.data<float>(),
+            out32.data<float>(),
+            batch_heads, seq_len_q, seq_len_k, head_dim,
+            scale, causal
+        );
+        output = out32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("fused_attention: unsupported dtype (expected Float32, Float64, or Float16)");
+        throw std::runtime_error("fused_attention: unsupported dtype (expected Float32, Float64, Float16, or BFloat16)");
     }
 
     return output;

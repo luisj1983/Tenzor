@@ -110,6 +110,9 @@ auto CPUInfo::detect_features() -> void {
         if (ebx7 & (1 << 17)) features_ = features_ | CPUFeature::AVX512DQ;
         if (ebx7 & (1 << 30)) features_ = features_ | CPUFeature::AVX512BW;
         if (ebx7 & (1 << 31)) features_ = features_ | CPUFeature::AVX512VL;
+
+        // ECX features (leaf 7, subleaf 0)
+        if (ecx7 & (1 << 11)) features_ = features_ | CPUFeature::AVX512VNNI;
     }
 #endif
 }
@@ -117,6 +120,7 @@ auto CPUInfo::detect_features() -> void {
 auto CPUInfo::feature_string() const -> std::string {
     std::ostringstream oss;
 
+    if (has(CPUFeature::AVX512VNNI)) oss << "AVX512-VNNI ";
     if (has(CPUFeature::AVX512F))  oss << "AVX-512 ";
     if (has(CPUFeature::AVX2))     oss << "AVX2 ";
     if (has(CPUFeature::AVX))      oss << "AVX ";

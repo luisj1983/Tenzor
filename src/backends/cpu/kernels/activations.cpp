@@ -471,8 +471,18 @@ auto relu_kernel(const Tensor& input) -> Tensor {
             float val = static_cast<float>(in_data[i]);
             out_data[i] = Float16(std::max(0.0f, val));
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = output.data<BFloat16>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(in_data[i]);
+            out_data[i] = BFloat16(std::max(0.0f, val));
+        }
     } else {
-        throw std::runtime_error("ReLU only supports Float32, Float64, and Float16");
+        throw std::runtime_error("ReLU only supports Float32, Float64, Float16, and BFloat16");
     }
 
     return output;
@@ -545,8 +555,20 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
             float grad_out_val = static_cast<float>(grad_out_data[i]);
             grad_in_data[i] = Float16(grad_out_val * (in_val > 0.0f ? 1.0f : 0.0f));
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* grad_out_data = grad_output.data<BFloat16>();
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* grad_in_data = grad_input.data<BFloat16>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float in_val = static_cast<float>(in_data[i]);
+            float grad_out_val = static_cast<float>(grad_out_data[i]);
+            grad_in_data[i] = BFloat16(grad_out_val * (in_val > 0.0f ? 1.0f : 0.0f));
+        }
     } else {
-        throw std::runtime_error("ReLU backward only supports Float32, Float64, and Float16");
+        throw std::runtime_error("ReLU backward only supports Float32, Float64, Float16, and BFloat16");
     }
 
     return grad_input;
@@ -663,8 +685,18 @@ auto sigmoid_kernel(const Tensor& input) -> Tensor {
             out_data[i] = Float16(1.0f / (1.0f + std::exp(-val)));
         }
 #endif
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = output.data<BFloat16>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(in_data[i]);
+            out_data[i] = BFloat16(1.0f / (1.0f + std::exp(-val)));
+        }
     } else {
-        throw std::runtime_error("Sigmoid only supports Float32, Float64, and Float16");
+        throw std::runtime_error("Sigmoid only supports Float32, Float64, Float16, and BFloat16");
     }
 
     return output;
@@ -694,8 +726,31 @@ auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input) -> 
             double sigmoid_x = 1.0 / (1.0 + std::exp(-in_data[i]));
             grad_in_data[i] = grad_out_data[i] * sigmoid_x * (1.0 - sigmoid_x);
         }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* grad_out_data = grad_output.data<Float16>();
+        const Float16* in_data = input.data<Float16>();
+        Float16* grad_in_data = grad_input.data<Float16>();
+        size_t n = input.numel();
+
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]);
+            float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
+            grad_in_data[i] = Float16(static_cast<float>(grad_out_data[i]) * sigmoid_x * (1.0f - sigmoid_x));
+        }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* grad_out_data = grad_output.data<BFloat16>();
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* grad_in_data = grad_input.data<BFloat16>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]);
+            float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
+            grad_in_data[i] = BFloat16(static_cast<float>(grad_out_data[i]) * sigmoid_x * (1.0f - sigmoid_x));
+        }
     } else {
-        throw std::runtime_error("Sigmoid backward only supports Float32 and Float64");
+        throw std::runtime_error("Sigmoid backward only supports Float32, Float64, Float16, and BFloat16");
     }
 
     return grad_input;
@@ -821,8 +876,18 @@ auto tanh_kernel(const Tensor& input) -> Tensor {
 #endif
             }
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = output.data<BFloat16>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(in_data[i]);
+            out_data[i] = BFloat16(std::tanh(val));
+        }
     } else {
-        throw std::runtime_error("Tanh only supports Float32, Float64, and Float16");
+        throw std::runtime_error("Tanh only supports Float32, Float64, Float16, and BFloat16");
     }
 
     return output;
@@ -864,8 +929,21 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
             float tanh_x = std::tanh(in_val);
             grad_in_data[i] = Float16(grad_out_val * (1.0f - tanh_x * tanh_x));
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* grad_out_data = grad_output.data<BFloat16>();
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* grad_in_data = grad_input.data<BFloat16>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float in_val = static_cast<float>(in_data[i]);
+            float grad_out_val = static_cast<float>(grad_out_data[i]);
+            float tanh_x = std::tanh(in_val);
+            grad_in_data[i] = BFloat16(grad_out_val * (1.0f - tanh_x * tanh_x));
+        }
     } else {
-        throw std::runtime_error("Tanh backward only supports Float32 and Float64");
+        throw std::runtime_error("Tanh backward only supports Float32, Float64, Float16, and BFloat16");
     }
 
     return grad_input;
@@ -973,8 +1051,22 @@ auto gelu_kernel(const Tensor& input) -> Tensor {
             float inner = sqrt_2_over_pi * (x + coeff * x3);
             out_data[i] = Float16(0.5f * x * (1.0f + std::tanh(inner)));
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = output.data<BFloat16>();
+        size_t n = input.numel();
+
+        constexpr float sqrt_2_over_pi = 0.7978845608f;
+        constexpr float coeff = 0.044715f;
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]);
+            float x3 = x * x * x;
+            float inner = sqrt_2_over_pi * (x + coeff * x3);
+            out_data[i] = BFloat16(0.5f * x * (1.0f + std::tanh(inner)));
+        }
     } else {
-        throw std::runtime_error("GELU only supports Float32/Float64/Float16");
+        throw std::runtime_error("GELU only supports Float32/Float64/Float16/BFloat16");
     }
 
     return output;
@@ -1024,8 +1116,21 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
             float pdf = (1.0f / sqrt_2_pi) * std::exp(-0.5f * x * x);
             grad_in_data[i] = Float16(static_cast<float>(grad_out_data[i]) * (cdf + x * pdf));
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* grad_out_data = grad_output.data<BFloat16>();
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* grad_in_data = grad_input.data<BFloat16>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]);
+            float cdf = 0.5f * (1.0f + std::erf(x / sqrt_2));
+            float pdf = (1.0f / sqrt_2_pi) * std::exp(-0.5f * x * x);
+            grad_in_data[i] = BFloat16(static_cast<float>(grad_out_data[i]) * (cdf + x * pdf));
+        }
     } else {
-        throw std::runtime_error("GELU backward only supports Float32/Float64/Float16");
+        throw std::runtime_error("GELU backward only supports Float32/Float64/Float16/BFloat16");
     }
 
     return grad_input;
@@ -1070,8 +1175,19 @@ auto swish_kernel(const Tensor& input) -> Tensor {
             float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
             out_data[i] = Float16(x * sigmoid_x);
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = output.data<BFloat16>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]);
+            float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
+            out_data[i] = BFloat16(x * sigmoid_x);
+        }
     } else {
-        throw std::runtime_error("Swish only supports Float32, Float64, and Float16");
+        throw std::runtime_error("Swish only supports Float32, Float64, Float16, and BFloat16");
     }
 
     return output;
@@ -1116,8 +1232,21 @@ auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Te
             float grad = static_cast<float>(grad_out_data[i]) * (sigmoid_x * (1.0f + x * (1.0f - sigmoid_x)));
             grad_in_data[i] = Float16(grad);
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* grad_out_data = grad_output.data<BFloat16>();
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* grad_in_data = grad_input.data<BFloat16>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]);
+            float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
+            float grad = static_cast<float>(grad_out_data[i]) * (sigmoid_x * (1.0f + x * (1.0f - sigmoid_x)));
+            grad_in_data[i] = BFloat16(grad);
+        }
     } else {
-        throw std::runtime_error("Swish backward only supports Float32, Float64, and Float16");
+        throw std::runtime_error("Swish backward only supports Float32, Float64, Float16, and BFloat16");
     }
 
     return grad_input;
@@ -1197,8 +1326,18 @@ auto leaky_relu_kernel(const Tensor& input, float alpha) -> Tensor {
             float val = static_cast<float>(in_data[i]);
             out_data[i] = Float16(val > 0.0f ? val : alpha * val);
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = output.data<BFloat16>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(in_data[i]);
+            out_data[i] = BFloat16(val > 0.0f ? val : alpha * val);
+        }
     } else {
-        throw std::runtime_error("Leaky ReLU only supports Float32, Float64, and Float16");
+        throw std::runtime_error("Leaky ReLU only supports Float32, Float64, Float16, and BFloat16");
     }
 
     return output;
@@ -1238,8 +1377,20 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
             float grad_out_val = static_cast<float>(grad_out_data[i]);
             grad_in_data[i] = Float16(grad_out_val * (in_val > 0.0f ? 1.0f : alpha));
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* grad_out_data = grad_output.data<BFloat16>();
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* grad_in_data = grad_input.data<BFloat16>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float in_val = static_cast<float>(in_data[i]);
+            float grad_out_val = static_cast<float>(grad_out_data[i]);
+            grad_in_data[i] = BFloat16(grad_out_val * (in_val > 0.0f ? 1.0f : alpha));
+        }
     } else {
-        throw std::runtime_error("Leaky ReLU backward only supports Float32, Float64, and Float16");
+        throw std::runtime_error("Leaky ReLU backward only supports Float32, Float64, Float16, and BFloat16");
     }
 
     return grad_input;
@@ -1439,8 +1590,50 @@ auto softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
                 }
             }
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = output.data<BFloat16>();
+
+        auto shape_span = input.shape();
+        std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+
+        int64_t outer_size = 1;
+        for (int64_t i = 0; i < dim; ++i) {
+            outer_size *= shape[i];
+        }
+
+        int64_t dim_size = shape[dim];
+
+        int64_t inner_size = 1;
+        for (int64_t i = dim + 1; i < static_cast<int64_t>(shape.size()); ++i) {
+            inner_size *= shape[i];
+        }
+
+        // Use Float32 accumulation for numerical stability
+        for (int64_t i = 0; i < outer_size; ++i) {
+            for (int64_t k = 0; k < inner_size; ++k) {
+                float max_val = -std::numeric_limits<float>::infinity();
+                for (int64_t j = 0; j < dim_size; ++j) {
+                    int64_t idx = (i * dim_size + j) * inner_size + k;
+                    max_val = std::max(max_val, static_cast<float>(in_data[idx]));
+                }
+
+                float sum = 0.0f;
+                for (int64_t j = 0; j < dim_size; ++j) {
+                    int64_t idx = (i * dim_size + j) * inner_size + k;
+                    float exp_val = std::exp(static_cast<float>(in_data[idx]) - max_val);
+                    out_data[idx] = BFloat16(exp_val);
+                    sum += exp_val;
+                }
+
+                for (int64_t j = 0; j < dim_size; ++j) {
+                    int64_t idx = (i * dim_size + j) * inner_size + k;
+                    out_data[idx] = BFloat16(static_cast<float>(out_data[idx]) / sum);
+                }
+            }
+        }
     } else {
-        throw std::runtime_error("Softmax only supports Float16, Float32, and Float64");
+        throw std::runtime_error("Softmax only supports Float16, Float32, Float64, and BFloat16");
     }
 
     return output;
@@ -1563,8 +1756,41 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
                 }
             }
         }
+    } else if (output.dtype() == DType::BFloat16) {
+        const BFloat16* grad_out_data = grad_output.data<BFloat16>();
+        const BFloat16* out_data = output.data<BFloat16>();
+        BFloat16* grad_in_data = grad_input.data<BFloat16>();
+
+        auto shape_span = output.shape();
+        std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+
+        int64_t outer_size = 1;
+        for (int64_t i = 0; i < dim; ++i) {
+            outer_size *= shape[i];
+        }
+
+        int64_t dim_size = shape[dim];
+
+        int64_t inner_size = 1;
+        for (int64_t i = dim + 1; i < static_cast<int64_t>(shape.size()); ++i) {
+            inner_size *= shape[i];
+        }
+
+        for (int64_t i = 0; i < outer_size; ++i) {
+            for (int64_t k = 0; k < inner_size; ++k) {
+                float sum = 0.0f;
+                for (int64_t j = 0; j < dim_size; ++j) {
+                    int64_t idx = (i * dim_size + j) * inner_size + k;
+                    sum += static_cast<float>(grad_out_data[idx]) * static_cast<float>(out_data[idx]);
+                }
+                for (int64_t j = 0; j < dim_size; ++j) {
+                    int64_t idx = (i * dim_size + j) * inner_size + k;
+                    grad_in_data[idx] = BFloat16(static_cast<float>(out_data[idx]) * (static_cast<float>(grad_out_data[idx]) - sum));
+                }
+            }
+        }
     } else {
-        throw std::runtime_error("Softmax backward only supports Float16, Float32, and Float64");
+        throw std::runtime_error("Softmax backward only supports Float16, Float32, Float64, and BFloat16");
     }
 
     return grad_input;
@@ -1728,8 +1954,48 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
                 }
             }
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = output.data<BFloat16>();
+
+        auto shape_span = input.shape();
+        std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+
+        int64_t outer_size = 1;
+        for (int64_t i = 0; i < dim; ++i) {
+            outer_size *= shape[i];
+        }
+
+        int64_t dim_size = shape[dim];
+
+        int64_t inner_size = 1;
+        for (int64_t i = dim + 1; i < static_cast<int64_t>(shape.size()); ++i) {
+            inner_size *= shape[i];
+        }
+
+        for (int64_t i = 0; i < outer_size; ++i) {
+            for (int64_t k = 0; k < inner_size; ++k) {
+                float max_val = -std::numeric_limits<float>::infinity();
+                for (int64_t j = 0; j < dim_size; ++j) {
+                    int64_t idx = (i * dim_size + j) * inner_size + k;
+                    max_val = std::max(max_val, static_cast<float>(in_data[idx]));
+                }
+
+                float sum_exp = 0.0f;
+                for (int64_t j = 0; j < dim_size; ++j) {
+                    int64_t idx = (i * dim_size + j) * inner_size + k;
+                    sum_exp += std::exp(static_cast<float>(in_data[idx]) - max_val);
+                }
+                float log_sum_exp = std::log(sum_exp);
+
+                for (int64_t j = 0; j < dim_size; ++j) {
+                    int64_t idx = (i * dim_size + j) * inner_size + k;
+                    out_data[idx] = BFloat16(static_cast<float>(in_data[idx]) - max_val - log_sum_exp);
+                }
+            }
+        }
     } else {
-        throw std::runtime_error("LogSoftmax only supports Float16, Float32, and Float64");
+        throw std::runtime_error("LogSoftmax only supports Float16, Float32, Float64, and BFloat16");
     }
 
     return output;
@@ -1850,8 +2116,41 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
                 }
             }
         }
+    } else if (output.dtype() == DType::BFloat16) {
+        const BFloat16* grad_out_data = grad_output.data<BFloat16>();
+        const BFloat16* out_data = output.data<BFloat16>();
+        BFloat16* grad_in_data = grad_input.data<BFloat16>();
+
+        auto shape_span = output.shape();
+        std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+
+        int64_t outer_size = 1;
+        for (int64_t i = 0; i < dim; ++i) {
+            outer_size *= shape[i];
+        }
+
+        int64_t dim_size = shape[dim];
+
+        int64_t inner_size = 1;
+        for (int64_t i = dim + 1; i < static_cast<int64_t>(shape.size()); ++i) {
+            inner_size *= shape[i];
+        }
+
+        for (int64_t i = 0; i < outer_size; ++i) {
+            for (int64_t k = 0; k < inner_size; ++k) {
+                float sum_grad = 0.0f;
+                for (int64_t j = 0; j < dim_size; ++j) {
+                    int64_t idx = (i * dim_size + j) * inner_size + k;
+                    sum_grad += static_cast<float>(grad_out_data[idx]);
+                }
+                for (int64_t j = 0; j < dim_size; ++j) {
+                    int64_t idx = (i * dim_size + j) * inner_size + k;
+                    grad_in_data[idx] = BFloat16(static_cast<float>(grad_out_data[idx]) - std::exp(static_cast<float>(out_data[idx])) * sum_grad);
+                }
+            }
+        }
     } else {
-        throw std::runtime_error("LogSoftmax backward only supports Float16, Float32, and Float64");
+        throw std::runtime_error("LogSoftmax backward only supports Float16, Float32, Float64, and BFloat16");
     }
 
     return grad_input;
@@ -1895,8 +2194,19 @@ auto elu_kernel(const Tensor& input, float alpha) -> Tensor {
             float result = (x > 0.0f) ? x : alpha * (std::exp(x) - 1.0f);
             out_data[i] = Float16(result);
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = output.data<BFloat16>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]);
+            float result = (x > 0.0f) ? x : alpha * (std::exp(x) - 1.0f);
+            out_data[i] = BFloat16(result);
+        }
     } else {
-        throw std::runtime_error("ELU only supports Float32, Float64, and Float16");
+        throw std::runtime_error("ELU only supports Float32, Float64, Float16, and BFloat16");
     }
 
     return output;
@@ -1940,8 +2250,21 @@ auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float a
             float result = grad_out * ((x > 0.0f) ? 1.0f : alpha * std::exp(x));
             grad_in_data[i] = Float16(result);
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* grad_out_data = grad_output.data<BFloat16>();
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* grad_in_data = grad_input.data<BFloat16>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]);
+            float grad_out = static_cast<float>(grad_out_data[i]);
+            float result = grad_out * ((x > 0.0f) ? 1.0f : alpha * std::exp(x));
+            grad_in_data[i] = BFloat16(result);
+        }
     } else {
-        throw std::runtime_error("ELU backward only supports Float32, Float64, and Float16");
+        throw std::runtime_error("ELU backward only supports Float32, Float64, Float16, and BFloat16");
     }
 
     return grad_input;
@@ -1990,8 +2313,19 @@ auto selu_kernel(const Tensor& input) -> Tensor {
             float result = SELU_SCALE * ((x > 0.0f) ? x : SELU_ALPHA * (std::exp(x) - 1.0f));
             out_data[i] = Float16(result);
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = output.data<BFloat16>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]);
+            float result = SELU_SCALE * ((x > 0.0f) ? x : SELU_ALPHA * (std::exp(x) - 1.0f));
+            out_data[i] = BFloat16(result);
+        }
     } else {
-        throw std::runtime_error("SELU only supports Float32, Float64, and Float16");
+        throw std::runtime_error("SELU only supports Float32, Float64, Float16, and BFloat16");
     }
 
     return output;
@@ -2037,8 +2371,21 @@ auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
             float result = grad_out * SELU_SCALE * ((x > 0.0f) ? 1.0f : SELU_ALPHA * std::exp(x));
             grad_in_data[i] = Float16(result);
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* grad_out_data = grad_output.data<BFloat16>();
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* grad_in_data = grad_input.data<BFloat16>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]);
+            float grad_out = static_cast<float>(grad_out_data[i]);
+            float result = grad_out * SELU_SCALE * ((x > 0.0f) ? 1.0f : SELU_ALPHA * std::exp(x));
+            grad_in_data[i] = BFloat16(result);
+        }
     } else {
-        throw std::runtime_error("SELU backward only supports Float32, Float64, and Float16");
+        throw std::runtime_error("SELU backward only supports Float32, Float64, Float16, and BFloat16");
     }
 
     return grad_input;
@@ -2108,8 +2455,26 @@ auto mish_kernel(const Tensor& input) -> Tensor {
             }
             out_data[i] = Float16(x * std::tanh(softplus));
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = output.data<BFloat16>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]);
+            float softplus;
+            if (x > 20.0f) {
+                softplus = x;
+            } else if (x < -20.0f) {
+                softplus = std::exp(x);
+            } else {
+                softplus = std::log1p(std::exp(x));
+            }
+            out_data[i] = BFloat16(x * std::tanh(softplus));
+        }
     } else {
-        throw std::runtime_error("Mish only supports Float32, Float64, and Float16");
+        throw std::runtime_error("Mish only supports Float32, Float64, Float16, and BFloat16");
     }
 
     return output;
@@ -2186,8 +2551,31 @@ auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
             float sech2 = 1.0f - tanh_sp * tanh_sp;
             grad_in_data[i] = Float16(grad_out * (tanh_sp + x * sech2 * sigmoid_x));
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* grad_out_data = grad_output.data<BFloat16>();
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* grad_in_data = grad_input.data<BFloat16>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]);
+            float grad_out = static_cast<float>(grad_out_data[i]);
+            float softplus;
+            if (x > 20.0f) {
+                softplus = x;
+            } else if (x < -20.0f) {
+                softplus = std::exp(x);
+            } else {
+                softplus = std::log1p(std::exp(x));
+            }
+            float tanh_sp = std::tanh(softplus);
+            float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
+            float sech2 = 1.0f - tanh_sp * tanh_sp;
+            grad_in_data[i] = BFloat16(grad_out * (tanh_sp + x * sech2 * sigmoid_x));
+        }
     } else {
-        throw std::runtime_error("Mish backward only supports Float32, Float64, and Float16");
+        throw std::runtime_error("Mish backward only supports Float32, Float64, Float16, and BFloat16");
     }
 
     return grad_input;
@@ -2252,8 +2640,26 @@ auto softplus_kernel(const Tensor& input, float beta, float threshold) -> Tensor
             }
             out_data[i] = Float16(result);
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = output.data<BFloat16>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for schedule(static) if(n > 1000)
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]) * beta;
+            float result;
+            if (x > threshold) {
+                result = static_cast<float>(in_data[i]);
+            } else if (x < -threshold) {
+                result = std::exp(x) / beta;
+            } else {
+                result = std::log1p(std::exp(x)) / beta;
+            }
+            out_data[i] = BFloat16(result);
+        }
     } else {
-        throw std::runtime_error("Softplus only supports Float32, Float64, and Float16");
+        throw std::runtime_error("Softplus only supports Float32, Float64, Float16, and BFloat16");
     }
 
     return output;
@@ -2321,8 +2727,27 @@ auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, fl
             }
             grad_in_data[i] = Float16(static_cast<float>(grad_out_data[i]) * sigmoid_x);
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* grad_out_data = grad_output.data<BFloat16>();
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* grad_in_data = grad_input.data<BFloat16>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for schedule(static) if(n > 1000)
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]) * beta;
+            float sigmoid_x;
+            if (x > threshold) {
+                sigmoid_x = 1.0f;
+            } else if (x < -threshold) {
+                sigmoid_x = std::exp(x);
+            } else {
+                sigmoid_x = 1.0f / (1.0f + std::exp(-x));
+            }
+            grad_in_data[i] = BFloat16(static_cast<float>(grad_out_data[i]) * sigmoid_x);
+        }
     } else {
-        throw std::runtime_error("Softplus backward only supports Float32, Float64, and Float16");
+        throw std::runtime_error("Softplus backward only supports Float32, Float64, Float16, and BFloat16");
     }
 
     return grad_input;
@@ -2354,6 +2779,14 @@ auto relu_inplace_kernel(Tensor& input) -> void {
             float val = static_cast<float>(data[i]);
             data[i] = Float16(val > 0.0f ? val : 0.0f);
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        BFloat16* data = input.data<BFloat16>();
+        size_t n = input.numel();
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(data[i]);
+            data[i] = BFloat16(val > 0.0f ? val : 0.0f);
+        }
     } else {
         throw std::runtime_error("relu_inplace: Unsupported dtype");
     }
@@ -2380,6 +2813,14 @@ auto sigmoid_inplace_kernel(Tensor& input) -> void {
         for (size_t i = 0; i < n; ++i) {
             float val = static_cast<float>(data[i]);
             data[i] = Float16(1.0f / (1.0f + std::exp(-val)));
+        }
+    } else if (input.dtype() == DType::BFloat16) {
+        BFloat16* data = input.data<BFloat16>();
+        size_t n = input.numel();
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(data[i]);
+            data[i] = BFloat16(1.0f / (1.0f + std::exp(-val)));
         }
     } else {
         throw std::runtime_error("sigmoid_inplace: Unsupported dtype");
@@ -2408,6 +2849,14 @@ auto tanh_inplace_kernel(Tensor& input) -> void {
             float val = static_cast<float>(data[i]);
             data[i] = Float16(std::tanh(val));
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        BFloat16* data = input.data<BFloat16>();
+        size_t n = input.numel();
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(data[i]);
+            data[i] = BFloat16(std::tanh(val));
+        }
     } else {
         throw std::runtime_error("tanh_inplace: Unsupported dtype");
     }
@@ -2435,6 +2884,14 @@ auto leaky_relu_inplace_kernel(Tensor& input, float alpha) -> void {
         for (size_t i = 0; i < n; ++i) {
             float val = static_cast<float>(data[i]);
             data[i] = Float16(val > 0.0f ? val : alpha * val);
+        }
+    } else if (input.dtype() == DType::BFloat16) {
+        BFloat16* data = input.data<BFloat16>();
+        size_t n = input.numel();
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(data[i]);
+            data[i] = BFloat16(val > 0.0f ? val : alpha * val);
         }
     } else {
         throw std::runtime_error("leaky_relu_inplace: Unsupported dtype");
@@ -2475,6 +2932,16 @@ auto gelu_inplace_kernel(Tensor& input) -> void {
             float x_cubed = x * x * x;
             float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
             data[i] = Float16(0.5f * x * (1.0f + std::tanh(inner)));
+        }
+    } else if (input.dtype() == DType::BFloat16) {
+        BFloat16* data = input.data<BFloat16>();
+        size_t n = input.numel();
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(data[i]);
+            float x_cubed = x * x * x;
+            float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
+            data[i] = BFloat16(0.5f * x * (1.0f + std::tanh(inner)));
         }
     } else {
         throw std::runtime_error("gelu_inplace: Unsupported dtype");

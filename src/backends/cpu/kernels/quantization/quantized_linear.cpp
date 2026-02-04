@@ -7,10 +7,37 @@
 #include <algorithm>
 #include <immintrin.h>  // For SIMD operations
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 namespace tenzor {
 namespace nn {
 namespace quantization {
 namespace kernels {
+
+// AVX512-VNNI inner product: uses _mm512_dpbusd_epi32 for 4x throughput
+#if defined(__AVX512VNNI__)
+static inline int32_t dot_int8_vnni(const int8_t* a, const int8_t* b, int64_t len) {
+    __m512i acc_vec = _mm512_setzero_si512();
+    int64_t i = 0;
+
+    // Process 64 elements at a time with VNNI
+    for (; i + 64 <= len; i += 64) {
+        __m512i va = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(a + i));
+        __m512i vb = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(b + i));
+        acc_vec = _mm512_dpbusd_epi32(acc_vec, va, vb);
+    }
+
+    int32_t acc = _mm512_reduce_add_epi32(acc_vec);
+
+    // Handle remainder
+    for (; i < len; ++i) {
+        acc += static_cast<int32_t>(a[i]) * static_cast<int32_t>(b[i]);
+    }
+    return acc;
+}
+#endif
 
 /**
  * @brief Quantized matrix multiplication for linear layer (CPU).
@@ -44,7 +71,10 @@ auto quantized_linear_kernel(
             const int8_t* input_row = input + b * in_features;
             const int8_t* weight_row = weight + o * in_features;
 
-#ifdef __AVX2__
+#if defined(__AVX512VNNI__)
+            // AVX512-VNNI path: ~4x throughput over AVX2
+            acc = dot_int8_vnni(input_row, weight_row, in_features);
+#elif defined(__AVX2__)
             // SIMD-optimized path for x86 with AVX2
             __m256i acc_vec = _mm256_setzero_si256();
             int64_t i = 0;

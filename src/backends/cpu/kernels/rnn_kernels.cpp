@@ -25,6 +25,17 @@ auto lstm_cell_forward_kernel(const Tensor& input, const Tensor& hx, const Tenso
                                const Tensor& weight_ih, const Tensor& weight_hh,
                                const Tensor& bias_ih, const Tensor& bias_hh)
     -> std::vector<Tensor> {
+    // Multi-dtype support: convert non-Float32 inputs to Float32, compute, convert back
+    if (input.dtype() != DType::Float32) {
+        DType orig = input.dtype();
+        auto results = lstm_cell_forward_kernel(
+            input.to(DType::Float32), hx.to(DType::Float32), cx.to(DType::Float32),
+            weight_ih.to(DType::Float32), weight_hh.to(DType::Float32),
+            bias_ih.to(DType::Float32), bias_hh.to(DType::Float32));
+        for (auto& t : results) t = t.to(orig);
+        return results;
+    }
+
     // input: [batch, input_size]
     // hx: [batch, hidden_size]
     // cx: [batch, hidden_size]
@@ -94,6 +105,18 @@ auto lstm_cell_backward_kernel(const Tensor& grad_hy, const Tensor& grad_cy,
                                 const Tensor& hy, const Tensor& cy,
                                 const Tensor& weight_ih, const Tensor& weight_hh)
     -> std::vector<Tensor> {
+    // Multi-dtype support: convert non-Float32 inputs to Float32, compute, convert back
+    if (grad_hy.dtype() != DType::Float32) {
+        DType orig = grad_hy.dtype();
+        auto results = lstm_cell_backward_kernel(
+            grad_hy.to(DType::Float32), grad_cy.to(DType::Float32),
+            input.to(DType::Float32), hx.to(DType::Float32), cx.to(DType::Float32),
+            hy.to(DType::Float32), cy.to(DType::Float32),
+            weight_ih.to(DType::Float32), weight_hh.to(DType::Float32));
+        for (auto& t : results) t = t.to(orig);
+        return results;
+    }
+
     auto shape = grad_hy.shape();
     int64_t batch_size = shape[0];
     int64_t hidden_size = shape[1];
@@ -244,6 +267,16 @@ auto lstm_cell_backward_kernel(const Tensor& grad_hy, const Tensor& grad_cy,
 auto gru_cell_forward_kernel(const Tensor& input, const Tensor& hx,
                               const Tensor& weight_ih, const Tensor& weight_hh,
                               const Tensor& bias_ih, const Tensor& bias_hh) -> Tensor {
+    // Multi-dtype support: convert non-Float32 inputs to Float32, compute, convert back
+    if (input.dtype() != DType::Float32) {
+        DType orig = input.dtype();
+        auto result = gru_cell_forward_kernel(
+            input.to(DType::Float32), hx.to(DType::Float32),
+            weight_ih.to(DType::Float32), weight_hh.to(DType::Float32),
+            bias_ih.to(DType::Float32), bias_hh.to(DType::Float32));
+        return result.to(orig);
+    }
+
     // input: [batch, input_size]
     // hx: [batch, hidden_size]
     // weight_ih: [3 * hidden_size, input_size] (r, z, n gates)
@@ -308,6 +341,16 @@ auto gru_cell_forward_kernel(const Tensor& input, const Tensor& hx,
 auto gru_cell_backward_kernel(const Tensor& grad_hy, const Tensor& input, const Tensor& hx,
                                const Tensor& weight_ih, const Tensor& weight_hh)
     -> std::vector<Tensor> {
+    // Multi-dtype support: convert non-Float32 inputs to Float32, compute, convert back
+    if (grad_hy.dtype() != DType::Float32) {
+        DType orig = grad_hy.dtype();
+        auto results = gru_cell_backward_kernel(
+            grad_hy.to(DType::Float32), input.to(DType::Float32), hx.to(DType::Float32),
+            weight_ih.to(DType::Float32), weight_hh.to(DType::Float32));
+        for (auto& t : results) t = t.to(orig);
+        return results;
+    }
+
     auto shape = grad_hy.shape();
     int64_t batch_size = shape[0];
     int64_t hidden_size = shape[1];
@@ -522,6 +565,18 @@ auto lstm_forward_kernel(
     const Tensor& h0,
     const Tensor& c0
 ) -> std::vector<Tensor> {
+    // Multi-dtype support: convert non-Float32 inputs to Float32, compute, convert back
+    if (input.dtype() != DType::Float32) {
+        DType orig = input.dtype();
+        auto results = lstm_forward_kernel(
+            input.to(DType::Float32), W_ih.to(DType::Float32), W_hh.to(DType::Float32),
+            bias_ih.numel() > 0 ? bias_ih.to(DType::Float32) : bias_ih,
+            bias_hh.numel() > 0 ? bias_hh.to(DType::Float32) : bias_hh,
+            h0.to(DType::Float32), c0.to(DType::Float32));
+        for (auto& t : results) t = t.to(orig);
+        return results;
+    }
+
     // Get dimensions
     auto input_shape = input.shape();
     int64_t seq_len = input_shape[0];
@@ -650,6 +705,21 @@ auto bilstm_forward_kernel(
     const Tensor& h0,
     const Tensor& c0
 ) -> std::vector<Tensor> {
+    // Multi-dtype support: convert non-Float32 inputs to Float32, compute, convert back
+    if (input.dtype() != DType::Float32) {
+        DType orig = input.dtype();
+        auto to_f32 = [](const Tensor& t) { return t.numel() > 0 ? t.to(DType::Float32) : t; };
+        auto results = bilstm_forward_kernel(
+            input.to(DType::Float32),
+            W_ih_fwd.to(DType::Float32), W_hh_fwd.to(DType::Float32),
+            to_f32(bias_ih_fwd), to_f32(bias_hh_fwd),
+            W_ih_bwd.to(DType::Float32), W_hh_bwd.to(DType::Float32),
+            to_f32(bias_ih_bwd), to_f32(bias_hh_bwd),
+            h0.to(DType::Float32), c0.to(DType::Float32));
+        for (auto& t : results) t = t.to(orig);
+        return results;
+    }
+
     // Get dimensions
     auto input_shape = input.shape();
     int64_t seq_len = input_shape[0];
@@ -770,6 +840,17 @@ auto gru_forward_kernel(
     const Tensor& bias,
     const Tensor& h0
 ) -> std::vector<Tensor> {
+    // Multi-dtype support: convert non-Float32 inputs to Float32, compute, convert back
+    if (input.dtype() != DType::Float32) {
+        DType orig = input.dtype();
+        auto results = gru_forward_kernel(
+            input.to(DType::Float32), W_ih.to(DType::Float32), W_hh.to(DType::Float32),
+            bias.numel() > 0 ? bias.to(DType::Float32) : bias,
+            h0.to(DType::Float32));
+        for (auto& t : results) t = t.to(orig);
+        return results;
+    }
+
     // Get dimensions
     auto input_shape = input.shape();
     int64_t seq_len = input_shape[0];
@@ -850,6 +931,20 @@ auto lstm_multilayer_forward_kernel(
     const Tensor& h0,
     const Tensor& c0
 ) -> std::vector<Tensor> {
+    // Multi-dtype support: convert non-Float32 inputs to Float32, compute, convert back
+    if (input.dtype() != DType::Float32) {
+        DType orig = input.dtype();
+        std::vector<Tensor> W_ih_f32, W_hh_f32, bias_f32;
+        for (const auto& t : W_ih_list) W_ih_f32.push_back(t.to(DType::Float32));
+        for (const auto& t : W_hh_list) W_hh_f32.push_back(t.to(DType::Float32));
+        for (const auto& t : bias_list) bias_f32.push_back(t.numel() > 0 ? t.to(DType::Float32) : t);
+        auto results = lstm_multilayer_forward_kernel(
+            input.to(DType::Float32), W_ih_f32, W_hh_f32, bias_f32,
+            h0.to(DType::Float32), c0.to(DType::Float32));
+        for (auto& t : results) t = t.to(orig);
+        return results;
+    }
+
     // Get dimensions
     auto input_shape = input.shape();
     int64_t seq_len = input_shape[0];
@@ -967,6 +1062,20 @@ auto gru_multilayer_forward_kernel(
     const std::vector<Tensor>& bias_list,
     const Tensor& h0
 ) -> std::vector<Tensor> {
+    // Multi-dtype support: convert non-Float32 inputs to Float32, compute, convert back
+    if (input.dtype() != DType::Float32) {
+        DType orig = input.dtype();
+        std::vector<Tensor> W_ih_f32, W_hh_f32, bias_f32;
+        for (const auto& t : W_ih_list) W_ih_f32.push_back(t.to(DType::Float32));
+        for (const auto& t : W_hh_list) W_hh_f32.push_back(t.to(DType::Float32));
+        for (const auto& t : bias_list) bias_f32.push_back(t.numel() > 0 ? t.to(DType::Float32) : t);
+        auto results = gru_multilayer_forward_kernel(
+            input.to(DType::Float32), W_ih_f32, W_hh_f32, bias_f32,
+            h0.to(DType::Float32));
+        for (auto& t : results) t = t.to(orig);
+        return results;
+    }
+
     // Get dimensions
     auto input_shape = input.shape();
     int64_t seq_len = input_shape[0];

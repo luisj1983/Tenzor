@@ -38,6 +38,7 @@ enum class CPUFeature : uint32_t {
     AVX512DQ = 1 << 10,
     AVX512BW = 1 << 11,
     AVX512VL = 1 << 12,
+    AVX512VNNI = 1 << 13,
 };
 
 inline CPUFeature operator|(CPUFeature a, CPUFeature b) {
@@ -111,6 +112,13 @@ public:
      */
     auto has_sse42() const -> bool {
         return has(CPUFeature::SSE42);
+    }
+
+    /**
+     * @brief Check if AVX512-VNNI is available
+     */
+    auto has_avx512_vnni() const -> bool {
+        return has(CPUFeature::AVX512VNNI);
     }
 
 private:

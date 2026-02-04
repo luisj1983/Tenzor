@@ -443,6 +443,40 @@ auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias
 
         // Convert result back to Float16
         return output_f32.to(DType::Float16);
+    } else if (input_c.dtype() == DType::BFloat16) {
+        // BFloat16: Convert to Float32, compute, convert back
+        auto input_f32 = input_c.to(DType::Float32);
+        auto weight_f32 = weight_c.to(DType::Float32);
+        auto output_f32 = Tensor::empty_uninitialized(out_shape, DType::Float32, input_c.device());
+        Tensor bias_f32;
+        if (bias) {
+            bias_f32 = bias->to(DType::Float32);
+        }
+
+        const float* in_data = input_f32.data<float>();
+        const float* w_data = weight_f32.data<float>();
+        float* out_data = output_f32.data<float>();
+        const float* b_data = bias ? bias_f32.data<float>() : nullptr;
+
+#ifdef TENZOR_USE_MKL
+        if (linear_mkl_float32(in_data, w_data, b_data, out_data, batch_size, in_features, out_features)) {
+            return output_f32.to(DType::BFloat16);
+        }
+#endif
+
+        #pragma omp parallel for collapse(2)
+        for (int64_t b = 0; b < batch_size; ++b) {
+            for (int64_t o = 0; o < out_features; ++o) {
+                float sum = 0.0f;
+                #pragma omp simd reduction(+:sum)
+                for (int64_t i = 0; i < in_features; ++i) {
+                    sum += in_data[b * in_features + i] * w_data[o * in_features + i];
+                }
+                out_data[b * out_features + o] = sum + (b_data ? b_data[o] : 0.0f);
+            }
+        }
+
+        return output_f32.to(DType::BFloat16);
     } else {
         // For other dtypes, throw an error rather than crash
         throw std::runtime_error("linear_kernel: Unsupported dtype " +
@@ -615,19 +649,36 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input,
                                       grad_in_data, grad_w_data, grad_b_data,
                                       batch_size, in_features, out_features);
 
-    } else {
-        // Float16 and other dtypes: use Float32 scalar fallback
-        // (MKL doesn't support Float16 directly)
-        const float* grad_out_data = grad_output.data<float>();
-        const float* w_data = weight.data<float>();
-        const float* in_data = input.data<float>();
-        float* grad_in_data = grad_input.data<float>();
-        float* grad_w_data = grad_weight.data<float>();
-        float* grad_b_data = grad_bias.data<float>();
+    } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
+        // Float16/BFloat16: convert to Float32, compute, convert back
+        DType orig_dtype = grad_output.dtype();
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto weight_f32 = weight.to(DType::Float32);
+
+        auto grad_input_f32 = Tensor::empty_uninitialized(
+            std::vector<int64_t>(in_shape.begin(), in_shape.end()),
+            DType::Float32, input.device());
+        auto grad_weight_f32 = zeros(
+            std::vector<int64_t>(w_shape.begin(), w_shape.end()),
+            DType::Float32, weight.device());
+        auto grad_bias_f32 = zeros({out_features}, DType::Float32, grad_output.device());
+
+        const float* grad_out_data = grad_output_f32.data<float>();
+        const float* w_data = weight_f32.data<float>();
+        const float* in_data = input_f32.data<float>();
+        float* grad_in_data = grad_input_f32.data<float>();
+        float* grad_w_data = grad_weight_f32.data<float>();
+        float* grad_b_data = grad_bias_f32.data<float>();
 
         linear_backward_impl<float>(grad_out_data, in_data, w_data,
                                      grad_in_data, grad_w_data, grad_b_data,
                                      batch_size, in_features, out_features);
+
+        return {grad_input_f32.to(orig_dtype), grad_weight_f32.to(orig_dtype), grad_bias_f32.to(orig_dtype)};
+    } else {
+        throw std::runtime_error("linear_backward_kernel: Unsupported dtype " +
+                                 std::to_string(static_cast<int>(grad_output.dtype())));
     }
 
     return {grad_input, grad_weight, grad_bias};

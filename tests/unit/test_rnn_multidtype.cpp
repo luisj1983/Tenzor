@@ -320,7 +320,7 @@ TEST_P(RNNMultiDTypeTest, RNNInvalidDropout) {
 // Test Instantiation
 // ============================================================================
 
-INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(RNNMultiDTypeTest);
+INSTANTIATE_MULTI_BACKEND_ALL_DTYPE_TESTS(RNNMultiDTypeTest);
 
 /*
  * COVERAGE SUMMARY:

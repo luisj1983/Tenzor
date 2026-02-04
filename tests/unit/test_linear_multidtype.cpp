@@ -386,7 +386,7 @@ TEST_P(LinearMultiDTypeTest, LargeBatchSize) {
 // Test Instantiation
 // ============================================================================
 
-INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(LinearMultiDTypeTest);
+INSTANTIATE_MULTI_BACKEND_ALL_DTYPE_TESTS(LinearMultiDTypeTest);
 
 /*
  * COVERAGE SUMMARY:
