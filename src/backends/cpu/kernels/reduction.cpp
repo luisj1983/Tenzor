@@ -874,27 +874,31 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                 output_data[0] = Float16(max_val);
             } else {
                 // Dimensional reduction - compute in Float32
-                const int64_t num_outputs = output.numel();
                 const int64_t dim_size = input_shape[dim];
-                const int64_t dim_stride = input_strides[dim];
 
-                #pragma omp parallel for if(num_outputs > 1000)
-                for (int64_t out_idx = 0; out_idx < num_outputs; out_idx++) {
-                    // Calculate input base index
-                    int64_t base_idx = 0;
-                    int64_t remaining = out_idx;
-                    for (int64_t d = ndim - 1; d >= 0; d--) {
+                int64_t output_size = 1;
+                for (int64_t d = 0; d < ndim; d++) {
+                    if (d != dim) output_size *= input_shape[d];
+                }
+
+                const int64_t total_work = output_size * dim_size;
+                #pragma omp parallel for if(total_work > REDUCTION_OMP_THRESHOLD)
+                for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
+                    std::vector<int64_t> indices(ndim, 0);
+                    int64_t tmp = out_idx;
+                    for (int64_t d = 0; d < ndim; d++) {
                         if (d == dim) continue;
-                        int64_t out_d = (d > dim) ? d - 1 : d;
-                        int64_t size = (d > dim) ? input_shape[d] : input_shape[d];
-                        int64_t coord = remaining % size;
-                        remaining /= size;
-                        base_idx += coord * input_strides[d];
+                        indices[d] = tmp % input_shape[d];
+                        tmp /= input_shape[d];
                     }
 
                     float max_val = std::numeric_limits<float>::lowest();
                     for (int64_t i = 0; i < dim_size; i++) {
-                        int64_t in_idx = base_idx + i * dim_stride;
+                        indices[dim] = i;
+                        int64_t in_idx = 0;
+                        for (int64_t d = 0; d < ndim; d++) {
+                            in_idx += indices[d] * input_strides[d];
+                        }
                         float val = static_cast<float>(input_data[in_idx]);
                         if (val > max_val) {
                             max_val = val;
@@ -1083,27 +1087,31 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                 output_data[0] = Float16(min_val);
             } else {
                 // Dimensional reduction - compute in Float32
-                const int64_t num_outputs = output.numel();
                 const int64_t dim_size = input_shape[dim];
-                const int64_t dim_stride = input_strides[dim];
 
-                #pragma omp parallel for if(num_outputs > 1000)
-                for (int64_t out_idx = 0; out_idx < num_outputs; out_idx++) {
-                    // Calculate input base index
-                    int64_t base_idx = 0;
-                    int64_t remaining = out_idx;
-                    for (int64_t d = ndim - 1; d >= 0; d--) {
+                int64_t output_size = 1;
+                for (int64_t d = 0; d < ndim; d++) {
+                    if (d != dim) output_size *= input_shape[d];
+                }
+
+                const int64_t total_work = output_size * dim_size;
+                #pragma omp parallel for if(total_work > REDUCTION_OMP_THRESHOLD)
+                for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
+                    std::vector<int64_t> indices(ndim, 0);
+                    int64_t tmp = out_idx;
+                    for (int64_t d = 0; d < ndim; d++) {
                         if (d == dim) continue;
-                        int64_t out_d = (d > dim) ? d - 1 : d;
-                        int64_t size = (d > dim) ? input_shape[d] : input_shape[d];
-                        int64_t coord = remaining % size;
-                        remaining /= size;
-                        base_idx += coord * input_strides[d];
+                        indices[d] = tmp % input_shape[d];
+                        tmp /= input_shape[d];
                     }
 
                     float min_val = std::numeric_limits<float>::max();
                     for (int64_t i = 0; i < dim_size; i++) {
-                        int64_t in_idx = base_idx + i * dim_stride;
+                        indices[dim] = i;
+                        int64_t in_idx = 0;
+                        for (int64_t d = 0; d < ndim; d++) {
+                            in_idx += indices[d] * input_strides[d];
+                        }
                         float val = static_cast<float>(input_data[in_idx]);
                         if (val < min_val) {
                             min_val = val;
@@ -1780,6 +1788,63 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
     return output;
 }
 
+// Variance along a specific dimension using two-pass algorithm
+template<typename T>
+void var_along_dim(const T* input_data,
+                   T* output_data,
+                   const std::vector<int64_t>& input_shape,
+                   const std::vector<int64_t>& input_strides,
+                   int64_t dim,
+                   int64_t correction) {
+    const int64_t ndim = input_shape.size();
+    const int64_t dim_size = input_shape[dim];
+
+    int64_t output_size = 1;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != dim) output_size *= input_shape[i];
+    }
+
+    int64_t divisor = dim_size - correction;
+    if (divisor <= 0) divisor = 1;
+
+    const int64_t total_work = output_size * dim_size;
+    #pragma omp parallel for if(total_work > REDUCTION_OMP_THRESHOLD)
+    for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
+        std::vector<int64_t> indices(ndim, 0);
+        int64_t tmp = out_idx;
+        for (int64_t d = 0; d < ndim; d++) {
+            if (d == dim) continue;
+            indices[d] = tmp % input_shape[d];
+            tmp /= input_shape[d];
+        }
+
+        // Pass 1: compute mean
+        T sum = T(0);
+        for (int64_t i = 0; i < dim_size; i++) {
+            indices[dim] = i;
+            int64_t in_idx = 0;
+            for (int64_t d = 0; d < ndim; d++) {
+                in_idx += indices[d] * input_strides[d];
+            }
+            sum += input_data[in_idx];
+        }
+        T mean = sum / static_cast<T>(dim_size);
+
+        // Pass 2: compute variance
+        T var_sum = T(0);
+        for (int64_t i = 0; i < dim_size; i++) {
+            indices[dim] = i;
+            int64_t in_idx = 0;
+            for (int64_t d = 0; d < ndim; d++) {
+                in_idx += indices[d] * input_strides[d];
+            }
+            T diff = input_data[in_idx] - mean;
+            var_sum += diff * diff;
+        }
+        output_data[out_idx] = var_sum / static_cast<T>(divisor);
+    }
+}
+
 // Variance using two-pass algorithm for numerical stability
 auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction) -> Tensor {
     auto shape_span = input.shape();
@@ -1791,60 +1856,196 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
 
     auto output_shape = compute_reduction_shape(input_shape, dim, keepdim);
 
-    Tensor output(output_shape, input.dtype(), input.device());
-
-    if (dim != REDUCE_ALL) {
-        throw std::runtime_error("var: only full reduction is currently supported for CPU");
+    // For Float16/BFloat16, compute and store in Float32
+    DType output_dtype = input.dtype();
+    if (output_dtype == DType::Float16 || output_dtype == DType::BFloat16) {
+        output_dtype = DType::Float32;
     }
+
+    Tensor output(output_shape, output_dtype, input.device());
 
     const int64_t n = input.numel();
     if (n == 0) {
         throw std::runtime_error("var: input tensor is empty");
     }
 
-    switch (input.dtype()) {
-        case DType::Float32: {
-            auto* input_data = input.data<float>();
-            auto* output_data = output.data<float>();
-
-            // Pass 1: Compute mean
-            float mean = sum_impl(input_data, n) / static_cast<float>(n);
-
-            // Pass 2: Compute variance
-            float var_sum = 0.0f;
-            #pragma omp parallel for reduction(+:var_sum) if(n > 10000)
-            for (int64_t i = 0; i < n; i++) {
-                float diff = input_data[i] - mean;
-                var_sum += diff * diff;
+    if (dim == REDUCE_ALL) {
+        switch (input.dtype()) {
+            case DType::Float32: {
+                auto* input_data = input.data<float>();
+                auto* output_data = output.data<float>();
+                float mean = sum_impl(input_data, n) / static_cast<float>(n);
+                float var_sum = 0.0f;
+                #pragma omp parallel for reduction(+:var_sum) if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
+                    float diff = input_data[i] - mean;
+                    var_sum += diff * diff;
+                }
+                int64_t divisor = n - correction;
+                if (divisor <= 0) divisor = 1;
+                output_data[0] = var_sum / static_cast<float>(divisor);
+                break;
             }
-
-            int64_t divisor = n - correction;
-            if (divisor <= 0) divisor = 1;
-            output_data[0] = var_sum / static_cast<float>(divisor);
-            break;
-        }
-        case DType::Float64: {
-            auto* input_data = input.data<double>();
-            auto* output_data = output.data<double>();
-
-            // Pass 1: Compute mean
-            double mean = sum_impl(input_data, n) / static_cast<double>(n);
-
-            // Pass 2: Compute variance
-            double var_sum = 0.0;
-            #pragma omp parallel for reduction(+:var_sum) if(n > 10000)
-            for (int64_t i = 0; i < n; i++) {
-                double diff = input_data[i] - mean;
-                var_sum += diff * diff;
+            case DType::Float64: {
+                auto* input_data = input.data<double>();
+                auto* output_data = output.data<double>();
+                double mean = sum_impl(input_data, n) / static_cast<double>(n);
+                double var_sum = 0.0;
+                #pragma omp parallel for reduction(+:var_sum) if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
+                    double diff = input_data[i] - mean;
+                    var_sum += diff * diff;
+                }
+                int64_t divisor = n - correction;
+                if (divisor <= 0) divisor = 1;
+                output_data[0] = var_sum / static_cast<double>(divisor);
+                break;
             }
-
-            int64_t divisor = n - correction;
-            if (divisor <= 0) divisor = 1;
-            output_data[0] = var_sum / static_cast<double>(divisor);
-            break;
+            case DType::Float16: {
+                auto* input_data = input.data<Float16>();
+                auto* output_data = output.data<float>();
+                float sum = 0.0f;
+                for (int64_t i = 0; i < n; i++) sum += static_cast<float>(input_data[i]);
+                float mean = sum / static_cast<float>(n);
+                float var_sum = 0.0f;
+                for (int64_t i = 0; i < n; i++) {
+                    float diff = static_cast<float>(input_data[i]) - mean;
+                    var_sum += diff * diff;
+                }
+                int64_t divisor = n - correction;
+                if (divisor <= 0) divisor = 1;
+                output_data[0] = var_sum / static_cast<float>(divisor);
+                break;
+            }
+            case DType::BFloat16: {
+                auto* input_data = input.data<BFloat16>();
+                auto* output_data = output.data<float>();
+                float sum = 0.0f;
+                for (int64_t i = 0; i < n; i++) sum += static_cast<float>(input_data[i]);
+                float mean = sum / static_cast<float>(n);
+                float var_sum = 0.0f;
+                for (int64_t i = 0; i < n; i++) {
+                    float diff = static_cast<float>(input_data[i]) - mean;
+                    var_sum += diff * diff;
+                }
+                int64_t divisor = n - correction;
+                if (divisor <= 0) divisor = 1;
+                output_data[0] = var_sum / static_cast<float>(divisor);
+                break;
+            }
+            default:
+                throw std::runtime_error("var: unsupported dtype");
         }
-        default:
-            throw std::runtime_error("var: unsupported dtype");
+    } else {
+        // Dimensional reduction
+        auto strides_span = input.strides();
+        std::vector<int64_t> input_strides(strides_span.begin(), strides_span.end());
+
+        switch (input.dtype()) {
+            case DType::Float32: {
+                var_along_dim<float>(input.data<float>(), output.data<float>(),
+                                    input_shape, input_strides, dim, correction);
+                break;
+            }
+            case DType::Float64: {
+                var_along_dim<double>(input.data<double>(), output.data<double>(),
+                                     input_shape, input_strides, dim, correction);
+                break;
+            }
+            case DType::Float16: {
+                // Compute in Float32
+                int64_t output_size = output.numel();
+                const int64_t dim_size = input_shape[dim];
+                const auto* input_data = input.data<Float16>();
+                auto* output_data = output.data<float>();
+
+                int64_t out_size = 1;
+                for (int64_t d = 0; d < ndim; d++) {
+                    if (d != dim) out_size *= input_shape[d];
+                }
+
+                int64_t divisor = dim_size - correction;
+                if (divisor <= 0) divisor = 1;
+
+                #pragma omp parallel for if(out_size * dim_size > REDUCTION_OMP_THRESHOLD)
+                for (int64_t out_idx = 0; out_idx < out_size; out_idx++) {
+                    std::vector<int64_t> indices(ndim, 0);
+                    int64_t tmp = out_idx;
+                    for (int64_t d = 0; d < ndim; d++) {
+                        if (d == dim) continue;
+                        indices[d] = tmp % input_shape[d];
+                        tmp /= input_shape[d];
+                    }
+
+                    float sum = 0.0f;
+                    for (int64_t i = 0; i < dim_size; i++) {
+                        indices[dim] = i;
+                        int64_t in_idx = 0;
+                        for (int64_t d = 0; d < ndim; d++) in_idx += indices[d] * input_strides[d];
+                        sum += static_cast<float>(input_data[in_idx]);
+                    }
+                    float mean = sum / static_cast<float>(dim_size);
+
+                    float var_sum = 0.0f;
+                    for (int64_t i = 0; i < dim_size; i++) {
+                        indices[dim] = i;
+                        int64_t in_idx = 0;
+                        for (int64_t d = 0; d < ndim; d++) in_idx += indices[d] * input_strides[d];
+                        float diff = static_cast<float>(input_data[in_idx]) - mean;
+                        var_sum += diff * diff;
+                    }
+                    output_data[out_idx] = var_sum / static_cast<float>(divisor);
+                }
+                break;
+            }
+            case DType::BFloat16: {
+                int64_t output_size = output.numel();
+                const int64_t dim_size = input_shape[dim];
+                const auto* input_data = input.data<BFloat16>();
+                auto* output_data = output.data<float>();
+
+                int64_t out_size = 1;
+                for (int64_t d = 0; d < ndim; d++) {
+                    if (d != dim) out_size *= input_shape[d];
+                }
+
+                int64_t divisor = dim_size - correction;
+                if (divisor <= 0) divisor = 1;
+
+                #pragma omp parallel for if(out_size * dim_size > REDUCTION_OMP_THRESHOLD)
+                for (int64_t out_idx = 0; out_idx < out_size; out_idx++) {
+                    std::vector<int64_t> indices(ndim, 0);
+                    int64_t tmp = out_idx;
+                    for (int64_t d = 0; d < ndim; d++) {
+                        if (d == dim) continue;
+                        indices[d] = tmp % input_shape[d];
+                        tmp /= input_shape[d];
+                    }
+
+                    float sum = 0.0f;
+                    for (int64_t i = 0; i < dim_size; i++) {
+                        indices[dim] = i;
+                        int64_t in_idx = 0;
+                        for (int64_t d = 0; d < ndim; d++) in_idx += indices[d] * input_strides[d];
+                        sum += static_cast<float>(input_data[in_idx]);
+                    }
+                    float mean = sum / static_cast<float>(dim_size);
+
+                    float var_sum = 0.0f;
+                    for (int64_t i = 0; i < dim_size; i++) {
+                        indices[dim] = i;
+                        int64_t in_idx = 0;
+                        for (int64_t d = 0; d < ndim; d++) in_idx += indices[d] * input_strides[d];
+                        float diff = static_cast<float>(input_data[in_idx]) - mean;
+                        var_sum += diff * diff;
+                    }
+                    output_data[out_idx] = var_sum / static_cast<float>(divisor);
+                }
+                break;
+            }
+            default:
+                throw std::runtime_error("var: unsupported dtype");
+        }
     }
 
     return output;
@@ -1881,7 +2082,7 @@ auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
             break;
         }
         default:
-            throw std::runtime_error("std: unsupported dtype");
+            throw std::runtime_error("std: unsupported dtype (got " + std::string(dtype_name(var_result.dtype())) + ")");
     }
 
     return output;

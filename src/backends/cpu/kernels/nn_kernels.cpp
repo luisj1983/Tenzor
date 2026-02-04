@@ -1106,6 +1106,37 @@ static void layer_norm_simd(
     }
 }
 
+// Scalar layer norm implementation for non-Float32 dtypes
+template<typename T>
+void layer_norm_scalar(const T* in_data, T* out_data, const T* w_data, const T* b_data,
+                       int64_t batch_size, int64_t norm_size, float eps) {
+    #pragma omp parallel for if(batch_size > 16)
+    for (int64_t b = 0; b < batch_size; ++b) {
+        const T* in_ptr = in_data + b * norm_size;
+        T* out_ptr = out_data + b * norm_size;
+
+        // Two-pass: compute mean and variance in float for precision
+        float sum = 0.0f;
+        for (int64_t i = 0; i < norm_size; ++i) {
+            sum += static_cast<float>(in_ptr[i]);
+        }
+        float mean = sum / static_cast<float>(norm_size);
+
+        float var = 0.0f;
+        for (int64_t i = 0; i < norm_size; ++i) {
+            float diff = static_cast<float>(in_ptr[i]) - mean;
+            var += diff * diff;
+        }
+        var /= static_cast<float>(norm_size);
+        float inv_std = 1.0f / std::sqrt(var + eps);
+
+        for (int64_t i = 0; i < norm_size; ++i) {
+            float normalized = (static_cast<float>(in_ptr[i]) - mean) * inv_std;
+            out_ptr[i] = static_cast<T>(normalized * static_cast<float>(w_data[i]) + static_cast<float>(b_data[i]));
+        }
+    }
+}
+
 auto layer_norm_kernel(const Tensor& input, const std::vector<int64_t>& normalized_shape,
                         const Tensor& weight, const Tensor& bias, float eps) -> Tensor {
     // Ensure input is contiguous for optimal memory access patterns
@@ -1122,28 +1153,74 @@ auto layer_norm_kernel(const Tensor& input, const std::vector<int64_t>& normaliz
         std::vector<int64_t>(in_shape.begin(), in_shape.end()),
         input_cont.dtype(), input_cont.device());
 
-    const float* in_data = input_cont.data<float>();
-    const float* w_data = weight.data<float>();
-    const float* b_data = bias.data<float>();
-    float* out_data = output.data<float>();
+    if (input_cont.dtype() == DType::Float32) {
+        const float* in_data = input_cont.data<float>();
+        const float* w_data = weight.data<float>();
+        const float* b_data = bias.data<float>();
+        float* out_data = output.data<float>();
 
 #ifdef TENZOR_USE_ONEDNN
-    // Use oneDNN only for very large inputs - SIMD implementation is highly optimized
-    // and faster for typical transformer sizes (batch*seq*hidden < 8M)
-    // oneDNN primitive cache helps but doesn't beat well-tuned AVX-512 code
-    const int64_t total_elements = batch_size * norm_size;
-    const bool use_onednn = total_elements >= 8 * 1024 * 1024;  // 8M threshold (original)
+        const int64_t total_elements = batch_size * norm_size;
+        const bool use_onednn = total_elements >= 8 * 1024 * 1024;
 
-    if (use_onednn && input_cont.dtype() == DType::Float32 &&
-        layer_norm_onednn(in_data, out_data, w_data, b_data, batch_size, norm_size, eps)) {
-        return output;
-    }
+        if (use_onednn &&
+            layer_norm_onednn(in_data, out_data, w_data, b_data, batch_size, norm_size, eps)) {
+            return output;
+        }
 #endif
 
-    // Use SIMD-optimized implementation for small inputs or as fallback
-    layer_norm_simd(in_data, out_data, w_data, b_data, batch_size, norm_size, eps);
+        layer_norm_simd(in_data, out_data, w_data, b_data, batch_size, norm_size, eps);
+    } else if (input_cont.dtype() == DType::Float64) {
+        layer_norm_scalar<double>(input_cont.data<double>(), output.data<double>(),
+                                  weight.data<double>(), bias.data<double>(),
+                                  batch_size, norm_size, eps);
+    } else if (input_cont.dtype() == DType::Float16) {
+        layer_norm_scalar<Float16>(input_cont.data<Float16>(), output.data<Float16>(),
+                                   weight.data<Float16>(), bias.data<Float16>(),
+                                   batch_size, norm_size, eps);
+    } else if (input_cont.dtype() == DType::BFloat16) {
+        layer_norm_scalar<BFloat16>(input_cont.data<BFloat16>(), output.data<BFloat16>(),
+                                    weight.data<BFloat16>(), bias.data<BFloat16>(),
+                                    batch_size, norm_size, eps);
+    } else {
+        throw std::runtime_error("Unsupported dtype for layer_norm");
+    }
 
     return output;
+}
+
+// Scalar layer norm with stats for non-Float32 dtypes
+template<typename T>
+void layer_norm_scalar_with_stats(const T* in_data, T* out_data, const T* w_data, const T* b_data,
+                                   float* mean_data, float* rstd_data,
+                                   int64_t batch_size, int64_t norm_size, float eps) {
+    #pragma omp parallel for if(batch_size > 16)
+    for (int64_t b = 0; b < batch_size; ++b) {
+        const T* in_ptr = in_data + b * norm_size;
+        T* out_ptr = out_data + b * norm_size;
+
+        float sum = 0.0f;
+        for (int64_t i = 0; i < norm_size; ++i) {
+            sum += static_cast<float>(in_ptr[i]);
+        }
+        float mean = sum / static_cast<float>(norm_size);
+
+        float var = 0.0f;
+        for (int64_t i = 0; i < norm_size; ++i) {
+            float diff = static_cast<float>(in_ptr[i]) - mean;
+            var += diff * diff;
+        }
+        var /= static_cast<float>(norm_size);
+        float inv_std = 1.0f / std::sqrt(var + eps);
+
+        mean_data[b] = mean;
+        rstd_data[b] = inv_std;
+
+        for (int64_t i = 0; i < norm_size; ++i) {
+            float normalized = (static_cast<float>(in_ptr[i]) - mean) * inv_std;
+            out_ptr[i] = static_cast<T>(normalized * static_cast<float>(w_data[i]) + static_cast<float>(b_data[i]));
+        }
+    }
 }
 
 // LayerNorm kernel that also returns mean and rstd for backward pass
@@ -1167,22 +1244,78 @@ auto layer_norm_kernel_with_stats(const Tensor& input, const std::vector<int64_t
         std::vector<int64_t>(in_shape.begin(), in_shape.end()),
         input_cont.dtype(), input_cont.device());
 
-    // Create mean and rstd tensors (one per batch element)
+    // Create mean and rstd tensors (one per batch element) - always Float32
     auto mean = Tensor::empty_uninitialized({batch_size}, DType::Float32, input_cont.device());
     auto rstd = Tensor::empty_uninitialized({batch_size}, DType::Float32, input_cont.device());
-
-    const float* in_data = input_cont.data<float>();
-    const float* w_data = weight.data<float>();
-    const float* b_data = bias.data<float>();
-    float* out_data = output.data<float>();
     float* mean_data = mean.data<float>();
     float* rstd_data = rstd.data<float>();
 
-    // Use SIMD-optimized implementation that saves statistics
-    layer_norm_simd_with_stats(in_data, out_data, w_data, b_data, mean_data, rstd_data,
-                                batch_size, norm_size, eps);
+    if (input_cont.dtype() == DType::Float32) {
+        const float* in_data = input_cont.data<float>();
+        const float* w_data = weight.data<float>();
+        const float* b_data = bias.data<float>();
+        float* out_data = output.data<float>();
+
+        layer_norm_simd_with_stats(in_data, out_data, w_data, b_data, mean_data, rstd_data,
+                                    batch_size, norm_size, eps);
+    } else if (input_cont.dtype() == DType::Float64) {
+        layer_norm_scalar_with_stats<double>(input_cont.data<double>(), output.data<double>(),
+                                             weight.data<double>(), bias.data<double>(),
+                                             mean_data, rstd_data, batch_size, norm_size, eps);
+    } else if (input_cont.dtype() == DType::Float16) {
+        layer_norm_scalar_with_stats<Float16>(input_cont.data<Float16>(), output.data<Float16>(),
+                                              weight.data<Float16>(), bias.data<Float16>(),
+                                              mean_data, rstd_data, batch_size, norm_size, eps);
+    } else if (input_cont.dtype() == DType::BFloat16) {
+        layer_norm_scalar_with_stats<BFloat16>(input_cont.data<BFloat16>(), output.data<BFloat16>(),
+                                               weight.data<BFloat16>(), bias.data<BFloat16>(),
+                                               mean_data, rstd_data, batch_size, norm_size, eps);
+    } else {
+        throw std::runtime_error("Unsupported dtype for layer_norm_with_stats");
+    }
 
     return {output, mean, rstd};
+}
+
+template<typename T>
+void group_norm_impl(const T* in_data, T* out_data, const T* w_data, const T* b_data,
+                     int64_t N, int64_t C, int64_t spatial_size, int64_t num_groups, float eps) {
+    int64_t channels_per_group = C / num_groups;
+
+    #pragma omp parallel for collapse(2) if(N * num_groups > 16)
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t g = 0; g < num_groups; ++g) {
+            int64_t c_start = g * channels_per_group;
+            int64_t group_size = channels_per_group * spatial_size;
+
+            float mean = 0.0f;
+            for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                for (int64_t s = 0; s < spatial_size; ++s) {
+                    mean += static_cast<float>(in_data[(n * C + c) * spatial_size + s]);
+                }
+            }
+            mean /= static_cast<float>(group_size);
+
+            float var = 0.0f;
+            for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                for (int64_t s = 0; s < spatial_size; ++s) {
+                    float diff = static_cast<float>(in_data[(n * C + c) * spatial_size + s]) - mean;
+                    var += diff * diff;
+                }
+            }
+            var /= static_cast<float>(group_size);
+
+            float inv_std = 1.0f / std::sqrt(var + eps);
+
+            for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                for (int64_t s = 0; s < spatial_size; ++s) {
+                    int64_t idx = (n * C + c) * spatial_size + s;
+                    float normalized = (static_cast<float>(in_data[idx]) - mean) * inv_std;
+                    out_data[idx] = static_cast<T>(normalized * static_cast<float>(w_data[c]) + static_cast<float>(b_data[c]));
+                }
+            }
+        }
+    }
 }
 
 auto group_norm_kernel(const Tensor& input, int64_t num_groups,
@@ -1195,57 +1328,64 @@ auto group_norm_kernel(const Tensor& input, int64_t num_groups,
         spatial_size *= shape[i];
     }
 
-    int64_t channels_per_group = C / num_groups;
-
     auto output = Tensor::empty_uninitialized(
         std::vector<int64_t>(shape.begin(), shape.end()),
         input.dtype(), input.device());
 
-    const float* in_data = input.data<float>();
-    const float* w_data = weight.data<float>();
-    const float* b_data = bias.data<float>();
-    float* out_data = output.data<float>();
-
-    // Only parallelize for large total work to avoid thread overhead
-    #pragma omp parallel for collapse(2) if(N * num_groups > 16)
-    for (int64_t n = 0; n < N; ++n) {
-        for (int64_t g = 0; g < num_groups; ++g) {
-            int64_t c_start = g * channels_per_group;
-            int64_t group_size = channels_per_group * spatial_size;
-
-            // Compute mean
-            float mean = 0.0f;
-            for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
-                for (int64_t s = 0; s < spatial_size; ++s) {
-                    mean += in_data[(n * C + c) * spatial_size + s];
-                }
-            }
-            mean /= group_size;
-
-            // Compute variance
-            float var = 0.0f;
-            for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
-                for (int64_t s = 0; s < spatial_size; ++s) {
-                    float diff = in_data[(n * C + c) * spatial_size + s] - mean;
-                    var += diff * diff;
-                }
-            }
-            var /= group_size;
-
-            float inv_std = 1.0f / std::sqrt(var + eps);
-
-            // Normalize
-            for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
-                for (int64_t s = 0; s < spatial_size; ++s) {
-                    int64_t idx = (n * C + c) * spatial_size + s;
-                    float normalized = (in_data[idx] - mean) * inv_std;
-                    out_data[idx] = normalized * w_data[c] + b_data[c];
-                }
-            }
-        }
+    if (input.dtype() == DType::Float32) {
+        group_norm_impl<float>(input.data<float>(), output.data<float>(),
+                               weight.data<float>(), bias.data<float>(),
+                               N, C, spatial_size, num_groups, eps);
+    } else if (input.dtype() == DType::Float64) {
+        group_norm_impl<double>(input.data<double>(), output.data<double>(),
+                                weight.data<double>(), bias.data<double>(),
+                                N, C, spatial_size, num_groups, eps);
+    } else if (input.dtype() == DType::Float16) {
+        group_norm_impl<Float16>(input.data<Float16>(), output.data<Float16>(),
+                                 weight.data<Float16>(), bias.data<Float16>(),
+                                 N, C, spatial_size, num_groups, eps);
+    } else if (input.dtype() == DType::BFloat16) {
+        group_norm_impl<BFloat16>(input.data<BFloat16>(), output.data<BFloat16>(),
+                                  weight.data<BFloat16>(), bias.data<BFloat16>(),
+                                  N, C, spatial_size, num_groups, eps);
+    } else {
+        throw std::runtime_error("Unsupported dtype for group_norm");
     }
 
     return output;
+}
+
+template<typename T>
+void instance_norm_impl(const T* in_data, T* out_data, const T* w_data, const T* b_data,
+                         int64_t N, int64_t C, int64_t spatial_size, float eps) {
+    #pragma omp parallel for collapse(2) if(N * C > 16)
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            float mean = 0.0f;
+            for (int64_t s = 0; s < spatial_size; ++s) {
+                mean += static_cast<float>(in_data[(n * C + c) * spatial_size + s]);
+            }
+            mean /= static_cast<float>(spatial_size);
+
+            float var = 0.0f;
+            for (int64_t s = 0; s < spatial_size; ++s) {
+                float diff = static_cast<float>(in_data[(n * C + c) * spatial_size + s]) - mean;
+                var += diff * diff;
+            }
+            var /= static_cast<float>(spatial_size);
+
+            float inv_std = 1.0f / std::sqrt(var + eps);
+
+            float w = w_data ? static_cast<float>(w_data[c]) : 1.0f;
+            float b = b_data ? static_cast<float>(b_data[c]) : 0.0f;
+
+            for (int64_t s = 0; s < spatial_size; ++s) {
+                int64_t idx = (n * C + c) * spatial_size + s;
+                float normalized = (static_cast<float>(in_data[idx]) - mean) * inv_std;
+                out_data[idx] = static_cast<T>(normalized * w + b);
+            }
+        }
+    }
 }
 
 auto instance_norm_kernel(const Tensor& input, const Tensor& weight,
@@ -1262,45 +1402,756 @@ auto instance_norm_kernel(const Tensor& input, const Tensor& weight,
         std::vector<int64_t>(shape.begin(), shape.end()),
         input.dtype(), input.device());
 
-    const float* in_data = input.data<float>();
-    const float* w_data = weight.impl() ? weight.data<float>() : nullptr;
-    const float* b_data = bias.impl() ? bias.data<float>() : nullptr;
-    float* out_data = output.data<float>();
-
-    // Only parallelize for large total work to avoid thread overhead
-    #pragma omp parallel for collapse(2) if(N * C > 16)
-    for (int64_t n = 0; n < N; ++n) {
-        for (int64_t c = 0; c < C; ++c) {
-            // Compute mean
-            float mean = 0.0f;
-            for (int64_t s = 0; s < spatial_size; ++s) {
-                mean += in_data[(n * C + c) * spatial_size + s];
-            }
-            mean /= spatial_size;
-
-            // Compute variance
-            float var = 0.0f;
-            for (int64_t s = 0; s < spatial_size; ++s) {
-                float diff = in_data[(n * C + c) * spatial_size + s] - mean;
-                var += diff * diff;
-            }
-            var /= spatial_size;
-
-            float inv_std = 1.0f / std::sqrt(var + eps);
-
-            // Normalize
-            float w = w_data ? w_data[c] : 1.0f;
-            float b = b_data ? b_data[c] : 0.0f;
-
-            for (int64_t s = 0; s < spatial_size; ++s) {
-                int64_t idx = (n * C + c) * spatial_size + s;
-                float normalized = (in_data[idx] - mean) * inv_std;
-                out_data[idx] = normalized * w + b;
-            }
-        }
+    if (input.dtype() == DType::Float32) {
+        instance_norm_impl<float>(input.data<float>(), output.data<float>(),
+                                  weight.impl() ? weight.data<float>() : nullptr,
+                                  bias.impl() ? bias.data<float>() : nullptr,
+                                  N, C, spatial_size, eps);
+    } else if (input.dtype() == DType::Float64) {
+        instance_norm_impl<double>(input.data<double>(), output.data<double>(),
+                                   weight.impl() ? weight.data<double>() : nullptr,
+                                   bias.impl() ? bias.data<double>() : nullptr,
+                                   N, C, spatial_size, eps);
+    } else if (input.dtype() == DType::Float16) {
+        instance_norm_impl<Float16>(input.data<Float16>(), output.data<Float16>(),
+                                    weight.impl() ? weight.data<Float16>() : nullptr,
+                                    bias.impl() ? bias.data<Float16>() : nullptr,
+                                    N, C, spatial_size, eps);
+    } else if (input.dtype() == DType::BFloat16) {
+        instance_norm_impl<BFloat16>(input.data<BFloat16>(), output.data<BFloat16>(),
+                                     weight.impl() ? weight.data<BFloat16>() : nullptr,
+                                     bias.impl() ? bias.data<BFloat16>() : nullptr,
+                                     N, C, spatial_size, eps);
+    } else {
+        throw std::runtime_error("Unsupported dtype for instance_norm");
     }
 
     return output;
+}
+
+// ============================================================================
+// LayerNorm Backward
+// ============================================================================
+
+auto layer_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
+                                 const std::vector<int64_t>& normalized_shape,
+                                 const Tensor& mean, const Tensor& rstd,
+                                 const Tensor& weight) -> std::vector<Tensor> {
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    Tensor grad_cont = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+
+    auto in_shape = input_cont.shape();
+    int64_t norm_size = 1;
+    for (auto s : normalized_shape) {
+        norm_size *= s;
+    }
+    int64_t batch_size = input_cont.numel() / norm_size;
+
+    auto grad_input = Tensor::empty_uninitialized(
+        std::vector<int64_t>(in_shape.begin(), in_shape.end()),
+        input_cont.dtype(), input_cont.device());
+    auto grad_weight = zeros(std::vector<int64_t>(normalized_shape.begin(), normalized_shape.end()),
+                             weight.dtype(), weight.device());
+    auto grad_bias = zeros(std::vector<int64_t>(normalized_shape.begin(), normalized_shape.end()),
+                           weight.dtype(), weight.device());
+
+    const float* mean_data = mean.data<float>();
+    const float* rstd_data = rstd.data<float>();
+
+    // Dispatch based on input dtype - compute always in float for precision
+    if (input_cont.dtype() == DType::Float32) {
+        const float* in_data = input_cont.data<float>();
+        const float* grad_out_data = grad_cont.data<float>();
+        const float* w_data = weight.data<float>();
+        float* grad_in_data = grad_input.data<float>();
+        float* grad_w_data = grad_weight.data<float>();
+        float* grad_b_data = grad_bias.data<float>();
+
+        // Accumulate grad_weight and grad_bias across batch (not thread-safe, so use local buffers)
+        std::vector<float> local_grad_w(norm_size, 0.0f);
+        std::vector<float> local_grad_b(norm_size, 0.0f);
+
+        #pragma omp parallel if(batch_size > 16)
+        {
+            std::vector<float> thread_grad_w(norm_size, 0.0f);
+            std::vector<float> thread_grad_b(norm_size, 0.0f);
+
+            #pragma omp for
+            for (int64_t b = 0; b < batch_size; ++b) {
+                const float* in_ptr = in_data + b * norm_size;
+                const float* grad_out_ptr = grad_out_data + b * norm_size;
+                float* grad_in_ptr = grad_in_data + b * norm_size;
+
+                float m = mean_data[b];
+                float r = rstd_data[b];
+
+                // Accumulate ds = sum(dy * w * x_hat) and db = sum(dy * w) over normalized dims
+                float ds = 0.0f;
+                float db = 0.0f;
+                for (int64_t i = 0; i < norm_size; ++i) {
+                    float dy = grad_out_ptr[i];
+                    float x_hat = (in_ptr[i] - m) * r;
+                    float dy_w = dy * w_data[i];
+                    ds += dy_w * x_hat;
+                    db += dy_w;
+                }
+
+                // Compute grad_input
+                float inv_n = 1.0f / static_cast<float>(norm_size);
+                for (int64_t i = 0; i < norm_size; ++i) {
+                    float dy = grad_out_ptr[i];
+                    float x_hat = (in_ptr[i] - m) * r;
+                    grad_in_ptr[i] = r * (dy * w_data[i] - inv_n * (db + x_hat * ds));
+                }
+
+                // Accumulate weight/bias gradients
+                for (int64_t i = 0; i < norm_size; ++i) {
+                    float x_hat = (in_ptr[i] - m) * r;
+                    thread_grad_w[i] += grad_out_ptr[i] * x_hat;
+                    thread_grad_b[i] += grad_out_ptr[i];
+                }
+            }
+
+            #pragma omp critical
+            {
+                for (int64_t i = 0; i < norm_size; ++i) {
+                    grad_w_data[i] += thread_grad_w[i];
+                    grad_b_data[i] += thread_grad_b[i];
+                }
+            }
+        }
+    } else if (input_cont.dtype() == DType::Float64) {
+        const double* in_data = input_cont.data<double>();
+        const double* grad_out_data = grad_cont.data<double>();
+        const double* w_data = weight.data<double>();
+        double* grad_in_data = grad_input.data<double>();
+        double* grad_w_data = grad_weight.data<double>();
+        double* grad_b_data = grad_bias.data<double>();
+
+        #pragma omp parallel if(batch_size > 16)
+        {
+            std::vector<double> thread_grad_w(norm_size, 0.0);
+            std::vector<double> thread_grad_b(norm_size, 0.0);
+
+            #pragma omp for
+            for (int64_t b = 0; b < batch_size; ++b) {
+                const double* in_ptr = in_data + b * norm_size;
+                const double* grad_out_ptr = grad_out_data + b * norm_size;
+                double* grad_in_ptr = grad_in_data + b * norm_size;
+
+                double m = static_cast<double>(mean_data[b]);
+                double r = static_cast<double>(rstd_data[b]);
+
+                double ds = 0.0;
+                double db = 0.0;
+                for (int64_t i = 0; i < norm_size; ++i) {
+                    double dy = grad_out_ptr[i];
+                    double x_hat = (in_ptr[i] - m) * r;
+                    double dy_w = dy * w_data[i];
+                    ds += dy_w * x_hat;
+                    db += dy_w;
+                }
+
+                double inv_n = 1.0 / static_cast<double>(norm_size);
+                for (int64_t i = 0; i < norm_size; ++i) {
+                    double dy = grad_out_ptr[i];
+                    double x_hat = (in_ptr[i] - m) * r;
+                    grad_in_ptr[i] = r * (dy * w_data[i] - inv_n * (db + x_hat * ds));
+                }
+
+                for (int64_t i = 0; i < norm_size; ++i) {
+                    double x_hat = (in_ptr[i] - m) * r;
+                    thread_grad_w[i] += grad_out_ptr[i] * x_hat;
+                    thread_grad_b[i] += grad_out_ptr[i];
+                }
+            }
+
+            #pragma omp critical
+            {
+                for (int64_t i = 0; i < norm_size; ++i) {
+                    grad_w_data[i] += thread_grad_w[i];
+                    grad_b_data[i] += thread_grad_b[i];
+                }
+            }
+        }
+    } else if (input_cont.dtype() == DType::Float16 || input_cont.dtype() == DType::BFloat16) {
+        // Compute in Float32, read/write in native dtype
+        // Use Float32 intermediate tensors
+        auto grad_input_f32 = Tensor::empty_uninitialized(
+            std::vector<int64_t>(in_shape.begin(), in_shape.end()), DType::Float32, input_cont.device());
+        auto grad_weight_f32 = zeros({norm_size}, DType::Float32, weight.device());
+        auto grad_bias_f32 = zeros({norm_size}, DType::Float32, weight.device());
+
+        // Convert input and grad_output to float32
+        int64_t total = input_cont.numel();
+        std::vector<float> in_f32(total);
+        std::vector<float> grad_out_f32(total);
+        std::vector<float> w_f32(norm_size);
+
+        if (input_cont.dtype() == DType::Float16) {
+            const Float16* in_raw = input_cont.data<Float16>();
+            const Float16* grad_raw = grad_cont.data<Float16>();
+            const Float16* w_raw = weight.data<Float16>();
+            for (int64_t i = 0; i < total; ++i) in_f32[i] = static_cast<float>(in_raw[i]);
+            for (int64_t i = 0; i < total; ++i) grad_out_f32[i] = static_cast<float>(grad_raw[i]);
+            for (int64_t i = 0; i < norm_size; ++i) w_f32[i] = static_cast<float>(w_raw[i]);
+        } else {
+            const BFloat16* in_raw = input_cont.data<BFloat16>();
+            const BFloat16* grad_raw = grad_cont.data<BFloat16>();
+            const BFloat16* w_raw = weight.data<BFloat16>();
+            for (int64_t i = 0; i < total; ++i) in_f32[i] = static_cast<float>(in_raw[i]);
+            for (int64_t i = 0; i < total; ++i) grad_out_f32[i] = static_cast<float>(grad_raw[i]);
+            for (int64_t i = 0; i < norm_size; ++i) w_f32[i] = static_cast<float>(w_raw[i]);
+        }
+
+        float* grad_in_f32 = grad_input_f32.data<float>();
+        float* grad_w_f32 = grad_weight_f32.data<float>();
+        float* grad_b_f32 = grad_bias_f32.data<float>();
+
+        #pragma omp parallel if(batch_size > 16)
+        {
+            std::vector<float> thread_grad_w(norm_size, 0.0f);
+            std::vector<float> thread_grad_b(norm_size, 0.0f);
+
+            #pragma omp for
+            for (int64_t b = 0; b < batch_size; ++b) {
+                const float* in_ptr = in_f32.data() + b * norm_size;
+                const float* grad_out_ptr = grad_out_f32.data() + b * norm_size;
+                float* grad_in_ptr = grad_in_f32 + b * norm_size;
+
+                float m = mean_data[b];
+                float r = rstd_data[b];
+
+                float ds = 0.0f;
+                float db = 0.0f;
+                for (int64_t i = 0; i < norm_size; ++i) {
+                    float dy = grad_out_ptr[i];
+                    float x_hat = (in_ptr[i] - m) * r;
+                    float dy_w = dy * w_f32[i];
+                    ds += dy_w * x_hat;
+                    db += dy_w;
+                }
+
+                float inv_n = 1.0f / static_cast<float>(norm_size);
+                for (int64_t i = 0; i < norm_size; ++i) {
+                    float dy = grad_out_ptr[i];
+                    float x_hat = (in_ptr[i] - m) * r;
+                    grad_in_ptr[i] = r * (dy * w_f32[i] - inv_n * (db + x_hat * ds));
+                }
+
+                for (int64_t i = 0; i < norm_size; ++i) {
+                    float x_hat = (in_ptr[i] - m) * r;
+                    thread_grad_w[i] += grad_out_ptr[i] * x_hat;
+                    thread_grad_b[i] += grad_out_ptr[i];
+                }
+            }
+
+            #pragma omp critical
+            {
+                for (int64_t i = 0; i < norm_size; ++i) {
+                    grad_w_f32[i] += thread_grad_w[i];
+                    grad_b_f32[i] += thread_grad_b[i];
+                }
+            }
+        }
+
+        // Convert back to native dtype
+        if (input_cont.dtype() == DType::Float16) {
+            Float16* gi = grad_input.data<Float16>();
+            Float16* gw = grad_weight.data<Float16>();
+            Float16* gb = grad_bias.data<Float16>();
+            for (int64_t i = 0; i < total; ++i) gi[i] = Float16(grad_in_f32[i]);
+            for (int64_t i = 0; i < norm_size; ++i) gw[i] = Float16(grad_w_f32[i]);
+            for (int64_t i = 0; i < norm_size; ++i) gb[i] = Float16(grad_b_f32[i]);
+        } else {
+            BFloat16* gi = grad_input.data<BFloat16>();
+            BFloat16* gw = grad_weight.data<BFloat16>();
+            BFloat16* gb = grad_bias.data<BFloat16>();
+            for (int64_t i = 0; i < total; ++i) gi[i] = BFloat16(grad_in_f32[i]);
+            for (int64_t i = 0; i < norm_size; ++i) gw[i] = BFloat16(grad_w_f32[i]);
+            for (int64_t i = 0; i < norm_size; ++i) gb[i] = BFloat16(grad_b_f32[i]);
+        }
+    } else {
+        throw std::runtime_error("Unsupported dtype for layer_norm_backward");
+    }
+
+    return {grad_input, grad_weight, grad_bias};
+}
+
+// ============================================================================
+// GroupNorm Backward
+// ============================================================================
+
+auto group_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
+                                 int64_t num_groups, const Tensor& mean,
+                                 const Tensor& rstd, const Tensor& weight) -> std::vector<Tensor> {
+    auto shape = input.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t spatial_size = 1;
+    for (size_t i = 2; i < shape.size(); ++i) {
+        spatial_size *= shape[i];
+    }
+    int64_t channels_per_group = C / num_groups;
+    int64_t group_size = channels_per_group * spatial_size;
+
+    auto grad_input = Tensor::empty_uninitialized(
+        std::vector<int64_t>(shape.begin(), shape.end()),
+        input.dtype(), input.device());
+    auto grad_weight = zeros({C}, weight.dtype(), weight.device());
+    auto grad_bias = zeros({C}, weight.dtype(), weight.device());
+
+    // mean and rstd are Float32, shape [N * num_groups]
+    const float* mean_data = mean.data<float>();
+    const float* rstd_data = rstd.data<float>();
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_data = input.data<float>();
+        const float* grad_out_data = grad_output.data<float>();
+        const float* w_data = weight.data<float>();
+        float* grad_in_data = grad_input.data<float>();
+        float* grad_w_data = grad_weight.data<float>();
+        float* grad_b_data = grad_bias.data<float>();
+
+        // Accumulate grad_weight/grad_bias per channel across batch
+        // Use per-channel atomic-free accumulation
+        std::vector<float> gw_accum(C, 0.0f);
+        std::vector<float> gb_accum(C, 0.0f);
+
+        #pragma omp parallel if(N * num_groups > 16)
+        {
+            std::vector<float> t_gw(C, 0.0f);
+            std::vector<float> t_gb(C, 0.0f);
+
+            #pragma omp for collapse(2)
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t g = 0; g < num_groups; ++g) {
+                    int64_t c_start = g * channels_per_group;
+                    float m = mean_data[n * num_groups + g];
+                    float r = rstd_data[n * num_groups + g];
+
+                    // Pass 1: accumulate ds, db
+                    float ds = 0.0f;
+                    float db = 0.0f;
+                    for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                        for (int64_t s = 0; s < spatial_size; ++s) {
+                            int64_t idx = (n * C + c) * spatial_size + s;
+                            float dy = grad_out_data[idx];
+                            float x_hat = (in_data[idx] - m) * r;
+                            float dy_w = dy * w_data[c];
+                            ds += dy_w * x_hat;
+                            db += dy_w;
+                        }
+                    }
+
+                    // Pass 2: compute grad_input
+                    float inv_gs = 1.0f / static_cast<float>(group_size);
+                    for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                        for (int64_t s = 0; s < spatial_size; ++s) {
+                            int64_t idx = (n * C + c) * spatial_size + s;
+                            float dy = grad_out_data[idx];
+                            float x_hat = (in_data[idx] - m) * r;
+                            grad_in_data[idx] = r * (dy * w_data[c] - inv_gs * (db + x_hat * ds));
+                        }
+                    }
+
+                    // Accumulate grad_weight/grad_bias
+                    for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                        for (int64_t s = 0; s < spatial_size; ++s) {
+                            int64_t idx = (n * C + c) * spatial_size + s;
+                            float x_hat = (in_data[idx] - m) * r;
+                            t_gw[c] += grad_out_data[idx] * x_hat;
+                            t_gb[c] += grad_out_data[idx];
+                        }
+                    }
+                }
+            }
+
+            #pragma omp critical
+            {
+                for (int64_t c = 0; c < C; ++c) {
+                    grad_w_data[c] += t_gw[c];
+                    grad_b_data[c] += t_gb[c];
+                }
+            }
+        }
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_data = input.data<double>();
+        const double* grad_out_data = grad_output.data<double>();
+        const double* w_data = weight.data<double>();
+        double* grad_in_data = grad_input.data<double>();
+        double* grad_w_data = grad_weight.data<double>();
+        double* grad_b_data = grad_bias.data<double>();
+
+        #pragma omp parallel if(N * num_groups > 16)
+        {
+            std::vector<double> t_gw(C, 0.0);
+            std::vector<double> t_gb(C, 0.0);
+
+            #pragma omp for collapse(2)
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t g = 0; g < num_groups; ++g) {
+                    int64_t c_start = g * channels_per_group;
+                    double m = static_cast<double>(mean_data[n * num_groups + g]);
+                    double r = static_cast<double>(rstd_data[n * num_groups + g]);
+
+                    double ds = 0.0;
+                    double db = 0.0;
+                    for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                        for (int64_t s = 0; s < spatial_size; ++s) {
+                            int64_t idx = (n * C + c) * spatial_size + s;
+                            double dy = grad_out_data[idx];
+                            double x_hat = (in_data[idx] - m) * r;
+                            double dy_w = dy * w_data[c];
+                            ds += dy_w * x_hat;
+                            db += dy_w;
+                        }
+                    }
+
+                    double inv_gs = 1.0 / static_cast<double>(group_size);
+                    for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                        for (int64_t s = 0; s < spatial_size; ++s) {
+                            int64_t idx = (n * C + c) * spatial_size + s;
+                            double dy = grad_out_data[idx];
+                            double x_hat = (in_data[idx] - m) * r;
+                            grad_in_data[idx] = r * (dy * w_data[c] - inv_gs * (db + x_hat * ds));
+                        }
+                    }
+
+                    for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                        for (int64_t s = 0; s < spatial_size; ++s) {
+                            int64_t idx = (n * C + c) * spatial_size + s;
+                            double x_hat = (in_data[idx] - m) * r;
+                            t_gw[c] += grad_out_data[idx] * x_hat;
+                            t_gb[c] += grad_out_data[idx];
+                        }
+                    }
+                }
+            }
+
+            #pragma omp critical
+            {
+                for (int64_t c = 0; c < C; ++c) {
+                    grad_w_data[c] += t_gw[c];
+                    grad_b_data[c] += t_gb[c];
+                }
+            }
+        }
+    } else {
+        // Float16/BFloat16: compute entirely in Float32
+        int64_t total = input.numel();
+        std::vector<float> in_f32(total), grad_out_f32(total);
+        std::vector<float> w_f32(C);
+
+        if (input.dtype() == DType::Float16) {
+            const Float16* ir = input.data<Float16>();
+            const Float16* gr = grad_output.data<Float16>();
+            const Float16* wr = weight.data<Float16>();
+            for (int64_t i = 0; i < total; ++i) { in_f32[i] = static_cast<float>(ir[i]); grad_out_f32[i] = static_cast<float>(gr[i]); }
+            for (int64_t i = 0; i < C; ++i) w_f32[i] = static_cast<float>(wr[i]);
+        } else {
+            const BFloat16* ir = input.data<BFloat16>();
+            const BFloat16* gr = grad_output.data<BFloat16>();
+            const BFloat16* wr = weight.data<BFloat16>();
+            for (int64_t i = 0; i < total; ++i) { in_f32[i] = static_cast<float>(ir[i]); grad_out_f32[i] = static_cast<float>(gr[i]); }
+            for (int64_t i = 0; i < C; ++i) w_f32[i] = static_cast<float>(wr[i]);
+        }
+
+        std::vector<float> grad_in_f32(total, 0.0f);
+        std::vector<float> grad_w_f32(C, 0.0f);
+        std::vector<float> grad_b_f32(C, 0.0f);
+
+        #pragma omp parallel if(N * num_groups > 16)
+        {
+            std::vector<float> t_gw(C, 0.0f);
+            std::vector<float> t_gb(C, 0.0f);
+
+            #pragma omp for collapse(2)
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t g = 0; g < num_groups; ++g) {
+                    int64_t c_start = g * channels_per_group;
+                    float m = mean_data[n * num_groups + g];
+                    float r = rstd_data[n * num_groups + g];
+
+                    float ds = 0.0f, db = 0.0f;
+                    for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                        for (int64_t s = 0; s < spatial_size; ++s) {
+                            int64_t idx = (n * C + c) * spatial_size + s;
+                            float dy = grad_out_f32[idx];
+                            float x_hat = (in_f32[idx] - m) * r;
+                            ds += dy * w_f32[c] * x_hat;
+                            db += dy * w_f32[c];
+                        }
+                    }
+
+                    float inv_gs = 1.0f / static_cast<float>(group_size);
+                    for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                        for (int64_t s = 0; s < spatial_size; ++s) {
+                            int64_t idx = (n * C + c) * spatial_size + s;
+                            float dy = grad_out_f32[idx];
+                            float x_hat = (in_f32[idx] - m) * r;
+                            grad_in_f32[idx] = r * (dy * w_f32[c] - inv_gs * (db + x_hat * ds));
+                        }
+                    }
+
+                    for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                        for (int64_t s = 0; s < spatial_size; ++s) {
+                            int64_t idx = (n * C + c) * spatial_size + s;
+                            float x_hat = (in_f32[idx] - m) * r;
+                            t_gw[c] += grad_out_f32[idx] * x_hat;
+                            t_gb[c] += grad_out_f32[idx];
+                        }
+                    }
+                }
+            }
+
+            #pragma omp critical
+            {
+                for (int64_t c = 0; c < C; ++c) {
+                    grad_w_f32[c] += t_gw[c];
+                    grad_b_f32[c] += t_gb[c];
+                }
+            }
+        }
+
+        // Convert back
+        if (input.dtype() == DType::Float16) {
+            Float16* gi = grad_input.data<Float16>();
+            Float16* gw = grad_weight.data<Float16>();
+            Float16* gb = grad_bias.data<Float16>();
+            for (int64_t i = 0; i < total; ++i) gi[i] = Float16(grad_in_f32[i]);
+            for (int64_t i = 0; i < C; ++i) { gw[i] = Float16(grad_w_f32[i]); gb[i] = Float16(grad_b_f32[i]); }
+        } else {
+            BFloat16* gi = grad_input.data<BFloat16>();
+            BFloat16* gw = grad_weight.data<BFloat16>();
+            BFloat16* gb = grad_bias.data<BFloat16>();
+            for (int64_t i = 0; i < total; ++i) gi[i] = BFloat16(grad_in_f32[i]);
+            for (int64_t i = 0; i < C; ++i) { gw[i] = BFloat16(grad_w_f32[i]); gb[i] = BFloat16(grad_b_f32[i]); }
+        }
+    }
+
+    return {grad_input, grad_weight, grad_bias};
+}
+
+// ============================================================================
+// InstanceNorm Backward
+// ============================================================================
+
+auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
+                                    const Tensor& mean, const Tensor& rstd,
+                                    const Tensor& weight) -> std::vector<Tensor> {
+    auto shape = input.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t spatial_size = 1;
+    for (size_t i = 2; i < shape.size(); ++i) {
+        spatial_size *= shape[i];
+    }
+
+    auto grad_input = Tensor::empty_uninitialized(
+        std::vector<int64_t>(shape.begin(), shape.end()),
+        input.dtype(), input.device());
+    auto grad_weight = zeros({C}, weight.dtype(), weight.device());
+    auto grad_bias = zeros({C}, weight.dtype(), weight.device());
+
+    // mean and rstd are Float32, shape [N * C]
+    const float* mean_data = mean.data<float>();
+    const float* rstd_data = rstd.data<float>();
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_data = input.data<float>();
+        const float* grad_out_data = grad_output.data<float>();
+        const float* w_data = weight.impl() ? weight.data<float>() : nullptr;
+        float* grad_in_data = grad_input.data<float>();
+        float* grad_w_data = grad_weight.data<float>();
+        float* grad_b_data = grad_bias.data<float>();
+
+        #pragma omp parallel if(N * C > 16)
+        {
+            std::vector<float> t_gw(C, 0.0f);
+            std::vector<float> t_gb(C, 0.0f);
+
+            #pragma omp for collapse(2)
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    float m = mean_data[n * C + c];
+                    float r = rstd_data[n * C + c];
+                    float w = w_data ? w_data[c] : 1.0f;
+
+                    float ds = 0.0f;
+                    float db = 0.0f;
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        int64_t idx = (n * C + c) * spatial_size + s;
+                        float dy = grad_out_data[idx];
+                        float x_hat = (in_data[idx] - m) * r;
+                        ds += dy * w * x_hat;
+                        db += dy * w;
+                    }
+
+                    float inv_ss = 1.0f / static_cast<float>(spatial_size);
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        int64_t idx = (n * C + c) * spatial_size + s;
+                        float dy = grad_out_data[idx];
+                        float x_hat = (in_data[idx] - m) * r;
+                        grad_in_data[idx] = r * (dy * w - inv_ss * (db + x_hat * ds));
+                    }
+
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        int64_t idx = (n * C + c) * spatial_size + s;
+                        float x_hat = (in_data[idx] - m) * r;
+                        t_gw[c] += grad_out_data[idx] * x_hat;
+                        t_gb[c] += grad_out_data[idx];
+                    }
+                }
+            }
+
+            #pragma omp critical
+            {
+                for (int64_t c = 0; c < C; ++c) {
+                    grad_w_data[c] += t_gw[c];
+                    grad_b_data[c] += t_gb[c];
+                }
+            }
+        }
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_data = input.data<double>();
+        const double* grad_out_data = grad_output.data<double>();
+        const double* w_data = weight.impl() ? weight.data<double>() : nullptr;
+        double* grad_in_data = grad_input.data<double>();
+        double* grad_w_data = grad_weight.data<double>();
+        double* grad_b_data = grad_bias.data<double>();
+
+        #pragma omp parallel if(N * C > 16)
+        {
+            std::vector<double> t_gw(C, 0.0);
+            std::vector<double> t_gb(C, 0.0);
+
+            #pragma omp for collapse(2)
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    double m = static_cast<double>(mean_data[n * C + c]);
+                    double r = static_cast<double>(rstd_data[n * C + c]);
+                    double w = w_data ? w_data[c] : 1.0;
+
+                    double ds = 0.0, db = 0.0;
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        int64_t idx = (n * C + c) * spatial_size + s;
+                        double dy = grad_out_data[idx];
+                        double x_hat = (in_data[idx] - m) * r;
+                        ds += dy * w * x_hat;
+                        db += dy * w;
+                    }
+
+                    double inv_ss = 1.0 / static_cast<double>(spatial_size);
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        int64_t idx = (n * C + c) * spatial_size + s;
+                        double dy = grad_out_data[idx];
+                        double x_hat = (in_data[idx] - m) * r;
+                        grad_in_data[idx] = r * (dy * w - inv_ss * (db + x_hat * ds));
+                    }
+
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        int64_t idx = (n * C + c) * spatial_size + s;
+                        double x_hat = (in_data[idx] - m) * r;
+                        t_gw[c] += grad_out_data[idx] * x_hat;
+                        t_gb[c] += grad_out_data[idx];
+                    }
+                }
+            }
+
+            #pragma omp critical
+            {
+                for (int64_t c = 0; c < C; ++c) {
+                    grad_w_data[c] += t_gw[c];
+                    grad_b_data[c] += t_gb[c];
+                }
+            }
+        }
+    } else {
+        // Float16/BFloat16: compute in Float32
+        int64_t total = input.numel();
+        std::vector<float> in_f32(total), grad_out_f32(total);
+        std::vector<float> w_f32(C, 1.0f);
+
+        if (input.dtype() == DType::Float16) {
+            const Float16* ir = input.data<Float16>();
+            const Float16* gr = grad_output.data<Float16>();
+            for (int64_t i = 0; i < total; ++i) { in_f32[i] = static_cast<float>(ir[i]); grad_out_f32[i] = static_cast<float>(gr[i]); }
+            if (weight.impl()) { const Float16* wr = weight.data<Float16>(); for (int64_t i = 0; i < C; ++i) w_f32[i] = static_cast<float>(wr[i]); }
+        } else {
+            const BFloat16* ir = input.data<BFloat16>();
+            const BFloat16* gr = grad_output.data<BFloat16>();
+            for (int64_t i = 0; i < total; ++i) { in_f32[i] = static_cast<float>(ir[i]); grad_out_f32[i] = static_cast<float>(gr[i]); }
+            if (weight.impl()) { const BFloat16* wr = weight.data<BFloat16>(); for (int64_t i = 0; i < C; ++i) w_f32[i] = static_cast<float>(wr[i]); }
+        }
+
+        std::vector<float> grad_in_f32(total, 0.0f);
+        std::vector<float> grad_w_f32(C, 0.0f);
+        std::vector<float> grad_b_f32(C, 0.0f);
+
+        #pragma omp parallel if(N * C > 16)
+        {
+            std::vector<float> t_gw(C, 0.0f);
+            std::vector<float> t_gb(C, 0.0f);
+
+            #pragma omp for collapse(2)
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    float m = mean_data[n * C + c];
+                    float r = rstd_data[n * C + c];
+                    float w = w_f32[c];
+
+                    float ds = 0.0f, db = 0.0f;
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        int64_t idx = (n * C + c) * spatial_size + s;
+                        float dy = grad_out_f32[idx];
+                        float x_hat = (in_f32[idx] - m) * r;
+                        ds += dy * w * x_hat;
+                        db += dy * w;
+                    }
+
+                    float inv_ss = 1.0f / static_cast<float>(spatial_size);
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        int64_t idx = (n * C + c) * spatial_size + s;
+                        float dy = grad_out_f32[idx];
+                        float x_hat = (in_f32[idx] - m) * r;
+                        grad_in_f32[idx] = r * (dy * w - inv_ss * (db + x_hat * ds));
+                    }
+
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        int64_t idx = (n * C + c) * spatial_size + s;
+                        float x_hat = (in_f32[idx] - m) * r;
+                        t_gw[c] += grad_out_f32[idx] * x_hat;
+                        t_gb[c] += grad_out_f32[idx];
+                    }
+                }
+            }
+
+            #pragma omp critical
+            {
+                for (int64_t c = 0; c < C; ++c) {
+                    grad_w_f32[c] += t_gw[c];
+                    grad_b_f32[c] += t_gb[c];
+                }
+            }
+        }
+
+        if (input.dtype() == DType::Float16) {
+            Float16* gi = grad_input.data<Float16>();
+            Float16* gw = grad_weight.data<Float16>();
+            Float16* gb = grad_bias.data<Float16>();
+            for (int64_t i = 0; i < total; ++i) gi[i] = Float16(grad_in_f32[i]);
+            for (int64_t i = 0; i < C; ++i) { gw[i] = Float16(grad_w_f32[i]); gb[i] = Float16(grad_b_f32[i]); }
+        } else {
+            BFloat16* gi = grad_input.data<BFloat16>();
+            BFloat16* gw = grad_weight.data<BFloat16>();
+            BFloat16* gb = grad_bias.data<BFloat16>();
+            for (int64_t i = 0; i < total; ++i) gi[i] = BFloat16(grad_in_f32[i]);
+            for (int64_t i = 0; i < C; ++i) { gw[i] = BFloat16(grad_w_f32[i]); gb[i] = BFloat16(grad_b_f32[i]); }
+        }
+    }
+
+    return {grad_input, grad_weight, grad_bias};
 }
 
 } // namespace cpu

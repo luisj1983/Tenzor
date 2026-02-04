@@ -938,6 +938,26 @@ auto batchnorm2d_fused_training_kernel(const Tensor& input, Tensor& running_mean
         for (int64_t i = 0; i < C; ++i) {
             inv_var_data[i] = 1.0f / std::sqrt(var_data[i] + epsilon);
         }
+    } else if (batch_var.dtype() == DType::Float64) {
+        const double* var_data = batch_var.data<double>();
+        double* inv_var_data = saved_inv_var.data<double>();
+        for (int64_t i = 0; i < C; ++i) {
+            inv_var_data[i] = 1.0 / std::sqrt(var_data[i] + static_cast<double>(epsilon));
+        }
+    } else if (batch_var.dtype() == DType::Float16) {
+        const Float16* var_data = batch_var.data<Float16>();
+        Float16* inv_var_data = saved_inv_var.data<Float16>();
+        for (int64_t i = 0; i < C; ++i) {
+            float v = static_cast<float>(var_data[i]);
+            inv_var_data[i] = Float16(1.0f / std::sqrt(v + epsilon));
+        }
+    } else if (batch_var.dtype() == DType::BFloat16) {
+        const BFloat16* var_data = batch_var.data<BFloat16>();
+        BFloat16* inv_var_data = saved_inv_var.data<BFloat16>();
+        for (int64_t i = 0; i < C; ++i) {
+            float v = static_cast<float>(var_data[i]);
+            inv_var_data[i] = BFloat16(1.0f / std::sqrt(v + epsilon));
+        }
     }
 
     return {output, running_mean, running_var, batch_mean, saved_inv_var};

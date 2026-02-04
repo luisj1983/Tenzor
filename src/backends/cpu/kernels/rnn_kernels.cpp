@@ -99,13 +99,13 @@ auto lstm_cell_backward_kernel(const Tensor& grad_hy, const Tensor& grad_cy,
     int64_t hidden_size = shape[1];
     int64_t input_size = input.shape()[1];
 
-    // Gradients
+    // Allocate gradients
     auto grad_input = zeros(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                             input.dtype(), input.device());
     auto grad_hx = zeros(std::vector<int64_t>(hx.shape().begin(), hx.shape().end()),
                          hx.dtype(), hx.device());
-    auto grad_cx = zeros(std::vector<int64_t>(cx.shape().begin(), cx.shape().end()),
-                         cx.dtype(), cx.device());
+    auto grad_cx_out = zeros(std::vector<int64_t>(cx.shape().begin(), cx.shape().end()),
+                             cx.dtype(), cx.device());
     auto grad_weight_ih = zeros(std::vector<int64_t>(weight_ih.shape().begin(), weight_ih.shape().end()),
                                 weight_ih.dtype(), weight_ih.device());
     auto grad_weight_hh = zeros(std::vector<int64_t>(weight_hh.shape().begin(), weight_hh.shape().end()),
@@ -113,9 +113,132 @@ auto lstm_cell_backward_kernel(const Tensor& grad_hy, const Tensor& grad_cy,
     auto grad_bias_ih = zeros({4 * hidden_size}, input.dtype(), input.device());
     auto grad_bias_hh = zeros({4 * hidden_size}, input.dtype(), input.device());
 
-    // Simplified backward pass (would need gate caching for full implementation)
-    // For now, return zero gradients as placeholder
-    return {grad_input, grad_hx, grad_cx, grad_weight_ih, grad_weight_hh, grad_bias_ih, grad_bias_hh};
+    const float* in_data = input.data<float>();
+    const float* hx_data = hx.data<float>();
+    const float* cx_data = cx.data<float>();
+    const float* w_ih_data = weight_ih.data<float>();
+    const float* w_hh_data = weight_hh.data<float>();
+    const float* dhy_data = grad_hy.data<float>();
+    const float* dcy_data = grad_cy.data<float>();
+
+    float* d_input = grad_input.data<float>();
+    float* d_hx = grad_hx.data<float>();
+    float* d_cx = grad_cx_out.data<float>();
+    float* d_w_ih = grad_weight_ih.data<float>();
+    float* d_w_hh = grad_weight_hh.data<float>();
+    float* d_b_ih = grad_bias_ih.data<float>();
+    float* d_b_hh = grad_bias_hh.data<float>();
+
+    // Process each batch element
+    // Note: weight gradients need accumulation across batch, so we use per-thread buffers
+    #pragma omp parallel if(batch_size > 4)
+    {
+        std::vector<float> t_d_w_ih(4 * hidden_size * input_size, 0.0f);
+        std::vector<float> t_d_w_hh(4 * hidden_size * hidden_size, 0.0f);
+        std::vector<float> t_d_b(4 * hidden_size, 0.0f);
+
+        #pragma omp for
+        for (int64_t b = 0; b < batch_size; ++b) {
+            // Step 1: Recompute gates from forward pass
+            std::vector<float> gates(4 * hidden_size);
+            for (int64_t g = 0; g < 4 * hidden_size; ++g) {
+                float sum = 0.0f;
+                for (int64_t i = 0; i < input_size; ++i) {
+                    sum += in_data[b * input_size + i] * w_ih_data[g * input_size + i];
+                }
+                for (int64_t h = 0; h < hidden_size; ++h) {
+                    sum += hx_data[b * hidden_size + h] * w_hh_data[g * hidden_size + h];
+                }
+                gates[g] = sum;
+            }
+
+            // Step 2: Apply activations
+            std::vector<float> i_gate(hidden_size), f_gate(hidden_size);
+            std::vector<float> g_gate(hidden_size), o_gate(hidden_size);
+            std::vector<float> c_new(hidden_size), tanh_c(hidden_size);
+
+            for (int64_t h = 0; h < hidden_size; ++h) {
+                i_gate[h] = sigmoid(gates[h]);
+                f_gate[h] = sigmoid(gates[hidden_size + h]);
+                g_gate[h] = std::tanh(gates[2 * hidden_size + h]);
+                o_gate[h] = sigmoid(gates[3 * hidden_size + h]);
+
+                c_new[h] = f_gate[h] * cx_data[b * hidden_size + h] + i_gate[h] * g_gate[h];
+                tanh_c[h] = std::tanh(c_new[h]);
+            }
+
+            // Step 3: Backprop through output
+            // dh -> grad w.r.t. h = o * tanh(c)
+            // dc from both dhy and dcy paths
+            std::vector<float> d_gates(4 * hidden_size, 0.0f);
+
+            for (int64_t h = 0; h < hidden_size; ++h) {
+                float dh = dhy_data[b * hidden_size + h];
+                float dc = dcy_data[b * hidden_size + h];
+
+                // dh = o * tanh(c) => do_raw = dh * tanh(c), dc += dh * o * (1 - tanh(c)^2)
+                float d_o = dh * tanh_c[h];
+                dc += dh * o_gate[h] * (1.0f - tanh_c[h] * tanh_c[h]);
+
+                // c = f * c_prev + i * g => df = dc * c_prev, di = dc * g, dg = dc * i, dc_prev = dc * f
+                float d_f = dc * cx_data[b * hidden_size + h];
+                float d_i = dc * g_gate[h];
+                float d_g = dc * i_gate[h];
+                d_cx[b * hidden_size + h] = dc * f_gate[h];
+
+                // Gate activation derivatives
+                // sigmoid' = x * (1-x), tanh' = 1 - x^2
+                d_gates[h] = d_i * i_gate[h] * (1.0f - i_gate[h]);                    // di
+                d_gates[hidden_size + h] = d_f * f_gate[h] * (1.0f - f_gate[h]);       // df
+                d_gates[2 * hidden_size + h] = d_g * (1.0f - g_gate[h] * g_gate[h]);   // dg
+                d_gates[3 * hidden_size + h] = d_o * o_gate[h] * (1.0f - o_gate[h]);   // do
+            }
+
+            // Step 4: Compute input and hidden gradients
+            // grad_input = d_gates @ weight_ih
+            for (int64_t i = 0; i < input_size; ++i) {
+                float sum = 0.0f;
+                for (int64_t g = 0; g < 4 * hidden_size; ++g) {
+                    sum += d_gates[g] * w_ih_data[g * input_size + i];
+                }
+                d_input[b * input_size + i] = sum;
+            }
+
+            // grad_hx = d_gates @ weight_hh
+            for (int64_t h = 0; h < hidden_size; ++h) {
+                float sum = 0.0f;
+                for (int64_t g = 0; g < 4 * hidden_size; ++g) {
+                    sum += d_gates[g] * w_hh_data[g * hidden_size + h];
+                }
+                d_hx[b * hidden_size + h] = sum;
+            }
+
+            // Step 5: Accumulate weight gradients
+            // d_w_ih += d_gates^T @ input
+            for (int64_t g = 0; g < 4 * hidden_size; ++g) {
+                for (int64_t i = 0; i < input_size; ++i) {
+                    t_d_w_ih[g * input_size + i] += d_gates[g] * in_data[b * input_size + i];
+                }
+                for (int64_t h = 0; h < hidden_size; ++h) {
+                    t_d_w_hh[g * hidden_size + h] += d_gates[g] * hx_data[b * hidden_size + h];
+                }
+                t_d_b[g] += d_gates[g];
+            }
+        }
+
+        // Reduce thread-local buffers
+        #pragma omp critical
+        {
+            for (int64_t i = 0; i < 4 * hidden_size * input_size; ++i) d_w_ih[i] += t_d_w_ih[i];
+            for (int64_t i = 0; i < 4 * hidden_size * hidden_size; ++i) d_w_hh[i] += t_d_w_hh[i];
+            for (int64_t i = 0; i < 4 * hidden_size; ++i) {
+                d_b_ih[i] += t_d_b[i];
+                d_b_hh[i] += t_d_b[i];
+            }
+        }
+    }
+
+    return {grad_input, grad_hx, grad_cx_out, grad_weight_ih, grad_weight_hh, grad_bias_ih, grad_bias_hh};
 }
 
 auto gru_cell_forward_kernel(const Tensor& input, const Tensor& hx,
@@ -186,10 +309,10 @@ auto gru_cell_backward_kernel(const Tensor& grad_hy, const Tensor& input, const 
                                const Tensor& weight_ih, const Tensor& weight_hh)
     -> std::vector<Tensor> {
     auto shape = grad_hy.shape();
+    int64_t batch_size = shape[0];
     int64_t hidden_size = shape[1];
     int64_t input_size = input.shape()[1];
 
-    // Gradients (placeholder implementation)
     auto grad_input = zeros(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                             input.dtype(), input.device());
     auto grad_hx = zeros(std::vector<int64_t>(hx.shape().begin(), hx.shape().end()),
@@ -200,6 +323,175 @@ auto gru_cell_backward_kernel(const Tensor& grad_hy, const Tensor& input, const 
                                 weight_hh.dtype(), weight_hh.device());
     auto grad_bias_ih = zeros({3 * hidden_size}, input.dtype(), input.device());
     auto grad_bias_hh = zeros({3 * hidden_size}, input.dtype(), input.device());
+
+    const float* in_data = input.data<float>();
+    const float* hx_data = hx.data<float>();
+    const float* w_ih_data = weight_ih.data<float>();
+    const float* w_hh_data = weight_hh.data<float>();
+    const float* dhy_data = grad_hy.data<float>();
+
+    float* d_input = grad_input.data<float>();
+    float* d_hx = grad_hx.data<float>();
+    float* d_w_ih = grad_weight_ih.data<float>();
+    float* d_w_hh = grad_weight_hh.data<float>();
+    float* d_b_ih = grad_bias_ih.data<float>();
+    float* d_b_hh = grad_bias_hh.data<float>();
+
+    // Need bias_ih and bias_hh for recomputation - extract from weight_ih registry pattern
+    // The forward kernel uses bias_ih and bias_hh but backward doesn't receive them.
+    // We need to recompute gates without bias (gates are linear + bias, but we can
+    // recompute from the forward intermediate values).
+
+    #pragma omp parallel if(batch_size > 4)
+    {
+        std::vector<float> t_d_w_ih(3 * hidden_size * input_size, 0.0f);
+        std::vector<float> t_d_w_hh(3 * hidden_size * hidden_size, 0.0f);
+        std::vector<float> t_d_b_ih(3 * hidden_size, 0.0f);
+        std::vector<float> t_d_b_hh(3 * hidden_size, 0.0f);
+
+        #pragma omp for
+        for (int64_t b = 0; b < batch_size; ++b) {
+            // Step 1: Recompute gates (same as forward)
+            // Compute r, z gate pre-activations
+            std::vector<float> rz_pre(2 * hidden_size);
+            for (int64_t g = 0; g < 2 * hidden_size; ++g) {
+                float sum = 0.0f;
+                for (int64_t i = 0; i < input_size; ++i) {
+                    sum += in_data[b * input_size + i] * w_ih_data[g * input_size + i];
+                }
+                for (int64_t h = 0; h < hidden_size; ++h) {
+                    sum += hx_data[b * hidden_size + h] * w_hh_data[g * hidden_size + h];
+                }
+                rz_pre[g] = sum;
+            }
+
+            std::vector<float> r_gate(hidden_size), z_gate(hidden_size);
+            for (int64_t h = 0; h < hidden_size; ++h) {
+                r_gate[h] = sigmoid(rz_pre[h]);
+                z_gate[h] = sigmoid(rz_pre[hidden_size + h]);
+            }
+
+            // Compute n gate
+            // n_ih[h] = sum(input * w_ih[2H+h,:])
+            // n_hh[h] = sum((r * hx) * w_hh[2H+h,:])
+            // n = tanh(n_ih + n_hh)
+            std::vector<float> n_ih(hidden_size, 0.0f);
+            std::vector<float> n_hh(hidden_size, 0.0f);
+            std::vector<float> n_gate(hidden_size);
+
+            for (int64_t h = 0; h < hidden_size; ++h) {
+                for (int64_t i = 0; i < input_size; ++i) {
+                    n_ih[h] += in_data[b * input_size + i] * w_ih_data[(2 * hidden_size + h) * input_size + i];
+                }
+                for (int64_t hh = 0; hh < hidden_size; ++hh) {
+                    n_hh[h] += (r_gate[h] * hx_data[b * hidden_size + hh]) *
+                               w_hh_data[(2 * hidden_size + h) * hidden_size + hh];
+                }
+                n_gate[h] = std::tanh(n_ih[h] + n_hh[h]);
+            }
+
+            // Step 2: Backprop
+            // hy = (1 - z) * n + z * hx
+            // dhy -> dn = dhy * (1 - z), dz = dhy * (hx - n), dhx += dhy * z
+            std::vector<float> d_gates_ih(3 * hidden_size, 0.0f);
+            std::vector<float> d_gates_hh(3 * hidden_size, 0.0f);
+
+            for (int64_t h = 0; h < hidden_size; ++h) {
+                float dh = dhy_data[b * hidden_size + h];
+
+                float dn = dh * (1.0f - z_gate[h]);
+                float dz = dh * (hx_data[b * hidden_size + h] - n_gate[h]);
+                d_hx[b * hidden_size + h] = dh * z_gate[h];
+
+                // Backprop through n = tanh(n_ih + n_hh)
+                float dn_pre = dn * (1.0f - n_gate[h] * n_gate[h]);
+
+                // Backprop through n_hh: sum((r * hx) * w_hh)
+                // d_r from n_hh path: d(r * hx) * w_hh => need to accumulate
+                float dr_from_n = 0.0f;
+                for (int64_t hh = 0; hh < hidden_size; ++hh) {
+                    // d(r * hx[hh]) w.r.t r = hx[hh] * w_hh
+                    dr_from_n += dn_pre * w_hh_data[(2 * hidden_size + h) * hidden_size + hh] *
+                                 hx_data[b * hidden_size + hh];
+                    // d_hx from n_hh path
+                    d_hx[b * hidden_size + hh] += dn_pre * w_hh_data[(2 * hidden_size + h) * hidden_size + hh] *
+                                                   r_gate[h];
+                }
+
+                // Backprop through z = sigmoid(rz_pre[H+h])
+                float dz_pre = dz * z_gate[h] * (1.0f - z_gate[h]);
+
+                // Backprop through r = sigmoid(rz_pre[h])
+                float dr = dr_from_n;
+                float dr_pre = dr * r_gate[h] * (1.0f - r_gate[h]);
+
+                // Gate gradients for ih (input-hidden): r, z, n
+                d_gates_ih[h] = dr_pre;                          // r gate
+                d_gates_ih[hidden_size + h] = dz_pre;            // z gate
+                d_gates_ih[2 * hidden_size + h] = dn_pre;        // n gate (input part)
+
+                // Gate gradients for hh (hidden-hidden): r, z, n
+                d_gates_hh[h] = dr_pre;                          // r gate
+                d_gates_hh[hidden_size + h] = dz_pre;            // z gate
+                d_gates_hh[2 * hidden_size + h] = dn_pre;        // n gate (hidden part, through r*hx)
+            }
+
+            // Step 3: Compute input gradient
+            // d_input = d_gates_ih @ w_ih (for r, z, n_ih parts)
+            for (int64_t i = 0; i < input_size; ++i) {
+                float sum = 0.0f;
+                for (int64_t g = 0; g < 3 * hidden_size; ++g) {
+                    sum += d_gates_ih[g] * w_ih_data[g * input_size + i];
+                }
+                d_input[b * input_size + i] = sum;
+            }
+
+            // d_hx += d_gates_hh[:2H] @ w_hh[:2H] (r, z parts affect hx directly)
+            for (int64_t h = 0; h < hidden_size; ++h) {
+                float sum = 0.0f;
+                for (int64_t g = 0; g < 2 * hidden_size; ++g) {
+                    sum += d_gates_hh[g] * w_hh_data[g * hidden_size + h];
+                }
+                d_hx[b * hidden_size + h] += sum;
+            }
+
+            // Step 4: Accumulate weight gradients
+            for (int64_t g = 0; g < 3 * hidden_size; ++g) {
+                for (int64_t i = 0; i < input_size; ++i) {
+                    t_d_w_ih[g * input_size + i] += d_gates_ih[g] * in_data[b * input_size + i];
+                }
+                t_d_b_ih[g] += d_gates_ih[g];
+            }
+
+            // Weight_hh gradients: r and z use hx directly, n uses r*hx
+            for (int64_t g = 0; g < 2 * hidden_size; ++g) {
+                for (int64_t h = 0; h < hidden_size; ++h) {
+                    t_d_w_hh[g * hidden_size + h] += d_gates_hh[g] * hx_data[b * hidden_size + h];
+                }
+                t_d_b_hh[g] += d_gates_hh[g];
+            }
+            // n gate hidden weights use r*hx
+            for (int64_t h_out = 0; h_out < hidden_size; ++h_out) {
+                float dn_pre = d_gates_hh[2 * hidden_size + h_out];
+                for (int64_t h = 0; h < hidden_size; ++h) {
+                    t_d_w_hh[(2 * hidden_size + h_out) * hidden_size + h] +=
+                        dn_pre * r_gate[h_out] * hx_data[b * hidden_size + h];
+                }
+                t_d_b_hh[2 * hidden_size + h_out] += dn_pre;
+            }
+        }
+
+        // Reduce thread-local buffers
+        #pragma omp critical
+        {
+            for (int64_t i = 0; i < 3 * hidden_size * input_size; ++i) d_w_ih[i] += t_d_w_ih[i];
+            for (int64_t i = 0; i < 3 * hidden_size * hidden_size; ++i) d_w_hh[i] += t_d_w_hh[i];
+            for (int64_t i = 0; i < 3 * hidden_size; ++i) {
+                d_b_ih[i] += t_d_b_ih[i];
+                d_b_hh[i] += t_d_b_hh[i];
+            }
+        }
+    }
 
     return {grad_input, grad_hx, grad_weight_ih, grad_weight_hh, grad_bias_ih, grad_bias_hh};
 }

@@ -77,6 +77,47 @@ inline Float16& operator/=(Float16& a, const Float16& b) {
 }
 
 // ============================================================================
+// BFloat16 Arithmetic Helper Functions
+// ============================================================================
+// Same pattern as Float16 - operations in Float32 precision.
+
+inline BFloat16 operator+(const BFloat16& a, const BFloat16& b) {
+    return BFloat16(static_cast<float>(a) + static_cast<float>(b));
+}
+
+inline BFloat16 operator-(const BFloat16& a, const BFloat16& b) {
+    return BFloat16(static_cast<float>(a) - static_cast<float>(b));
+}
+
+inline BFloat16 operator*(const BFloat16& a, const BFloat16& b) {
+    return BFloat16(static_cast<float>(a) * static_cast<float>(b));
+}
+
+inline BFloat16 operator/(const BFloat16& a, const BFloat16& b) {
+    return BFloat16(static_cast<float>(a) / static_cast<float>(b));
+}
+
+inline BFloat16& operator+=(BFloat16& a, const BFloat16& b) {
+    a = BFloat16(static_cast<float>(a) + static_cast<float>(b));
+    return a;
+}
+
+inline BFloat16& operator-=(BFloat16& a, const BFloat16& b) {
+    a = BFloat16(static_cast<float>(a) - static_cast<float>(b));
+    return a;
+}
+
+inline BFloat16& operator*=(BFloat16& a, const BFloat16& b) {
+    a = BFloat16(static_cast<float>(a) * static_cast<float>(b));
+    return a;
+}
+
+inline BFloat16& operator/=(BFloat16& a, const BFloat16& b) {
+    a = BFloat16(static_cast<float>(a) / static_cast<float>(b));
+    return a;
+}
+
+// ============================================================================
 // Helper Functions
 // ============================================================================
 
@@ -876,6 +917,8 @@ auto conv2d_forward_kernel(
         conv2d_forward_impl<double>(input, weight, bias, output, stride, padding, dilation, groups);
     } else if (input.dtype() == DType::Float16) {
         conv2d_forward_impl<Float16>(input, weight, bias, output, stride, padding, dilation, groups);
+    } else if (input.dtype() == DType::BFloat16) {
+        conv2d_forward_impl<BFloat16>(input, weight, bias, output, stride, padding, dilation, groups);
     } else {
         throw std::runtime_error("Unsupported dtype for conv2d_forward");
     }
@@ -984,6 +1027,8 @@ auto conv2d_backward_input_kernel(
         conv2d_backward_input_impl<double>(grad_output, weight, grad_input, input_shape, stride, padding, dilation, groups);
     } else if (grad_output.dtype() == DType::Float16) {
         conv2d_backward_input_impl<Float16>(grad_output, weight, grad_input, input_shape, stride, padding, dilation, groups);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        conv2d_backward_input_impl<BFloat16>(grad_output, weight, grad_input, input_shape, stride, padding, dilation, groups);
     } else {
         throw std::runtime_error("Unsupported dtype for conv2d_backward_input");
     }
@@ -1090,6 +1135,8 @@ auto conv2d_backward_weight_kernel(
         conv2d_backward_weight_impl<double>(grad_output, input, grad_weight, weight_shape, stride, padding, dilation, groups);
     } else if (grad_output.dtype() == DType::Float16) {
         conv2d_backward_weight_impl<Float16>(grad_output, input, grad_weight, weight_shape, stride, padding, dilation, groups);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        conv2d_backward_weight_impl<BFloat16>(grad_output, input, grad_weight, weight_shape, stride, padding, dilation, groups);
     } else {
         throw std::runtime_error("Unsupported dtype for conv2d_backward_weight");
     }
@@ -1152,6 +1199,8 @@ auto conv2d_backward_bias_kernel(
         conv2d_backward_bias_impl<double>(grad_output, grad_bias);
     } else if (grad_output.dtype() == DType::Float16) {
         conv2d_backward_bias_impl<Float16>(grad_output, grad_bias);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        conv2d_backward_bias_impl<BFloat16>(grad_output, grad_bias);
     } else {
         throw std::runtime_error("Unsupported dtype for conv2d_backward_bias");
     }
@@ -1323,6 +1372,8 @@ auto conv_transpose2d_forward_kernel(
         conv_transpose2d_forward_impl<double>(input, weight, bias, output, stride, padding, output_padding, dilation, groups);
     } else if (input.dtype() == DType::Float16) {
         conv_transpose2d_forward_impl<Float16>(input, weight, bias, output, stride, padding, output_padding, dilation, groups);
+    } else if (input.dtype() == DType::BFloat16) {
+        conv_transpose2d_forward_impl<BFloat16>(input, weight, bias, output, stride, padding, output_padding, dilation, groups);
     } else {
         throw std::runtime_error("Unsupported dtype for conv_transpose2d_forward");
     }
@@ -1333,6 +1384,41 @@ auto conv_transpose2d_forward_kernel(
 // ============================================================================
 // Depthwise Conv2d Forward CPU Implementation
 // ============================================================================
+
+template<typename T>
+void depthwise_conv2d_impl(const T* in_data, const T* w_data, const T* b_data, T* out_data,
+                            int64_t N, int64_t C, int64_t H, int64_t W,
+                            int64_t kH, int64_t kW, int64_t H_out, int64_t W_out,
+                            int64_t stride, int64_t padding, int64_t dilation) {
+    #pragma omp parallel for collapse(4)
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            for (int64_t oh = 0; oh < H_out; ++oh) {
+                for (int64_t ow = 0; ow < W_out; ++ow) {
+                    float sum = 0.0f;
+
+                    for (int64_t kh = 0; kh < kH; ++kh) {
+                        for (int64_t kw = 0; kw < kW; ++kw) {
+                            int64_t h = oh * stride - padding + kh * dilation;
+                            int64_t w = ow * stride - padding + kw * dilation;
+
+                            if (h >= 0 && h < H && w >= 0 && w < W) {
+                                sum += static_cast<float>(in_data[((n * C + c) * H + h) * W + w]) *
+                                       static_cast<float>(w_data[(c * 1 + 0) * kH * kW + kh * kW + kw]);
+                            }
+                        }
+                    }
+
+                    if (b_data) {
+                        sum += static_cast<float>(b_data[c]);
+                    }
+
+                    out_data[((n * C + c) * H_out + oh) * W_out + ow] = static_cast<T>(sum);
+                }
+            }
+        }
+    }
+}
 
 auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight,
                               const Tensor* bias, int64_t stride,
@@ -1356,38 +1442,24 @@ auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight,
 
     auto output = Tensor::empty_uninitialized({N, C, H_out, W_out}, input.dtype(), input.device());
 
-    const float* in_data = input.data<float>();
-    const float* w_data = weight.data<float>();
-    const float* b_data = bias ? bias->data<float>() : nullptr;
-    float* out_data = output.data<float>();
-
-    #pragma omp parallel for collapse(4)
-    for (int64_t n = 0; n < N; ++n) {
-        for (int64_t c = 0; c < C; ++c) {
-            for (int64_t oh = 0; oh < H_out; ++oh) {
-                for (int64_t ow = 0; ow < W_out; ++ow) {
-                    float sum = 0.0f;
-
-                    for (int64_t kh = 0; kh < kH; ++kh) {
-                        for (int64_t kw = 0; kw < kW; ++kw) {
-                            int64_t h = oh * stride - padding + kh * dilation;
-                            int64_t w = ow * stride - padding + kw * dilation;
-
-                            if (h >= 0 && h < H && w >= 0 && w < W) {
-                                sum += in_data[((n * C + c) * H + h) * W + w] *
-                                       w_data[(c * 1 + 0) * kH * kW + kh * kW + kw];
-                            }
-                        }
-                    }
-
-                    if (b_data) {
-                        sum += b_data[c];
-                    }
-
-                    out_data[((n * C + c) * H_out + oh) * W_out + ow] = sum;
-                }
-            }
-        }
+    if (input.dtype() == DType::Float32) {
+        depthwise_conv2d_impl<float>(input.data<float>(), weight.data<float>(),
+            bias ? bias->data<float>() : nullptr, output.data<float>(),
+            N, C, H, W, kH, kW, H_out, W_out, stride, padding, dilation);
+    } else if (input.dtype() == DType::Float64) {
+        depthwise_conv2d_impl<double>(input.data<double>(), weight.data<double>(),
+            bias ? bias->data<double>() : nullptr, output.data<double>(),
+            N, C, H, W, kH, kW, H_out, W_out, stride, padding, dilation);
+    } else if (input.dtype() == DType::Float16) {
+        depthwise_conv2d_impl<Float16>(input.data<Float16>(), weight.data<Float16>(),
+            bias ? bias->data<Float16>() : nullptr, output.data<Float16>(),
+            N, C, H, W, kH, kW, H_out, W_out, stride, padding, dilation);
+    } else if (input.dtype() == DType::BFloat16) {
+        depthwise_conv2d_impl<BFloat16>(input.data<BFloat16>(), weight.data<BFloat16>(),
+            bias ? bias->data<BFloat16>() : nullptr, output.data<BFloat16>(),
+            N, C, H, W, kH, kW, H_out, W_out, stride, padding, dilation);
+    } else {
+        throw std::runtime_error("Unsupported dtype for depthwise_conv2d");
     }
 
     return output;
