@@ -16,6 +16,9 @@
 #include <cmath>
 #include <limits>
 #include <iostream>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #ifdef TENZOR_CUDA_ENABLED
 extern "C" void nms_cuda(const float* boxes, const float* scores,
@@ -396,7 +399,9 @@ auto nms(const Tensor& boxes, const Tensor& scores, double iou_threshold) -> Ten
         const float y2 = boxes_data[idx * 4 + 3];
         const float area = (x2 - x1) * (y2 - y1);
 
-        // Suppress overlapping boxes
+        // Suppress overlapping boxes (parallelized IoU computation)
+        int64_t remaining = N - i - 1;
+        #pragma omp parallel for schedule(dynamic, 64) if(remaining > 1024)
         for (int64_t j = i + 1; j < N; ++j) {
             int64_t idx2 = indices[j];
             if (suppressed[idx2]) continue;

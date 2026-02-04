@@ -1481,6 +1481,184 @@ auto instance_norm_kernel(const Tensor& input, const Tensor& weight,
 }
 
 // ============================================================================
+// GroupNorm / InstanceNorm with saved stats (for backward pass)
+// ============================================================================
+
+template<typename T>
+void group_norm_impl_with_stats(const T* in_data, T* out_data, const T* w_data, const T* b_data,
+                                 float* mean_out, float* inv_std_out,
+                                 int64_t N, int64_t C, int64_t spatial_size, int64_t num_groups, float eps) {
+    int64_t channels_per_group = C / num_groups;
+
+    #pragma omp parallel for collapse(2) if(N * num_groups > 16)
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t g = 0; g < num_groups; ++g) {
+            int64_t c_start = g * channels_per_group;
+            int64_t group_size = channels_per_group * spatial_size;
+
+            float mean = 0.0f;
+            for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                for (int64_t s = 0; s < spatial_size; ++s) {
+                    mean += static_cast<float>(in_data[(n * C + c) * spatial_size + s]);
+                }
+            }
+            mean /= static_cast<float>(group_size);
+
+            float var = 0.0f;
+            for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                for (int64_t s = 0; s < spatial_size; ++s) {
+                    float diff = static_cast<float>(in_data[(n * C + c) * spatial_size + s]) - mean;
+                    var += diff * diff;
+                }
+            }
+            var /= static_cast<float>(group_size);
+
+            float inv_std = 1.0f / std::sqrt(var + eps);
+
+            // Save stats
+            mean_out[n * num_groups + g] = mean;
+            inv_std_out[n * num_groups + g] = inv_std;
+
+            for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                for (int64_t s = 0; s < spatial_size; ++s) {
+                    int64_t idx = (n * C + c) * spatial_size + s;
+                    float normalized = (static_cast<float>(in_data[idx]) - mean) * inv_std;
+                    out_data[idx] = static_cast<T>(normalized * static_cast<float>(w_data[c]) + static_cast<float>(b_data[c]));
+                }
+            }
+        }
+    }
+}
+
+auto group_norm_kernel_with_stats(const Tensor& input, int64_t num_groups,
+                                    const Tensor& weight, const Tensor& bias, float eps) -> std::vector<Tensor> {
+    auto shape = input.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t spatial_size = 1;
+    for (size_t i = 2; i < shape.size(); ++i) {
+        spatial_size *= shape[i];
+    }
+
+    auto output = Tensor::empty_uninitialized(
+        std::vector<int64_t>(shape.begin(), shape.end()),
+        input.dtype(), input.device());
+    auto mean = Tensor::empty_uninitialized({N, num_groups}, DType::Float32, input.device());
+    auto inv_std = Tensor::empty_uninitialized({N, num_groups}, DType::Float32, input.device());
+
+    if (input.dtype() == DType::Float32) {
+        group_norm_impl_with_stats<float>(input.data<float>(), output.data<float>(),
+                                           weight.data<float>(), bias.data<float>(),
+                                           mean.data<float>(), inv_std.data<float>(),
+                                           N, C, spatial_size, num_groups, eps);
+    } else if (input.dtype() == DType::Float64) {
+        group_norm_impl_with_stats<double>(input.data<double>(), output.data<double>(),
+                                            weight.data<double>(), bias.data<double>(),
+                                            mean.data<float>(), inv_std.data<float>(),
+                                            N, C, spatial_size, num_groups, eps);
+    } else if (input.dtype() == DType::Float16) {
+        group_norm_impl_with_stats<Float16>(input.data<Float16>(), output.data<Float16>(),
+                                             weight.data<Float16>(), bias.data<Float16>(),
+                                             mean.data<float>(), inv_std.data<float>(),
+                                             N, C, spatial_size, num_groups, eps);
+    } else if (input.dtype() == DType::BFloat16) {
+        group_norm_impl_with_stats<BFloat16>(input.data<BFloat16>(), output.data<BFloat16>(),
+                                              weight.data<BFloat16>(), bias.data<BFloat16>(),
+                                              mean.data<float>(), inv_std.data<float>(),
+                                              N, C, spatial_size, num_groups, eps);
+    } else {
+        throw std::runtime_error("Unsupported dtype for group_norm_with_stats");
+    }
+
+    return {output, mean, inv_std};
+}
+
+template<typename T>
+void instance_norm_impl_with_stats(const T* in_data, T* out_data, const T* w_data, const T* b_data,
+                                    float* mean_out, float* inv_std_out,
+                                    int64_t N, int64_t C, int64_t spatial_size, float eps) {
+    #pragma omp parallel for collapse(2) if(N * C > 16)
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            float mean = 0.0f;
+            for (int64_t s = 0; s < spatial_size; ++s) {
+                mean += static_cast<float>(in_data[(n * C + c) * spatial_size + s]);
+            }
+            mean /= static_cast<float>(spatial_size);
+
+            float var = 0.0f;
+            for (int64_t s = 0; s < spatial_size; ++s) {
+                float diff = static_cast<float>(in_data[(n * C + c) * spatial_size + s]) - mean;
+                var += diff * diff;
+            }
+            var /= static_cast<float>(spatial_size);
+
+            float inv_std = 1.0f / std::sqrt(var + eps);
+
+            // Save stats
+            mean_out[n * C + c] = mean;
+            inv_std_out[n * C + c] = inv_std;
+
+            float w = w_data ? static_cast<float>(w_data[c]) : 1.0f;
+            float b = b_data ? static_cast<float>(b_data[c]) : 0.0f;
+
+            for (int64_t s = 0; s < spatial_size; ++s) {
+                int64_t idx = (n * C + c) * spatial_size + s;
+                float normalized = (static_cast<float>(in_data[idx]) - mean) * inv_std;
+                out_data[idx] = static_cast<T>(normalized * w + b);
+            }
+        }
+    }
+}
+
+auto instance_norm_kernel_with_stats(const Tensor& input, const Tensor& weight,
+                                       const Tensor& bias, float eps) -> std::vector<Tensor> {
+    auto shape = input.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t spatial_size = 1;
+    for (size_t i = 2; i < shape.size(); ++i) {
+        spatial_size *= shape[i];
+    }
+
+    auto output = Tensor::empty_uninitialized(
+        std::vector<int64_t>(shape.begin(), shape.end()),
+        input.dtype(), input.device());
+    auto mean = Tensor::empty_uninitialized({N, C}, DType::Float32, input.device());
+    auto inv_std = Tensor::empty_uninitialized({N, C}, DType::Float32, input.device());
+
+    if (input.dtype() == DType::Float32) {
+        instance_norm_impl_with_stats<float>(input.data<float>(), output.data<float>(),
+                                              weight.impl() ? weight.data<float>() : nullptr,
+                                              bias.impl() ? bias.data<float>() : nullptr,
+                                              mean.data<float>(), inv_std.data<float>(),
+                                              N, C, spatial_size, eps);
+    } else if (input.dtype() == DType::Float64) {
+        instance_norm_impl_with_stats<double>(input.data<double>(), output.data<double>(),
+                                               weight.impl() ? weight.data<double>() : nullptr,
+                                               bias.impl() ? bias.data<double>() : nullptr,
+                                               mean.data<float>(), inv_std.data<float>(),
+                                               N, C, spatial_size, eps);
+    } else if (input.dtype() == DType::Float16) {
+        instance_norm_impl_with_stats<Float16>(input.data<Float16>(), output.data<Float16>(),
+                                                weight.impl() ? weight.data<Float16>() : nullptr,
+                                                bias.impl() ? bias.data<Float16>() : nullptr,
+                                                mean.data<float>(), inv_std.data<float>(),
+                                                N, C, spatial_size, eps);
+    } else if (input.dtype() == DType::BFloat16) {
+        instance_norm_impl_with_stats<BFloat16>(input.data<BFloat16>(), output.data<BFloat16>(),
+                                                 weight.impl() ? weight.data<BFloat16>() : nullptr,
+                                                 bias.impl() ? bias.data<BFloat16>() : nullptr,
+                                                 mean.data<float>(), inv_std.data<float>(),
+                                                 N, C, spatial_size, eps);
+    } else {
+        throw std::runtime_error("Unsupported dtype for instance_norm_with_stats");
+    }
+
+    return {output, mean, inv_std};
+}
+
+// ============================================================================
 // LayerNorm Backward
 // ============================================================================
 

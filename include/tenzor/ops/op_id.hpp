@@ -237,6 +237,8 @@ enum class OpId : uint16_t {
     FusedConv2dSigmoid,
     FusedConv2dTanh,
     FusedConv2dSwish,
+    FusedConv2dBnReLU,
+    FusedLayerNormBackward,
 
     // =========================================================================
     // Creation Operations (230-249)

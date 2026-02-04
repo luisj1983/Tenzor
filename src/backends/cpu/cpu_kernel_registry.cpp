@@ -146,8 +146,10 @@ namespace cpu {
     auto layer_norm_kernel_with_stats(const Tensor& input, const std::vector<int64_t>& normalized_shape, const Tensor& weight, const Tensor& bias, float eps) -> std::tuple<Tensor, Tensor, Tensor>;
     auto layer_norm_backward_kernel(const Tensor& grad_output, const Tensor& input, const std::vector<int64_t>& normalized_shape, const Tensor& mean, const Tensor& rstd, const Tensor& weight) -> std::vector<Tensor>;
     auto group_norm_kernel(const Tensor& input, int64_t num_groups, const Tensor& weight, const Tensor& bias, float eps) -> Tensor;
+    auto group_norm_kernel_with_stats(const Tensor& input, int64_t num_groups, const Tensor& weight, const Tensor& bias, float eps) -> std::vector<Tensor>;
     auto group_norm_backward_kernel(const Tensor& grad_output, const Tensor& input, int64_t num_groups, const Tensor& mean, const Tensor& rstd, const Tensor& weight) -> std::vector<Tensor>;
     auto instance_norm_kernel(const Tensor& input, const Tensor& weight, const Tensor& bias, float eps) -> Tensor;
+    auto instance_norm_kernel_with_stats(const Tensor& input, const Tensor& weight, const Tensor& bias, float eps) -> std::vector<Tensor>;
     auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& mean, const Tensor& rstd, const Tensor& weight) -> std::vector<Tensor>;
 
     // Convolution
@@ -176,6 +178,8 @@ namespace cpu {
     auto fused_add_relu_kernel(const Tensor& a, const Tensor& b) -> Tensor;
     auto fused_gelu_kernel(const Tensor& input) -> Tensor;
     auto fused_layer_norm_kernel(const Tensor& input, const std::vector<int64_t>& normalized_shape, const Tensor& weight, const Tensor& bias, float eps) -> std::tuple<Tensor, Tensor, Tensor>;
+    auto fused_layer_norm_backward_kernel(const Tensor& grad_output, const Tensor& input, const std::vector<int64_t>& normalized_shape, const Tensor& mean, const Tensor& inv_std, const Tensor& weight) -> std::vector<Tensor>;
+    auto fused_conv2d_bn_relu_kernel(const Tensor& input, const Tensor& weight, const Tensor& conv_bias, const Tensor& bn_gamma, const Tensor& bn_beta, const Tensor& bn_running_mean, const Tensor& bn_running_var, int64_t stride, int64_t padding, float bn_momentum, float bn_eps, bool training) -> Tensor;
 
     // Creation
     auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
@@ -716,10 +720,10 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return cpu::layer_norm_backward_kernel(inputs[0], inputs[1], normalized_shape, inputs[3], inputs[4], inputs[2]);
     });
 
-    table.register_single_output_kernel(OpId::GroupNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+    table.register_kernel(OpId::GroupNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t num_groups = parse_attr<int64_t>(attrs, "num_groups", 1);
         float eps = parse_attr<float>(attrs, "eps", 1e-5f);
-        return cpu::group_norm_kernel(inputs[0], num_groups, inputs[1], inputs[2], eps);
+        return cpu::group_norm_kernel_with_stats(inputs[0], num_groups, inputs[1], inputs[2], eps);
     });
 
     table.register_kernel(OpId::GroupNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -728,9 +732,9 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return cpu::group_norm_backward_kernel(inputs[0], inputs[1], num_groups, inputs[3], inputs[4], inputs[2]);
     });
 
-    table.register_single_output_kernel(OpId::InstanceNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+    table.register_kernel(OpId::InstanceNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         float eps = parse_attr<float>(attrs, "eps", 1e-5f);
-        return cpu::instance_norm_kernel(inputs[0], inputs[1], inputs[2], eps);
+        return cpu::instance_norm_kernel_with_stats(inputs[0], inputs[1], inputs[2], eps);
     });
 
     table.register_kernel(OpId::InstanceNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -880,6 +884,23 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         float eps = parse_attr<float>(attrs, "eps", 1e-5f);
         auto [output, mean, inv_std] = cpu::fused_layer_norm_kernel(inputs[0], normalized_shape, inputs[1], inputs[2], eps);
         return std::vector<Tensor>{output, mean, inv_std};
+    });
+
+    table.register_kernel(OpId::FusedLayerNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [grad_output, input, weight, mean, inv_std]
+        auto normalized_shape = parse_int_list(attrs, "normalized_shape");
+        return cpu::fused_layer_norm_backward_kernel(inputs[0], inputs[1], normalized_shape, inputs[3], inputs[4], inputs[2]);
+    });
+
+    table.register_single_output_kernel(OpId::FusedConv2dBnReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // inputs: [input, weight, conv_bias, bn_gamma, bn_beta, bn_running_mean, bn_running_var]
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        float bn_momentum = parse_attr<float>(attrs, "bn_momentum", 0.1f);
+        float bn_eps = parse_attr<float>(attrs, "bn_eps", 1e-5f);
+        bool training = parse_attr<int64_t>(attrs, "training", 0) != 0;
+        return cpu::fused_conv2d_bn_relu_kernel(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5], inputs[6],
+                                                  stride, padding, bn_momentum, bn_eps, training);
     });
 
     // =========================================================================

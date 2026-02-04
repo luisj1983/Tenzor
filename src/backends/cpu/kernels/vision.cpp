@@ -473,8 +473,71 @@ auto roi_align_forward_kernel(const Tensor& features, const Tensor& rois,
                 }
             }
         }
+    } else if (features.dtype() == DType::Float64) {
+        const double* feat_data = features.data<double>();
+        const double* roi_data = rois.data<double>();
+        double* out_data = output.data<double>();
+
+        double offset = aligned ? 0.5 : 0.0;
+
+        #pragma omp parallel for if(num_rois > 16)
+        for (int64_t n = 0; n < num_rois; ++n) {
+            int64_t batch_idx = static_cast<int64_t>(roi_data[n * 5 + 0]);
+            float roi_x1 = static_cast<float>(roi_data[n * 5 + 1] * spatial_scale - offset);
+            float roi_y1 = static_cast<float>(roi_data[n * 5 + 2] * spatial_scale - offset);
+            float roi_x2 = static_cast<float>(roi_data[n * 5 + 3] * spatial_scale - offset);
+            float roi_y2 = static_cast<float>(roi_data[n * 5 + 4] * spatial_scale - offset);
+
+            float roi_w = roi_x2 - roi_x1;
+            float roi_h = roi_y2 - roi_y1;
+            if (!aligned) {
+                roi_w = std::max(roi_w, 1.0f);
+                roi_h = std::max(roi_h, 1.0f);
+            }
+
+            float bin_h = roi_h / static_cast<float>(output_h);
+            float bin_w = roi_w / static_cast<float>(output_w);
+
+            int64_t roi_bin_h = sampling_ratio > 0 ? sampling_ratio
+                : static_cast<int64_t>(std::ceil(bin_h));
+            int64_t roi_bin_w = sampling_ratio > 0 ? sampling_ratio
+                : static_cast<int64_t>(std::ceil(bin_w));
+            roi_bin_h = std::max(roi_bin_h, int64_t(1));
+            roi_bin_w = std::max(roi_bin_w, int64_t(1));
+
+            float count = static_cast<float>(roi_bin_h * roi_bin_w);
+
+            for (int64_t c = 0; c < channels; ++c) {
+                const double* channel_data = feat_data + (batch_idx * channels + c) * height * width;
+
+                for (int64_t ph = 0; ph < output_h; ++ph) {
+                    for (int64_t pw = 0; pw < output_w; ++pw) {
+                        float val = 0.0f;
+
+                        for (int64_t iy = 0; iy < roi_bin_h; ++iy) {
+                            float y = roi_y1 + bin_h * (static_cast<float>(ph) +
+                                (static_cast<float>(iy) + 0.5f) / static_cast<float>(roi_bin_h));
+                            for (int64_t ix = 0; ix < roi_bin_w; ++ix) {
+                                float x = roi_x1 + bin_w * (static_cast<float>(pw) +
+                                    (static_cast<float>(ix) + 0.5f) / static_cast<float>(roi_bin_w));
+                                val += bilinear_interpolate(channel_data, height, width, y, x);
+                            }
+                        }
+
+                        out_data[((n * channels + c) * output_h + ph) * output_w + pw] = static_cast<double>(val / count);
+                    }
+                }
+            }
+        }
+    } else if (features.dtype() == DType::Float16 || features.dtype() == DType::BFloat16) {
+        // Convert to Float32, compute, convert back
+        auto features_f32 = features.to(DType::Float32);
+        auto rois_f32 = rois.to(DType::Float32);
+        auto output_f32 = roi_align_forward_kernel(features_f32, rois_f32, output_h, output_w,
+                                                     spatial_scale, sampling_ratio, aligned);
+        return output_f32.to(features.dtype());
     } else {
-        throw std::runtime_error("roi_align_forward: only Float32 supported");
+        throw std::runtime_error("roi_align_forward: unsupported dtype");
     }
 
     return output;
@@ -502,6 +565,8 @@ auto roi_align_backward_kernel(const Tensor& grad_output, const Tensor& rois,
 
         float offset = aligned ? 0.5f : 0.0f;
 
+        // Parallelize over ROIs; use atomic adds for overlapping spatial regions
+        #pragma omp parallel for if(num_rois > 16)
         for (int64_t n = 0; n < num_rois; ++n) {
             int64_t batch_idx = static_cast<int64_t>(roi_data[n * 5 + 0]);
             float roi_x1 = roi_data[n * 5 + 1] * spatial_scale - offset;
@@ -559,9 +624,13 @@ auto roi_align_backward_kernel(const Tensor& grad_output, const Tensor& rois,
                                 float ly = y - static_cast<float>(y_low);
                                 float lx = x - static_cast<float>(x_low);
 
+                                #pragma omp atomic
                                 gi_channel[y_low * feat_width + x_low] += grad_val * (1.0f - ly) * (1.0f - lx);
+                                #pragma omp atomic
                                 gi_channel[y_low * feat_width + x_high] += grad_val * (1.0f - ly) * lx;
+                                #pragma omp atomic
                                 gi_channel[y_high * feat_width + x_low] += grad_val * ly * (1.0f - lx);
+                                #pragma omp atomic
                                 gi_channel[y_high * feat_width + x_high] += grad_val * ly * lx;
                             }
                         }
@@ -569,6 +638,92 @@ auto roi_align_backward_kernel(const Tensor& grad_output, const Tensor& rois,
                 }
             }
         }
+    } else if (grad_output.dtype() == DType::Float64) {
+        double* gi_data = grad_input.data<double>();
+        const double* go_data = grad_output.data<double>();
+        const double* roi_data = rois.data<double>();
+
+        double offset = aligned ? 0.5 : 0.0;
+
+        #pragma omp parallel for if(num_rois > 16)
+        for (int64_t n = 0; n < num_rois; ++n) {
+            int64_t batch_idx = static_cast<int64_t>(roi_data[n * 5 + 0]);
+            float roi_x1 = static_cast<float>(roi_data[n * 5 + 1] * spatial_scale - offset);
+            float roi_y1 = static_cast<float>(roi_data[n * 5 + 2] * spatial_scale - offset);
+            float roi_x2 = static_cast<float>(roi_data[n * 5 + 3] * spatial_scale - offset);
+            float roi_y2 = static_cast<float>(roi_data[n * 5 + 4] * spatial_scale - offset);
+
+            float roi_w = roi_x2 - roi_x1;
+            float roi_h = roi_y2 - roi_y1;
+            if (!aligned) {
+                roi_w = std::max(roi_w, 1.0f);
+                roi_h = std::max(roi_h, 1.0f);
+            }
+
+            float bin_h = roi_h / static_cast<float>(output_h);
+            float bin_w = roi_w / static_cast<float>(output_w);
+
+            int64_t roi_bin_h = sampling_ratio > 0 ? sampling_ratio
+                : static_cast<int64_t>(std::ceil(bin_h));
+            int64_t roi_bin_w = sampling_ratio > 0 ? sampling_ratio
+                : static_cast<int64_t>(std::ceil(bin_w));
+            roi_bin_h = std::max(roi_bin_h, int64_t(1));
+            roi_bin_w = std::max(roi_bin_w, int64_t(1));
+
+            float count = static_cast<float>(roi_bin_h * roi_bin_w);
+
+            for (int64_t c = 0; c < channels; ++c) {
+                double* gi_channel = gi_data + (batch_idx * channels + c) * feat_height * feat_width;
+
+                for (int64_t ph = 0; ph < output_h; ++ph) {
+                    for (int64_t pw = 0; pw < output_w; ++pw) {
+                        double grad_val = go_data[((n * channels + c) * output_h + ph) * output_w + pw] / count;
+
+                        for (int64_t iy = 0; iy < roi_bin_h; ++iy) {
+                            float y = roi_y1 + bin_h * (static_cast<float>(ph) +
+                                (static_cast<float>(iy) + 0.5f) / static_cast<float>(roi_bin_h));
+                            for (int64_t ix = 0; ix < roi_bin_w; ++ix) {
+                                float x = roi_x1 + bin_w * (static_cast<float>(pw) +
+                                    (static_cast<float>(ix) + 0.5f) / static_cast<float>(roi_bin_w));
+
+                                if (y < -1.0f || y > static_cast<float>(feat_height) ||
+                                    x < -1.0f || x > static_cast<float>(feat_width)) continue;
+
+                                y = std::max(y, 0.0f);
+                                x = std::max(x, 0.0f);
+
+                                int64_t y_low = static_cast<int64_t>(y);
+                                int64_t x_low = static_cast<int64_t>(x);
+                                int64_t y_high = y_low + 1;
+                                int64_t x_high = x_low + 1;
+
+                                if (y_low >= feat_height - 1) { y_low = y_high = feat_height - 1; }
+                                if (x_low >= feat_width - 1) { x_low = x_high = feat_width - 1; }
+
+                                float ly = y - static_cast<float>(y_low);
+                                float lx = x - static_cast<float>(x_low);
+
+                                #pragma omp atomic
+                                gi_channel[y_low * feat_width + x_low] += grad_val * static_cast<double>((1.0f - ly) * (1.0f - lx));
+                                #pragma omp atomic
+                                gi_channel[y_low * feat_width + x_high] += grad_val * static_cast<double>((1.0f - ly) * lx);
+                                #pragma omp atomic
+                                gi_channel[y_high * feat_width + x_low] += grad_val * static_cast<double>(ly * (1.0f - lx));
+                                #pragma omp atomic
+                                gi_channel[y_high * feat_width + x_high] += grad_val * static_cast<double>(ly * lx);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
+        // Convert to Float32, compute, convert back
+        auto go_f32 = grad_output.to(DType::Float32);
+        auto rois_f32 = rois.to(DType::Float32);
+        auto result = roi_align_backward_kernel(go_f32, rois_f32, batch_size, feat_height, feat_width,
+                                                  spatial_scale, sampling_ratio, aligned);
+        return result.to(grad_output.dtype());
     }
 
     return grad_input;
@@ -642,18 +797,15 @@ auto unfold_kernel(const Tensor& input, int64_t kernel_size,
 
     Tensor output({N, C * cols_per_channel, L}, input.dtype(), input.device());
 
-    if (input.dtype() == DType::Float32) {
-        const float* in_data = input.data<float>();
-        float* out_data = output.data<float>();
-
+    auto unfold_impl = [&]<typename T>(const T* in_data, T* out_data) {
         #pragma omp parallel for if(N > 4)
         for (int64_t n = 0; n < N; ++n) {
             for (int64_t c = 0; c < C; ++c) {
-                const float* channel = in_data + (n * C + c) * H * W;
+                const T* channel = in_data + (n * C + c) * H * W;
                 for (int64_t kh = 0; kh < kernel_size; ++kh) {
                     for (int64_t kw = 0; kw < kernel_size; ++kw) {
                         int64_t col_idx = (c * cols_per_channel + kh * kernel_size + kw);
-                        float* col = out_data + (n * C * cols_per_channel + col_idx) * L;
+                        T* col = out_data + (n * C * cols_per_channel + col_idx) * L;
 
                         for (int64_t h_out = 0; h_out < H_out; ++h_out) {
                             for (int64_t w_out = 0; w_out < W_out; ++w_out) {
@@ -664,7 +816,7 @@ auto unfold_kernel(const Tensor& input, int64_t kernel_size,
                                 if (h_in >= 0 && h_in < H && w_in >= 0 && w_in < W) {
                                     col[l_idx] = channel[h_in * W + w_in];
                                 } else {
-                                    col[l_idx] = 0.0f;
+                                    col[l_idx] = static_cast<T>(0);
                                 }
                             }
                         }
@@ -672,8 +824,19 @@ auto unfold_kernel(const Tensor& input, int64_t kernel_size,
                 }
             }
         }
+    };
+
+    if (input.dtype() == DType::Float32) {
+        unfold_impl(input.data<float>(), output.data<float>());
+    } else if (input.dtype() == DType::Float64) {
+        unfold_impl(input.data<double>(), output.data<double>());
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto output_f32 = Tensor({N, C * cols_per_channel, L}, DType::Float32, input.device());
+        unfold_impl(input_f32.data<float>(), output_f32.data<float>());
+        return output_f32.to(input.dtype());
     } else {
-        throw std::runtime_error("unfold: only Float32 supported");
+        throw std::runtime_error("unfold: unsupported dtype");
     }
 
     return output;
@@ -696,17 +859,15 @@ auto fold_kernel(const Tensor& input, const std::vector<int64_t>& output_size,
     Tensor output({N, C, H_out, W_out}, input.dtype(), input.device());
     std::memset(output.data<uint8_t>(), 0, output.numel() * dtype_size(output.dtype()));
 
-    if (input.dtype() == DType::Float32) {
-        const float* in_data = input.data<float>();
-        float* out_data = output.data<float>();
-
+    auto fold_impl = [&]<typename T>(const T* in_data, T* out_data) {
+        #pragma omp parallel for if(N > 4)
         for (int64_t n = 0; n < N; ++n) {
             for (int64_t c = 0; c < C; ++c) {
-                float* channel = out_data + (n * C + c) * H_out * W_out;
+                T* channel = out_data + (n * C + c) * H_out * W_out;
                 for (int64_t kh = 0; kh < kernel_size; ++kh) {
                     for (int64_t kw = 0; kw < kernel_size; ++kw) {
                         int64_t col_idx = c * cols_per_channel + kh * kernel_size + kw;
-                        const float* col = in_data + (n * C * cols_per_channel + col_idx) * (H_col * W_col);
+                        const T* col = in_data + (n * C * cols_per_channel + col_idx) * (H_col * W_col);
 
                         for (int64_t h_col = 0; h_col < H_col; ++h_col) {
                             for (int64_t w_col = 0; w_col < W_col; ++w_col) {
@@ -722,8 +883,20 @@ auto fold_kernel(const Tensor& input, const std::vector<int64_t>& output_size,
                 }
             }
         }
+    };
+
+    if (input.dtype() == DType::Float32) {
+        fold_impl(input.data<float>(), output.data<float>());
+    } else if (input.dtype() == DType::Float64) {
+        fold_impl(input.data<double>(), output.data<double>());
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto output_f32 = Tensor({N, C, H_out, W_out}, DType::Float32, input.device());
+        std::memset(output_f32.data<uint8_t>(), 0, output_f32.numel() * dtype_size(output_f32.dtype()));
+        fold_impl(input_f32.data<float>(), output_f32.data<float>());
+        return output_f32.to(input.dtype());
     } else {
-        throw std::runtime_error("fold: only Float32 supported");
+        throw std::runtime_error("fold: unsupported dtype");
     }
 
     return output;

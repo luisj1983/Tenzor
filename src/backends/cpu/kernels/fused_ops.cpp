@@ -3,6 +3,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "buffer_pool.hpp"
+#include "fused_conv_bn_relu.hpp"
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
@@ -1504,6 +1505,37 @@ auto fused_rmsprop_step_kernel(Tensor& param, const Tensor& grad,
                 p[i] -= lr * grad_val / avg;
             }
         }
+    } else if (param.dtype() == DType::Float64) {
+        double* p = param.data<double>();
+        const double* g = grad.data<double>();
+        double* sq = square_avg.data<double>();
+        double* ga = (centered && grad_avg) ? grad_avg->data<double>() : nullptr;
+        double* buf = (momentum > 0.0f && momentum_buffer) ? momentum_buffer->data<double>() : nullptr;
+
+        #pragma omp parallel for if(n > 65536)
+        for (int64_t i = 0; i < n; ++i) {
+            double grad_val = g[i];
+            if (weight_decay != 0.0f) {
+                grad_val += static_cast<double>(weight_decay) * p[i];
+            }
+
+            sq[i] = static_cast<double>(alpha) * sq[i] + (1.0 - static_cast<double>(alpha)) * grad_val * grad_val;
+
+            double avg;
+            if (centered && ga) {
+                ga[i] = static_cast<double>(alpha) * ga[i] + (1.0 - static_cast<double>(alpha)) * grad_val;
+                avg = std::sqrt(sq[i] - ga[i] * ga[i] + static_cast<double>(eps));
+            } else {
+                avg = std::sqrt(sq[i] + static_cast<double>(eps));
+            }
+
+            if (buf) {
+                buf[i] = static_cast<double>(momentum) * buf[i] + grad_val / avg;
+                p[i] -= static_cast<double>(lr) * buf[i];
+            } else {
+                p[i] -= static_cast<double>(lr) * grad_val / avg;
+            }
+        }
     }
 }
 
@@ -1531,6 +1563,24 @@ auto fused_adadelta_step_kernel(Tensor& param, const Tensor& grad,
             ad[i] = rho * ad[i] + (1.0f - rho) * delta * delta;
             p[i] -= lr * delta;
         }
+    } else if (param.dtype() == DType::Float64) {
+        double* p = param.data<double>();
+        const double* g = grad.data<double>();
+        double* sq = square_avg.data<double>();
+        double* ad = acc_delta.data<double>();
+
+        #pragma omp parallel for if(n > 65536)
+        for (int64_t i = 0; i < n; ++i) {
+            double grad_val = g[i];
+            if (weight_decay != 0.0f) {
+                grad_val += static_cast<double>(weight_decay) * p[i];
+            }
+
+            sq[i] = static_cast<double>(rho) * sq[i] + (1.0 - static_cast<double>(rho)) * grad_val * grad_val;
+            double delta = std::sqrt(ad[i] + static_cast<double>(eps)) / std::sqrt(sq[i] + static_cast<double>(eps)) * grad_val;
+            ad[i] = static_cast<double>(rho) * ad[i] + (1.0 - static_cast<double>(rho)) * delta * delta;
+            p[i] -= static_cast<double>(lr) * delta;
+        }
     }
 }
 
@@ -1555,7 +1605,227 @@ auto fused_adagrad_step_kernel(Tensor& param, const Tensor& grad,
             ss[i] += grad_val * grad_val;
             p[i] -= clr * grad_val / (std::sqrt(ss[i]) + eps);
         }
+    } else if (param.dtype() == DType::Float64) {
+        double* p = param.data<double>();
+        const double* g = grad.data<double>();
+        double* ss = sum_sq.data<double>();
+        double clr_d = static_cast<double>(lr) / (1.0 + static_cast<double>(step - 1) * static_cast<double>(lr_decay));
+
+        #pragma omp parallel for if(n > 65536)
+        for (int64_t i = 0; i < n; ++i) {
+            double grad_val = g[i];
+            if (weight_decay != 0.0f) {
+                grad_val += static_cast<double>(weight_decay) * p[i];
+            }
+            ss[i] += grad_val * grad_val;
+            p[i] -= clr_d * grad_val / (std::sqrt(ss[i]) + static_cast<double>(eps));
+        }
     }
+}
+
+// =========================================================================
+// FusedConv2dBnReLU
+// =========================================================================
+
+auto fused_conv2d_bn_relu_kernel(
+    const Tensor& input, const Tensor& weight, const Tensor& conv_bias,
+    const Tensor& bn_gamma, const Tensor& bn_beta,
+    const Tensor& bn_running_mean, const Tensor& bn_running_var,
+    int64_t stride, int64_t padding,
+    float bn_momentum, float bn_eps, bool training) -> Tensor {
+
+    auto in_shape = input.shape();
+    auto w_shape = weight.shape();
+    int64_t batch = in_shape[0];
+    int64_t in_channels = in_shape[1];
+    int64_t height = in_shape[2];
+    int64_t width = in_shape[3];
+    int64_t out_channels = w_shape[0];
+    int64_t kernel_h = w_shape[2];
+    int64_t kernel_w = w_shape[3];
+    int64_t out_h = (height + 2 * padding - kernel_h) / stride + 1;
+    int64_t out_w = (width + 2 * padding - kernel_w) / stride + 1;
+
+    Tensor output({batch, out_channels, out_h, out_w}, DType::Float32, input.device());
+
+    if (training) {
+        // Training path: compute batch stats inline
+        Tensor rm = bn_running_mean;  // Will be updated in-place
+        Tensor rv = bn_running_var;
+        fused::conv_bn_relu_training(
+            input.data<float>(), weight.data<float>(),
+            conv_bias.numel() > 0 ? conv_bias.data<float>() : nullptr,
+            bn_gamma.data<float>(), bn_beta.data<float>(),
+            rm.data<float>(), rv.data<float>(),
+            output.data<float>(),
+            batch, in_channels, height, width,
+            out_channels, kernel_h, kernel_w, stride, padding,
+            out_h, out_w, bn_momentum, bn_eps);
+    } else {
+        // Inference path: fold BN into conv weights
+        auto weight_folded = weight.contiguous();
+        auto bias_folded = conv_bias.numel() > 0 ? conv_bias.contiguous()
+            : Tensor({out_channels}, DType::Float32, input.device());
+        if (conv_bias.numel() == 0) {
+            std::memset(bias_folded.data<float>(), 0, out_channels * sizeof(float));
+        }
+
+        fused::fold_bn_params(
+            weight_folded.data<float>(), bias_folded.data<float>(),
+            bn_gamma.data<float>(), bn_beta.data<float>(),
+            bn_running_mean.data<float>(), bn_running_var.data<float>(),
+            out_channels, in_channels, kernel_h, kernel_w, bn_eps);
+
+        fused::conv_bn_relu_folded(
+            input.data<float>(), weight_folded.data<float>(), bias_folded.data<float>(),
+            output.data<float>(),
+            batch, in_channels, height, width,
+            out_channels, kernel_h, kernel_w, stride, padding,
+            out_h, out_w);
+    }
+
+    return output;
+}
+
+// =========================================================================
+// FusedLayerNormBackward
+// =========================================================================
+
+auto fused_layer_norm_backward_kernel(
+    const Tensor& grad_output, const Tensor& input,
+    const std::vector<int64_t>& normalized_shape,
+    const Tensor& mean, const Tensor& inv_std,
+    const Tensor& weight) -> std::vector<Tensor> {
+
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    Tensor grad_cont = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+
+    int64_t norm_size = 1;
+    for (auto s : normalized_shape) {
+        norm_size *= s;
+    }
+    int64_t batch_size = input_cont.numel() / norm_size;
+
+    auto in_shape = input_cont.shape();
+    Tensor grad_input = Tensor::empty_uninitialized(
+        std::vector<int64_t>(in_shape.begin(), in_shape.end()),
+        input_cont.dtype(), input_cont.device());
+    Tensor grad_weight({norm_size}, DType::Float32, input_cont.device());
+    Tensor grad_bias({norm_size}, DType::Float32, input_cont.device());
+    std::memset(grad_weight.data<float>(), 0, norm_size * sizeof(float));
+    std::memset(grad_bias.data<float>(), 0, norm_size * sizeof(float));
+
+    const float* mean_data = mean.data<float>();
+    const float* inv_std_data = inv_std.data<float>();
+
+    if (input_cont.dtype() == DType::Float32) {
+        const float* in_data = input_cont.data<float>();
+        const float* go_data = grad_cont.data<float>();
+        const float* w_data = weight.data<float>();
+        float* gi_data = grad_input.data<float>();
+        float* gw_data = grad_weight.data<float>();
+        float* gb_data = grad_bias.data<float>();
+
+        // Thread-local accumulators for grad_weight and grad_bias
+        #pragma omp parallel if(batch_size > 16)
+        {
+            std::vector<float> local_gw(norm_size, 0.0f);
+            std::vector<float> local_gb(norm_size, 0.0f);
+
+            #pragma omp for
+            for (int64_t b = 0; b < batch_size; ++b) {
+                const float* in_b = in_data + b * norm_size;
+                const float* go_b = go_data + b * norm_size;
+                float* gi_b = gi_data + b * norm_size;
+                float m = mean_data[b];
+                float rstd = inv_std_data[b];
+
+                // Compute dot products for grad_input
+                float ds = 0.0f;  // sum(grad_output * (input - mean))
+                float db = 0.0f;  // sum(grad_output * weight)
+                for (int64_t j = 0; j < norm_size; ++j) {
+                    float normalized = (in_b[j] - m) * rstd;
+                    float go_w = go_b[j] * w_data[j];
+                    ds += go_w * normalized;
+                    db += go_w;
+                    local_gw[j] += go_b[j] * normalized;
+                    local_gb[j] += go_b[j];
+                }
+
+                float inv_n = 1.0f / static_cast<float>(norm_size);
+                for (int64_t j = 0; j < norm_size; ++j) {
+                    float normalized = (in_b[j] - m) * rstd;
+                    gi_b[j] = rstd * w_data[j] * (go_b[j] - inv_n * (db + normalized * ds)) ;
+                }
+            }
+
+            #pragma omp critical
+            {
+                for (int64_t j = 0; j < norm_size; ++j) {
+                    gw_data[j] += local_gw[j];
+                    gb_data[j] += local_gb[j];
+                }
+            }
+        }
+    } else if (input_cont.dtype() == DType::Float64) {
+        const double* in_data = input_cont.data<double>();
+        const double* go_data = grad_cont.data<double>();
+        const double* w_data = weight.data<double>();
+        double* gi_data = grad_input.data<double>();
+        float* gw_data = grad_weight.data<float>();
+        float* gb_data = grad_bias.data<float>();
+
+        #pragma omp parallel if(batch_size > 16)
+        {
+            std::vector<float> local_gw(norm_size, 0.0f);
+            std::vector<float> local_gb(norm_size, 0.0f);
+
+            #pragma omp for
+            for (int64_t b = 0; b < batch_size; ++b) {
+                const double* in_b = in_data + b * norm_size;
+                const double* go_b = go_data + b * norm_size;
+                double* gi_b = gi_data + b * norm_size;
+                double m = static_cast<double>(mean_data[b]);
+                double rstd = static_cast<double>(inv_std_data[b]);
+
+                double ds = 0.0;
+                double db = 0.0;
+                for (int64_t j = 0; j < norm_size; ++j) {
+                    double normalized = (in_b[j] - m) * rstd;
+                    double go_w = go_b[j] * w_data[j];
+                    ds += go_w * normalized;
+                    db += go_w;
+                    local_gw[j] += static_cast<float>(go_b[j] * normalized);
+                    local_gb[j] += static_cast<float>(go_b[j]);
+                }
+
+                double inv_n = 1.0 / static_cast<double>(norm_size);
+                for (int64_t j = 0; j < norm_size; ++j) {
+                    double normalized = (in_b[j] - m) * rstd;
+                    gi_b[j] = rstd * w_data[j] * (go_b[j] - inv_n * (db + normalized * ds));
+                }
+            }
+
+            #pragma omp critical
+            {
+                for (int64_t j = 0; j < norm_size; ++j) {
+                    gw_data[j] += local_gw[j];
+                    gb_data[j] += local_gb[j];
+                }
+            }
+        }
+    } else if (input_cont.dtype() == DType::Float16 || input_cont.dtype() == DType::BFloat16) {
+        // Convert to Float32, compute, convert back
+        auto result = fused_layer_norm_backward_kernel(
+            grad_output.to(DType::Float32), input.to(DType::Float32),
+            normalized_shape, mean, inv_std, weight.to(DType::Float32));
+        result[0] = result[0].to(input.dtype());
+        return result;
+    } else {
+        throw std::runtime_error("fused_layer_norm_backward: unsupported dtype");
+    }
+
+    return std::vector<Tensor>{grad_input, grad_weight, grad_bias};
 }
 
 } // namespace cpu

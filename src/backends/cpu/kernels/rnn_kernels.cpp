@@ -817,8 +817,18 @@ auto bilstm_forward_kernel(
     }
 #endif
 
-    // Fallback: not implemented for BiLSTM without oneDNN
-    throw std::runtime_error("BiLSTM requires oneDNN support");
+    // Native fallback using fused LSTM bidirectional implementation
+    lstm::lstm_forward_bidirectional(
+        input_contig.data<float>(),
+        W_ih_fwd_contig.data<float>(), W_hh_fwd_contig.data<float>(), bias_fwd_ptr,
+        W_ih_bwd_contig.data<float>(), W_hh_bwd_contig.data<float>(), bias_bwd_ptr,
+        h0_fwd, c0_fwd, h0_bwd, c0_bwd,
+        output.data<float>(),
+        h_n_fwd, c_n_fwd, h_n_bwd, c_n_bwd,
+        seq_len, batch, input_size, hidden
+    );
+
+    return {output, h_n, c_n};
 }
 
 /**
