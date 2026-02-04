@@ -288,21 +288,28 @@ auto fused_batchnorm_relu_kernel(
  * @brief Fused softmax + cross entropy kernel (CPU implementation)
  *
  * Uses log-sum-exp trick for numerical stability.
+ * Returns {loss} or {loss, grad_logits} depending on compute_grad.
  */
 auto fused_softmax_cross_entropy_kernel(
     const Tensor& logits,
     const Tensor& targets,
-    const std::string& reduction
-) -> Tensor {
+    bool compute_grad
+) -> std::vector<Tensor> {
     int64_t batch_size = logits.shape()[0];
     int64_t num_classes = logits.shape()[1];
 
     Tensor losses = zeros({batch_size}, logits.dtype(), logits.device());
+    Tensor grad_logits;
+    if (compute_grad) {
+        std::vector<int64_t> logits_shape(logits.shape().begin(), logits.shape().end());
+        grad_logits = zeros(logits_shape, logits.dtype(), logits.device());
+    }
 
     if (logits.dtype() == DType::Float32) {
         const float* logits_data = logits.data<float>();
         const int64_t* targets_data = targets.data<int64_t>();
         float* losses_data = losses.data<float>();
+        float* grad_data = compute_grad ? grad_logits.data<float>() : nullptr;
 
         for (int64_t i = 0; i < batch_size; ++i) {
             const float* row = logits_data + i * num_classes;
@@ -313,7 +320,7 @@ auto fused_softmax_cross_entropy_kernel(
                 max_logit = std::max(max_logit, row[j]);
             }
 
-            // Compute log_sum_exp
+            // Compute log_sum_exp and softmax probabilities
             float sum_exp = 0.0f;
             for (int64_t j = 0; j < num_classes; ++j) {
                 sum_exp += std::exp(row[j] - max_logit);
@@ -328,19 +335,33 @@ auto fused_softmax_cross_entropy_kernel(
                 );
             }
             losses_data[i] = log_sum_exp - row[target];
+
+            // Compute gradient: softmax(logits) - one_hot(target)
+            if (compute_grad) {
+                float* grad_row = grad_data + i * num_classes;
+                float inv_sum_exp = 1.0f / sum_exp;
+                for (int64_t j = 0; j < num_classes; ++j) {
+                    grad_row[j] = std::exp(row[j] - max_logit) * inv_sum_exp;
+                }
+                grad_row[target] -= 1.0f;
+                // Normalize by batch size for mean reduction
+                float scale = 1.0f / static_cast<float>(batch_size);
+                for (int64_t j = 0; j < num_classes; ++j) {
+                    grad_row[j] *= scale;
+                }
+            }
         }
     } else {
         throw std::runtime_error("fused_softmax_cross_entropy: Only Float32 supported");
     }
 
-    // Apply reduction
-    if (reduction == "mean") {
-        return tenzor::mean(losses);
-    } else if (reduction == "sum") {
-        return tenzor::sum(losses);
-    } else {
-        return losses;
+    // Apply mean reduction to loss (matching CUDA behavior)
+    Tensor loss = tenzor::mean(losses);
+
+    if (compute_grad) {
+        return {loss, grad_logits};
     }
+    return {loss};
 }
 
 /**
@@ -436,6 +457,7 @@ auto fused_gelu_kernel(const Tensor& input) -> Tensor {
  * @brief Fused layer norm kernel (CPU implementation)
  *
  * Single-pass computation of mean, variance, and normalization.
+ * Returns {output, mean, inv_std} to match CUDA backend for backward pass support.
  */
 auto fused_layer_norm_kernel(
     const Tensor& input,
@@ -443,7 +465,7 @@ auto fused_layer_norm_kernel(
     const Tensor& weight,
     const Tensor& bias,
     float eps
-) -> Tensor {
+) -> std::tuple<Tensor, Tensor, Tensor> {
     // Calculate batch size and normalization size
     int64_t norm_size = 1;
     for (auto dim : normalized_shape) {
@@ -454,18 +476,22 @@ auto fused_layer_norm_kernel(
 
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     Tensor result = zeros(shape_vec, input.dtype(), input.device());
+    // Store per-batch-element mean and inv_std for backward pass
+    Tensor mean_out({batch_size}, input.dtype(), input.device());
+    Tensor inv_std_out({batch_size}, input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
         const float* weight_data = weight.data<float>();
         const float* bias_data = bias.data<float>();
         float* out_data = result.data<float>();
+        float* mean_data = mean_out.data<float>();
+        float* inv_std_data = inv_std_out.data<float>();
 
         for (int64_t b = 0; b < batch_size; ++b) {
             const float* batch_in = in_data + b * norm_size;
             float* batch_out = out_data + b * norm_size;
 
-            // Single-pass mean and variance computation (Welford's algorithm)
             float mean = 0.0f;
             for (int64_t i = 0; i < norm_size; ++i) {
                 mean += batch_in[i];
@@ -479,8 +505,10 @@ auto fused_layer_norm_kernel(
             }
             variance /= norm_size;
 
-            // Normalize and scale
             float inv_std = 1.0f / std::sqrt(variance + eps);
+            mean_data[b] = mean;
+            inv_std_data[b] = inv_std;
+
             for (int64_t i = 0; i < norm_size; ++i) {
                 float normalized = (batch_in[i] - mean) * inv_std;
                 batch_out[i] = normalized * weight_data[i] + bias_data[i];
@@ -491,6 +519,8 @@ auto fused_layer_norm_kernel(
         const double* weight_data = weight.data<double>();
         const double* bias_data = bias.data<double>();
         double* out_data = result.data<double>();
+        double* mean_data = mean_out.data<double>();
+        double* inv_std_data = inv_std_out.data<double>();
 
         for (int64_t b = 0; b < batch_size; ++b) {
             const double* batch_in = in_data + b * norm_size;
@@ -510,6 +540,9 @@ auto fused_layer_norm_kernel(
             variance /= norm_size;
 
             double inv_std = 1.0 / std::sqrt(variance + eps);
+            mean_data[b] = mean;
+            inv_std_data[b] = inv_std;
+
             for (int64_t i = 0; i < norm_size; ++i) {
                 double normalized = (batch_in[i] - mean) * inv_std;
                 batch_out[i] = normalized * weight_data[i] + bias_data[i];
@@ -520,12 +553,13 @@ auto fused_layer_norm_kernel(
         const Float16* weight_data = weight.data<Float16>();
         const Float16* bias_data = bias.data<Float16>();
         Float16* out_data = result.data<Float16>();
+        Float16* mean_data = mean_out.data<Float16>();
+        Float16* inv_std_data = inv_std_out.data<Float16>();
 
         for (int64_t b = 0; b < batch_size; ++b) {
             const Float16* batch_in = in_data + b * norm_size;
             Float16* batch_out = out_data + b * norm_size;
 
-            // Single-pass mean and variance computation (use float accumulation for stability)
             float mean = 0.0f;
             for (int64_t i = 0; i < norm_size; ++i) {
                 mean += static_cast<float>(batch_in[i]);
@@ -539,8 +573,10 @@ auto fused_layer_norm_kernel(
             }
             variance /= static_cast<float>(norm_size);
 
-            // Normalize and scale
             float inv_std = 1.0f / std::sqrt(variance + eps);
+            mean_data[b] = Float16(mean);
+            inv_std_data[b] = Float16(inv_std);
+
             for (int64_t i = 0; i < norm_size; ++i) {
                 float normalized = (static_cast<float>(batch_in[i]) - mean) * inv_std;
                 batch_out[i] = Float16(normalized * static_cast<float>(weight_data[i]) + static_cast<float>(bias_data[i]));
@@ -550,7 +586,7 @@ auto fused_layer_norm_kernel(
         throw std::runtime_error("fused_layer_norm: Only Float32/Float64/Float16 supported");
     }
 
-    return result;
+    return {result, mean_out, inv_std_out};
 }
 
 // =========================================================================
