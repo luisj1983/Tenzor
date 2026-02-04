@@ -618,7 +618,15 @@ static void matmul_blocked_float16(
                 #endif
 
                 // Compute FP32 GEMM (accumulate into C_fp32)
+#ifdef TENZOR_USE_MKL
+                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                            static_cast<MKL_INT>(tile_m), static_cast<MKL_INT>(tile_n), static_cast<MKL_INT>(tile_k),
+                            1.0f, A_fp32, static_cast<MKL_INT>(tile_k),
+                            B_fp32, static_cast<MKL_INT>(tile_n),
+                            1.0f, C_fp32, static_cast<MKL_INT>(tile_n));
+#else
                 gemm::gemm_optimized(A_fp32, B_fp32, C_fp32, tile_m, tile_n, tile_k, 1.0f, 1.0f);
+#endif
             }
 
             // Convert C tile back to FP16 using F16C SIMD
@@ -702,7 +710,15 @@ static void matmul_blocked_bfloat16(
                 }
 
                 // Compute FP32 GEMM (accumulate into C_fp32)
+#ifdef TENZOR_USE_MKL
+                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                            static_cast<MKL_INT>(tile_m), static_cast<MKL_INT>(tile_n), static_cast<MKL_INT>(tile_k),
+                            1.0f, A_fp32, static_cast<MKL_INT>(tile_k),
+                            B_fp32, static_cast<MKL_INT>(tile_n),
+                            1.0f, C_fp32, static_cast<MKL_INT>(tile_n));
+#else
                 gemm::gemm_optimized(A_fp32, B_fp32, C_fp32, tile_m, tile_n, tile_k, 1.0f, 1.0f);
+#endif
             }
 
             // Convert C tile back: Float32 → BFloat16
@@ -2101,22 +2117,14 @@ auto bmm_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             static_cast<MKL_INT>(batch_size)
         );
 #else
-        // Fallback: Parallelize across batches with naive GEMM
+        // Fallback: Parallelize across batches with optimized GEMM
         #pragma omp parallel for if(batch_size > 1)
         for (int64_t batch = 0; batch < batch_size; ++batch) {
             const float* a_batch = a_data + batch * a_batch_stride;
             const float* b_batch = b_data + batch * b_batch_stride;
             float* c_batch = c_data + batch * c_batch_stride;
 
-            for (int64_t i = 0; i < M; ++i) {
-                for (int64_t j = 0; j < N; ++j) {
-                    float sum = 0.0f;
-                    for (int64_t k = 0; k < K; ++k) {
-                        sum += a_batch[i * K + k] * b_batch[k * N + j];
-                    }
-                    c_batch[i * N + j] = sum;
-                }
-            }
+            gemm::gemm_optimized(a_batch, b_batch, c_batch, M, N, K, 1.0f, 0.0f);
         }
 #endif
     } else if (a.dtype() == DType::Float64) {
@@ -2145,13 +2153,24 @@ auto bmm_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const double* b_batch = b_data + batch * b_batch_stride;
             double* c_batch = c_data + batch * c_batch_stride;
 
-            for (int64_t i = 0; i < M; ++i) {
-                for (int64_t j = 0; j < N; ++j) {
-                    double sum = 0.0;
-                    for (int64_t k = 0; k < K; ++k) {
-                        sum += a_batch[i * K + k] * b_batch[k * N + j];
+            // Use tiled approach for better cache behavior
+            constexpr int64_t TILE = 64;
+            std::fill_n(c_batch, M * N, 0.0);
+            for (int64_t ii = 0; ii < M; ii += TILE) {
+                for (int64_t kk = 0; kk < K; kk += TILE) {
+                    for (int64_t jj = 0; jj < N; jj += TILE) {
+                        int64_t i_end = std::min(ii + TILE, M);
+                        int64_t k_end = std::min(kk + TILE, K);
+                        int64_t j_end = std::min(jj + TILE, N);
+                        for (int64_t i = ii; i < i_end; ++i) {
+                            for (int64_t k = kk; k < k_end; ++k) {
+                                double a_val = a_batch[i * K + k];
+                                for (int64_t j = jj; j < j_end; ++j) {
+                                    c_batch[i * N + j] += a_val * b_batch[k * N + j];
+                                }
+                            }
+                        }
                     }
-                    c_batch[i * N + j] = sum;
                 }
             }
         }
@@ -2201,15 +2220,7 @@ auto bmm_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const float* b_batch = b_f32.data() + batch * b_batch_stride;
             float* c_batch = c_f32.data() + batch * c_batch_stride;
 
-            for (int64_t i = 0; i < M; ++i) {
-                for (int64_t j = 0; j < N; ++j) {
-                    float sum = 0.0f;
-                    for (int64_t k = 0; k < K; ++k) {
-                        sum += a_batch[i * K + k] * b_batch[k * N + j];
-                    }
-                    c_batch[i * N + j] = sum;
-                }
-            }
+            gemm::gemm_optimized(a_batch, b_batch, c_batch, M, N, K, 1.0f, 0.0f);
         }
 #endif
 

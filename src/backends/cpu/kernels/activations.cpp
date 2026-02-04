@@ -940,6 +940,7 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
         float* grad_in_data = grad_input.data<float>();
         size_t n = input.numel();
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float tanh_x = std::tanh(in_data[i]);
             grad_in_data[i] = grad_out_data[i] * (1.0f - tanh_x * tanh_x);
@@ -950,6 +951,7 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
         double* grad_in_data = grad_input.data<double>();
         size_t n = input.numel();
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             double tanh_x = std::tanh(in_data[i]);
             grad_in_data[i] = grad_out_data[i] * (1.0 - tanh_x * tanh_x);
@@ -1109,62 +1111,83 @@ auto gelu_kernel(const Tensor& input) -> Tensor {
     return output;
 }
 
-// Backward: grad_out * (0.5 * (1 + erf(x/sqrt(2))) + x * (1/sqrt(2*pi)) * exp(-x^2/2))
+// Backward: derivative of tanh-approximation GELU
+// gelu(x) = 0.5 * x * (1 + tanh(u)), where u = sqrt(2/pi) * (x + 0.044715 * x^3)
+// gelu'(x) = 0.5 * (1 + tanh(u)) + 0.5 * x * sech^2(u) * du/dx
+//          = 0.5 * (1 + tanh(u)) + 0.5 * x * (1 - tanh(u)^2) * sqrt(2/pi) * (1 + 3*0.044715*x^2)
 auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor {
     auto grad_input = zeros_like(input);
-    constexpr float sqrt_2 = 1.41421356237f;
-    constexpr float sqrt_2_pi = 2.50662827463f;  // sqrt(2*pi)
 
     if (input.dtype() == DType::Float32) {
         const float* grad_out_data = grad_output.data<float>();
         const float* in_data = input.data<float>();
         float* grad_in_data = grad_input.data<float>();
         size_t n = input.numel();
+        constexpr float sqrt_2_over_pi = 0.7978845608f;
+        constexpr float coeff = 0.044715f;
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = in_data[i];
-            float cdf = 0.5f * (1.0f + std::erf(x / sqrt_2));
-            float pdf = (1.0f / sqrt_2_pi) * std::exp(-0.5f * x * x);
-            grad_in_data[i] = grad_out_data[i] * (cdf + x * pdf);
+            float x2 = x * x;
+            float u = sqrt_2_over_pi * (x + coeff * x * x2);
+            float tanh_u = std::tanh(u);
+            float du_dx = sqrt_2_over_pi * (1.0f + 3.0f * coeff * x2);
+            float grad = 0.5f * (1.0f + tanh_u) + 0.5f * x * (1.0f - tanh_u * tanh_u) * du_dx;
+            grad_in_data[i] = grad_out_data[i] * grad;
         }
     } else if (input.dtype() == DType::Float64) {
         const double* grad_out_data = grad_output.data<double>();
         const double* in_data = input.data<double>();
         double* grad_in_data = grad_input.data<double>();
         size_t n = input.numel();
-        constexpr double sqrt_2_d = 1.41421356237;
-        constexpr double sqrt_2_pi_d = 2.50662827463;
+        constexpr double sqrt_2_over_pi = 0.7978845608028654;
+        constexpr double coeff = 0.044715;
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             double x = in_data[i];
-            double cdf = 0.5 * (1.0 + std::erf(x / sqrt_2_d));
-            double pdf = (1.0 / sqrt_2_pi_d) * std::exp(-0.5 * x * x);
-            grad_in_data[i] = grad_out_data[i] * (cdf + x * pdf);
+            double x2 = x * x;
+            double u = sqrt_2_over_pi * (x + coeff * x * x2);
+            double tanh_u = std::tanh(u);
+            double du_dx = sqrt_2_over_pi * (1.0 + 3.0 * coeff * x2);
+            double grad = 0.5 * (1.0 + tanh_u) + 0.5 * x * (1.0 - tanh_u * tanh_u) * du_dx;
+            grad_in_data[i] = grad_out_data[i] * grad;
         }
     } else if (input.dtype() == DType::Float16) {
         const Float16* grad_out_data = grad_output.data<Float16>();
         const Float16* in_data = input.data<Float16>();
         Float16* grad_in_data = grad_input.data<Float16>();
         size_t n = input.numel();
+        constexpr float sqrt_2_over_pi = 0.7978845608f;
+        constexpr float coeff = 0.044715f;
 
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
-            float cdf = 0.5f * (1.0f + std::erf(x / sqrt_2));
-            float pdf = (1.0f / sqrt_2_pi) * std::exp(-0.5f * x * x);
-            grad_in_data[i] = Float16(static_cast<float>(grad_out_data[i]) * (cdf + x * pdf));
+            float x2 = x * x;
+            float u = sqrt_2_over_pi * (x + coeff * x * x2);
+            float tanh_u = std::tanh(u);
+            float du_dx = sqrt_2_over_pi * (1.0f + 3.0f * coeff * x2);
+            float grad = 0.5f * (1.0f + tanh_u) + 0.5f * x * (1.0f - tanh_u * tanh_u) * du_dx;
+            grad_in_data[i] = Float16(static_cast<float>(grad_out_data[i]) * grad);
         }
     } else if (input.dtype() == DType::BFloat16) {
         const BFloat16* grad_out_data = grad_output.data<BFloat16>();
         const BFloat16* in_data = input.data<BFloat16>();
         BFloat16* grad_in_data = grad_input.data<BFloat16>();
         size_t n = input.numel();
+        constexpr float sqrt_2_over_pi = 0.7978845608f;
+        constexpr float coeff = 0.044715f;
 
         #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
-            float cdf = 0.5f * (1.0f + std::erf(x / sqrt_2));
-            float pdf = (1.0f / sqrt_2_pi) * std::exp(-0.5f * x * x);
-            grad_in_data[i] = BFloat16(static_cast<float>(grad_out_data[i]) * (cdf + x * pdf));
+            float x2 = x * x;
+            float u = sqrt_2_over_pi * (x + coeff * x * x2);
+            float tanh_u = std::tanh(u);
+            float du_dx = sqrt_2_over_pi * (1.0f + 3.0f * coeff * x2);
+            float grad = 0.5f * (1.0f + tanh_u) + 0.5f * x * (1.0f - tanh_u * tanh_u) * du_dx;
+            grad_in_data[i] = BFloat16(static_cast<float>(grad_out_data[i]) * grad);
         }
     } else {
         throw std::runtime_error("GELU backward only supports Float32/Float64/Float16/BFloat16");
@@ -1241,6 +1264,7 @@ auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Te
         float* grad_in_data = grad_input.data<float>();
         size_t n = input.numel();
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = in_data[i];
             float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
@@ -1252,6 +1276,7 @@ auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Te
         double* grad_in_data = grad_input.data<double>();
         size_t n = input.numel();
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             double x = in_data[i];
             double sigmoid_x = 1.0 / (1.0 + std::exp(-x));
@@ -1390,6 +1415,7 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
         float* grad_in_data = grad_input.data<float>();
         size_t n = input.numel();
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             grad_in_data[i] = grad_out_data[i] * (in_data[i] > 0.0f ? 1.0f : alpha);
         }
@@ -1400,6 +1426,7 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
         size_t n = input.numel();
         double alpha_d = static_cast<double>(alpha);
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             grad_in_data[i] = grad_out_data[i] * (in_data[i] > 0.0 ? 1.0 : alpha_d);
         }

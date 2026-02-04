@@ -10,6 +10,9 @@
 #include <cstring>
 #include <stdexcept>
 #include <type_traits>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 // SIMD support detection
 #if defined(__AVX512F__)
@@ -38,13 +41,20 @@ void index_select_impl(const T* in_data, T* out_data,
                        std::span<const int64_t> in_strides,
                        std::span<const int64_t> out_strides,
                        int64_t dim) {
+    // Validate indices first (can't throw in OpenMP region)
+    for (int64_t idx = 0; idx < num_indices; ++idx) {
+        int64_t src_idx = index_data[idx];
+        if (src_idx < 0) src_idx += in_shape[dim];
+        if (src_idx < 0 || src_idx >= in_shape[dim]) {
+            throw std::out_of_range("index_select: index out of range");
+        }
+    }
+
+    #pragma omp parallel for collapse(2) if(outer_size * num_indices > 65536)
     for (int64_t outer = 0; outer < outer_size; ++outer) {
         for (int64_t idx = 0; idx < num_indices; ++idx) {
             int64_t src_idx = index_data[idx];
             if (src_idx < 0) src_idx += in_shape[dim];
-            if (src_idx < 0 || src_idx >= in_shape[dim]) {
-                throw std::out_of_range("index_select: index out of range");
-            }
             for (int64_t inner = 0; inner < inner_size; ++inner) {
                 int64_t in_offset = outer * in_strides[dim] * in_shape[dim] +
                                    src_idx * in_strides[dim] + inner;
@@ -64,6 +74,7 @@ void gather_impl(const T* input_ptr, T* output_ptr,
                  const std::vector<int64_t>& input_strides,
                  const std::vector<int64_t>& index_strides,
                  size_t ndims, int64_t dim) {
+    #pragma omp parallel for if(numel > 65536)
     for (int64_t flat_idx = 0; flat_idx < numel; ++flat_idx) {
         int64_t temp = flat_idx;
         int64_t input_idx = 0;
@@ -258,8 +269,13 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index) -> Ten
         throw std::invalid_argument("gather: index tensor must have dtype Int64");
     }
 
-    auto input_shape_span = input.shape();
-    auto index_shape_span = index.shape();
+    // Ensure input and index are contiguous - strides are computed from shape
+    // so non-contiguous tensors (from transpose/slice) would produce wrong results
+    auto input_c = input.contiguous();
+    auto index_c = index.contiguous();
+
+    auto input_shape_span = input_c.shape();
+    auto index_shape_span = index_c.shape();
 
     std::vector<int64_t> input_shape(input_shape_span.begin(), input_shape_span.end());
     std::vector<int64_t> index_shape(index_shape_span.begin(), index_shape_span.end());
@@ -276,18 +292,18 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index) -> Ten
     }
 
     // Output has same shape as index
-    Tensor output(index_shape, input.dtype(), input.device());
+    Tensor output(index_shape, input_c.dtype(), input_c.device());
 
     auto input_strides = calculate_strides(input_shape);
     auto index_strides = calculate_strides(index_shape);
     const int64_t numel = output.numel();
     const size_t ndims = index_shape.size();
 
-    const int64_t* index_ptr = index.data<int64_t>();
+    const int64_t* index_ptr = index_c.data<int64_t>();
 
     #define GATHER_DISPATCH(DTYPE_ENUM, CPP_TYPE) \
-        if (input.dtype() == DTYPE_ENUM) { \
-            detail::gather_impl(input.data<CPP_TYPE>(), output.data<CPP_TYPE>(), \
+        if (input_c.dtype() == DTYPE_ENUM) { \
+            detail::gather_impl(input_c.data<CPP_TYPE>(), output.data<CPP_TYPE>(), \
                 index_ptr, numel, input_shape, input_strides, index_strides, ndims, dim); \
         }
 
@@ -317,9 +333,14 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index, const
         throw std::invalid_argument("scatter: index tensor must have dtype Int64");
     }
 
-    auto input_shape_span = input.shape();
-    auto index_shape_span = index.shape();
-    auto src_shape_span = src.shape();
+    // Ensure tensors are contiguous - strides are computed from shape
+    auto input_c = input.contiguous();
+    auto index_c = index.contiguous();
+    auto src_c = src.contiguous();
+
+    auto input_shape_span = input_c.shape();
+    auto index_shape_span = index_c.shape();
+    auto src_shape_span = src_c.shape();
 
     std::vector<int64_t> input_shape(input_shape_span.begin(), input_shape_span.end());
     std::vector<int64_t> index_shape(index_shape_span.begin(), index_shape_span.end());
@@ -341,19 +362,19 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index, const
     }
 
     // Create output as copy of input
-    Tensor output(input_shape, input.dtype(), input.device());
+    Tensor output(input_shape, input_c.dtype(), input_c.device());
 
     auto input_strides = calculate_strides(input_shape);
     auto index_strides = calculate_strides(index_shape);
-    const int64_t numel = index.numel();
+    const int64_t numel = index_c.numel();
     const size_t ndims = index_shape.size();
 
-    const int64_t* index_ptr = index.data<int64_t>();
+    const int64_t* index_ptr = index_c.data<int64_t>();
 
     #define SCATTER_DISPATCH(DTYPE_ENUM, CPP_TYPE) \
-        if (input.dtype() == DTYPE_ENUM) { \
-            detail::scatter_impl(input.data<CPP_TYPE>(), output.data<CPP_TYPE>(), \
-                src.data<CPP_TYPE>(), index_ptr, input.numel(), numel, \
+        if (input_c.dtype() == DTYPE_ENUM) { \
+            detail::scatter_impl(input_c.data<CPP_TYPE>(), output.data<CPP_TYPE>(), \
+                src_c.data<CPP_TYPE>(), index_ptr, input_c.numel(), numel, \
                 input_shape, input_strides, index_strides, ndims, dim); \
         }
 
@@ -517,6 +538,22 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask, float value) ->
         const int64_t* input_ptr = input.data<int64_t>();
         int64_t* output_ptr = output.data<int64_t>();
         const int64_t fill_value = static_cast<int64_t>(value);
+
+        for (int64_t i = 0; i < numel; ++i) {
+            output_ptr[i] = is_mask_true(i) ? fill_value : input_ptr[i];
+        }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* input_ptr = input.data<Float16>();
+        Float16* output_ptr = output.data<Float16>();
+        const Float16 fill_value = Float16(value);
+
+        for (int64_t i = 0; i < numel; ++i) {
+            output_ptr[i] = is_mask_true(i) ? fill_value : input_ptr[i];
+        }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* input_ptr = input.data<BFloat16>();
+        BFloat16* output_ptr = output.data<BFloat16>();
+        const BFloat16 fill_value = BFloat16(value);
 
         for (int64_t i = 0; i < numel; ++i) {
             output_ptr[i] = is_mask_true(i) ? fill_value : input_ptr[i];

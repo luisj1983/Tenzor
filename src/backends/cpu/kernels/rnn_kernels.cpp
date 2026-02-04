@@ -103,7 +103,8 @@ auto lstm_cell_forward_kernel(const Tensor& input, const Tensor& hx, const Tenso
 auto lstm_cell_backward_kernel(const Tensor& grad_hy, const Tensor& grad_cy,
                                 const Tensor& input, const Tensor& hx, const Tensor& cx,
                                 const Tensor& hy, const Tensor& cy,
-                                const Tensor& weight_ih, const Tensor& weight_hh)
+                                const Tensor& weight_ih, const Tensor& weight_hh,
+                                const Tensor& bias_ih, const Tensor& bias_hh)
     -> std::vector<Tensor> {
     // Multi-dtype support: convert non-Float32 inputs to Float32, compute, convert back
     if (grad_hy.dtype() != DType::Float32) {
@@ -112,7 +113,8 @@ auto lstm_cell_backward_kernel(const Tensor& grad_hy, const Tensor& grad_cy,
             grad_hy.to(DType::Float32), grad_cy.to(DType::Float32),
             input.to(DType::Float32), hx.to(DType::Float32), cx.to(DType::Float32),
             hy.to(DType::Float32), cy.to(DType::Float32),
-            weight_ih.to(DType::Float32), weight_hh.to(DType::Float32));
+            weight_ih.to(DType::Float32), weight_hh.to(DType::Float32),
+            bias_ih.to(DType::Float32), bias_hh.to(DType::Float32));
         for (auto& t : results) t = t.to(orig);
         return results;
     }
@@ -144,6 +146,10 @@ auto lstm_cell_backward_kernel(const Tensor& grad_hy, const Tensor& grad_cy,
     const float* dhy_data = grad_hy.data<float>();
     const float* dcy_data = grad_cy.data<float>();
 
+    // Bias data for gate recomputation (forward uses bias, so backward must too)
+    const float* b_ih_data = bias_ih.numel() > 0 ? bias_ih.data<float>() : nullptr;
+    const float* b_hh_data = bias_hh.numel() > 0 ? bias_hh.data<float>() : nullptr;
+
     float* d_input = grad_input.data<float>();
     float* d_hx = grad_hx.data<float>();
     float* d_cx = grad_cx_out.data<float>();
@@ -162,10 +168,10 @@ auto lstm_cell_backward_kernel(const Tensor& grad_hy, const Tensor& grad_cy,
 
         #pragma omp for
         for (int64_t b = 0; b < batch_size; ++b) {
-            // Step 1: Recompute gates from forward pass
+            // Step 1: Recompute gates from forward pass (including bias)
             std::vector<float> gates(4 * hidden_size);
             for (int64_t g = 0; g < 4 * hidden_size; ++g) {
-                float sum = 0.0f;
+                float sum = (b_ih_data ? b_ih_data[g] : 0.0f) + (b_hh_data ? b_hh_data[g] : 0.0f);
                 for (int64_t i = 0; i < input_size; ++i) {
                     sum += in_data[b * input_size + i] * w_ih_data[g * input_size + i];
                 }
@@ -339,14 +345,16 @@ auto gru_cell_forward_kernel(const Tensor& input, const Tensor& hx,
 }
 
 auto gru_cell_backward_kernel(const Tensor& grad_hy, const Tensor& input, const Tensor& hx,
-                               const Tensor& weight_ih, const Tensor& weight_hh)
+                               const Tensor& weight_ih, const Tensor& weight_hh,
+                               const Tensor& bias_ih, const Tensor& bias_hh)
     -> std::vector<Tensor> {
     // Multi-dtype support: convert non-Float32 inputs to Float32, compute, convert back
     if (grad_hy.dtype() != DType::Float32) {
         DType orig = grad_hy.dtype();
         auto results = gru_cell_backward_kernel(
             grad_hy.to(DType::Float32), input.to(DType::Float32), hx.to(DType::Float32),
-            weight_ih.to(DType::Float32), weight_hh.to(DType::Float32));
+            weight_ih.to(DType::Float32), weight_hh.to(DType::Float32),
+            bias_ih.to(DType::Float32), bias_hh.to(DType::Float32));
         for (auto& t : results) t = t.to(orig);
         return results;
     }
@@ -373,17 +381,16 @@ auto gru_cell_backward_kernel(const Tensor& grad_hy, const Tensor& input, const 
     const float* w_hh_data = weight_hh.data<float>();
     const float* dhy_data = grad_hy.data<float>();
 
+    // Bias data for gate recomputation (forward uses bias, so backward must too)
+    const float* b_ih_data = bias_ih.numel() > 0 ? bias_ih.data<float>() : nullptr;
+    const float* b_hh_data = bias_hh.numel() > 0 ? bias_hh.data<float>() : nullptr;
+
     float* d_input = grad_input.data<float>();
     float* d_hx = grad_hx.data<float>();
     float* d_w_ih = grad_weight_ih.data<float>();
     float* d_w_hh = grad_weight_hh.data<float>();
     float* d_b_ih = grad_bias_ih.data<float>();
     float* d_b_hh = grad_bias_hh.data<float>();
-
-    // Need bias_ih and bias_hh for recomputation - extract from weight_ih registry pattern
-    // The forward kernel uses bias_ih and bias_hh but backward doesn't receive them.
-    // We need to recompute gates without bias (gates are linear + bias, but we can
-    // recompute from the forward intermediate values).
 
     #pragma omp parallel if(batch_size > 4)
     {
@@ -394,11 +401,11 @@ auto gru_cell_backward_kernel(const Tensor& grad_hy, const Tensor& input, const 
 
         #pragma omp for
         for (int64_t b = 0; b < batch_size; ++b) {
-            // Step 1: Recompute gates (same as forward)
+            // Step 1: Recompute gates (same as forward, including bias)
             // Compute r, z gate pre-activations
             std::vector<float> rz_pre(2 * hidden_size);
             for (int64_t g = 0; g < 2 * hidden_size; ++g) {
-                float sum = 0.0f;
+                float sum = (b_ih_data ? b_ih_data[g] : 0.0f) + (b_hh_data ? b_hh_data[g] : 0.0f);
                 for (int64_t i = 0; i < input_size; ++i) {
                     sum += in_data[b * input_size + i] * w_ih_data[g * input_size + i];
                 }
@@ -414,15 +421,17 @@ auto gru_cell_backward_kernel(const Tensor& grad_hy, const Tensor& input, const 
                 z_gate[h] = sigmoid(rz_pre[hidden_size + h]);
             }
 
-            // Compute n gate
-            // n_ih[h] = sum(input * w_ih[2H+h,:])
-            // n_hh[h] = sum((r * hx) * w_hh[2H+h,:])
+            // Compute n gate (with bias)
+            // n_ih[h] = b_ih[2H+h] + sum(input * w_ih[2H+h,:])
+            // n_hh[h] = b_hh[2H+h] + sum((r * hx) * w_hh[2H+h,:])
             // n = tanh(n_ih + n_hh)
-            std::vector<float> n_ih(hidden_size, 0.0f);
-            std::vector<float> n_hh(hidden_size, 0.0f);
+            std::vector<float> n_ih(hidden_size);
+            std::vector<float> n_hh(hidden_size);
             std::vector<float> n_gate(hidden_size);
 
             for (int64_t h = 0; h < hidden_size; ++h) {
+                n_ih[h] = b_ih_data ? b_ih_data[2 * hidden_size + h] : 0.0f;
+                n_hh[h] = b_hh_data ? b_hh_data[2 * hidden_size + h] : 0.0f;
                 for (int64_t i = 0; i < input_size; ++i) {
                     n_ih[h] += in_data[b * input_size + i] * w_ih_data[(2 * hidden_size + h) * input_size + i];
                 }

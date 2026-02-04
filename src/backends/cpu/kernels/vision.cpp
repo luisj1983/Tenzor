@@ -739,9 +739,43 @@ auto box_iou_kernel(const Tensor& boxes1, const Tensor& boxes2, int iou_type) ->
     const int64_t N = boxes1.shape()[0];
     const int64_t M = boxes2.shape()[0];
 
+    // Convert half types to Float32 for precision
+    Tensor b1_f32 = boxes1;
+    Tensor b2_f32 = boxes2;
+    if (boxes1.dtype() == DType::Float16 || boxes1.dtype() == DType::BFloat16) {
+        // Convert to Float32 by copying element-wise
+        b1_f32 = Tensor({N, 4}, DType::Float32, boxes1.device());
+        b2_f32 = Tensor({M, 4}, DType::Float32, boxes2.device());
+        if (boxes1.dtype() == DType::Float16) {
+            const Float16* src1 = boxes1.data<Float16>();
+            float* dst1 = b1_f32.data<float>();
+            for (int64_t i = 0; i < N * 4; ++i) dst1[i] = static_cast<float>(src1[i]);
+            const Float16* src2 = boxes2.data<Float16>();
+            float* dst2 = b2_f32.data<float>();
+            for (int64_t i = 0; i < M * 4; ++i) dst2[i] = static_cast<float>(src2[i]);
+        } else {
+            const BFloat16* src1 = boxes1.data<BFloat16>();
+            float* dst1 = b1_f32.data<float>();
+            for (int64_t i = 0; i < N * 4; ++i) dst1[i] = static_cast<float>(src1[i]);
+            const BFloat16* src2 = boxes2.data<BFloat16>();
+            float* dst2 = b2_f32.data<float>();
+            for (int64_t i = 0; i < M * 4; ++i) dst2[i] = static_cast<float>(src2[i]);
+        }
+    } else if (boxes1.dtype() == DType::Float64) {
+        // Convert Float64 to Float32 for IoU computation
+        b1_f32 = Tensor({N, 4}, DType::Float32, boxes1.device());
+        b2_f32 = Tensor({M, 4}, DType::Float32, boxes2.device());
+        const double* src1 = boxes1.data<double>();
+        float* dst1 = b1_f32.data<float>();
+        for (int64_t i = 0; i < N * 4; ++i) dst1[i] = static_cast<float>(src1[i]);
+        const double* src2 = boxes2.data<double>();
+        float* dst2 = b2_f32.data<float>();
+        for (int64_t i = 0; i < M * 4; ++i) dst2[i] = static_cast<float>(src2[i]);
+    }
+
     Tensor output({N, M}, DType::Float32, boxes1.device());
-    const float* b1 = boxes1.data<float>();
-    const float* b2 = boxes2.data<float>();
+    const float* b1 = b1_f32.data<float>();
+    const float* b2 = b2_f32.data<float>();
     float* out = output.data<float>();
 
     #pragma omp parallel for collapse(2) if(N * M > 4096)

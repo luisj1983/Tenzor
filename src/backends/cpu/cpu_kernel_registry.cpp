@@ -198,12 +198,14 @@ namespace cpu {
     auto lstm_cell_backward_kernel(const Tensor& grad_hy, const Tensor& grad_cy,
                                     const Tensor& input, const Tensor& hx, const Tensor& cx,
                                     const Tensor& hy, const Tensor& cy,
-                                    const Tensor& weight_ih, const Tensor& weight_hh) -> std::vector<Tensor>;
+                                    const Tensor& weight_ih, const Tensor& weight_hh,
+                                    const Tensor& bias_ih, const Tensor& bias_hh) -> std::vector<Tensor>;
     auto gru_cell_forward_kernel(const Tensor& input, const Tensor& hx,
                                   const Tensor& weight_ih, const Tensor& weight_hh,
                                   const Tensor& bias_ih, const Tensor& bias_hh) -> Tensor;
     auto gru_cell_backward_kernel(const Tensor& grad_hy, const Tensor& input, const Tensor& hx,
-                                   const Tensor& weight_ih, const Tensor& weight_hh) -> std::vector<Tensor>;
+                                   const Tensor& weight_ih, const Tensor& weight_hh,
+                                   const Tensor& bias_ih, const Tensor& bias_hh) -> std::vector<Tensor>;
 
     // RNN - Full sequence operations (fused, SIMD-optimized)
     auto lstm_forward_kernel(const Tensor& input, const Tensor& W_ih, const Tensor& W_hh,
@@ -950,11 +952,15 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::LSTMCellBackward, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        // inputs: [grad_hy, grad_cy, input, hx, cx, hy, cy, weight_ih, weight_hh]
+        // inputs: [grad_hy, grad_cy, input, hx, cx, hy, cy, weight_ih, weight_hh, bias_ih, bias_hh]
+        // bias_ih and bias_hh are optional (may not be present for backward compatibility)
+        Tensor bias_ih = inputs.size() > 9 ? inputs[9] : Tensor({0}, inputs[0].dtype(), inputs[0].device());
+        Tensor bias_hh = inputs.size() > 10 ? inputs[10] : Tensor({0}, inputs[0].dtype(), inputs[0].device());
         return cpu::lstm_cell_backward_kernel(inputs[0], inputs[1],
                                                inputs[2], inputs[3], inputs[4],
                                                inputs[5], inputs[6],
-                                               inputs[7], inputs[8]);
+                                               inputs[7], inputs[8],
+                                               bias_ih, bias_hh);
     });
 
     table.register_kernel(OpId::GRUCellForward, [](std::span<const Tensor> inputs, const OpAttributes&) {
@@ -964,9 +970,13 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::GRUCellBackward, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        // inputs: [grad_hy, input, hx, weight_ih, weight_hh]
+        // inputs: [grad_hy, input, hx, weight_ih, weight_hh, bias_ih, bias_hh]
+        // bias_ih and bias_hh are optional (may not be present for backward compatibility)
+        Tensor bias_ih = inputs.size() > 5 ? inputs[5] : Tensor({0}, inputs[0].dtype(), inputs[0].device());
+        Tensor bias_hh = inputs.size() > 6 ? inputs[6] : Tensor({0}, inputs[0].dtype(), inputs[0].device());
         return cpu::gru_cell_backward_kernel(inputs[0], inputs[1], inputs[2],
-                                              inputs[3], inputs[4]);
+                                              inputs[3], inputs[4],
+                                              bias_ih, bias_hh);
     });
 
     // Full-sequence RNN operations (fused, SIMD-optimized)

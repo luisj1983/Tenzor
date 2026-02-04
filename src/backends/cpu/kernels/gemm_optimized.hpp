@@ -73,6 +73,22 @@ constexpr size_t NR_AVX512 = 32; // 2 ZMM registers
 constexpr size_t PREFETCH_DISTANCE_A = 64;  // Cache lines ahead
 constexpr size_t PREFETCH_DISTANCE_B = 128;
 
+// Maximum packing buffer sizes (used for heap allocation to avoid stack overflow)
+constexpr size_t MAX_A_PACK_SIZE = std::max(MC_AVX2 * KC_AVX2, MC_AVX512 * KC_AVX512);
+constexpr size_t MAX_B_PACK_SIZE = std::max(KC_AVX2 * NC_AVX2, KC_AVX512 * NC_AVX512);
+
+// Thread-local packing buffers allocated on the heap
+// Each thread gets its own buffers to avoid contention
+struct GemmPackBuffers {
+    alignas(64) float A_packed[MAX_A_PACK_SIZE];
+    alignas(64) float B_packed[MAX_B_PACK_SIZE];
+};
+
+inline GemmPackBuffers& get_thread_pack_buffers() {
+    thread_local auto buffers = std::make_unique<GemmPackBuffers>();
+    return *buffers;
+}
+
 // ============================================================================
 // AVX2 Micro-kernel (6x16)
 // ============================================================================
@@ -430,11 +446,12 @@ inline void gemm_optimized(
     const size_t MR = MR_AVX512;
     const size_t NR = NR_AVX512;
 
-    // Use thread-local packing buffers (same structure as AVX2 for correct behavior)
+    // Use thread-local heap packing buffers to avoid stack overflow
     #pragma omp parallel if(M * N > OMP_THRESHOLD_GEMM)
     {
-        alignas(64) float A_packed[MC * KC];
-        alignas(64) float B_packed[KC * NC];
+        auto& bufs = get_thread_pack_buffers();
+        float* A_packed = bufs.A_packed;
+        float* B_packed = bufs.B_packed;
 
         #pragma omp for collapse(2) schedule(dynamic)
         for (int64_t jc = 0; jc < N; jc += NC) {
@@ -495,11 +512,12 @@ inline void gemm_optimized(
     const size_t MR = MR_AVX2;
     const size_t NR = NR_AVX2;
 
-    // Use thread-local packing buffers
+    // Use thread-local heap packing buffers to avoid stack overflow
     #pragma omp parallel if(M * N > OMP_THRESHOLD_GEMM)
     {
-        alignas(64) float A_packed[MC * KC];
-        alignas(64) float B_packed[KC * NC];
+        auto& bufs = get_thread_pack_buffers();
+        float* A_packed = bufs.A_packed;
+        float* B_packed = bufs.B_packed;
 
         #pragma omp for collapse(2) schedule(dynamic)
         for (int64_t jc = 0; jc < N; jc += NC) {
@@ -589,6 +607,23 @@ inline void gemm_transB_optimized(
     float* __restrict__ C,
     int64_t M, int64_t N, int64_t K
 ) {
+    // For non-trivial sizes, transpose B and use the optimized blocked GEMM.
+    // The O(K*N) transpose cost is dominated by the O(M*N*K) compute.
+    constexpr int64_t TRANSPOSE_THRESHOLD = 64;
+    if (M > TRANSPOSE_THRESHOLD && N > TRANSPOSE_THRESHOLD && K > TRANSPOSE_THRESHOLD) {
+        // Transpose B (N x K) -> B_T (K x N)
+        std::vector<float> B_T(static_cast<size_t>(K * N));
+        #pragma omp parallel for collapse(2) if(K * N > OMP_THRESHOLD_GEMM)
+        for (int64_t k = 0; k < K; ++k) {
+            for (int64_t n = 0; n < N; ++n) {
+                B_T[k * N + n] = B[n * K + k];
+            }
+        }
+        gemm_optimized(A, B_T.data(), C, M, N, K, 1.0f, 0.0f);
+        return;
+    }
+
+    // For small sizes, use direct dot-product approach
     std::memset(C, 0, M * N * sizeof(float));
 
 #ifdef TENZOR_GEMM_AVX2

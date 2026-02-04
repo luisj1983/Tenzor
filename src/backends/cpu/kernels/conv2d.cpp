@@ -385,7 +385,8 @@ struct Conv2dCacheKey {
     int64_t out_channels, in_channels_per_group, kernel_h, kernel_w;
     int64_t stride, padding, dilation, groups;
     bool has_bias;
-    const float* weight_ptr;  // Use weight pointer as part of key for weight identity
+    // Note: weight_ptr removed from key - weights may change in-place (optimizer updates)
+    // Weight data is refreshed on every cache hit via set_data_handle + reorder.
 
     bool operator==(const Conv2dCacheKey& other) const {
         return batch == other.batch && in_channels == other.in_channels &&
@@ -395,7 +396,7 @@ struct Conv2dCacheKey {
                kernel_h == other.kernel_h && kernel_w == other.kernel_w &&
                stride == other.stride && padding == other.padding &&
                dilation == other.dilation && groups == other.groups &&
-               has_bias == other.has_bias && weight_ptr == other.weight_ptr;
+               has_bias == other.has_bias;
     }
 };
 
@@ -417,7 +418,6 @@ struct Conv2dCacheKeyHash {
         hash_combine(std::hash<int64_t>{}(k.dilation));
         hash_combine(std::hash<int64_t>{}(k.groups));
         hash_combine(std::hash<bool>{}(k.has_bias));
-        hash_combine(std::hash<const void*>{}(k.weight_ptr));
         return h;
     }
 };
@@ -426,6 +426,8 @@ struct Conv2dCachedPrimitive {
     dnnl::convolution_forward::primitive_desc conv_pd;
     dnnl::convolution_forward conv_prim;
     dnnl::memory weights_mem;           // Reordered weights in optimal format
+    dnnl::memory::desc weights_md_user; // User weights memory descriptor (for reorder on update)
+    bool need_weights_reorder;          // Whether weights need reorder to optimal format
     dnnl::memory::desc src_md_user;     // User source memory descriptor
     dnnl::memory::desc dst_md_user;     // User destination memory descriptor
     dnnl::memory::desc bias_md;         // Bias memory descriptor (if applicable)
@@ -531,8 +533,7 @@ static bool conv2d_forward_onednn(
             batch, in_channels, height, width,
             out_channels, in_channels_per_group, kernel_h, kernel_w,
             stride, padding, dilation, groups,
-            bias != nullptr,
-            weight.data<float>()
+            bias != nullptr
         };
 
         // Try to get cached primitive
@@ -606,9 +607,13 @@ static bool conv2d_forward_onednn(
             cached->need_src_reorder = (cached->conv_pd.src_desc() != cached->src_md_user);
             cached->need_dst_reorder = (cached->conv_pd.dst_desc() != cached->dst_md_user);
 
-            // Reorder weights to optimal layout and cache them (weights don't change)
+            // Store user weights descriptor for future reorder on cache hit
+            cached->weights_md_user = weights_md_user;
+            cached->need_weights_reorder = (cached->conv_pd.weights_desc() != weights_md_user);
+
+            // Reorder weights to optimal layout
             auto weights_mem_user = dnnl::memory(weights_md_user, engine, const_cast<float*>(weight.data<float>()));
-            if (cached->conv_pd.weights_desc() != weights_md_user) {
+            if (cached->need_weights_reorder) {
                 cached->weights_mem = dnnl::memory(cached->conv_pd.weights_desc(), engine);
                 dnnl::reorder(weights_mem_user, cached->weights_mem).execute(stream, weights_mem_user, cached->weights_mem);
                 stream.wait();
@@ -624,6 +629,17 @@ static bool conv2d_forward_onednn(
 
             // Store in cache
             g_conv2d_cache.put(cache_key, cached);
+        }
+
+        // Always refresh weight data - weights may have been updated by optimizer
+        {
+            auto weights_mem_user = dnnl::memory(cached->weights_md_user, engine, const_cast<float*>(weight.data<float>()));
+            if (cached->need_weights_reorder) {
+                dnnl::reorder(weights_mem_user, cached->weights_mem).execute(stream, weights_mem_user, cached->weights_mem);
+                stream.wait();
+            } else {
+                cached->weights_mem.set_data_handle(const_cast<float*>(weight.data<float>()));
+            }
         }
 
         // Execute convolution using cached primitive
@@ -792,23 +808,30 @@ void conv2d_forward_impl(
         int64_t col_cols = in_channels_per_group * kernel_h * kernel_w;
         std::vector<T> col_buffer(col_rows * col_cols);
 
-        // Apply im2col transformation for this group's input channels
-        const T* input_ptr = input.data<T>() + in_start * height * width;
-        im2col_cpu(
-            input_ptr,
-            col_buffer.data(),
-            batch,
-            in_channels_per_group,
-            height,
-            width,
-            kernel_h,
-            kernel_w,
-            stride,
-            padding,
-            dilation,
-            out_h,
-            out_w
-        );
+        // Apply im2col transformation per-batch to handle correct strides
+        // im2col_cpu expects input pointer at batch 0, channel 0 of the group,
+        // and internally strides by channels*H*W per batch element.
+        // With groups, we must process each batch element separately so the
+        // pointer correctly accounts for the full in_channels stride.
+        int64_t col_per_batch = out_h * out_w * col_cols;
+        for (int64_t b = 0; b < batch; ++b) {
+            const T* input_ptr = input.data<T>() + (b * in_channels + in_start) * height * width;
+            im2col_cpu(
+                input_ptr,
+                col_buffer.data() + b * col_per_batch,
+                1,  // single batch element
+                in_channels_per_group,
+                height,
+                width,
+                kernel_h,
+                kernel_w,
+                stride,
+                padding,
+                dilation,
+                out_h,
+                out_w
+            );
+        }
 
         // Matrix multiplication into temporary buffer
         // GEMM output is (batch * out_h * out_w, out_channels_per_group) row-major
@@ -969,42 +992,56 @@ void conv2d_backward_input_impl(
         int64_t in_start = g * in_channels_per_group;
         int64_t out_start = g * out_channels_per_group;
 
-        // Allocate col buffer
+        // Process per-batch to handle correct strides with groups
+        int64_t col_per_batch = out_h * out_w * col_cols;
+        int64_t grad_out_per_batch = out_h * out_w * out_channels_per_group;
+
+        // Allocate col buffer for all batches
         std::vector<T> grad_col(col_rows * col_cols);
+
+        // Reshape grad_output for this group: extract per-batch, per-group data
+        // and pack into contiguous GEMM input
+        std::vector<T> grad_out_packed(col_rows * out_channels_per_group);
+        for (int64_t b = 0; b < batch; ++b) {
+            const T* src = grad_output.data<T>() + (b * out_channels + out_start) * out_h * out_w;
+            T* dst = grad_out_packed.data() + b * grad_out_per_batch;
+            std::memcpy(dst, src, grad_out_per_batch * sizeof(T));
+        }
 
         int64_t M = col_rows;
         int64_t K = out_channels_per_group;
         int64_t N = col_cols;
 
-        const T* grad_out_ptr = grad_output.data<T>() + out_start * out_h * out_w;
         const T* weight_ptr = weight.data<T>() + out_start * in_channels_per_group * kernel_h * kernel_w;
 
         // Perform GEMM: C = A @ B (no transpose)
         gemm_cpu<T>(
-            grad_out_ptr,       // A: (M, K)
-            weight_ptr,         // B: (K, N) - already in correct orientation
-            grad_col.data(),    // C: (M, N)
+            grad_out_packed.data(),  // A: (M, K)
+            weight_ptr,              // B: (K, N) - already in correct orientation
+            grad_col.data(),         // C: (M, N)
             M, N, K,
             false  // don't transpose B
         );
 
-        // Apply col2im to accumulate gradients
-        T* grad_input_ptr = grad_input.data<T>() + in_start * height * width;
-        col2im_cpu<T>(
-            grad_col.data(),
-            grad_input_ptr,
-            batch,
-            in_channels_per_group,
-            height,
-            width,
-            kernel_h,
-            kernel_w,
-            stride,
-            padding,
-            dilation,
-            out_h,
-            out_w
-        );
+        // Apply col2im per-batch to accumulate gradients with correct strides
+        for (int64_t b = 0; b < batch; ++b) {
+            T* grad_input_ptr = grad_input.data<T>() + (b * in_channels + in_start) * height * width;
+            col2im_cpu<T>(
+                grad_col.data() + b * col_per_batch,
+                grad_input_ptr,
+                1,  // single batch element
+                in_channels_per_group,
+                height,
+                width,
+                kernel_h,
+                kernel_w,
+                stride,
+                padding,
+                dilation,
+                out_h,
+                out_w
+            );
+        }
     }
 }
 
@@ -1079,31 +1116,43 @@ void conv2d_backward_weight_impl(
         int64_t in_start = g * in_channels_per_group;
         int64_t out_start = g * out_channels_per_group;
 
-        // Apply im2col to input
+        // Apply im2col per-batch to handle correct strides with groups
         std::vector<T> input_col(col_rows * col_cols);
+        int64_t col_per_batch = out_h * out_w * col_cols;
 
-        const T* input_ptr = input.data<T>() + in_start * height * width;
-        im2col_cpu<T>(
-            input_ptr,
-            input_col.data(),
-            batch,
-            in_channels_per_group,
-            height,
-            width,
-            kernel_h,
-            kernel_w,
-            stride,
-            padding,
-            dilation,
-            out_h,
-            out_w
-        );
+        for (int64_t b = 0; b < batch; ++b) {
+            const T* input_ptr = input.data<T>() + (b * in_channels + in_start) * height * width;
+            im2col_cpu<T>(
+                input_ptr,
+                input_col.data() + b * col_per_batch,
+                1,  // single batch element
+                in_channels_per_group,
+                height,
+                width,
+                kernel_h,
+                kernel_w,
+                stride,
+                padding,
+                dilation,
+                out_h,
+                out_w
+            );
+        }
 
         int64_t M = out_channels_per_group;
         int64_t K = col_rows;
         int64_t N = col_cols;
 
-        const T* grad_out_ptr = grad_output.data<T>() + out_start * out_h * out_w;
+        // Pack grad_output for this group across batches
+        int64_t grad_out_per_batch = out_h * out_w * out_channels_per_group;
+        std::vector<T> grad_out_packed(col_rows * out_channels_per_group);
+        for (int64_t b = 0; b < batch; ++b) {
+            const T* src = grad_output.data<T>() + (b * out_channels + out_start) * out_h * out_w;
+            T* dst = grad_out_packed.data() + b * grad_out_per_batch;
+            std::memcpy(dst, src, grad_out_per_batch * sizeof(T));
+        }
+
+        const T* grad_out_ptr = grad_out_packed.data();
         T* grad_weight_ptr = grad_weight.data<T>() + out_start * in_channels_per_group * kernel_h * kernel_w;
 
         // Perform GEMM: C = A^T @ B

@@ -65,7 +65,46 @@ inline Float16& operator/=(Float16& a, const Float16& b) {
     return a;
 }
 
-// Math helper templates for Float16 support
+// ============================================================================
+// BFloat16 Arithmetic Helper Functions
+// ============================================================================
+inline BFloat16 operator+(const BFloat16& a, const BFloat16& b) {
+    return BFloat16(static_cast<float>(a) + static_cast<float>(b));
+}
+
+inline BFloat16 operator-(const BFloat16& a, const BFloat16& b) {
+    return BFloat16(static_cast<float>(a) - static_cast<float>(b));
+}
+
+inline BFloat16 operator*(const BFloat16& a, const BFloat16& b) {
+    return BFloat16(static_cast<float>(a) * static_cast<float>(b));
+}
+
+inline BFloat16 operator/(const BFloat16& a, const BFloat16& b) {
+    return BFloat16(static_cast<float>(a) / static_cast<float>(b));
+}
+
+inline BFloat16& operator+=(BFloat16& a, const BFloat16& b) {
+    a = BFloat16(static_cast<float>(a) + static_cast<float>(b));
+    return a;
+}
+
+inline BFloat16& operator-=(BFloat16& a, const BFloat16& b) {
+    a = BFloat16(static_cast<float>(a) - static_cast<float>(b));
+    return a;
+}
+
+inline BFloat16& operator*=(BFloat16& a, const BFloat16& b) {
+    a = BFloat16(static_cast<float>(a) * static_cast<float>(b));
+    return a;
+}
+
+inline BFloat16& operator/=(BFloat16& a, const BFloat16& b) {
+    a = BFloat16(static_cast<float>(a) / static_cast<float>(b));
+    return a;
+}
+
+// Math helper templates for Float16/BFloat16 support
 template<typename T>
 inline T safe_sqrt(const T& x) {
     return std::sqrt(x);
@@ -74,6 +113,11 @@ inline T safe_sqrt(const T& x) {
 template<>
 inline Float16 safe_sqrt<Float16>(const Float16& x) {
     return Float16(safe_sqrt(static_cast<float>(x)));
+}
+
+template<>
+inline BFloat16 safe_sqrt<BFloat16>(const BFloat16& x) {
+    return BFloat16(std::sqrt(static_cast<float>(x)));
 }
 
 // ============================================================================
@@ -116,10 +160,15 @@ static void batchnorm_mean_var_simd_f32(
                 __m256 v = _mm256_loadu_ps(ch_ptr + i);
                 vsum = _mm256_add_ps(vsum, v);
             }
-            // Handle remainder
+            // Handle remainder with scalar accumulator to avoid 8x overcounting
+            float scalar_remainder_sum = 0.0f;
             for (; i < spatial_size; i++) {
-                vsum = _mm256_add_ps(vsum, _mm256_set1_ps(ch_ptr[i]));
+                scalar_remainder_sum += ch_ptr[i];
             }
+            // Add scalar to only lane 0 of vsum
+            __m256 remainder_vec = _mm256_setzero_ps();
+            remainder_vec = _mm256_blend_ps(remainder_vec, _mm256_set1_ps(scalar_remainder_sum), 0x01);
+            vsum = _mm256_add_ps(vsum, remainder_vec);
         }
 
         // Horizontal sum of vsum
@@ -145,11 +194,16 @@ static void batchnorm_mean_var_simd_f32(
                 __m256 diff = _mm256_sub_ps(v, vmean);
                 vvar = _mm256_fmadd_ps(diff, diff, vvar);
             }
-            // Handle remainder
+            // Handle remainder with scalar accumulator to avoid 8x overcounting
+            float scalar_remainder_var = 0.0f;
             for (; i < spatial_size; i++) {
                 float diff = ch_ptr[i] - channel_mean;
-                vvar = _mm256_add_ps(vvar, _mm256_set1_ps(diff * diff));
+                scalar_remainder_var += diff * diff;
             }
+            // Add scalar to only lane 0 of vvar
+            __m256 var_remainder_vec = _mm256_setzero_ps();
+            var_remainder_vec = _mm256_blend_ps(var_remainder_vec, _mm256_set1_ps(scalar_remainder_var), 0x01);
+            vvar = _mm256_add_ps(vvar, var_remainder_vec);
         }
 
         // Horizontal sum of vvar
@@ -316,8 +370,15 @@ auto batchnorm2d_mean_var_kernel(const Tensor& input) -> std::vector<Tensor> {
             variance.data<Float16>(),
             N, C, H, W
         );
+    } else if (input.dtype() == DType::BFloat16) {
+        batchnorm_mean_var_impl<BFloat16>(
+            input.data<BFloat16>(),
+            mean.data<BFloat16>(),
+            variance.data<BFloat16>(),
+            N, C, H, W
+        );
     } else {
-        throw std::runtime_error("BatchNorm2d only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("BatchNorm2d only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     return {mean, variance};
@@ -409,8 +470,17 @@ auto batchnorm2d_forward_kernel(const Tensor& input,
             Float16(static_cast<float>(epsilon)),
             N, C, H, W
         );
+    } else if (input.dtype() == DType::BFloat16) {
+        batchnorm_forward_impl<BFloat16>(
+            input.data<BFloat16>(),
+            output.data<BFloat16>(),
+            mean.data<BFloat16>(),
+            variance.data<BFloat16>(),
+            BFloat16(static_cast<float>(epsilon)),
+            N, C, H, W
+        );
     } else {
-        throw std::runtime_error("BatchNorm2d only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("BatchNorm2d only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     return output;
@@ -758,8 +828,19 @@ auto batchnorm2d_forward_affine_kernel(const Tensor& input,
             Float16(static_cast<float>(epsilon)),
             N, C, H, W
         );
+    } else if (input.dtype() == DType::BFloat16) {
+        batchnorm_forward_affine_impl<BFloat16>(
+            input.data<BFloat16>(),
+            output.data<BFloat16>(),
+            mean.data<BFloat16>(),
+            variance.data<BFloat16>(),
+            gamma.data<BFloat16>(),
+            beta.data<BFloat16>(),
+            BFloat16(static_cast<float>(epsilon)),
+            N, C, H, W
+        );
     } else {
-        throw std::runtime_error("BatchNorm2d only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("BatchNorm2d only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     return output;
@@ -819,8 +900,17 @@ auto batchnorm2d_update_running_stats_kernel(Tensor& running_mean,
             Float16(static_cast<float>(momentum)),
             C
         );
+    } else if (running_mean.dtype() == DType::BFloat16) {
+        batchnorm_update_running_stats_impl<BFloat16>(
+            running_mean.data<BFloat16>(),
+            running_var.data<BFloat16>(),
+            batch_mean.data<BFloat16>(),
+            batch_var.data<BFloat16>(),
+            BFloat16(static_cast<float>(momentum)),
+            C
+        );
     } else {
-        throw std::runtime_error("BatchNorm2d only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("BatchNorm2d only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 }
 
@@ -992,8 +1082,21 @@ auto batchnorm2d_backward_kernel(const Tensor& grad_output,
             Float16(static_cast<float>(epsilon)),
             N, C, H, W
         );
+    } else if (input.dtype() == DType::BFloat16) {
+        batchnorm_backward_impl<BFloat16>(
+            grad_output.data<BFloat16>(),
+            input.data<BFloat16>(),
+            grad_input.data<BFloat16>(),
+            grad_gamma.data<BFloat16>(),
+            grad_beta.data<BFloat16>(),
+            mean.data<BFloat16>(),
+            variance.data<BFloat16>(),
+            gamma.data<BFloat16>(),
+            BFloat16(static_cast<float>(epsilon)),
+            N, C, H, W
+        );
     } else {
-        throw std::runtime_error("BatchNorm2d only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("BatchNorm2d only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     return {grad_input, grad_gamma, grad_beta};

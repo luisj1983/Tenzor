@@ -525,15 +525,14 @@ void sum_along_dim(const T* input_data,
     const int64_t total_work = output_size * dim_size;
     #pragma omp parallel for if(total_work > REDUCTION_OMP_THRESHOLD)
     for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
-        // Compute multi-dimensional index for output
+        // Compute multi-dimensional index for output (row-major order: last dim varies fastest)
         std::vector<int64_t> indices(ndim, 0);
         int64_t tmp = out_idx;
 
-        for (int64_t d = 0; d < ndim; d++) {
+        for (int64_t d = ndim - 1; d >= 0; --d) {
             if (d == dim) continue;
-            int64_t size = input_shape[d];
-            indices[d] = tmp % size;
-            tmp /= size;
+            indices[d] = tmp % input_shape[d];
+            tmp /= input_shape[d];
         }
 
         // Sum along the reduction dimension - simple accumulation
@@ -603,11 +602,10 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                     std::vector<int64_t> indices(shape_ndim, 0);
                     int64_t tmp = out_idx;
 
-                    for (int64_t d = 0; d < shape_ndim; d++) {
+                    for (int64_t d = shape_ndim - 1; d >= 0; --d) {
                         if (d == dim) continue;
-                        int64_t size = input_shape[d];
-                        indices[d] = tmp % size;
-                        tmp /= size;
+                        indices[d] = tmp % input_shape[d];
+                        tmp /= input_shape[d];
                     }
 
                     // Sum along dimension - simple accumulation in Float32
@@ -795,11 +793,10 @@ void max_along_dim(const T* input_data,
         std::vector<int64_t> indices(ndim, 0);
         int64_t tmp = out_idx;
 
-        for (int64_t d = 0; d < ndim; d++) {
+        for (int64_t d = ndim - 1; d >= 0; --d) {
             if (d == dim) continue;
-            int64_t size = input_shape[d];
-            indices[d] = tmp % size;
-            tmp /= size;
+            indices[d] = tmp % input_shape[d];
+            tmp /= input_shape[d];
         }
 
         // Find max along the reduction dimension
@@ -886,7 +883,7 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                 for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
                     std::vector<int64_t> indices(ndim, 0);
                     int64_t tmp = out_idx;
-                    for (int64_t d = 0; d < ndim; d++) {
+                    for (int64_t d = ndim - 1; d >= 0; --d) {
                         if (d == dim) continue;
                         indices[d] = tmp % input_shape[d];
                         tmp /= input_shape[d];
@@ -1008,11 +1005,10 @@ void min_along_dim(const T* input_data,
         std::vector<int64_t> indices(ndim, 0);
         int64_t tmp = out_idx;
 
-        for (int64_t d = 0; d < ndim; d++) {
+        for (int64_t d = ndim - 1; d >= 0; --d) {
             if (d == dim) continue;
-            int64_t size = input_shape[d];
-            indices[d] = tmp % size;
-            tmp /= size;
+            indices[d] = tmp % input_shape[d];
+            tmp /= input_shape[d];
         }
 
         // Find min along the reduction dimension
@@ -1099,7 +1095,7 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                 for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
                     std::vector<int64_t> indices(ndim, 0);
                     int64_t tmp = out_idx;
-                    for (int64_t d = 0; d < ndim; d++) {
+                    for (int64_t d = ndim - 1; d >= 0; --d) {
                         if (d == dim) continue;
                         indices[d] = tmp % input_shape[d];
                         tmp /= input_shape[d];
@@ -1214,11 +1210,10 @@ void argmax_along_dim(const T* input_data,
         std::vector<int64_t> indices(ndim, 0);
         int64_t tmp = out_idx;
 
-        for (int64_t d = 0; d < ndim; d++) {
+        for (int64_t d = ndim - 1; d >= 0; --d) {
             if (d == dim) continue;
-            int64_t size = input_shape[d];
-            indices[d] = tmp % size;
-            tmp /= size;
+            indices[d] = tmp % input_shape[d];
+            tmp /= input_shape[d];
         }
 
         // Find index of max along the reduction dimension
@@ -1333,11 +1328,10 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                 for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
                     std::vector<int64_t> indices(ndim, 0);
                     int64_t tmp = out_idx;
-                    for (int64_t d = 0; d < ndim; d++) {
+                    for (int64_t d = ndim - 1; d >= 0; --d) {
                         if (d == dim) continue;
-                        int64_t size = input_shape[d];
-                        indices[d] = tmp % size;
-                        tmp /= size;
+                        indices[d] = tmp % input_shape[d];
+                        tmp /= input_shape[d];
                     }
 
                     indices[dim] = 0;
@@ -1452,11 +1446,10 @@ void argmin_along_dim(const T* input_data,
         std::vector<int64_t> indices(ndim, 0);
         int64_t tmp = out_idx;
 
-        for (int64_t d = 0; d < ndim; d++) {
+        for (int64_t d = ndim - 1; d >= 0; --d) {
             if (d == dim) continue;
-            int64_t size = input_shape[d];
-            indices[d] = tmp % size;
-            tmp /= size;
+            indices[d] = tmp % input_shape[d];
+            tmp /= input_shape[d];
         }
 
         // Find index of min along the reduction dimension
@@ -1949,7 +1942,7 @@ void var_along_dim(const T* input_data,
     for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
         std::vector<int64_t> indices(ndim, 0);
         int64_t tmp = out_idx;
-        for (int64_t d = 0; d < ndim; d++) {
+        for (int64_t d = ndim - 1; d >= 0; --d) {
             if (d == dim) continue;
             indices[d] = tmp % input_shape[d];
             tmp /= input_shape[d];
@@ -2112,7 +2105,7 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
                 for (int64_t out_idx = 0; out_idx < out_size; out_idx++) {
                     std::vector<int64_t> indices(ndim, 0);
                     int64_t tmp = out_idx;
-                    for (int64_t d = 0; d < ndim; d++) {
+                    for (int64_t d = ndim - 1; d >= 0; --d) {
                         if (d == dim) continue;
                         indices[d] = tmp % input_shape[d];
                         tmp /= input_shape[d];
@@ -2157,7 +2150,7 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
                 for (int64_t out_idx = 0; out_idx < out_size; out_idx++) {
                     std::vector<int64_t> indices(ndim, 0);
                     int64_t tmp = out_idx;
-                    for (int64_t d = 0; d < ndim; d++) {
+                    for (int64_t d = ndim - 1; d >= 0; --d) {
                         if (d == dim) continue;
                         indices[d] = tmp % input_shape[d];
                         tmp /= input_shape[d];

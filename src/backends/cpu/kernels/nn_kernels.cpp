@@ -699,27 +699,59 @@ auto dropout_kernel(const Tensor& input, float p, bool training)
         DType::Float32, input.device());
 
     int64_t n = input.numel();
-    const float* in_data = input.data<float>();
-    float* out_data = output.data<float>();
     float* mask_data = mask.data<float>();
 
     float scale = 1.0f / (1.0f - p);
     std::uniform_real_distribution<float> dist(0.0f, 1.0f);
 
-    #pragma omp parallel
-    {
-        std::mt19937 local_rng(tl_rng());
-        #pragma omp for
-        for (int64_t i = 0; i < n; ++i) {
-            float r = dist(local_rng);
-            if (r < p) {
-                mask_data[i] = 0.0f;
-                out_data[i] = 0.0f;
-            } else {
-                mask_data[i] = scale;
-                out_data[i] = in_data[i] * scale;
+    auto apply_dropout_float = [&](auto* in_data, auto* out_data) {
+        using T = std::remove_pointer_t<decltype(in_data)>;
+        #pragma omp parallel
+        {
+            std::mt19937 local_rng(tl_rng());
+            #pragma omp for
+            for (int64_t i = 0; i < n; ++i) {
+                float r = dist(local_rng);
+                if (r < p) {
+                    mask_data[i] = 0.0f;
+                    out_data[i] = T(0);
+                } else {
+                    mask_data[i] = scale;
+                    out_data[i] = in_data[i] * static_cast<T>(scale);
+                }
             }
         }
+    };
+
+    auto apply_dropout_half = [&](auto* in_data, auto* out_data) {
+        using T = std::remove_pointer_t<decltype(in_data)>;
+        #pragma omp parallel
+        {
+            std::mt19937 local_rng(tl_rng());
+            #pragma omp for
+            for (int64_t i = 0; i < n; ++i) {
+                float r = dist(local_rng);
+                if (r < p) {
+                    mask_data[i] = 0.0f;
+                    out_data[i] = T(0.0f);
+                } else {
+                    mask_data[i] = scale;
+                    out_data[i] = T(static_cast<float>(in_data[i]) * scale);
+                }
+            }
+        }
+    };
+
+    if (input.dtype() == DType::Float32) {
+        apply_dropout_float(input.data<float>(), output.data<float>());
+    } else if (input.dtype() == DType::Float64) {
+        apply_dropout_float(input.data<double>(), output.data<double>());
+    } else if (input.dtype() == DType::Float16) {
+        apply_dropout_half(input.data<Float16>(), output.data<Float16>());
+    } else if (input.dtype() == DType::BFloat16) {
+        apply_dropout_half(input.data<BFloat16>(), output.data<BFloat16>());
+    } else {
+        throw std::runtime_error("dropout: unsupported dtype");
     }
 
     return {output, mask};
@@ -735,13 +767,38 @@ auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, floa
         grad_output.dtype(), grad_output.device());
 
     int64_t n = grad_output.numel();
-    const float* grad_data = grad_output.data<float>();
     const float* mask_data = mask.data<float>();
-    float* grad_in_data = grad_input.data<float>();
 
-    #pragma omp parallel for if(n > 10000)
-    for (int64_t i = 0; i < n; ++i) {
-        grad_in_data[i] = grad_data[i] * mask_data[i];
+    if (grad_output.dtype() == DType::Float32) {
+        const float* grad_data = grad_output.data<float>();
+        float* grad_in_data = grad_input.data<float>();
+        #pragma omp parallel for if(n > 10000)
+        for (int64_t i = 0; i < n; ++i) {
+            grad_in_data[i] = grad_data[i] * mask_data[i];
+        }
+    } else if (grad_output.dtype() == DType::Float64) {
+        const double* grad_data = grad_output.data<double>();
+        double* grad_in_data = grad_input.data<double>();
+        #pragma omp parallel for if(n > 10000)
+        for (int64_t i = 0; i < n; ++i) {
+            grad_in_data[i] = grad_data[i] * static_cast<double>(mask_data[i]);
+        }
+    } else if (grad_output.dtype() == DType::Float16) {
+        const Float16* grad_data = grad_output.data<Float16>();
+        Float16* grad_in_data = grad_input.data<Float16>();
+        #pragma omp parallel for if(n > 10000)
+        for (int64_t i = 0; i < n; ++i) {
+            grad_in_data[i] = Float16(static_cast<float>(grad_data[i]) * mask_data[i]);
+        }
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        const BFloat16* grad_data = grad_output.data<BFloat16>();
+        BFloat16* grad_in_data = grad_input.data<BFloat16>();
+        #pragma omp parallel for if(n > 10000)
+        for (int64_t i = 0; i < n; ++i) {
+            grad_in_data[i] = BFloat16(static_cast<float>(grad_data[i]) * mask_data[i]);
+        }
+    } else {
+        throw std::runtime_error("dropout_backward: unsupported dtype");
     }
 
     return grad_input;
@@ -763,16 +820,28 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices) -> Tensor {
     auto output = Tensor::empty_uninitialized(out_shape, weight.dtype(), weight.device());
 
     int64_t num_indices = indices.numel();
-    const float* w_data = weight.data<float>();
     const int64_t* idx_data = indices.data<int64_t>();
-    float* out_data = output.data<float>();
 
-    #pragma omp parallel for if(num_indices * embedding_dim > 10000)
-    for (int64_t i = 0; i < num_indices; ++i) {
-        int64_t idx = idx_data[i];
-        for (int64_t j = 0; j < embedding_dim; ++j) {
-            out_data[i * embedding_dim + j] = w_data[idx * embedding_dim + j];
+    auto do_embedding = [&](auto* w_data, auto* out_data) {
+        #pragma omp parallel for if(num_indices * embedding_dim > 10000)
+        for (int64_t i = 0; i < num_indices; ++i) {
+            int64_t idx = idx_data[i];
+            for (int64_t j = 0; j < embedding_dim; ++j) {
+                out_data[i * embedding_dim + j] = w_data[idx * embedding_dim + j];
+            }
         }
+    };
+
+    if (weight.dtype() == DType::Float32) {
+        do_embedding(weight.data<float>(), output.data<float>());
+    } else if (weight.dtype() == DType::Float64) {
+        do_embedding(weight.data<double>(), output.data<double>());
+    } else if (weight.dtype() == DType::Float16) {
+        do_embedding(weight.data<Float16>(), output.data<Float16>());
+    } else if (weight.dtype() == DType::BFloat16) {
+        do_embedding(weight.data<BFloat16>(), output.data<BFloat16>());
+    } else {
+        throw std::runtime_error("embedding: unsupported dtype");
     }
 
     return output;
@@ -787,16 +856,50 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
                              grad_output.dtype(), grad_output.device());
 
     int64_t num_indices = indices.numel();
-    const float* grad_data = grad_output.data<float>();
     const int64_t* idx_data = indices.data<int64_t>();
-    float* grad_w_data = grad_weight.data<float>();
 
-    // Accumulate gradients (no parallel due to potential race conditions)
-    for (int64_t i = 0; i < num_indices; ++i) {
-        int64_t idx = idx_data[i];
-        for (int64_t j = 0; j < embedding_dim; ++j) {
-            grad_w_data[idx * embedding_dim + j] += grad_data[i * embedding_dim + j];
+    if (grad_output.dtype() == DType::Float32) {
+        const float* grad_data = grad_output.data<float>();
+        float* grad_w_data = grad_weight.data<float>();
+        for (int64_t i = 0; i < num_indices; ++i) {
+            int64_t idx = idx_data[i];
+            for (int64_t j = 0; j < embedding_dim; ++j) {
+                grad_w_data[idx * embedding_dim + j] += grad_data[i * embedding_dim + j];
+            }
         }
+    } else if (grad_output.dtype() == DType::Float64) {
+        const double* grad_data = grad_output.data<double>();
+        double* grad_w_data = grad_weight.data<double>();
+        for (int64_t i = 0; i < num_indices; ++i) {
+            int64_t idx = idx_data[i];
+            for (int64_t j = 0; j < embedding_dim; ++j) {
+                grad_w_data[idx * embedding_dim + j] += grad_data[i * embedding_dim + j];
+            }
+        }
+    } else if (grad_output.dtype() == DType::Float16) {
+        const Float16* grad_data = grad_output.data<Float16>();
+        Float16* grad_w_data = grad_weight.data<Float16>();
+        for (int64_t i = 0; i < num_indices; ++i) {
+            int64_t idx = idx_data[i];
+            for (int64_t j = 0; j < embedding_dim; ++j) {
+                float val = static_cast<float>(grad_w_data[idx * embedding_dim + j]) +
+                            static_cast<float>(grad_data[i * embedding_dim + j]);
+                grad_w_data[idx * embedding_dim + j] = Float16(val);
+            }
+        }
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        const BFloat16* grad_data = grad_output.data<BFloat16>();
+        BFloat16* grad_w_data = grad_weight.data<BFloat16>();
+        for (int64_t i = 0; i < num_indices; ++i) {
+            int64_t idx = idx_data[i];
+            for (int64_t j = 0; j < embedding_dim; ++j) {
+                float val = static_cast<float>(grad_w_data[idx * embedding_dim + j]) +
+                            static_cast<float>(grad_data[i * embedding_dim + j]);
+                grad_w_data[idx * embedding_dim + j] = BFloat16(val);
+            }
+        }
+    } else {
+        throw std::runtime_error("embedding_backward: unsupported dtype");
     }
 
     return grad_weight;

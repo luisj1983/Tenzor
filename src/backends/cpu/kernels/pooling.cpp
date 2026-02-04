@@ -297,6 +297,11 @@ auto maxpool2d_forward_kernel(const Tensor& input, int64_t kernel_size,
     auto indices = Tensor::empty_uninitialized({N, C, H_out, W_out}, DType::Int64, input.device());
     int64_t* idx_data = indices.data<int64_t>();
 
+    // Note: oneDNN maxpool forward is defined but not dispatched here because
+    // oneDNN cannot produce indices, which are always required for backward pass.
+    // Computing output via oneDNN + indices via template impl would be no faster
+    // than computing both together in the template impl.
+
     if (input.dtype() == DType::Float32) {
         maxpool2d_forward_impl<float>(input.data<float>(), output.data<float>(), idx_data,
                                       N, C, H, W, H_out, W_out, kernel_size, stride, padding, dilation);
@@ -320,6 +325,7 @@ template<typename T>
 void maxpool2d_backward_impl(const T* grad_out_data, const int64_t* idx_data, T* grad_in_data,
                               int64_t N, int64_t C, int64_t H, int64_t W,
                               int64_t H_out, int64_t W_out) {
+    #pragma omp parallel for collapse(2) if(N * C > 4)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
             for (int64_t oh = 0; oh < H_out; ++oh) {
@@ -452,6 +458,7 @@ void avgpool2d_backward_impl(const T* grad_out_data, T* grad_in_data,
                               int64_t N, int64_t C, int64_t H, int64_t W,
                               int64_t H_out, int64_t W_out,
                               int64_t kernel_size, int64_t stride, int64_t padding) {
+    #pragma omp parallel for collapse(2) if(N * C > 4)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
             for (int64_t oh = 0; oh < H_out; ++oh) {
@@ -581,6 +588,7 @@ template<typename T>
 void adaptive_avgpool2d_backward_impl(const T* grad_out_data, T* grad_in_data,
                                        int64_t N, int64_t C, int64_t H, int64_t W,
                                        int64_t output_h, int64_t output_w) {
+    #pragma omp parallel for collapse(2) if(N * C > 4)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
             for (int64_t oh = 0; oh < output_h; ++oh) {
@@ -710,6 +718,7 @@ template<typename T>
 void adaptive_maxpool2d_backward_impl(const T* grad_out_data, const int64_t* idx_data, T* grad_in_data,
                                        int64_t N, int64_t C, int64_t H, int64_t W,
                                        int64_t output_h, int64_t output_w) {
+    #pragma omp parallel for collapse(2) if(N * C > 4)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
             for (int64_t oh = 0; oh < output_h; ++oh) {

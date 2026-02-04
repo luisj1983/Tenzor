@@ -330,6 +330,7 @@ auto fused_softmax_cross_entropy_kernel(
         float* losses_data = losses.data<float>();
         float* grad_data = compute_grad ? grad_logits.data<float>() : nullptr;
 
+        #pragma omp parallel for if(batch_size > 64)
         for (int64_t i = 0; i < batch_size; ++i) {
             const float* row = logits_data + i * num_classes;
 
@@ -349,9 +350,10 @@ auto fused_softmax_cross_entropy_kernel(
             // Compute loss for target class
             int64_t target = targets_data[i];
             if (target < 0 || target >= num_classes) {
-                throw std::runtime_error(
-                    "fused_softmax_cross_entropy: target index out of range"
-                );
+                // Can't throw from OpenMP parallel region safely,
+                // store sentinel and check after
+                losses_data[i] = std::numeric_limits<float>::quiet_NaN();
+                continue;
             }
             losses_data[i] = log_sum_exp - row[target];
 
@@ -370,8 +372,80 @@ auto fused_softmax_cross_entropy_kernel(
                 }
             }
         }
+        // Check for out-of-range targets (from OpenMP region)
+        for (int64_t i = 0; i < batch_size; ++i) {
+            if (std::isnan(losses_data[i])) {
+                throw std::runtime_error(
+                    "fused_softmax_cross_entropy: target index out of range"
+                );
+            }
+        }
+    } else if (logits.dtype() == DType::Float64) {
+        const double* logits_data = logits.data<double>();
+        const int64_t* targets_data = targets.data<int64_t>();
+        double* losses_data = losses.data<double>();
+        double* grad_data = compute_grad ? grad_logits.data<double>() : nullptr;
+
+        #pragma omp parallel for if(batch_size > 64)
+        for (int64_t i = 0; i < batch_size; ++i) {
+            const double* row = logits_data + i * num_classes;
+
+            double max_logit = row[0];
+            for (int64_t j = 1; j < num_classes; ++j) {
+                max_logit = std::max(max_logit, row[j]);
+            }
+
+            double sum_exp = 0.0;
+            for (int64_t j = 0; j < num_classes; ++j) {
+                sum_exp += std::exp(row[j] - max_logit);
+            }
+            double log_sum_exp = std::log(sum_exp) + max_logit;
+
+            int64_t target = targets_data[i];
+            if (target < 0 || target >= num_classes) {
+                losses_data[i] = std::numeric_limits<double>::quiet_NaN();
+                continue;
+            }
+            losses_data[i] = log_sum_exp - row[target];
+
+            if (compute_grad) {
+                double* grad_row = grad_data + i * num_classes;
+                double inv_sum_exp = 1.0 / sum_exp;
+                for (int64_t j = 0; j < num_classes; ++j) {
+                    grad_row[j] = std::exp(row[j] - max_logit) * inv_sum_exp;
+                }
+                grad_row[target] -= 1.0;
+                double scale = 1.0 / static_cast<double>(batch_size);
+                for (int64_t j = 0; j < num_classes; ++j) {
+                    grad_row[j] *= scale;
+                }
+            }
+        }
+        for (int64_t i = 0; i < batch_size; ++i) {
+            if (std::isnan(losses_data[i])) {
+                throw std::runtime_error(
+                    "fused_softmax_cross_entropy: target index out of range"
+                );
+            }
+        }
+    } else if (logits.dtype() == DType::Float16 || logits.dtype() == DType::BFloat16) {
+        // Convert to Float32 for precision, compute, then use Float32 loss
+        // Loss computation needs precision - keep output as Float32
+        Tensor logits_f32({batch_size, num_classes}, DType::Float32, logits.device());
+        float* lf32 = logits_f32.data<float>();
+        if (logits.dtype() == DType::Float16) {
+            const Float16* src = logits.data<Float16>();
+            for (int64_t i = 0; i < batch_size * num_classes; ++i)
+                lf32[i] = static_cast<float>(src[i]);
+        } else {
+            const BFloat16* src = logits.data<BFloat16>();
+            for (int64_t i = 0; i < batch_size * num_classes; ++i)
+                lf32[i] = static_cast<float>(src[i]);
+        }
+        auto result = fused_softmax_cross_entropy_kernel(logits_f32, targets, compute_grad);
+        return result;
     } else {
-        throw std::runtime_error("fused_softmax_cross_entropy: Only Float32 supported");
+        throw std::runtime_error("fused_softmax_cross_entropy: unsupported dtype");
     }
 
     // Apply mean reduction to loss (matching CUDA behavior)
@@ -507,31 +581,100 @@ auto fused_layer_norm_kernel(
         float* mean_data = mean_out.data<float>();
         float* inv_std_data = inv_std_out.data<float>();
 
+        #pragma omp parallel for if(batch_size > 64)
         for (int64_t b = 0; b < batch_size; ++b) {
             const float* batch_in = in_data + b * norm_size;
             float* batch_out = out_data + b * norm_size;
 
+            // Compute mean with AVX2
             float mean = 0.0f;
+#ifdef TENZOR_ATTN_AVX2
+            {
+                __m256 vsum = _mm256_setzero_ps();
+                int64_t i = 0;
+                for (; i + 8 <= norm_size; i += 8) {
+                    __m256 v = _mm256_loadu_ps(batch_in + i);
+                    vsum = _mm256_add_ps(vsum, v);
+                }
+                // Horizontal sum
+                __m128 hi = _mm256_extractf128_ps(vsum, 1);
+                __m128 lo = _mm256_castps256_ps128(vsum);
+                __m128 sum4 = _mm_add_ps(lo, hi);
+                sum4 = _mm_hadd_ps(sum4, sum4);
+                sum4 = _mm_hadd_ps(sum4, sum4);
+                mean = _mm_cvtss_f32(sum4);
+                // Scalar remainder
+                for (; i < norm_size; ++i) {
+                    mean += batch_in[i];
+                }
+            }
+#else
             for (int64_t i = 0; i < norm_size; ++i) {
                 mean += batch_in[i];
             }
+#endif
             mean /= norm_size;
 
+            // Compute variance with AVX2
             float variance = 0.0f;
+#ifdef TENZOR_ATTN_AVX2
+            {
+                __m256 vmean = _mm256_set1_ps(mean);
+                __m256 vvar = _mm256_setzero_ps();
+                int64_t i = 0;
+                for (; i + 8 <= norm_size; i += 8) {
+                    __m256 v = _mm256_loadu_ps(batch_in + i);
+                    __m256 diff = _mm256_sub_ps(v, vmean);
+                    vvar = _mm256_fmadd_ps(diff, diff, vvar);
+                }
+                __m128 hi = _mm256_extractf128_ps(vvar, 1);
+                __m128 lo = _mm256_castps256_ps128(vvar);
+                __m128 sum4 = _mm_add_ps(lo, hi);
+                sum4 = _mm_hadd_ps(sum4, sum4);
+                sum4 = _mm_hadd_ps(sum4, sum4);
+                variance = _mm_cvtss_f32(sum4);
+                for (; i < norm_size; ++i) {
+                    float diff = batch_in[i] - mean;
+                    variance += diff * diff;
+                }
+            }
+#else
             for (int64_t i = 0; i < norm_size; ++i) {
                 float diff = batch_in[i] - mean;
                 variance += diff * diff;
             }
+#endif
             variance /= norm_size;
 
             float inv_std = 1.0f / std::sqrt(variance + eps);
             mean_data[b] = mean;
             inv_std_data[b] = inv_std;
 
+            // Normalize with AVX2
+#ifdef TENZOR_ATTN_AVX2
+            {
+                __m256 vmean = _mm256_set1_ps(mean);
+                __m256 vinv = _mm256_set1_ps(inv_std);
+                int64_t i = 0;
+                for (; i + 8 <= norm_size; i += 8) {
+                    __m256 v = _mm256_loadu_ps(batch_in + i);
+                    __m256 w = _mm256_loadu_ps(weight_data + i);
+                    __m256 bi = _mm256_loadu_ps(bias_data + i);
+                    __m256 normed = _mm256_mul_ps(_mm256_sub_ps(v, vmean), vinv);
+                    __m256 out = _mm256_fmadd_ps(normed, w, bi);
+                    _mm256_storeu_ps(batch_out + i, out);
+                }
+                for (; i < norm_size; ++i) {
+                    float normalized = (batch_in[i] - mean) * inv_std;
+                    batch_out[i] = normalized * weight_data[i] + bias_data[i];
+                }
+            }
+#else
             for (int64_t i = 0; i < norm_size; ++i) {
                 float normalized = (batch_in[i] - mean) * inv_std;
                 batch_out[i] = normalized * weight_data[i] + bias_data[i];
             }
+#endif
         }
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
@@ -541,6 +684,7 @@ auto fused_layer_norm_kernel(
         double* mean_data = mean_out.data<double>();
         double* inv_std_data = inv_std_out.data<double>();
 
+        #pragma omp parallel for if(batch_size > 64)
         for (int64_t b = 0; b < batch_size; ++b) {
             const double* batch_in = in_data + b * norm_size;
             double* batch_out = out_data + b * norm_size;
@@ -638,19 +782,55 @@ auto fused_rms_norm_kernel(const Tensor& input, const Tensor& weight, float eps)
             const float* x = in_data + b * norm_size;
             float* y = out_data + b * norm_size;
 
-            // Compute mean(x^2)
+            // Compute mean(x^2) with AVX2 FMA
             float sum_sq = 0.0f;
+#ifdef TENZOR_ATTN_AVX2
+            {
+                __m256 vsum = _mm256_setzero_ps();
+                int64_t i = 0;
+                for (; i + 8 <= norm_size; i += 8) {
+                    __m256 v = _mm256_loadu_ps(x + i);
+                    vsum = _mm256_fmadd_ps(v, v, vsum);
+                }
+                __m128 hi = _mm256_extractf128_ps(vsum, 1);
+                __m128 lo = _mm256_castps256_ps128(vsum);
+                __m128 sum4 = _mm_add_ps(lo, hi);
+                sum4 = _mm_hadd_ps(sum4, sum4);
+                sum4 = _mm_hadd_ps(sum4, sum4);
+                sum_sq = _mm_cvtss_f32(sum4);
+                for (; i < norm_size; ++i) {
+                    sum_sq += x[i] * x[i];
+                }
+            }
+#else
             for (int64_t i = 0; i < norm_size; ++i) {
                 sum_sq += x[i] * x[i];
             }
+#endif
             float mean_sq = sum_sq / static_cast<float>(norm_size);
             float inv_rms = 1.0f / std::sqrt(mean_sq + eps);
             rrms_data[b] = inv_rms;
 
-            // Apply normalization and weight
+            // Apply normalization and weight with AVX2
+#ifdef TENZOR_ATTN_AVX2
+            {
+                __m256 vinv = _mm256_set1_ps(inv_rms);
+                int64_t i = 0;
+                for (; i + 8 <= norm_size; i += 8) {
+                    __m256 vx = _mm256_loadu_ps(x + i);
+                    __m256 vw = _mm256_loadu_ps(w_data + i);
+                    __m256 out = _mm256_mul_ps(_mm256_mul_ps(vx, vinv), vw);
+                    _mm256_storeu_ps(y + i, out);
+                }
+                for (; i < norm_size; ++i) {
+                    y[i] = x[i] * inv_rms * w_data[i];
+                }
+            }
+#else
             for (int64_t i = 0; i < norm_size; ++i) {
                 y[i] = x[i] * inv_rms * w_data[i];
             }
+#endif
         }
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
@@ -1462,6 +1642,36 @@ auto fused_adam_atan2_step_kernel(Tensor& param, const Tensor& grad,
             // Use atan2 for numerically stable update
             float update = std::atan2(m[i], std::sqrt(v_hat) + eps);
             p[i] -= step_size * update;
+        }
+    } else if (param.dtype() == DType::Float64) {
+        double* p = param.data<double>();
+        const double* g = grad.data<double>();
+        double* m = exp_avg.data<double>();
+        double* v = exp_avg_sq.data<double>();
+        double* v_max = (amsgrad && max_exp_avg_sq) ? max_exp_avg_sq->data<double>() : nullptr;
+
+        double d_bias_correction2 = 1.0 - std::pow(static_cast<double>(beta2), static_cast<double>(step));
+        double d_step_size = static_cast<double>(lr) / (1.0 - std::pow(static_cast<double>(beta1), static_cast<double>(step)));
+
+        #pragma omp parallel for if(n > 32768)
+        for (int64_t i = 0; i < n; ++i) {
+            double grad_val = g[i];
+            if (weight_decay != 0.0f) {
+                p[i] *= 1.0 - static_cast<double>(lr) * static_cast<double>(weight_decay);
+            }
+            m[i] = static_cast<double>(beta1) * m[i] + (1.0 - static_cast<double>(beta1)) * grad_val;
+            v[i] = static_cast<double>(beta2) * v[i] + (1.0 - static_cast<double>(beta2)) * grad_val * grad_val;
+
+            double v_hat;
+            if (amsgrad && v_max) {
+                v_max[i] = std::max(v_max[i], v[i]);
+                v_hat = v_max[i] / d_bias_correction2;
+            } else {
+                v_hat = v[i] / d_bias_correction2;
+            }
+
+            double update = std::atan2(m[i], std::sqrt(v_hat) + static_cast<double>(eps));
+            p[i] -= d_step_size * update;
         }
     }
 }
