@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <charconv>
 #include <climits>
+#include <cstdint>
 #include <tuple>
 
 namespace tenzor {
@@ -132,6 +133,7 @@ namespace cpu {
     auto masked_fill_kernel(const Tensor& input, const Tensor& mask, float value) -> Tensor;
     auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y) -> Tensor;
     auto slice_kernel(const Tensor& input, int64_t dim, int64_t start, int64_t end, int64_t step) -> Tensor;
+    auto slice_multi_kernel(const Tensor& input, const std::vector<int64_t>& starts, const std::vector<int64_t>& ends, const std::vector<int64_t>& steps) -> Tensor;
     auto cat_kernel(const std::vector<Tensor>& tensors, int64_t dim) -> Tensor;
 
     // Normalization
@@ -141,6 +143,7 @@ namespace cpu {
     auto batchnorm2d_update_running_stats_kernel(Tensor& running_mean, Tensor& running_var, const Tensor& batch_mean, const Tensor& batch_var, float momentum) -> void;
     auto batchnorm2d_backward_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& mean, const Tensor& variance, const Tensor& gamma, float epsilon) -> std::vector<Tensor>;
     auto layer_norm_kernel(const Tensor& input, const std::vector<int64_t>& normalized_shape, const Tensor& weight, const Tensor& bias, float eps) -> Tensor;
+    auto layer_norm_kernel_with_stats(const Tensor& input, const std::vector<int64_t>& normalized_shape, const Tensor& weight, const Tensor& bias, float eps) -> std::tuple<Tensor, Tensor, Tensor>;
     auto layer_norm_backward_kernel(const Tensor& grad_output, const Tensor& input, const std::vector<int64_t>& normalized_shape, const Tensor& mean, const Tensor& rstd, const Tensor& weight) -> std::vector<Tensor>;
     auto group_norm_kernel(const Tensor& input, int64_t num_groups, const Tensor& weight, const Tensor& bias, float eps) -> Tensor;
     auto group_norm_backward_kernel(const Tensor& grad_output, const Tensor& input, int64_t num_groups, const Tensor& mean, const Tensor& rstd, const Tensor& weight) -> std::vector<Tensor>;
@@ -156,7 +159,7 @@ namespace cpu {
     auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation) -> Tensor;
 
     // Pooling
-    auto maxpool2d_forward_kernel(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding) -> std::pair<Tensor, Tensor>;
+    auto maxpool2d_forward_kernel(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation = 1) -> std::pair<Tensor, Tensor>;
     auto maxpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape) -> Tensor;
     auto avgpool2d_forward_kernel(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding) -> Tensor;
     auto avgpool2d_backward_kernel(const Tensor& grad_output, const std::vector<int64_t>& input_shape, int64_t kernel_size, int64_t stride, int64_t padding) -> Tensor;
@@ -167,7 +170,7 @@ namespace cpu {
 
     // Fused operations
     auto fused_linear_relu_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias) -> Tensor;
-    auto fused_conv2d_relu_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding) -> Tensor;
+    auto fused_conv2d_relu_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
     auto fused_batchnorm_relu_kernel(const Tensor& input, const Tensor& running_mean, const Tensor& running_var, const Tensor& weight, const Tensor& bias, float eps) -> Tensor;
     auto fused_softmax_cross_entropy_kernel(const Tensor& logits, const Tensor& targets, const std::string& reduction) -> Tensor;
     auto fused_add_relu_kernel(const Tensor& a, const Tensor& b) -> Tensor;
@@ -412,16 +415,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     TENZOR_REGISTER_REDUCTION_KERNEL(table, ArgMin, cpu::argmin_kernel);
     TENZOR_REGISTER_REDUCTION_KERNEL(table, Prod, cpu::prod_kernel);
 
-    // Use LLONG_MIN as sentinel for "reduce all dimensions" (no dim specified)
+    // Use INT64_MIN as sentinel for "reduce all dimensions" (no dim specified)
     table.register_kernel(OpId::Var, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", LLONG_MIN);
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", INT64_MIN);
         bool keepdim = parse_attr<bool>(attrs, "keepdim", false);
         int64_t correction = parse_attr<int64_t>(attrs, "correction", 1);
         return std::vector<Tensor>{cpu::var_kernel(inputs[0], dim, keepdim, correction)};
     });
 
     table.register_kernel(OpId::Std, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", LLONG_MIN);
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", INT64_MIN);
         bool keepdim = parse_attr<bool>(attrs, "keepdim", false);
         int64_t correction = parse_attr<int64_t>(attrs, "correction", 1);
         return std::vector<Tensor>{cpu::std_kernel(inputs[0], dim, keepdim, correction)};
@@ -429,7 +432,7 @@ void register_cpu_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Norm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         float p = parse_attr<float>(attrs, "p", 2.0f);
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", LLONG_MIN);
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", INT64_MIN);
         bool keepdim = parse_attr<bool>(attrs, "keepdim", false);
         return std::vector<Tensor>{cpu::norm_kernel(inputs[0], p, dim, keepdim)};
     });
@@ -632,13 +635,20 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     TENZOR_REGISTER_BINARY_KERNEL(table, MaskedSelect, cpu::masked_select_kernel);
 
     table.register_kernel(OpId::MaskedFill, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float value = parse_attr<float>(attrs, "value", 0.0f);
-        return std::vector<Tensor>{cpu::masked_fill_kernel(inputs[0], inputs[1], value)};
+        double value = parse_attr<double>(attrs, "value", 0.0);
+        return std::vector<Tensor>{cpu::masked_fill_kernel(inputs[0], inputs[1], static_cast<float>(value))};
     });
 
     TENZOR_REGISTER_TERNARY_KERNEL(table, Where, cpu::where_kernel);
 
     table.register_kernel(OpId::Slice, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // Support both multi-dim format (CUDA-compatible) and single-dim format
+        if (attrs.contains("starts")) {
+            auto starts = parse_int_list(attrs, "starts");
+            auto ends = parse_int_list(attrs, "ends");
+            auto steps = parse_int_list(attrs, "steps");
+            return std::vector<Tensor>{cpu::slice_multi_kernel(inputs[0], starts, ends, steps)};
+        }
         int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
         int64_t start = parse_attr<int64_t>(attrs, "start", 0);
         int64_t end = parse_attr<int64_t>(attrs, "end", -1);
@@ -686,10 +696,12 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     });
 
     // Register both multi-output and single-output versions for LayerNorm
+    // Multi-output returns {output, mean, rstd} to match CUDA backend (needed for backward pass)
     table.register_kernel(OpId::LayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto normalized_shape = parse_int_list(attrs, "normalized_shape");
         float eps = parse_attr<float>(attrs, "eps", 1e-5f);
-        return std::vector<Tensor>{cpu::layer_norm_kernel(inputs[0], normalized_shape, inputs[1], inputs[2], eps)};
+        auto [output, mean, rstd] = cpu::layer_norm_kernel_with_stats(inputs[0], normalized_shape, inputs[1], inputs[2], eps);
+        return std::vector<Tensor>{output, mean, rstd};
     });
 
     // Single-output version for optimized dispatch (no vector allocation)
@@ -786,7 +798,8 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         int64_t kernel_size = parse_attr<int64_t>(attrs, "kernel_size", 2);
         int64_t stride = parse_attr<int64_t>(attrs, "stride", kernel_size);
         int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-        auto [output, indices] = cpu::maxpool2d_forward_kernel(inputs[0], kernel_size, stride, padding);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        auto [output, indices] = cpu::maxpool2d_forward_kernel(inputs[0], kernel_size, stride, padding, dilation);
         return std::vector<Tensor>{output, indices};
     });
 
@@ -844,8 +857,10 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::FusedConv2dReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
         int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
-        return std::vector<Tensor>{cpu::fused_conv2d_relu_kernel(inputs[0], inputs[1], bias, stride, padding)};
+        return std::vector<Tensor>{cpu::fused_conv2d_relu_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups)};
     });
 
     table.register_kernel(OpId::FusedBatchNormReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {

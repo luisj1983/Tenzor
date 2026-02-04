@@ -241,7 +241,7 @@ static bool onednn_avgpool2d_forward(
 #endif // TENZOR_USE_ONEDNN
 
 auto maxpool2d_forward_kernel(const Tensor& input, int64_t kernel_size,
-                               int64_t stride, int64_t padding)
+                               int64_t stride, int64_t padding, int64_t dilation)
     -> std::pair<Tensor, Tensor> {
     auto shape = input.shape();
     int64_t N = shape[0];
@@ -249,8 +249,8 @@ auto maxpool2d_forward_kernel(const Tensor& input, int64_t kernel_size,
     int64_t H = shape[2];
     int64_t W = shape[3];
 
-    int64_t H_out = (H + 2 * padding - kernel_size) / stride + 1;
-    int64_t W_out = (W + 2 * padding - kernel_size) / stride + 1;
+    int64_t H_out = (H + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+    int64_t W_out = (W + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
 
     auto output = Tensor::empty_uninitialized({N, C, H_out, W_out}, input.dtype(), input.device());
     auto indices = Tensor::empty_uninitialized({N, C, H_out, W_out}, DType::Int64, input.device());
@@ -272,8 +272,8 @@ auto maxpool2d_forward_kernel(const Tensor& input, int64_t kernel_size,
 
                     for (int64_t kh = 0; kh < kernel_size; ++kh) {
                         for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                            int64_t h = h_start + kh;
-                            int64_t w = w_start + kw;
+                            int64_t h = h_start + kh * dilation;
+                            int64_t w = w_start + kw * dilation;
 
                             if (h >= 0 && h < H && w >= 0 && w < W) {
                                 int64_t in_idx = ((n * C + c) * H + h) * W + w;

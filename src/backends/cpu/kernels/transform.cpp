@@ -446,6 +446,17 @@ auto slice_kernel(const Tensor& input, int64_t dim, int64_t start, int64_t end, 
     return output;
 }
 
+auto slice_multi_kernel(const Tensor& input,
+                        const std::vector<int64_t>& starts,
+                        const std::vector<int64_t>& ends,
+                        const std::vector<int64_t>& steps) -> Tensor {
+    Tensor result = input;
+    for (size_t d = 0; d < starts.size(); ++d) {
+        result = slice_kernel(result, static_cast<int64_t>(d), starts[d], ends[d], steps[d]);
+    }
+    return result;
+}
+
 auto expand_kernel(const Tensor& input, const std::vector<int64_t>& target_shape) -> Tensor {
     // Expand creates a view with stride=0 for broadcast dimensions
     const auto& in_shape = input.shape();

@@ -939,6 +939,32 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{grad_input, grad_gamma, grad_beta};
     });
 #else
+    // Fallback: compose batchnorm2d operations when cuDNN is unavailable
+    table.register_kernel(OpId::BatchNorm2dFusedTraining, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [input, running_mean, running_var, gamma, beta]
+        float epsilon = parse_attr<float>(attrs, "epsilon", 1e-5f);
+        float momentum = parse_attr<float>(attrs, "momentum", 0.1f);
+        auto stream = get_cuda_stream(attrs);
+
+        // Compute batch mean and variance
+        Tensor batch_mean = tenzor::zeros({inputs[0].shape()[1]}, inputs[0].dtype(), inputs[0].device());
+        Tensor batch_var = tenzor::zeros({inputs[0].shape()[1]}, inputs[0].dtype(), inputs[0].device());
+        cuda::batchnorm2d_mean_var(inputs[0], batch_mean, batch_var, stream);
+
+        // Forward with affine transform
+        Tensor output = cuda::batchnorm2d_forward_affine(inputs[0], batch_mean, batch_var, inputs[3], inputs[4], epsilon, stream);
+
+        // Update running stats
+        Tensor running_mean = inputs[1];
+        Tensor running_var = inputs[2];
+        cuda::batchnorm2d_update_running_stats(running_mean, running_var, batch_mean, batch_var, momentum, stream);
+
+        // Compute saved_inv_var for backward pass
+        // inv_var = 1 / sqrt(var + eps) — computed on device via existing kernels
+        // For simplicity, use the batch_var directly (backward will recompute inv_var)
+        return std::vector<Tensor>{output, running_mean, running_var, batch_mean, batch_var};
+    });
+
     // Custom CUDA kernel backward - fallback when cuDNN is not available
     table.register_kernel(OpId::BatchNorm2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [grad_output, input, mean, variance, gamma]
@@ -1155,6 +1181,44 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return cuda::cudnn_fused_conv2d_swish_forward(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
+    });
+#else
+    // Fallback: compose conv2d + activation when cuDNN is unavailable
+    table.register_single_output_kernel(OpId::FusedConv2dReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        Tensor result = cuda::conv2d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
+        return cuda::relu_kernel(result, get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::FusedConv2dSigmoid, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        Tensor result = cuda::conv2d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
+        return cuda::sigmoid_kernel(result, get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::FusedConv2dTanh, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        Tensor result = cuda::conv2d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
+        return cuda::tanh_kernel(result, get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::FusedConv2dSwish, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        Tensor result = cuda::conv2d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
+        return cuda::swish_kernel(result, get_cuda_stream(attrs));
     });
 #endif
 
