@@ -9,6 +9,7 @@
 #include "simd_fast_math.hpp"
 #include <cstring>
 #include <stdexcept>
+#include <type_traits>
 
 // SIMD support detection
 #if defined(__AVX512F__)
@@ -25,6 +26,129 @@
 
 namespace tenzor {
 namespace cpu {
+
+namespace detail {
+
+// Template helper for index_select inner loop (pure copy, no arithmetic)
+template<typename T>
+void index_select_impl(const T* in_data, T* out_data,
+                       const int64_t* index_data, int64_t num_indices,
+                       int64_t outer_size, int64_t inner_size,
+                       std::span<const int64_t> in_shape,
+                       std::span<const int64_t> in_strides,
+                       std::span<const int64_t> out_strides,
+                       int64_t dim) {
+    for (int64_t outer = 0; outer < outer_size; ++outer) {
+        for (int64_t idx = 0; idx < num_indices; ++idx) {
+            int64_t src_idx = index_data[idx];
+            if (src_idx < 0) src_idx += in_shape[dim];
+            if (src_idx < 0 || src_idx >= in_shape[dim]) {
+                throw std::out_of_range("index_select: index out of range");
+            }
+            for (int64_t inner = 0; inner < inner_size; ++inner) {
+                int64_t in_offset = outer * in_strides[dim] * in_shape[dim] +
+                                   src_idx * in_strides[dim] + inner;
+                int64_t out_offset = outer * out_strides[dim] * num_indices +
+                                    idx * out_strides[dim] + inner;
+                out_data[out_offset] = in_data[in_offset];
+            }
+        }
+    }
+}
+
+// Template helper for gather inner loop
+template<typename T>
+void gather_impl(const T* input_ptr, T* output_ptr,
+                 const int64_t* index_ptr, int64_t numel,
+                 const std::vector<int64_t>& input_shape,
+                 const std::vector<int64_t>& input_strides,
+                 const std::vector<int64_t>& index_strides,
+                 size_t ndims, int64_t dim) {
+    for (int64_t flat_idx = 0; flat_idx < numel; ++flat_idx) {
+        int64_t temp = flat_idx;
+        int64_t input_idx = 0;
+        for (size_t d = 0; d < ndims; ++d) {
+            int64_t coord = temp / index_strides[d];
+            temp %= index_strides[d];
+            if (static_cast<int64_t>(d) == dim) {
+                int64_t idx_val = index_ptr[flat_idx];
+                if (idx_val < 0) idx_val += input_shape[d];
+                input_idx += idx_val * input_strides[d];
+            } else {
+                input_idx += coord * input_strides[d];
+            }
+        }
+        output_ptr[flat_idx] = input_ptr[input_idx];
+    }
+}
+
+// Template helper for scatter inner loop
+template<typename T>
+void scatter_impl(const T* input_ptr, T* output_ptr, const T* src_ptr,
+                  const int64_t* index_ptr, int64_t input_numel, int64_t index_numel,
+                  const std::vector<int64_t>& input_shape,
+                  const std::vector<int64_t>& input_strides,
+                  const std::vector<int64_t>& index_strides,
+                  size_t ndims, int64_t dim) {
+    std::memcpy(output_ptr, input_ptr, input_numel * sizeof(T));
+    for (int64_t flat_idx = 0; flat_idx < index_numel; ++flat_idx) {
+        int64_t temp = flat_idx;
+        int64_t output_idx = 0;
+        for (size_t d = 0; d < ndims; ++d) {
+            int64_t coord = temp / index_strides[d];
+            temp %= index_strides[d];
+            if (static_cast<int64_t>(d) == dim) {
+                int64_t idx_val = index_ptr[flat_idx];
+                if (idx_val < 0) idx_val += input_shape[d];
+                output_idx += idx_val * input_strides[d];
+            } else {
+                output_idx += coord * input_strides[d];
+            }
+        }
+        output_ptr[output_idx] = src_ptr[flat_idx];
+    }
+}
+
+// Template helper for masked_select
+template<typename T, typename MaskFn>
+void masked_select_impl(const T* input_ptr, T* output_ptr,
+                        int64_t numel, MaskFn is_mask_true) {
+    int64_t out_idx = 0;
+    for (int64_t i = 0; i < numel; ++i) {
+        if (is_mask_true(i)) {
+            output_ptr[out_idx++] = input_ptr[i];
+        }
+    }
+}
+
+// Template helper for where
+template<typename T, typename CondFn>
+void where_impl(const T* x_ptr, const T* y_ptr, T* output_ptr,
+                int64_t numel, CondFn is_cond_true) {
+    for (int64_t i = 0; i < numel; ++i) {
+        output_ptr[i] = is_cond_true(i) ? x_ptr[i] : y_ptr[i];
+    }
+}
+
+// Template helper for nonzero - default uses memcmp against zero
+template<typename T>
+void nonzero_impl(const T* data, int64_t numel, std::vector<int64_t>& nz_indices) {
+    if constexpr (std::is_same_v<T, bool>) {
+        for (int64_t i = 0; i < numel; ++i) {
+            if (data[i]) nz_indices.push_back(i);
+        }
+    } else if constexpr (std::is_same_v<T, Float16> || std::is_same_v<T, BFloat16>) {
+        for (int64_t i = 0; i < numel; ++i) {
+            if (static_cast<float>(data[i]) != 0.0f) nz_indices.push_back(i);
+        }
+    } else {
+        for (int64_t i = 0; i < numel; ++i) {
+            if (data[i] != T(0)) nz_indices.push_back(i);
+        }
+    }
+}
+
+} // namespace detail
 
 /**
  * @brief Select elements along a dimension using an index tensor
@@ -88,152 +212,30 @@ auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index) 
     // Size of one element along the selected dimension
     const int64_t elem_size = inner_size * dtype_size(input.dtype());
 
-    // Perform the selection based on dtype
-    if (input.dtype() == DType::Float32) {
-        const float* in_data = input.data<float>();
-        float* out_data = output.data<float>();
-
-        for (int64_t outer = 0; outer < outer_size; ++outer) {
-            for (int64_t idx = 0; idx < num_indices; ++idx) {
-                int64_t src_idx = index_data[idx];
-
-                // Handle negative indices
-                if (src_idx < 0) {
-                    src_idx += in_shape[dim];
-                }
-
-                // Validate index
-                if (src_idx < 0 || src_idx >= in_shape[dim]) {
-                    std::string error_msg = "index_select: index out of range. ";
-                    error_msg += "Index: " + std::to_string(src_idx) + ", ";
-                    error_msg += "Valid range: [0, " + std::to_string(in_shape[dim]) + "), ";
-                    error_msg += "Input shape: [";
-                    for (size_t i = 0; i < in_shape.size(); ++i) {
-                        if (i > 0) error_msg += ", ";
-                        error_msg += std::to_string(in_shape[i]);
-                    }
-                    error_msg += "], dim: " + std::to_string(dim);
-                    throw std::out_of_range(error_msg);
-                }
-
-                // Copy elements
-                for (int64_t inner = 0; inner < inner_size; ++inner) {
-                    int64_t in_offset = outer * in_strides[dim] * in_shape[dim] +
-                                       src_idx * in_strides[dim] + inner;
-                    int64_t out_offset = outer * out_strides[dim] * num_indices +
-                                        idx * out_strides[dim] + inner;
-                    out_data[out_offset] = in_data[in_offset];
-                }
-            }
+    // Perform the selection based on dtype using template helper
+    // Macro to reduce repetition for pure-copy index_select dispatch
+    #define INDEX_SELECT_DISPATCH(DTYPE_ENUM, CPP_TYPE) \
+        if (input.dtype() == DTYPE_ENUM) { \
+            detail::index_select_impl(input.data<CPP_TYPE>(), output.data<CPP_TYPE>(), \
+                index_data, num_indices, outer_size, inner_size, \
+                in_shape, in_strides, out_strides, dim); \
         }
-    } else if (input.dtype() == DType::Float64) {
-        const double* in_data = input.data<double>();
-        double* out_data = output.data<double>();
 
-        for (int64_t outer = 0; outer < outer_size; ++outer) {
-            for (int64_t idx = 0; idx < num_indices; ++idx) {
-                int64_t src_idx = index_data[idx];
-                if (src_idx < 0) src_idx += in_shape[dim];
-                if (src_idx < 0 || src_idx >= in_shape[dim]) {
-                    throw std::out_of_range("index_select: index out of range");
-                }
-
-                for (int64_t inner = 0; inner < inner_size; ++inner) {
-                    int64_t in_offset = outer * in_strides[dim] * in_shape[dim] +
-                                       src_idx * in_strides[dim] + inner;
-                    int64_t out_offset = outer * out_strides[dim] * num_indices +
-                                        idx * out_strides[dim] + inner;
-                    out_data[out_offset] = in_data[in_offset];
-                }
-            }
-        }
-    } else if (input.dtype() == DType::Int32) {
-        const int32_t* in_data = input.data<int32_t>();
-        int32_t* out_data = output.data<int32_t>();
-
-        for (int64_t outer = 0; outer < outer_size; ++outer) {
-            for (int64_t idx = 0; idx < num_indices; ++idx) {
-                int64_t src_idx = index_data[idx];
-                if (src_idx < 0) src_idx += in_shape[dim];
-                if (src_idx < 0 || src_idx >= in_shape[dim]) {
-                    throw std::out_of_range("index_select: index out of range");
-                }
-
-                for (int64_t inner = 0; inner < inner_size; ++inner) {
-                    int64_t in_offset = outer * in_strides[dim] * in_shape[dim] +
-                                       src_idx * in_strides[dim] + inner;
-                    int64_t out_offset = outer * out_strides[dim] * num_indices +
-                                        idx * out_strides[dim] + inner;
-                    out_data[out_offset] = in_data[in_offset];
-                }
-            }
-        }
-    } else if (input.dtype() == DType::Int64) {
-        const int64_t* in_data = input.data<int64_t>();
-        int64_t* out_data = output.data<int64_t>();
-
-        for (int64_t outer = 0; outer < outer_size; ++outer) {
-            for (int64_t idx = 0; idx < num_indices; ++idx) {
-                int64_t src_idx = index_data[idx];
-                if (src_idx < 0) src_idx += in_shape[dim];
-                if (src_idx < 0 || src_idx >= in_shape[dim]) {
-                    throw std::out_of_range("index_select: index out of range");
-                }
-
-                for (int64_t inner = 0; inner < inner_size; ++inner) {
-                    int64_t in_offset = outer * in_strides[dim] * in_shape[dim] +
-                                       src_idx * in_strides[dim] + inner;
-                    int64_t out_offset = outer * out_strides[dim] * num_indices +
-                                        idx * out_strides[dim] + inner;
-                    out_data[out_offset] = in_data[in_offset];
-                }
-            }
-        }
-    } else if (input.dtype() == DType::Bool) {
-        const bool* in_data = input.data<bool>();
-        bool* out_data = output.data<bool>();
-
-        for (int64_t outer = 0; outer < outer_size; ++outer) {
-            for (int64_t idx = 0; idx < num_indices; ++idx) {
-                int64_t src_idx = index_data[idx];
-                if (src_idx < 0) src_idx += in_shape[dim];
-                if (src_idx < 0 || src_idx >= in_shape[dim]) {
-                    throw std::out_of_range("index_select: index out of range");
-                }
-
-                for (int64_t inner = 0; inner < inner_size; ++inner) {
-                    int64_t in_offset = outer * in_strides[dim] * in_shape[dim] +
-                                       src_idx * in_strides[dim] + inner;
-                    int64_t out_offset = outer * out_strides[dim] * num_indices +
-                                        idx * out_strides[dim] + inner;
-                    out_data[out_offset] = in_data[in_offset];
-                }
-            }
-        }
-    } else if (input.dtype() == DType::Float16) {
-        const Float16* in_data = input.data<Float16>();
-        Float16* out_data = output.data<Float16>();
-
-        for (int64_t outer = 0; outer < outer_size; ++outer) {
-            for (int64_t idx = 0; idx < num_indices; ++idx) {
-                int64_t src_idx = index_data[idx];
-                if (src_idx < 0) src_idx += in_shape[dim];
-                if (src_idx < 0 || src_idx >= in_shape[dim]) {
-                    throw std::out_of_range("index_select: index out of range");
-                }
-
-                for (int64_t inner = 0; inner < inner_size; ++inner) {
-                    int64_t in_offset = outer * in_strides[dim] * in_shape[dim] +
-                                       src_idx * in_strides[dim] + inner;
-                    int64_t out_offset = outer * out_strides[dim] * num_indices +
-                                        idx * out_strides[dim] + inner;
-                    out_data[out_offset] = in_data[in_offset];
-                }
-            }
-        }
-    } else {
+    if (false) {}
+    else INDEX_SELECT_DISPATCH(DType::Float32, float)
+    else INDEX_SELECT_DISPATCH(DType::Float64, double)
+    else INDEX_SELECT_DISPATCH(DType::Float16, Float16)
+    else INDEX_SELECT_DISPATCH(DType::BFloat16, BFloat16)
+    else INDEX_SELECT_DISPATCH(DType::Int32, int32_t)
+    else INDEX_SELECT_DISPATCH(DType::Int64, int64_t)
+    else INDEX_SELECT_DISPATCH(DType::Int8, int8_t)
+    else INDEX_SELECT_DISPATCH(DType::UInt8, uint8_t)
+    else INDEX_SELECT_DISPATCH(DType::Bool, bool)
+    else {
         throw std::runtime_error("index_select: unsupported dtype");
     }
+
+    #undef INDEX_SELECT_DISPATCH
 
     return output;
 }
@@ -283,126 +285,27 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index) -> Ten
 
     const int64_t* index_ptr = index.data<int64_t>();
 
-    if (input.dtype() == DType::Float32) {
-        const float* input_ptr = input.data<float>();
-        float* output_ptr = output.data<float>();
-
-        for (int64_t flat_idx = 0; flat_idx < numel; ++flat_idx) {
-            // Compute multi-dimensional index in output
-            int64_t temp = flat_idx;
-            int64_t input_idx = 0;
-
-            for (size_t d = 0; d < ndims; ++d) {
-                int64_t coord = temp / index_strides[d];
-                temp %= index_strides[d];
-
-                if (static_cast<int64_t>(d) == dim) {
-                    // Use index tensor to determine coordinate
-                    int64_t idx_val = index_ptr[flat_idx];
-                    if (idx_val < 0) idx_val += input_shape[d];
-                    input_idx += idx_val * input_strides[d];
-                } else {
-                    input_idx += coord * input_strides[d];
-                }
-            }
-
-            output_ptr[flat_idx] = input_ptr[input_idx];
+    #define GATHER_DISPATCH(DTYPE_ENUM, CPP_TYPE) \
+        if (input.dtype() == DTYPE_ENUM) { \
+            detail::gather_impl(input.data<CPP_TYPE>(), output.data<CPP_TYPE>(), \
+                index_ptr, numel, input_shape, input_strides, index_strides, ndims, dim); \
         }
-    } else if (input.dtype() == DType::Float64) {
-        const double* input_ptr = input.data<double>();
-        double* output_ptr = output.data<double>();
 
-        for (int64_t flat_idx = 0; flat_idx < numel; ++flat_idx) {
-            int64_t temp = flat_idx;
-            int64_t input_idx = 0;
-
-            for (size_t d = 0; d < ndims; ++d) {
-                int64_t coord = temp / index_strides[d];
-                temp %= index_strides[d];
-
-                if (static_cast<int64_t>(d) == dim) {
-                    int64_t idx_val = index_ptr[flat_idx];
-                    if (idx_val < 0) idx_val += input_shape[d];
-                    input_idx += idx_val * input_strides[d];
-                } else {
-                    input_idx += coord * input_strides[d];
-                }
-            }
-
-            output_ptr[flat_idx] = input_ptr[input_idx];
-        }
-    } else if (input.dtype() == DType::Int32) {
-        const int32_t* input_ptr = input.data<int32_t>();
-        int32_t* output_ptr = output.data<int32_t>();
-
-        for (int64_t flat_idx = 0; flat_idx < numel; ++flat_idx) {
-            int64_t temp = flat_idx;
-            int64_t input_idx = 0;
-
-            for (size_t d = 0; d < ndims; ++d) {
-                int64_t coord = temp / index_strides[d];
-                temp %= index_strides[d];
-
-                if (static_cast<int64_t>(d) == dim) {
-                    int64_t idx_val = index_ptr[flat_idx];
-                    if (idx_val < 0) idx_val += input_shape[d];
-                    input_idx += idx_val * input_strides[d];
-                } else {
-                    input_idx += coord * input_strides[d];
-                }
-            }
-
-            output_ptr[flat_idx] = input_ptr[input_idx];
-        }
-    } else if (input.dtype() == DType::Int64) {
-        const int64_t* input_ptr = input.data<int64_t>();
-        int64_t* output_ptr = output.data<int64_t>();
-
-        for (int64_t flat_idx = 0; flat_idx < numel; ++flat_idx) {
-            int64_t temp = flat_idx;
-            int64_t input_idx = 0;
-
-            for (size_t d = 0; d < ndims; ++d) {
-                int64_t coord = temp / index_strides[d];
-                temp %= index_strides[d];
-
-                if (static_cast<int64_t>(d) == dim) {
-                    int64_t idx_val = index_ptr[flat_idx];
-                    if (idx_val < 0) idx_val += input_shape[d];
-                    input_idx += idx_val * input_strides[d];
-                } else {
-                    input_idx += coord * input_strides[d];
-                }
-            }
-
-            output_ptr[flat_idx] = input_ptr[input_idx];
-        }
-    } else if (input.dtype() == DType::Bool) {
-        const bool* input_ptr = input.data<bool>();
-        bool* output_ptr = output.data<bool>();
-
-        for (int64_t flat_idx = 0; flat_idx < numel; ++flat_idx) {
-            int64_t temp = flat_idx;
-            int64_t input_idx = 0;
-
-            for (size_t d = 0; d < ndims; ++d) {
-                int64_t coord = temp / index_strides[d];
-                temp %= index_strides[d];
-
-                if (static_cast<int64_t>(d) == dim) {
-                    int64_t idx_val = index_ptr[flat_idx];
-                    if (idx_val < 0) idx_val += input_shape[d];
-                    input_idx += idx_val * input_strides[d];
-                } else {
-                    input_idx += coord * input_strides[d];
-                }
-            }
-
-            output_ptr[flat_idx] = input_ptr[input_idx];
-        }
-    } else {
+    if (false) {}
+    else GATHER_DISPATCH(DType::Float32, float)
+    else GATHER_DISPATCH(DType::Float64, double)
+    else GATHER_DISPATCH(DType::Float16, Float16)
+    else GATHER_DISPATCH(DType::BFloat16, BFloat16)
+    else GATHER_DISPATCH(DType::Int32, int32_t)
+    else GATHER_DISPATCH(DType::Int64, int64_t)
+    else GATHER_DISPATCH(DType::Int8, int8_t)
+    else GATHER_DISPATCH(DType::UInt8, uint8_t)
+    else GATHER_DISPATCH(DType::Bool, bool)
+    else {
         throw std::runtime_error("gather: unsupported dtype");
     }
+
+    #undef GATHER_DISPATCH
 
     return output;
 }
@@ -447,175 +350,28 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index, const
 
     const int64_t* index_ptr = index.data<int64_t>();
 
-    if (input.dtype() == DType::Float32) {
-        const float* input_ptr = input.data<float>();
-        float* output_ptr = output.data<float>();
-        const float* src_ptr = src.data<float>();
-
-        // Copy input to output first
-        std::memcpy(output_ptr, input_ptr, input.numel() * sizeof(float));
-
-        // Scatter src values into output
-        for (int64_t flat_idx = 0; flat_idx < numel; ++flat_idx) {
-            int64_t temp = flat_idx;
-            int64_t output_idx = 0;
-
-            for (size_t d = 0; d < ndims; ++d) {
-                int64_t coord = temp / index_strides[d];
-                temp %= index_strides[d];
-
-                if (static_cast<int64_t>(d) == dim) {
-                    int64_t idx_val = index_ptr[flat_idx];
-                    if (idx_val < 0) idx_val += input_shape[d];
-                    output_idx += idx_val * input_strides[d];
-                } else {
-                    output_idx += coord * input_strides[d];
-                }
-            }
-
-            output_ptr[output_idx] = src_ptr[flat_idx];
-        }
-    } else if (input.dtype() == DType::Float64) {
-        const double* input_ptr = input.data<double>();
-        double* output_ptr = output.data<double>();
-        const double* src_ptr = src.data<double>();
-
-        std::memcpy(output_ptr, input_ptr, input.numel() * sizeof(double));
-
-        for (int64_t flat_idx = 0; flat_idx < numel; ++flat_idx) {
-            int64_t temp = flat_idx;
-            int64_t output_idx = 0;
-
-            for (size_t d = 0; d < ndims; ++d) {
-                int64_t coord = temp / index_strides[d];
-                temp %= index_strides[d];
-
-                if (static_cast<int64_t>(d) == dim) {
-                    int64_t idx_val = index_ptr[flat_idx];
-                    if (idx_val < 0) idx_val += input_shape[d];
-                    output_idx += idx_val * input_strides[d];
-                } else {
-                    output_idx += coord * input_strides[d];
-                }
-            }
-
-            output_ptr[output_idx] = src_ptr[flat_idx];
-        }
-    } else if (input.dtype() == DType::Int32) {
-        const int32_t* input_ptr = input.data<int32_t>();
-        int32_t* output_ptr = output.data<int32_t>();
-        const int32_t* src_ptr = src.data<int32_t>();
-
-        std::memcpy(output_ptr, input_ptr, input.numel() * sizeof(int32_t));
-
-        for (int64_t flat_idx = 0; flat_idx < numel; ++flat_idx) {
-            int64_t temp = flat_idx;
-            int64_t output_idx = 0;
-
-            for (size_t d = 0; d < ndims; ++d) {
-                int64_t coord = temp / index_strides[d];
-                temp %= index_strides[d];
-
-                if (static_cast<int64_t>(d) == dim) {
-                    int64_t idx_val = index_ptr[flat_idx];
-                    if (idx_val < 0) idx_val += input_shape[d];
-                    output_idx += idx_val * input_strides[d];
-                } else {
-                    output_idx += coord * input_strides[d];
-                }
-            }
-
-            output_ptr[output_idx] = src_ptr[flat_idx];
-        }
-    } else if (input.dtype() == DType::Int64) {
-        const int64_t* input_ptr = input.data<int64_t>();
-        int64_t* output_ptr = output.data<int64_t>();
-        const int64_t* src_ptr = src.data<int64_t>();
-
-        std::memcpy(output_ptr, input_ptr, input.numel() * sizeof(int64_t));
-
-        for (int64_t flat_idx = 0; flat_idx < numel; ++flat_idx) {
-            int64_t temp = flat_idx;
-            int64_t output_idx = 0;
-
-            for (size_t d = 0; d < ndims; ++d) {
-                int64_t coord = temp / index_strides[d];
-                temp %= index_strides[d];
-
-                if (static_cast<int64_t>(d) == dim) {
-                    int64_t idx_val = index_ptr[flat_idx];
-                    if (idx_val < 0) idx_val += input_shape[d];
-                    output_idx += idx_val * input_strides[d];
-                } else {
-                    output_idx += coord * input_strides[d];
-                }
-            }
-
-            output_ptr[output_idx] = src_ptr[flat_idx];
-        }
-    } else if (input.dtype() == DType::Bool) {
-        const bool* input_ptr = input.data<bool>();
-        bool* output_ptr = output.data<bool>();
-        const bool* src_ptr = src.data<bool>();
-
-        std::memcpy(output_ptr, input_ptr, input.numel() * sizeof(bool));
-
-        for (int64_t flat_idx = 0; flat_idx < numel; ++flat_idx) {
-            int64_t temp = flat_idx;
-            int64_t output_idx = 0;
-
-            for (size_t d = 0; d < ndims; ++d) {
-                int64_t coord = temp / index_strides[d];
-                temp %= index_strides[d];
-
-                if (static_cast<int64_t>(d) == dim) {
-                    int64_t idx_val = index_ptr[flat_idx];
-                    if (idx_val < 0) idx_val += input_shape[d];
-                    output_idx += idx_val * input_strides[d];
-                } else {
-                    output_idx += coord * input_strides[d];
-                }
-            }
-
-            output_ptr[output_idx] = src_ptr[flat_idx];
-        }
-    } else if (input.dtype() == DType::Float16) {
-        // Convert to Float32 for computation
-        auto input_f32 = input.to(DType::Float32);
-        auto src_f32 = src.to(DType::Float32);
-        Tensor output_f32(input_shape, DType::Float32, input.device());
-
-        const float* input_ptr = input_f32.data<float>();
-        float* output_ptr = output_f32.data<float>();
-        const float* src_ptr = src_f32.data<float>();
-
-        std::memcpy(output_ptr, input_ptr, input_f32.numel() * sizeof(float));
-
-        for (int64_t flat_idx = 0; flat_idx < numel; ++flat_idx) {
-            int64_t temp = flat_idx;
-            int64_t output_idx = 0;
-
-            for (size_t d = 0; d < ndims; ++d) {
-                int64_t coord = temp / index_strides[d];
-                temp %= index_strides[d];
-
-                if (static_cast<int64_t>(d) == dim) {
-                    int64_t idx_val = index_ptr[flat_idx];
-                    if (idx_val < 0) idx_val += input_shape[d];
-                    output_idx += idx_val * input_strides[d];
-                } else {
-                    output_idx += coord * input_strides[d];
-                }
-            }
-
-            output_ptr[output_idx] = src_ptr[flat_idx];
+    #define SCATTER_DISPATCH(DTYPE_ENUM, CPP_TYPE) \
+        if (input.dtype() == DTYPE_ENUM) { \
+            detail::scatter_impl(input.data<CPP_TYPE>(), output.data<CPP_TYPE>(), \
+                src.data<CPP_TYPE>(), index_ptr, input.numel(), numel, \
+                input_shape, input_strides, index_strides, ndims, dim); \
         }
 
-        // Convert back to Float16
-        output = output_f32.to(DType::Float16);
-    } else {
+    if (false) {}
+    else SCATTER_DISPATCH(DType::Float32, float)
+    else SCATTER_DISPATCH(DType::Float64, double)
+    else SCATTER_DISPATCH(DType::Float16, Float16)
+    else SCATTER_DISPATCH(DType::BFloat16, BFloat16)
+    else SCATTER_DISPATCH(DType::Int32, int32_t)
+    else SCATTER_DISPATCH(DType::Int64, int64_t)
+    else SCATTER_DISPATCH(DType::Int8, int8_t)
+    else SCATTER_DISPATCH(DType::UInt8, uint8_t)
+    else SCATTER_DISPATCH(DType::Bool, bool)
+    else {
         throw std::runtime_error("scatter: unsupported dtype");
     }
+
+    #undef SCATTER_DISPATCH
 
     return output;
 }
@@ -670,59 +426,27 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask) -> Tensor {
     };
 
     // Second pass: copy selected elements
-    if (input.dtype() == DType::Float32) {
-        const float* input_ptr = input.data<float>();
-        float* output_ptr = output.data<float>();
-
-        int64_t out_idx = 0;
-        for (int64_t i = 0; i < numel; ++i) {
-            if (is_mask_true(i)) {
-                output_ptr[out_idx++] = input_ptr[i];
-            }
+    #define MASKED_SELECT_DISPATCH(DTYPE_ENUM, CPP_TYPE) \
+        if (input.dtype() == DTYPE_ENUM) { \
+            detail::masked_select_impl(input.data<CPP_TYPE>(), output.data<CPP_TYPE>(), \
+                numel, is_mask_true); \
         }
-    } else if (input.dtype() == DType::Float64) {
-        const double* input_ptr = input.data<double>();
-        double* output_ptr = output.data<double>();
 
-        int64_t out_idx = 0;
-        for (int64_t i = 0; i < numel; ++i) {
-            if (is_mask_true(i)) {
-                output_ptr[out_idx++] = input_ptr[i];
-            }
-        }
-    } else if (input.dtype() == DType::Int32) {
-        const int32_t* input_ptr = input.data<int32_t>();
-        int32_t* output_ptr = output.data<int32_t>();
-
-        int64_t out_idx = 0;
-        for (int64_t i = 0; i < numel; ++i) {
-            if (is_mask_true(i)) {
-                output_ptr[out_idx++] = input_ptr[i];
-            }
-        }
-    } else if (input.dtype() == DType::Int64) {
-        const int64_t* input_ptr = input.data<int64_t>();
-        int64_t* output_ptr = output.data<int64_t>();
-
-        int64_t out_idx = 0;
-        for (int64_t i = 0; i < numel; ++i) {
-            if (is_mask_true(i)) {
-                output_ptr[out_idx++] = input_ptr[i];
-            }
-        }
-    } else if (input.dtype() == DType::Bool) {
-        const bool* input_ptr = input.data<bool>();
-        bool* output_ptr = output.data<bool>();
-
-        int64_t out_idx = 0;
-        for (int64_t i = 0; i < numel; ++i) {
-            if (is_mask_true(i)) {
-                output_ptr[out_idx++] = input_ptr[i];
-            }
-        }
-    } else {
+    if (false) {}
+    else MASKED_SELECT_DISPATCH(DType::Float32, float)
+    else MASKED_SELECT_DISPATCH(DType::Float64, double)
+    else MASKED_SELECT_DISPATCH(DType::Float16, Float16)
+    else MASKED_SELECT_DISPATCH(DType::BFloat16, BFloat16)
+    else MASKED_SELECT_DISPATCH(DType::Int32, int32_t)
+    else MASKED_SELECT_DISPATCH(DType::Int64, int64_t)
+    else MASKED_SELECT_DISPATCH(DType::Int8, int8_t)
+    else MASKED_SELECT_DISPATCH(DType::UInt8, uint8_t)
+    else MASKED_SELECT_DISPATCH(DType::Bool, bool)
+    else {
         throw std::runtime_error("masked_select: unsupported dtype");
     }
+
+    #undef MASKED_SELECT_DISPATCH
 
     return output;
 }
@@ -881,40 +605,28 @@ auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y) -> 
                 output_ptr[i] = bool_cond_ptr[i] ? x_ptr[i] : y_ptr[i];
             }
         }
-    } else if (x.dtype() == DType::Float64) {
-        const double* x_ptr = x.data<double>();
-        const double* y_ptr = y.data<double>();
-        double* output_ptr = output.data<double>();
-
-        for (int64_t i = 0; i < numel; ++i) {
-            output_ptr[i] = is_cond_true(i) ? x_ptr[i] : y_ptr[i];
-        }
-    } else if (x.dtype() == DType::Int32) {
-        const int32_t* x_ptr = x.data<int32_t>();
-        const int32_t* y_ptr = y.data<int32_t>();
-        int32_t* output_ptr = output.data<int32_t>();
-
-        for (int64_t i = 0; i < numel; ++i) {
-            output_ptr[i] = is_cond_true(i) ? x_ptr[i] : y_ptr[i];
-        }
-    } else if (x.dtype() == DType::Int64) {
-        const int64_t* x_ptr = x.data<int64_t>();
-        const int64_t* y_ptr = y.data<int64_t>();
-        int64_t* output_ptr = output.data<int64_t>();
-
-        for (int64_t i = 0; i < numel; ++i) {
-            output_ptr[i] = is_cond_true(i) ? x_ptr[i] : y_ptr[i];
-        }
-    } else if (x.dtype() == DType::Bool) {
-        const bool* x_ptr = x.data<bool>();
-        const bool* y_ptr = y.data<bool>();
-        bool* output_ptr = output.data<bool>();
-
-        for (int64_t i = 0; i < numel; ++i) {
-            output_ptr[i] = is_cond_true(i) ? x_ptr[i] : y_ptr[i];
-        }
     } else {
-        throw std::runtime_error("where: unsupported dtype");
+        // Generic path for all other dtypes
+        #define WHERE_DISPATCH(DTYPE_ENUM, CPP_TYPE) \
+            if (x.dtype() == DTYPE_ENUM) { \
+                detail::where_impl(x.data<CPP_TYPE>(), y.data<CPP_TYPE>(), \
+                    output.data<CPP_TYPE>(), numel, is_cond_true); \
+            }
+
+        if (false) {}
+        else WHERE_DISPATCH(DType::Float64, double)
+        else WHERE_DISPATCH(DType::Float16, Float16)
+        else WHERE_DISPATCH(DType::BFloat16, BFloat16)
+        else WHERE_DISPATCH(DType::Int32, int32_t)
+        else WHERE_DISPATCH(DType::Int64, int64_t)
+        else WHERE_DISPATCH(DType::Int8, int8_t)
+        else WHERE_DISPATCH(DType::UInt8, uint8_t)
+        else WHERE_DISPATCH(DType::Bool, bool)
+        else {
+            throw std::runtime_error("where: unsupported dtype");
+        }
+
+        #undef WHERE_DISPATCH
     }
 
     return output;
@@ -928,34 +640,26 @@ auto nonzero_kernel(const Tensor& input) -> Tensor {
     std::vector<int64_t> nz_indices;
     nz_indices.reserve(numel / 4);  // Heuristic
 
-    if (input.dtype() == DType::Float32) {
-        const float* data = input.data<float>();
-        for (int64_t i = 0; i < numel; ++i) {
-            if (data[i] != 0.0f) nz_indices.push_back(i);
+    #define NONZERO_DISPATCH(DTYPE_ENUM, CPP_TYPE) \
+        if (input.dtype() == DTYPE_ENUM) { \
+            detail::nonzero_impl(input.data<CPP_TYPE>(), numel, nz_indices); \
         }
-    } else if (input.dtype() == DType::Float64) {
-        const double* data = input.data<double>();
-        for (int64_t i = 0; i < numel; ++i) {
-            if (data[i] != 0.0) nz_indices.push_back(i);
-        }
-    } else if (input.dtype() == DType::Int32) {
-        const int32_t* data = input.data<int32_t>();
-        for (int64_t i = 0; i < numel; ++i) {
-            if (data[i] != 0) nz_indices.push_back(i);
-        }
-    } else if (input.dtype() == DType::Int64) {
-        const int64_t* data = input.data<int64_t>();
-        for (int64_t i = 0; i < numel; ++i) {
-            if (data[i] != 0) nz_indices.push_back(i);
-        }
-    } else if (input.dtype() == DType::Bool) {
-        const bool* data = input.data<bool>();
-        for (int64_t i = 0; i < numel; ++i) {
-            if (data[i]) nz_indices.push_back(i);
-        }
-    } else {
+
+    if (false) {}
+    else NONZERO_DISPATCH(DType::Float32, float)
+    else NONZERO_DISPATCH(DType::Float64, double)
+    else NONZERO_DISPATCH(DType::Float16, Float16)
+    else NONZERO_DISPATCH(DType::BFloat16, BFloat16)
+    else NONZERO_DISPATCH(DType::Int32, int32_t)
+    else NONZERO_DISPATCH(DType::Int64, int64_t)
+    else NONZERO_DISPATCH(DType::Int8, int8_t)
+    else NONZERO_DISPATCH(DType::UInt8, uint8_t)
+    else NONZERO_DISPATCH(DType::Bool, bool)
+    else {
         throw std::runtime_error("nonzero: unsupported dtype");
     }
+
+    #undef NONZERO_DISPATCH
 
     int64_t nnz = static_cast<int64_t>(nz_indices.size());
 

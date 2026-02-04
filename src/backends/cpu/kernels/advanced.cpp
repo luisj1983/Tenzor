@@ -186,6 +186,14 @@ auto topk_kernel(const Tensor& input, int64_t k, int64_t dim,
         topk_impl(cont.data<int64_t>(), cont.numel(), dim_size,
                   outer_size, inner_size, k, largest, sorted,
                   values.data<int64_t>(), indices.data<int64_t>());
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        Tensor cont_f32 = cont.to(DType::Float32);
+        Tensor values_f32(out_shape, DType::Float32, input.device());
+        topk_impl(cont_f32.data<float>(), cont_f32.numel(), dim_size,
+                  outer_size, inner_size, k, largest, sorted,
+                  values_f32.data<float>(), indices.data<int64_t>());
+        values = values_f32.to(orig);
     } else {
         throw std::runtime_error("topk: unsupported dtype");
     }
@@ -216,6 +224,14 @@ auto sort_kernel(const Tensor& input, int64_t dim,
     } else if (input.dtype() == DType::Int64) {
         sort_impl(cont.data<int64_t>(), dim_size, outer_size, inner_size, descending,
                   values.data<int64_t>(), indices.data<int64_t>());
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        Tensor cont_f32 = cont.to(DType::Float32);
+        Tensor values_f32(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                          DType::Float32, input.device());
+        sort_impl(cont_f32.data<float>(), dim_size, outer_size, inner_size, descending,
+                  values_f32.data<float>(), indices.data<int64_t>());
+        values = values_f32.to(orig);
     } else {
         throw std::runtime_error("sort: unsupported dtype");
     }
@@ -243,6 +259,14 @@ auto cumsum_kernel(const Tensor& input, int64_t dim) -> Tensor {
     } else if (input.dtype() == DType::Int64) {
         cumsum_impl(cont.data<int64_t>(), output.data<int64_t>(),
                     dim_size, outer_size, inner_size);
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        Tensor cont_f32 = cont.to(DType::Float32);
+        Tensor output_f32(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                          DType::Float32, input.device());
+        cumsum_impl(cont_f32.data<float>(), output_f32.data<float>(),
+                    dim_size, outer_size, inner_size);
+        output = output_f32.to(orig);
     } else {
         throw std::runtime_error("cumsum: unsupported dtype");
     }
@@ -270,6 +294,14 @@ auto cumprod_kernel(const Tensor& input, int64_t dim) -> Tensor {
     } else if (input.dtype() == DType::Int64) {
         cumprod_impl(cont.data<int64_t>(), output.data<int64_t>(),
                      dim_size, outer_size, inner_size);
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        Tensor cont_f32 = cont.to(DType::Float32);
+        Tensor output_f32(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                          DType::Float32, input.device());
+        cumprod_impl(cont_f32.data<float>(), output_f32.data<float>(),
+                     dim_size, outer_size, inner_size);
+        output = output_f32.to(orig);
     } else {
         throw std::runtime_error("cumprod: unsupported dtype");
     }
@@ -331,22 +363,20 @@ auto unique_kernel(const Tensor& input, bool sorted_output,
             }
         } else {
             // Unsorted unique: preserve order of first appearance
-            std::unordered_map<int64_t, int64_t> seen; // value hash -> unique index
-            // Use bit representation for hashing
+            // Use unordered_map with bit-pattern keys for O(n) amortized lookup
+            std::unordered_map<uint64_t, int64_t> seen;
+            seen.reserve(std::min(numel, int64_t(65536)));
             for (int64_t i = 0; i < numel; ++i) {
-                T val = data[i];
-                // Simple approach: linear scan (correct, handles all types)
-                int64_t uidx = -1;
-                for (int64_t j = 0; j < static_cast<int64_t>(unique_vals.size()); ++j) {
-                    if (unique_vals[j] == val) { uidx = j; break; }
+                uint64_t key = 0;
+                std::memcpy(&key, &data[i], sizeof(T));
+                auto [it, inserted] = seen.try_emplace(key, static_cast<int64_t>(unique_vals.size()));
+                if (inserted) {
+                    unique_vals.push_back(data[i]);
+                    if (return_counts) counts_vec.push_back(1);
+                } else {
+                    if (return_counts) counts_vec[it->second]++;
                 }
-                if (uidx < 0) {
-                    uidx = static_cast<int64_t>(unique_vals.size());
-                    unique_vals.push_back(val);
-                    if (return_counts) counts_vec.push_back(0);
-                }
-                if (return_inverse) inverse_map[i] = uidx;
-                if (return_counts) counts_vec[uidx]++;
+                if (return_inverse) inverse_map[i] = it->second;
             }
         }
 
@@ -380,10 +410,69 @@ auto unique_kernel(const Tensor& input, bool sorted_output,
         return do_unique(cont.data<float>());
     } else if (input.dtype() == DType::Float64) {
         return do_unique(cont.data<double>());
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        Tensor cont_f32 = cont.to(DType::Float32);
+        auto [unique_f32, inverse_out, counts_out] = do_unique(cont_f32.data<float>());
+        return {unique_f32.to(orig), inverse_out, counts_out};
     } else if (input.dtype() == DType::Int32) {
         return do_unique(cont.data<int32_t>());
     } else if (input.dtype() == DType::Int64) {
         return do_unique(cont.data<int64_t>());
+    } else if (input.dtype() == DType::Int8) {
+        return do_unique(cont.data<int8_t>());
+    } else if (input.dtype() == DType::UInt8) {
+        return do_unique(cont.data<uint8_t>());
+    } else if (input.dtype() == DType::Bool) {
+        // vector<bool> is special in C++, use uint8_t internally
+        const bool* bdata = cont.data<bool>();
+        // Bool has at most 2 unique values
+        std::vector<uint8_t> seen_vals;
+        std::vector<int64_t> inverse_map(numel);
+        std::vector<int64_t> counts_vec;
+
+        std::unordered_map<int, int64_t> seen;
+        for (int64_t i = 0; i < numel; ++i) {
+            int key = bdata[i] ? 1 : 0;
+            auto [it, inserted] = seen.try_emplace(key, static_cast<int64_t>(seen_vals.size()));
+            if (inserted) {
+                seen_vals.push_back(static_cast<uint8_t>(bdata[i]));
+                if (return_counts) counts_vec.push_back(1);
+            } else {
+                if (return_counts) counts_vec[it->second]++;
+            }
+            if (return_inverse) inverse_map[i] = it->second;
+        }
+
+        if (sorted_output && seen_vals.size() == 2 && seen_vals[0]) {
+            // Swap so false comes first
+            std::swap(seen_vals[0], seen_vals[1]);
+            if (return_counts) std::swap(counts_vec[0], counts_vec[1]);
+            if (return_inverse) {
+                for (auto& v : inverse_map) v = 1 - v;
+            }
+        }
+
+        int64_t n_unique = static_cast<int64_t>(seen_vals.size());
+        Tensor unique_out({n_unique}, DType::Bool, input.device());
+        bool* udata = unique_out.data<bool>();
+        for (int64_t i = 0; i < n_unique; ++i) udata[i] = static_cast<bool>(seen_vals[i]);
+
+        Tensor inverse_out = return_inverse
+            ? Tensor({numel}, DType::Int64, input.device())
+            : Tensor({0}, DType::Int64, input.device());
+        if (return_inverse) {
+            std::memcpy(inverse_out.data<int64_t>(), inverse_map.data(), numel * sizeof(int64_t));
+        }
+
+        Tensor counts_out = return_counts
+            ? Tensor({n_unique}, DType::Int64, input.device())
+            : Tensor({0}, DType::Int64, input.device());
+        if (return_counts) {
+            std::memcpy(counts_out.data<int64_t>(), counts_vec.data(), n_unique * sizeof(int64_t));
+        }
+
+        return {unique_out, inverse_out, counts_out};
     } else {
         throw std::runtime_error("unique: unsupported dtype");
     }

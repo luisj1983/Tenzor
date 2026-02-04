@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <limits>
+#include <iostream>
 
 #if defined(__x86_64__) || defined(_M_X64)
     #include <immintrin.h>
@@ -673,8 +674,15 @@ auto fused_rms_norm_kernel(const Tensor& input, const Tensor& weight, float eps)
                 y[i] = x[i] * inv_rms * w_data[i];
             }
         }
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        Tensor in_f32 = input.to(DType::Float32);
+        Tensor w_f32 = weight.to(DType::Float32);
+        auto [out_f32, rrms_f32] = fused_rms_norm_kernel(in_f32, w_f32, eps);
+        output = out_f32.to(orig);
+        rrms = rrms_f32.to(orig);
     } else {
-        throw std::runtime_error("fused_rms_norm: only Float32/Float64 supported");
+        throw std::runtime_error("fused_rms_norm: unsupported dtype");
     }
 
     return {output, rrms};
@@ -750,8 +758,17 @@ auto rms_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
                 gi_b[i] = (go_b[i] * w[i] - x_b[i] * coeff) * inv_rms;
             }
         }
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        Tensor go_f32 = grad_output.to(DType::Float32);
+        Tensor in_f32 = input.to(DType::Float32);
+        Tensor w_f32 = weight.to(DType::Float32);
+        Tensor r_f32 = rrms.to(DType::Float32);
+        auto [gi_f32, gw_f32] = rms_norm_backward_kernel(go_f32, in_f32, w_f32, r_f32);
+        grad_input = gi_f32.to(orig);
+        grad_weight = gw_f32.to(orig);
     } else {
-        throw std::runtime_error("rms_norm_backward: only Float32/Float64 supported");
+        throw std::runtime_error("rms_norm_backward: unsupported dtype");
     }
 
     return {grad_input, grad_weight};
@@ -1090,6 +1107,12 @@ auto fused_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
         // then store back. For full Float64 precision the user should cast
         // Q/K/V to Float32 explicitly. We convert per-tensor here to keep
         // the kernel simple and still correct.
+        static bool warned = false;
+        if (!warned) {
+            std::cerr << "[tenzor] Warning: fused_attention computing Float64 in Float32 precision. "
+                      << "Cast inputs to Float32 explicitly to suppress this warning.\n";
+            warned = true;
+        }
         Tensor q32 = Q.to(DType::Float32);
         Tensor k32 = K.to(DType::Float32);
         Tensor v32 = V.to(DType::Float32);

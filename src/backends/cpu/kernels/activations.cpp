@@ -712,10 +712,46 @@ auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input) -> 
         float* grad_in_data = grad_input.data<float>();
         size_t n = input.numel();
 
+#ifdef TENZOR_HAS_AVX512
+        size_t i = 0;
+        __m512 one = _mm512_set1_ps(1.0f);
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t ii = 0; ii < n / 16; ++ii) {
+            size_t offset = ii * 16;
+            __m512 x = _mm512_loadu_ps(in_data + offset);
+            __m512 grad = _mm512_loadu_ps(grad_out_data + offset);
+            __m512 sig = fast_math::sigmoid_avx512(x);
+            __m512 result = _mm512_mul_ps(_mm512_mul_ps(grad, sig), _mm512_sub_ps(one, sig));
+            _mm512_storeu_ps(grad_in_data + offset, result);
+        }
+        // Scalar remainder
+        for (size_t j = (n / 16) * 16; j < n; ++j) {
+            float sigmoid_x = 1.0f / (1.0f + std::exp(-in_data[j]));
+            grad_in_data[j] = grad_out_data[j] * sigmoid_x * (1.0f - sigmoid_x);
+        }
+#elif defined(TENZOR_HAS_AVX2)
+        __m256 one = _mm256_set1_ps(1.0f);
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t ii = 0; ii < n / 8; ++ii) {
+            size_t offset = ii * 8;
+            __m256 x = _mm256_loadu_ps(in_data + offset);
+            __m256 grad = _mm256_loadu_ps(grad_out_data + offset);
+            __m256 sig = fast_math::sigmoid_avx2(x);
+            __m256 result = _mm256_mul_ps(_mm256_mul_ps(grad, sig), _mm256_sub_ps(one, sig));
+            _mm256_storeu_ps(grad_in_data + offset, result);
+        }
+        // Scalar remainder
+        for (size_t j = (n / 8) * 8; j < n; ++j) {
+            float sigmoid_x = 1.0f / (1.0f + std::exp(-in_data[j]));
+            grad_in_data[j] = grad_out_data[j] * sigmoid_x * (1.0f - sigmoid_x);
+        }
+#else
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float sigmoid_x = 1.0f / (1.0f + std::exp(-in_data[i]));
             grad_in_data[i] = grad_out_data[i] * sigmoid_x * (1.0f - sigmoid_x);
         }
+#endif
     } else if (input.dtype() == DType::Float64) {
         const double* grad_out_data = grad_output.data<double>();
         const double* in_data = input.data<double>();
@@ -732,6 +768,7 @@ auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input) -> 
         Float16* grad_in_data = grad_input.data<Float16>();
         size_t n = input.numel();
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float sigmoid_x = 1.0f / (1.0f + std::exp(-x));

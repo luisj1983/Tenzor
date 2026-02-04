@@ -1299,6 +1299,15 @@ auto add_kernel(const Tensor& a, const Tensor& b) -> Tensor {
                 n
             );
 
+        } else if (a.dtype() == DType::BFloat16) {
+            const BFloat16* a_data = a.data<BFloat16>();
+            const BFloat16* b_data = b.data<BFloat16>();
+            BFloat16* c_data = result.data<BFloat16>();
+            #pragma omp parallel for schedule(static) if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = BFloat16(static_cast<float>(a_data[i]) + static_cast<float>(b_data[i]));
+            }
+
         } else if (a.dtype() == DType::Int8) {
             const int8_t* a_data = a.data<int8_t>();
             const int8_t* b_data = b.data<int8_t>();
@@ -1360,6 +1369,15 @@ auto add_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](Float16 x, Float16 y) {
                                     return Float16(static_cast<float>(x) + static_cast<float>(y));
+                                });
+
+        } else if (a.dtype() == DType::BFloat16) {
+            const BFloat16* a_data = a.data<BFloat16>();
+            const BFloat16* b_data = b.data<BFloat16>();
+            BFloat16* c_data = result.data<BFloat16>();
+            detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](BFloat16 x, BFloat16 y) {
+                                    return BFloat16(static_cast<float>(x) + static_cast<float>(y));
                                 });
 
         } else if (a.dtype() == DType::Int8) {
@@ -1463,6 +1481,15 @@ auto sub_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             detail::sub_scalar(a_data, b_data, c_data, n);
 #endif
 
+        } else if (a.dtype() == DType::BFloat16) {
+            const BFloat16* a_data = a.data<BFloat16>();
+            const BFloat16* b_data = b.data<BFloat16>();
+            BFloat16* c_data = result.data<BFloat16>();
+            #pragma omp parallel for schedule(static) if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = BFloat16(static_cast<float>(a_data[i]) - static_cast<float>(b_data[i]));
+            }
+
         } else if (a.dtype() == DType::Int8) {
             const int8_t* a_data = a.data<int8_t>();
             const int8_t* b_data = b.data<int8_t>();
@@ -1517,6 +1544,15 @@ auto sub_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             int64_t* c_data = result.data<int64_t>();
             detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](int64_t x, int64_t y) { return x - y; });
+
+        } else if (a.dtype() == DType::BFloat16) {
+            const BFloat16* a_data = a.data<BFloat16>();
+            const BFloat16* b_data = b.data<BFloat16>();
+            BFloat16* c_data = result.data<BFloat16>();
+            detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](BFloat16 x, BFloat16 y) {
+                                    return BFloat16(static_cast<float>(x) - static_cast<float>(y));
+                                });
 
         } else if (a.dtype() == DType::Int8) {
             const int8_t* a_data = a.data<int8_t>();
@@ -1626,6 +1662,15 @@ auto mul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
                 n
             );
 
+        } else if (a.dtype() == DType::BFloat16) {
+            const BFloat16* a_data = a.data<BFloat16>();
+            const BFloat16* b_data = b.data<BFloat16>();
+            BFloat16* c_data = result.data<BFloat16>();
+            #pragma omp parallel for schedule(static) if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = BFloat16(static_cast<float>(a_data[i]) * static_cast<float>(b_data[i]));
+            }
+
         } else {
             throw std::runtime_error("Unsupported dtype for mul operation");
         }
@@ -1673,6 +1718,15 @@ auto mul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](Float16 x, Float16 y) {
                                     return Float16(static_cast<float>(x) * static_cast<float>(y));
+                                });
+
+        } else if (a.dtype() == DType::BFloat16) {
+            const BFloat16* a_data = a.data<BFloat16>();
+            const BFloat16* b_data = b.data<BFloat16>();
+            BFloat16* c_data = result.data<BFloat16>();
+            detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](BFloat16 x, BFloat16 y) {
+                                    return BFloat16(static_cast<float>(x) * static_cast<float>(y));
                                 });
 
         } else {
@@ -1754,6 +1808,18 @@ auto div_kernel(const Tensor& a, const Tensor& b) -> Tensor {
                 c_data[i] = Float16(result_f32);
             }
 
+        } else if (a.dtype() == DType::BFloat16) {
+            const BFloat16* a_data = a.data<BFloat16>();
+            const BFloat16* b_data = b.data<BFloat16>();
+            BFloat16* c_data = result.data<BFloat16>();
+            #pragma omp parallel for schedule(static) if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; ++i) {
+                float a_f32 = static_cast<float>(a_data[i]);
+                float b_f32 = static_cast<float>(b_data[i]);
+                float result_f32 = (b_f32 == 0.0f) ? std::numeric_limits<float>::infinity() : a_f32 / b_f32;
+                c_data[i] = BFloat16(result_f32);
+            }
+
         } else {
             throw std::runtime_error("Unsupported dtype for div operation");
         }
@@ -1809,6 +1875,18 @@ auto div_kernel(const Tensor& a, const Tensor& b) -> Tensor {
                                     float y_f32 = static_cast<float>(y);
                                     if (y_f32 == 0.0f) return Float16(std::numeric_limits<float>::infinity());
                                     return Float16(x_f32 / y_f32);
+                                });
+
+        } else if (a.dtype() == DType::BFloat16) {
+            const BFloat16* a_data = a.data<BFloat16>();
+            const BFloat16* b_data = b.data<BFloat16>();
+            BFloat16* c_data = result.data<BFloat16>();
+            detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](BFloat16 x, BFloat16 y) {
+                                    float x_f32 = static_cast<float>(x);
+                                    float y_f32 = static_cast<float>(y);
+                                    if (y_f32 == 0.0f) return BFloat16(std::numeric_limits<float>::infinity());
+                                    return BFloat16(x_f32 / y_f32);
                                 });
 
         } else {
