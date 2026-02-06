@@ -26,8 +26,157 @@ extern "C" void nms_cuda(const float* boxes, const float* scores,
                          int64_t* keep_indices, int64_t* num_keep);
 #endif
 
+// SIMD headers for optimized NMS
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
+
 namespace tenzor {
 namespace ops {
+
+// ============================================================================
+// Optimized NMS Helper Functions
+// ============================================================================
+
+namespace {
+
+#if defined(__AVX2__) || defined(TENZOR_HAS_AVX512)
+
+/**
+ * @brief Compute IoU between one reference box and 8 candidate boxes using AVX2
+ */
+inline __m256 compute_iou_avx2(
+    __m256 ref_x1, __m256 ref_y1, __m256 ref_x2, __m256 ref_y2, __m256 ref_area,
+    __m256 cand_x1, __m256 cand_y1, __m256 cand_x2, __m256 cand_y2
+) {
+    // Compute intersection coordinates
+    __m256 inter_x1 = _mm256_max_ps(ref_x1, cand_x1);
+    __m256 inter_y1 = _mm256_max_ps(ref_y1, cand_y1);
+    __m256 inter_x2 = _mm256_min_ps(ref_x2, cand_x2);
+    __m256 inter_y2 = _mm256_min_ps(ref_y2, cand_y2);
+
+    // Compute intersection dimensions (clamped to 0)
+    __m256 zero = _mm256_setzero_ps();
+    __m256 inter_w = _mm256_max_ps(zero, _mm256_sub_ps(inter_x2, inter_x1));
+    __m256 inter_h = _mm256_max_ps(zero, _mm256_sub_ps(inter_y2, inter_y1));
+
+    // Compute intersection area
+    __m256 inter_area = _mm256_mul_ps(inter_w, inter_h);
+
+    // Compute candidate areas
+    __m256 cand_w = _mm256_sub_ps(cand_x2, cand_x1);
+    __m256 cand_h = _mm256_sub_ps(cand_y2, cand_y1);
+    __m256 cand_area = _mm256_mul_ps(cand_w, cand_h);
+
+    // Compute union area (ref_area + cand_area - inter_area)
+    __m256 union_area = _mm256_add_ps(ref_area, cand_area);
+    union_area = _mm256_sub_ps(union_area, inter_area);
+
+    // Add small epsilon to avoid division by zero
+    __m256 eps = _mm256_set1_ps(1e-7f);
+    union_area = _mm256_add_ps(union_area, eps);
+
+    // Compute IoU = inter_area / union_area
+    return _mm256_div_ps(inter_area, union_area);
+}
+
+/**
+ * @brief SIMD-accelerated batch IoU suppression check
+ */
+inline void suppress_batch_avx2(
+    const float* boxes,
+    const int64_t* indices,
+    uint8_t* suppressed,
+    int64_t ref_idx,
+    int64_t start_j,
+    int64_t end_j,
+    float iou_threshold
+) {
+    // Load reference box (broadcast)
+    const float ref_x1 = boxes[ref_idx * 4 + 0];
+    const float ref_y1 = boxes[ref_idx * 4 + 1];
+    const float ref_x2 = boxes[ref_idx * 4 + 2];
+    const float ref_y2 = boxes[ref_idx * 4 + 3];
+    const float ref_area = (ref_x2 - ref_x1) * (ref_y2 - ref_y1);
+
+    __m256 vref_x1 = _mm256_set1_ps(ref_x1);
+    __m256 vref_y1 = _mm256_set1_ps(ref_y1);
+    __m256 vref_x2 = _mm256_set1_ps(ref_x2);
+    __m256 vref_y2 = _mm256_set1_ps(ref_y2);
+    __m256 vref_area = _mm256_set1_ps(ref_area);
+    __m256 vthreshold = _mm256_set1_ps(iou_threshold);
+
+    int64_t j = start_j;
+
+    // Process 8 candidates at a time
+    for (; j + 8 <= end_j; j += 8) {
+        // Gather box coordinates for 8 candidates
+        alignas(32) float cand_x1[8], cand_y1[8], cand_x2[8], cand_y2[8];
+
+        for (int k = 0; k < 8; ++k) {
+            int64_t idx = indices[j + k];
+            cand_x1[k] = boxes[idx * 4 + 0];
+            cand_y1[k] = boxes[idx * 4 + 1];
+            cand_x2[k] = boxes[idx * 4 + 2];
+            cand_y2[k] = boxes[idx * 4 + 3];
+        }
+
+        // Load candidate coordinates
+        __m256 vcand_x1 = _mm256_load_ps(cand_x1);
+        __m256 vcand_y1 = _mm256_load_ps(cand_y1);
+        __m256 vcand_x2 = _mm256_load_ps(cand_x2);
+        __m256 vcand_y2 = _mm256_load_ps(cand_y2);
+
+        // Compute IoU for 8 candidates
+        __m256 iou = compute_iou_avx2(
+            vref_x1, vref_y1, vref_x2, vref_y2, vref_area,
+            vcand_x1, vcand_y1, vcand_x2, vcand_y2
+        );
+
+        // Compare with threshold
+        __m256 mask = _mm256_cmp_ps(iou, vthreshold, _CMP_GT_OQ);
+        int suppress_mask = _mm256_movemask_ps(mask);
+
+        // Apply suppression
+        for (int k = 0; k < 8; ++k) {
+            if ((suppress_mask >> k) & 1) {
+                suppressed[indices[j + k]] = 1;
+            }
+        }
+    }
+
+    // Handle remaining candidates (scalar fallback)
+    for (; j < end_j; ++j) {
+        int64_t idx2 = indices[j];
+        if (suppressed[idx2]) continue;
+
+        const float x1_2 = boxes[idx2 * 4 + 0];
+        const float y1_2 = boxes[idx2 * 4 + 1];
+        const float x2_2 = boxes[idx2 * 4 + 2];
+        const float y2_2 = boxes[idx2 * 4 + 3];
+
+        const float inter_x1 = std::max(ref_x1, x1_2);
+        const float inter_y1 = std::max(ref_y1, y1_2);
+        const float inter_x2 = std::min(ref_x2, x2_2);
+        const float inter_y2 = std::min(ref_y2, y2_2);
+
+        const float inter_w = std::max(0.0f, inter_x2 - inter_x1);
+        const float inter_h = std::max(0.0f, inter_y2 - inter_y1);
+        const float inter_area = inter_w * inter_h;
+
+        const float area2 = (x2_2 - x1_2) * (y2_2 - y1_2);
+        const float union_area = ref_area + area2 - inter_area;
+        const float iou = inter_area / (union_area + 1e-7f);
+
+        if (iou > iou_threshold) {
+            suppressed[idx2] = 1;
+        }
+    }
+}
+
+#endif // __AVX2__
+
+} // anonymous namespace
 
 // Helper functions for element-wise maximum and minimum
 static auto element_maximum(const Tensor& a, const Tensor& b) -> Tensor {
@@ -381,11 +530,12 @@ auto nms(const Tensor& boxes, const Tensor& scores, double iou_threshold) -> Ten
                   return scores_data[i] > scores_data[j];
               });
 
-    // NMS algorithm
-    std::vector<bool> suppressed(N, false);
+    // Initialize suppression mask (using uint8_t for SIMD compatibility)
+    std::vector<uint8_t> suppressed(N, 0);
     std::vector<int64_t> keep;
     keep.reserve(N);
 
+    // Main NMS loop with SIMD acceleration
     for (int64_t i = 0; i < N; ++i) {
         int64_t idx = indices[i];
         if (suppressed[idx]) continue;
@@ -399,8 +549,21 @@ auto nms(const Tensor& boxes, const Tensor& scores, double iou_threshold) -> Ten
         const float y2 = boxes_data[idx * 4 + 3];
         const float area = (x2 - x1) * (y2 - y1);
 
-        // Suppress overlapping boxes (parallelized IoU computation)
+        // Number of remaining candidates to check
         int64_t remaining = N - i - 1;
+
+#if defined(__AVX2__) || defined(TENZOR_HAS_AVX512)
+        // Use SIMD for batch suppression when we have enough candidates
+        if (remaining >= 8) {
+            suppress_batch_avx2(
+                boxes_data, indices.data(), suppressed.data(),
+                idx, i + 1, N, static_cast<float>(iou_threshold)
+            );
+            continue;  // All remaining candidates have been processed
+        }
+#endif
+
+        // Scalar fallback (or for small remaining sets)
         #pragma omp parallel for schedule(dynamic, 64) if(remaining > 1024)
         for (int64_t j = i + 1; j < N; ++j) {
             int64_t idx2 = indices[j];
@@ -426,7 +589,7 @@ auto nms(const Tensor& boxes, const Tensor& scores, double iou_threshold) -> Ten
             const float iou = inter_area / (union_area + 1e-7f);
 
             if (iou > iou_threshold) {
-                suppressed[idx2] = true;
+                suppressed[idx2] = 1;
             }
         }
     }

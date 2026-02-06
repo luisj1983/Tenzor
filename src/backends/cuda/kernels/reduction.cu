@@ -2,6 +2,7 @@
 #include "tenzor/backend/caching_allocator.hpp"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cuda_bf16.h>
 #include <device_launch_parameters.h>
 #include <cfloat>
 #include <cmath>
@@ -48,6 +49,32 @@ __device__ __forceinline__ T cuda_add(T a, T b) { return a + b; }
 
 template<>
 __device__ __forceinline__ __half cuda_add<__half>(__half a, __half b) { return __hadd(a, b); }
+
+// BFloat16 type helpers
+template<>
+__device__ __forceinline__ __nv_bfloat16 cuda_zero<__nv_bfloat16>() { return __float2bfloat16(0.0f); }
+
+template<>
+__device__ __forceinline__ __nv_bfloat16 cuda_add<__nv_bfloat16>(__nv_bfloat16 a, __nv_bfloat16 b) { return __hadd(a, b); }
+
+// Get negative infinity for __nv_bfloat16
+__device__ __forceinline__ __nv_bfloat16 bfloat16_neg_inf() {
+    return __ushort_as_bfloat16(0xFF80);  // -inf in bfloat16
+}
+
+// Get positive infinity for __nv_bfloat16
+__device__ __forceinline__ __nv_bfloat16 bfloat16_pos_inf() {
+    return __ushort_as_bfloat16(0x7F80);  // +inf in bfloat16
+}
+
+// BFloat16 comparison helpers
+__device__ __forceinline__ __nv_bfloat16 cuda_max_val(__nv_bfloat16 a, __nv_bfloat16 b) {
+    return __hgt(a, b) ? a : b;
+}
+
+__device__ __forceinline__ __nv_bfloat16 cuda_min_val(__nv_bfloat16 a, __nv_bfloat16 b) {
+    return __hlt(a, b) ? a : b;
+}
 
 // GPU-side scalar fill (replaces host_zero + cudaMemcpyAsync H2D pattern to avoid UB)
 template<typename T>
@@ -267,6 +294,16 @@ __device__ __forceinline__ __half warp_reduce_sum(__half val) {
     return val;
 }
 
+// Specialization for __nv_bfloat16
+template<>
+__device__ __forceinline__ __nv_bfloat16 warp_reduce_sum(__nv_bfloat16 val) {
+    #pragma unroll
+    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+        val = __hadd(val, __shfl_down_sync(0xffffffff, val, offset));
+    }
+    return val;
+}
+
 // Helper for __half comparison (using __hgt and __hlt)
 __device__ __forceinline__ __half cuda_max_val(__half a, __half b) {
     return __hgt(a, b) ? a : b;
@@ -323,6 +360,28 @@ __device__ __forceinline__ __half warp_reduce_min(__half val) {
     #pragma unroll
     for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
         __half other = __shfl_down_sync(0xffffffff, val, offset);
+        val = cuda_min_val(val, other);
+    }
+    return val;
+}
+
+// Specialization for __nv_bfloat16
+template<>
+__device__ __forceinline__ __nv_bfloat16 warp_reduce_max(__nv_bfloat16 val) {
+    #pragma unroll
+    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+        __nv_bfloat16 other = __shfl_down_sync(0xffffffff, val, offset);
+        val = cuda_max_val(val, other);
+    }
+    return val;
+}
+
+// Specialization for __nv_bfloat16
+template<>
+__device__ __forceinline__ __nv_bfloat16 warp_reduce_min(__nv_bfloat16 val) {
+    #pragma unroll
+    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+        __nv_bfloat16 other = __shfl_down_sync(0xffffffff, val, offset);
         val = cuda_min_val(val, other);
     }
     return val;
@@ -549,6 +608,104 @@ __global__ void min_reduce_kernel_half(const __half* input, __half* output, int6
         for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
             if (tid + offset < blockDim.x) {
                 __half other = shared[tid + offset];
+                val = cuda_min_val(val, other);
+            }
+        }
+        val = warp_reduce_min(val);
+
+        if (tid == 0) {
+            output[blockIdx.x] = val;
+        }
+    }
+}
+
+// ============================================================================
+// BFloat16 specializations for max/min reduction kernels
+// ============================================================================
+
+// Specialized max_reduce_kernel for __nv_bfloat16
+__global__ void max_reduce_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* output, int64_t n) {
+    __shared__ __nv_bfloat16 shared[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    // Initialize with first element or negative infinity
+    __nv_bfloat16 thread_max = (idx < n) ? input[idx] : bfloat16_neg_inf();
+
+    // Grid-stride loop
+    for (int64_t i = idx + grid_size; i < n; i += grid_size) {
+        __nv_bfloat16 val = input[i];
+        thread_max = cuda_max_val(val, thread_max);
+    }
+
+    shared[tid] = thread_max;
+    __syncthreads();
+
+    // Block-level reduction
+    for (int stride = blockDim.x / 2; stride > WARP_SIZE; stride >>= 1) {
+        if (tid < stride) {
+            __nv_bfloat16 other = shared[tid + stride];
+            shared[tid] = cuda_max_val(shared[tid], other);
+        }
+        __syncthreads();
+    }
+
+    // Warp-level reduction
+    if (tid < WARP_SIZE) {
+        __nv_bfloat16 val = shared[tid];
+        #pragma unroll
+        for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+            if (tid + offset < blockDim.x) {
+                __nv_bfloat16 other = shared[tid + offset];
+                val = cuda_max_val(val, other);
+            }
+        }
+        val = warp_reduce_max(val);
+
+        if (tid == 0) {
+            output[blockIdx.x] = val;
+        }
+    }
+}
+
+// Specialized min_reduce_kernel for __nv_bfloat16
+__global__ void min_reduce_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* output, int64_t n) {
+    __shared__ __nv_bfloat16 shared[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    // Initialize with first element or positive infinity
+    __nv_bfloat16 thread_min = (idx < n) ? input[idx] : bfloat16_pos_inf();
+
+    // Grid-stride loop
+    for (int64_t i = idx + grid_size; i < n; i += grid_size) {
+        __nv_bfloat16 val = input[i];
+        thread_min = cuda_min_val(val, thread_min);
+    }
+
+    shared[tid] = thread_min;
+    __syncthreads();
+
+    // Block-level reduction
+    for (int stride = blockDim.x / 2; stride > WARP_SIZE; stride >>= 1) {
+        if (tid < stride) {
+            __nv_bfloat16 other = shared[tid + stride];
+            shared[tid] = cuda_min_val(shared[tid], other);
+        }
+        __syncthreads();
+    }
+
+    // Warp-level reduction
+    if (tid < WARP_SIZE) {
+        __nv_bfloat16 val = shared[tid];
+        #pragma unroll
+        for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+            if (tid + offset < blockDim.x) {
+                __nv_bfloat16 other = shared[tid + offset];
                 val = cuda_min_val(val, other);
             }
         }
@@ -797,6 +954,102 @@ __global__ void min_along_dim_kernel_half(
             in_idx += indices[d] * meta.strides[d];
         }
         __half val = input[in_idx];
+        min_val = cuda_min_val(val, min_val);
+    }
+
+    output[out_idx] = min_val;
+}
+
+// Specialized max_along_dim_kernel for __nv_bfloat16
+__global__ void max_along_dim_kernel_bf16(
+    const __nv_bfloat16* input,
+    __nv_bfloat16* output,
+    DimMeta meta,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (out_idx >= output_size) return;
+
+    // Compute multi-dimensional indices
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+
+    for (int64_t d = 0; d < ndim; d++) {
+        if (d == dim) {
+            indices[d] = 0;
+            continue;
+        }
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
+    }
+
+    // Find max along the reduction dimension
+    indices[dim] = 0;
+    int64_t in_idx = 0;
+    for (int64_t d = 0; d < ndim; d++) {
+        in_idx += indices[d] * meta.strides[d];
+    }
+    __nv_bfloat16 max_val = input[in_idx];
+
+    for (int64_t i = 1; i < dim_size; i++) {
+        indices[dim] = i;
+        in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * meta.strides[d];
+        }
+        __nv_bfloat16 val = input[in_idx];
+        max_val = cuda_max_val(val, max_val);
+    }
+
+    output[out_idx] = max_val;
+}
+
+// Specialized min_along_dim_kernel for __nv_bfloat16
+__global__ void min_along_dim_kernel_bf16(
+    const __nv_bfloat16* input,
+    __nv_bfloat16* output,
+    DimMeta meta,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (out_idx >= output_size) return;
+
+    // Compute multi-dimensional indices
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+
+    for (int64_t d = 0; d < ndim; d++) {
+        if (d == dim) {
+            indices[d] = 0;
+            continue;
+        }
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
+    }
+
+    // Find min along the reduction dimension
+    indices[dim] = 0;
+    int64_t in_idx = 0;
+    for (int64_t d = 0; d < ndim; d++) {
+        in_idx += indices[d] * meta.strides[d];
+    }
+    __nv_bfloat16 min_val = input[in_idx];
+
+    for (int64_t i = 1; i < dim_size; i++) {
+        indices[dim] = i;
+        in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * meta.strides[d];
+        }
+        __nv_bfloat16 val = input[in_idx];
         min_val = cuda_min_val(val, min_val);
     }
 
@@ -1131,6 +1384,112 @@ static void launch_dim_reduction_min_half(
 }
 
 // ============================================================================
+// BFloat16 specialized launch functions
+// ============================================================================
+
+static void launch_full_reduction_max_bf16(const __nv_bfloat16* d_input, __nv_bfloat16* d_output, int64_t n, cudaStream_t stream = nullptr) {
+    if (n == 0) {
+        throw std::runtime_error("max: input tensor is empty");
+    }
+
+    if (n == 1) {
+        cudaMemcpyAsync(d_output, d_input, sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice, stream);
+        return;
+    }
+
+    int num_blocks = std::min<int>((n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE, 1024);
+
+    if (num_blocks == 1) {
+        max_reduce_kernel_bf16<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+    } else {
+        backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(__nv_bfloat16));
+        auto* d_temp = static_cast<__nv_bfloat16*>(d_temp_guard.get());
+        max_reduce_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+        max_reduce_kernel_bf16<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
+    }
+}
+
+static void launch_full_reduction_min_bf16(const __nv_bfloat16* d_input, __nv_bfloat16* d_output, int64_t n, cudaStream_t stream = nullptr) {
+    if (n == 0) {
+        throw std::runtime_error("min: input tensor is empty");
+    }
+
+    if (n == 1) {
+        cudaMemcpyAsync(d_output, d_input, sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice, stream);
+        return;
+    }
+
+    int num_blocks = std::min<int>((n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE, 1024);
+
+    if (num_blocks == 1) {
+        min_reduce_kernel_bf16<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+    } else {
+        backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(__nv_bfloat16));
+        auto* d_temp = static_cast<__nv_bfloat16*>(d_temp_guard.get());
+        min_reduce_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+        min_reduce_kernel_bf16<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
+    }
+}
+
+static void launch_dim_reduction_max_bf16(
+    const __nv_bfloat16* d_input,
+    __nv_bfloat16* d_output,
+    const std::vector<int64_t>& input_shape,
+    const std::vector<int64_t>& input_strides,
+    int64_t dim
+) {
+    const int64_t ndim = input_shape.size();
+    const int64_t dim_size = input_shape[dim];
+
+    int64_t output_size = 1;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != dim) {
+            output_size *= input_shape[i];
+        }
+    }
+
+    if (output_size == 0 || dim_size == 0) {
+        return;
+    }
+
+    DimMeta meta = make_dim_meta(input_shape, input_strides);
+
+    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    max_along_dim_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+        d_input, d_output, meta, ndim, dim, output_size, dim_size
+    );
+}
+
+static void launch_dim_reduction_min_bf16(
+    const __nv_bfloat16* d_input,
+    __nv_bfloat16* d_output,
+    const std::vector<int64_t>& input_shape,
+    const std::vector<int64_t>& input_strides,
+    int64_t dim
+) {
+    const int64_t ndim = input_shape.size();
+    const int64_t dim_size = input_shape[dim];
+
+    int64_t output_size = 1;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != dim) {
+            output_size *= input_shape[i];
+        }
+    }
+
+    if (output_size == 0 || dim_size == 0) {
+        return;
+    }
+
+    DimMeta meta = make_dim_meta(input_shape, input_strides);
+
+    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    min_along_dim_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+        d_input, d_output, meta, ndim, dim, output_size, dim_size
+    );
+}
+
+// ============================================================================
 // Public API
 // ============================================================================
 
@@ -1242,6 +1601,22 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             }
             break;
         }
+        case DType::BFloat16: {
+            auto* input_data = reinterpret_cast<const __nv_bfloat16*>(input.data_ptr());
+            auto* output_data = reinterpret_cast<__nv_bfloat16*>(output.data_ptr());
+
+            if (dim == INT64_MIN) {  // Full reduction
+                launch_full_reduction_sum(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_reduction_sum(
+                    input_data, output_data,
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    normalized_dim
+                );
+            }
+            break;
+        }
         default:
             throw std::runtime_error("sum: unsupported dtype");
     }
@@ -1275,11 +1650,20 @@ __global__ void scale_kernel<__half>(__half* data, int64_t n, __half scale) {
     }
 }
 
+// Specialization for __nv_bfloat16 (no *= operator)
+template<>
+__global__ void scale_kernel<__nv_bfloat16>(__nv_bfloat16* data, int64_t n, __nv_bfloat16 scale) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        data[idx] = __float2bfloat16(__bfloat162float(data[idx]) * __bfloat162float(scale));
+    }
+}
+
 auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
     const auto dtype = input.dtype();
 
-    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16) {
-        throw std::runtime_error("mean: only Float32, Float64, and Float16 are supported");
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
+        throw std::runtime_error("mean: only Float32, Float64, Float16, and BFloat16 are supported");
     }
 
     // Compute sum first
@@ -1312,9 +1696,13 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t st
         auto* data = sum_result.data<double>();
         const double scale = 1.0 / static_cast<double>(count);
         scale_kernel<<<grid_size, block_size, 0, stream>>>(data, n, scale);
-    } else {  // Float16
+    } else if (dtype == DType::Float16) {
         auto* data = reinterpret_cast<__half*>(sum_result.data_ptr());
         const __half scale = __float2half(1.0f / static_cast<float>(count));
+        scale_kernel<<<grid_size, block_size, 0, stream>>>(data, n, scale);
+    } else {  // BFloat16
+        auto* data = reinterpret_cast<__nv_bfloat16*>(sum_result.data_ptr());
+        const __nv_bfloat16 scale = __float2bfloat16(1.0f / static_cast<float>(count));
         scale_kernel<<<grid_size, block_size, 0, stream>>>(data, n, scale);
     }
 
@@ -1415,6 +1803,22 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
                 launch_full_reduction_max_half(input_data, output_data, input.numel(), stream);
             } else {
                 launch_dim_reduction_max_half(
+                    input_data, output_data,
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    dim
+                );
+            }
+            break;
+        }
+        case DType::BFloat16: {
+            auto* input_data = reinterpret_cast<const __nv_bfloat16*>(input.data_ptr());
+            auto* output_data = reinterpret_cast<__nv_bfloat16*>(output.data_ptr());
+
+            if (dim < 0) {
+                launch_full_reduction_max_bf16(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_reduction_max_bf16(
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
@@ -1524,6 +1928,22 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
                 launch_full_reduction_min_half(input_data, output_data, input.numel(), stream);
             } else {
                 launch_dim_reduction_min_half(
+                    input_data, output_data,
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    dim
+                );
+            }
+            break;
+        }
+        case DType::BFloat16: {
+            auto* input_data = reinterpret_cast<const __nv_bfloat16*>(input.data_ptr());
+            auto* output_data = reinterpret_cast<__nv_bfloat16*>(output.data_ptr());
+
+            if (dim < 0) {
+                launch_full_reduction_min_bf16(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_reduction_min_bf16(
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
@@ -1999,6 +2419,320 @@ __global__ void argmin_along_dim_kernel_half(
     output[out_idx] = min_idx;
 }
 
+// ============================================================================
+// BFloat16 specializations for argmax/argmin kernels
+// ============================================================================
+
+// BFloat16 final kernel for argmax
+__global__ void argmax_final_kernel_bf16(const __nv_bfloat16* input, const int64_t* block_indices, int64_t* output, int num_blocks) {
+    __shared__ float shared_vals[REDUCTION_BLOCK_SIZE];
+    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    float best_val;
+    int64_t best_idx;
+
+    if (tid < num_blocks) {
+        best_idx = block_indices[tid];
+        best_val = __bfloat162float(input[best_idx]);
+    } else {
+        best_val = -FLT_MAX;
+        best_idx = 0;
+    }
+
+    for (int i = tid + blockDim.x; i < num_blocks; i += blockDim.x) {
+        int64_t idx = block_indices[i];
+        float val = __bfloat162float(input[idx]);
+        if (val > best_val) {
+            best_val = val;
+            best_idx = idx;
+        }
+    }
+
+    shared_vals[tid] = best_val;
+    shared_idxs[tid] = best_idx;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            if (shared_vals[tid + stride] > shared_vals[tid]) {
+                shared_vals[tid] = shared_vals[tid + stride];
+                shared_idxs[tid] = shared_idxs[tid + stride];
+            }
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        *output = shared_idxs[0];
+    }
+}
+
+// BFloat16 final kernel for argmin
+__global__ void argmin_final_kernel_bf16(const __nv_bfloat16* input, const int64_t* block_indices, int64_t* output, int num_blocks) {
+    __shared__ float shared_vals[REDUCTION_BLOCK_SIZE];
+    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    float best_val;
+    int64_t best_idx;
+
+    if (tid < num_blocks) {
+        best_idx = block_indices[tid];
+        best_val = __bfloat162float(input[best_idx]);
+    } else {
+        best_val = FLT_MAX;
+        best_idx = 0;
+    }
+
+    for (int i = tid + blockDim.x; i < num_blocks; i += blockDim.x) {
+        int64_t idx = block_indices[i];
+        float val = __bfloat162float(input[idx]);
+        if (val < best_val) {
+            best_val = val;
+            best_idx = idx;
+        }
+    }
+
+    shared_vals[tid] = best_val;
+    shared_idxs[tid] = best_idx;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            if (shared_vals[tid + stride] < shared_vals[tid]) {
+                shared_vals[tid] = shared_vals[tid + stride];
+                shared_idxs[tid] = shared_idxs[tid + stride];
+            }
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        *output = shared_idxs[0];
+    }
+}
+
+// Specialized argmax_full_kernel for __nv_bfloat16
+__global__ void argmax_full_kernel_bf16(const __nv_bfloat16* input, int64_t* output, int64_t n) {
+    __shared__ __nv_bfloat16 shared_vals[REDUCTION_BLOCK_SIZE];
+    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    // Initialize with first element or negative infinity
+    __nv_bfloat16 thread_max = (idx < n) ? input[idx] : bfloat16_neg_inf();
+    int64_t thread_idx = (idx < n) ? idx : 0;
+
+    // Grid-stride loop to find local maximum
+    for (int64_t i = idx + grid_size; i < n; i += grid_size) {
+        __nv_bfloat16 val = input[i];
+        if (__hgt(val, thread_max)) {
+            thread_max = val;
+            thread_idx = i;
+        }
+    }
+
+    shared_vals[tid] = thread_max;
+    shared_idxs[tid] = thread_idx;
+    __syncthreads();
+
+    // Block-level reduction
+    for (int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
+        if (tid < stride) {
+            if (__hgt(shared_vals[tid + stride], shared_vals[tid])) {
+                shared_vals[tid] = shared_vals[tid + stride];
+                shared_idxs[tid] = shared_idxs[tid + stride];
+            }
+        }
+        __syncthreads();
+    }
+
+    // Warp-level reduction (last 32 threads)
+    if (tid < 32) {
+        __nv_bfloat16 val = shared_vals[tid];
+        int64_t val_idx = shared_idxs[tid];
+
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset /= 2) {
+            __nv_bfloat16 other_val = __shfl_down_sync(0xffffffff, val, offset);
+            int64_t other_idx = __shfl_down_sync(0xffffffff, val_idx, offset);
+            if (__hgt(other_val, val)) {
+                val = other_val;
+                val_idx = other_idx;
+            }
+        }
+
+        if (tid == 0) {
+            output[blockIdx.x] = val_idx;
+        }
+    }
+}
+
+// Specialized argmin_full_kernel for __nv_bfloat16
+__global__ void argmin_full_kernel_bf16(const __nv_bfloat16* input, int64_t* output, int64_t n) {
+    __shared__ __nv_bfloat16 shared_vals[REDUCTION_BLOCK_SIZE];
+    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    // Initialize with first element or positive infinity
+    __nv_bfloat16 thread_min = (idx < n) ? input[idx] : bfloat16_pos_inf();
+    int64_t thread_idx = (idx < n) ? idx : 0;
+
+    // Grid-stride loop to find local minimum
+    for (int64_t i = idx + grid_size; i < n; i += grid_size) {
+        __nv_bfloat16 val = input[i];
+        if (__hlt(val, thread_min)) {
+            thread_min = val;
+            thread_idx = i;
+        }
+    }
+
+    shared_vals[tid] = thread_min;
+    shared_idxs[tid] = thread_idx;
+    __syncthreads();
+
+    // Block-level reduction
+    for (int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
+        if (tid < stride) {
+            if (__hlt(shared_vals[tid + stride], shared_vals[tid])) {
+                shared_vals[tid] = shared_vals[tid + stride];
+                shared_idxs[tid] = shared_idxs[tid + stride];
+            }
+        }
+        __syncthreads();
+    }
+
+    // Warp-level reduction (last 32 threads)
+    if (tid < 32) {
+        __nv_bfloat16 val = shared_vals[tid];
+        int64_t val_idx = shared_idxs[tid];
+
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset /= 2) {
+            __nv_bfloat16 other_val = __shfl_down_sync(0xffffffff, val, offset);
+            int64_t other_idx = __shfl_down_sync(0xffffffff, val_idx, offset);
+            if (__hlt(other_val, val)) {
+                val = other_val;
+                val_idx = other_idx;
+            }
+        }
+
+        if (tid == 0) {
+            output[blockIdx.x] = val_idx;
+        }
+    }
+}
+
+// Specialized argmax_along_dim_kernel for __nv_bfloat16
+__global__ void argmax_along_dim_kernel_bf16(
+    const __nv_bfloat16* input,
+    int64_t* output,
+    DimMeta meta,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (out_idx >= output_size) return;
+
+    // Compute multi-dimensional indices
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+
+    for (int64_t d = 0; d < ndim; d++) {
+        if (d == dim) {
+            indices[d] = 0;
+            continue;
+        }
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
+    }
+
+    // Find argmax along the reduction dimension
+    indices[dim] = 0;
+    int64_t in_idx = 0;
+    for (int64_t d = 0; d < ndim; d++) {
+        in_idx += indices[d] * meta.strides[d];
+    }
+    __nv_bfloat16 max_val = input[in_idx];
+    int64_t max_idx = 0;
+
+    for (int64_t i = 1; i < dim_size; i++) {
+        indices[dim] = i;
+        in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * meta.strides[d];
+        }
+        __nv_bfloat16 val = input[in_idx];
+        if (__hgt(val, max_val)) {
+            max_val = val;
+            max_idx = i;
+        }
+    }
+
+    output[out_idx] = max_idx;
+}
+
+// Specialized argmin_along_dim_kernel for __nv_bfloat16
+__global__ void argmin_along_dim_kernel_bf16(
+    const __nv_bfloat16* input,
+    int64_t* output,
+    DimMeta meta,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (out_idx >= output_size) return;
+
+    // Compute multi-dimensional indices
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+
+    for (int64_t d = 0; d < ndim; d++) {
+        if (d == dim) {
+            indices[d] = 0;
+            continue;
+        }
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
+    }
+
+    // Find argmin along the reduction dimension
+    indices[dim] = 0;
+    int64_t in_idx = 0;
+    for (int64_t d = 0; d < ndim; d++) {
+        in_idx += indices[d] * meta.strides[d];
+    }
+    __nv_bfloat16 min_val = input[in_idx];
+    int64_t min_idx = 0;
+
+    for (int64_t i = 1; i < dim_size; i++) {
+        indices[dim] = i;
+        in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * meta.strides[d];
+        }
+        __nv_bfloat16 val = input[in_idx];
+        if (__hlt(val, min_val)) {
+            min_val = val;
+            min_idx = i;
+        }
+    }
+
+    output[out_idx] = min_idx;
+}
+
 // Helper function to launch argmax reduction
 template<typename T>
 static void launch_full_argmax(const T* d_input, int64_t* d_output, int64_t n, cudaStream_t stream = nullptr) {
@@ -2228,6 +2962,118 @@ static void launch_dim_argmin_half(
     );
 }
 
+// ============================================================================
+// BFloat16 specialized launch functions for argmax/argmin
+// ============================================================================
+
+static void launch_full_argmax_bf16(const __nv_bfloat16* d_input, int64_t* d_output, int64_t n, cudaStream_t stream = nullptr) {
+    if (n == 0) {
+        throw std::runtime_error("argmax: input tensor is empty");
+    }
+
+    if (n == 1) {
+        fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, int64_t(0));
+        return;
+    }
+
+    int num_blocks = std::min<int>((n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE, 1024);
+
+    if (num_blocks == 1) {
+        argmax_full_kernel_bf16<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+    } else {
+        // Two-phase GPU-only reduction
+        backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(int64_t));
+        auto* d_temp = static_cast<int64_t*>(d_temp_guard.get());
+        argmax_full_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+
+        // Phase 2: compare block results entirely on GPU
+        argmax_final_kernel_bf16<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, d_output, num_blocks);
+    }
+}
+
+static void launch_full_argmin_bf16(const __nv_bfloat16* d_input, int64_t* d_output, int64_t n, cudaStream_t stream = nullptr) {
+    if (n == 0) {
+        throw std::runtime_error("argmin: input tensor is empty");
+    }
+
+    if (n == 1) {
+        fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, int64_t(0));
+        return;
+    }
+
+    int num_blocks = std::min<int>((n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE, 1024);
+
+    if (num_blocks == 1) {
+        argmin_full_kernel_bf16<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+    } else {
+        // Two-phase GPU-only reduction
+        backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(int64_t));
+        auto* d_temp = static_cast<int64_t*>(d_temp_guard.get());
+        argmin_full_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+
+        // Phase 2: compare block results entirely on GPU
+        argmin_final_kernel_bf16<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, d_output, num_blocks);
+    }
+}
+
+static void launch_dim_argmax_bf16(
+    const __nv_bfloat16* d_input,
+    int64_t* d_output,
+    const std::vector<int64_t>& input_shape,
+    const std::vector<int64_t>& input_strides,
+    int64_t dim
+) {
+    const int64_t ndim = input_shape.size();
+    const int64_t dim_size = input_shape[dim];
+
+    int64_t output_size = 1;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != dim) {
+            output_size *= input_shape[i];
+        }
+    }
+
+    if (output_size == 0 || dim_size == 0) {
+        return;
+    }
+
+    DimMeta meta = make_dim_meta(input_shape, input_strides);
+
+    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    argmax_along_dim_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+        d_input, d_output, meta, ndim, dim, output_size, dim_size
+    );
+}
+
+static void launch_dim_argmin_bf16(
+    const __nv_bfloat16* d_input,
+    int64_t* d_output,
+    const std::vector<int64_t>& input_shape,
+    const std::vector<int64_t>& input_strides,
+    int64_t dim
+) {
+    const int64_t ndim = input_shape.size();
+    const int64_t dim_size = input_shape[dim];
+
+    int64_t output_size = 1;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != dim) {
+            output_size *= input_shape[i];
+        }
+    }
+
+    if (output_size == 0 || dim_size == 0) {
+        return;
+    }
+
+    DimMeta meta = make_dim_meta(input_shape, input_strides);
+
+    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    argmin_along_dim_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+        d_input, d_output, meta, ndim, dim, output_size, dim_size
+    );
+}
+
 // Public API for argmax
 auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
     const auto dtype = input.dtype();
@@ -2333,8 +3179,24 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
             }
             break;
         }
+        case DType::BFloat16: {
+            auto* input_data = reinterpret_cast<const __nv_bfloat16*>(input.data_ptr());
+            auto* output_data = output.data<int64_t>();
+
+            if (dim == INT64_MIN) {
+                launch_full_argmax_bf16(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_argmax_bf16(
+                    input_data, output_data,
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    normalized_dim
+                );
+            }
+            break;
+        }
         default:
-            throw std::runtime_error("argmax: only Float32, Float64, Float16, Int32, and Int64 are supported");
+            throw std::runtime_error("argmax: only Float32, Float64, Float16, BFloat16, Int32, and Int64 are supported");
     }
 
 #ifndef NDEBUG
@@ -2453,8 +3315,24 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
             }
             break;
         }
+        case DType::BFloat16: {
+            auto* input_data = reinterpret_cast<const __nv_bfloat16*>(input.data_ptr());
+            auto* output_data = output.data<int64_t>();
+
+            if (dim == INT64_MIN) {
+                launch_full_argmin_bf16(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_argmin_bf16(
+                    input_data, output_data,
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    normalized_dim
+                );
+            }
+            break;
+        }
         default:
-            throw std::runtime_error("argmin: only Float32, Float64, Float16, Int32, and Int64 are supported");
+            throw std::runtime_error("argmin: only Float32, Float64, Float16, BFloat16, Int32, and Int64 are supported");
     }
 
 #ifndef NDEBUG
