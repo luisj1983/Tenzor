@@ -728,7 +728,110 @@ auto LayerNorm::forward_impl(const Variable& input) -> Variable {
     // Dtype-aware computation
     DType input_dtype = input_cpu.dtype();
 
-    if (input_dtype == DType::Float16) {
+    if (input_dtype == DType::BFloat16) {
+        // BFloat16: convert to Float32, compute, convert back
+        // Uses same approach as Float16 - all computation in Float32 for precision
+        auto batch_mean = zeros({batch_size}, DType::Float32, Device::cpu());
+        auto batch_var = zeros({batch_size}, DType::Float32, Device::cpu());
+        auto* mean_data = batch_mean.data<float>();
+        auto* var_data = batch_var.data<float>();
+
+        auto* input_data = input_cpu.data<BFloat16>();
+
+        for (int64_t b = 0; b < batch_size; b++) {
+            double sum = 0.0;
+            for (int64_t i = 0; i < N; i++) {
+                sum += static_cast<float>(input_data[b * N + i]);
+            }
+            mean_data[b] = static_cast<float>(sum / N);
+        }
+
+        for (int64_t b = 0; b < batch_size; b++) {
+            double sum_sq = 0.0;
+            float mu = mean_data[b];
+            for (int64_t i = 0; i < N; i++) {
+                float diff = static_cast<float>(input_data[b * N + i]) - mu;
+                sum_sq += diff * diff;
+            }
+            var_data[b] = static_cast<float>(sum_sq / N);
+        }
+
+        auto rstd = zeros({batch_size}, DType::Float32, Device::cpu());
+        auto* rstd_data = rstd.data<float>();
+        for (int64_t b = 0; b < batch_size; b++) {
+            rstd_data[b] = 1.0f / std::sqrt(var_data[b] + static_cast<float>(eps_));
+        }
+
+        auto output_cpu = zeros_like(input_cpu);
+        auto* output_data = output_cpu.data<BFloat16>();
+        // Weight/bias are already converted to input dtype (BFloat16) above
+        auto* weight_data = elementwise_affine_ ? weight_cpu.data<BFloat16>() : nullptr;
+        auto* bias_data = elementwise_affine_ ? bias_cpu.data<BFloat16>() : nullptr;
+
+        for (int64_t b = 0; b < batch_size; b++) {
+            float mu = mean_data[b];
+            float inv_std = rstd_data[b];
+
+            for (int64_t i = 0; i < N; i++) {
+                int64_t idx = b * N + i;
+                float normalized = (static_cast<float>(input_data[idx]) - mu) * inv_std;
+
+                if (elementwise_affine_) {
+                    output_data[idx] = BFloat16(normalized * static_cast<float>(weight_data[i]) + static_cast<float>(bias_data[i]));
+                } else {
+                    output_data[idx] = BFloat16(normalized);
+                }
+            }
+        }
+
+        Tensor output = (original_device == Device::cpu()) ? output_cpu : output_cpu.to(original_device);
+
+        if (is_grad_enabled() && (input.requires_grad() || (elementwise_affine_ && cached_weight_ && cached_weight_->requires_grad()))) {
+            auto result = Variable(output, true);
+
+            Tensor saved_mean = (original_device == Device::cpu()) ? batch_mean : batch_mean.to(original_device);
+            Tensor saved_rstd = (original_device == Device::cpu()) ? rstd : rstd.to(original_device);
+
+            std::vector<Tensor> tensors_to_save = {
+                input.tensor(),
+                saved_mean,
+                saved_rstd,
+                (elementwise_affine_ && cached_weight_) ? cached_weight_->tensor() : ones({N}, input.tensor().dtype(), input.tensor().device())
+            };
+
+            auto grad_fn = std::make_shared<LayerNormBackward>(
+                elementwise_affine_, eps_, N, std::move(tensors_to_save)
+            );
+
+            result.set_grad_fn(grad_fn);
+
+            std::vector<std::shared_ptr<Function>> next_funcs;
+            if (auto input_grad_fn = input.grad_fn()) {
+                next_funcs.push_back(input_grad_fn);
+            }
+            if (elementwise_affine_ && cached_weight_ && cached_weight_->grad_fn()) {
+                next_funcs.push_back(cached_weight_->grad_fn());
+            }
+            grad_fn->set_next_functions(std::move(next_funcs));
+
+            std::vector<Variable> input_vars;
+            if (input.requires_grad()) {
+                input_vars.push_back(input);
+            }
+            if (elementwise_affine_ && cached_weight_ && cached_weight_->requires_grad()) {
+                input_vars.push_back(*cached_weight_);
+            }
+            if (elementwise_affine_ && cached_bias_ && cached_bias_->requires_grad()) {
+                input_vars.push_back(*cached_bias_);
+            }
+            grad_fn->set_input_variables(input_vars);
+
+            return result;
+        }
+
+        return Variable(output, false);
+
+    } else if (input_dtype == DType::Float16) {
         // Float16 path: need batch_mean and batch_var for two-pass algorithm
         auto batch_mean = zeros({batch_size}, DType::Float32, Device::cpu());
         auto batch_var = zeros({batch_size}, DType::Float32, Device::cpu());
@@ -1386,7 +1489,7 @@ auto GroupNorm::forward_impl(const Variable& input) -> Variable {
 
     // CPU path: pointer-based computation
     Tensor input_tensor_cpu = input.tensor();
-    if (original_dtype == DType::Float16 || original_dtype == DType::Float64) {
+    if (original_dtype == DType::Float16 || original_dtype == DType::BFloat16 || original_dtype == DType::Float64) {
         input_tensor_cpu = input_tensor_cpu.to(DType::Float32);
     }
     Variable input_cpu = Variable(input_tensor_cpu, input.requires_grad());
@@ -1403,7 +1506,7 @@ auto GroupNorm::forward_impl(const Variable& input) -> Variable {
         weight_tensor_cpu = weight_tensor_cpu.cpu();
         bias_tensor_cpu = bias_tensor_cpu.cpu();
     }
-    if (weight_tensor_cpu.dtype() == DType::Float16 || weight_tensor_cpu.dtype() == DType::Float64) {
+    if (weight_tensor_cpu.dtype() == DType::Float16 || weight_tensor_cpu.dtype() == DType::BFloat16 || weight_tensor_cpu.dtype() == DType::Float64) {
         weight_tensor_cpu = weight_tensor_cpu.to(DType::Float32);
         bias_tensor_cpu = bias_tensor_cpu.to(DType::Float32);
     }
@@ -1502,7 +1605,7 @@ auto GroupNorm::forward_impl(const Variable& input) -> Variable {
 
     // Convert back to original dtype and move to original device if needed
     Tensor output_final = output;
-    if (original_dtype == DType::Float16 || original_dtype == DType::Float64) {
+    if (original_dtype == DType::Float16 || original_dtype == DType::BFloat16 || original_dtype == DType::Float64) {
         output_final = output_final.to(original_dtype);
     }
     if (original_device.type != Device::Type::CPU) {

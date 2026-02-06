@@ -362,8 +362,9 @@ TEST_P(FusedOpsMultiDTypeTest, FusedLayerNorm_ForwardCorrectness_2D) {
     ASSERT_EQ(output.dtype(), dtype());
 
     // Verify normalization: mean ≈ 0, std ≈ 1 for each sample
-    float mean_tol = (dtype() == DType::Float16) ? 1e-2f : 1e-4f;
-    float var_tol = (dtype() == DType::Float16) ? 0.1f : 1e-3f;
+    // BFloat16 has even lower precision than Float16 (7 vs 10 mantissa bits)
+    float mean_tol = (dtype() == DType::Float16 || dtype() == DType::BFloat16) ? 1e-2f : 1e-4f;
+    float var_tol = (dtype() == DType::Float16 || dtype() == DType::BFloat16) ? 0.1f : 1e-3f;
 
     auto output_cpu = output.to(Device::cpu()).to(DType::Float32);
     const float* out_data = output_cpu.data<float>();

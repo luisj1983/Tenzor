@@ -114,8 +114,15 @@ auto Dropout::forward_impl(const Variable& input) -> Variable {
             for (size_t i = 0; i < numel; ++i) {
                 mask_out[i] = rand_data[i] > p_ ? 1.0 : 0.0;
             }
+        } else if (random_tensor.dtype() == DType::BFloat16) {
+            BFloat16* rand_data = static_cast<BFloat16*>(random_ptr);
+            BFloat16* mask_out = static_cast<BFloat16*>(mask_ptr);
+            for (size_t i = 0; i < numel; ++i) {
+                float rand_val = static_cast<float>(rand_data[i]);
+                mask_out[i] = BFloat16(rand_val > static_cast<float>(p_) ? 1.0f : 0.0f);
+            }
         } else {
-            throw std::runtime_error("Dropout only supports Float16, Float32 and Float64 dtypes");
+            throw std::runtime_error("Dropout only supports Float16, BFloat16, Float32 and Float64 dtypes");
         }
 
         // Transfer mask to target device if needed

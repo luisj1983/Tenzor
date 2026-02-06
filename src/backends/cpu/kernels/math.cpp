@@ -2228,6 +2228,57 @@ auto bmm_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         for (size_t i = 0; i < c_size; ++i) {
             c_data[i] = Float16(c_f32[i]);
         }
+    } else if (a.dtype() == DType::BFloat16) {
+        // BFloat16: Convert to Float32, compute, convert back
+        const BFloat16* a_data = a_cont.data<BFloat16>();
+        const BFloat16* b_data = b_cont.data<BFloat16>();
+        BFloat16* c_data = output.data<BFloat16>();
+
+        size_t a_size = static_cast<size_t>(batch_size * M * K);
+        size_t b_size = static_cast<size_t>(batch_size * K * N);
+        size_t c_size = static_cast<size_t>(batch_size * M * N);
+
+        std::vector<float> a_f32(a_size);
+        std::vector<float> b_f32(b_size);
+        std::vector<float> c_f32(c_size);
+
+        // Convert BFloat16 to Float32
+        for (size_t i = 0; i < a_size; ++i) {
+            a_f32[i] = static_cast<float>(a_data[i]);
+        }
+        for (size_t i = 0; i < b_size; ++i) {
+            b_f32[i] = static_cast<float>(b_data[i]);
+        }
+
+#ifdef TENZOR_USE_MKL
+        cblas_sgemm_batch_strided(
+            CblasRowMajor,
+            CblasNoTrans, CblasNoTrans,
+            static_cast<MKL_INT>(M),
+            static_cast<MKL_INT>(N),
+            static_cast<MKL_INT>(K),
+            1.0f,
+            a_f32.data(), static_cast<MKL_INT>(K), a_batch_stride,
+            b_f32.data(), static_cast<MKL_INT>(N), b_batch_stride,
+            0.0f,
+            c_f32.data(), static_cast<MKL_INT>(N), c_batch_stride,
+            static_cast<MKL_INT>(batch_size)
+        );
+#else
+        #pragma omp parallel for if(batch_size > 1)
+        for (int64_t batch = 0; batch < batch_size; ++batch) {
+            const float* a_batch = a_f32.data() + batch * a_batch_stride;
+            const float* b_batch = b_f32.data() + batch * b_batch_stride;
+            float* c_batch = c_f32.data() + batch * c_batch_stride;
+
+            gemm::gemm_optimized(a_batch, b_batch, c_batch, M, N, K, 1.0f, 0.0f);
+        }
+#endif
+
+        // Convert Float32 back to BFloat16
+        for (size_t i = 0; i < c_size; ++i) {
+            c_data[i] = BFloat16(c_f32[i]);
+        }
     } else {
         throw std::runtime_error(
             "bmm_kernel unsupported dtype: " +
@@ -2486,6 +2537,15 @@ auto neg_kernel(const Tensor& input) -> Tensor {
         }
 #endif
 
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = result.data<BFloat16>();
+
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+        for (size_t i = 0; i < n; ++i) {
+            out_data[i] = BFloat16(-static_cast<float>(in_data[i]));
+        }
+
     } else if (input.dtype() == DType::Int32) {
         const int32_t* in_data = input.data<int32_t>();
         int32_t* out_data = result.data<int32_t>();
@@ -2495,7 +2555,7 @@ auto neg_kernel(const Tensor& input) -> Tensor {
         }
 
     } else {
-        throw std::runtime_error("neg operation only supports Float32, Float64, Float16, and Int32 dtypes");
+        throw std::runtime_error("neg operation only supports Float32, Float64, Float16, BFloat16, and Int32 dtypes");
     }
 
     return result;
@@ -2679,8 +2739,18 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val) -> Tensor {
             out_data[i] = Float16(val);
         }
 
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = result.data<BFloat16>();
+
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(in_data[i]);
+            val = std::max(std::min(val, max_val), min_val);
+            out_data[i] = BFloat16(val);
+        }
+
     } else {
-        throw std::runtime_error("clamp operation only supports Float16, Float32 and Float64 dtypes");
+        throw std::runtime_error("clamp operation only supports Float16, BFloat16, Float32 and Float64 dtypes");
     }
 
     return result;

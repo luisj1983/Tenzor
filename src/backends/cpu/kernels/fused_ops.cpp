@@ -155,6 +155,27 @@ auto fused_linear_relu_kernel(
         }
 
         output = output_f32.to(DType::Float16);
+    } else if (input.dtype() == DType::BFloat16) {
+        // BFloat16: convert to Float32 for computation, convert back
+        Tensor output_f32 = output.to(DType::Float32);
+        Tensor bias_f32 = bias ? bias->to(DType::Float32) : Tensor();
+
+        float* out_data = output_f32.data<float>();
+        const float* bias_data = bias ? bias_f32.data<float>() : nullptr;
+
+        for (size_t i = 0; i < static_cast<size_t>(batch_size); ++i) {
+            for (size_t j = 0; j < static_cast<size_t>(out_features); ++j) {
+                size_t idx = i * out_features + j;
+                float val = out_data[idx];
+                if (bias_data) {
+                    val += bias_data[j];
+                }
+                // ReLU
+                out_data[idx] = std::max(0.0f, val);
+            }
+        }
+
+        output = output_f32.to(DType::BFloat16);
     }
 
     // Reshape back to original batch dimensions
@@ -293,6 +314,31 @@ auto fused_batchnorm_relu_kernel(
                     float scaled = normalized * gamma + beta;
                     // ReLU
                     out_data[idx] = Float16(std::max(0.0f, scaled));
+                }
+            }
+        }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        const BFloat16* mean_data = running_mean.data<BFloat16>();
+        const BFloat16* var_data = running_var.data<BFloat16>();
+        const BFloat16* gamma_data = weight.data<BFloat16>();
+        const BFloat16* beta_data = bias.data<BFloat16>();
+        BFloat16* out_data = output.data<BFloat16>();
+
+        for (int64_t n = 0; n < batch_size; ++n) {
+            for (int64_t c = 0; c < num_features; ++c) {
+                float mean = static_cast<float>(mean_data[c]);
+                float var = static_cast<float>(var_data[c]);
+                float gamma = static_cast<float>(gamma_data[c]);
+                float beta = static_cast<float>(beta_data[c]);
+                float inv_std = 1.0f / std::sqrt(var + eps);
+
+                for (int64_t s = 0; s < spatial_size; ++s) {
+                    size_t idx = n * num_features * spatial_size + c * spatial_size + s;
+                    float in_val = static_cast<float>(in_data[idx]);
+                    float normalized = (in_val - mean) * inv_std;
+                    float scaled = normalized * gamma + beta;
+                    out_data[idx] = BFloat16(std::max(0.0f, scaled));
                 }
             }
         }
@@ -484,6 +530,14 @@ auto fused_add_relu_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             data[i] = std::max(0.0f, data[i]);
         }
         result = result_f32.to(DType::Float16);
+    } else if (result.dtype() == DType::BFloat16) {
+        Tensor result_f32 = result.to(DType::Float32);
+        float* data = result_f32.data<float>();
+        size_t n = static_cast<size_t>(result.numel());
+        for (size_t i = 0; i < n; ++i) {
+            data[i] = std::max(0.0f, data[i]);
+        }
+        result = result_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("fused_add_relu: unsupported dtype");
     }
@@ -539,8 +593,20 @@ auto fused_gelu_kernel(const Tensor& input) -> Tensor {
             float tanh_val = std::tanh(inner);
             out_data[i] = Float16(0.5f * x * (1.0f + tanh_val));
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = result.data<BFloat16>();
+        size_t n = static_cast<size_t>(input.numel());
+
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]);
+            float x_cubed = x * x * x;
+            float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
+            float tanh_val = std::tanh(inner);
+            out_data[i] = BFloat16(0.5f * x * (1.0f + tanh_val));
+        }
     } else {
-        throw std::runtime_error("fused_gelu: Only Float32/Float64/Float16 supported");
+        throw std::runtime_error("fused_gelu: Only Float32/Float64/Float16/BFloat16 supported");
     }
 
     return result;
@@ -745,8 +811,42 @@ auto fused_layer_norm_kernel(
                 batch_out[i] = Float16(normalized * static_cast<float>(weight_data[i]) + static_cast<float>(bias_data[i]));
             }
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = result.data<BFloat16>();
+        const BFloat16* weight_data = weight.data<BFloat16>();
+        const BFloat16* bias_data = bias.data<BFloat16>();
+        BFloat16* mean_data = mean_out.data<BFloat16>();
+        BFloat16* inv_std_data = inv_std_out.data<BFloat16>();
+
+        for (int64_t b = 0; b < batch_size; ++b) {
+            const BFloat16* batch_in = in_data + b * norm_size;
+            BFloat16* batch_out = out_data + b * norm_size;
+
+            float mean = 0.0f;
+            for (int64_t i = 0; i < norm_size; ++i) {
+                mean += static_cast<float>(batch_in[i]);
+            }
+            mean /= static_cast<float>(norm_size);
+
+            float variance = 0.0f;
+            for (int64_t i = 0; i < norm_size; ++i) {
+                float diff = static_cast<float>(batch_in[i]) - mean;
+                variance += diff * diff;
+            }
+            variance /= static_cast<float>(norm_size);
+
+            float inv_std = 1.0f / std::sqrt(variance + eps);
+            mean_data[b] = BFloat16(mean);
+            inv_std_data[b] = BFloat16(inv_std);
+
+            for (int64_t i = 0; i < norm_size; ++i) {
+                float normalized = (static_cast<float>(batch_in[i]) - mean) * inv_std;
+                batch_out[i] = BFloat16(normalized * static_cast<float>(weight_data[i]) + static_cast<float>(bias_data[i]));
+            }
+        }
     } else {
-        throw std::runtime_error("fused_layer_norm: Only Float32/Float64/Float16 supported");
+        throw std::runtime_error("fused_layer_norm: Only Float32/Float64/Float16/BFloat16 supported");
     }
 
     return {result, mean_out, inv_std_out};

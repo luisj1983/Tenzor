@@ -72,6 +72,13 @@ protected:
      */
     int64_t getInputSize(int64_t default_size) {
         if (device().type == Device::Type::CPU) {
+            // Half-precision on CPU has dtype conversion overhead even with Float32 compute
+            bool is_half = (dtype() == DType::Float16 || dtype() == DType::BFloat16);
+            if (is_half) {
+                if (default_size >= 1024) return 384;
+                if (default_size >= 512) return 256;
+                return std::min(default_size, int64_t(224));
+            }
             return default_size;
         }
 

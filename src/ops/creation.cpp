@@ -137,6 +137,11 @@ auto ones(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
             std::fill(ptr, ptr + numel, Float16(1.0f));
             break;
         }
+        case DType::BFloat16: {
+            BFloat16* ptr = static_cast<BFloat16*>(data);
+            std::fill(ptr, ptr + numel, BFloat16(1.0f));
+            break;
+        }
         case DType::Float32: {
             float* ptr = static_cast<float*>(data);
             std::fill(ptr, ptr + numel, 1.0f);
@@ -213,6 +218,11 @@ auto full(std::vector<int64_t> shape, float value, DType dtype, Device device) -
             std::fill(ptr, ptr + numel, Float16(static_cast<float>(value)));
             break;
         }
+        case DType::BFloat16: {
+            BFloat16* ptr = static_cast<BFloat16*>(data);
+            std::fill(ptr, ptr + numel, BFloat16(static_cast<float>(value)));
+            break;
+        }
         case DType::Float32: {
             float* ptr = static_cast<float*>(data);
             std::fill(ptr, ptr + numel, static_cast<float>(value));
@@ -286,6 +296,11 @@ auto full(std::vector<int64_t> shape, double value, DType dtype, Device device) 
         case DType::Float16: {
             Float16* ptr = static_cast<Float16*>(data);
             std::fill(ptr, ptr + numel, Float16(static_cast<float>(value)));
+            break;
+        }
+        case DType::BFloat16: {
+            BFloat16* ptr = static_cast<BFloat16*>(data);
+            std::fill(ptr, ptr + numel, BFloat16(static_cast<float>(value)));
             break;
         }
         case DType::Float32: {
@@ -386,8 +401,16 @@ auto rand(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
             }
             break;
         }
+        case DType::BFloat16: {
+            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+            BFloat16* ptr = static_cast<BFloat16*>(data);
+            for (size_t i = 0; i < numel; ++i) {
+                ptr[i] = BFloat16(dist(gen));
+            }
+            break;
+        }
         default:
-            throw std::runtime_error("Unsupported dtype for rand() - only Float32, Float64, and Float16 are supported");
+            throw std::runtime_error("Unsupported dtype for rand() - only Float32, Float64, Float16, and BFloat16 are supported");
     }
     return tensor;
 }
@@ -444,8 +467,16 @@ auto randn(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
             }
             break;
         }
+        case DType::BFloat16: {
+            std::normal_distribution<float> dist(0.0f, 1.0f);
+            BFloat16* ptr = static_cast<BFloat16*>(data);
+            for (size_t i = 0; i < numel; ++i) {
+                ptr[i] = BFloat16(dist(gen));
+            }
+            break;
+        }
         default:
-            throw std::runtime_error("Unsupported dtype for randn() - only Float32, Float64, and Float16 are supported");
+            throw std::runtime_error("Unsupported dtype for randn() - only Float32, Float64, Float16, and BFloat16 are supported");
     }
     return tensor;
 }

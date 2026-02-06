@@ -307,6 +307,43 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
                     }
                 }
             }
+        } else if (dtype == DType::BFloat16) {
+            const BFloat16* input_data = input.tensor().data<BFloat16>();
+            BFloat16* output_data = output.data<BFloat16>();
+            BFloat16* indices_data = indices.data<BFloat16>();
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
+                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
+                            int64_t h_start = h_out * stride_ - padding_;
+                            int64_t w_start = w_out * stride_ - padding_;
+                            int64_t h_end = h_start + kernel_size_;
+                            int64_t w_end = w_start + kernel_size_;
+
+                            float max_val = -std::numeric_limits<float>::infinity();
+                            int64_t max_idx = 0;
+
+                            for (int64_t h = h_start; h < h_end; ++h) {
+                                for (int64_t w = w_start; w < w_end; ++w) {
+                                    if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
+                                        int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
+                                        float val = static_cast<float>(input_data[input_idx]);
+                                        if (val > max_val) {
+                                            max_val = val;
+                                            max_idx = input_idx;
+                                        }
+                                    }
+                                }
+                            }
+
+                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+                            output_data[out_idx] = BFloat16(max_val);
+                            indices_data[out_idx] = BFloat16(static_cast<float>(max_idx));
+                        }
+                    }
+                }
+            }
         } else {
             throw std::runtime_error("MaxPool2d: Unsupported dtype");
         }
@@ -962,6 +999,41 @@ auto AdaptiveAvgPool2d::forward_impl(const Variable& input) -> Variable {
             }
 
             output = output_f32.to(DType::Float16);
+        } else if (dtype == DType::BFloat16) {
+            auto input_f32 = input_cpu.to(DType::Float32);
+            auto output_f32 = zeros({N, C, H_out, W_out}, DType::Float32, Device::cpu());
+
+            const float* input_data = input_f32.data<float>();
+            float* output_data = output_f32.data<float>();
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
+                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
+                            int64_t h_start = (h_out * H_in) / H_out;
+                            int64_t h_end = ((h_out + 1) * H_in) / H_out;
+                            int64_t w_start = (w_out * W_in) / W_out;
+                            int64_t w_end = ((w_out + 1) * W_in) / W_out;
+
+                            float sum = 0.0f;
+                            int64_t count = 0;
+
+                            for (int64_t h = h_start; h < h_end; ++h) {
+                                for (int64_t w = w_start; w < w_end; ++w) {
+                                    int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
+                                    sum += input_data[input_idx];
+                                    count++;
+                                }
+                            }
+
+                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+                            output_data[out_idx] = sum / static_cast<float>(count);
+                        }
+                    }
+                }
+            }
+
+            output = output_f32.to(DType::BFloat16);
         } else {
             throw std::runtime_error("AdaptiveAvgPool2d: Unsupported dtype");
         }

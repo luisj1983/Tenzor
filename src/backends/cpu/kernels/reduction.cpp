@@ -623,6 +623,59 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             }
             break;
         }
+        case DType::BFloat16: {
+            auto* input_data = input.data<BFloat16>();
+            auto* output_data = output.data<BFloat16>();
+
+            if (dim == REDUCE_ALL) {
+                // Full reduction - compute in Float32 for precision
+                const int64_t n = input.numel();
+                float sum = 0.0f;
+
+                #pragma omp parallel for reduction(+:sum) if(n > REDUCTION_OMP_THRESHOLD)
+                for (int64_t i = 0; i < n; i++) {
+                    sum += static_cast<float>(input_data[i]);
+                }
+                output_data[0] = BFloat16(sum);
+            } else {
+                // Dimensional reduction - compute in Float32
+                const int64_t shape_ndim = static_cast<int64_t>(input_shape.size());
+                const int64_t dim_size = input_shape[dim];
+
+                int64_t output_size = 1;
+                for (int64_t i = 0; i < shape_ndim; i++) {
+                    if (i != dim) {
+                        output_size *= input_shape[i];
+                    }
+                }
+
+                const int64_t total_work = output_size * dim_size;
+                #pragma omp parallel for if(total_work > REDUCTION_OMP_THRESHOLD)
+                for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
+                    std::vector<int64_t> indices(shape_ndim, 0);
+                    int64_t tmp = out_idx;
+
+                    for (int64_t d = shape_ndim - 1; d >= 0; --d) {
+                        if (d == dim) continue;
+                        indices[d] = tmp % input_shape[d];
+                        tmp /= input_shape[d];
+                    }
+
+                    // Sum along dimension - accumulation in Float32
+                    float sum = 0.0f;
+                    for (int64_t i = 0; i < dim_size; i++) {
+                        indices[dim] = i;
+                        int64_t in_idx = 0;
+                        for (int64_t d = 0; d < shape_ndim; d++) {
+                            in_idx += indices[d] * input_strides[d];
+                        }
+                        sum += static_cast<float>(input_data[in_idx]);
+                    }
+                    output_data[out_idx] = BFloat16(sum);
+                }
+            }
+            break;
+        }
         case DType::Float32: {
             auto* input_data = input.data<float>();
             auto* output_data = output.data<float>();
@@ -692,8 +745,8 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
     const int64_t ndim = input.ndim();
 
     // Mean only supports floating point types
-    if (dtype != DType::Float16 && dtype != DType::Float32 && dtype != DType::Float64) {
-        throw std::runtime_error("mean: only Float16, Float32, and Float64 are supported");
+    if (dtype != DType::Float16 && dtype != DType::BFloat16 && dtype != DType::Float32 && dtype != DType::Float64) {
+        throw std::runtime_error("mean: only Float16, BFloat16, Float32, and Float64 are supported");
     }
 
     // Normalize negative dimension
@@ -719,6 +772,15 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         #pragma omp parallel for if(n > 10000)
         for (int64_t i = 0; i < n; i++) {
             data[i] = Float16(static_cast<float>(data[i]) * scale);
+        }
+    } else if (dtype == DType::BFloat16) {
+        auto* data = sum_result.data<BFloat16>();
+        const float scale = 1.0f / static_cast<float>(count);
+        const int64_t n = sum_result.numel();
+
+        #pragma omp parallel for if(n > 10000)
+        for (int64_t i = 0; i < n; i++) {
+            data[i] = BFloat16(static_cast<float>(data[i]) * scale);
         }
     } else if (dtype == DType::Float32) {
         auto* data = sum_result.data<float>();

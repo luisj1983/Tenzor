@@ -938,10 +938,47 @@ auto conv2d_forward_kernel(
         conv2d_forward_impl<float>(input, weight, bias, output, stride, padding, dilation, groups);
     } else if (input.dtype() == DType::Float64) {
         conv2d_forward_impl<double>(input, weight, bias, output, stride, padding, dilation, groups);
-    } else if (input.dtype() == DType::Float16) {
-        conv2d_forward_impl<Float16>(input, weight, bias, output, stride, padding, dilation, groups);
-    } else if (input.dtype() == DType::BFloat16) {
-        conv2d_forward_impl<BFloat16>(input, weight, bias, output, stride, padding, dilation, groups);
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        // Half-precision on CPU: compute in Float32 for performance.
+        // Scalar half-precision GEMM is 10-100x slower than optimized Float32 GEMM/oneDNN.
+        // Convert inputs to Float32, compute, then convert output back.
+        DType original_dtype = input.dtype();
+        auto input_f32 = input.to(DType::Float32);
+        auto weight_f32 = weight.to(DType::Float32);
+
+        Tensor bias_f32;
+        const Tensor* bias_f32_ptr = nullptr;
+        if (bias) {
+            bias_f32 = bias->to(DType::Float32);
+            bias_f32_ptr = &bias_f32;
+        }
+
+        Tensor output_f32(output_shape, DType::Float32, input.device());
+
+#ifdef TENZOR_USE_ONEDNN
+        if (!conv2d_forward_onednn(input_f32, weight_f32, bias_f32_ptr, output_f32, stride, padding, dilation, groups)) {
+#endif
+            conv2d_forward_impl<float>(input_f32, weight_f32, bias_f32_ptr, output_f32, stride, padding, dilation, groups);
+#ifdef TENZOR_USE_ONEDNN
+        }
+#endif
+
+        // Convert Float32 result back to original half-precision dtype
+        const float* src = output_f32.data<float>();
+        int64_t n = output.numel();
+        if (original_dtype == DType::Float16) {
+            Float16* dst = output.data<Float16>();
+            #pragma omp parallel for if(n > 65536)
+            for (int64_t i = 0; i < n; ++i) {
+                dst[i] = Float16(src[i]);
+            }
+        } else {
+            BFloat16* dst = output.data<BFloat16>();
+            #pragma omp parallel for if(n > 65536)
+            for (int64_t i = 0; i < n; ++i) {
+                dst[i] = BFloat16(src[i]);
+            }
+        }
     } else {
         throw std::runtime_error("Unsupported dtype for conv2d_forward");
     }
@@ -1062,10 +1099,27 @@ auto conv2d_backward_input_kernel(
         conv2d_backward_input_impl<float>(grad_output, weight, grad_input, input_shape, stride, padding, dilation, groups);
     } else if (grad_output.dtype() == DType::Float64) {
         conv2d_backward_input_impl<double>(grad_output, weight, grad_input, input_shape, stride, padding, dilation, groups);
-    } else if (grad_output.dtype() == DType::Float16) {
-        conv2d_backward_input_impl<Float16>(grad_output, weight, grad_input, input_shape, stride, padding, dilation, groups);
-    } else if (grad_output.dtype() == DType::BFloat16) {
-        conv2d_backward_input_impl<BFloat16>(grad_output, weight, grad_input, input_shape, stride, padding, dilation, groups);
+    } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
+        // Half-precision on CPU: compute in Float32 for performance
+        DType original_dtype = grad_output.dtype();
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto weight_f32 = weight.to(DType::Float32);
+        Tensor grad_input_f32(input_shape, DType::Float32, grad_output.device());
+
+        conv2d_backward_input_impl<float>(grad_output_f32, weight_f32, grad_input_f32, input_shape, stride, padding, dilation, groups);
+
+        // Convert Float32 result back to original dtype
+        const float* src = grad_input_f32.data<float>();
+        int64_t n = grad_input.numel();
+        if (original_dtype == DType::Float16) {
+            Float16* dst = grad_input.data<Float16>();
+            #pragma omp parallel for if(n > 65536)
+            for (int64_t i = 0; i < n; ++i) dst[i] = Float16(src[i]);
+        } else {
+            BFloat16* dst = grad_input.data<BFloat16>();
+            #pragma omp parallel for if(n > 65536)
+            for (int64_t i = 0; i < n; ++i) dst[i] = BFloat16(src[i]);
+        }
     } else {
         throw std::runtime_error("Unsupported dtype for conv2d_backward_input");
     }
@@ -1182,10 +1236,27 @@ auto conv2d_backward_weight_kernel(
         conv2d_backward_weight_impl<float>(grad_output, input, grad_weight, weight_shape, stride, padding, dilation, groups);
     } else if (grad_output.dtype() == DType::Float64) {
         conv2d_backward_weight_impl<double>(grad_output, input, grad_weight, weight_shape, stride, padding, dilation, groups);
-    } else if (grad_output.dtype() == DType::Float16) {
-        conv2d_backward_weight_impl<Float16>(grad_output, input, grad_weight, weight_shape, stride, padding, dilation, groups);
-    } else if (grad_output.dtype() == DType::BFloat16) {
-        conv2d_backward_weight_impl<BFloat16>(grad_output, input, grad_weight, weight_shape, stride, padding, dilation, groups);
+    } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
+        // Half-precision on CPU: compute in Float32 for performance
+        DType original_dtype = grad_output.dtype();
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        Tensor grad_weight_f32(weight_shape, DType::Float32, grad_output.device());
+
+        conv2d_backward_weight_impl<float>(grad_output_f32, input_f32, grad_weight_f32, weight_shape, stride, padding, dilation, groups);
+
+        // Convert Float32 result back to original dtype
+        const float* src = grad_weight_f32.data<float>();
+        int64_t n = grad_weight.numel();
+        if (original_dtype == DType::Float16) {
+            Float16* dst = grad_weight.data<Float16>();
+            #pragma omp parallel for if(n > 65536)
+            for (int64_t i = 0; i < n; ++i) dst[i] = Float16(src[i]);
+        } else {
+            BFloat16* dst = grad_weight.data<BFloat16>();
+            #pragma omp parallel for if(n > 65536)
+            for (int64_t i = 0; i < n; ++i) dst[i] = BFloat16(src[i]);
+        }
     } else {
         throw std::runtime_error("Unsupported dtype for conv2d_backward_weight");
     }
@@ -1246,10 +1317,24 @@ auto conv2d_backward_bias_kernel(
         conv2d_backward_bias_impl<float>(grad_output, grad_bias);
     } else if (grad_output.dtype() == DType::Float64) {
         conv2d_backward_bias_impl<double>(grad_output, grad_bias);
-    } else if (grad_output.dtype() == DType::Float16) {
-        conv2d_backward_bias_impl<Float16>(grad_output, grad_bias);
-    } else if (grad_output.dtype() == DType::BFloat16) {
-        conv2d_backward_bias_impl<BFloat16>(grad_output, grad_bias);
+    } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
+        // Half-precision on CPU: compute in Float32 for performance
+        DType original_dtype = grad_output.dtype();
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        int64_t out_channels = grad_output.shape()[1];
+        Tensor grad_bias_f32({out_channels}, DType::Float32, grad_output.device());
+
+        conv2d_backward_bias_impl<float>(grad_output_f32, grad_bias_f32);
+
+        // Convert Float32 result back to original dtype
+        const float* src = grad_bias_f32.data<float>();
+        if (original_dtype == DType::Float16) {
+            Float16* dst = grad_bias.data<Float16>();
+            for (int64_t i = 0; i < out_channels; ++i) dst[i] = Float16(src[i]);
+        } else {
+            BFloat16* dst = grad_bias.data<BFloat16>();
+            for (int64_t i = 0; i < out_channels; ++i) dst[i] = BFloat16(src[i]);
+        }
     } else {
         throw std::runtime_error("Unsupported dtype for conv2d_backward_bias");
     }

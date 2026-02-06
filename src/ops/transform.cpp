@@ -626,8 +626,17 @@ auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor {
 
         // Dispatch based on dtype
         switch (input.dtype()) {
+            case DType::Float16:
+                expand_impl(static_cast<Float16*>(nullptr));
+                break;
+            case DType::BFloat16:
+                expand_impl(static_cast<BFloat16*>(nullptr));
+                break;
             case DType::Float32:
                 expand_impl(static_cast<float*>(nullptr));
+                break;
+            case DType::Float64:
+                expand_impl(static_cast<double*>(nullptr));
                 break;
             case DType::Int32:
                 expand_impl(static_cast<int32_t*>(nullptr));
