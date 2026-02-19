@@ -12,7 +12,7 @@
 #include <unordered_map>
 
 // Forward declare NCCL types to avoid dependency in header
-#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
+#if defined(TENZOR_HAS_NCCL)
     #ifdef TENZOR_USE_ROCM
         #include <rccl/rccl.h>
     #else

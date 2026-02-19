@@ -15,6 +15,7 @@
 #include "tenzor/core/tensor.hpp"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cuda_bf16.h>
 #include <vector>
 
 namespace tenzor {
@@ -26,6 +27,15 @@ __global__ void f32_to_half_kernel(const float* src, __half* dst, int64_t n) {
     int64_t stride = blockDim.x * gridDim.x;
     for (int64_t i = idx; i < n; i += stride) {
         dst[i] = __float2half(src[i]);
+    }
+}
+
+// Direct FP32->BF16 copy kernel — avoids intermediate tensor allocation
+__global__ void f32_to_bfloat16_kernel(const float* src, __nv_bfloat16* dst, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t stride = blockDim.x * gridDim.x;
+    for (int64_t i = idx; i < n; i += stride) {
+        dst[i] = __float2bfloat16(src[i]);
     }
 }
 
@@ -76,6 +86,7 @@ auto cudnn_batchnorm2d_forward_inference(
         case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
         case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
         case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
+        case DType::BFloat16: cudnn_dtype = CUDNN_DATA_BFLOAT16; break;
         default:
             throw std::runtime_error("cuDNN BatchNorm: unsupported dtype");
     }
@@ -174,6 +185,34 @@ auto cudnn_batchnorm2d_forward_inference(
             var_f32.data<float>(),
             epsilon
         ));
+    } else if (input.dtype() == DType::BFloat16) {
+        // cuDNN mandates FP32 for bnScale, bnBias, estimatedMean, estimatedVariance
+        // when the input tensor is BF16 (same as FP16 case).
+        const float alpha = 1.0f;
+        const float zero = 0.0f;
+
+        // Convert parameters to Float32 as required by cuDNN
+        Tensor gamma_f32 = gamma_c.to(DType::Float32);
+        Tensor beta_f32 = beta_c.to(DType::Float32);
+        Tensor mean_f32 = mean_c.to(DType::Float32);
+        Tensor var_f32 = var_c.to(DType::Float32);
+
+        CUDNN_CHECK(cudnnBatchNormalizationForwardInference(
+            handle,
+            CUDNN_BATCHNORM_SPATIAL,
+            &alpha,
+            &zero,
+            input_desc.get(),
+            input_c.data_ptr(),
+            output_desc.get(),
+            output.data_ptr(),
+            bn_desc,
+            gamma_f32.data<float>(),
+            beta_f32.data<float>(),
+            mean_f32.data<float>(),
+            var_f32.data<float>(),
+            epsilon
+        ));
     }
 
     // Cleanup
@@ -228,6 +267,7 @@ auto cudnn_batchnorm2d_forward_training(
         case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
         case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
         case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
+        case DType::BFloat16: cudnn_dtype = CUDNN_DATA_BFLOAT16; break;
         default:
             throw std::runtime_error("cuDNN BatchNorm: unsupported dtype");
     }
@@ -247,8 +287,8 @@ auto cudnn_batchnorm2d_forward_training(
     // Create output tensor (same dtype as input)
     Tensor output(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
 
-    // For Float16 input, cuDNN requires saved stats to be Float32
-    DType stats_dtype = (input.dtype() == DType::Float16) ? DType::Float32 : input.dtype();
+    // For Float16/BFloat16 input, cuDNN requires saved stats to be Float32
+    DType stats_dtype = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) ? DType::Float32 : input.dtype();
     Tensor saved_mean({C}, stats_dtype, input.device());
     Tensor saved_inv_var({C}, stats_dtype, input.device());
 
@@ -347,6 +387,51 @@ auto cudnn_batchnorm2d_forward_training(
             running_var_f32.data<float>(),
             reinterpret_cast<__half*>(running_var.data_ptr()),
             stat_n);
+    } else if (input.dtype() == DType::BFloat16) {
+        // For BF16 input, cuDNN requires FP32 for all BN parameters
+        const float alpha = 1.0f;
+        const float zero = 0.0f;
+
+        // Convert parameters to Float32 as required by cuDNN
+        Tensor gamma_f32 = gamma_c.to(DType::Float32);
+        Tensor beta_f32 = beta_c.to(DType::Float32);
+
+        // Convert running stats to Float32, update, then copy back
+        Tensor running_mean_f32 = running_mean.to(DType::Float32);
+        Tensor running_var_f32 = running_var.to(DType::Float32);
+
+        CUDNN_CHECK(cudnnBatchNormalizationForwardTraining(
+            handle,
+            CUDNN_BATCHNORM_SPATIAL,
+            &alpha,
+            &zero,
+            input_desc.get(),
+            input_c.data_ptr(),
+            output_desc.get(),
+            output.data_ptr(),
+            bn_desc,
+            gamma_f32.data<float>(),
+            beta_f32.data<float>(),
+            momentum,
+            running_mean_f32.data<float>(),
+            running_var_f32.data<float>(),
+            epsilon,
+            saved_mean.data<float>(),
+            saved_inv_var.data<float>()
+        ));
+
+        // Copy updated running stats directly from FP32 to BF16 — no intermediate tensors
+        int64_t stat_n = running_mean.numel();
+        int block = 256;
+        int grid = (stat_n + block - 1) / block;
+        f32_to_bfloat16_kernel<<<grid, block, 0, stream>>>(
+            running_mean_f32.data<float>(),
+            reinterpret_cast<__nv_bfloat16*>(running_mean.data_ptr()),
+            stat_n);
+        f32_to_bfloat16_kernel<<<grid, block, 0, stream>>>(
+            running_var_f32.data<float>(),
+            reinterpret_cast<__nv_bfloat16*>(running_var.data_ptr()),
+            stat_n);
     }
 
     cudnnDestroyTensorDescriptor(bn_desc);
@@ -397,6 +482,7 @@ auto cudnn_batchnorm2d_backward(
         case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
         case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
         case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
+        case DType::BFloat16: cudnn_dtype = CUDNN_DATA_BFLOAT16; break;
         default:
             throw std::runtime_error("cuDNN BatchNorm backward: unsupported dtype");
     }
@@ -513,6 +599,45 @@ auto cudnn_batchnorm2d_backward(
         // Convert gradients back to Float16 to match original parameter dtypes
         grad_gamma = grad_gamma_f32.to(DType::Float16);
         grad_beta = grad_beta_f32.to(DType::Float16);
+    } else if (input.dtype() == DType::BFloat16) {
+        // For BF16 input, cuDNN requires FP32 for gamma, saved_mean, saved_inv_var
+        const float alpha = 1.0f;
+        const float zero = 0.0f;
+
+        // Convert parameters to Float32 as required by cuDNN
+        Tensor gamma_f32 = gamma_c.to(DType::Float32);
+        Tensor mean_f32 = mean_c.to(DType::Float32);
+        Tensor inv_var_f32 = inv_var_c.to(DType::Float32);
+
+        // Temporary Float32 tensors for gradients
+        Tensor grad_gamma_f32({C}, DType::Float32, input.device());
+        Tensor grad_beta_f32({C}, DType::Float32, input.device());
+
+        CUDNN_CHECK(cudnnBatchNormalizationBackward(
+            handle,
+            CUDNN_BATCHNORM_SPATIAL,
+            &alpha,
+            &zero,
+            &alpha,
+            &zero,
+            input_desc.get(),
+            input_c.data_ptr(),
+            grad_desc.get(),
+            grad_out_c.data_ptr(),
+            input_desc.get(),
+            grad_input.data_ptr(),
+            bn_desc,
+            gamma_f32.data<float>(),
+            grad_gamma_f32.data<float>(),
+            grad_beta_f32.data<float>(),
+            epsilon,
+            mean_f32.data<float>(),
+            inv_var_f32.data<float>()
+        ));
+
+        // Convert gradients back to BFloat16 to match original parameter dtypes
+        grad_gamma = grad_gamma_f32.to(DType::BFloat16);
+        grad_beta = grad_beta_f32.to(DType::BFloat16);
     }
 
     cudnnDestroyTensorDescriptor(bn_desc);

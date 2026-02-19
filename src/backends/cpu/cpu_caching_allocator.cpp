@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/backend/cpu_caching_allocator.hpp"
+#include "tenzor/backend/loader.hpp"
 #include <cstdlib>
 #include <stdexcept>
 #include <algorithm>
@@ -43,9 +44,15 @@ auto CPUCachingAllocator::instance() -> CPUCachingAllocator& {
 CPUCachingAllocator::CPUCachingAllocator() = default;
 
 CPUCachingAllocator::~CPUCachingAllocator() {
-    // During static destruction, thread-local storage may already be destroyed.
-    // Free all roots - at shutdown we release everything regardless of coalescing state.
-    // Any "leaked" blocks would have their root freed anyway when we exit.
+    // If the backend registry has already been shut down (finalize() ran),
+    // skip freeing — the OS reclaims all memory at process exit anyway.
+    // This prevents use-after-free if this static outlives other statics
+    // during unordered static destruction.
+    if (!is_backend_registry_alive()) {
+        return;
+    }
+
+    // During normal shutdown, free all roots.
     std::lock_guard<std::mutex> lock(global_mutex_);
     for (auto& [root_ptr, root] : global_root_allocations_) {
         free_to_system(root.ptr);

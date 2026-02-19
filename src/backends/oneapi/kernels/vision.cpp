@@ -17,6 +17,8 @@ struct ROIAlignKernelFloat16 {};
 struct ROIAlignBackwardKernelFloat32 {};
 struct ROIAlignBackwardKernelFloat64 {};
 struct ROIAlignBackwardKernelFloat16 {};
+struct ROIAlignBackwardF16AccumKernel {};
+struct ROIAlignBackwardF16ConvertKernel {};
 struct GatherRelativePositionBiasKernelFloat32 {};
 struct GatherRelativePositionBiasKernelFloat64 {};
 struct GatherRelativePositionBiasKernelFloat16 {};
@@ -728,11 +730,13 @@ auto roi_align_backward_kernel(
         const sycl::half* rois_ptr = get_data_ptr<const sycl::half>(rois);
         sycl::half* grad_feat_ptr = get_data_ptr<sycl::half>(grad_features);
 
-        queue.fill(grad_feat_ptr, sycl::half(0.0f), feat_size).wait();
+        // Accumulate in float32 since sycl::half doesn't support atomic operations
+        float* accum_ptr = sycl::malloc_device<float>(feat_size, queue);
+        queue.fill(accum_ptr, 0.0f, feat_size).wait();
 
         const float offset = aligned ? 0.5f : 0.0f;
 
-        queue.parallel_for<ROIAlignBackwardKernelFloat16>(
+        queue.parallel_for<ROIAlignBackwardF16AccumKernel>(
             sycl::range<1>(total_elements),
             [=](sycl::id<1> idx) {
                 int64_t pw = idx % output_width;
@@ -790,28 +794,35 @@ auto roi_align_backward_kernel(
 
                         int64_t base = batch_idx * channels * feat_height * feat_width + c * feat_height * feat_width;
 
-                        // Use atomic_ref on sycl::half - accumulate in half precision
-                        // Note: atomic operations on half may not be supported on all devices
-                        // For safety, we use a float-based approach via atomic_ref
-                        sycl::atomic_ref<sycl::half, sycl::memory_order::relaxed, sycl::memory_scope::device>
-                            a1(grad_feat_ptr[base + y_low * feat_width + x_low]);
-                        a1 += sycl::half(hy * hx * grad_val);
+                        sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                            a1(accum_ptr[base + y_low * feat_width + x_low]);
+                        a1 += hy * hx * grad_val;
 
-                        sycl::atomic_ref<sycl::half, sycl::memory_order::relaxed, sycl::memory_scope::device>
-                            a2(grad_feat_ptr[base + y_low * feat_width + x_high]);
-                        a2 += sycl::half(hy * lx * grad_val);
+                        sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                            a2(accum_ptr[base + y_low * feat_width + x_high]);
+                        a2 += hy * lx * grad_val;
 
-                        sycl::atomic_ref<sycl::half, sycl::memory_order::relaxed, sycl::memory_scope::device>
-                            a3(grad_feat_ptr[base + y_high * feat_width + x_low]);
-                        a3 += sycl::half(ly * hx * grad_val);
+                        sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                            a3(accum_ptr[base + y_high * feat_width + x_low]);
+                        a3 += ly * hx * grad_val;
 
-                        sycl::atomic_ref<sycl::half, sycl::memory_order::relaxed, sycl::memory_scope::device>
-                            a4(grad_feat_ptr[base + y_high * feat_width + x_high]);
-                        a4 += sycl::half(ly * lx * grad_val);
+                        sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                            a4(accum_ptr[base + y_high * feat_width + x_high]);
+                        a4 += ly * lx * grad_val;
                     }
                 }
             }
         ).wait();
+
+        // Convert float32 accumulation buffer back to half
+        queue.parallel_for<ROIAlignBackwardF16ConvertKernel>(
+            sycl::range<1>(feat_size),
+            [=](sycl::id<1> i) {
+                grad_feat_ptr[i] = sycl::half(accum_ptr[i]);
+            }
+        ).wait();
+
+        sycl::free(accum_ptr, queue);
     }
     else {
         throw std::runtime_error("roi_align_backward: unsupported dtype");

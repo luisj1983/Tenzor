@@ -15,17 +15,20 @@ auto backend_registry() -> BackendLoader&;
 // Global registry destruction flag - defined at the end of this file
 extern std::atomic<bool> g_registry_destroying;
 
-BackendLoader::~BackendLoader() {
+auto BackendLoader::shutdown() -> void {
+    if (shutdown_called_) {
+        return;
+    }
+    shutdown_called_ = true;
+
     // Mark that we're destroying the registry - this prevents DeviceStorage
     // from trying to access backends during static destruction
     g_registry_destroying.store(true, std::memory_order_release);
 
-    // Destroy backends in reverse dependency order to avoid cleanup issues.
-
     // Clear device type mapping first
     device_to_backend_.clear();
 
-    // Destroy backends in specific order to avoid runtime cleanup races
+    // Destroy backends in reverse dependency order to avoid cleanup issues
     const std::vector<std::string> destruction_order = {
         "oneapi",       // Independent SYCL runtime
         "vulkan",       // Independent GPU API
@@ -33,13 +36,12 @@ BackendLoader::~BackendLoader() {
         "webgpu",       // Independent GPU API
         "rocm",         // AMD runtime
         "cuda",         // NVIDIA runtime
-        "cpu"           // Always safe last
+        "cpu"           // Always safe last (destructor calls mkl_cleanup)
     };
 
     for (const auto& name : destruction_order) {
         auto it = backends_.find(name);
         if (it != backends_.end()) {
-            // Explicitly reset the unique_ptr to destroy the backend
             it->second.reset();
             backends_.erase(it);
         }
@@ -48,11 +50,25 @@ BackendLoader::~BackendLoader() {
     // Destroy any remaining backends not in the explicit order
     backends_.clear();
 
-    // Then unload libraries
-    for (auto handle : loaded_libraries_) {
-        unload_library(handle);
-    }
+    // Do NOT dlclose backend libraries. Backend .so files pull in transitive
+    // dependencies (MKL → TBB/tbbmalloc) that register their own static
+    // destructors. Unloading these libraries removes code that those
+    // destructors will call, causing segfaults during exit().
+    // The OS reclaims all memory at process exit anyway.
     loaded_libraries_.clear();
+}
+
+BackendLoader::~BackendLoader() {
+    // Fallback: if shutdown() was not called (e.g. finalize() was never invoked),
+    // perform cleanup. During static destruction we skip dlclose since other
+    // statics may still hold function pointers into backend libraries.
+    if (!shutdown_called_) {
+        g_registry_destroying.store(true, std::memory_order_release);
+        device_to_backend_.clear();
+        backends_.clear();
+        // Skip dlclose — OS reclaims at exit
+        loaded_libraries_.clear();
+    }
 }
 
 auto BackendLoader::load_backend(const std::filesystem::path& library_path)
@@ -159,9 +175,9 @@ auto BackendLoader::load_library(const std::filesystem::path& path) -> LibHandle
     #else
         // Clear any existing error
         dlerror();
-        // Use RTLD_LOCAL to prevent symbol pollution to other libraries (e.g., PyTorch)
-        // that also use MKL. RTLD_GLOBAL would make Tenzor's MKL symbols visible globally,
-        // causing conflicts when another library tries to use its own MKL.
+        // Use RTLD_LOCAL to prevent symbol pollution between backends.
+        // TBB/tbbmalloc are pre-loaded with RTLD_GLOBAL in initialize()
+        // so TBB's internal dlopen of tbbmalloc works even under RTLD_LOCAL.
         return dlopen(path.c_str(), RTLD_LAZY | RTLD_LOCAL);
     #endif
 }

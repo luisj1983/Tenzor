@@ -5,6 +5,7 @@
 #include "tenzor/core/shape.hpp"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cuda_bf16.h>
 #include <algorithm>
 #include <limits>
 #include <vector>
@@ -456,6 +457,7 @@ auto cudnn_conv2d_forward(
         case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
         case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
         case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
+        case DType::BFloat16: cudnn_dtype = CUDNN_DATA_BFLOAT16; break;
         default:
             throw std::runtime_error("cuDNN Conv2d: unsupported dtype");
     }
@@ -539,14 +541,31 @@ auto cudnn_conv2d_forward(
             ));
         } else {
             // Find the fastest successful algorithm
+            // For half-precision types, prefer GEMM-based algorithms which have
+            // better FP16/BF16 support and use tensor cores effectively
             algo = perf_results[0].algo;
             workspace_size = perf_results[0].memory;
             float best_time = std::numeric_limits<float>::max();
 
+            bool is_half_precision = (cudnn_dtype == CUDNN_DATA_HALF ||
+                                       cudnn_dtype == CUDNN_DATA_BFLOAT16);
+
             for (int i = 0; i < returned_algo_count; ++i) {
-                if (perf_results[i].status == CUDNN_STATUS_SUCCESS &&
-                    perf_results[i].memory <= kMaxWorkspaceSize &&
-                    perf_results[i].time < best_time) {
+                if (perf_results[i].status != CUDNN_STATUS_SUCCESS ||
+                    perf_results[i].memory > kMaxWorkspaceSize) {
+                    continue;
+                }
+
+                // For half precision, skip FFT algorithms which don't support FP16/BF16
+                if (is_half_precision) {
+                    cudnnConvolutionFwdAlgo_t candidate = perf_results[i].algo;
+                    if (candidate == CUDNN_CONVOLUTION_FWD_ALGO_FFT ||
+                        candidate == CUDNN_CONVOLUTION_FWD_ALGO_FFT_TILING) {
+                        continue;
+                    }
+                }
+
+                if (perf_results[i].time < best_time) {
                     best_time = perf_results[i].time;
                     algo = perf_results[i].algo;
                     workspace_size = perf_results[i].memory;
@@ -601,7 +620,9 @@ auto cudnn_conv2d_forward(
             output.data<double>()
         ));
     } else if (input.dtype() == DType::Float16) {
-        CUDNN_CHECK(cudnnConvolutionForward(
+        // Try the selected algorithm; if it fails, fall back to IMPLICIT_PRECOMP_GEMM
+        // which is the most reliable algorithm for half precision types
+        cudnnStatus_t status = cudnnConvolutionForward(
             handle,
             &alpha,
             input_desc.get(),
@@ -615,7 +636,76 @@ auto cudnn_conv2d_forward(
             &beta,
             output_desc.get(),
             output.data<Float16>()
-        ));
+        );
+        if (status != CUDNN_STATUS_SUCCESS) {
+            // Fallback to IMPLICIT_PRECOMP_GEMM for better FP16 compatibility
+            algo = CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM;
+            CUDNN_CHECK(cudnnGetConvolutionForwardWorkspaceSize(
+                handle, input_desc.get(), filter_desc.get(), conv_desc.get(),
+                output_desc.get(), algo, &workspace_size
+            ));
+            workspace = CuDNNWorkspace::get(workspace_size);
+            CUDNN_CHECK(cudnnConvolutionForward(
+                handle,
+                &alpha,
+                input_desc.get(),
+                input.data<Float16>(),
+                filter_desc.get(),
+                weight.data<Float16>(),
+                conv_desc.get(),
+                algo,
+                workspace,
+                workspace_size,
+                &beta,
+                output_desc.get(),
+                output.data<Float16>()
+            ));
+            // Update the cache with the working algorithm
+            Conv2dAlgoCache::instance().set_fwd(cache_key, {algo, workspace_size});
+        }
+    } else if (input.dtype() == DType::BFloat16) {
+        // BFloat16 uses float alpha/beta like Float16
+        cudnnStatus_t status = cudnnConvolutionForward(
+            handle,
+            &alpha,
+            input_desc.get(),
+            input.data<BFloat16>(),
+            filter_desc.get(),
+            weight.data<BFloat16>(),
+            conv_desc.get(),
+            algo,
+            workspace,
+            workspace_size,
+            &beta,
+            output_desc.get(),
+            output.data<BFloat16>()
+        );
+        if (status != CUDNN_STATUS_SUCCESS) {
+            // Fallback to IMPLICIT_PRECOMP_GEMM for better BF16 compatibility
+            algo = CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM;
+            CUDNN_CHECK(cudnnGetConvolutionForwardWorkspaceSize(
+                handle, input_desc.get(), filter_desc.get(), conv_desc.get(),
+                output_desc.get(), algo, &workspace_size
+            ));
+            workspace = CuDNNWorkspace::get(workspace_size);
+            CUDNN_CHECK(cudnnConvolutionForward(
+                handle,
+                &alpha,
+                input_desc.get(),
+                input.data<BFloat16>(),
+                filter_desc.get(),
+                weight.data<BFloat16>(),
+                conv_desc.get(),
+                algo,
+                workspace,
+                workspace_size,
+                &beta,
+                output_desc.get(),
+                output.data<BFloat16>()
+            ));
+            // Update the cache with the working algorithm
+            Conv2dAlgoCache::instance().set_fwd(cache_key, {algo, workspace_size});
+        }
     }
 
     // Add bias if present
@@ -715,6 +805,7 @@ auto cudnn_fused_conv2d_activation_forward(
         case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
         case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
         case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
+        case DType::BFloat16: cudnn_dtype = CUDNN_DATA_BFLOAT16; break;
         default:
             throw std::runtime_error("cuDNN FusedConv2dActivation: unsupported dtype");
     }
@@ -770,7 +861,7 @@ auto cudnn_fused_conv2d_activation_forward(
     const float alpha1 = 1.0f;
     const float alpha2 = 0.0f;
 
-    if (input.dtype() == DType::Float32 || input.dtype() == DType::Float16) {
+    if (input.dtype() == DType::Float32 || input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         CUDNN_CHECK(cudnnConvolutionBiasActivationForward(
             handle,
             &alpha1,
@@ -918,6 +1009,7 @@ auto cudnn_conv2d_backward(
         case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
         case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
         case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
+        case DType::BFloat16: cudnn_dtype = CUDNN_DATA_BFLOAT16; break;
         default:
             throw std::runtime_error("cuDNN Conv2d backward: unsupported dtype");
     }
@@ -1394,6 +1486,7 @@ auto cudnn_conv2d_forward_nhwc(
         case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
         case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
         case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
+        case DType::BFloat16: cudnn_dtype = CUDNN_DATA_BFLOAT16; break;
         default:
             throw std::runtime_error("cuDNN Conv2d NHWC: unsupported dtype");
     }
@@ -1655,6 +1748,7 @@ auto cudnn_conv2d_backward_nhwc(
         case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
         case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
         case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
+        case DType::BFloat16: cudnn_dtype = CUDNN_DATA_BFLOAT16; break;
         default:
             throw std::runtime_error("cuDNN Conv2d backward NHWC: unsupported dtype");
     }
@@ -1945,6 +2039,7 @@ auto cudnn_lstm_forward(
         case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
         case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
         case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
+        case DType::BFloat16: cudnn_dtype = CUDNN_DATA_BFLOAT16; break;
         default:
             throw std::runtime_error("cuDNN LSTM: unsupported dtype");
     }
@@ -2182,6 +2277,7 @@ auto cudnn_maxpool2d_forward(
         case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
         case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
         case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
+        case DType::BFloat16: cudnn_dtype = CUDNN_DATA_BFLOAT16; break;
         default:
             throw std::runtime_error("cuDNN MaxPool2d: unsupported dtype");
     }
@@ -2256,6 +2352,7 @@ auto cudnn_maxpool2d_backward(
         case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
         case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
         case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
+        case DType::BFloat16: cudnn_dtype = CUDNN_DATA_BFLOAT16; break;
         default:
             throw std::runtime_error("cuDNN MaxPool2d backward: unsupported dtype");
     }
@@ -2335,6 +2432,7 @@ auto cudnn_avgpool2d_forward(
         case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
         case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
         case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
+        case DType::BFloat16: cudnn_dtype = CUDNN_DATA_BFLOAT16; break;
         default:
             throw std::runtime_error("cuDNN AvgPool2d: unsupported dtype");
     }
@@ -2408,6 +2506,7 @@ auto cudnn_avgpool2d_backward(
         case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
         case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
         case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
+        case DType::BFloat16: cudnn_dtype = CUDNN_DATA_BFLOAT16; break;
         default:
             throw std::runtime_error("cuDNN AvgPool2d backward: unsupported dtype");
     }
@@ -2496,6 +2595,7 @@ auto cudnn_softmax_forward(
         case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
         case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
         case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
+        case DType::BFloat16: cudnn_dtype = CUDNN_DATA_BFLOAT16; break;
         default:
             throw std::runtime_error("cuDNN Softmax: unsupported dtype");
     }
@@ -2570,6 +2670,7 @@ auto cudnn_softmax_backward(
         case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
         case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
         case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
+        case DType::BFloat16: cudnn_dtype = CUDNN_DATA_BFLOAT16; break;
         default:
             throw std::runtime_error("cuDNN Softmax backward: unsupported dtype");
     }
@@ -2646,6 +2747,7 @@ auto cudnn_log_softmax_forward(
         case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
         case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
         case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
+        case DType::BFloat16: cudnn_dtype = CUDNN_DATA_BFLOAT16; break;
         default:
             throw std::runtime_error("cuDNN LogSoftmax: unsupported dtype");
     }
@@ -2719,6 +2821,7 @@ auto cudnn_log_softmax_backward(
         case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
         case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
         case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
+        case DType::BFloat16: cudnn_dtype = CUDNN_DATA_BFLOAT16; break;
         default:
             throw std::runtime_error("cuDNN LogSoftmax backward: unsupported dtype");
     }
@@ -3363,6 +3466,22 @@ auto cudnn_layer_norm_forward(
             norm_size,
             eps
         );
+    } else if (input_c.dtype() == DType::BFloat16) {
+        // BFloat16: read __nv_bfloat16, accumulate in float, write __nv_bfloat16
+        constexpr int BLOCK_SIZE = 256;
+        int blocks = static_cast<int>(batch_size);
+
+        layer_norm_mixed_kernel<BLOCK_SIZE, __nv_bfloat16, __nv_bfloat16><<<blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input_c.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(weight_c.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(bias_c.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(mean_tensor.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(inv_std_tensor.data_ptr()),
+            batch_size,
+            norm_size,
+            eps
+        );
     } else {
         throw std::runtime_error("cudnn_layer_norm_forward: unsupported dtype");
     }
@@ -3474,6 +3593,32 @@ auto cudnn_layer_norm_backward(
 
         grad_weight = grad_weight_f32.to(DType::Float16);
         grad_bias = grad_bias_f32.to(DType::Float16);
+    } else if (input_c.dtype() == DType::BFloat16) {
+        // BFloat16: read __nv_bfloat16, accumulate grad_weight/grad_bias in float, write __nv_bfloat16 grad_input
+        constexpr int BLOCK_SIZE = 256;
+        int blocks = static_cast<int>(batch_size);
+
+        // grad_weight and grad_bias accumulate atomically in float for precision
+        Tensor grad_weight_f32({norm_size}, DType::Float32, weight.device());
+        Tensor grad_bias_f32({norm_size}, DType::Float32, weight.device());
+        cudaMemsetAsync(grad_weight_f32.data_ptr(), 0, grad_weight_f32.numel() * sizeof(float), stream);
+        cudaMemsetAsync(grad_bias_f32.data_ptr(), 0, grad_bias_f32.numel() * sizeof(float), stream);
+
+        layer_norm_backward_mixed_kernel<BLOCK_SIZE, __nv_bfloat16, __nv_bfloat16><<<blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(grad_out_c.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(input_c.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(weight_c.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(mean_c.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(inv_std_c.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(grad_input.data_ptr()),
+            grad_weight_f32.data<float>(),
+            grad_bias_f32.data<float>(),
+            batch_size,
+            norm_size
+        );
+
+        grad_weight = grad_weight_f32.to(DType::BFloat16);
+        grad_bias = grad_bias_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("cudnn_layer_norm_backward: unsupported dtype");
     }

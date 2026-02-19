@@ -1,4 +1,5 @@
 #include "tenzor/backend/oneapi_caching_allocator.hpp"
+#include "tenzor/backend/loader.hpp"
 
 #include <sycl/sycl.hpp>
 #include <algorithm>
@@ -22,6 +23,12 @@ OneAPICachingAllocator::OneAPICachingAllocator()
 }
 
 OneAPICachingAllocator::~OneAPICachingAllocator() {
+    // During static destruction the SYCL runtime may already be torn down,
+    // making USM free calls crash. Skip cleanup if the backend registry
+    // is already shut down — the OS reclaims all memory at exit anyway.
+    if (!is_backend_registry_alive()) {
+        return;
+    }
     // Release all cached memory
     empty_cache(-1);
 }

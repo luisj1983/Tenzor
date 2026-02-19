@@ -3063,6 +3063,11 @@ auto adaptive_avg_pool2d_forward(const Tensor& input, int64_t output_h, int64_t 
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(output.data_ptr()),
             N, C, H_in, W_in, output_h, output_w);
+    } else if (input.dtype() == DType::BFloat16) {
+        adaptive_avg_pool2d_forward_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+            N, C, H_in, W_in, output_h, output_w);
     } else {
         throw std::runtime_error("adaptive_avg_pool2d_forward: unsupported dtype");
     }
@@ -3100,6 +3105,11 @@ auto adaptive_avg_pool2d_backward(const Tensor& grad_output, int64_t H_in, int64
         adaptive_avg_pool2d_backward_kernel<<<grid, block, 0, stream>>>(
             reinterpret_cast<const __half*>(grad_output.data_ptr()),
             reinterpret_cast<__half*>(grad_input.data_ptr()),
+            N, C, H_in, W_in, H_out, W_out);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        adaptive_avg_pool2d_backward_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(grad_input.data_ptr()),
             N, C, H_in, W_in, H_out, W_out);
     } else {
         throw std::runtime_error("adaptive_avg_pool2d_backward: unsupported dtype");
@@ -3175,6 +3185,12 @@ auto adaptive_max_pool2d_forward(const Tensor& input, int64_t output_h, int64_t 
             reinterpret_cast<__half*>(output.data_ptr()),
             indices.data<int64_t>(),
             N, C, H_in, W_in, output_h, output_w);
+    } else if (input.dtype() == DType::BFloat16) {
+        adaptive_max_pool2d_forward_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+            indices.data<int64_t>(),
+            N, C, H_in, W_in, output_h, output_w);
     } else {
         throw std::runtime_error("adaptive_max_pool2d_forward: unsupported dtype");
     }
@@ -3212,6 +3228,11 @@ auto adaptive_max_pool2d_backward(const Tensor& grad_output, const Tensor& indic
             reinterpret_cast<const __half*>(grad_output.data_ptr()),
             indices.data<int64_t>(),
             reinterpret_cast<__half*>(grad_input.data_ptr()), total);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        adaptive_max_pool2d_backward_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
+            indices.data<int64_t>(),
+            reinterpret_cast<__nv_bfloat16*>(grad_input.data_ptr()), total);
     } else {
         throw std::runtime_error("adaptive_max_pool2d_backward: unsupported dtype");
     }
@@ -3321,6 +3342,12 @@ auto max_pool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride
             reinterpret_cast<__half*>(output.data_ptr()),
             indices.data<int64_t>(),
             N, C, H_in, W_in, H_out, W_out, kernel_size, stride, padding);
+    } else if (input.dtype() == DType::BFloat16) {
+        max_pool2d_forward_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+            indices.data<int64_t>(),
+            N, C, H_in, W_in, H_out, W_out, kernel_size, stride, padding);
     } else {
         throw std::runtime_error("max_pool2d_forward: unsupported dtype");
     }
@@ -3359,6 +3386,12 @@ auto max_pool2d_backward(const Tensor& grad_output, const Tensor& indices,
             reinterpret_cast<const __half*>(grad_output.data_ptr()),
             indices.data<int64_t>(),
             reinterpret_cast<__half*>(grad_input.data_ptr()),
+            total_output, total_input);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        max_pool2d_backward_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
+            indices.data<int64_t>(),
+            reinterpret_cast<__nv_bfloat16*>(grad_input.data_ptr()),
             total_output, total_input);
     } else {
         throw std::runtime_error("max_pool2d_backward: unsupported dtype");
@@ -3504,6 +3537,11 @@ auto avg_pool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(output.data_ptr()),
             N, C, H_in, W_in, H_out, W_out, kernel_size, stride, padding);
+    } else if (input.dtype() == DType::BFloat16) {
+        avg_pool2d_forward_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+            N, C, H_in, W_in, H_out, W_out, kernel_size, stride, padding);
     } else {
         throw std::runtime_error("avg_pool2d_forward: unsupported dtype");
     }
@@ -3542,6 +3580,11 @@ auto avg_pool2d_backward(const Tensor& grad_output, int64_t H_in, int64_t W_in,
         avg_pool2d_backward_kernel<<<grid, block, 0, stream>>>(
             reinterpret_cast<const __half*>(grad_output.data_ptr()),
             reinterpret_cast<__half*>(grad_input.data_ptr()),
+            N, C, H_in, W_in, H_out, W_out, kernel_size, stride, padding);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        avg_pool2d_backward_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(grad_input.data_ptr()),
             N, C, H_in, W_in, H_out, W_out, kernel_size, stride, padding);
     } else {
         throw std::runtime_error("avg_pool2d_backward: unsupported dtype");
@@ -3779,6 +3822,20 @@ __global__ void arange_kernel_impl(T* output, T start, T step, int64_t n) {
     output[idx] = start + static_cast<T>(idx) * step;
 }
 
+// Specialized arange kernel for Float16 - compute in float, store as half
+__global__ void arange_kernel_f16(__half* output, float start, float step, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    output[idx] = __float2half(start + static_cast<float>(idx) * step);
+}
+
+// Specialized arange kernel for BFloat16 - compute in float, store as bfloat16
+__global__ void arange_kernel_bf16(__nv_bfloat16* output, float start, float step, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    output[idx] = __float2bfloat16(start + static_cast<float>(idx) * step);
+}
+
 auto arange_kernel(float start, float end, float step, DType dtype, Device device, cudaStream_t stream) -> Tensor {
     int64_t n = static_cast<int64_t>(std::ceil((end - start) / step));
     if (n <= 0) n = 0;
@@ -3792,6 +3849,10 @@ auto arange_kernel(float start, float end, float step, DType dtype, Device devic
         arange_kernel_impl<float><<<num_blocks, block_size, 0, stream>>>(output.data<float>(), start, step, n);
     } else if (dtype == DType::Float64) {
         arange_kernel_impl<double><<<num_blocks, block_size, 0, stream>>>(output.data<double>(), static_cast<double>(start), static_cast<double>(step), n);
+    } else if (dtype == DType::Float16) {
+        arange_kernel_f16<<<num_blocks, block_size, 0, stream>>>(reinterpret_cast<__half*>(output.data_ptr()), start, step, n);
+    } else if (dtype == DType::BFloat16) {
+        arange_kernel_bf16<<<num_blocks, block_size, 0, stream>>>(reinterpret_cast<__nv_bfloat16*>(output.data_ptr()), start, step, n);
     } else if (dtype == DType::Int32) {
         arange_kernel_impl<int32_t><<<num_blocks, block_size, 0, stream>>>(output.data<int32_t>(), static_cast<int32_t>(start), static_cast<int32_t>(step), n);
     } else if (dtype == DType::Int64) {
@@ -3811,6 +3872,20 @@ __global__ void linspace_kernel_impl(T* output, T start, T step, int64_t n) {
     output[idx] = start + static_cast<T>(idx) * step;
 }
 
+// Specialized linspace kernel for Float16 - compute in float, store as half
+__global__ void linspace_kernel_f16(__half* output, float start, float step, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    output[idx] = __float2half(start + static_cast<float>(idx) * step);
+}
+
+// Specialized linspace kernel for BFloat16 - compute in float, store as bfloat16
+__global__ void linspace_kernel_bf16(__nv_bfloat16* output, float start, float step, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    output[idx] = __float2bfloat16(start + static_cast<float>(idx) * step);
+}
+
 auto linspace_kernel(float start, float end, int64_t steps, DType dtype, Device device, cudaStream_t stream) -> Tensor {
     if (steps <= 0) return Tensor({0}, dtype, device);
     Tensor output({steps}, dtype, device);
@@ -3824,6 +3899,12 @@ auto linspace_kernel(float start, float end, int64_t steps, DType dtype, Device 
     } else if (dtype == DType::Float64) {
         double step_val = (steps > 1) ? (static_cast<double>(end) - static_cast<double>(start)) / static_cast<double>(steps - 1) : 0.0;
         linspace_kernel_impl<double><<<num_blocks, block_size, 0, stream>>>(output.data<double>(), static_cast<double>(start), step_val, steps);
+    } else if (dtype == DType::Float16) {
+        float step_val = (steps > 1) ? (end - start) / static_cast<float>(steps - 1) : 0.0f;
+        linspace_kernel_f16<<<num_blocks, block_size, 0, stream>>>(reinterpret_cast<__half*>(output.data_ptr()), start, step_val, steps);
+    } else if (dtype == DType::BFloat16) {
+        float step_val = (steps > 1) ? (end - start) / static_cast<float>(steps - 1) : 0.0f;
+        linspace_kernel_bf16<<<num_blocks, block_size, 0, stream>>>(reinterpret_cast<__nv_bfloat16*>(output.data_ptr()), start, step_val, steps);
     } else {
         throw std::runtime_error("linspace: unsupported dtype");
     }
@@ -3842,6 +3923,26 @@ __global__ void eye_kernel_impl(T* output, int64_t rows, int64_t cols) {
     output[idx] = (r == c) ? T(1) : T(0);
 }
 
+// Specialized eye kernel for Float16
+__global__ void eye_kernel_f16(__half* output, int64_t rows, int64_t cols) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = rows * cols;
+    if (idx >= total) return;
+    int64_t r = idx / cols;
+    int64_t c = idx % cols;
+    output[idx] = (r == c) ? __float2half(1.0f) : __float2half(0.0f);
+}
+
+// Specialized eye kernel for BFloat16
+__global__ void eye_kernel_bf16(__nv_bfloat16* output, int64_t rows, int64_t cols) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = rows * cols;
+    if (idx >= total) return;
+    int64_t r = idx / cols;
+    int64_t c = idx % cols;
+    output[idx] = (r == c) ? __float2bfloat16(1.0f) : __float2bfloat16(0.0f);
+}
+
 auto eye_kernel(int64_t n, int64_t m, DType dtype, Device device, cudaStream_t stream) -> Tensor {
     if (m <= 0) m = n;
     Tensor output({n, m}, dtype, device);
@@ -3853,6 +3954,10 @@ auto eye_kernel(int64_t n, int64_t m, DType dtype, Device device, cudaStream_t s
         eye_kernel_impl<float><<<num_blocks, block_size, 0, stream>>>(output.data<float>(), n, m);
     } else if (dtype == DType::Float64) {
         eye_kernel_impl<double><<<num_blocks, block_size, 0, stream>>>(output.data<double>(), n, m);
+    } else if (dtype == DType::Float16) {
+        eye_kernel_f16<<<num_blocks, block_size, 0, stream>>>(reinterpret_cast<__half*>(output.data_ptr()), n, m);
+    } else if (dtype == DType::BFloat16) {
+        eye_kernel_bf16<<<num_blocks, block_size, 0, stream>>>(reinterpret_cast<__nv_bfloat16*>(output.data_ptr()), n, m);
     } else if (dtype == DType::Int32) {
         eye_kernel_impl<int32_t><<<num_blocks, block_size, 0, stream>>>(output.data<int32_t>(), n, m);
     } else if (dtype == DType::Int64) {

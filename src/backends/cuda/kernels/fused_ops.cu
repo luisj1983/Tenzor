@@ -2,6 +2,7 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cuda_bf16.h>
 #include <cub/cub.cuh>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/backend/caching_allocator.hpp"
@@ -138,6 +139,48 @@ __global__ void fused_linear_relu_kernel(
 }
 
 /**
+ * @brief Specialized kernel for BFloat16 with float accumulation
+ *
+ * BFloat16 has only 7 bits of mantissa, so accumulating in BFloat16
+ * leads to significant precision loss. This kernel reads BFloat16
+ * inputs, accumulates in float, and writes BFloat16 output.
+ */
+__global__ void fused_linear_relu_bf16_kernel(
+    const __nv_bfloat16* input,
+    const __nv_bfloat16* weight,
+    const __nv_bfloat16* bias,
+    __nv_bfloat16* output,
+    int64_t batch_size,
+    int64_t in_features,
+    int64_t out_features,
+    bool has_bias
+) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total_elements = batch_size * out_features;
+    int64_t stride = blockDim.x * gridDim.x;
+
+    for (int64_t idx = tid; idx < total_elements; idx += stride) {
+        int64_t b = idx / out_features;
+        int64_t o = idx % out_features;
+
+        // Accumulate in float for precision
+        float sum = 0.0f;
+        for (int64_t i = 0; i < in_features; ++i) {
+            float in_val = __bfloat162float(input[b * in_features + i]);
+            float w_val = __bfloat162float(weight[o * in_features + i]);
+            sum += in_val * w_val;
+        }
+
+        if (has_bias) {
+            sum += __bfloat162float(bias[o]);
+        }
+
+        // ReLU and convert back to BFloat16
+        output[idx] = __float2bfloat16(sum > 0.0f ? sum : 0.0f);
+    }
+}
+
+/**
  * @brief Fused linear + ReLU host function
  */
 auto fused_linear_relu_cuda(
@@ -201,6 +244,19 @@ auto fused_linear_relu_cuda(
             out_features,
             bias != nullptr
         );
+    } else if (input.dtype() == DType::BFloat16) {
+        const __nv_bfloat16* bias_ptr = bias ? reinterpret_cast<const __nv_bfloat16*>(bias->data_ptr()) : nullptr;
+        // Use specialized kernel with float accumulation for BFloat16
+        fused_linear_relu_bf16_kernel<<<blocks, threads>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr()),
+            bias_ptr,
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+            batch_size,
+            in_features,
+            out_features,
+            bias != nullptr
+        );
     } else {
         throw std::runtime_error("fused_linear_relu_cuda: Unsupported dtype");
     }
@@ -232,6 +288,11 @@ __device__ __forceinline__ double device_rsqrt<double>(double x) {
 
 template<>
 __device__ __forceinline__ __half device_rsqrt<__half>(__half x) {
+    return hrsqrt(x);
+}
+
+template<>
+__device__ __forceinline__ __nv_bfloat16 device_rsqrt<__nv_bfloat16>(__nv_bfloat16 x) {
     return hrsqrt(x);
 }
 
@@ -325,6 +386,19 @@ auto fused_batchnorm_relu_cuda(
             num_features,
             spatial_size,
             __float2half(eps)
+        );
+    } else if (input.dtype() == DType::BFloat16) {
+        fused_batchnorm_relu_kernel<<<blocks, threads>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(running_mean.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(running_var.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(bias.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+            batch_size,
+            num_features,
+            spatial_size,
+            __float2bfloat16(eps)
         );
     } else {
         throw std::runtime_error("fused_batchnorm_relu_cuda: Unsupported dtype");
@@ -485,6 +559,13 @@ auto fused_add_relu_cuda(const Tensor& a, const Tensor& b) -> Tensor {
             reinterpret_cast<__half*>(result.data_ptr()),
             n
         );
+    } else if (a.dtype() == DType::BFloat16) {
+        fused_add_relu_kernel<<<blocks, threads>>>(
+            reinterpret_cast<const __nv_bfloat16*>(a.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(b.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(result.data_ptr()),
+            n
+        );
     } else {
         throw std::runtime_error("fused_add_relu_cuda: Unsupported dtype");
     }
@@ -518,6 +599,12 @@ template<>
 __device__ __forceinline__ __half device_tanh<__half>(__half x) {
     // Convert to float, compute tanh, convert back
     return __float2half(tanhf(__half2float(x)));
+}
+
+template<>
+__device__ __forceinline__ __nv_bfloat16 device_tanh<__nv_bfloat16>(__nv_bfloat16 x) {
+    // Convert to float, compute tanh, convert back
+    return __float2bfloat16(tanhf(__bfloat162float(x)));
 }
 
 template<typename T>
@@ -610,6 +697,12 @@ auto fused_gelu_cuda(const Tensor& input) -> Tensor {
         fused_gelu_kernel<<<blocks, threads>>>(
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(output.data_ptr()),
+            n
+        );
+    } else if (input.dtype() == DType::BFloat16) {
+        fused_gelu_kernel<<<blocks, threads>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
             n
         );
     } else {
@@ -763,6 +856,18 @@ auto fused_layer_norm_cuda(
             batch_size,
             norm_size,
             __float2half(eps)
+        );
+    } else if (input.dtype() == DType::BFloat16) {
+        fused_layer_norm_kernel<__nv_bfloat16, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(bias.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(mean.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(inv_std.data_ptr()),
+            batch_size,
+            norm_size,
+            __float2bfloat16(eps)
         );
     } else {
         throw std::runtime_error("fused_layer_norm_cuda: Unsupported dtype");
@@ -922,6 +1027,19 @@ auto fused_layer_norm_backward_cuda(
             reinterpret_cast<__half*>(grad_input.data_ptr()),
             reinterpret_cast<__half*>(grad_weight.data_ptr()),
             reinterpret_cast<__half*>(grad_bias.data_ptr()),
+            batch_size,
+            norm_size
+        );
+    } else if (input.dtype() == DType::BFloat16) {
+        fused_layer_norm_backward_kernel<__nv_bfloat16, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+            reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(mean.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(inv_std.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(grad_input.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(grad_weight.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(grad_bias.data_ptr()),
             batch_size,
             norm_size
         );

@@ -10,6 +10,7 @@
 #pragma once
 
 #include <functional>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <span>
@@ -139,6 +140,19 @@ public:
      * @endcode
      */
     auto has_kernel(std::string_view op_name, Device::Type device_type) const -> bool;
+
+    /**
+     * @brief Clear all registered kernels.
+     *
+     * Removes all kernel registrations. Must be called before backends
+     * are destroyed to prevent dangling function pointers captured in lambdas.
+     *
+     * @note Thread-safe with exclusive locking.
+     */
+    auto clear() -> void {
+        std::unique_lock lock(mutex_);
+        kernels_.clear();
+    }
 
     /**
      * @brief Get list of all registered operation names.

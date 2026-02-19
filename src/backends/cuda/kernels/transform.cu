@@ -1,5 +1,6 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cuda_bf16.h>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/backend/caching_allocator.hpp"
 #include "tenzor/core/dtype.hpp"
@@ -130,6 +131,11 @@ auto contiguous_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
         contiguous_kernel_impl<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()),
+            meta, ndim, total_elements);
+    } else if (input.dtype() == DType::BFloat16) {
+        contiguous_kernel_impl<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(result.data_ptr()),
             meta, ndim, total_elements);
     } else if (input.dtype() == DType::Int32) {
         contiguous_kernel_impl<int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
@@ -475,6 +481,11 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, cudaStream_t strea
     } else if (tensors[0].dtype() == DType::Float16) {
         cat_kernel_impl<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<__half**>(d_input_ptrs), reinterpret_cast<__half*>(output.data_ptr()),
+            d_input_shapes, d_output_shape, d_output_strides, d_offsets,
+            num_tensors, ndim, dim, total_elements);
+    } else if (tensors[0].dtype() == DType::BFloat16) {
+        cat_kernel_impl<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<__nv_bfloat16**>(d_input_ptrs), reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
             d_input_shapes, d_output_shape, d_output_strides, d_offsets,
             num_tensors, ndim, dim, total_elements);
     } else if (tensors[0].dtype() == DType::Int8) {
@@ -858,5 +869,138 @@ auto chunk_kernel(const Tensor& input, int64_t chunks, int64_t dim, cudaStream_t
 auto tile_kernel(const Tensor& input, const std::vector<int64_t>& reps, cudaStream_t stream) -> Tensor {
     return repeat_kernel(input, reps, stream);
 }
+
+// ============================================================================
+// Memory Format Conversion (fallback when cuDNN is not available)
+// ============================================================================
+#ifndef TENZOR_HAS_CUDNN
+
+template<typename T>
+__global__ void nchw_to_nhwc_transform(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    int64_t batch, int64_t channels, int64_t height, int64_t width
+) {
+    const int64_t hw = height * width;
+    const int64_t chw = channels * hw;
+    const int64_t hwc = hw * channels;
+    const int64_t total = batch * chw;
+
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < total;
+         idx += blockDim.x * gridDim.x) {
+        int64_t n = idx / chw;
+        int64_t rem = idx % chw;
+        int64_t c = rem / hw;
+        rem = rem % hw;
+        int64_t h = rem / width;
+        int64_t w = rem % width;
+
+        int64_t out_idx = n * hwc + h * width * channels + w * channels + c;
+        output[out_idx] = input[idx];
+    }
+}
+
+template<typename T>
+__global__ void nhwc_to_nchw_transform(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    int64_t batch, int64_t channels, int64_t height, int64_t width
+) {
+    const int64_t hw = height * width;
+    const int64_t chw = channels * hw;
+    const int64_t hwc = hw * channels;
+    const int64_t total = batch * hwc;
+
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < total;
+         idx += blockDim.x * gridDim.x) {
+        int64_t n = idx / hwc;
+        int64_t rem = idx % hwc;
+        int64_t h = rem / (width * channels);
+        rem = rem % (width * channels);
+        int64_t w = rem / channels;
+        int64_t c = rem % channels;
+
+        int64_t out_idx = n * chw + c * hw + h * width + w;
+        output[out_idx] = input[idx];
+    }
+}
+
+auto to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* stream_ptr) -> Tensor {
+    cudaStream_t stream = static_cast<cudaStream_t>(stream_ptr);
+
+    auto shape = input.shape();
+
+    if (shape.size() != 4) {
+        if (format == MemoryFormat::ChannelsLast) {
+            return input;
+        }
+        return input.contiguous();
+    }
+
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t H = shape[2];
+    int64_t W = shape[3];
+
+    Tensor output = Tensor::empty_uninitialized(
+        std::vector<int64_t>{N, C, H, W},
+        input.dtype(),
+        input.device()
+    );
+
+    std::vector<int64_t> target_strides;
+    if (format == MemoryFormat::ChannelsLast) {
+        target_strides = {H * W * C, 1, W * C, C};
+    } else {
+        target_strides = {C * H * W, H * W, W, 1};
+    }
+
+    CUDAKernelAccess::get_impl(output)->strides = target_strides;
+
+    const int64_t total = N * C * H * W;
+    const int block_size = 256;
+    const int grid_size = std::min(static_cast<int>((total + block_size - 1) / block_size), 65535);
+
+    if (format == MemoryFormat::ChannelsLast) {
+        if (input.dtype() == DType::Float32) {
+            nchw_to_nhwc_transform<float><<<grid_size, block_size, 0, stream>>>(
+                input.data<float>(), output.data<float>(), N, C, H, W);
+        } else if (input.dtype() == DType::Float16) {
+            nchw_to_nhwc_transform<Float16><<<grid_size, block_size, 0, stream>>>(
+                input.data<Float16>(), output.data<Float16>(), N, C, H, W);
+        } else if (input.dtype() == DType::Float64) {
+            nchw_to_nhwc_transform<double><<<grid_size, block_size, 0, stream>>>(
+                input.data<double>(), output.data<double>(), N, C, H, W);
+        } else if (input.dtype() == DType::BFloat16) {
+            nchw_to_nhwc_transform<BFloat16><<<grid_size, block_size, 0, stream>>>(
+                input.data<BFloat16>(), output.data<BFloat16>(), N, C, H, W);
+        } else {
+            throw std::runtime_error("to_memory_format_kernel: unsupported dtype for ChannelsLast");
+        }
+    } else {
+        if (input.dtype() == DType::Float32) {
+            nhwc_to_nchw_transform<float><<<grid_size, block_size, 0, stream>>>(
+                input.data<float>(), output.data<float>(), N, C, H, W);
+        } else if (input.dtype() == DType::Float16) {
+            nhwc_to_nchw_transform<Float16><<<grid_size, block_size, 0, stream>>>(
+                input.data<Float16>(), output.data<Float16>(), N, C, H, W);
+        } else if (input.dtype() == DType::Float64) {
+            nhwc_to_nchw_transform<double><<<grid_size, block_size, 0, stream>>>(
+                input.data<double>(), output.data<double>(), N, C, H, W);
+        } else if (input.dtype() == DType::BFloat16) {
+            nhwc_to_nchw_transform<BFloat16><<<grid_size, block_size, 0, stream>>>(
+                input.data<BFloat16>(), output.data<BFloat16>(), N, C, H, W);
+        } else {
+            throw std::runtime_error("to_memory_format_kernel: unsupported dtype for Contiguous");
+        }
+    }
+
+    return output;
+}
+
+#endif // !TENZOR_HAS_CUDNN
+
 } // namespace cuda
 } // namespace tenzor

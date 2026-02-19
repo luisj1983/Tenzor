@@ -170,8 +170,16 @@ namespace cpu {
     auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y) -> Tensor;
 } // namespace cpu
 
+// Forward declaration — defined in kernels/math.cpp
+void mkl_cleanup();
+
 class CPUBackend : public Backend {
 public:
+    ~CPUBackend() override {
+        // Release MKL thread buffers before the backend library is unloaded.
+        mkl_cleanup();
+    }
+
     auto name() const -> std::string_view override {
         return "cpu";
     }

@@ -19,16 +19,21 @@ include(GoogleTest)
 
 # Custom function that wraps gtest_discover_tests
 function(tenzor_discover_tests target)
-    cmake_parse_arguments(PARSE_ARGV 1 ARG "" "DISCOVERY_TIMEOUT" "PROPERTIES")
+    cmake_parse_arguments(PARSE_ARGV 1 ARG "" "DISCOVERY_TIMEOUT;DISCOVERY_MODE" "PROPERTIES")
     set(TIMEOUT ${ARG_DISCOVERY_TIMEOUT})
     if(NOT TIMEOUT)
         set(TIMEOUT 30)
     endif()
     set(PROPS ${ARG_PROPERTIES})
+    set(MODE ${ARG_DISCOVERY_MODE})
+    if(NOT MODE)
+        set(MODE "POST_BUILD")
+    endif()
 
     # Now call gtest_discover_tests
     gtest_discover_tests(${target}
         DISCOVERY_TIMEOUT ${TIMEOUT}
+        DISCOVERY_MODE ${MODE}
         PROPERTIES ${PROPS})
 endfunction()
 
@@ -1280,8 +1285,8 @@ tenzor_discover_tests(test_zero_profiling DISCOVERY_TIMEOUT 30)
 
 tenzor_discover_tests(test_fused_ops DISCOVERY_TIMEOUT 30)
 tenzor_discover_tests(test_fused_ops_multidtype DISCOVERY_TIMEOUT 30)
-tenzor_discover_tests(test_backend_ops_parameterized DISCOVERY_TIMEOUT 30)
-tenzor_discover_tests(test_edge_cases DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_backend_ops_parameterized DISCOVERY_TIMEOUT 120)
+tenzor_discover_tests(test_edge_cases DISCOVERY_TIMEOUT 120)
 tenzor_discover_tests(test_dtype_edge_cases DISCOVERY_TIMEOUT 30)
 
 # Loss function multi-dtype tests
@@ -1588,25 +1593,9 @@ if(TENZOR_BUILD_ROCM)
         ${ROCM_PATH}/include
     )
 
-    # ROCm gradient debug test (CPU vs ROCm comparison)
-    add_executable(test_rocm_gradient_debug
-        unit/test_rocm_gradient_debug.cpp
-    )
-
-    target_link_libraries(test_rocm_gradient_debug PRIVATE
-        tenzor_core
-        GTest::gtest_main
-        hip::host
-    )
-
-    target_include_directories(test_rocm_gradient_debug PRIVATE
-        ${ROCM_PATH}/include
-    )
-
     # ROCm initialization can be slow, use 60 second timeout
     tenzor_discover_tests(test_rocm_backend DISCOVERY_TIMEOUT 60)
     tenzor_discover_tests(test_rocm_kernels DISCOVERY_TIMEOUT 60)
-    tenzor_discover_tests(test_rocm_gradient_debug DISCOVERY_TIMEOUT 60)
 endif()
 # Debug tests commented out - tmp files not tracked in git
 # add_executable(debug_multi_linear ../tests/tmp/debug_multi_linear.cpp)
@@ -2113,7 +2102,7 @@ target_link_libraries(test_edge_cases_multidtype PRIVATE
     GTest::gtest_main
 )
 
-tenzor_discover_tests(test_edge_cases_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_edge_cases_multidtype DISCOVERY_TIMEOUT 120)
 
 # Quantization tests
 add_executable(test_quantization

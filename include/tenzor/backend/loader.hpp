@@ -159,7 +159,17 @@ public:
      */
     auto unload_backend(std::string_view name) -> bool;
 
+    /**
+     * @brief Perform ordered shutdown of all backends.
+     *
+     * Destroys backends in reverse dependency order and dlcloses all loaded
+     * libraries. The destructor becomes a no-op after shutdown() has been called.
+     * This should be called from finalize() before static destructors run.
+     */
+    auto shutdown() -> void;
+
 private:
+    bool shutdown_called_{false};                                            ///< Whether shutdown() has been called
     std::unordered_map<std::string, std::unique_ptr<Backend>> backends_;     ///< Registered backends
     std::unordered_map<Device::Type, Backend*> device_to_backend_;           ///< Device type mapping
 

@@ -4,6 +4,9 @@
  */
 
 #include "tenzor/distributed/nccl_backend.hpp"
+
+#if defined(TENZOR_HAS_NCCL)
+
 #include "tenzor/utils/error.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
@@ -623,3 +626,5 @@ auto NCCLBackend::close_socket(int socket_fd) -> void {
 
 } // namespace distributed
 } // namespace tenzor
+
+#endif // TENZOR_HAS_NCCL

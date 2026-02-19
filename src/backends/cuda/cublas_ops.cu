@@ -920,6 +920,49 @@ auto linear_kernel(
                 out_features
             );
         }
+    } else if (input_c.dtype() == DType::BFloat16) {
+        const float alpha = 1.0f;
+        const float beta = 0.0f;
+
+        // Use BF16 Tensor Cores with FP32 accumulation for accuracy
+        CUBLAS_CHECK(cublasGemmEx(
+            handle,
+            CUBLAS_OP_T,
+            CUBLAS_OP_N,
+            out_features,
+            batch_size,
+            in_features,
+            &alpha,
+            weight_c.data_ptr(),
+            CUDA_R_16BF,
+            in_features,
+            input_c.data_ptr(),
+            CUDA_R_16BF,
+            in_features,
+            &beta,
+            output.data_ptr(),
+            CUDA_R_16BF,
+            out_features,
+            CUBLAS_COMPUTE_32F,  // FP32 accumulation
+            CUBLAS_GEMM_DEFAULT_TENSOR_OP
+        ));
+
+        // Add bias using bfloat16 precision
+        if (bias != nullptr && bias->numel() > 0) {
+            Tensor bias_c = bias->is_contiguous() ? *bias : bias->contiguous();
+            int64_t total = batch_size * out_features;
+            int threads = 256;
+            int blocks = std::min(
+                static_cast<int>((total + threads - 1) / threads),
+                65535
+            );
+            bias_add_kernel<__nv_bfloat16><<<blocks, threads, 0, stream>>>(
+                reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+                reinterpret_cast<const __nv_bfloat16*>(bias_c.data_ptr()),
+                batch_size,
+                out_features
+            );
+        }
     } else {
         throw std::runtime_error("linear_kernel: Unsupported dtype");
     }
@@ -1091,6 +1134,128 @@ auto linear_backward_kernel(
             bias_grad_reduce_kernel<double, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
                 grad_out_c.data<double>(),
                 grad_bias.data<double>(),
+                batch_size,
+                out_features
+            );
+        }
+    } else if (input_c.dtype() == DType::Float16) {
+        const float alpha = 1.0f;
+        const float beta = 0.0f;
+
+        // grad_input = grad_output @ weight
+        CUBLAS_CHECK(cublasGemmEx(
+            handle,
+            CUBLAS_OP_N,
+            CUBLAS_OP_N,
+            in_features,
+            batch_size,
+            out_features,
+            &alpha,
+            weight_c.data_ptr(),
+            CUDA_R_16F,
+            in_features,
+            grad_out_c.data_ptr(),
+            CUDA_R_16F,
+            out_features,
+            &beta,
+            grad_input.data_ptr(),
+            CUDA_R_16F,
+            in_features,
+            CUBLAS_COMPUTE_32F,
+            CUBLAS_GEMM_DEFAULT_TENSOR_OP
+        ));
+
+        // grad_weight = grad_output.T @ input
+        CUBLAS_CHECK(cublasGemmEx(
+            handle,
+            CUBLAS_OP_N,
+            CUBLAS_OP_T,
+            in_features,
+            out_features,
+            batch_size,
+            &alpha,
+            input_c.data_ptr(),
+            CUDA_R_16F,
+            in_features,
+            grad_out_c.data_ptr(),
+            CUDA_R_16F,
+            out_features,
+            &beta,
+            grad_weight.data_ptr(),
+            CUDA_R_16F,
+            in_features,
+            CUBLAS_COMPUTE_32F,
+            CUBLAS_GEMM_DEFAULT_TENSOR_OP
+        ));
+
+        // grad_bias = sum(grad_output, dim=0)
+        {
+            constexpr int BLOCK_SIZE = 256;
+            int blocks = static_cast<int>(out_features);
+            bias_grad_reduce_kernel<__half, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                reinterpret_cast<const __half*>(grad_out_c.data_ptr()),
+                reinterpret_cast<__half*>(grad_bias.data_ptr()),
+                batch_size,
+                out_features
+            );
+        }
+    } else if (input_c.dtype() == DType::BFloat16) {
+        const float alpha = 1.0f;
+        const float beta = 0.0f;
+
+        // grad_input = grad_output @ weight
+        CUBLAS_CHECK(cublasGemmEx(
+            handle,
+            CUBLAS_OP_N,
+            CUBLAS_OP_N,
+            in_features,
+            batch_size,
+            out_features,
+            &alpha,
+            weight_c.data_ptr(),
+            CUDA_R_16BF,
+            in_features,
+            grad_out_c.data_ptr(),
+            CUDA_R_16BF,
+            out_features,
+            &beta,
+            grad_input.data_ptr(),
+            CUDA_R_16BF,
+            in_features,
+            CUBLAS_COMPUTE_32F,
+            CUBLAS_GEMM_DEFAULT_TENSOR_OP
+        ));
+
+        // grad_weight = grad_output.T @ input
+        CUBLAS_CHECK(cublasGemmEx(
+            handle,
+            CUBLAS_OP_N,
+            CUBLAS_OP_T,
+            in_features,
+            out_features,
+            batch_size,
+            &alpha,
+            input_c.data_ptr(),
+            CUDA_R_16BF,
+            in_features,
+            grad_out_c.data_ptr(),
+            CUDA_R_16BF,
+            out_features,
+            &beta,
+            grad_weight.data_ptr(),
+            CUDA_R_16BF,
+            in_features,
+            CUBLAS_COMPUTE_32F,
+            CUBLAS_GEMM_DEFAULT_TENSOR_OP
+        ));
+
+        // grad_bias = sum(grad_output, dim=0)
+        {
+            constexpr int BLOCK_SIZE = 256;
+            int blocks = static_cast<int>(out_features);
+            bias_grad_reduce_kernel<__nv_bfloat16, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                reinterpret_cast<const __nv_bfloat16*>(grad_out_c.data_ptr()),
+                reinterpret_cast<__nv_bfloat16*>(grad_bias.data_ptr()),
                 batch_size,
                 out_features
             );

@@ -7,6 +7,8 @@
 #include <filesystem>
 #include <dlfcn.h>
 #include <thread>
+#include <atomic>
+#include <mutex>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -14,13 +16,31 @@
 
 namespace tenzor {
 
-// Flag to track initialization
-static bool g_initialized = false;
+// Flag to track initialization (atomic for thread safety with atexit)
+static std::atomic<bool> g_initialized{false};
 
 auto initialize() -> void {
-    if (g_initialized) {
+    if (g_initialized.load(std::memory_order_acquire)) {
         return;
     }
+
+    // Pre-load TBB and tbbmalloc into the global symbol table. The CPU backend
+    // is loaded with RTLD_LOCAL (to prevent MKL symbol pollution), but TBB
+    // internally uses dlopen("libtbbmalloc.so.2") which only searches the
+    // global scope. Without this pre-load, TBB's cache_aligned_allocate fails
+    // with a null function pointer, causing segfaults in __TBB_InitOnce
+    // destructors during process exit.
+#ifndef _WIN32
+    const char* tbb_libs[] = {
+        "libtbbmalloc.so.2",
+        "libtbbmalloc_debug.so.2",
+        "libtbb.so.12",
+        "libtbb_debug.so.12",
+    };
+    for (const char* lib : tbb_libs) {
+        dlopen(lib, RTLD_NOW | RTLD_GLOBAL);
+    }
+#endif
 
     // Configure OpenMP to use optimal thread count
     // Use physical cores (not logical/hyperthreaded) to avoid contention
@@ -3050,19 +3070,32 @@ auto initialize() -> void {
 
     std::cout << "Tenzor initialization complete - 51 CPU operations registered" << std::endl;
 
-    g_initialized = true;
+    g_initialized.store(true, std::memory_order_release);
+
+    // Register finalize() to run before static destructors.
+    // atexit handlers registered after a static's construction run before
+    // that static's destructor, ensuring proper ordered cleanup.
+    static std::once_flag atexit_flag;
+    std::call_once(atexit_flag, []() {
+        std::atexit([]() { finalize(); });
+    });
 }
 
 auto finalize() -> void {
-    if (!g_initialized) {
+    if (!g_initialized.load(std::memory_order_acquire)) {
         return;
     }
 
-    std::cout << "Finalizing Tenzor library" << std::endl;
+    // 1. Clear dispatch tables — removes all function pointers into backend .so files
+    DispatchTableRegistry::clear();
 
-    // Cleanup (backend loader doesn't need explicit cleanup)
+    // 2. Clear operation registry — removes all kernel lambdas that capture backend pointers
+    operation_registry().clear();
 
-    g_initialized = false;
+    // 3. Ordered backend shutdown — destroys backends, dlcloses libraries
+    backend_registry().shutdown();
+
+    g_initialized.store(false, std::memory_order_release);
 }
 
 } // namespace tenzor

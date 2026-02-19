@@ -1418,8 +1418,13 @@ auto GroupNorm::forward_impl(const Variable& input) -> Variable {
 
     // GPU fast path: dispatch to backend kernel (CUDA, Vulkan, ROCm, etc.)
     if (original_device.type != Device::Type::CPU) {
-        Tensor weight_tensor = affine_ ? parameters_["weight"]->tensor() : ones({C}, input.tensor().dtype(), input.tensor().device());
-        Tensor bias_tensor = affine_ ? parameters_["bias"]->tensor() : zeros({C}, input.tensor().dtype(), input.tensor().device());
+        // Ensure weight and bias are on the same device and dtype as input
+        Tensor weight_tensor = affine_
+            ? parameters_["weight"]->tensor().to(original_dtype).to(original_device)
+            : ones({C}, input.tensor().dtype(), input.tensor().device());
+        Tensor bias_tensor = affine_
+            ? parameters_["bias"]->tensor().to(original_dtype).to(original_device)
+            : zeros({C}, input.tensor().dtype(), input.tensor().device());
 
         OpAttributes attrs;
         attrs["num_groups"] = std::to_string(num_groups_);

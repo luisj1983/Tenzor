@@ -457,8 +457,11 @@ public:
         // For FP16 inputs, use FP32 compute type to prevent intermediate product
         // overflow (FP16 × FP16 can exceed 65504 and produce Inf in tensor cores).
         // This matches CPU behavior where Float32 products are used in GEMM.
+        // For FP16/BF16 inputs, use FP32 compute type to prevent intermediate
+        // product overflow and maintain precision (cuDNN requires FP32 compute
+        // for half-precision data types)
         cudnnDataType_t compute_type = dtype;
-        if (dtype == CUDNN_DATA_HALF) {
+        if (dtype == CUDNN_DATA_HALF || dtype == CUDNN_DATA_BFLOAT16) {
             compute_type = CUDNN_DATA_FLOAT;
         }
 
@@ -471,13 +474,12 @@ public:
             compute_type
         ));
 
-        // Enable tensor core acceleration
-        // For FP16 with FP32 compute: TENSOR_OP_MATH_ALLOW_CONVERSION allows
-        // cuDNN to use tensor cores (FP16 I/O with FP32 accumulate) while
-        // maintaining FP32 compute precision for intermediate operations.
-        // For FP32: default math enables TF32 on compatible GPUs.
+        // Enable tensor core acceleration for half-precision types
+        // TENSOR_OP_MATH_ALLOW_CONVERSION allows cuDNN to use tensor cores
+        // (FP16/BF16 I/O with FP32 accumulate) while maintaining FP32 compute
+        // precision for intermediate operations.
         #ifdef TENZOR_HAS_TENSOR_CORES
-        if (dtype == CUDNN_DATA_HALF) {
+        if (dtype == CUDNN_DATA_HALF || dtype == CUDNN_DATA_BFLOAT16) {
             CUDNN_CHECK(cudnnSetConvolutionMathType(desc_, CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION));
         }
         #endif

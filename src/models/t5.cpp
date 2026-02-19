@@ -116,11 +116,16 @@ auto T5Attention::compute_bias(int64_t query_length, int64_t key_length) -> Tens
             );
 
             // Look up bias for this bucket
+            // Create bucket tensor on the target device to match embedding weights
             Tensor bucket_tensor({1}, DType::Int64, Device::cpu());
             bucket_tensor.data<int64_t>()[0] = bucket;
+            // Move to target device for embedding lookup
+            bucket_tensor = bucket_tensor.to(target_device);
             auto bias_values = relative_attention_bias_->forward(
                 Variable(bucket_tensor, false)
             ).tensor();
+            // Move result back to CPU for data access
+            bias_values = bias_values.to(Device::cpu());
 
             // Assign to all heads (dtype-generic)
             if (dtype == DType::Float16) {

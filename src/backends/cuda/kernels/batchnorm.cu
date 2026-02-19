@@ -1,5 +1,6 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cuda_bf16.h>
 #include <cmath>
 #include <cfloat>
 #include <cstdio>
@@ -1248,8 +1249,30 @@ auto group_norm_forward_kernel(
             input.data<double>(), weight.data<double>(), bias.data<double>(),
             output.data<double>(), mean_out.data<double>(), inv_std_out.data<double>(),
             N, C, HW, num_groups, channels_per_group, eps);
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        // Mixed precision: compute in Float32, convert back
+        // Create Float32 temporaries
+        Tensor input_f32 = input.to(DType::Float32);
+        Tensor weight_f32 = weight.to(DType::Float32);
+        Tensor bias_f32 = bias.to(DType::Float32);
+        Tensor output_f32(shape, DType::Float32, input.device());
+        Tensor mean_f32({N * num_groups}, DType::Float32, input.device());
+        Tensor inv_std_f32({N * num_groups}, DType::Float32, input.device());
+
+        group_norm_forward_kernel<float><<<num_group_instances, block_size, 0, stream>>>(
+            input_f32.data<float>(), weight_f32.data<float>(), bias_f32.data<float>(),
+            output_f32.data<float>(), mean_f32.data<float>(), inv_std_f32.data<float>(),
+            N, C, HW, num_groups, channels_per_group, eps);
+
+        CUDA_CHECK(cudaGetLastError());
+
+        // Convert outputs back to original dtype
+        output = output_f32.to(input.dtype());
+        mean_out = mean_f32.to(input.dtype());
+        inv_std_out = inv_std_f32.to(input.dtype());
+        return {output, mean_out, inv_std_out};
     } else {
-        throw std::runtime_error("group_norm_forward: only Float32 and Float64 supported");
+        throw std::runtime_error("group_norm_forward: unsupported dtype");
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -1297,8 +1320,36 @@ auto group_norm_backward_kernel(
             mean_saved.data<double>(), inv_std_saved.data<double>(),
             grad_input.data<double>(), grad_weight.data<double>(), grad_bias.data<double>(),
             N, C, HW, num_groups, channels_per_group);
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        // Mixed precision: compute in Float32, convert back
+        Tensor grad_out_f32 = grad_output.to(DType::Float32);
+        Tensor input_f32 = input.to(DType::Float32);
+        Tensor weight_f32 = weight.to(DType::Float32);
+        Tensor mean_f32 = mean_saved.to(DType::Float32);
+        Tensor inv_std_f32 = inv_std_saved.to(DType::Float32);
+
+        Tensor grad_input_f32(shape, DType::Float32, input.device());
+        Tensor grad_weight_f32({C}, DType::Float32, input.device());
+        Tensor grad_bias_f32({C}, DType::Float32, input.device());
+
+        cudaMemsetAsync(grad_weight_f32.data_ptr(), 0, C * sizeof(float), stream);
+        cudaMemsetAsync(grad_bias_f32.data_ptr(), 0, C * sizeof(float), stream);
+
+        group_norm_backward_kernel<float><<<num_group_instances, block_size, 0, stream>>>(
+            grad_out_f32.data<float>(), input_f32.data<float>(), weight_f32.data<float>(),
+            mean_f32.data<float>(), inv_std_f32.data<float>(),
+            grad_input_f32.data<float>(), grad_weight_f32.data<float>(), grad_bias_f32.data<float>(),
+            N, C, HW, num_groups, channels_per_group);
+
+        CUDA_CHECK(cudaGetLastError());
+
+        // Convert outputs back to original dtype
+        grad_input = grad_input_f32.to(input.dtype());
+        grad_weight = grad_weight_f32.to(input.dtype());
+        grad_bias = grad_bias_f32.to(input.dtype());
+        return {grad_input, grad_weight, grad_bias};
     } else {
-        throw std::runtime_error("group_norm_backward: only Float32 and Float64 supported");
+        throw std::runtime_error("group_norm_backward: unsupported dtype");
     }
 
     CUDA_CHECK(cudaGetLastError());

@@ -4,7 +4,7 @@
  */
 
 #include "tenzor/distributed/distributed.hpp"
-#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
+#if defined(TENZOR_HAS_NCCL)
 #include "tenzor/distributed/nccl_backend.hpp"
 #endif
 #include "tenzor/distributed/gloo_backend.hpp"
@@ -161,10 +161,10 @@ auto ProcessGroup::create_process_group(
 
     switch (backend) {
         case Backend::NCCL:
-#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
+#if defined(TENZOR_HAS_NCCL)
             comm_backend = std::make_unique<NCCLBackend>();
 #else
-            throw std::runtime_error("NCCL backend requires CUDA or ROCm support");
+            throw std::runtime_error("NCCL backend requires CUDA/ROCm with NCCL installed");
 #endif
             break;
         case Backend::GLOO:

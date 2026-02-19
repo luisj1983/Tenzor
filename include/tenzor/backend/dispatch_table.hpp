@@ -351,6 +351,22 @@ public:
     }
 
     /**
+     * @brief Clear all dispatch tables.
+     *
+     * Zeroes out all kernel function pointers and backend pointers across
+     * all device types. Must be called before backends are destroyed to
+     * prevent dangling function pointers.
+     */
+    static void clear() noexcept {
+        for (auto& table : tables_) {
+            table.kernels.fill(nullptr);
+            table.single_output_kernels.fill(nullptr);
+            table.inplace_kernels.fill(nullptr);
+            table.backend = nullptr;
+        }
+    }
+
+    /**
      * @brief Check if a backend is registered.
      *
      * @param type Device type
