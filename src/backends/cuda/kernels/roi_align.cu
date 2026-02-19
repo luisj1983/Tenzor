@@ -454,22 +454,30 @@ auto roi_align_forward(const Tensor& features, const Tensor& rois,
     const Tensor rois_f32 = (rois.dtype() == DType::Float32) ? rois : rois.to(DType::Float32);
     const float* rois_ptr = rois_f32.data<float>();
 
-    const int threads = 512;
-    const int blocks = (total_outputs + threads - 1) / threads;
+    int min_grid_size, block_size;
 
     if (dtype == DType::Float32) {
-        roi_align_forward_kernel<float><<<blocks, threads>>>(
+        cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
+                                           roi_align_forward_kernel<float>, 0, 0);
+        const int blocks = (total_outputs + block_size - 1) / block_size;
+        roi_align_forward_kernel<float><<<blocks, block_size>>>(
             features.data<float>(), rois_ptr, output.data<float>(),
             num_rois, channels, feat_height, feat_width,
             output_h, output_w, spatial_scale, sampling_ratio, aligned);
     } else if (dtype == DType::Float64) {
-        roi_align_forward_kernel<double><<<blocks, threads>>>(
+        cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
+                                           roi_align_forward_kernel<double>, 0, 0);
+        const int blocks = (total_outputs + block_size - 1) / block_size;
+        roi_align_forward_kernel<double><<<blocks, block_size>>>(
             features.data<double>(), rois_ptr, output.data<double>(),
             num_rois, channels, feat_height, feat_width,
             output_h, output_w, static_cast<double>(spatial_scale),
             sampling_ratio, aligned);
     } else if (dtype == DType::Float16) {
-        roi_align_forward_fp16_kernel<<<blocks, threads>>>(
+        cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
+                                           roi_align_forward_fp16_kernel, 0, 0);
+        const int blocks = (total_outputs + block_size - 1) / block_size;
+        roi_align_forward_fp16_kernel<<<blocks, block_size>>>(
             reinterpret_cast<const __half*>(features.data_ptr()),
             rois_ptr,
             reinterpret_cast<__half*>(output.data_ptr()),
@@ -503,15 +511,17 @@ auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
     const Tensor rois_f32 = (rois.dtype() == DType::Float32) ? rois : rois.to(DType::Float32);
     const float* rois_ptr = rois_f32.data<float>();
 
-    const int threads = 512;
+    int min_grid_size, block_size;
 
     if (dtype == DType::Float32) {
         Tensor grad_features(grad_shape, DType::Float32, grad_output.device());
         ROI_CUDA_CHECK(cudaMemset(grad_features.data<float>(), 0, total_features * sizeof(float)));
         if (total_grads == 0) return grad_features;
 
-        const int blocks = (total_grads + threads - 1) / threads;
-        roi_align_backward_kernel<float><<<blocks, threads>>>(
+        cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
+                                           roi_align_backward_kernel<float>, 0, 0);
+        const int blocks = (total_grads + block_size - 1) / block_size;
+        roi_align_backward_kernel<float><<<blocks, block_size>>>(
             grad_output.data<float>(), rois_ptr, grad_features.data<float>(),
             num_rois, channels, feat_height, feat_width,
             output_h, output_w, spatial_scale, sampling_ratio, aligned);
@@ -522,8 +532,10 @@ auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
         ROI_CUDA_CHECK(cudaMemset(grad_features.data<double>(), 0, total_features * sizeof(double)));
         if (total_grads == 0) return grad_features;
 
-        const int blocks = (total_grads + threads - 1) / threads;
-        roi_align_backward_kernel<double><<<blocks, threads>>>(
+        cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
+                                           roi_align_backward_kernel<double>, 0, 0);
+        const int blocks = (total_grads + block_size - 1) / block_size;
+        roi_align_backward_kernel<double><<<blocks, block_size>>>(
             grad_output.data<double>(), rois_ptr, grad_features.data<double>(),
             num_rois, channels, feat_height, feat_width,
             output_h, output_w, static_cast<double>(spatial_scale),
@@ -536,8 +548,10 @@ auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
         ROI_CUDA_CHECK(cudaMemset(grad_features_f32.data<float>(), 0, total_features * sizeof(float)));
 
         if (total_grads > 0) {
-            const int blocks = (total_grads + threads - 1) / threads;
-            roi_align_backward_fp16_kernel<<<blocks, threads>>>(
+            cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
+                                               roi_align_backward_fp16_kernel, 0, 0);
+            const int blocks = (total_grads + block_size - 1) / block_size;
+            roi_align_backward_fp16_kernel<<<blocks, block_size>>>(
                 reinterpret_cast<const __half*>(grad_output.data_ptr()),
                 rois_ptr,
                 grad_features_f32.data<float>(),
@@ -548,8 +562,10 @@ auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
 
         // Convert accumulated float gradients to FP16 output
         Tensor grad_features(grad_shape, DType::Float16, grad_output.device());
-        const int conv_blocks = (total_features + threads - 1) / threads;
-        f32_grad_to_fp16_kernel<<<conv_blocks, threads>>>(
+        cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
+                                           f32_grad_to_fp16_kernel, 0, 0);
+        const int conv_blocks = (total_features + block_size - 1) / block_size;
+        f32_grad_to_fp16_kernel<<<conv_blocks, block_size>>>(
             grad_features_f32.data<float>(),
             reinterpret_cast<__half*>(grad_features.data_ptr()),
             total_features);

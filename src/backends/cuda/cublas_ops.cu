@@ -814,25 +814,28 @@ auto linear_kernel(
             int64_t total = batch_size * out_features;
 
             // Use vectorized kernel if dimensions allow
+            int min_grid_size, block_size;
             if (out_features % 4 == 0 && out_features >= 16) {
-                int threads = 256;
+                cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
+                                                   bias_add_kernel_vec4, 0, 0);
                 int blocks = std::min(
-                    static_cast<int>((total / 4 + threads - 1) / threads),
+                    static_cast<int>((total / 4 + block_size - 1) / block_size),
                     65535
                 );
-                bias_add_kernel_vec4<<<blocks, threads, 0, stream>>>(
+                bias_add_kernel_vec4<<<blocks, block_size, 0, stream>>>(
                     output.data<float>(),
                     bias_c.data<float>(),
                     batch_size,
                     out_features
                 );
             } else {
-                int threads = 256;
+                cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
+                                                   bias_add_kernel<float>, 0, 0);
                 int blocks = std::min(
-                    static_cast<int>((total + threads - 1) / threads),
+                    static_cast<int>((total + block_size - 1) / block_size),
                     65535
                 );
-                bias_add_kernel<float><<<blocks, threads, 0, stream>>>(
+                bias_add_kernel<float><<<blocks, block_size, 0, stream>>>(
                     output.data<float>(),
                     bias_c.data<float>(),
                     batch_size,
@@ -865,12 +868,14 @@ auto linear_kernel(
         if (bias != nullptr && bias->numel() > 0) {
             Tensor bias_c = bias->is_contiguous() ? *bias : bias->contiguous();
             int64_t total = batch_size * out_features;
-            int threads = 256;
+            int min_grid_size, block_size;
+            cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
+                                               bias_add_kernel<double>, 0, 0);
             int blocks = std::min(
-                static_cast<int>((total + threads - 1) / threads),
+                static_cast<int>((total + block_size - 1) / block_size),
                 65535
             );
-            bias_add_kernel<double><<<blocks, threads, 0, stream>>>(
+            bias_add_kernel<double><<<blocks, block_size, 0, stream>>>(
                 output.data<double>(),
                 bias_c.data<double>(),
                 batch_size,
@@ -908,12 +913,14 @@ auto linear_kernel(
         if (bias != nullptr && bias->numel() > 0) {
             Tensor bias_c = bias->is_contiguous() ? *bias : bias->contiguous();
             int64_t total = batch_size * out_features;
-            int threads = 256;
+            int min_grid_size, block_size;
+            cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
+                                               bias_add_kernel<__half>, 0, 0);
             int blocks = std::min(
-                static_cast<int>((total + threads - 1) / threads),
+                static_cast<int>((total + block_size - 1) / block_size),
                 65535
             );
-            bias_add_kernel<__half><<<blocks, threads, 0, stream>>>(
+            bias_add_kernel<__half><<<blocks, block_size, 0, stream>>>(
                 reinterpret_cast<__half*>(output.data_ptr()),
                 reinterpret_cast<const __half*>(bias_c.data_ptr()),
                 batch_size,
@@ -951,12 +958,14 @@ auto linear_kernel(
         if (bias != nullptr && bias->numel() > 0) {
             Tensor bias_c = bias->is_contiguous() ? *bias : bias->contiguous();
             int64_t total = batch_size * out_features;
-            int threads = 256;
+            int min_grid_size, block_size;
+            cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
+                                               bias_add_kernel<__nv_bfloat16>, 0, 0);
             int blocks = std::min(
-                static_cast<int>((total + threads - 1) / threads),
+                static_cast<int>((total + block_size - 1) / block_size),
                 65535
             );
-            bias_add_kernel<__nv_bfloat16><<<blocks, threads, 0, stream>>>(
+            bias_add_kernel<__nv_bfloat16><<<blocks, block_size, 0, stream>>>(
                 reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
                 reinterpret_cast<const __nv_bfloat16*>(bias_c.data_ptr()),
                 batch_size,
