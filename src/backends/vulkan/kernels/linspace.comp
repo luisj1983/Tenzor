@@ -1,0 +1,24 @@
+#version 450
+
+// Linspace: generate linearly-spaced values from start to end
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    float start;
+    float end_val;
+    uint num_steps;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_steps) return;
+
+    if (params.num_steps == 1) {
+        output_data[idx] = params.start;
+    } else {
+        float t = float(idx) / float(params.num_steps - 1);
+        output_data[idx] = params.start + t * (params.end_val - params.start);
+    }
+}

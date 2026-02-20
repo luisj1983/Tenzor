@@ -1,0 +1,18 @@
+#version 450
+
+// Arange: generate sequential values [start, start+step, start+2*step, ...]
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    float start;
+    float step;
+    uint num_elements;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_elements) return;
+    output_data[idx] = params.start + float(idx) * params.step;
+}

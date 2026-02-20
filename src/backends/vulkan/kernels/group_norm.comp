@@ -7,6 +7,8 @@ layout(binding = 0) buffer Input { float input_data[]; };
 layout(binding = 1) buffer Output { float output_data[]; };
 layout(binding = 2) buffer Gamma { float gamma_data[]; };
 layout(binding = 3) buffer Beta { float beta_data[]; };
+layout(binding = 4) buffer MeanOut { float mean_out[]; };
+layout(binding = 5) buffer InvStdOut { float inv_std_out[]; };
 
 layout(push_constant) uniform PushConstants {
     uint batch_size;
@@ -76,6 +78,13 @@ void main() {
     float variance = shared_sum_sq[0] / float(group_size);
     float inv_std = 1.0 / sqrt(variance + params.epsilon);
     barrier();
+
+    // Write mean and inv_std (one thread per workgroup)
+    if (tid == 0) {
+        uint stats_idx = batch_idx * params.num_groups + group_idx;
+        mean_out[stats_idx] = mean;
+        inv_std_out[stats_idx] = inv_std;
+    }
 
     // Step 3: Normalize and apply affine transformation
     for (uint i = tid; i < group_size; i += 256) {

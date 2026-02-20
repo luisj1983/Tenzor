@@ -1,0 +1,21 @@
+#version 450
+
+// Eye: generate identity matrix
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint rows;
+    uint cols;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = params.rows * params.cols;
+    if (idx >= total) return;
+
+    uint row = idx / params.cols;
+    uint col = idx % params.cols;
+    output_data[idx] = (row == col) ? 1.0 : 0.0;
+}

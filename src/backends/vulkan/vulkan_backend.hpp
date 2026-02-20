@@ -215,7 +215,7 @@ private:
     auto dispatchLayerNorm(const Tensor& input, int64_t normalized_shape,
                           const Tensor* gamma, const Tensor* beta, float epsilon) -> Tensor;
     auto dispatchGroupNorm(const Tensor& input, int64_t num_groups,
-                          const Tensor* gamma, const Tensor* beta, float epsilon) -> Tensor;
+                          const Tensor* gamma, const Tensor* beta, float epsilon) -> std::vector<Tensor>;
     auto dispatchLayerNormBackward(const Tensor& grad_output, const Tensor& input,
                                    const Tensor& mean, const Tensor& rstd,
                                    const Tensor* weight, int64_t normalized_shape)
@@ -269,6 +269,11 @@ private:
     auto dispatchSqueeze(const Tensor& input, int64_t dim) -> Tensor;
     auto dispatchUnsqueeze(const Tensor& input, int64_t dim) -> Tensor;
     auto dispatchContiguous(const Tensor& input) -> Tensor;
+
+    // Creation operations
+    auto dispatchArange(float start, float end, float step, DType dtype, const Device& device) -> Tensor;
+    auto dispatchLinspace(float start, float end, int64_t steps, DType dtype, const Device& device) -> Tensor;
+    auto dispatchEye(int64_t n, int64_t m, DType dtype, const Device& device) -> Tensor;
 
     // Memory operations
     auto dispatchZeros(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;

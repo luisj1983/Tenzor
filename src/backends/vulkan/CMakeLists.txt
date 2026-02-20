@@ -101,6 +101,7 @@ set(SHADERS
     boolean_reduction
     # Indexing operations
     embedding
+    embedding_f64
     gather
     scatter
     scatter_f64
@@ -273,6 +274,10 @@ set(SHADERS
     bitonic_sort_f64
     bitonic_sort_i32
     cast_int64_to_int32
+    # Creation operations
+    arange
+    linspace
+    eye
     # Phase 4: Fused optimizer kernels
     fused_rmsprop_step
     fused_adadelta_step

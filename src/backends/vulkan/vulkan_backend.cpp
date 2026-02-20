@@ -2772,6 +2772,8 @@ auto VulkanBackend::dispatch(const std::string& op_name,
                 dtype = DType::Float32;
             } else if (dtype_str == "float16" || dtype_str == "Float16") {
                 dtype = DType::Float16;
+            } else if (dtype_str == "bfloat16" || dtype_str == "BFloat16") {
+                dtype = DType::BFloat16;
             } else if (dtype_str == "float64" || dtype_str == "Float64") {
                 dtype = DType::Float64;
             } else if (dtype_str == "int64" || dtype_str == "Int64") {
@@ -2810,6 +2812,8 @@ auto VulkanBackend::dispatch(const std::string& op_name,
                 dtype = DType::Float32;
             } else if (dtype_str == "float16") {
                 dtype = DType::Float16;
+            } else if (dtype_str == "bfloat16") {
+                dtype = DType::BFloat16;
             } else if (dtype_str == "int32") {
                 dtype = DType::Int32;
             } else if (dtype_str == "int64") {
@@ -2850,6 +2854,8 @@ auto VulkanBackend::dispatch(const std::string& op_name,
                 dtype = DType::Float64;
             } else if (dtype_str == "float16" || dtype_str == "Float16") {
                 dtype = DType::Float16;
+            } else if (dtype_str == "bfloat16" || dtype_str == "BFloat16") {
+                dtype = DType::BFloat16;
             }
         }
         return {dispatchRand(shape, dtype)};
@@ -2878,9 +2884,76 @@ auto VulkanBackend::dispatch(const std::string& op_name,
                 dtype = DType::Float64;
             } else if (dtype_str == "float16" || dtype_str == "Float16") {
                 dtype = DType::Float16;
+            } else if (dtype_str == "bfloat16" || dtype_str == "BFloat16") {
+                dtype = DType::BFloat16;
             }
         }
         return {dispatchRandn(shape, dtype)};
+    }
+
+    // Arange operation
+    if (op_name == "arange") {
+        float start = attrs.contains("start") ? std::stof(attrs.at("start")) : 0.0f;
+        float end_val = attrs.contains("end") ? std::stof(attrs.at("end")) : 0.0f;
+        float step = attrs.contains("step") ? std::stof(attrs.at("step")) : 1.0f;
+        DType dtype = DType::Float32;
+        if (attrs.contains("dtype")) {
+            std::string dtype_str = attrs.at("dtype");
+            if (dtype_str == "float64" || dtype_str == "Float64") dtype = DType::Float64;
+            else if (dtype_str == "float16" || dtype_str == "Float16") dtype = DType::Float16;
+            else if (dtype_str == "bfloat16" || dtype_str == "BFloat16") dtype = DType::BFloat16;
+            else if (dtype_str == "int32" || dtype_str == "Int32") dtype = DType::Int32;
+            else if (dtype_str == "int64" || dtype_str == "Int64") dtype = DType::Int64;
+            else if (dtype_str == "int8" || dtype_str == "Int8") dtype = DType::Int8;
+            else if (dtype_str == "uint8" || dtype_str == "UInt8") dtype = DType::UInt8;
+            else if (dtype_str == "bool" || dtype_str == "Bool") dtype = DType::Bool;
+        }
+        int32_t device_id = attrs.contains("device_id") ? std::stoi(attrs.at("device_id")) : 0;
+        Device device = Device::vulkan(device_id);
+        return {dispatchArange(start, end_val, step, dtype, device)};
+    }
+
+    // Linspace operation
+    if (op_name == "linspace") {
+        float start = attrs.contains("start") ? std::stof(attrs.at("start")) : 0.0f;
+        float end_val = attrs.contains("end") ? std::stof(attrs.at("end")) : 1.0f;
+        int64_t steps = attrs.contains("steps") ? std::stoll(attrs.at("steps")) : 100;
+        DType dtype = DType::Float32;
+        if (attrs.contains("dtype")) {
+            std::string dtype_str = attrs.at("dtype");
+            if (dtype_str == "float64" || dtype_str == "Float64") dtype = DType::Float64;
+            else if (dtype_str == "float16" || dtype_str == "Float16") dtype = DType::Float16;
+            else if (dtype_str == "bfloat16" || dtype_str == "BFloat16") dtype = DType::BFloat16;
+            else if (dtype_str == "int32" || dtype_str == "Int32") dtype = DType::Int32;
+            else if (dtype_str == "int64" || dtype_str == "Int64") dtype = DType::Int64;
+            else if (dtype_str == "int8" || dtype_str == "Int8") dtype = DType::Int8;
+            else if (dtype_str == "uint8" || dtype_str == "UInt8") dtype = DType::UInt8;
+            else if (dtype_str == "bool" || dtype_str == "Bool") dtype = DType::Bool;
+        }
+        int32_t device_id = attrs.contains("device_id") ? std::stoi(attrs.at("device_id")) : 0;
+        Device device = Device::vulkan(device_id);
+        return {dispatchLinspace(start, end_val, steps, dtype, device)};
+    }
+
+    // Eye operation
+    if (op_name == "eye") {
+        int64_t n = attrs.contains("n") ? std::stoll(attrs.at("n")) : 0;
+        int64_t m = attrs.contains("m") ? std::stoll(attrs.at("m")) : -1;
+        DType dtype = DType::Float32;
+        if (attrs.contains("dtype")) {
+            std::string dtype_str = attrs.at("dtype");
+            if (dtype_str == "float64" || dtype_str == "Float64") dtype = DType::Float64;
+            else if (dtype_str == "float16" || dtype_str == "Float16") dtype = DType::Float16;
+            else if (dtype_str == "bfloat16" || dtype_str == "BFloat16") dtype = DType::BFloat16;
+            else if (dtype_str == "int32" || dtype_str == "Int32") dtype = DType::Int32;
+            else if (dtype_str == "int64" || dtype_str == "Int64") dtype = DType::Int64;
+            else if (dtype_str == "int8" || dtype_str == "Int8") dtype = DType::Int8;
+            else if (dtype_str == "uint8" || dtype_str == "UInt8") dtype = DType::UInt8;
+            else if (dtype_str == "bool" || dtype_str == "Bool") dtype = DType::Bool;
+        }
+        int32_t device_id = attrs.contains("device_id") ? std::stoi(attrs.at("device_id")) : 0;
+        Device device = Device::vulkan(device_id);
+        return {dispatchEye(n, m, dtype, device)};
     }
 
     // Repeat operation
@@ -3130,7 +3203,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         float eps = attrs.contains("eps") ? std::stof(attrs.at("eps")) : 1e-5f;
         const Tensor* gamma = (inputs.size() > 1) ? &inputs[1] : nullptr;
         const Tensor* beta = (inputs.size() > 2) ? &inputs[2] : nullptr;
-        return {dispatchGroupNorm(inputs[0], num_groups, gamma, beta, eps)};
+        return dispatchGroupNorm(inputs[0], num_groups, gamma, beta, eps);
     }
 
     if (op_name == "group_norm_backward") {
@@ -3521,6 +3594,14 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
     else if (op_name == "div") opcode = 3;
     else throw std::runtime_error("Unknown binary operation: " + op_name);
 
+    // BFloat16: upcast to Float32, compute, downcast back
+    if (a.dtype() == DType::BFloat16) {
+        auto a_f32 = a.to(DType::Float32);
+        auto b_f32 = b.to(DType::Float32);
+        auto result_f32 = dispatchBinaryOp(op_name, a_f32, b_f32);
+        return result_f32.to(DType::BFloat16);
+    }
+
     // Check if we can use the legacy float-only fast path
     bool same_shape = std::equal(a_shape.begin(), a_shape.end(), b_shape.begin(), b_shape.end());
     bool is_float32 = (a.dtype() == DType::Float32);
@@ -3754,6 +3835,13 @@ auto VulkanBackend::dispatchUnaryOp(const std::string& op_name,
         return Tensor(output_shape, input.dtype(), input.device());
     }
 
+    // BFloat16: upcast to Float32, compute, downcast back
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = dispatchUnaryOp(op_name, input_f32);
+        return result_f32.to(DType::BFloat16);
+    }
+
     int32_t device_id = input.device().index;
 
     // Create output tensor (convert span to vector)
@@ -3925,6 +4013,13 @@ auto VulkanBackend::dispatchUnaryOp(const std::string& op_name,
 auto VulkanBackend::dispatchUnaryOpWithParam(const std::string& op_name,
                                               const Tensor& input,
                                               float param) -> Tensor {
+    // BFloat16: upcast to Float32, compute, downcast back
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = dispatchUnaryOpWithParam(op_name, input_f32, param);
+        return result_f32.to(DType::BFloat16);
+    }
+
     int32_t device_id = input.device().index;
 
     // Select correct pipeline based on dtype
@@ -4343,6 +4438,13 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
         return result_cpu.to(input.device());
     }
 
+    // BFloat16: upcast to Float32, compute, downcast back
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = dispatchReduction(op_name, input_f32, dim, keepdim);
+        return result_f32.to(DType::BFloat16);
+    }
+
     int32_t device_id = input.device().index;
     auto input_shape = input.shape();
 
@@ -4497,14 +4599,15 @@ static bool isSimpleTranspose2D(const Tensor& t) {
 auto VulkanBackend::dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor {
     // Optimized matmul with proper buffer binding and tiled execution
 
-    // Float16: upcast to Float32 for numerical stability
+    // Float16/BFloat16: upcast to Float32 for numerical stability
     // The matmul_f16 shader uses F32 accumulation but outputs F16, which can
     // overflow the F16 range (±65504) for large reduction dimensions (K).
-    if (a.dtype() == DType::Float16) {
+    if (a.dtype() == DType::Float16 || a.dtype() == DType::BFloat16) {
+        DType orig_dtype = a.dtype();
         auto a_f32 = a.to(DType::Float32);
         auto b_f32 = b.to(DType::Float32);
         auto result_f32 = dispatchMatmul(a_f32, b_f32);
-        return result_f32.to(DType::Float16);
+        return result_f32.to(orig_dtype);
     }
 
     // Make A contiguous if needed (A is usually already contiguous)
@@ -4672,14 +4775,15 @@ auto VulkanBackend::dispatchBmm(const Tensor& a, const Tensor& b) -> Tensor {
             std::to_string(K) + " vs " + std::to_string(b_shape[1]));
     }
 
-    // Float16: upcast to Float32 BEFORE making contiguous to avoid
+    // Float16/BFloat16: upcast to Float32 BEFORE making contiguous to avoid
     // strided_copy_f16 shader issues with non-contiguous permuted tensors.
     // The .to(DType::Float32) goes through CPU which handles strides correctly.
-    if (a.dtype() == DType::Float16) {
+    if (a.dtype() == DType::Float16 || a.dtype() == DType::BFloat16) {
+        DType orig_dtype = a.dtype();
         Tensor a_f32 = a.to(DType::Float32);
         Tensor b_f32 = b.to(DType::Float32);
         Tensor result_f32 = dispatchBmm(a_f32, b_f32);
-        return result_f32.to(DType::Float16);
+        return result_f32.to(orig_dtype);
     }
 
     int32_t device_id = a.device().index;
@@ -6257,6 +6361,24 @@ auto VulkanBackend::dispatchBatchNorm2dForward(const Tensor& input, const Tensor
     int64_t width = input_shape[3];
     int64_t spatial_size = height * width;
 
+    // BFloat16: upcast to Float32, compute, downcast back
+    if (input.dtype() == DType::BFloat16) {
+        auto in_f32 = input.to(DType::Float32);
+        auto mean_f32 = mean.to(DType::Float32);
+        auto var_f32 = var.to(DType::Float32);
+        Tensor gamma_f32, beta_f32;
+        const Tensor* g_ptr = nullptr;
+        const Tensor* b_ptr = nullptr;
+        if (gamma && beta) {
+            gamma_f32 = gamma->to(DType::Float32);
+            beta_f32 = beta->to(DType::Float32);
+            g_ptr = &gamma_f32;
+            b_ptr = &beta_f32;
+        }
+        auto result_f32 = dispatchBatchNorm2dForward(in_f32, mean_f32, var_f32, g_ptr, b_ptr, epsilon);
+        return result_f32.to(DType::BFloat16);
+    }
+
     int32_t device_id = input.device().index;
 
     // Select shader based on dtype
@@ -6567,8 +6689,9 @@ auto VulkanBackend::dispatchLayerNorm(const Tensor& input, int64_t normalized_sh
     auto input_shape = input.shape();
     int32_t device_id = input.device().index;
 
-    // For Float16, upcast to Float32 for numerical stability
-    if (input.dtype() == DType::Float16) {
+    // For Float16/BFloat16, upcast to Float32 for numerical stability
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig_dtype = input.dtype();
         auto input_f32 = input.to(DType::Float32);
         Tensor gamma_f32, beta_f32;
         const Tensor* gamma_ptr = nullptr;
@@ -6580,7 +6703,7 @@ auto VulkanBackend::dispatchLayerNorm(const Tensor& input, int64_t normalized_sh
             beta_ptr = &beta_f32;
         }
         auto result_f32 = dispatchLayerNorm(input_f32, normalized_shape, gamma_ptr, beta_ptr, epsilon);
-        return result_f32.to(DType::Float16);
+        return result_f32.to(orig_dtype);
     }
 
     // Select correct pipeline based on dtype
@@ -6667,26 +6790,129 @@ auto VulkanBackend::dispatchLayerNorm(const Tensor& input, int64_t normalized_sh
 }
 
 auto VulkanBackend::dispatchGroupNorm(const Tensor& input, int64_t num_groups,
-                                      const Tensor* gamma, const Tensor* beta, float epsilon) -> Tensor {
+                                      const Tensor* gamma, const Tensor* beta, float epsilon) -> std::vector<Tensor> {
     auto input_shape = input.shape();
-    int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("group_norm", device_id);
+    if (input_shape.size() < 2) {
+        throw std::invalid_argument("group_norm requires at least 2D input");
+    }
 
+    // For non-Float32 types, convert to Float32, compute, convert back
+    if (input.dtype() != DType::Float32) {
+        DType orig_dtype = input.dtype();
+        auto input_f32 = input.to(DType::Float32);
+        Tensor gamma_f32, beta_f32;
+        const Tensor* gamma_ptr = nullptr;
+        const Tensor* beta_ptr = nullptr;
+        if (gamma && beta) {
+            gamma_f32 = gamma->to(DType::Float32);
+            beta_f32 = beta->to(DType::Float32);
+            gamma_ptr = &gamma_f32;
+            beta_ptr = &beta_f32;
+        }
+        auto results = dispatchGroupNorm(input_f32, num_groups, gamma_ptr, beta_ptr, epsilon);
+        // Output in original dtype, mean/inv_std stay Float32 (used for backward)
+        return {results[0].to(orig_dtype), results[1], results[2]};
+    }
+
+    int32_t device_id = input.device().index;
+
+    // GroupNorm shader operates on Float32
+    std::string shader_name = "group_norm";
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    int64_t N = input_shape[0];
+    int64_t C = input_shape[1];
+    int64_t H = (input_shape.size() > 2) ? input_shape[2] : 1;
+    int64_t W = (input_shape.size() > 3) ? input_shape[3] : 1;
+    // For >4D, fold extra spatial dims into W
+    for (size_t i = 4; i < input_shape.size(); ++i) {
+        W *= input_shape[i];
+    }
+
+    bool has_affine = (gamma != nullptr && beta != nullptr);
+
+    // Create output tensors
     std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
     Tensor output(out_shape, input.dtype(), input.device());
+    Tensor mean_out({N, num_groups}, DType::Float32, input.device());
+    Tensor inv_std_out({N, num_groups}, DType::Float32, input.device());
+
+    size_t elem_size = input.dtype_size();
+
+    // Get VkBuffer handles
+    VkBuffer buf_input = getVulkanBuffer(input.data_ptr());
+    VkBuffer buf_output = getVulkanBuffer(output.data_ptr());
+    VkBuffer buf_mean = getVulkanBuffer(mean_out.data_ptr());
+    VkBuffer buf_inv_std = getVulkanBuffer(inv_std_out.data_ptr());
+
+    size_t input_buf_size = input.numel() * elem_size;
+    size_t output_buf_size = output.numel() * elem_size;
+    size_t stats_buf_size = N * num_groups * sizeof(float);
+
+    // Bindings: input(0), output(1), gamma(2), beta(3), mean(4), inv_std(5)
+    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        {0, buf_input},
+        {1, buf_output},
+    };
+    std::vector<size_t> sizes = {input_buf_size, output_buf_size};
+
+    if (has_affine) {
+        VkBuffer buf_gamma = getVulkanBuffer(gamma->data_ptr());
+        VkBuffer buf_beta = getVulkanBuffer(beta->data_ptr());
+        bindings.push_back({2, buf_gamma});
+        bindings.push_back({3, buf_beta});
+        sizes.push_back(C * elem_size);
+        sizes.push_back(C * elem_size);
+    } else {
+        // Bind dummy buffers for unused bindings
+        bindings.push_back({2, buf_output});
+        bindings.push_back({3, buf_output});
+        sizes.push_back(output_buf_size);
+        sizes.push_back(output_buf_size);
+    }
+
+    bindings.push_back({4, buf_mean});
+    bindings.push_back({5, buf_inv_std});
+    sizes.push_back(stats_buf_size);
+    sizes.push_back(stats_buf_size);
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    struct PushConstants {
+        uint32_t batch_size;
+        uint32_t num_channels;
+        uint32_t height;
+        uint32_t width;
+        uint32_t num_groups;
+        float epsilon;
+        uint32_t affine;
+    } push_constants;
+
+    push_constants.batch_size = static_cast<uint32_t>(N);
+    push_constants.num_channels = static_cast<uint32_t>(C);
+    push_constants.height = static_cast<uint32_t>(H);
+    push_constants.width = static_cast<uint32_t>(W);
+    push_constants.num_groups = static_cast<uint32_t>(num_groups);
+    push_constants.epsilon = epsilon;
+    push_constants.affine = has_affine ? 1u : 0u;
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &push_constants);
 
-    uint32_t workgroups = (num_groups + 255) / 256;
+    // One workgroup per (batch, group) pair
+    uint32_t workgroups = static_cast<uint32_t>(N * num_groups);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-    // Add memory barrier
     insertComputeBarrier(cmdBuffer);
-
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    return output;
+    return {output, mean_out, inv_std_out};
 }
 
 // LayerNorm Backward - GPU implementation
@@ -6696,8 +6922,9 @@ auto VulkanBackend::dispatchLayerNormBackward(const Tensor& grad_output, const T
                                                -> std::tuple<Tensor, Tensor, Tensor> {
     int32_t device_id = input.device().index;
 
-    // For Float16, upcast to Float32 for numerical stability
-    if (input.dtype() == DType::Float16) {
+    // For Float16/BFloat16, upcast to Float32 for numerical stability
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig_dtype = input.dtype();
         auto go_f32 = grad_output.to(DType::Float32);
         auto in_f32 = input.to(DType::Float32);
         auto mean_f32 = mean.to(DType::Float32);
@@ -6709,7 +6936,7 @@ auto VulkanBackend::dispatchLayerNormBackward(const Tensor& grad_output, const T
             w_ptr = &w_f32;
         }
         auto [gi, gw, gb] = dispatchLayerNormBackward(go_f32, in_f32, mean_f32, rstd_f32, w_ptr, normalized_shape);
-        return {gi.to(DType::Float16), gw.to(DType::Float16), gb.to(DType::Float16)};
+        return {gi.to(orig_dtype), gw.to(orig_dtype), gb.to(orig_dtype)};
     }
 
     bool is_float64 = (input.dtype() == DType::Float64);
@@ -6814,8 +7041,9 @@ auto VulkanBackend::dispatchGroupNormBackward(const Tensor& grad_output, const T
     int64_t W = input_shape[3];
     int32_t device_id = input.device().index;
 
-    // For Float16, upcast to Float32
-    if (input.dtype() == DType::Float16) {
+    // For Float16/BFloat16, upcast to Float32
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig_dtype = input.dtype();
         auto go_f32 = grad_output.to(DType::Float32);
         auto in_f32 = input.to(DType::Float32);
         auto mean_f32 = mean.to(DType::Float32);
@@ -6827,7 +7055,7 @@ auto VulkanBackend::dispatchGroupNormBackward(const Tensor& grad_output, const T
             w_ptr = &w_f32;
         }
         auto [gi, gw, gb] = dispatchGroupNormBackward(go_f32, in_f32, mean_f32, rstd_f32, w_ptr, num_groups);
-        return {gi.to(DType::Float16), gw.to(DType::Float16), gb.to(DType::Float16)};
+        return {gi.to(orig_dtype), gw.to(orig_dtype), gb.to(orig_dtype)};
     }
 
     bool is_float64 = (input.dtype() == DType::Float64);
@@ -6926,11 +7154,12 @@ auto VulkanBackend::dispatchEmbeddingBackward(const Tensor& grad_output, const T
     int32_t device_id = grad_output.device().index;
     int64_t num_indices = indices.numel();
 
-    // For Float16, upcast to Float32
-    if (grad_output.dtype() == DType::Float16) {
+    // For Float16/BFloat16, upcast to Float32
+    if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
+        DType orig_dtype = grad_output.dtype();
         auto go_f32 = grad_output.to(DType::Float32);
         auto result_f32 = dispatchEmbeddingBackward(go_f32, indices, num_embeddings, embedding_dim);
-        return result_f32.to(DType::Float16);
+        return result_f32.to(orig_dtype);
     }
 
     bool is_float64 = (grad_output.dtype() == DType::Float64);
@@ -6995,12 +7224,13 @@ auto VulkanBackend::dispatchRMSNorm(const Tensor& input, const Tensor& weight,
                                      int64_t normalized_shape, float epsilon) -> std::pair<Tensor, Tensor> {
     int32_t device_id = input.device().index;
 
-    // For Float16, upcast to Float32
-    if (input.dtype() == DType::Float16) {
+    // For Float16/BFloat16, upcast to Float32
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig_dtype = input.dtype();
         auto in_f32 = input.to(DType::Float32);
         auto w_f32 = weight.to(DType::Float32);
         auto [out_f32, rrms_f32] = dispatchRMSNorm(in_f32, w_f32, normalized_shape, epsilon);
-        return {out_f32.to(DType::Float16), rrms_f32};  // rrms stays F32 for backward
+        return {out_f32.to(orig_dtype), rrms_f32};  // rrms stays F32 for backward
     }
 
     bool is_float64 = (input.dtype() == DType::Float64);
@@ -7078,14 +7308,15 @@ auto VulkanBackend::dispatchRMSNormBackward(const Tensor& grad_output, const Ten
                                               -> std::pair<Tensor, Tensor> {
     int32_t device_id = input.device().index;
 
-    // For Float16, upcast to Float32
-    if (input.dtype() == DType::Float16) {
+    // For Float16/BFloat16, upcast to Float32
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig_dtype = input.dtype();
         auto go_f32 = grad_output.to(DType::Float32);
         auto in_f32 = input.to(DType::Float32);
         auto rrms_f32 = rrms.to(DType::Float32);
         auto w_f32 = weight.to(DType::Float32);
         auto [gi, gw] = dispatchRMSNormBackward(go_f32, in_f32, rrms_f32, w_f32, normalized_shape);
-        return {gi.to(DType::Float16), gw.to(DType::Float16)};
+        return {gi.to(orig_dtype), gw.to(orig_dtype)};
     }
 
     bool is_float64 = (input.dtype() == DType::Float64);
@@ -7479,11 +7710,12 @@ auto VulkanBackend::dispatchSoftmax(const Tensor& input, int64_t dim) -> Tensor 
     auto input_shape = input.shape();
     int32_t device_id = input.device().index;
 
-    // For Float16, upcast to Float32 for numerical stability
-    if (input.dtype() == DType::Float16) {
+    // For Float16/BFloat16, upcast to Float32 for numerical stability
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig_dtype = input.dtype();
         auto input_f32 = input.to(DType::Float32);
         auto result_f32 = dispatchSoftmax(input_f32, dim);
-        return result_f32.to(DType::Float16);
+        return result_f32.to(orig_dtype);
     }
 
     // Select correct pipeline based on dtype
@@ -7569,6 +7801,13 @@ auto VulkanBackend::dispatchSoftmax(const Tensor& input, int64_t dim) -> Tensor 
 auto VulkanBackend::dispatchLogSoftmax(const Tensor& input, int64_t dim) -> Tensor {
     auto input_shape = input.shape();
     int32_t device_id = input.device().index;
+
+    // For BFloat16, upcast to Float32 for numerical stability
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = dispatchLogSoftmax(input_f32, dim);
+        return result_f32.to(DType::BFloat16);
+    }
 
     // Select shader based on dtype
     std::string shader_name = (input.dtype() == DType::Float64) ? "log_softmax_f64" : "log_softmax";
@@ -8160,7 +8399,13 @@ auto VulkanBackend::dispatchEmbedding(const Tensor& weight, const Tensor& indice
     auto indices_shape = indices.shape();
 
     int32_t device_id = weight.device().index;
-    auto* pipeline = getPipeline("embedding", device_id);
+    bool is_float64 = (weight.dtype() == DType::Float64);
+    std::string shader_name = is_float64 ? "embedding_f64" : "embedding";
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    uint32_t num_embeddings = static_cast<uint32_t>(weight_shape[0]);
+    uint32_t embedding_dim = static_cast<uint32_t>(weight_shape[1]);
+    uint32_t num_indices = static_cast<uint32_t>(indices.numel());
 
     // Output shape: indices_shape + [embedding_dim]
     std::vector<int64_t> out_shape(indices_shape.begin(), indices_shape.end());
@@ -8168,15 +8413,89 @@ auto VulkanBackend::dispatchEmbedding(const Tensor& weight, const Tensor& indice
 
     Tensor output(out_shape, weight.dtype(), weight.device());
 
+    // Handle empty tensors
+    if (num_indices == 0) {
+        return output;
+    }
+
+    // Convert Int64 indices to Int32 for shader compatibility
+    Tensor indices_i32 = indices;
+    if (indices.dtype() == DType::Int64) {
+        std::vector<int64_t> idx_shape(indices_shape.begin(), indices_shape.end());
+        indices_i32 = Tensor(idx_shape, DType::Int32, indices.device());
+
+        auto* cast_pipeline = getPipeline("cast_int64_to_int32", device_id);
+        VkBuffer buf_in = getVulkanBuffer(indices.data_ptr());
+        VkBuffer buf_out = getVulkanBuffer(indices_i32.data_ptr());
+        size_t size_in = indices.numel() * sizeof(int64_t);
+        size_t size_out = indices_i32.numel() * sizeof(int32_t);
+
+        std::vector<std::pair<uint32_t, VkBuffer>> cast_bindings = {
+            {0, buf_in}, {1, buf_out}
+        };
+        std::vector<size_t> cast_sizes = {size_in, size_out};
+        VkDescriptorSet cast_ds = allocateAndWriteDescriptorSet(device_id, cast_pipeline, cast_bindings, cast_sizes);
+
+        struct { uint32_t n_elements; } cast_pc;
+        cast_pc.n_elements = static_cast<uint32_t>(indices.numel());
+
+        VkCommandBuffer cast_cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cast_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cast_pipeline->pipeline());
+        vkCmdBindDescriptorSets(cast_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               cast_pipeline->layout(), 0, 1, &cast_ds, 0, nullptr);
+        vkCmdPushConstants(cast_cmd, cast_pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(cast_pc), &cast_pc);
+        vkCmdDispatch(cast_cmd, (indices.numel() + 255) / 256, 1, 1);
+        insertComputeBarrier(cast_cmd);
+        endSingleTimeCommands(cast_cmd, device_id);
+    }
+
+    // Get VkBuffer handles
+    VkBuffer buf_weight = getVulkanBuffer(weight.data_ptr());
+    VkBuffer buf_indices = getVulkanBuffer(indices_i32.data_ptr());
+    VkBuffer buf_output = getVulkanBuffer(output.data_ptr());
+
+    size_t weight_buf_size = weight.numel() * weight.dtype_size();
+    size_t indices_buf_size = indices_i32.numel() * sizeof(int32_t);
+    size_t output_buf_size = output.numel() * output.dtype_size();
+
+    // Bindings: embeddings(0), indices(1), output(2)
+    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        {0, buf_weight},
+        {1, buf_indices},
+        {2, buf_output}
+    };
+    std::vector<size_t> sizes = {weight_buf_size, indices_buf_size, output_buf_size};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    // Push constants
+    struct PushConstants {
+        uint32_t num_embeddings;
+        uint32_t embedding_dim;
+        uint32_t num_indices;
+        uint32_t padding_idx;
+    } push_constants;
+
+    push_constants.num_embeddings = num_embeddings;
+    push_constants.embedding_dim = embedding_dim;
+    push_constants.num_indices = num_indices;
+    push_constants.padding_idx = (padding_idx >= 0) ? static_cast<uint32_t>(padding_idx) : 0xFFFFFFFFu;
+
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &push_constants);
 
-    uint32_t workgroups = (output.numel() + 255) / 256;
+    // One thread per index (each thread copies embedding_dim elements)
+    uint32_t workgroups = (num_indices + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-    // Add memory barrier
     insertComputeBarrier(cmdBuffer);
-
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -9024,7 +9343,7 @@ auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
     std::string shader_name = "strided_copy";
     if (input.dtype() == DType::Float64) {
         shader_name = "strided_copy_f64";
-    } else if (input.dtype() == DType::Float16) {
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         shader_name = "strided_copy_f16";
     }
 
@@ -9180,6 +9499,183 @@ auto VulkanBackend::dispatchZeros(const std::vector<int64_t>& shape, DType dtype
     // Add memory barrier
     insertComputeBarrier(cmdBuffer);
 
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+/**
+ * @brief Arange - generate sequential values on GPU
+ */
+auto VulkanBackend::dispatchArange(float start, float end, float step, DType dtype, const Device& device) -> Tensor {
+    if (step == 0.0f) {
+        throw std::runtime_error("arange: step must be non-zero");
+    }
+    if ((step > 0 && start >= end) || (step < 0 && start <= end)) {
+        return Tensor({0}, dtype, device);
+    }
+
+    int64_t numel = static_cast<int64_t>(std::ceil((end - start) / step));
+    if (numel <= 0) {
+        return Tensor({0}, dtype, device);
+    }
+
+    // Arange shader only supports Float32; for other dtypes, compute in Float32 then convert
+    if (dtype != DType::Float32) {
+        auto result_f32 = dispatchArange(start, end, step, DType::Float32, device);
+        return result_f32.to(dtype);
+    }
+
+    Tensor output({numel}, DType::Float32, device);
+
+    int32_t device_id = device.index;
+    auto* pipeline = getPipeline("arange", device_id);
+
+    VkBuffer buf_out = getVulkanBuffer(output.data_ptr());
+    size_t buf_size = output.numel() * output.dtype_size();
+
+    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {{0, buf_out}};
+    std::vector<size_t> sizes = {buf_size};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    struct PushConstants {
+        float start;
+        float step;
+        uint32_t num_elements;
+    } push_constants;
+
+    push_constants.start = start;
+    push_constants.step = step;
+    push_constants.num_elements = static_cast<uint32_t>(numel);
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &push_constants);
+
+    uint32_t workgroups = (numel + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    insertComputeBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+/**
+ * @brief Linspace - generate linearly-spaced values on GPU
+ */
+auto VulkanBackend::dispatchLinspace(float start, float end, int64_t steps, DType dtype, const Device& device) -> Tensor {
+    if (steps < 0) {
+        throw std::runtime_error("linspace: number of steps must be non-negative");
+    }
+    if (steps == 0) {
+        return Tensor({0}, dtype, device);
+    }
+
+    // Linspace shader only supports Float32; for other dtypes, compute in Float32 then convert
+    if (dtype != DType::Float32) {
+        auto result_f32 = dispatchLinspace(start, end, steps, DType::Float32, device);
+        return result_f32.to(dtype);
+    }
+
+    Tensor output({steps}, DType::Float32, device);
+
+    int32_t device_id = device.index;
+    auto* pipeline = getPipeline("linspace", device_id);
+
+    VkBuffer buf_out = getVulkanBuffer(output.data_ptr());
+    size_t buf_size = output.numel() * output.dtype_size();
+
+    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {{0, buf_out}};
+    std::vector<size_t> sizes = {buf_size};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    struct PushConstants {
+        float start;
+        float end_val;
+        uint32_t num_steps;
+    } push_constants;
+
+    push_constants.start = start;
+    push_constants.end_val = end;
+    push_constants.num_steps = static_cast<uint32_t>(steps);
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &push_constants);
+
+    uint32_t workgroups = (steps + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    insertComputeBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+/**
+ * @brief Eye - generate identity matrix on GPU
+ */
+auto VulkanBackend::dispatchEye(int64_t n, int64_t m, DType dtype, const Device& device) -> Tensor {
+    if (m < 0) m = n;
+
+    if (n == 0 || m == 0) {
+        return Tensor({n, m}, dtype, device);
+    }
+
+    // Eye shader only supports Float32; for other dtypes, compute in Float32 then convert
+    if (dtype != DType::Float32) {
+        auto result_f32 = dispatchEye(n, m, DType::Float32, device);
+        return result_f32.to(dtype);
+    }
+
+    Tensor output({n, m}, DType::Float32, device);
+
+    int32_t device_id = device.index;
+    auto* pipeline = getPipeline("eye", device_id);
+
+    VkBuffer buf_out = getVulkanBuffer(output.data_ptr());
+    size_t buf_size = output.numel() * output.dtype_size();
+
+    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {{0, buf_out}};
+    std::vector<size_t> sizes = {buf_size};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    struct PushConstants {
+        uint32_t rows;
+        uint32_t cols;
+    } push_constants;
+
+    push_constants.rows = static_cast<uint32_t>(n);
+    push_constants.cols = static_cast<uint32_t>(m);
+
+    int64_t total = n * m;
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &push_constants);
+
+    uint32_t workgroups = (total + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    insertComputeBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -9644,6 +10140,13 @@ auto VulkanBackend::dispatchActivation(const std::string& op_name,
         return Tensor(output_shape, input.dtype(), input.device());
     }
 
+    // BFloat16: upcast to Float32, compute, downcast back
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = dispatchActivation(op_name, input_f32, opcode, param);
+        return result_f32.to(DType::BFloat16);
+    }
+
     int32_t device_id = input.device().index;
 
     // Select correct pipeline based on dtype
@@ -9760,6 +10263,14 @@ auto VulkanBackend::dispatchActivationBackward(const std::string& op_name,
                                                 const Tensor& input_or_output,
                                                 uint32_t opcode,
                                                 float param) -> Tensor {
+    // BFloat16: upcast to Float32, compute, downcast back
+    if (grad_output.dtype() == DType::BFloat16) {
+        auto go_f32 = grad_output.to(DType::Float32);
+        auto io_f32 = input_or_output.to(DType::Float32);
+        auto result_f32 = dispatchActivationBackward(op_name, go_f32, io_f32, opcode, param);
+        return result_f32.to(DType::BFloat16);
+    }
+
     int32_t device_id = grad_output.device().index;
 
     // Select correct pipeline based on dtype
@@ -9923,12 +10434,13 @@ auto VulkanBackend::dispatchSoftmaxBackward(const Tensor& grad_output,
                                              int64_t dim) -> Tensor {
     int32_t device_id = grad_output.device().index;
 
-    // For Float16, upcast to Float32 for numerical stability
-    if (grad_output.dtype() == DType::Float16) {
+    // For Float16/BFloat16, upcast to Float32 for numerical stability
+    if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
+        DType orig_dtype = grad_output.dtype();
         auto grad_f32 = grad_output.to(DType::Float32);
         auto out_f32 = output.to(DType::Float32);
         auto result_f32 = dispatchSoftmaxBackward(grad_f32, out_f32, dim);
-        return result_f32.to(DType::Float16);
+        return result_f32.to(orig_dtype);
     }
 
     // Select correct pipeline based on dtype
@@ -10960,6 +11472,12 @@ auto VulkanBackend::dispatchConvTranspose2dForward(const Tensor& input, const Te
 // ============================================================================
 
 auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value, DType dtype) -> Tensor {
+    // BFloat16: generate as Float32, then convert
+    if (dtype == DType::BFloat16) {
+        auto result_f32 = dispatchFull(shape, value, DType::Float32);
+        return result_f32.to(DType::BFloat16);
+    }
+
     // Create tensor on first available Vulkan device
     Device device(Device::Type::Vulkan, 0);
     Tensor output(shape, dtype, device);
@@ -11217,9 +11735,8 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
 // ============================================================================
 
 auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype) -> Tensor {
-    // For Float64, Int64, UInt8, or Bool, use full() instead since ones shader only supports 32-bit values
-    // Bool is stored as uint8_t, so it needs byte-level access like UInt8
-    if (dtype == DType::Float64 || dtype == DType::Int64 || dtype == DType::UInt8 || dtype == DType::Bool) {
+    // For Float64, Int64, UInt8, Bool, or BFloat16, use full() instead since ones shader only supports 32-bit values
+    if (dtype == DType::Float64 || dtype == DType::Int64 || dtype == DType::UInt8 || dtype == DType::Bool || dtype == DType::BFloat16) {
         return dispatchFull(shape, 1.0, dtype);
     }
 
@@ -11352,6 +11869,12 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
 }
 
 auto VulkanBackend::dispatchRand(const std::vector<int64_t>& shape, DType dtype) -> Tensor {
+    // BFloat16: generate as Float32, then convert
+    if (dtype == DType::BFloat16) {
+        auto result_f32 = dispatchRand(shape, DType::Float32);
+        return result_f32.to(DType::BFloat16);
+    }
+
     // Create tensor on first available Vulkan device
     Device device(Device::Type::Vulkan, 0);
     Tensor output(shape, dtype, device);
@@ -11371,7 +11894,7 @@ auto VulkanBackend::dispatchRand(const std::vector<int64_t>& shape, DType dtype)
     } else if (dtype == DType::Float16) {
         shader_name = "random_f16";
     } else if (dtype != DType::Float32) {
-        throw std::runtime_error("Unsupported dtype for rand: only Float32, Float64, and Float16 are supported");
+        throw std::runtime_error("Unsupported dtype for rand: only Float32, Float64, Float16, and BFloat16 are supported");
     }
 
     auto* pipeline = getPipeline(shader_name, device_id);
@@ -11421,6 +11944,12 @@ auto VulkanBackend::dispatchRand(const std::vector<int64_t>& shape, DType dtype)
 }
 
 auto VulkanBackend::dispatchRandn(const std::vector<int64_t>& shape, DType dtype) -> Tensor {
+    // BFloat16: generate as Float32, then convert
+    if (dtype == DType::BFloat16) {
+        auto result_f32 = dispatchRandn(shape, DType::Float32);
+        return result_f32.to(DType::BFloat16);
+    }
+
     // Create tensor on first available Vulkan device
     Device device(Device::Type::Vulkan, 0);
     Tensor output(shape, dtype, device);
@@ -11440,7 +11969,7 @@ auto VulkanBackend::dispatchRandn(const std::vector<int64_t>& shape, DType dtype
     } else if (dtype == DType::Float16) {
         shader_name = "random_f16";
     } else if (dtype != DType::Float32) {
-        throw std::runtime_error("Unsupported dtype for randn: only Float32, Float64, and Float16 are supported");
+        throw std::runtime_error("Unsupported dtype for randn: only Float32, Float64, Float16, and BFloat16 are supported");
     }
 
     auto* pipeline = getPipeline(shader_name, device_id);

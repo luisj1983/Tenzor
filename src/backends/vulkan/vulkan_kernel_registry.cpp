@@ -491,6 +491,18 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return get_vulkan_backend()->dispatch("randn", inputs, attrs);
     });
 
+    table.register_kernel(OpId::Arange, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("arange", inputs, attrs);
+    });
+
+    table.register_kernel(OpId::Linspace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("linspace", inputs, attrs);
+    });
+
+    table.register_kernel(OpId::Eye, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("eye", inputs, attrs);
+    });
+
     // ========================================================================
     // Pooling Operations
     // ========================================================================
