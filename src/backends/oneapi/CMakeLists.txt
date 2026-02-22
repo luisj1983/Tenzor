@@ -146,7 +146,7 @@ endif()
 set(SYCL_LINK_FLAGS "-L${SYCL_LIBRARY_DIR}" "-lsycl" "-Wl,-rpath,${SYCL_LIBRARY_DIR}")
 
 # Create shared library
-set(ONEAPI_SO_OUTPUT "${CMAKE_SOURCE_DIR}/bin/tenzor_backend_oneapi.so")
+set(ONEAPI_SO_OUTPUT "${CMAKE_BINARY_DIR}/bin/tenzor_backend_oneapi.so")
 add_custom_command(
     OUTPUT ${ONEAPI_SO_OUTPUT}
     COMMAND ${SYCL_COMPILER}
@@ -154,7 +154,9 @@ add_custom_command(
         -fsycl -fsycl-targets=${SYCL_TARGET_ARCH}
         ${ALL_OBJECTS}
         -o ${ONEAPI_SO_OUTPUT}
-        -L${CMAKE_SOURCE_DIR}/bin -ltenzor_core
+        -Wl,-soname,tenzor_backend_oneapi.so
+        -L${CMAKE_BINARY_DIR}/bin -ltenzor_core
+        -Wl,-rpath,${CMAKE_BINARY_DIR}/bin
         ${SYCL_LINK_FLAGS}
         ${ONEMKL_LINK_FLAGS}
     DEPENDS ${ALL_OBJECTS}
