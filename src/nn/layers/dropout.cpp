@@ -1,6 +1,8 @@
 #include "tenzor/nn/layers/dropout.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
+#include "tenzor/ops/indexing.hpp"
+#include "tenzor/ops/transform.hpp"
 #include "tenzor/autograd/function.hpp"
 #include <stdexcept>
 
@@ -82,52 +84,16 @@ auto Dropout::forward_impl(const Variable& input) -> Variable {
         // No dropout - mask is all ones
         mask_data = ones(shape_vec, input.tensor().dtype(), input.tensor().device());
     } else {
-        // Create random tensor on CPU to access its data
-        auto random_tensor = rand(shape_vec, input.tensor().dtype(), Device::cpu());
+        // Generate random tensor directly on target device
+        auto random_tensor = rand(shape_vec, input.tensor().dtype(), input.tensor().device());
 
-        // Create binary mask: mask = (random > p)
-        // Elements with random value > p are kept (set to 1), others are dropped (set to 0)
-        auto mask_data_cpu = zeros(shape_vec, input.tensor().dtype(), Device::cpu());
-
-        // Create mask on CPU by comparing random values with p
-        // mask[i] = random[i] > p ? 1 : 0
-        size_t numel = random_tensor.numel();
-        void* random_ptr = random_tensor.impl()->storage->data();
-        void* mask_ptr = mask_data_cpu.impl()->storage->data();
-
-        if (random_tensor.dtype() == DType::Float16) {
-            Float16* rand_data = static_cast<Float16*>(random_ptr);
-            Float16* mask_out = static_cast<Float16*>(mask_ptr);
-            for (size_t i = 0; i < numel; ++i) {
-                float rand_val = static_cast<float>(rand_data[i]);
-                mask_out[i] = Float16(rand_val > static_cast<float>(p_) ? 1.0f : 0.0f);
-            }
-        } else if (random_tensor.dtype() == DType::Float32) {
-            float* rand_data = static_cast<float*>(random_ptr);
-            float* mask_out = static_cast<float*>(mask_ptr);
-            for (size_t i = 0; i < numel; ++i) {
-                mask_out[i] = rand_data[i] > static_cast<float>(p_) ? 1.0f : 0.0f;
-            }
-        } else if (random_tensor.dtype() == DType::Float64) {
-            double* rand_data = static_cast<double*>(random_ptr);
-            double* mask_out = static_cast<double*>(mask_ptr);
-            for (size_t i = 0; i < numel; ++i) {
-                mask_out[i] = rand_data[i] > p_ ? 1.0 : 0.0;
-            }
-        } else if (random_tensor.dtype() == DType::BFloat16) {
-            BFloat16* rand_data = static_cast<BFloat16*>(random_ptr);
-            BFloat16* mask_out = static_cast<BFloat16*>(mask_ptr);
-            for (size_t i = 0; i < numel; ++i) {
-                float rand_val = static_cast<float>(rand_data[i]);
-                mask_out[i] = BFloat16(rand_val > static_cast<float>(p_) ? 1.0f : 0.0f);
-            }
-        } else {
-            throw std::runtime_error("Dropout only supports Float16, BFloat16, Float32 and Float64 dtypes");
-        }
-
-        // Transfer mask to target device if needed
-        mask_data = (input.tensor().device().type == Device::Type::CPU) ?
-                    mask_data_cpu : mask_data_cpu.to(input.tensor().device());
+        // Create binary mask using device-native comparison: mask = (random > p)
+        auto threshold = full(shape_vec, static_cast<float>(p_),
+                             input.tensor().dtype(), input.tensor().device());
+        auto mask_bool = gt(random_tensor, threshold);
+        auto ones_tensor = ones(shape_vec, input.tensor().dtype(), input.tensor().device());
+        auto zeros_tensor = zeros(shape_vec, input.tensor().dtype(), input.tensor().device());
+        mask_data = where(mask_bool, ones_tensor, zeros_tensor);
     }
 
     // Apply inverted dropout: output = input * mask / (1 - p)
@@ -214,105 +180,22 @@ auto Dropout2d::forward_impl(const Variable& input) -> Variable {
         throw std::invalid_argument("Dropout2d input must be 2D, 3D or 4D");
     }
 
-    // Generate random values for each channel on CPU
-    auto random_tensor = rand(mask_shape, input.tensor().dtype(), Device::cpu());
+    // Generate random values for each channel directly on target device
+    auto random_tensor = rand(mask_shape, input.tensor().dtype(), input.tensor().device());
 
-    // Create binary mask on CPU
-    auto mask_data = zeros_like(random_tensor);
+    // Create binary mask using device-native comparison: mask = (random > p)
+    auto threshold = full(mask_shape, static_cast<float>(p_),
+                         input.tensor().dtype(), input.tensor().device());
+    auto mask_bool = gt(random_tensor, threshold);
+    auto mask_ones = ones(mask_shape, input.tensor().dtype(), input.tensor().device());
+    auto mask_zeros = zeros(mask_shape, input.tensor().dtype(), input.tensor().device());
+    auto channel_mask = where(mask_bool, mask_ones, mask_zeros);
 
-    size_t numel = random_tensor.numel();
-    void* random_ptr = random_tensor.impl()->storage->data();
-    void* mask_ptr = mask_data.impl()->storage->data();
-
-    if (random_tensor.dtype() == DType::Float16) {
-        Float16* rand_data = static_cast<Float16*>(random_ptr);
-        Float16* mask_out = static_cast<Float16*>(mask_ptr);
-        for (size_t i = 0; i < numel; ++i) {
-            float rand_val = static_cast<float>(rand_data[i]);
-            mask_out[i] = Float16(rand_val > static_cast<float>(p_) ? 1.0f : 0.0f);
-        }
-    } else if (random_tensor.dtype() == DType::Float32) {
-        float* rand_data = static_cast<float*>(random_ptr);
-        float* mask_out = static_cast<float*>(mask_ptr);
-        for (size_t i = 0; i < numel; ++i) {
-            mask_out[i] = rand_data[i] > static_cast<float>(p_) ? 1.0f : 0.0f;
-        }
-    } else if (random_tensor.dtype() == DType::Float64) {
-        double* rand_data = static_cast<double*>(random_ptr);
-        double* mask_out = static_cast<double*>(mask_ptr);
-        for (size_t i = 0; i < numel; ++i) {
-            mask_out[i] = rand_data[i] > p_ ? 1.0 : 0.0;
-        }
-    } else {
-        throw std::runtime_error("Dropout2d only supports Float16, Float32 and Float64 dtypes");
-    }
-
-    // Manually expand mask to input shape for proper channel-wise dropout
+    // Expand channel mask to full input shape via broadcasting
+    // mask_shape has trailing 1s (e.g., [N,C,1,1]) so expand() broadcasts to full [N,C,H,W]
     double scale = 1.0 / (1.0 - p_);
-
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
-    // Create expanded mask on CPU first
-    auto expanded_mask = zeros(shape_vec, input.tensor().dtype(), Device::cpu());
-
-    // Copy mask values to all spatial positions within each channel
-    // Use template lambda to support multiple dtypes
-    auto expand_mask = [&]<typename T>(T*) {
-        const T* mask_ptr_data = static_cast<const T*>(mask_data.impl()->storage->data());
-        T* expanded_ptr = static_cast<T*>(expanded_mask.impl()->storage->data());
-
-        if (shape.size() == 4) {
-            // [N, C, H, W]
-            int64_t N = shape[0], C = shape[1], H = shape[2], W = shape[3];
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    T mask_val = mask_ptr_data[n * C + c];
-                    for (int64_t h = 0; h < H; ++h) {
-                        for (int64_t w = 0; w < W; ++w) {
-                            expanded_ptr[n * (C * H * W) + c * (H * W) + h * W + w] = mask_val;
-                        }
-                    }
-                }
-            }
-        } else if (shape.size() == 3) {
-            // [C, H, W]
-            int64_t C = shape[0], H = shape[1], W = shape[2];
-            for (int64_t c = 0; c < C; ++c) {
-                T mask_val = mask_ptr_data[c];
-                for (int64_t h = 0; h < H; ++h) {
-                    for (int64_t w = 0; w < W; ++w) {
-                        expanded_ptr[c * (H * W) + h * W + w] = mask_val;
-                    }
-                }
-            }
-        } else if (shape.size() == 2) {
-            // [C, H]
-            int64_t C = shape[0], H = shape[1];
-            for (int64_t c = 0; c < C; ++c) {
-                T mask_val = mask_ptr_data[c];
-                for (int64_t h = 0; h < H; ++h) {
-                    expanded_ptr[c * H + h] = mask_val;
-                }
-            }
-        }
-    };
-
-    switch (input.tensor().dtype()) {
-        case DType::Float32:
-            expand_mask(static_cast<float*>(nullptr));
-            break;
-        case DType::Float64:
-            expand_mask(static_cast<double*>(nullptr));
-            break;
-        case DType::Float16:
-            expand_mask(static_cast<Float16*>(nullptr));
-            break;
-        default:
-            throw std::runtime_error("Dropout2d only supports Float16, Float32 and Float64 dtypes");
-    }
-
-    // Transfer expanded mask to target device if needed
-    auto expanded_mask_final = (input.tensor().device().type == Device::Type::CPU) ?
-                               expanded_mask : expanded_mask.to(input.tensor().device());
+    auto expanded_mask_final = expand(channel_mask, shape_vec);
 
     // Compute forward: output = input * expanded_mask * scale
     auto scale_tensor = full(shape_vec, static_cast<float>(scale),
@@ -421,46 +304,19 @@ auto AlphaDropout::forward_impl(const Variable& input) -> Variable {
     const double a = std::sqrt((1.0 - p_) * (1.0 + p_ * alpha_p * alpha_p));
     const double b = -a * alpha_p * p_ / (1.0 - p_);
 
-    // Generate random mask
+    // Generate random mask directly on target device
     auto shape_span = input.tensor().shape();
     std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
 
-    // Create random tensor on CPU
-    auto random_tensor = rand(shape_vec, input.tensor().dtype(), Device::cpu());
+    auto random_tensor = rand(shape_vec, input.tensor().dtype(), input.tensor().device());
 
-    // Create binary mask: 1 for kept, 0 for dropped
-    auto mask_data_cpu = zeros(shape_vec, input.tensor().dtype(), Device::cpu());
-
-    size_t numel = random_tensor.numel();
-    void* random_ptr = random_tensor.impl()->storage->data();
-    void* mask_ptr = mask_data_cpu.impl()->storage->data();
-
-    if (random_tensor.dtype() == DType::Float16) {
-        Float16* rand_data = static_cast<Float16*>(random_ptr);
-        Float16* mask_out = static_cast<Float16*>(mask_ptr);
-        for (size_t i = 0; i < numel; ++i) {
-            float rand_val = static_cast<float>(rand_data[i]);
-            mask_out[i] = Float16(rand_val > static_cast<float>(p_) ? 1.0f : 0.0f);
-        }
-    } else if (random_tensor.dtype() == DType::Float32) {
-        float* rand_data = static_cast<float*>(random_ptr);
-        float* mask_out = static_cast<float*>(mask_ptr);
-        for (size_t i = 0; i < numel; ++i) {
-            mask_out[i] = rand_data[i] > static_cast<float>(p_) ? 1.0f : 0.0f;
-        }
-    } else if (random_tensor.dtype() == DType::Float64) {
-        double* rand_data = static_cast<double*>(random_ptr);
-        double* mask_out = static_cast<double*>(mask_ptr);
-        for (size_t i = 0; i < numel; ++i) {
-            mask_out[i] = rand_data[i] > p_ ? 1.0 : 0.0;
-        }
-    } else {
-        throw std::runtime_error("AlphaDropout only supports Float16, Float32 and Float64 dtypes");
-    }
-
-    // Transfer mask to target device if needed
-    auto mask_data = (input.tensor().device().type == Device::Type::CPU) ?
-                     mask_data_cpu : mask_data_cpu.to(input.tensor().device());
+    // Create binary mask using device-native comparison: mask = (random > p)
+    auto threshold = full(shape_vec, static_cast<float>(p_),
+                         input.tensor().dtype(), input.tensor().device());
+    auto mask_bool = gt(random_tensor, threshold);
+    auto mask_ones = ones(shape_vec, input.tensor().dtype(), input.tensor().device());
+    auto mask_zeros = zeros(shape_vec, input.tensor().dtype(), input.tensor().device());
+    auto mask_data = where(mask_bool, mask_ones, mask_zeros);
 
     // Create masked input: set dropped elements to alpha_p
     // masked_input = input * mask + alpha_p * (1 - mask)

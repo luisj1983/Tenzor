@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <optional>
 #include <functional>
@@ -45,11 +46,51 @@ struct VariableImpl {
         : data_(std::move(data)),
           requires_grad_(requires_grad) {}
 
-    // Default copy/move constructors for standard semantics
-    VariableImpl(const VariableImpl&) = default;
-    VariableImpl(VariableImpl&&) noexcept = default;
-    VariableImpl& operator=(const VariableImpl&) = default;
-    VariableImpl& operator=(VariableImpl&&) noexcept = default;
+    // Custom copy/move constructors needed because std::atomic is non-copyable
+    VariableImpl(const VariableImpl& other)
+        : data_(other.data_),
+          grad_(other.grad_),
+          grad_fn_(other.grad_fn_),
+          requires_grad_(other.requires_grad_.load(std::memory_order_relaxed)),
+          retain_grad_(other.retain_grad_.load(std::memory_order_relaxed)),
+          hooks_(other.hooks_),
+          next_hook_id_(other.next_hook_id_) {}
+
+    VariableImpl(VariableImpl&& other) noexcept
+        : data_(std::move(other.data_)),
+          grad_(std::move(other.grad_)),
+          grad_fn_(std::move(other.grad_fn_)),
+          requires_grad_(other.requires_grad_.load(std::memory_order_relaxed)),
+          retain_grad_(other.retain_grad_.load(std::memory_order_relaxed)),
+          hooks_(std::move(other.hooks_)),
+          next_hook_id_(other.next_hook_id_) {}
+
+    VariableImpl& operator=(const VariableImpl& other) {
+        if (this != &other) {
+            data_ = other.data_;
+            grad_ = other.grad_;
+            grad_fn_ = other.grad_fn_;
+            requires_grad_.store(other.requires_grad_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            retain_grad_.store(other.retain_grad_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            hooks_ = other.hooks_;
+            next_hook_id_ = other.next_hook_id_;
+        }
+        return *this;
+    }
+
+    VariableImpl& operator=(VariableImpl&& other) noexcept {
+        if (this != &other) {
+            data_ = std::move(other.data_);
+            grad_ = std::move(other.grad_);
+            grad_fn_ = std::move(other.grad_fn_);
+            requires_grad_.store(other.requires_grad_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            retain_grad_.store(other.retain_grad_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            hooks_ = std::move(other.hooks_);
+            next_hook_id_ = other.next_hook_id_;
+        }
+        return *this;
+    }
+
     ~VariableImpl() = default;
 
     // === State Members (moved from Variable) ===
@@ -63,11 +104,11 @@ struct VariableImpl {
     /// Gradient function that created this variable (thread-safe for reads)
     std::shared_ptr<Function> grad_fn_;
 
-    /// Whether gradient tracking is enabled (consider atomic if modified concurrently)
-    bool requires_grad_{false};
+    /// Whether gradient tracking is enabled (atomic for thread-safe concurrent backward traversal)
+    std::atomic<bool> requires_grad_{false};
 
-    /// Whether to retain gradient for non-leaf variables (consider atomic if modified concurrently)
-    bool retain_grad_{false};
+    /// Whether to retain gradient for non-leaf variables (atomic for thread-safe concurrent access)
+    std::atomic<bool> retain_grad_{false};
 
     /// Backward hooks keyed by ID (requires synchronization for modifications)
     std::unordered_map<size_t, std::function<Tensor(const Tensor&)>> hooks_;

@@ -594,6 +594,159 @@ private:
 auto wrap_with_backward_hooks(Module* module, const Variable& input, Variable output) -> Variable;
 
 /**
+ * @brief List container for modules (like PyTorch's nn.ModuleList).
+ *
+ * ModuleList holds modules in a list and properly registers them as
+ * submodules so that parameter traversal works correctly. Unlike
+ * Sequential, ModuleList does NOT implement forward — it is a
+ * container only.
+ *
+ * @code
+ * auto layers = std::make_shared<ModuleList>();
+ * layers->append(std::make_shared<Linear>(10, 20));
+ * layers->append(std::make_shared<Linear>(20, 30));
+ *
+ * // Iterate manually
+ * Variable x = input;
+ * for (size_t i = 0; i < layers->size(); ++i) {
+ *     x = layers->at(i)->forward(x);
+ * }
+ * @endcode
+ */
+class ModuleList : public Module {
+public:
+    ModuleList() = default;
+
+    /**
+     * @brief Append a module to the list.
+     *
+     * @param module Module to append
+     * @return Reference to this ModuleList for chaining
+     */
+    auto append(std::shared_ptr<Module> module) -> ModuleList&;
+
+    /**
+     * @brief Get module at index.
+     *
+     * @param idx Index (0-based)
+     * @return Shared pointer to module
+     * @throws std::out_of_range if index is out of bounds
+     */
+    auto at(size_t idx) const -> std::shared_ptr<Module>;
+
+    /**
+     * @brief Get number of modules.
+     */
+    auto size() const -> size_t { return modules_.size(); }
+
+    auto begin() { return modules_.begin(); }
+    auto end() { return modules_.end(); }
+    auto begin() const { return modules_.begin(); }
+    auto end() const { return modules_.end(); }
+
+    /**
+     * @brief ModuleList does not implement forward.
+     * @throws std::runtime_error always
+     */
+    auto forward_impl(const Variable& input) -> Variable override;
+
+    auto parameters() -> std::vector<std::shared_ptr<Variable>> override;
+    auto named_parameters() -> std::vector<std::pair<std::string, std::shared_ptr<Variable>>> override;
+    auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
+    auto load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void override;
+
+private:
+    std::vector<std::shared_ptr<Module>> modules_;
+};
+
+/**
+ * @brief Dictionary container for modules (like PyTorch's nn.ModuleDict).
+ *
+ * ModuleDict holds modules in a dictionary keyed by string and properly
+ * registers them as submodules. Maintains insertion order for iteration.
+ * Does NOT implement forward.
+ *
+ * @code
+ * auto blocks = std::make_shared<ModuleDict>();
+ * blocks->insert("encoder", std::make_shared<Linear>(784, 256));
+ * blocks->insert("decoder", std::make_shared<Linear>(256, 784));
+ *
+ * auto encoded = blocks->at("encoder")->forward(input);
+ * auto decoded = blocks->at("decoder")->forward(encoded);
+ * @endcode
+ */
+class ModuleDict : public Module {
+public:
+    ModuleDict() = default;
+
+    /**
+     * @brief Insert or replace a module with the given key.
+     *
+     * @param key String key for the module
+     * @param module Module to insert
+     * @return Reference to this ModuleDict for chaining
+     */
+    auto insert(const std::string& key, std::shared_ptr<Module> module) -> ModuleDict&;
+
+    /**
+     * @brief Get module by key.
+     *
+     * @param key Module key
+     * @return Shared pointer to module
+     * @throws std::out_of_range if key not found
+     */
+    auto at(const std::string& key) const -> std::shared_ptr<Module>;
+
+    /**
+     * @brief Check if key exists.
+     */
+    auto contains(const std::string& key) const -> bool;
+
+    /**
+     * @brief Remove module by key.
+     *
+     * @param key Module key
+     * @throws std::out_of_range if key not found
+     */
+    auto erase(const std::string& key) -> void;
+
+    /**
+     * @brief Get number of modules.
+     */
+    auto size() const -> size_t { return order_.size(); }
+
+    /**
+     * @brief Get keys in insertion order.
+     */
+    auto keys() const -> std::vector<std::string> { return order_; }
+
+    /**
+     * @brief Get values in insertion order.
+     */
+    auto values() const -> std::vector<std::shared_ptr<Module>>;
+
+    /**
+     * @brief Get key-value pairs in insertion order.
+     */
+    auto items() const -> std::vector<std::pair<std::string, std::shared_ptr<Module>>>;
+
+    /**
+     * @brief ModuleDict does not implement forward.
+     * @throws std::runtime_error always
+     */
+    auto forward_impl(const Variable& input) -> Variable override;
+
+    auto parameters() -> std::vector<std::shared_ptr<Variable>> override;
+    auto named_parameters() -> std::vector<std::pair<std::string, std::shared_ptr<Variable>>> override;
+    auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
+    auto load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void override;
+
+private:
+    std::unordered_map<std::string, std::shared_ptr<Module>> modules_;
+    std::vector<std::string> order_;  ///< Insertion-order keys
+};
+
+/**
  * @brief Sequential container for chaining modules.
  *
  * Sequential chains multiple modules together, passing the output of each

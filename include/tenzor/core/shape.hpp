@@ -11,6 +11,7 @@
 #include <vector>
 #include <cstdint>
 #include <span>
+#include <string>
 #include <algorithm>
 #include <numeric>
 #include <stdexcept>
@@ -47,7 +48,15 @@ public:
      * Shape shape({32, 64, 128});
      * @endcode
      */
-    explicit Shape(std::vector<size_type> dims) : dims_(std::move(dims)) {}
+    explicit Shape(std::vector<size_type> dims) : dims_(std::move(dims)) {
+        for (size_t i = 0; i < dims_.size(); ++i) {
+            if (dims_[i] < 0) {
+                throw std::invalid_argument(
+                    "Shape dimensions must be non-negative, got " +
+                    std::to_string(dims_[i]) + " at index " + std::to_string(i));
+            }
+        }
+    }
 
     /**
      * @brief Access dimension by index (unchecked).
@@ -107,7 +116,13 @@ public:
      * shape.push_back(4);  // Now {2, 3, 4}
      * @endcode
      */
-    auto push_back(size_type dim) -> void { dims_.push_back(dim); }
+    auto push_back(size_type dim) -> void {
+        if (dim < 0) {
+            throw std::invalid_argument(
+                "Shape dimensions must be non-negative, got " + std::to_string(dim));
+        }
+        dims_.push_back(dim);
+    }
 
     /**
      * @brief Resize number of dimensions.

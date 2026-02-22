@@ -21,7 +21,8 @@ namespace tenzor {
 // TensorImpl implementation
 TensorImpl::TensorImpl(std::vector<int64_t> shape_, DType dtype_, Device device_,
                        bool zero_init)
-    : shape(std::move(shape_)), dtype(dtype_), device(device_) {
+    : shape(std::move(shape_)), dtype(dtype_), device(device_),
+      is_contiguous_cache_(true) {
 
     // Compute strides
     strides = compute_strides(this->shape);
@@ -56,10 +57,15 @@ auto TensorImpl::numel() const -> int64_t {
 }
 
 auto TensorImpl::is_contiguous() const -> bool {
+    // Return cached result if available
+    if (is_contiguous_cache_.has_value()) {
+        return *is_contiguous_cache_;
+    }
     // A tensor is contiguous if its strides match the expected row-major strides.
     // Offset does not affect contiguity — a slice can be contiguous at a non-zero offset.
     auto expected_strides = compute_strides(shape);
-    return strides == expected_strides;
+    is_contiguous_cache_ = (strides == expected_strides);
+    return *is_contiguous_cache_;
 }
 
 // Tensor implementation

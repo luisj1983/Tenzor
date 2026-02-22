@@ -82,8 +82,8 @@ __global__ void matmul_tiled_f32_kernel(
     int64_t lda, int64_t ldb, int64_t ldc) {
 
     // Shared memory for tiles
-    __shared__ float As[TILE_M][TILE_K];
-    __shared__ float Bs[TILE_K][TILE_N];
+    __shared__ float As[TILE_M][TILE_K + 1];
+    __shared__ float Bs[TILE_K][TILE_N + 1];
 
     // Thread indices
     int tx = threadIdx.x;
@@ -157,8 +157,8 @@ __global__ void matmul_tiled_f64_kernel(
     int64_t lda, int64_t ldb, int64_t ldc) {
 
     // Shared memory for tiles
-    __shared__ double As[TILE_M][TILE_K];
-    __shared__ double Bs[TILE_K][TILE_N];
+    __shared__ double As[TILE_M][TILE_K + 1];
+    __shared__ double Bs[TILE_K][TILE_N + 1];
 
     // Thread indices
     int tx = threadIdx.x;
@@ -231,8 +231,8 @@ __global__ void matmul_tiled_i32_kernel(
     int64_t lda, int64_t ldb, int64_t ldc) {
 
     // Shared memory for tiles
-    __shared__ int32_t As[TILE_M][TILE_K];
-    __shared__ int32_t Bs[TILE_K][TILE_N];
+    __shared__ int32_t As[TILE_M][TILE_K + 1];
+    __shared__ int32_t Bs[TILE_K][TILE_N + 1];
 
     // Thread indices
     int tx = threadIdx.x;
@@ -318,8 +318,8 @@ __global__ void batched_matmul_tiled_f32_kernel(
     float* C_batch = C + batch_idx * stride_c;
 
     // Shared memory for tiles
-    __shared__ float As[TILE_M][TILE_K];
-    __shared__ float Bs[TILE_K][TILE_N];
+    __shared__ float As[TILE_M][TILE_K + 1];
+    __shared__ float Bs[TILE_K][TILE_N + 1];
 
     // Thread indices
     int tx = threadIdx.x;
@@ -401,8 +401,8 @@ __global__ void batched_matmul_tiled_f64_kernel(
     double* C_batch = C + batch_idx * stride_c;
 
     // Shared memory for tiles
-    __shared__ double As[TILE_M][TILE_K];
-    __shared__ double Bs[TILE_K][TILE_N];
+    __shared__ double As[TILE_M][TILE_K + 1];
+    __shared__ double Bs[TILE_K][TILE_N + 1];
 
     // Thread indices
     int tx = threadIdx.x;
@@ -530,8 +530,8 @@ __global__ void matmul_tensor_core_f16_kernel(
             const int64_t bCol = warpN * WMMA_N;
 
             // Create temporary padded tiles in shared memory
-            __shared__ __half As[WMMA_M][WMMA_K];
-            __shared__ __half Bs[WMMA_K][WMMA_N];
+            __shared__ __half As[WMMA_M][WMMA_K + 1];
+            __shared__ __half Bs[WMMA_K][WMMA_N + 1];
 
             // Load with bounds checking
             for (int i = threadIdx.y; i < WMMA_M; i += blockDim.y) {
@@ -570,7 +570,7 @@ __global__ void matmul_tensor_core_f16_kernel(
 
     if (cRow < M && cCol < N) {
         // Store float accumulator to shared memory first
-        __shared__ float Cs_float[WMMA_M][WMMA_N];
+        __shared__ float Cs_float[WMMA_M][WMMA_N + 1];
         store_matrix_sync(&Cs_float[0][0], acc_frag, WMMA_N, mem_row_major);
 
         __syncthreads();
@@ -601,8 +601,8 @@ __global__ void matmul_tiled_f16_kernel(
     int64_t lda, int64_t ldb, int64_t ldc) {
 
     // Shared memory for tiles
-    __shared__ __half As[TILE_M][TILE_K];
-    __shared__ __half Bs[TILE_K][TILE_N];
+    __shared__ __half As[TILE_M][TILE_K + 1];
+    __shared__ __half Bs[TILE_K][TILE_N + 1];
 
     // Thread indices
     int tx = threadIdx.x;
@@ -680,8 +680,8 @@ __global__ void batched_matmul_tiled_f16_kernel(
     const __half* B_batch = B + batch * stride_b;
     __half* C_batch = C + batch * stride_c;
 
-    __shared__ __half As[TILE_M][TILE_K];
-    __shared__ __half Bs[TILE_K][TILE_N];
+    __shared__ __half As[TILE_M][TILE_K + 1];
+    __shared__ __half Bs[TILE_K][TILE_N + 1];
 
     int tx = threadIdx.x;
     int ty = threadIdx.y;
@@ -796,7 +796,7 @@ __global__ void batched_matmul_tensor_core_f16_kernel(
 
     if (cRow < M && cCol < N && cRow + WMMA_M <= M && cCol + WMMA_N <= N) {
         // Store float accumulator to shared memory first
-        __shared__ float Cs_float[WMMA_M][WMMA_N];
+        __shared__ float Cs_float[WMMA_M][WMMA_N + 1];
         store_matrix_sync(&Cs_float[0][0], acc_frag, WMMA_N, mem_row_major);
 
         __syncthreads();
@@ -831,8 +831,8 @@ __global__ void matmul_tiled_bf16_kernel(
     int64_t lda, int64_t ldb, int64_t ldc) {
 
     // Shared memory for tiles
-    __shared__ __nv_bfloat16 As[TILE_M][TILE_K];
-    __shared__ __nv_bfloat16 Bs[TILE_K][TILE_N];
+    __shared__ __nv_bfloat16 As[TILE_M][TILE_K + 1];
+    __shared__ __nv_bfloat16 Bs[TILE_K][TILE_N + 1];
 
     // Thread indices
     int tx = threadIdx.x;
@@ -910,8 +910,8 @@ __global__ void batched_matmul_tiled_bf16_kernel(
     const __nv_bfloat16* B_batch = B + batch * stride_b;
     __nv_bfloat16* C_batch = C + batch * stride_c;
 
-    __shared__ __nv_bfloat16 As[TILE_M][TILE_K];
-    __shared__ __nv_bfloat16 Bs[TILE_K][TILE_N];
+    __shared__ __nv_bfloat16 As[TILE_M][TILE_K + 1];
+    __shared__ __nv_bfloat16 Bs[TILE_K][TILE_N + 1];
 
     int tx = threadIdx.x;
     int ty = threadIdx.y;

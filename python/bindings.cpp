@@ -178,43 +178,7 @@ public:
     }
 };
 
-// ============================================================================
-// PyModuleList: A list container for modules (like PyTorch's nn.ModuleList)
-// ============================================================================
-// This properly registers each module as a submodule, so parameters() works correctly.
-class PyModuleList : public tenzor::nn::Module {
-public:
-    PyModuleList() = default;
-
-    void append(std::shared_ptr<tenzor::nn::Module> module) {
-        std::string name = std::to_string(modules_.size());
-        modules_.push_back(module);
-        register_module(name, module);
-    }
-
-    std::shared_ptr<tenzor::nn::Module> get(size_t idx) const {
-        if (idx >= modules_.size()) {
-            throw std::out_of_range("ModuleList index out of range");
-        }
-        return modules_[idx];
-    }
-
-    size_t size() const { return modules_.size(); }
-
-    auto begin() { return modules_.begin(); }
-    auto end() { return modules_.end(); }
-    auto begin() const { return modules_.begin(); }
-    auto end() const { return modules_.end(); }
-
-    // forward_impl just throws - ModuleList doesn't have a forward pass
-    auto forward_impl(const tenzor::Variable& /*input*/) -> tenzor::Variable override {
-        throw std::runtime_error("ModuleList does not implement forward(). "
-                                 "Use it to store modules and iterate over them manually.");
-    }
-
-private:
-    std::vector<std::shared_ptr<tenzor::nn::Module>> modules_;
-};
+// ModuleList and ModuleDict are now implemented in C++ at tenzor::nn::ModuleList / ModuleDict
 
 PYBIND11_MODULE(tenzor_core, m) {
     m.doc() = "Tenzor: High-performance tensor library";
@@ -2286,28 +2250,55 @@ PYBIND11_MODULE(tenzor_core, m) {
         }, py::arg("module"), "Append a module to the sequence");
 
     // ModuleList - a list container for modules (like PyTorch's nn.ModuleList)
-    // This is a pure Python class that properly registers submodules
-    py::class_<PyModuleList, tenzor::nn::Module, std::shared_ptr<PyModuleList>>(nn, "ModuleList")
+    py::class_<tenzor::nn::ModuleList, tenzor::nn::Module, std::shared_ptr<tenzor::nn::ModuleList>>(nn, "ModuleList")
         .def(py::init<>(), "Create an empty ModuleList")
         .def(py::init([](py::list modules) {
-            auto ml = std::make_shared<PyModuleList>();
+            auto ml = std::make_shared<tenzor::nn::ModuleList>();
             for (auto module : modules) {
                 ml->append(module.cast<std::shared_ptr<tenzor::nn::Module>>());
             }
             return ml;
         }), py::arg("modules"), "Create ModuleList from list of modules")
-        .def("append", &PyModuleList::append, py::arg("module"),
-             "Append a module to the list")
-        .def("extend", [](PyModuleList& self, py::list modules) {
+        .def("append", [](tenzor::nn::ModuleList& self, std::shared_ptr<tenzor::nn::Module> module) {
+            self.append(module);
+        }, py::arg("module"), "Append a module to the list")
+        .def("extend", [](tenzor::nn::ModuleList& self, py::list modules) {
             for (auto module : modules) {
                 self.append(module.cast<std::shared_ptr<tenzor::nn::Module>>());
             }
         }, py::arg("modules"), "Extend with a list of modules")
-        .def("__len__", &PyModuleList::size, "Return number of modules")
-        .def("__getitem__", &PyModuleList::get, py::arg("index"), "Get module at index")
-        .def("__iter__", [](PyModuleList& self) {
+        .def("__len__", &tenzor::nn::ModuleList::size, "Return number of modules")
+        .def("__getitem__", &tenzor::nn::ModuleList::at, py::arg("index"), "Get module at index")
+        .def("__iter__", [](tenzor::nn::ModuleList& self) {
             return py::make_iterator(self.begin(), self.end());
         }, py::keep_alive<0, 1>(), "Iterate over modules");
+
+    // ModuleDict - a dictionary container for modules (like PyTorch's nn.ModuleDict)
+    py::class_<tenzor::nn::ModuleDict, tenzor::nn::Module, std::shared_ptr<tenzor::nn::ModuleDict>>(nn, "ModuleDict")
+        .def(py::init<>(), "Create an empty ModuleDict")
+        .def(py::init([](py::dict modules) {
+            auto md = std::make_shared<tenzor::nn::ModuleDict>();
+            for (auto item : modules) {
+                md->insert(item.first.cast<std::string>(),
+                          item.second.cast<std::shared_ptr<tenzor::nn::Module>>());
+            }
+            return md;
+        }), py::arg("modules"), "Create ModuleDict from dictionary of modules")
+        .def("__getitem__", &tenzor::nn::ModuleDict::at, py::arg("key"), "Get module by key")
+        .def("__setitem__", [](tenzor::nn::ModuleDict& self, const std::string& key,
+                               std::shared_ptr<tenzor::nn::Module> module) {
+            self.insert(key, module);
+        }, py::arg("key"), py::arg("module"), "Set module at key")
+        .def("__delitem__", &tenzor::nn::ModuleDict::erase, py::arg("key"), "Delete module at key")
+        .def("__len__", &tenzor::nn::ModuleDict::size, "Return number of modules")
+        .def("__contains__", &tenzor::nn::ModuleDict::contains, py::arg("key"), "Check if key exists")
+        .def("__iter__", [](tenzor::nn::ModuleDict& self) {
+            auto keys = self.keys();
+            return py::make_iterator(keys.begin(), keys.end());
+        }, py::keep_alive<0, 1>(), "Iterate over keys")
+        .def("keys", &tenzor::nn::ModuleDict::keys, "Get all keys in insertion order")
+        .def("values", &tenzor::nn::ModuleDict::values, "Get all modules in insertion order")
+        .def("items", &tenzor::nn::ModuleDict::items, "Get all (key, module) pairs in insertion order");
 
     // Activation function classes
     py::class_<tenzor::nn::ReLU, tenzor::nn::Module,

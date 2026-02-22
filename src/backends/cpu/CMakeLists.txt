@@ -23,11 +23,13 @@ set(CPU_BACKEND_SOURCES
     simd.cpp
     kernels/math.cpp
     kernels/math_simd.cpp
+    kernels/math_simd_avx512.cpp
     kernels/reduction.cpp
     kernels/transform.cpp
     kernels/indexing.cpp
     kernels/activations.cpp
     kernels/activations_simd.cpp
+    kernels/activations_simd_avx512.cpp
     kernels/batchnorm.cpp
     kernels/creation.cpp
     kernels/conv2d.cpp
@@ -104,12 +106,23 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
             PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c"
         )
 
+        # AVX-512 implementations are in separate translation units so they
+        # can be compiled with -mavx512f even in portable mode. Runtime
+        # dispatch (CPUInfo::has_avx512()) selects them only on capable hardware.
+        set_source_files_properties(
+            kernels/math_simd_avx512.cpp
+            kernels/activations_simd_avx512.cpp
+            PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx2;-mfma;-mf16c"
+        )
+
         # F16C and FMA are available in portable mode via per-function attributes
         # or per-file flags above, so we define these for the SIMD kernel files
         set_source_files_properties(
             kernels/math_simd.cpp
             kernels/activations_simd.cpp
             kernels/simd_dispatch.cpp
+            kernels/math_simd_avx512.cpp
+            kernels/activations_simd_avx512.cpp
             PROPERTIES COMPILE_DEFINITIONS "TENZOR_HAS_F16C;TENZOR_HAS_FMA"
         )
 
@@ -129,6 +142,15 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
             -fno-trapping-math
             -fno-finite-math-only  # Preserves NaN/Inf handling for IEEE 754 compliance
             -Wno-unused-parameter
+        )
+
+        # AVX-512 translation units always get -mavx512f so that even on
+        # non-AVX-512 build hosts, the binary contains real AVX-512 code
+        # available for runtime dispatch on capable hardware.
+        set_source_files_properties(
+            kernels/math_simd_avx512.cpp
+            kernels/activations_simd_avx512.cpp
+            PROPERTIES COMPILE_OPTIONS "-mavx512f"
         )
 
         # Check for specific SIMD support

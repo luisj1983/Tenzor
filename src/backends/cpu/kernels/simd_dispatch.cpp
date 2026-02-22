@@ -188,137 +188,9 @@ void gelu(const float* a, float* out, size_t size) {
 #endif // __AVX2__
 
 // ============================================================================
-// AVX-512 wrappers
-// ============================================================================
-
-#if defined(__AVX512F__)
-
-namespace avx512_impl {
-
-void add(const float* a, const float* b, float* out, size_t size) {
-    size_t i = 0;
-    for (; i + 16 <= size; i += 16) {
-        __m512 va = _mm512_loadu_ps(a + i);
-        __m512 vb = _mm512_loadu_ps(b + i);
-        _mm512_storeu_ps(out + i, _mm512_add_ps(va, vb));
-    }
-#if defined(__AVX2__)
-    avx2_impl::add(a + i, b + i, out + i, size - i);
-#else
-    for (; i < size; ++i) out[i] = a[i] + b[i];
-#endif
-}
-
-void sub(const float* a, const float* b, float* out, size_t size) {
-    size_t i = 0;
-    for (; i + 16 <= size; i += 16) {
-        __m512 va = _mm512_loadu_ps(a + i);
-        __m512 vb = _mm512_loadu_ps(b + i);
-        _mm512_storeu_ps(out + i, _mm512_sub_ps(va, vb));
-    }
-#if defined(__AVX2__)
-    avx2_impl::sub(a + i, b + i, out + i, size - i);
-#else
-    for (; i < size; ++i) out[i] = a[i] - b[i];
-#endif
-}
-
-void mul(const float* a, const float* b, float* out, size_t size) {
-    size_t i = 0;
-    for (; i + 16 <= size; i += 16) {
-        __m512 va = _mm512_loadu_ps(a + i);
-        __m512 vb = _mm512_loadu_ps(b + i);
-        _mm512_storeu_ps(out + i, _mm512_mul_ps(va, vb));
-    }
-#if defined(__AVX2__)
-    avx2_impl::mul(a + i, b + i, out + i, size - i);
-#else
-    for (; i < size; ++i) out[i] = a[i] * b[i];
-#endif
-}
-
-void div(const float* a, const float* b, float* out, size_t size) {
-    size_t i = 0;
-    for (; i + 16 <= size; i += 16) {
-        __m512 va = _mm512_loadu_ps(a + i);
-        __m512 vb = _mm512_loadu_ps(b + i);
-        _mm512_storeu_ps(out + i, _mm512_div_ps(va, vb));
-    }
-#if defined(__AVX2__)
-    avx2_impl::div(a + i, b + i, out + i, size - i);
-#else
-    for (; i < size; ++i) out[i] = a[i] / b[i];
-#endif
-}
-
-void sqrt(const float* a, float* out, size_t size) {
-    size_t i = 0;
-    for (; i + 16 <= size; i += 16) {
-        __m512 va = _mm512_loadu_ps(a + i);
-        _mm512_storeu_ps(out + i, _mm512_sqrt_ps(va));
-    }
-#if defined(__AVX2__)
-    avx2_impl::sqrt(a + i, out + i, size - i);
-#else
-    for (; i < size; ++i) out[i] = std::sqrt(a[i]);
-#endif
-}
-
-void exp(const float* a, float* out, size_t size) {
-    fast_math::exp_batch_avx512(a, out, size);
-}
-
-void log(const float* a, float* out, size_t size) {
-    fast_math::log_batch_avx512(a, out, size);
-}
-
-void fma(const float* a, const float* b, const float* c, float* out, size_t size) {
-    size_t i = 0;
-    for (; i + 16 <= size; i += 16) {
-        __m512 va = _mm512_loadu_ps(a + i);
-        __m512 vb = _mm512_loadu_ps(b + i);
-        __m512 vc = _mm512_loadu_ps(c + i);
-        _mm512_storeu_ps(out + i, _mm512_fmadd_ps(va, vb, vc));
-    }
-#if defined(__AVX2__)
-    avx2_impl::fma(a + i, b + i, c + i, out + i, size - i);
-#else
-    for (; i < size; ++i) out[i] = a[i] * b[i] + c[i];
-#endif
-}
-
-void relu(const float* a, float* out, size_t size) {
-    size_t i = 0;
-    __m512 zero = _mm512_setzero_ps();
-    for (; i + 16 <= size; i += 16) {
-        __m512 va = _mm512_loadu_ps(a + i);
-        _mm512_storeu_ps(out + i, _mm512_max_ps(zero, va));
-    }
-#if defined(__AVX2__)
-    avx2_impl::relu(a + i, out + i, size - i);
-#else
-    for (; i < size; ++i) out[i] = std::max(0.0f, a[i]);
-#endif
-}
-
-void sigmoid(const float* a, float* out, size_t size) {
-    fast_math::sigmoid_batch_avx512(a, out, size);
-}
-
-void tanh(const float* a, float* out, size_t size) {
-    fast_math::tanh_batch_avx512(a, out, size);
-}
-
-void gelu(const float* a, float* out, size_t size) {
-    fast_math::gelu_batch_avx512(a, out, size);
-}
-
-} // namespace avx512_impl
-
-#endif // __AVX512F__
-
-// ============================================================================
 // Initialization
+// AVX-512 implementations come from separate TUs (math_simd_avx512.cpp,
+// activations_simd_avx512.cpp) via the avx512:: namespace declared in simd.hpp.
 // ============================================================================
 
 void init_dispatch() {
@@ -331,25 +203,23 @@ void init_dispatch() {
 
     const auto& cpu = CPUInfo::get();
 
-#if defined(__AVX512F__)
     if (cpu.has_avx512()) {
-        // Use AVX-512 implementations
-        g_dispatch.add = avx512_impl::add;
-        g_dispatch.sub = avx512_impl::sub;
-        g_dispatch.mul = avx512_impl::mul;
-        g_dispatch.div = avx512_impl::div;
-        g_dispatch.sqrt = avx512_impl::sqrt;
-        g_dispatch.exp = avx512_impl::exp;
-        g_dispatch.log = avx512_impl::log;
-        g_dispatch.fma = avx512_impl::fma;
-        g_dispatch.relu = avx512_impl::relu;
-        g_dispatch.sigmoid = avx512_impl::sigmoid;
-        g_dispatch.tanh = avx512_impl::tanh;
-        g_dispatch.gelu = avx512_impl::gelu;
+        // Use AVX-512 implementations (from separate TU)
+        g_dispatch.add = avx512::add;
+        g_dispatch.sub = avx512::sub;
+        g_dispatch.mul = avx512::mul;
+        g_dispatch.div = avx512::div;
+        g_dispatch.sqrt = avx512::sqrt;
+        g_dispatch.exp = avx512::exp;
+        g_dispatch.log = avx512::log;
+        g_dispatch.fma = avx512::fma;
+        g_dispatch.relu = avx512::relu;
+        g_dispatch.sigmoid = avx512::sigmoid;
+        g_dispatch.tanh = avx512::tanh;
+        g_dispatch.gelu = avx512::gelu;
         g_dispatch.initialized = true;
         return;
     }
-#endif
 
 #if defined(__AVX2__)
     if (cpu.has_avx2()) {

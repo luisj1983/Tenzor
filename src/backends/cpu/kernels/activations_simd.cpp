@@ -11,10 +11,6 @@
 #include <algorithm>
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
-    #if defined(__AVX512F__)
-        #include <immintrin.h>
-        #define TENZOR_HAS_AVX512
-    #endif
     #if defined(__AVX2__)
         #include <immintrin.h>
         #define TENZOR_HAS_AVX2
@@ -112,56 +108,9 @@ auto gelu(const float* a, float* out, size_t size) -> void { scalar::gelu(a, out
 } // namespace avx2
 
 // ============================================================================
-// AVX-512 implementations
-// ============================================================================
-
-namespace avx512 {
-
-#ifdef TENZOR_HAS_AVX512
-
-auto relu(const float* a, float* out, size_t size) -> void {
-    const size_t vec_size = 16;
-    size_t i = 0;
-
-    __m512 zero = _mm512_setzero_ps();
-
-    for (; i + vec_size <= size; i += vec_size) {
-        __m512 va = _mm512_loadu_ps(a + i);
-        __m512 vout = _mm512_max_ps(zero, va);
-        _mm512_storeu_ps(out + i, vout);
-    }
-
-    avx2::relu(a + i, out + i, size - i);
-}
-
-auto sigmoid(const float* a, float* out, size_t size) -> void {
-    // Use optimized vectorized sigmoid with AVX-512
-    fast_math::sigmoid_batch_avx512(a, out, size);
-}
-
-auto tanh(const float* a, float* out, size_t size) -> void {
-    // Use optimized vectorized tanh with AVX-512
-    fast_math::tanh_batch_avx512(a, out, size);
-}
-
-auto gelu(const float* a, float* out, size_t size) -> void {
-    // Use optimized vectorized GELU with AVX-512
-    fast_math::gelu_batch_avx512(a, out, size);
-}
-
-#else
-
-auto relu(const float* a, float* out, size_t size) -> void { avx2::relu(a, out, size); }
-auto sigmoid(const float* a, float* out, size_t size) -> void { avx2::sigmoid(a, out, size); }
-auto tanh(const float* a, float* out, size_t size) -> void { avx2::tanh(a, out, size); }
-auto gelu(const float* a, float* out, size_t size) -> void { avx2::gelu(a, out, size); }
-
-#endif
-
-} // namespace avx512
-
-// ============================================================================
 // Runtime dispatch
+// AVX-512 implementations are in activations_simd_avx512.cpp (separate TU for
+// portable builds that compile with -mavx512f per-file).
 // ============================================================================
 
 namespace simd {
@@ -179,53 +128,35 @@ auto relu(const float* a, float* out, size_t size) -> void {
 
 auto sigmoid(const float* a, float* out, size_t size) -> void {
     const auto& cpu = CPUInfo::get();
-#ifdef TENZOR_HAS_AVX512
     if (cpu.has_avx512()) {
-        fast_math::sigmoid_batch_avx512(a, out, size);
-        return;
+        avx512::sigmoid(a, out, size);
+    } else if (cpu.has_avx2()) {
+        avx2::sigmoid(a, out, size);
+    } else {
+        scalar::sigmoid(a, out, size);
     }
-#endif
-#ifdef TENZOR_HAS_AVX2
-    if (cpu.has_avx2()) {
-        fast_math::sigmoid_batch_avx2(a, out, size);
-        return;
-    }
-#endif
-    scalar::sigmoid(a, out, size);
 }
 
 auto tanh(const float* a, float* out, size_t size) -> void {
     const auto& cpu = CPUInfo::get();
-#ifdef TENZOR_HAS_AVX512
     if (cpu.has_avx512()) {
-        fast_math::tanh_batch_avx512(a, out, size);
-        return;
+        avx512::tanh(a, out, size);
+    } else if (cpu.has_avx2()) {
+        avx2::tanh(a, out, size);
+    } else {
+        scalar::tanh(a, out, size);
     }
-#endif
-#ifdef TENZOR_HAS_AVX2
-    if (cpu.has_avx2()) {
-        fast_math::tanh_batch_avx2(a, out, size);
-        return;
-    }
-#endif
-    scalar::tanh(a, out, size);
 }
 
 auto gelu(const float* a, float* out, size_t size) -> void {
     const auto& cpu = CPUInfo::get();
-#ifdef TENZOR_HAS_AVX512
     if (cpu.has_avx512()) {
-        fast_math::gelu_batch_avx512(a, out, size);
-        return;
+        avx512::gelu(a, out, size);
+    } else if (cpu.has_avx2()) {
+        avx2::gelu(a, out, size);
+    } else {
+        scalar::gelu(a, out, size);
     }
-#endif
-#ifdef TENZOR_HAS_AVX2
-    if (cpu.has_avx2()) {
-        fast_math::gelu_batch_avx2(a, out, size);
-        return;
-    }
-#endif
-    scalar::gelu(a, out, size);
 }
 
 } // namespace simd

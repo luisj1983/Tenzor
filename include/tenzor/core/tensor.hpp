@@ -933,6 +933,7 @@ public:
     DType dtype;                         ///< Element data type
     Device device;                       ///< Device location
     bool requires_grad{false};           ///< Gradient computation flag
+    mutable std::optional<bool> is_contiguous_cache_;  ///< Cached contiguity result
 
     /**
      * @brief Construct tensor implementation.

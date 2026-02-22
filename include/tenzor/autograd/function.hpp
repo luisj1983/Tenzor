@@ -351,6 +351,7 @@ class LinearBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 };
 
 /**
@@ -434,6 +435,7 @@ class LogBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 };
 
 /**
@@ -448,6 +450,7 @@ class ExpBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 };
 
 /**
@@ -485,6 +488,7 @@ public:
     LogSoftmaxBackward(int64_t dim) : dim_(dim) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 private:
     int64_t dim_;
 };
@@ -504,6 +508,7 @@ public:
     SoftmaxBackward(int64_t dim) : dim_(dim) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 private:
     int64_t dim_;
 };
@@ -520,6 +525,7 @@ class AbsBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 };
 
 /**
@@ -540,6 +546,7 @@ public:
     ClampBackward(float min, float max) : min_(min), max_(max) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 private:
     float min_;
     float max_;
@@ -583,6 +590,7 @@ public:
     ReshapeBackward(std::vector<int64_t> input_shape) : input_shape_(std::move(input_shape)) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 private:
     std::vector<int64_t> input_shape_;
 };
@@ -612,6 +620,7 @@ public:
     }
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 private:
     std::vector<int64_t> dims_;
     std::vector<int64_t> inv_dims_;
@@ -630,6 +639,7 @@ public:
     TransposeBackward(int64_t dim0, int64_t dim1) : dim0_(dim0), dim1_(dim1) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 private:
     int64_t dim0_;
     int64_t dim1_;
@@ -648,6 +658,7 @@ public:
     RollBackward(int64_t shifts, int64_t dim) : shifts_(shifts), dim_(dim) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 private:
     int64_t shifts_;
     int64_t dim_;
@@ -666,6 +677,7 @@ public:
     SqueezeBackward(int64_t dim) : dim_(dim) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 private:
     int64_t dim_;
 };
@@ -693,6 +705,7 @@ class BmmBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 };
 
 /**
@@ -718,6 +731,7 @@ public:
         : split_sizes_(std::move(split_sizes)), dim_(dim) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 private:
     std::vector<int64_t> split_sizes_;  ///< Size of each input along concat dimension
     int64_t dim_;                        ///< Concatenation dimension
@@ -745,6 +759,7 @@ public:
         : input_shape_(std::move(input_shape)), dim_(dim), start_(start), end_(end), step_(step) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 private:
     std::vector<int64_t> input_shape_;  ///< Original input shape
     int64_t dim_;                        ///< Slice dimension

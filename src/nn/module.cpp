@@ -286,6 +286,182 @@ auto Module::load(const std::string& path) -> void {
     load_state_dict(state);
 }
 
+// ============================================================================
+// ModuleList implementation
+// ============================================================================
+
+auto ModuleList::append(std::shared_ptr<Module> module) -> ModuleList& {
+    std::string name = std::to_string(modules_.size());
+    modules_.push_back(module);
+    register_module(name, module);
+    return *this;
+}
+
+auto ModuleList::at(size_t idx) const -> std::shared_ptr<Module> {
+    if (idx >= modules_.size()) {
+        throw std::out_of_range("ModuleList index out of range: " +
+                                std::to_string(idx) + " >= " + std::to_string(modules_.size()));
+    }
+    return modules_[idx];
+}
+
+auto ModuleList::forward_impl(const Variable& /*input*/) -> Variable {
+    throw std::runtime_error("ModuleList does not implement forward(). "
+                             "Use it to store modules and iterate over them manually.");
+}
+
+auto ModuleList::parameters() -> std::vector<std::shared_ptr<Variable>> {
+    std::vector<std::shared_ptr<Variable>> params;
+    for (auto& module : modules_) {
+        auto sub_params = module->parameters();
+        params.insert(params.end(), sub_params.begin(), sub_params.end());
+    }
+    return params;
+}
+
+auto ModuleList::named_parameters() -> std::vector<std::pair<std::string, std::shared_ptr<Variable>>> {
+    std::vector<std::pair<std::string, std::shared_ptr<Variable>>> params;
+    for (size_t i = 0; i < modules_.size(); ++i) {
+        std::string prefix = std::to_string(i);
+        auto sub_params = modules_[i]->named_parameters();
+        for (auto& [name, param] : sub_params) {
+            params.emplace_back(prefix + "." + name, param);
+        }
+    }
+    return params;
+}
+
+auto ModuleList::state_dict() const -> std::unordered_map<std::string, Tensor> {
+    std::unordered_map<std::string, Tensor> state;
+    for (size_t i = 0; i < modules_.size(); ++i) {
+        std::string prefix = std::to_string(i);
+        auto sub_state = modules_[i]->state_dict();
+        for (auto& [key, tensor] : sub_state) {
+            state[prefix + "." + key] = tensor;
+        }
+    }
+    return state;
+}
+
+auto ModuleList::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
+    for (size_t i = 0; i < modules_.size(); ++i) {
+        std::string prefix = std::to_string(i) + ".";
+        std::unordered_map<std::string, Tensor> sub_state;
+        for (const auto& [key, tensor] : state) {
+            if (key.rfind(prefix, 0) == 0) {
+                sub_state[key.substr(prefix.length())] = tensor;
+            }
+        }
+        modules_[i]->load_state_dict(sub_state);
+    }
+}
+
+// ============================================================================
+// ModuleDict implementation
+// ============================================================================
+
+auto ModuleDict::insert(const std::string& key, std::shared_ptr<Module> module) -> ModuleDict& {
+    // If key already exists, replace the module and update the registration
+    if (modules_.count(key)) {
+        modules_[key] = module;
+        // Re-register (Module::register_module handles replacement internally)
+        register_module(key, module);
+    } else {
+        order_.push_back(key);
+        modules_[key] = module;
+        register_module(key, module);
+    }
+    return *this;
+}
+
+auto ModuleDict::at(const std::string& key) const -> std::shared_ptr<Module> {
+    auto it = modules_.find(key);
+    if (it == modules_.end()) {
+        throw std::out_of_range("ModuleDict key not found: " + key);
+    }
+    return it->second;
+}
+
+auto ModuleDict::contains(const std::string& key) const -> bool {
+    return modules_.count(key) > 0;
+}
+
+auto ModuleDict::erase(const std::string& key) -> void {
+    auto it = modules_.find(key);
+    if (it == modules_.end()) {
+        throw std::out_of_range("ModuleDict key not found: " + key);
+    }
+    modules_.erase(it);
+    order_.erase(std::remove(order_.begin(), order_.end(), key), order_.end());
+}
+
+auto ModuleDict::values() const -> std::vector<std::shared_ptr<Module>> {
+    std::vector<std::shared_ptr<Module>> result;
+    result.reserve(order_.size());
+    for (const auto& key : order_) {
+        result.push_back(modules_.at(key));
+    }
+    return result;
+}
+
+auto ModuleDict::items() const -> std::vector<std::pair<std::string, std::shared_ptr<Module>>> {
+    std::vector<std::pair<std::string, std::shared_ptr<Module>>> result;
+    result.reserve(order_.size());
+    for (const auto& key : order_) {
+        result.emplace_back(key, modules_.at(key));
+    }
+    return result;
+}
+
+auto ModuleDict::forward_impl(const Variable& /*input*/) -> Variable {
+    throw std::runtime_error("ModuleDict does not implement forward(). "
+                             "Use it to store modules and access them by key.");
+}
+
+auto ModuleDict::parameters() -> std::vector<std::shared_ptr<Variable>> {
+    std::vector<std::shared_ptr<Variable>> params;
+    for (const auto& key : order_) {
+        auto sub_params = modules_.at(key)->parameters();
+        params.insert(params.end(), sub_params.begin(), sub_params.end());
+    }
+    return params;
+}
+
+auto ModuleDict::named_parameters() -> std::vector<std::pair<std::string, std::shared_ptr<Variable>>> {
+    std::vector<std::pair<std::string, std::shared_ptr<Variable>>> params;
+    for (const auto& key : order_) {
+        auto sub_params = modules_.at(key)->named_parameters();
+        for (auto& [name, param] : sub_params) {
+            params.emplace_back(key + "." + name, param);
+        }
+    }
+    return params;
+}
+
+auto ModuleDict::state_dict() const -> std::unordered_map<std::string, Tensor> {
+    std::unordered_map<std::string, Tensor> state;
+    for (const auto& key : order_) {
+        auto sub_state = modules_.at(key)->state_dict();
+        for (auto& [k, tensor] : sub_state) {
+            state[key + "." + k] = tensor;
+        }
+    }
+    return state;
+}
+
+auto ModuleDict::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
+    for (const auto& key : order_) {
+        std::string prefix = key + ".";
+        std::unordered_map<std::string, Tensor> sub_state;
+        for (const auto& [k, tensor] : state) {
+            if (k.rfind(prefix, 0) == 0) {
+                sub_state[k.substr(prefix.length())] = tensor;
+            }
+        }
+        modules_.at(key)->load_state_dict(sub_state);
+    }
+}
+
 // Sequential implementation
 auto Sequential::add_module(std::shared_ptr<Module> module) -> Sequential& {
     // Generate unique name for this module

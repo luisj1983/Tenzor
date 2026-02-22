@@ -131,7 +131,9 @@ set(TENZOR_CORE_SOURCES
     utils/tensorboard.cpp
     backends/cpu/simd.cpp
     backends/cpu/kernels/math_simd.cpp
+    backends/cpu/kernels/math_simd_avx512.cpp
     backends/cpu/kernels/activations_simd.cpp
+    backends/cpu/kernels/activations_simd_avx512.cpp
     backends/cpu/kernels/quantization/quantized_linear.cpp
     backends/cpu/kernels/quantization/quantized_conv2d.cpp
     onnx/exporter.cpp

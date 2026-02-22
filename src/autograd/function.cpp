@@ -457,6 +457,28 @@ auto LinearBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
     return {grad_x, grad_w, grad_b};
 }
 
+auto LinearBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // For y = x @ W.T + b:
+    // dL/dx = dL/dy @ W
+    // dL/dW = dL/dy.T @ x
+    // dL/db = sum(dL/dy, dim=0)
+    Variable saved_x, saved_w;
+    if (has_saved_variables()) {
+        saved_x = saved_variables_[0];
+        saved_w = saved_variables_[1];
+    } else {
+        saved_x = Variable(saved_tensors_[0], false);
+        saved_w = Variable(saved_tensors_[1], false);
+    }
+    const auto& grad_out = grad_outputs[0];
+
+    auto grad_x = tenzor::matmul(grad_out, saved_w);
+    auto grad_out_t = tenzor::transpose(grad_out, 0, 1);
+    auto grad_w = tenzor::matmul(grad_out_t, saved_x);
+    auto grad_b = tenzor::sum(grad_out, 0, false);
+    return {grad_x, grad_w, grad_b};
+}
+
 // SumBackward implementation
 auto SumBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     saved_tensors_ = {inputs[0].tensor()};
@@ -663,6 +685,13 @@ auto LogBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     return {grad_input};
 }
 
+auto LogBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // d(log(x))/dx = 1/x
+    // Use Variable division for higher-order gradient tracking
+    Variable saved_input(saved_tensors_[0], false);
+    return {grad_outputs[0] / saved_input};
+}
+
 // ExpBackward implementation
 auto ExpBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     auto result = exp(inputs[0].tensor());
@@ -675,6 +704,13 @@ auto ExpBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     const auto& output = saved_tensors_[0];
     auto grad_input = mul(grad_outputs[0], output);
     return {grad_input};
+}
+
+auto ExpBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // d(exp(x))/dx = exp(x) = saved output
+    // Use Variable multiplication for higher-order gradient tracking
+    Variable saved_output(saved_tensors_[0], false);
+    return {grad_outputs[0] * saved_output};
 }
 
 // NegBackward implementation
@@ -720,6 +756,16 @@ auto LogSoftmaxBackward::backward(std::vector<Tensor> grad_outputs) -> std::vect
     return {grad_input};
 }
 
+auto LogSoftmaxBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // dL/dx_i = dL/dy_i - exp(y_i) * sum_j(dL/dy_j)
+    // Use Variable operations for higher-order gradient tracking
+    Variable output_var(saved_tensors_[0], false);
+    auto grad_sum = tenzor::sum(grad_outputs[0], dim_, true);
+    auto softmax_output = tenzor::exp(output_var);
+    auto grad_input = grad_outputs[0] - softmax_output * grad_sum;
+    return {grad_input};
+}
+
 // SoftmaxBackward implementation
 auto SoftmaxBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     OpAttributes attrs;
@@ -746,6 +792,15 @@ auto SoftmaxBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<
     return {grad_input};
 }
 
+auto SoftmaxBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // dL/dx_i = y_i * (dL/dy_i - sum_j(dL/dy_j * y_j))
+    // Use Variable operations for higher-order gradient tracking
+    Variable output_var(saved_tensors_[0], false);
+    auto dot_product = tenzor::sum(grad_outputs[0] * output_var, dim_, true);
+    auto grad_input = output_var * (grad_outputs[0] - dot_product);
+    return {grad_input};
+}
+
 // AbsBackward implementation
 auto AbsBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     saved_tensors_ = {inputs[0].tensor()};
@@ -758,6 +813,14 @@ auto AbsBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     const auto& input = saved_tensors_[0];
     auto grad_input = mul(grad_outputs[0], sign(input));
     return {grad_input};
+}
+
+auto AbsBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // d(abs(x))/dx = sign(x)
+    // sign is non-differentiable, so compute it at Tensor level
+    auto sign_mask = sign(saved_tensors_[0]);
+    Variable sign_var(sign_mask, false);
+    return {grad_outputs[0] * sign_var};
 }
 
 // ClampBackward implementation
@@ -792,6 +855,20 @@ auto ClampBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Te
     auto mask = sub(ones_tensor, diff_sign);
 
     return {mul(grad_output, mask)};
+}
+
+auto ClampBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // d(clamp(x, min, max))/dx = 1 if min <= x <= max, else 0
+    // The mask is non-differentiable, compute at Tensor level
+    const auto& input = saved_tensors_[0];
+    auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
+    auto clamped = clamp(input, min_, max_);
+    auto diff = sub(input, clamped);
+    auto diff_sign = abs(sign(diff));
+    auto mask = sub(ones_tensor, diff_sign);
+    Variable mask_var(mask, false);
+    return {grad_outputs[0] * mask_var};
 }
 
 // MaxBackward implementation
@@ -842,6 +919,10 @@ auto MaxBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
         auto zeros_tensor = zeros(input_shape_vec, input.dtype(), input.device());
         auto mask = where(mask_bool, ones_tensor, zeros_tensor);
 
+        // Normalize mask by tie count so gradient is split among tied elements
+        auto tie_count = sum(mask);
+        mask = div(mask, tie_count);
+
         // Broadcast grad_output to input shape
         // FIX: grad_output is also scalar, need to reshape before expanding
         auto grad_reshaped = grad_output;
@@ -888,6 +969,10 @@ auto MaxBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
         auto clamped = clamp(scaled_diff, 0.0f, 1.0f);
         auto mask = sub(ones_tensor, clamped);
 
+        // Normalize mask by tie count along dim so gradient is split among tied elements
+        auto tie_count = sum(mask, dim, /*keepdim=*/true);
+        mask = div(mask, tie_count);
+
         return {mul(grad_expanded, mask)};
     }
 }
@@ -904,6 +989,11 @@ auto ReshapeBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<
     return {grad_input};
 }
 
+auto ReshapeBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    auto result = reshape(grad_outputs[0].tensor(), input_shape_).contiguous();
+    return {Variable(result, grad_outputs[0].requires_grad())};
+}
+
 // PermuteBackward implementation
 auto PermuteBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     throw std::runtime_error("PermuteBackward::forward should not be called");
@@ -914,6 +1004,11 @@ auto PermuteBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<
     // Permute creates non-contiguous views, which can cause issues in element-wise operations
     auto grad_input = permute(grad_outputs[0], inv_dims_).contiguous();
     return {grad_input};
+}
+
+auto PermuteBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    auto result = permute(grad_outputs[0].tensor(), inv_dims_).contiguous();
+    return {Variable(result, grad_outputs[0].requires_grad())};
 }
 
 // TransposeBackward implementation
@@ -927,6 +1022,11 @@ auto TransposeBackward::backward(std::vector<Tensor> grad_outputs) -> std::vecto
     return {grad_input};
 }
 
+auto TransposeBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    auto result = transpose(grad_outputs[0].tensor(), dim0_, dim1_).contiguous();
+    return {Variable(result, grad_outputs[0].requires_grad())};
+}
+
 // RollBackward implementation
 auto RollBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     throw std::runtime_error("RollBackward::forward should not be called");
@@ -938,6 +1038,11 @@ auto RollBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
     return {grad_input};
 }
 
+auto RollBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    auto result = roll(grad_outputs[0].tensor(), -shifts_, dim_);
+    return {Variable(result, grad_outputs[0].requires_grad())};
+}
+
 // SqueezeBackward implementation
 auto SqueezeBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     throw std::runtime_error("SqueezeBackward::forward should not be called");
@@ -947,6 +1052,11 @@ auto SqueezeBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<
     // Unsqueeze gradient back to original shape
     auto grad_input = unsqueeze(grad_outputs[0], dim_);
     return {grad_input};
+}
+
+auto SqueezeBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    auto result = unsqueeze(grad_outputs[0].tensor(), dim_);
+    return {Variable(result, grad_outputs[0].requires_grad())};
 }
 
 // BmmBackward implementation
@@ -984,6 +1094,26 @@ auto BmmBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     return {grad_a, grad_b};
 }
 
+auto BmmBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // For C = bmm(A, B):
+    // grad_a = grad_output @ B^T
+    // grad_b = A^T @ grad_output
+    Variable saved_a, saved_b;
+    if (has_saved_variables()) {
+        saved_a = saved_variables_[0];
+        saved_b = saved_variables_[1];
+    } else {
+        saved_a = Variable(saved_tensors_[0], false);
+        saved_b = Variable(saved_tensors_[1], false);
+    }
+    const auto& grad_out = grad_outputs[0];
+    auto b_t = tenzor::transpose(saved_b, saved_b.shape().size() - 2, saved_b.shape().size() - 1);
+    auto a_t = tenzor::transpose(saved_a, saved_a.shape().size() - 2, saved_a.shape().size() - 1);
+    auto grad_a = tenzor::bmm(grad_out, b_t);
+    auto grad_b = tenzor::bmm(a_t, grad_out);
+    return {grad_a, grad_b};
+}
+
 // CatBackward implementation
 auto CatBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     // Convert Variables to Tensors for concatenation
@@ -1014,6 +1144,19 @@ auto CatBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
         offset += split_size;
     }
 
+    return grad_inputs;
+}
+
+auto CatBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    const auto& grad_output = grad_outputs[0];
+    std::vector<Variable> grad_inputs;
+    grad_inputs.reserve(split_sizes_.size());
+    int64_t offset = 0;
+    for (int64_t split_size : split_sizes_) {
+        auto grad_slice = slice(grad_output.tensor(), dim_, offset, offset + split_size);
+        grad_inputs.emplace_back(grad_slice, grad_output.requires_grad());
+        offset += split_size;
+    }
     return grad_inputs;
 }
 
@@ -1062,6 +1205,12 @@ auto SliceBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Te
     grad_input = scatter(grad_input, dim_, index, grad_output);
 
     return {grad_input};
+}
+
+auto SliceBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // Same as tensor-level backward but wrapping with requires_grad=true
+    auto result_tensors = backward({grad_outputs[0].tensor()});
+    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
 }
 
 // UpsampleBilinearBackward implementation

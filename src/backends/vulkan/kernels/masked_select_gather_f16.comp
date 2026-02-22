@@ -40,10 +40,18 @@ void main() {
             uint half_offset = (gid % 2) * 16;
             uint val = (input_data[word_idx] >> half_offset) & 0xFFFF;
 
-            // Write F16 value to output
+            // Write F16 value to output using CAS loop for thread safety
             uint out_word_idx = out_idx / 2;
             uint out_half_offset = (out_idx % 2) * 16;
-            atomicOr(output_data[out_word_idx], val << out_half_offset);
+            uint out_mask = 0xFFFFu << out_half_offset;
+
+            uint old_word = output_data[out_word_idx];
+            for (int attempt = 0; attempt < 1024; ++attempt) {
+                uint new_word = (old_word & ~out_mask) | (val << out_half_offset);
+                uint cas_result = atomicCompSwap(output_data[out_word_idx], old_word, new_word);
+                if (cas_result == old_word) break;
+                old_word = cas_result;
+            }
         }
     }
 }
