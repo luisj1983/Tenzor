@@ -3093,9 +3093,17 @@ __global__ void optimized_layer_norm_backward_kernel(
         // grad_input = inv_std * (grad_w - mean_grad_w - normalized * mean_grad_w_norm)
         batch_grad_in[i] = batch_inv_std * (grad_w - mean_grad_w - normalized * mean_grad_w_norm);
 
-        // Atomically accumulate weight and bias gradients
-        atomicAdd(&grad_weight[i], batch_grad_out[i] * normalized);
-        atomicAdd(&grad_bias[i], batch_grad_out[i]);
+        // Warp-level reduction before atomic to reduce cross-block contention
+        float grad_weight_val = batch_grad_out[i] * normalized;
+        float grad_bias_val = batch_grad_out[i];
+        for (int offset = warpSize/2; offset > 0; offset >>= 1) {
+            grad_weight_val += __shfl_down_sync(0xFFFFFFFF, grad_weight_val, offset);
+            grad_bias_val += __shfl_down_sync(0xFFFFFFFF, grad_bias_val, offset);
+        }
+        if (threadIdx.x % warpSize == 0) {
+            atomicAdd(&grad_weight[i], grad_weight_val);
+            atomicAdd(&grad_bias[i], grad_bias_val);
+        }
     }
 }
 
@@ -3223,8 +3231,17 @@ __global__ void layer_norm_backward_mixed_kernel(
         batch_grad_in[i] = static_cast<OutputT>(
             batch_inv_std * (grad_w - mean_grad_w - normalized * mean_grad_w_norm));
 
-        atomicAdd(&grad_weight[i], static_cast<float>(batch_grad_out[i]) * normalized);
-        atomicAdd(&grad_bias[i], static_cast<float>(batch_grad_out[i]));
+        // Warp-level reduction before atomic to reduce cross-block contention
+        float grad_weight_val = static_cast<float>(batch_grad_out[i]) * normalized;
+        float grad_bias_val = static_cast<float>(batch_grad_out[i]);
+        for (int offset = warpSize/2; offset > 0; offset >>= 1) {
+            grad_weight_val += __shfl_down_sync(0xFFFFFFFF, grad_weight_val, offset);
+            grad_bias_val += __shfl_down_sync(0xFFFFFFFF, grad_bias_val, offset);
+        }
+        if (threadIdx.x % warpSize == 0) {
+            atomicAdd(&grad_weight[i], grad_weight_val);
+            atomicAdd(&grad_bias[i], grad_bias_val);
+        }
     }
 }
 
@@ -3375,8 +3392,17 @@ __global__ void layer_norm_backward_fp64_kernel(
 
         batch_grad_in[i] = batch_inv_std * (grad_w - mean_grad_w - normalized * mean_grad_w_norm);
 
-        atomicAdd(&grad_weight[i], batch_grad_out[i] * normalized);
-        atomicAdd(&grad_bias[i], batch_grad_out[i]);
+        // Warp-level reduction before atomic to reduce cross-block contention
+        double grad_weight_val = batch_grad_out[i] * normalized;
+        double grad_bias_val = batch_grad_out[i];
+        for (int offset = warpSize/2; offset > 0; offset >>= 1) {
+            grad_weight_val += __shfl_down_sync(0xFFFFFFFF, grad_weight_val, offset);
+            grad_bias_val += __shfl_down_sync(0xFFFFFFFF, grad_bias_val, offset);
+        }
+        if (threadIdx.x % warpSize == 0) {
+            atomicAdd(&grad_weight[i], grad_weight_val);
+            atomicAdd(&grad_bias[i], grad_bias_val);
+        }
     }
 }
 

@@ -274,6 +274,16 @@ install(FILES
     DESTINATION lib/cmake/Tenzor
 )
 
+# pkg-config support
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/tenzor.pc.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/tenzor.pc"
+    @ONLY
+)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/tenzor.pc"
+    DESTINATION lib/pkgconfig
+)
+
 # Print configuration summary
 message(STATUS "")
 message(STATUS "Tenzor Configuration Summary")

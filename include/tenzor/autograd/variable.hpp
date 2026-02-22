@@ -195,6 +195,11 @@ public:
      *
      * @param gradient Optional gradient tensor (required for non-scalar outputs)
      * @param retain_graph If true, keep computation graph for multiple backward passes
+     * @param create_graph If true, the backward pass itself is differentiable,
+     *        enabling higher-order gradients (e.g., for WGAN-GP, MAML, Hessian computation).
+     *        When true, gradient computations use Variable operations that build a new
+     *        computation graph, so you can call backward() again on the resulting gradients.
+     *        Implies retain_graph=true.
      * @throws std::runtime_error if gradient is required but not provided
      *
      * @code
@@ -208,9 +213,15 @@ public:
      * // For multiple backward passes:
      * loss.backward(std::nullopt, true);  // First backward, keep graph
      * loss.backward(std::nullopt, false); // Second backward, clear graph
+     *
+     * // For higher-order gradients (double backward):
+     * loss.backward(std::nullopt, false, true);  // create_graph=true
+     * // x.grad() is now a Variable-backed gradient that can be differentiated again
      * @endcode
      */
-    auto backward(std::optional<Tensor> gradient = std::nullopt, bool retain_graph = false) -> void;
+    auto backward(std::optional<Tensor> gradient = std::nullopt,
+                  bool retain_graph = false,
+                  bool create_graph = false) -> void;
 
     // ============================================================================
     // Gradient Management
@@ -510,6 +521,58 @@ private:
  * @return true if gradients are being computed
  */
 auto is_grad_enabled() -> bool;
+
+/**
+ * @brief Check if higher-order gradient graph creation is active.
+ *
+ * When true, backward pass operations should use Variable operations
+ * instead of raw Tensor operations, so the backward computation itself
+ * is tracked by autograd and can be differentiated again.
+ *
+ * @return true if create_graph mode is active (set during backward with create_graph=true)
+ */
+auto is_creating_graph() -> bool;
+
+/**
+ * @brief Set the higher-order gradient graph creation state.
+ *
+ * @param creating Whether to enable graph creation during backward
+ */
+auto set_creating_graph(bool creating) -> void;
+
+/**
+ * @brief RAII guard for create_graph mode during backward pass.
+ *
+ * Sets the thread-local create_graph flag on construction and restores
+ * the previous state on destruction. Used internally by the backward engine
+ * when create_graph=true.
+ *
+ * @code
+ * {
+ *     CreateGraphGuard guard;  // Enables create_graph mode
+ *     // backward functions now use Variable ops instead of Tensor ops
+ * }
+ * // create_graph mode restored to previous state
+ * @endcode
+ */
+class CreateGraphGuard {
+public:
+    /**
+     * @brief Construct guard and enable create_graph mode.
+     */
+    CreateGraphGuard();
+
+    /**
+     * @brief Restore previous create_graph state.
+     */
+    ~CreateGraphGuard();
+
+    CreateGraphGuard(const CreateGraphGuard&) = delete;
+    CreateGraphGuard& operator=(const CreateGraphGuard&) = delete;
+
+private:
+    bool prev_state_;  ///< Previous create_graph state
+};
 
 /**
  * @brief Set global gradient computation state.

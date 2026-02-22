@@ -600,6 +600,76 @@ inline void gemm_f16_transB(
 #endif
 }
 
+// ============================================================================
+// Batch Float16 <-> Float32 Conversion Helpers
+// ============================================================================
+
+/**
+ * @brief Batch convert Float16 array to Float32 array using F16C SIMD
+ *
+ * Processes 16 elements at a time (AVX-512) or 8 elements at a time (AVX2/F16C)
+ * with scalar fallback for remainder and non-SIMD targets.
+ *
+ * @param src  Source Float16 array
+ * @param dst  Destination float array (must hold at least n elements)
+ * @param n    Number of elements to convert
+ */
+inline void convert_f16_to_f32_batch(const Float16* src, float* dst, size_t n) {
+    const uint16_t* raw = reinterpret_cast<const uint16_t*>(src);
+    size_t i = 0;
+
+#ifdef TENZOR_F16C_AVAILABLE
+#ifdef TENZOR_F16_AVX512
+    for (; i + 16 <= n; i += 16) {
+        __m512 vals = cvt_f16_to_f32_avx512(raw + i);
+        _mm512_storeu_ps(dst + i, vals);
+    }
+#endif // TENZOR_F16_AVX512
+    for (; i + 8 <= n; i += 8) {
+        __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(raw + i));
+        __m256 unpacked = _mm256_cvtph_ps(packed);
+        _mm256_storeu_ps(dst + i, unpacked);
+    }
+#endif // TENZOR_F16C_AVAILABLE
+
+    for (; i < n; ++i) {
+        dst[i] = static_cast<float>(src[i]);
+    }
+}
+
+/**
+ * @brief Batch convert Float32 array to Float16 array using F16C SIMD
+ *
+ * Processes 16 elements at a time (AVX-512) or 8 elements at a time (AVX2/F16C)
+ * with scalar fallback for remainder and non-SIMD targets.
+ *
+ * @param src  Source float array
+ * @param dst  Destination Float16 array (must hold at least n elements)
+ * @param n    Number of elements to convert
+ */
+inline void convert_f32_to_f16_batch(const float* src, Float16* dst, size_t n) {
+    uint16_t* raw = reinterpret_cast<uint16_t*>(dst);
+    size_t i = 0;
+
+#ifdef TENZOR_F16C_AVAILABLE
+#ifdef TENZOR_F16_AVX512
+    for (; i + 16 <= n; i += 16) {
+        __m512 fp32_vals = _mm512_loadu_ps(src + i);
+        cvt_f32_to_f16_avx512(fp32_vals, raw + i);
+    }
+#endif // TENZOR_F16_AVX512
+    for (; i + 8 <= n; i += 8) {
+        __m256 fp32_vals = _mm256_loadu_ps(src + i);
+        __m128i packed = _mm256_cvtps_ph(fp32_vals, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(raw + i), packed);
+    }
+#endif // TENZOR_F16C_AVAILABLE
+
+    for (; i < n; ++i) {
+        dst[i] = Float16(src[i]);
+    }
+}
+
 } // namespace float16_simd
 } // namespace cpu
 } // namespace tenzor

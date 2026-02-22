@@ -634,6 +634,11 @@ auto matmul(const Variable& a, const Variable& b) -> Variable {
 
     grad_fn->save_for_backward({a_tensor, b_tensor});
 
+    // When create_graph is active, also save Variables to preserve graph connections
+    if (is_creating_graph()) {
+        grad_fn->save_variables_for_backward({a, b});
+    }
+
     // Set up backward graph - MUST maintain index correspondence with input_grads!
     // Use nullptr for leaf variables to preserve indices
     std::vector<std::shared_ptr<Function>> next_funcs;

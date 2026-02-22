@@ -145,6 +145,40 @@ auto NCCLBackend::all_reduce(Tensor& tensor, ReduceOp op) -> void {
 #endif
 }
 
+auto NCCLBackend::all_reduce_async(Tensor& tensor, ReduceOp op,
+                                    void* stream) -> void {
+#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
+    validate_gpu_tensor(tensor);
+    int device_id = get_device_id(tensor);
+    ncclComm_t comm = get_communicator(device_id);
+
+    ncclDataType_t nccl_dtype = to_nccl_datatype(tensor.dtype());
+    ncclRedOp_t nccl_op = to_nccl_reduce_op(op);
+
+    // Launch NCCL all-reduce on the caller-provided stream.
+    // Unlike all_reduce(), we do NOT call cudaDeviceSynchronize() --
+    // the caller is responsible for synchronization via CUDA events.
+    cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
+
+    NCCL_CHECK(ncclAllReduce(
+        tensor.data_ptr(),
+        tensor.data_ptr(),
+        tensor.numel(),
+        nccl_dtype,
+        nccl_op,
+        comm,
+        cuda_stream
+    ));
+
+    // Note: AVG handling (divide by world_size) is done by the caller
+    // after sync, since we cannot safely do tensor math on an async
+    // stream without additional synchronization.
+#else
+    (void)stream;
+    throw std::runtime_error("NCCLBackend: NCCL not available");
+#endif
+}
+
 auto NCCLBackend::reduce(Tensor& tensor, int dst_rank, ReduceOp op) -> void {
 #if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
     validate_gpu_tensor(tensor);

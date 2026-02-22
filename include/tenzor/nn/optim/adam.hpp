@@ -77,7 +77,7 @@ public:
          bool amsgrad = false);
 
     /** @brief Perform single Adam step */
-    auto step() -> void override;
+    auto step_impl() -> void override;
 
     /** @brief Set new learning rate */
     auto set_lr(double lr) -> void;
@@ -162,7 +162,7 @@ public:
           bool amsgrad = false);
 
     /** @brief Perform single AdamW step with decoupled weight decay */
-    auto step() -> void override;
+    auto step_impl() -> void override;
 
     /** @brief Set new learning rate */
     auto set_lr(double lr) -> void;

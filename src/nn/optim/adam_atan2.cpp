@@ -27,7 +27,7 @@ AdamAtan2::AdamAtan2(std::vector<std::shared_ptr<Variable>> params,
     update_stats_ = {0.0, 0.0, 0.0};
 }
 
-auto AdamAtan2::step() -> void {
+auto AdamAtan2::step_impl() -> void {
     step_count_++;
 
     double total_update_mag = 0.0;

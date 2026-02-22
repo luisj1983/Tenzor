@@ -158,20 +158,21 @@ auto BertEncoder::prepare_attention_mask(const Tensor& mask, int64_t seq_len) ->
     }
 
     // Input mask is [batch, seq_len] with 1 for valid, 0 for padding
-    // We need to convert to [seq_len, seq_len] with 0 for valid, -inf for padding
-    // For simplicity, we'll create a causal-style mask where 0 = attend, -inf = ignore
+    // Convert to [batch, 1, 1, seq_len] float mask with 0.0 for attended, -1e9 for masked
 
     auto batch_size = mask.shape()[0];
     auto device = mask.device();
 
-    // Create attention mask [batch, seq_len, seq_len]
-    Tensor attn_mask(std::vector<int64_t>{batch_size, seq_len, seq_len}, DType::Float32, device);
-    attn_mask.zero_();
+    // Convert mask to float: 1 -> 0.0 (attend), 0 -> -1e9 (ignore)
+    auto float_mask = mask.to(DType::Float32);
+    // (mask - 1.0) gives -1.0 for padding (was 0), 0.0 for valid (was 1)
+    // Multiply by 1e9 to get -1e9 for masked positions, 0.0 for attended
+    auto attn_mask = (float_mask - 1.0) * 1e9f;
 
-    // Set masked positions to -inf
-    // This is a simplified version - full implementation would handle broadcasting
-    // For now, we'll return an empty tensor and let TransformerEncoder handle it
-    return Tensor{};
+    // Reshape to [batch, 1, 1, seq_len] for broadcasting across heads and query positions
+    attn_mask = attn_mask.reshape({batch_size, 1, 1, seq_len});
+
+    return attn_mask;
 }
 
 auto BertEncoder::forward(const Variable& hidden_states,

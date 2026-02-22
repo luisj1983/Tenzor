@@ -72,7 +72,7 @@ ZeROStage1Optimizer::~ZeROStage1Optimizer() {
 // Optimizer Interface
 // =============================================================================
 
-auto ZeROStage1Optimizer::step() -> void {
+auto ZeROStage1Optimizer::step_impl() -> void {
     std::lock_guard<std::mutex> lock(mutex_);
 
     // Start profiling
@@ -923,7 +923,7 @@ ZeROStage2Optimizer::~ZeROStage2Optimizer() {
     // Hooks will be cleaned up by the autograd system
 }
 
-auto ZeROStage2Optimizer::step() -> void {
+auto ZeROStage2Optimizer::step_impl() -> void {
     std::lock_guard<std::mutex> lock(mutex_);
 
     // Start profiling
@@ -1428,7 +1428,7 @@ auto ZeROStage3Optimizer::unregister_model() -> void {
     registered_model_ = nullptr;
 }
 
-auto ZeROStage3Optimizer::step() -> void {
+auto ZeROStage3Optimizer::step_impl() -> void {
     std::lock_guard<std::mutex> lock(mutex_);
 
     // Stage 3 step algorithm:

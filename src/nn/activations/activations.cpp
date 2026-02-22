@@ -6,6 +6,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/math.hpp"
+#include <cmath>
 #include <iostream>
 
 namespace tenzor::nn {
@@ -370,7 +371,30 @@ auto leaky_relu(const Variable& input, double negative_slope) -> Variable {
     return Variable(result, input.requires_grad());
 }
 
-auto gelu(const Variable& input) -> Variable {
+auto gelu(const Variable& input, const std::string& approximate) -> Variable {
+    // Tanh approximation: GELU(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
+    if (approximate == "tanh") {
+        // Compute using existing ops for autograd support
+        auto x = input;
+        auto x_cubed = x * x * x;
+        // Scale factors as scalar tensors
+        Tensor coef_t = full({1}, 0.044715f, input.tensor().dtype(), input.tensor().device());
+        Tensor sqrt_2_pi_t = full({1}, static_cast<float>(std::sqrt(2.0 / M_PI)),
+                                  input.tensor().dtype(), input.tensor().device());
+        Tensor half_t = full({1}, 0.5f, input.tensor().dtype(), input.tensor().device());
+        Tensor one_t = full({1}, 1.0f, input.tensor().dtype(), input.tensor().device());
+
+        Variable coef(coef_t, false);
+        Variable sqrt_2_pi(sqrt_2_pi_t, false);
+        Variable half(half_t, false);
+        Variable one(one_t, false);
+
+        auto inner = sqrt_2_pi * (x + coef * x_cubed);
+        auto tanh_val = tanh(inner);
+        return half * x * (one + tanh_val);
+    }
+
+    // Exact GELU via erf dispatch
     if (!input.requires_grad() || !is_grad_enabled()) {
         std::vector<Tensor> inputs = {input.tensor()};
         auto result = dispatch(OpId::Gelu, inputs)[0];
@@ -418,8 +442,14 @@ auto LogSoftmax::forward_impl(const Variable& input) -> Variable {
     return tenzor::log_softmax(input, dim_);
 }
 
+GELU::GELU(const std::string& approximate) : approximate_(approximate) {
+    if (approximate != "none" && approximate != "tanh") {
+        throw std::invalid_argument("GELU approximate must be 'none' or 'tanh', got '" + approximate + "'");
+    }
+}
+
 auto GELU::forward_impl(const Variable& input) -> Variable {
-    return gelu(input);
+    return gelu(input, approximate_);
 }
 
 auto ELU::forward_impl(const Variable& input) -> Variable {

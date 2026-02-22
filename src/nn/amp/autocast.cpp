@@ -113,9 +113,10 @@ auto Autocast::should_autocast(const std::string& op_name, const Device& device)
         return false;
     }
 
-    // Don't autocast CPU operations by default (no Tensor Core benefit)
-    if (device.type == Device::Type::CPU &&
-        (!device_type_.has_value() || device_type_.value() != Device::Type::CPU)) {
+    // Only skip CPU autocast if no device type is specified (backward compat)
+    // When user explicitly enables CPU autocast, allow it (BFloat16 benefits on
+    // recent Intel CPUs with AMX/AVX-512 BF16 instructions)
+    if (device.type == Device::Type::CPU && !device_type_.has_value()) {
         return false;
     }
 

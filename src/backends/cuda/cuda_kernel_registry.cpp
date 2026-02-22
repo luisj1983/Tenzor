@@ -472,6 +472,9 @@ namespace cuda {
     Tensor mish_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor mish_backward_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
 
+    // Cast (dtype conversion) dispatch wrapper
+    Tensor cast_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+
 } // namespace cuda
 
 /**
@@ -1896,6 +1899,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         auto [unique_vals, inverse, counts] = cuda::unique_kernel(inputs[0], sorted, return_inverse, return_counts, get_cuda_stream(attrs));
         return std::vector<Tensor>{unique_vals, inverse, counts};
     });
+
+    // =========================================================================
+    // Type Conversion Operations
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Cast, cuda::cast_dispatch);
 }
 
 } // namespace tenzor

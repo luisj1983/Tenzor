@@ -13,6 +13,9 @@
 #   kernels/gemm_optimized.hpp         - High-performance GEMM micro-kernels
 #   kernels/simd_fast_math.hpp         - Fast transcendental approximations
 
+# Option for portable binary builds (multi-ISA kernel compilation)
+option(TENZOR_PORTABLE "Build portable binaries with runtime SIMD dispatch instead of -march=native" OFF)
+
 set(CPU_BACKEND_SOURCES
     cpu_backend.cpp
     cpu_caching_allocator.cpp
@@ -35,6 +38,7 @@ set(CPU_BACKEND_SOURCES
     kernels/rnn_kernels.cpp
     kernels/vision.cpp
     kernels/advanced.cpp
+    kernels/flash_attention.cpp
 )
 
 # Create CPU backend shared library
@@ -66,80 +70,140 @@ endif()
 
 # Platform-specific optimizations
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    # Enable SIMD optimizations with IEEE 754 compliance preserved
-    target_compile_options(tenzor_backend_cpu PRIVATE
-        -march=native
-        -mtune=native
-        -fno-math-errno
-        -fno-trapping-math
-        -fno-finite-math-only  # Preserves NaN/Inf handling for IEEE 754 compliance
-        -Wno-unused-parameter
-    )
+    if(TENZOR_PORTABLE)
+        # ============================================================
+        # Portable build: compile at baseline x86-64 level, use
+        # function-level __attribute__((target(...))) for multi-ISA
+        # dispatch. The runtime SIMD detection system
+        # (runtime_simd.hpp / SIMDKernelTable) selects the best
+        # kernel at startup.
+        # ============================================================
+        message(STATUS "CPU Backend: PORTABLE mode - baseline x86-64 with runtime SIMD dispatch")
 
-    # Check for specific SIMD support
-    # With -march=native, the compiler will emit the correct instructions
-    # We detect CPU capabilities at compile time via compiler predefined macros
-    message(STATUS "CPU Backend: Using -march=native for automatic SIMD detection")
+        target_compile_options(tenzor_backend_cpu PRIVATE
+            -fno-math-errno
+            -fno-trapping-math
+            -fno-finite-math-only  # Preserves NaN/Inf handling for IEEE 754 compliance
+            -Wno-unused-parameter
+        )
 
-    # Check for F16C support (required for Float16 SIMD operations)
-    include(CheckCXXSourceCompiles)
-    set(CMAKE_REQUIRED_FLAGS "-march=native")
-    check_cxx_source_compiles("
-        #include <immintrin.h>
-        int main() {
-            __m128i packed = _mm_setzero_si128();
-            __m256 unpacked = _mm256_cvtph_ps(packed);
-            (void)unpacked;
-            return 0;
-        }
-    " TENZOR_HAS_F16C)
+        target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_PORTABLE)
 
-    if(TENZOR_HAS_F16C)
-        target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_HAS_F16C)
-        message(STATUS "CPU Backend: F16C (Float16 conversion) support enabled")
+        # In portable mode, SIMD kernel files that use intrinsics must use
+        # __attribute__((target("avx2"))) etc. on each function. The existing
+        # simd_dispatch.cpp in src/backend/ already does this. The CPU-backend
+        # SIMD files (math_simd.cpp, activations_simd.cpp) use #ifdef guards
+        # so they fall back to scalar when compiled without -march=native.
+        #
+        # For files that need specific ISA to compile at all (e.g., they use
+        # intrinsics at file scope), we set per-file compile flags:
+        set_source_files_properties(
+            kernels/math_simd.cpp
+            kernels/activations_simd.cpp
+            kernels/simd_dispatch.cpp
+            PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c"
+        )
+
+        # F16C and FMA are available in portable mode via per-function attributes
+        # or per-file flags above, so we define these for the SIMD kernel files
+        set_source_files_properties(
+            kernels/math_simd.cpp
+            kernels/activations_simd.cpp
+            kernels/simd_dispatch.cpp
+            PROPERTIES COMPILE_DEFINITIONS "TENZOR_HAS_F16C;TENZOR_HAS_FMA"
+        )
+
     else()
-        message(STATUS "CPU Backend: F16C not available, Float16 ops will use scalar fallback")
-    endif()
+        # ============================================================
+        # Native build (default): use -march=native for maximum
+        # performance on the build host. Not portable to CPUs with
+        # fewer features than the build machine.
+        # ============================================================
+        message(STATUS "CPU Backend: NATIVE mode - using -march=native")
 
-    # Check for FMA support
-    check_cxx_source_compiles("
-        #include <immintrin.h>
-        int main() {
-            __m256 a = _mm256_setzero_ps();
-            __m256 b = _mm256_setzero_ps();
-            __m256 c = _mm256_fmadd_ps(a, b, a);
-            (void)c;
-            return 0;
-        }
-    " TENZOR_HAS_FMA)
+        # Enable SIMD optimizations with IEEE 754 compliance preserved
+        target_compile_options(tenzor_backend_cpu PRIVATE
+            -march=native
+            -mtune=native
+            -fno-math-errno
+            -fno-trapping-math
+            -fno-finite-math-only  # Preserves NaN/Inf handling for IEEE 754 compliance
+            -Wno-unused-parameter
+        )
 
-    if(TENZOR_HAS_FMA)
-        target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_HAS_FMA)
-        message(STATUS "CPU Backend: FMA (Fused Multiply-Add) support enabled")
-    endif()
+        # Check for specific SIMD support
+        # With -march=native, the compiler will emit the correct instructions
+        # We detect CPU capabilities at compile time via compiler predefined macros
+        message(STATUS "CPU Backend: Using -march=native for automatic SIMD detection")
 
-    # Check for AVX-512 support
-    check_cxx_source_compiles("
-        #include <immintrin.h>
-        int main() {
-            __m512 a = _mm512_setzero_ps();
-            __m512 b = _mm512_add_ps(a, a);
-            (void)b;
-            return 0;
-        }
-    " TENZOR_HAS_AVX512)
+        # Check for F16C support (required for Float16 SIMD operations)
+        include(CheckCXXSourceCompiles)
+        set(CMAKE_REQUIRED_FLAGS "-march=native")
+        check_cxx_source_compiles("
+            #include <immintrin.h>
+            int main() {
+                __m128i packed = _mm_setzero_si128();
+                __m256 unpacked = _mm256_cvtph_ps(packed);
+                (void)unpacked;
+                return 0;
+            }
+        " TENZOR_HAS_F16C)
 
-    if(TENZOR_HAS_AVX512)
-        target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_HAS_AVX512)
-        message(STATUS "CPU Backend: AVX-512 support enabled")
-    else()
-        message(STATUS "CPU Backend: Using AVX2 (AVX-512 not available)")
+        if(TENZOR_HAS_F16C)
+            target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_HAS_F16C)
+            message(STATUS "CPU Backend: F16C (Float16 conversion) support enabled")
+        else()
+            message(STATUS "CPU Backend: F16C not available, Float16 ops will use scalar fallback")
+        endif()
+
+        # Check for FMA support
+        check_cxx_source_compiles("
+            #include <immintrin.h>
+            int main() {
+                __m256 a = _mm256_setzero_ps();
+                __m256 b = _mm256_setzero_ps();
+                __m256 c = _mm256_fmadd_ps(a, b, a);
+                (void)c;
+                return 0;
+            }
+        " TENZOR_HAS_FMA)
+
+        if(TENZOR_HAS_FMA)
+            target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_HAS_FMA)
+            message(STATUS "CPU Backend: FMA (Fused Multiply-Add) support enabled")
+        endif()
+
+        # Check for AVX-512 support
+        check_cxx_source_compiles("
+            #include <immintrin.h>
+            int main() {
+                __m512 a = _mm512_setzero_ps();
+                __m512 b = _mm512_add_ps(a, a);
+                (void)b;
+                return 0;
+            }
+        " TENZOR_HAS_AVX512)
+
+        if(TENZOR_HAS_AVX512)
+            target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_HAS_AVX512)
+            message(STATUS "CPU Backend: AVX-512 support enabled")
+        else()
+            message(STATUS "CPU Backend: Using AVX2 (AVX-512 not available)")
+        endif()
     endif()
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
-    target_compile_options(tenzor_backend_cpu PRIVATE
-        /arch:AVX2
-        /fp:fast
-    )
+    if(TENZOR_PORTABLE)
+        message(STATUS "CPU Backend: PORTABLE mode (MSVC) - baseline with runtime dispatch")
+        target_compile_options(tenzor_backend_cpu PRIVATE
+            /fp:fast
+        )
+        target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_PORTABLE)
+    else()
+        target_compile_options(tenzor_backend_cpu PRIVATE
+            /arch:AVX2
+            /fp:fast
+        )
+    endif()
 endif()
 
 # Optional: Intel MKL for high-performance GEMM

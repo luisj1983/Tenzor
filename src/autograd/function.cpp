@@ -1,4 +1,5 @@
 #include "tenzor/autograd/function.hpp"
+#include "tenzor/autograd/ops.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/creation.hpp"
@@ -66,6 +67,77 @@ void Function::reload_saved_tensors() const {
         t = t.to(offloaded_device_);
     }
     tensors_offloaded_ = false;
+}
+
+auto Function::save_variables_for_backward(std::vector<Variable> variables) -> void {
+    saved_variables_ = std::move(variables);
+}
+
+auto Function::saved_variables() const -> const std::vector<Variable>& {
+    return saved_variables_;
+}
+
+auto Function::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // Default implementation: extract Tensors, call backward(), wrap results back
+    // This provides no higher-order gradient support but ensures backward compatibility
+    std::vector<Tensor> tensor_grads;
+    tensor_grads.reserve(grad_outputs.size());
+    for (auto& var : grad_outputs) {
+        tensor_grads.push_back(var.tensor());
+    }
+
+    auto result_tensors = backward(tensor_grads);
+
+    std::vector<Variable> result_vars;
+    result_vars.reserve(result_tensors.size());
+    for (auto& t : result_tensors) {
+        result_vars.emplace_back(t, false);
+    }
+    return result_vars;
+}
+
+// Helper function to reduce gradient Variable along broadcasted dimensions (for create_graph)
+static auto reduce_grad_var_for_broadcasting(const Variable& grad, const std::vector<int64_t>& target_shape) -> Variable {
+    auto grad_shape_vec = std::vector<int64_t>(grad.shape().begin(), grad.shape().end());
+
+    // If shapes match, no reduction needed
+    if (grad_shape_vec == target_shape) {
+        return grad;
+    }
+
+    auto result = grad;
+
+    // Handle size difference (prepended dimensions in grad)
+    int64_t ndim_diff = static_cast<int64_t>(grad_shape_vec.size()) - static_cast<int64_t>(target_shape.size());
+
+    if (ndim_diff > 0) {
+        // grad has MORE dimensions than target - sum along prepended dimensions
+        for (int64_t i = 0; i < ndim_diff; ++i) {
+            result = tenzor::sum(result, 0, false);
+        }
+    } else if (ndim_diff < 0) {
+        throw std::runtime_error(
+            "Autograd bug: gradient has fewer dimensions (" +
+            std::to_string(grad_shape_vec.size()) + ") than target shape (" +
+            std::to_string(target_shape.size()) + ")");
+    }
+
+    // Now result and target should have same ndim
+    // Sum along dimensions that were broadcasted (size 1 in target but > 1 in result)
+    auto result_shape_vec = std::vector<int64_t>(result.shape().begin(), result.shape().end());
+    for (size_t i = 0; i < target_shape.size(); ++i) {
+        if (target_shape[i] == 1 && result_shape_vec[i] > 1) {
+            result = tenzor::sum(result, static_cast<int64_t>(i), true);
+            result_shape_vec = std::vector<int64_t>(result.shape().begin(), result.shape().end());
+        }
+    }
+
+    // Final reshape to exact target shape
+    if (result_shape_vec != target_shape) {
+        result = tenzor::reshape(result, target_shape);
+    }
+
+    return result;
 }
 
 // Helper function to reduce gradient along broadcasted dimensions
@@ -143,6 +215,24 @@ auto AddBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     return {grad_a, grad_b};
 }
 
+auto AddBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    const auto& grad = grad_outputs[0];
+
+    // For add: gradients are just the incoming gradient (possibly with broadcast reduction)
+    // Since these are identity operations on the gradient, the Variable grad already has
+    // its grad_fn set, so higher-order gradients flow through naturally
+    if (input_shape_a_ == input_shape_b_) {
+        auto grad_shape = std::vector<int64_t>(grad.shape().begin(), grad.shape().end());
+        if (grad_shape == input_shape_a_) {
+            return {grad, grad};
+        }
+    }
+
+    auto grad_a = reduce_grad_var_for_broadcasting(grad, input_shape_a_);
+    auto grad_b = reduce_grad_var_for_broadcasting(grad, input_shape_b_);
+    return {grad_a, grad_b};
+}
+
 // SubBackward implementation
 auto SubBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     // Save input shapes for broadcasting-aware backward pass
@@ -159,6 +249,15 @@ auto SubBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     auto grad_a = reduce_grad_for_broadcasting(grad_outputs[0], input_shape_a_);
     auto grad_b_unreduced = neg(grad_outputs[0]);
     auto grad_b = reduce_grad_for_broadcasting(grad_b_unreduced, input_shape_b_);
+    return {grad_a, grad_b};
+}
+
+auto SubBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // d(a-b)/da = 1, d(a-b)/db = -1
+    // Use Variable operations so negation is tracked for higher-order gradients
+    auto grad_a = reduce_grad_var_for_broadcasting(grad_outputs[0], input_shape_a_);
+    auto grad_b_unreduced = tenzor::neg(grad_outputs[0]);  // Variable neg - tracked by autograd
+    auto grad_b = reduce_grad_var_for_broadcasting(grad_b_unreduced, input_shape_b_);
     return {grad_a, grad_b};
 }
 
@@ -185,6 +284,29 @@ auto MulBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     return {grad_a, grad_b};
 }
 
+auto MulBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // d(a*b)/da = b, d(a*b)/db = a
+    // Use saved Variables if available, otherwise wrap saved Tensors
+    Variable saved_a, saved_b;
+    if (has_saved_variables()) {
+        saved_a = saved_variables_[0];
+        saved_b = saved_variables_[1];
+    } else {
+        // Wrap raw tensors - no grad tracking but still works for first-order
+        saved_a = Variable(saved_tensors_[0], false);
+        saved_b = Variable(saved_tensors_[1], false);
+    }
+
+    // Use Variable operations so multiplication is tracked for higher-order gradients
+    auto grad_a_unreduced = grad_outputs[0] * saved_b;
+    auto grad_b_unreduced = grad_outputs[0] * saved_a;
+
+    auto grad_a = reduce_grad_var_for_broadcasting(grad_a_unreduced, input_shape_a_);
+    auto grad_b = reduce_grad_var_for_broadcasting(grad_b_unreduced, input_shape_b_);
+
+    return {grad_a, grad_b};
+}
+
 // DivBackward implementation
 auto DivBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     saved_tensors_ = {inputs[0].tensor(), inputs[1].tensor()};
@@ -200,6 +322,24 @@ auto DivBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     auto grad_a = div(grad_outputs[0], b);
     // grad_b = -a / (b^2) * grad_output = -(a * grad_output) / (b * b)
     auto grad_b = neg(div(mul(a, grad_outputs[0]), mul(b, b)));
+    return {grad_a, grad_b};
+}
+
+auto DivBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // d(a/b)/da = 1/b, d(a/b)/db = -a/(b^2)
+    Variable saved_a, saved_b;
+    if (has_saved_variables()) {
+        saved_a = saved_variables_[0];
+        saved_b = saved_variables_[1];
+    } else {
+        saved_a = Variable(saved_tensors_[0], false);
+        saved_b = Variable(saved_tensors_[1], false);
+    }
+
+    // Use Variable operations for higher-order gradient tracking
+    auto grad_a = grad_outputs[0] / saved_b;
+    // grad_b = -(a * grad_output) / (b * b)
+    auto grad_b = tenzor::neg((saved_a * grad_outputs[0]) / (saved_b * saved_b));
     return {grad_a, grad_b};
 }
 
@@ -228,6 +368,34 @@ auto MatMulBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
 
     auto grad_a = matmul(grad_out, b_t);
     auto grad_b = matmul(a_t, grad_out);
+
+    return {grad_a, grad_b};
+}
+
+auto MatMulBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // For C = A @ B:
+    // dL/dA = dL/dC @ B.T
+    // dL/dB = A.T @ dL/dC
+    Variable saved_a, saved_b;
+    if (has_saved_variables()) {
+        saved_a = saved_variables_[0];
+        saved_b = saved_variables_[1];
+    } else {
+        saved_a = Variable(saved_tensors_[0], false);
+        saved_b = Variable(saved_tensors_[1], false);
+    }
+
+    const auto& grad_out = grad_outputs[0];
+
+    // Use Variable operations for higher-order gradient tracking
+    auto a_ndim = saved_a.shape().size();
+    auto b_ndim = saved_b.shape().size();
+
+    auto b_t = tenzor::transpose(saved_b, b_ndim - 2, b_ndim - 1);
+    auto a_t = tenzor::transpose(saved_a, a_ndim - 2, a_ndim - 1);
+
+    auto grad_a = tenzor::matmul(grad_out, b_t);
+    auto grad_b = tenzor::matmul(a_t, grad_out);
 
     return {grad_a, grad_b};
 }
@@ -334,6 +502,39 @@ auto SumBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     }
 }
 
+auto SumBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // Sum backward is just expanding the gradient back to input shape.
+    // This operation doesn't depend on saved inputs, so we can use Tensor-level
+    // expand/reshape and wrap the result. The gradient Variable itself carries
+    // its computation graph for higher-order differentiation.
+    const auto& input = saved_tensors_[0];
+
+    TENZOR_CHECK_SHAPE(input.numel() > 0,
+        "SumBackward: cannot compute gradient of sum over empty tensor");
+
+    auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    auto grad_tensor = grad_outputs[0].tensor();
+
+    if (!dim_.has_value()) {
+        if (grad_tensor.ndim() > 0) {
+            grad_tensor = reshape(grad_tensor, {});
+        }
+        auto result = expand(grad_tensor, input_shape_vec);
+        // Wrap as Variable preserving requires_grad from the incoming gradient
+        return {Variable(result, grad_outputs[0].requires_grad())};
+    } else {
+        int64_t dim = dim_.value();
+        if (dim < 0) dim += input.shape().size();
+
+        auto grad = grad_tensor;
+        if (!keepdim_) {
+            grad = unsqueeze(grad, dim);
+        }
+        auto result = expand(grad, input_shape_vec);
+        return {Variable(result, grad_outputs[0].requires_grad())};
+    }
+}
+
 // MeanBackward implementation
 auto MeanBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     saved_tensors_ = {inputs[0].tensor()};
@@ -403,6 +604,51 @@ auto MeanBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
     }
 }
 
+auto MeanBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // Mean backward: expand gradient and scale by 1/N.
+    // The scaling by 1/N uses Variable::operator*(double) which IS tracked by autograd
+    // for higher-order gradient support.
+    const auto& input = saved_tensors_[0];
+
+    int64_t n_elements = 1;
+    if (dim_.has_value()) {
+        n_elements = input.shape()[dim_.value()];
+    } else {
+        n_elements = input.numel();
+    }
+
+    TENZOR_CHECK_SHAPE(n_elements > 0,
+        "MeanBackward: cannot compute mean of empty tensor (0 elements)");
+
+    double scale = 1.0 / static_cast<double>(n_elements);
+    auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+
+    // Scale the gradient Variable - this uses Variable::operator*(double) which
+    // builds autograd graph when create_graph is active
+    auto scaled_grad = grad_outputs[0] * scale;
+
+    // Now expand to input shape using Tensor-level operations
+    auto grad_tensor = scaled_grad.tensor();
+
+    if (!dim_.has_value()) {
+        if (grad_tensor.ndim() > 0) {
+            grad_tensor = reshape(grad_tensor, {});
+        }
+        auto result = expand(grad_tensor, input_shape_vec);
+        return {Variable(result, scaled_grad.requires_grad())};
+    } else {
+        int64_t dim = dim_.value();
+        if (dim < 0) dim += input.shape().size();
+
+        auto grad = grad_tensor;
+        if (!keepdim_) {
+            grad = unsqueeze(grad, dim);
+        }
+        auto result = expand(grad, input_shape_vec);
+        return {Variable(result, scaled_grad.requires_grad())};
+    }
+}
+
 // LogBackward implementation
 auto LogBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     saved_tensors_ = {inputs[0].tensor()};
@@ -440,6 +686,12 @@ auto NegBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable>
 auto NegBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     // d(-x)/dx = -1
     return {neg(grad_outputs[0])};
+}
+
+auto NegBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // d(-x)/dx = -1
+    // Use Variable neg for higher-order gradient tracking
+    return {tenzor::neg(grad_outputs[0])};
 }
 
 // LogSoftmaxBackward implementation

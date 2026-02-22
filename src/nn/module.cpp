@@ -378,6 +378,31 @@ auto Module::register_forward_post_hook(ForwardPostHook hook) -> size_t {
     return next_hook_id_++;
 }
 
+auto Module::register_forward_pre_hook_multi(ForwardPreHookMulti hook) -> size_t {
+    forward_pre_hooks_multi_.push_back(std::move(hook));
+    has_forward_hooks_ = true;
+    return next_hook_id_++;
+}
+
+auto Module::register_forward_post_hook_multi(ForwardPostHookMulti hook) -> size_t {
+    forward_post_hooks_multi_.push_back(std::move(hook));
+    has_forward_hooks_ = true;
+    return next_hook_id_++;
+}
+
+auto Module::call_forward_pre_hooks_multi(const std::vector<Variable>& inputs) -> void {
+    for (auto& hook : forward_pre_hooks_multi_) {
+        hook(this, inputs);
+    }
+}
+
+auto Module::call_forward_post_hooks_multi(const std::vector<Variable>& inputs,
+                                            const std::vector<Variable>& outputs) -> void {
+    for (auto& hook : forward_post_hooks_multi_) {
+        hook(this, inputs, outputs);
+    }
+}
+
 auto Module::register_backward_pre_hook(BackwardPreHook hook) -> size_t {
     backward_pre_hooks_.push_back(std::move(hook));
     has_backward_hooks_ = true;  // Enable backward hook wrapping in forward()

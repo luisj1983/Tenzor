@@ -28,7 +28,8 @@ static auto dtype_precedence(DType dt) -> int {
     }
 }
 
-auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient, bool retain_graph) -> void {
+auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
+                             bool retain_graph, bool create_graph) -> void {
     if (!root.requires_grad()) {
         return;
     }
@@ -50,8 +51,20 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient, boo
         return;
     }
 
-    // Topological sort from root
-    auto sorted = topological_sort(root.grad_fn());
+    // Topological sort from root (cached for retain_graph scenarios)
+    Function* root_ptr = root.grad_fn().get();
+    if (topo_cache_.root != root_ptr || topo_cache_.sorted.empty()) {
+        topo_cache_.root = root_ptr;
+        topo_cache_.sorted = topological_sort(root.grad_fn());
+    }
+    auto& sorted = topo_cache_.sorted;
+
+    // Set the create_graph flag so backward functions know to use Variable ops
+    // Use RAII guard to ensure flag is restored even on exception
+    std::optional<CreateGraphGuard> graph_guard;
+    if (create_graph) {
+        graph_guard.emplace();
+    }
 
     // Helper to clean up computation graph (breaks circular references)
     auto cleanup_graph = [&]() {
@@ -62,6 +75,8 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient, boo
                     func->set_next_functions({});
                 }
             }
+            topo_cache_.root = nullptr;
+            topo_cache_.sorted.clear();
             if (root.grad_fn() && !root.is_leaf()) {
                 root.set_grad_fn(nullptr);
             }
@@ -105,7 +120,33 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient, boo
             function->reload_saved_tensors();
 
             // Compute gradients for inputs
-            auto input_grads = function->backward(grad_outputs);
+            std::vector<Tensor> input_grads;
+
+            if (create_graph) {
+                // Higher-order gradient path: use backward_with_variables
+                // which operates on Variables so the backward computation itself
+                // is tracked by autograd (enabling gradients of gradients).
+                std::vector<Variable> var_grad_outputs;
+                var_grad_outputs.reserve(grad_outputs.size());
+                for (auto& g : grad_outputs) {
+                    // Wrap the gradient tensor as a Variable with requires_grad=true
+                    // so that operations on it during backward are tracked
+                    var_grad_outputs.emplace_back(g, true);
+                }
+
+                auto var_input_grads = function->backward_with_variables(var_grad_outputs);
+
+                // Extract the underlying tensors for accumulation, but the Variables
+                // in var_input_grads have grad_fn set from the Variable operations
+                // used in backward_with_variables, enabling higher-order differentiation
+                input_grads.reserve(var_input_grads.size());
+                for (auto& vg : var_input_grads) {
+                    input_grads.push_back(vg.tensor());
+                }
+            } else {
+                // Standard backward path: raw Tensor operations
+                input_grads = function->backward(grad_outputs);
+            }
 
             // Release saved tensors immediately to free GPU memory for subsequent layers.
             // This is safe because saved tensors are only needed during this backward() call.
@@ -146,8 +187,11 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient, boo
                 }
 
                 // Apply hooks (access through impl_ for handle pattern)
-                if (var.impl_) {
-                    for (auto& hook : var.impl_->hooks_) {
+                // Copy hooks vector to local before iterating -- a hook may
+                // modify the hooks list (register/unregister) during iteration
+                if (var.impl_ && !var.impl_->hooks_.empty()) {
+                    auto hooks_copy = var.impl_->hooks_;
+                    for (auto& hook : hooks_copy) {
                         grad_to_apply = hook(grad_to_apply);
                     }
                 }
@@ -247,7 +291,158 @@ auto BackwardEngine::get_accumulated_grads(Function* func) -> std::vector<Tensor
     return it->second;
 }
 
-// Thread-local engine — each thread gets its own instance so concurrent
+auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
+                                   std::vector<Tensor> gradients) -> void {
+    if (roots.empty()) {
+        return;
+    }
+
+    if (roots.size() != gradients.size()) {
+        throw AutogradException(
+            "execute_multi: number of roots (" + std::to_string(roots.size()) +
+            ") must match number of gradients (" + std::to_string(gradients.size()) + ")");
+    }
+
+    // Initialize gradients for each root
+    for (size_t i = 0; i < roots.size(); ++i) {
+        if (!roots[i] || !roots[i]->requires_grad()) {
+            continue;
+        }
+        roots[i]->grad() = gradients[i];
+    }
+
+    // Build combined topological sort from all roots
+    std::vector<std::shared_ptr<Function>> sorted;
+    std::unordered_set<Function*> visited;
+    std::unordered_set<Function*> recursion_stack;
+
+    std::function<void(std::shared_ptr<Function>)> dfs;
+    dfs = [&](std::shared_ptr<Function> node) {
+        if (!node) return;
+        if (recursion_stack.count(node.get())) {
+            throw AutogradException("Cycle detected in computation graph");
+        }
+        if (visited.count(node.get())) {
+            return;
+        }
+        visited.insert(node.get());
+        recursion_stack.insert(node.get());
+        for (const auto& next_func : node->next_functions()) {
+            if (next_func) {
+                dfs(next_func);
+            }
+        }
+        recursion_stack.erase(node.get());
+        sorted.push_back(node);
+    };
+
+    for (auto* root : roots) {
+        if (root && root->grad_fn()) {
+            dfs(root->grad_fn());
+        }
+    }
+
+    // Seed gradient accumulators for root grad_fns
+    for (size_t i = 0; i < roots.size(); ++i) {
+        if (roots[i] && roots[i]->grad_fn()) {
+            accumulate_grad(roots[i]->grad_fn().get(), gradients[i]);
+        }
+    }
+
+    auto cleanup_graph = [&]() {
+        for (auto& func : sorted) {
+            if (func) {
+                func->set_input_variables({});
+                func->set_next_functions({});
+            }
+        }
+        for (auto* root : roots) {
+            if (root && root->grad_fn() && !root->is_leaf()) {
+                root->set_grad_fn(nullptr);
+            }
+        }
+    };
+
+    try {
+        // Execute backward in reverse topological order
+        for (auto it = sorted.rbegin(); it != sorted.rend(); ++it) {
+            if (!*it) continue;
+            auto& function = *it;
+
+            std::vector<Tensor> grad_outputs;
+            auto accum_grads = get_accumulated_grads(function.get());
+            if (accum_grads.empty()) {
+                continue;  // No gradient flows to this function
+            }
+
+            // Sum all accumulated gradients with dtype promotion
+            Tensor total_grad = accum_grads[0];
+            for (size_t i = 1; i < accum_grads.size(); ++i) {
+                if (accum_grads[i].dtype() != total_grad.dtype()) {
+                    DType target = (dtype_precedence(accum_grads[i].dtype()) >= dtype_precedence(total_grad.dtype()))
+                        ? accum_grads[i].dtype() : total_grad.dtype();
+                    total_grad = total_grad.to(target);
+                    accum_grads[i] = accum_grads[i].to(target);
+                }
+                total_grad = total_grad + accum_grads[i];
+            }
+            grad_outputs.push_back(total_grad);
+
+            function->reload_saved_tensors();
+            auto input_grads = function->backward(grad_outputs);
+            function->release_saved_tensors();
+
+            // Accumulate gradients to input variables
+            const auto& input_vars = function->input_variables();
+            for (size_t i = 0; i < input_vars.size() && i < input_grads.size(); ++i) {
+                Variable& var = const_cast<Variable&>(input_vars[i]);
+                if (!var.requires_grad()) continue;
+
+                Tensor grad_to_apply = input_grads[i];
+
+                if (var.impl_) {
+                    for (auto& hook : var.impl_->hooks_) {
+                        grad_to_apply = hook(grad_to_apply);
+                    }
+                }
+
+                if (var.is_leaf() || var.retains_grad()) {
+                    if (var.has_grad()) {
+                        auto existing_grad = var.grad().value();
+                        if (grad_to_apply.dtype() != existing_grad.dtype()) {
+                            DType target = (dtype_precedence(grad_to_apply.dtype()) >= dtype_precedence(existing_grad.dtype()))
+                                ? grad_to_apply.dtype() : existing_grad.dtype();
+                            if (target != existing_grad.dtype()) {
+                                var.grad() = existing_grad.to(target);
+                            }
+                            grad_to_apply = grad_to_apply.to(target);
+                            existing_grad = var.grad().value();
+                        }
+                        var.grad() = existing_grad + grad_to_apply;
+                    } else {
+                        var.grad() = grad_to_apply;
+                    }
+                }
+            }
+
+            const auto& next_funcs = function->next_functions();
+            for (size_t i = 0; i < next_funcs.size() && i < input_grads.size(); ++i) {
+                if (next_funcs[i]) {
+                    accumulate_grad(next_funcs[i].get(), input_grads[i]);
+                }
+            }
+        }
+    } catch (...) {
+        clear_gradients();
+        cleanup_graph();
+        throw;
+    }
+
+    clear_gradients();
+    cleanup_graph();
+}
+
+// Thread-local engine -- each thread gets its own instance so concurrent
 // backward passes don't corrupt the shared grad_accumulators_ map.
 auto backward_engine() -> BackwardEngine& {
     static thread_local BackwardEngine engine;

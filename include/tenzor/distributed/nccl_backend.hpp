@@ -69,6 +69,11 @@ public:
 
     auto all_reduce(Tensor& tensor, ReduceOp op) -> void override;
 
+    auto all_reduce_async(Tensor& tensor, ReduceOp op,
+                          void* stream) -> void override;
+
+    auto supports_async_stream() const -> bool override { return true; }
+
     auto reduce(Tensor& tensor, int dst_rank, ReduceOp op) -> void override;
 
     auto all_gather(const Tensor& tensor, std::vector<Tensor>& output) -> void override;

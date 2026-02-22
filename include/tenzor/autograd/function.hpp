@@ -90,6 +90,23 @@ public:
     virtual auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> = 0;
 
     /**
+     * @brief Higher-order backward pass using Variables for graph creation.
+     *
+     * When create_graph=true during backward(), this method is called instead
+     * of backward(). It receives and returns Variables so that the gradient
+     * computation itself is tracked by autograd, enabling higher-order gradients.
+     *
+     * The default implementation falls back to backward() with raw Tensors,
+     * which means no higher-order gradient support. Subclasses that need
+     * higher-order gradient support (e.g., MulBackward, MatMulBackward) should
+     * override this method.
+     *
+     * @param grad_outputs Gradient Variables with respect to outputs
+     * @return Gradient Variables with respect to inputs (with grad_fn set)
+     */
+    virtual auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable>;
+
+    /**
      * @brief Set next functions in computation graph.
      *
      * Links this function to preceding functions for backpropagation.
@@ -164,8 +181,37 @@ public:
      */
     auto saved_tensors() const -> const std::vector<Tensor>&;
 
+    /**
+     * @brief Save Variables for backward pass (preserves graph connections).
+     *
+     * When create_graph=true, forward operations should save Variables instead
+     * of raw Tensors so that the backward pass can use Variable operations
+     * and build a higher-order gradient graph.
+     *
+     * @param variables Variables to save for gradient computation
+     */
+    auto save_variables_for_backward(std::vector<Variable> variables) -> void;
+
+    /**
+     * @brief Get saved Variables.
+     *
+     * Retrieves Variables saved during forward pass. If no Variables were saved
+     * but Tensors were saved, wraps the Tensors as Variables without grad tracking.
+     *
+     * @return Vector of saved Variables
+     */
+    auto saved_variables() const -> const std::vector<Variable>&;
+
+    /**
+     * @brief Check if Variables were saved for backward.
+     *
+     * @return true if save_variables_for_backward() was called
+     */
+    auto has_saved_variables() const -> bool { return !saved_variables_.empty(); }
+
 protected:
     mutable std::vector<Tensor> saved_tensors_;                     ///< Tensors saved for backward
+    mutable std::vector<Variable> saved_variables_;                 ///< Variables saved for backward (preserves graph for create_graph)
     mutable Device offloaded_device_{Device::cpu()};                ///< Original device when offloaded
     mutable bool tensors_offloaded_{false};                         ///< Whether saved tensors are on CPU due to offloading
     std::vector<std::shared_ptr<Function>> next_functions_;         ///< Chained gradient functions
@@ -197,6 +243,7 @@ class AddBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 
     // Public for direct access from Variable operators
     std::vector<int64_t> input_shape_a_;
@@ -217,6 +264,7 @@ class SubBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 
     // Public for direct access from Variable operators
     std::vector<int64_t> input_shape_a_;
@@ -237,6 +285,7 @@ class MulBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 
     // Public for direct access from Variable operators
     std::vector<int64_t> input_shape_a_;
@@ -257,6 +306,7 @@ class DivBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 };
 
 /**
@@ -279,6 +329,7 @@ class MatMulBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 };
 
 /**
@@ -344,6 +395,7 @@ public:
     SumBackward(std::optional<int64_t> dim, bool keepdim) : dim_(dim), keepdim_(keepdim) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 private:
     std::optional<int64_t> dim_;
     bool keepdim_;
@@ -364,6 +416,7 @@ public:
     MeanBackward(std::optional<int64_t> dim, bool keepdim) : dim_(dim), keepdim_(keepdim) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 private:
     std::optional<int64_t> dim_;
     bool keepdim_;
@@ -409,6 +462,7 @@ class NegBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 };
 
 /**

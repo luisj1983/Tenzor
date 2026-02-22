@@ -83,6 +83,16 @@ auto ProcessGroup::all_reduce(Tensor& tensor, ReduceOp op) -> void {
     backend_->all_reduce(tensor, op);
 }
 
+auto ProcessGroup::all_reduce_async(Tensor& tensor, ReduceOp op,
+                                     void* stream) -> void {
+    std::lock_guard<std::mutex> lock(mutex_);
+    backend_->all_reduce_async(tensor, op, stream);
+}
+
+auto ProcessGroup::supports_async_stream() const -> bool {
+    return backend_->supports_async_stream();
+}
+
 auto ProcessGroup::reduce(Tensor& tensor, int dst_rank, ReduceOp op) -> void {
     std::lock_guard<std::mutex> lock(mutex_);
     backend_->reduce(tensor, dst_rank, op);

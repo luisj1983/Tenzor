@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <vector>
@@ -17,6 +18,7 @@
 #include <functional>
 #include "../core/tensor.hpp"
 #include "../autograd/variable.hpp"
+#include "symbolic_shape.hpp"
 
 namespace tenzor {
 namespace jit {
@@ -114,6 +116,100 @@ public:
      */
     auto clear_uses() -> void { uses_.clear(); }
 
+    /**
+     * @brief Remove a specific consuming node from the uses list.
+     *
+     * @param n Node to remove from uses
+     */
+    auto remove_use(const std::shared_ptr<Node>& n) -> void {
+        uses_.erase(
+            std::remove_if(uses_.begin(), uses_.end(),
+                [&n](const std::weak_ptr<Node>& wp) {
+                    auto sp = wp.lock();
+                    return !sp || sp == n;
+                }),
+            uses_.end());
+    }
+
+    /**
+     * @brief Get buffer ID for memory planning.
+     *
+     * @return Buffer pool index (SIZE_MAX if unassigned)
+     */
+    auto buffer_id() const -> size_t { return buffer_id_; }
+
+    /**
+     * @brief Set buffer ID for memory planning.
+     *
+     * @param id Buffer pool index
+     */
+    auto set_buffer_id(size_t id) -> void { buffer_id_ = id; }
+
+    /**
+     * @brief Get buffer offset for memory planning.
+     *
+     * @return Byte offset within the assigned buffer
+     */
+    auto buffer_offset() const -> size_t { return buffer_offset_; }
+
+    /**
+     * @brief Set buffer offset for memory planning.
+     *
+     * @param offset Byte offset within the assigned buffer
+     */
+    auto set_buffer_offset(size_t offset) -> void { buffer_offset_ = offset; }
+
+    /**
+     * @brief Check if this value has a memory plan assignment.
+     *
+     * @return true if buffer_id has been set
+     */
+    auto has_memory_plan() const -> bool { return buffer_id_ != SIZE_MAX; }
+
+    // ========================================================================
+    // Symbolic shape support
+    // ========================================================================
+
+    /**
+     * @brief Get the symbolic shape.
+     *
+     * Returns the symbolic shape associated with this value. If no symbolic
+     * shape has been set, returns an empty SymbolicShape.
+     *
+     * @return Symbolic shape
+     */
+    auto symbolic_shape() const -> const SymbolicShape& { return symbolic_shape_; }
+
+    /**
+     * @brief Set the symbolic shape.
+     *
+     * @param shape New symbolic shape
+     */
+    auto set_symbolic_shape(SymbolicShape shape) -> void {
+        symbolic_shape_ = std::move(shape);
+    }
+
+    /**
+     * @brief Check if this value has any symbolic dimensions.
+     *
+     * Returns true if a symbolic shape has been set and it contains
+     * at least one symbolic (non-concrete) dimension.
+     *
+     * @return true if symbolic dimensions exist
+     */
+    auto has_symbolic_dims() const -> bool {
+        return !symbolic_shape_.empty() && symbolic_shape_.has_symbolic_dims();
+    }
+
+    /**
+     * @brief Check if a symbolic shape has been assigned.
+     *
+     * @return true if symbolic shape is non-empty
+     */
+    auto has_symbolic_shape() const -> bool {
+        return !symbolic_shape_.empty();
+    }
+
 private:
     std::string id_;                              ///< Unique identifier
     std::vector<int64_t> shape_;                  ///< Tensor shape
@@ -121,6 +217,9 @@ private:
     Device device_;                               ///< Device location
     std::weak_ptr<Node> node_;                    ///< Producing node
     std::vector<std::weak_ptr<Node>> uses_;       ///< Consuming nodes
+    size_t buffer_id_{SIZE_MAX};                  ///< Memory plan buffer index
+    size_t buffer_offset_{0};                     ///< Memory plan byte offset
+    SymbolicShape symbolic_shape_;                ///< Symbolic shape (may be empty)
 };
 
 /**
@@ -446,9 +545,45 @@ public:
     /**
      * @brief Remove node from graph.
      *
+     * Removes the node from the nodes list and removes the node from
+     * each input value's uses list (without clearing other uses).
+     *
      * @param node Node to remove
      */
     auto remove_node(std::shared_ptr<Node> node) -> void;
+
+    /**
+     * @brief Replace all uses of one value with another.
+     *
+     * For every node that has old_id in its inputs, replaces it with
+     * the value for new_id. Updates the uses lists accordingly.
+     *
+     * @param old_id ID of value to replace
+     * @param new_id ID of replacement value
+     */
+    auto replace_value(const std::string& old_id, const std::string& new_id) -> void;
+
+    /**
+     * @brief Replace a node with another node.
+     *
+     * Wires all consumers of old_node's outputs to use new_node's
+     * outputs instead. The old_node is then removed from the graph.
+     *
+     * @param old_node Node to replace
+     * @param new_node Replacement node
+     */
+    auto replace_node(std::shared_ptr<Node> old_node, std::shared_ptr<Node> new_node) -> void;
+
+    /**
+     * @brief Replace a node with an existing value (identity bypass).
+     *
+     * Redirects all consumers of the node's first output to use the
+     * given value instead. Used for simplifications like x+0 -> x.
+     *
+     * @param node Node to bypass
+     * @param value_id ID of the value to use instead
+     */
+    auto replace_node_with_value(std::shared_ptr<Node> node, const std::string& value_id) -> void;
 
     /**
      * @brief Perform topological sort of nodes.
@@ -463,6 +598,42 @@ public:
      * Propagates shape and dtype information through the graph.
      */
     auto infer_types() -> void;
+
+    /**
+     * @brief Set symbolic shape for a graph input.
+     *
+     * Marks specific dimensions of an input value as symbolic. This is used
+     * to indicate that certain dimensions (e.g., batch size, sequence length)
+     * are dynamic and may vary between executions.
+     *
+     * @param input_idx Index of the input value (0-based)
+     * @param shape Symbolic shape to assign
+     * @throws std::out_of_range if input_idx is out of bounds
+     *
+     * @code
+     * // Mark first input as having dynamic batch dimension
+     * SymbolicShape shape = {
+     *     SymbolicDim::symbolic("batch"),
+     *     SymbolicDim::concrete(3),
+     *     SymbolicDim::concrete(224),
+     *     SymbolicDim::concrete(224)
+     * };
+     * graph->set_symbolic_input_shape(0, shape);
+     * graph->infer_symbolic_types();
+     * @endcode
+     */
+    auto set_symbolic_input_shape(size_t input_idx, SymbolicShape shape) -> void;
+
+    /**
+     * @brief Run symbolic type inference pass.
+     *
+     * Propagates symbolic shape information through the graph, using
+     * the same operation-specific rules as infer_types() but operating
+     * on SymbolicShape instead of concrete shapes. Should be called
+     * after set_symbolic_input_shape() to propagate symbolic dimensions
+     * through the entire graph.
+     */
+    auto infer_symbolic_types() -> void;
 
     /**
      * @brief Execute graph with runtime inputs.
@@ -507,6 +678,17 @@ public:
      * @return Value count
      */
     auto num_values() const -> size_t { return values_.size(); }
+
+    /**
+     * @brief Find all nodes matching a given operation type name.
+     *
+     * Searches the graph for nodes whose OpType string representation
+     * matches the given type name.
+     *
+     * @param type_name Operation type name (e.g., "Conv2d", "ReLU")
+     * @return Vector of matching nodes
+     */
+    auto find_nodes_by_type(const std::string& type_name) const -> std::vector<std::shared_ptr<Node>>;
 
 private:
     std::vector<std::shared_ptr<Node>> nodes_;              ///< All nodes (topologically sorted)

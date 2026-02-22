@@ -12,7 +12,7 @@ SGD::SGD(std::vector<std::shared_ptr<Variable>> params, double lr, double moment
     initialize_buffers();
 }
 
-auto SGD::step() -> void {
+auto SGD::step_impl() -> void {
     for (size_t i = 0; i < parameters_.size(); ++i) {
         auto& param_ptr = parameters_[i];
         if (!param_ptr || !param_ptr->has_grad()) continue;

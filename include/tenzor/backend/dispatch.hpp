@@ -27,43 +27,14 @@ namespace tenzor {
  * All operations in Tenzor funnel through this dispatcher, which ensures
  * that operations are executed on the correct hardware backend.
  *
- * @code
- * Tensor a = tensor_on_cuda();
- * Tensor b = tensor_on_cuda();
- *
- * // Automatically dispatches to CUDA backend
- * auto result = Dispatcher::dispatch("add", {a, b});
- * @endcode
- *
+ * @note For dispatching operations, use the OpId-based dispatch in
+ *       fast_dispatch.hpp instead (e.g., dispatch<OpId::Add>({a, b})).
  * @note This class contains only static methods (utility class pattern).
  * @see Backend for backend interface
  * @see OperationRegistry for kernel registration
  */
 class Dispatcher {
 public:
-    /**
-     * @brief Dispatch operation to appropriate backend.
-     *
-     * Routes the operation to the correct backend based on input tensor
-     * devices. Performs device compatibility checking and selects the
-     * appropriate kernel implementation.
-     *
-     * @param op_name Operation identifier (e.g., "add", "matmul", "conv2d")
-     * @param inputs Input tensors (must all be on compatible devices)
-     * @param attrs Operation-specific attributes
-     * @return Vector of output tensors
-     * @throws std::runtime_error if devices are incompatible or operation unsupported
-     *
-     * @code
-     * Tensor a({3, 4}, DType::Float32, Device::cuda(0));
-     * Tensor b({3, 4}, DType::Float32, Device::cuda(0));
-     * auto result = Dispatcher::dispatch("add", {a, b});
-     * @endcode
-     */
-    static auto dispatch(const std::string& op_name,
-                        std::span<const Tensor> inputs,
-                        const OpAttributes& attrs = {}) -> std::vector<Tensor>;
-
     /**
      * @brief Get appropriate backend for tensor set.
      *

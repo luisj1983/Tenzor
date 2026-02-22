@@ -18,6 +18,7 @@
 #include "../nn/layers/linear.hpp"
 #include "../nn/layers/normalization.hpp"
 #include "../nn/layers/dropout.hpp"
+#include "../nn/layers/drop_path.hpp"
 #include "../nn/layers/pooling.hpp"
 #include "../nn/layers/vision.hpp"
 #include "../nn/activations/activations.hpp"
@@ -127,7 +128,7 @@ private:
     std::shared_ptr<nn::WindowAttention> attn_;
     std::shared_ptr<nn::LayerNorm> norm2_;
     std::shared_ptr<SwinMLP> mlp_;
-    std::shared_ptr<nn::Dropout> drop_path_;
+    std::shared_ptr<nn::DropPath> drop_path_;
 
     /**
      * @brief Compute and cache attention mask for shifted windows.

@@ -6,6 +6,7 @@
 #include "../../include/tenzor/jit/compiler.hpp"
 #include "../../include/tenzor/jit/tracer.hpp"
 #include "../../include/tenzor/ops/math.hpp"
+#include "../../include/tenzor/ops/reduction.hpp"
 #include <iostream>
 #include <algorithm>
 #include <unordered_set>
@@ -106,8 +107,35 @@ auto CommonSubexpressionEliminationPass::run(Graph& graph) -> bool {
         }
     }
 
-    // Apply replacements (would need graph rewriting support)
-    // This is a simplified version - full implementation would update all uses
+    // Apply replacements: redirect consumers and remove dead duplicate nodes
+    for (const auto& [old_id, new_id] : value_replacements) {
+        graph.replace_value(old_id, new_id);
+    }
+
+    // Remove duplicate nodes (those whose outputs were all replaced)
+    std::unordered_set<std::string> replaced_outputs;
+    for (const auto& [old_id, new_id] : value_replacements) {
+        replaced_outputs.insert(old_id);
+    }
+
+    // Collect nodes to remove (those whose ALL outputs have been replaced)
+    std::vector<std::shared_ptr<Node>> to_remove;
+    for (const auto& node : graph.nodes()) {
+        bool all_replaced = !node->outputs().empty();
+        for (const auto& output : node->outputs()) {
+            if (replaced_outputs.find(output->id()) == replaced_outputs.end()) {
+                all_replaced = false;
+                break;
+            }
+        }
+        if (all_replaced) {
+            to_remove.push_back(node);
+        }
+    }
+
+    for (auto& node : to_remove) {
+        graph.remove_node(node);
+    }
 
     return modified;
 }
@@ -118,6 +146,39 @@ auto CommonSubexpressionEliminationPass::compute_node_hash(const Node& node) -> 
     // Hash inputs
     for (const auto& input : node.inputs()) {
         hash ^= std::hash<std::string>{}(input->id()) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+    }
+
+    // Hash all node attributes
+    auto all_attrs = const_cast<Node&>(node).get_all_attrs();
+    auto& attrs = std::get<0>(all_attrs);
+    auto& int_attrs = std::get<1>(all_attrs);
+    auto& vec_attrs = std::get<2>(all_attrs);
+    auto& bool_attrs = std::get<3>(all_attrs);
+
+    // Hash float attributes
+    for (const auto& [name, val] : attrs) {
+        hash ^= std::hash<std::string>{}(name) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        hash ^= std::hash<float>{}(val) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+    }
+
+    // Hash int attributes
+    for (const auto& [name, val] : int_attrs) {
+        hash ^= std::hash<std::string>{}(name) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        hash ^= std::hash<int64_t>{}(val) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+    }
+
+    // Hash vector attributes
+    for (const auto& [name, vec] : vec_attrs) {
+        hash ^= std::hash<std::string>{}(name) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        for (auto v : vec) {
+            hash ^= std::hash<int64_t>{}(v) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        }
+    }
+
+    // Hash bool attributes
+    for (const auto& [name, val] : bool_attrs) {
+        hash ^= std::hash<std::string>{}(name) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        hash ^= std::hash<bool>{}(val) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
     }
 
     return hash;
@@ -135,7 +196,47 @@ auto CommonSubexpressionEliminationPass::nodes_equivalent(const Node& a, const N
         if (a.inputs()[i]->id() != b.inputs()[i]->id()) return false;
     }
 
-    // Note: Should also check attributes, but simplified for now
+    // Compare all attributes
+    auto all_attrs_a = const_cast<Node&>(a).get_all_attrs();
+    auto all_attrs_b = const_cast<Node&>(b).get_all_attrs();
+
+    auto& attrs_a = std::get<0>(all_attrs_a);
+    auto& int_attrs_a = std::get<1>(all_attrs_a);
+    auto& vec_attrs_a = std::get<2>(all_attrs_a);
+    auto& bool_attrs_a = std::get<3>(all_attrs_a);
+
+    auto& attrs_b = std::get<0>(all_attrs_b);
+    auto& int_attrs_b = std::get<1>(all_attrs_b);
+    auto& vec_attrs_b = std::get<2>(all_attrs_b);
+    auto& bool_attrs_b = std::get<3>(all_attrs_b);
+
+    // Compare float attributes
+    if (attrs_a.size() != attrs_b.size()) return false;
+    for (const auto& [name, val] : attrs_a) {
+        auto it = attrs_b.find(name);
+        if (it == attrs_b.end() || it->second != val) return false;
+    }
+
+    // Compare int attributes
+    if (int_attrs_a.size() != int_attrs_b.size()) return false;
+    for (const auto& [name, val] : int_attrs_a) {
+        auto it = int_attrs_b.find(name);
+        if (it == int_attrs_b.end() || it->second != val) return false;
+    }
+
+    // Compare vector attributes
+    if (vec_attrs_a.size() != vec_attrs_b.size()) return false;
+    for (const auto& [name, vec] : vec_attrs_a) {
+        auto it = vec_attrs_b.find(name);
+        if (it == vec_attrs_b.end() || it->second != vec) return false;
+    }
+
+    // Compare bool attributes
+    if (bool_attrs_a.size() != bool_attrs_b.size()) return false;
+    for (const auto& [name, val] : bool_attrs_a) {
+        auto it = bool_attrs_b.find(name);
+        if (it == bool_attrs_b.end() || it->second != val) return false;
+    }
 
     return true;
 }
@@ -147,20 +248,44 @@ auto CommonSubexpressionEliminationPass::nodes_equivalent(const Node& a, const N
 auto ConstantFoldingPass::run(Graph& graph) -> bool {
     bool modified = false;
 
+    // Collect nodes to fold first (avoid modifying graph while iterating)
+    std::vector<std::shared_ptr<Node>> foldable;
     for (const auto& node : graph.nodes()) {
         if (can_fold(*node)) {
-            try {
-                Tensor result = evaluate_constant(*node);
+            foldable.push_back(node);
+        }
+    }
 
-                // Create constant node
-                auto const_node = graph.create_node(OpType::Constant);
-                const_node->set_tensor_attr("value", result);
+    for (auto& node : foldable) {
+        try {
+            Tensor result = evaluate_constant(*node);
 
-                // Replace node with constant (simplified - would need graph rewriting)
+            // Create constant node with the folded result
+            auto const_node = graph.create_node(OpType::Constant);
+            const_node->set_tensor_attr("value", result);
+
+            // Create output value for the constant node
+            if (!node->outputs().empty()) {
+                auto old_output = node->outputs()[0];
+                std::string const_val_id = const_node->name() + "_out";
+                auto const_val = graph.create_value(
+                    const_val_id, old_output->shape(), old_output->dtype(), old_output->device());
+                const_val->set_node(const_node);
+                const_node->add_output(const_val);
+
+                // Add the constant node to the graph
+                graph.add_node(const_node);
+
+                // Redirect all consumers of the original node to use the constant
+                graph.replace_value(old_output->id(), const_val_id);
+
+                // Remove the original node
+                graph.remove_node(node);
+
                 modified = true;
-            } catch (...) {
-                // Failed to fold - continue
             }
+        } catch (...) {
+            // Failed to fold - continue
         }
     }
 
@@ -267,17 +392,51 @@ auto FuseConvBatchNormPass::fuse_pair(std::shared_ptr<Node> conv_node,
     Tensor conv_weight = conv_node->get_tensor_attr("weight");
     Tensor conv_bias = conv_node->get_tensor_attr("bias");
 
-    // Compute fused parameters
-    // w_fused = gamma * w_conv / sqrt(var + eps)
-    // b_fused = gamma * (b_conv - mean) / sqrt(var + eps) + beta
+    // Validate that we have the necessary tensors
+    if (gamma.numel() == 0 || running_var.numel() == 0 || conv_weight.numel() == 0) {
+        return false;
+    }
 
-    // This is a simplified version - actual implementation would need:
-    // 1. Proper broadcasting for gamma/beta
-    // 2. Channel-wise operations
-    // 3. Handling of optional bias
+    // Compute fused parameters:
+    //   inv_std = 1 / sqrt(var + eps)
+    //   w' = gamma * w / sqrt(var + eps) = gamma * inv_std * w
+    //   b' = gamma * (b - mean) / sqrt(var + eps) + beta
+    Tensor var_plus_eps = running_var + eps;
+    Tensor inv_std = tenzor::sqrt(var_plus_eps);
+    // inv_std = 1 / sqrt(var + eps): compute scale = gamma / sqrt(var + eps)
+    Tensor scale = gamma / inv_std;
 
-    // For now, just mark as fused (real implementation would rewrite the graph)
+    // Fuse weights: scale each output channel
+    // conv_weight shape: [out_channels, in_channels, kH, kW]
+    // scale shape: [out_channels]
+    // We need to reshape scale to [out_channels, 1, 1, 1] for broadcasting
+    auto w_shape = conv_weight.shape();
+    if (w_shape.size() == 4) {
+        Tensor scale_reshaped = scale.reshape({w_shape[0], 1, 1, 1});
+        Tensor fused_weight = conv_weight * scale_reshaped;
+        conv_node->set_tensor_attr("weight", fused_weight);
+    } else {
+        // Fallback: attempt direct element-wise (may not broadcast correctly)
+        conv_node->set_tensor_attr("weight", conv_weight * scale);
+    }
+
+    // Fuse bias: b' = scale * (b - mean) + beta
+    if (conv_bias.numel() > 0) {
+        Tensor fused_bias = scale * (conv_bias - running_mean) + beta;
+        conv_node->set_tensor_attr("bias", fused_bias);
+    } else {
+        // No conv bias: b' = scale * (0 - mean) + beta = -scale * mean + beta
+        Tensor fused_bias = beta - scale * running_mean;
+        conv_node->set_tensor_attr("bias", fused_bias);
+    }
+
     conv_node->set_bool_attr("fused_bn", true);
+
+    // Redirect consumers of BN output to use conv output, then remove BN node
+    if (!conv_node->outputs().empty() && !bn_node->outputs().empty()) {
+        graph.replace_value(bn_node->outputs()[0]->id(), conv_node->outputs()[0]->id());
+        graph.remove_node(bn_node);
+    }
 
     return true;
 }
@@ -306,11 +465,15 @@ auto FuseConvReluPass::run(Graph& graph) -> bool {
 auto FuseConvReluPass::fuse_pair(std::shared_ptr<Node> conv_node,
                                   std::shared_ptr<Node> relu_node,
                                   Graph& graph) -> bool {
-    // Mark conv as having fused ReLU
+    // Mark conv as having fused ReLU activation
     conv_node->set_bool_attr("fused_relu", true);
 
-    // Would need to remove ReLU node and rewire connections
-    // Simplified for now
+    // Redirect consumers of relu output to use conv output, then remove relu
+    if (!conv_node->outputs().empty() && !relu_node->outputs().empty()) {
+        graph.replace_value(relu_node->outputs()[0]->id(), conv_node->outputs()[0]->id());
+        graph.remove_node(relu_node);
+    }
+
     return true;
 }
 
@@ -338,8 +501,73 @@ auto FuseLinearReluPass::run(Graph& graph) -> bool {
 auto FuseLinearReluPass::fuse_pair(std::shared_ptr<Node> linear_node,
                                     std::shared_ptr<Node> relu_node,
                                     Graph& graph) -> bool {
+    // Mark linear as having fused ReLU activation
     linear_node->set_bool_attr("fused_relu", true);
+
+    // Redirect consumers of relu output to use linear output, then remove relu
+    if (!linear_node->outputs().empty() && !relu_node->outputs().empty()) {
+        graph.replace_value(relu_node->outputs()[0]->id(), linear_node->outputs()[0]->id());
+        graph.remove_node(relu_node);
+    }
+
     return true;
+}
+
+// ============================================================================
+// Algebraic Simplification Pass - Helpers
+// ============================================================================
+
+/**
+ * @brief Check if a Constant node holds a tensor with all zero values.
+ *
+ * @param node Node to check (must be OpType::Constant)
+ * @return true if the tensor is all zeros
+ */
+static auto is_all_zeros(const Node& node) -> bool {
+    if (node.op_type() != OpType::Constant) return false;
+    const Tensor& t = node.get_tensor_attr("value");
+    if (t.numel() == 0) return false;
+
+    // Check all elements are zero by comparing sum of absolute values
+    try {
+        Tensor abs_sum = tenzor::sum(tenzor::abs(t));
+        // Access the scalar value - for Float32
+        if (t.dtype() == DType::Float32) {
+            return abs_sum.item<float>() == 0.0f;
+        } else if (t.dtype() == DType::Float64) {
+            return abs_sum.item<double>() == 0.0;
+        }
+        // For integer types, try float conversion
+        return abs_sum.item<float>() == 0.0f;
+    } catch (...) {
+        return false;
+    }
+}
+
+/**
+ * @brief Check if a Constant node holds a tensor with all one values.
+ *
+ * @param node Node to check (must be OpType::Constant)
+ * @return true if the tensor is all ones
+ */
+static auto is_all_ones(const Node& node) -> bool {
+    if (node.op_type() != OpType::Constant) return false;
+    const Tensor& t = node.get_tensor_attr("value");
+    if (t.numel() == 0) return false;
+
+    // Check all elements are one: sum(abs(t - 1)) == 0
+    try {
+        Tensor diff = t - 1.0;
+        Tensor abs_sum = tenzor::sum(tenzor::abs(diff));
+        if (t.dtype() == DType::Float32) {
+            return abs_sum.item<float>() == 0.0f;
+        } else if (t.dtype() == DType::Float64) {
+            return abs_sum.item<double>() == 0.0;
+        }
+        return abs_sum.item<float>() == 0.0f;
+    } catch (...) {
+        return false;
+    }
 }
 
 // ============================================================================
@@ -349,11 +577,19 @@ auto FuseLinearReluPass::fuse_pair(std::shared_ptr<Node> linear_node,
 auto AlgebraicSimplificationPass::run(Graph& graph) -> bool {
     bool modified = false;
 
-    for (const auto& node : graph.nodes()) {
+    // Collect nodes to process (we may modify the graph during iteration)
+    std::vector<std::shared_ptr<Node>> nodes_to_process(graph.nodes().begin(), graph.nodes().end());
+
+    for (const auto& node : nodes_to_process) {
+        // Check if node is still in the graph (may have been removed by previous simplification)
+        auto& current_nodes = graph.nodes();
+        if (std::find(current_nodes.begin(), current_nodes.end(), node) == current_nodes.end()) {
+            continue;
+        }
+
         if (simplify_binary_op(node, graph)) {
             modified = true;
-        }
-        if (simplify_unary_op(node, graph)) {
+        } else if (simplify_unary_op(node, graph)) {
             modified = true;
         }
     }
@@ -364,7 +600,6 @@ auto AlgebraicSimplificationPass::run(Graph& graph) -> bool {
 auto AlgebraicSimplificationPass::simplify_binary_op(std::shared_ptr<Node> node, Graph& graph) -> bool {
     if (node->inputs().size() < 2) return false;
 
-    // Check for constant inputs
     auto input0 = node->inputs()[0];
     auto input1 = node->inputs()[1];
 
@@ -376,21 +611,55 @@ auto AlgebraicSimplificationPass::simplify_binary_op(std::shared_ptr<Node> node,
 
     if (!is_const0 && !is_const1) return false;
 
-    // Simplification rules
     switch (node->op_type()) {
         case OpType::Add:
-            if (is_const1) {
-                Tensor val = producer1->get_tensor_attr("value");
-                // Check if adding zero (simplified check)
-                // Would replace node with identity
+            // x + 0 = x
+            if (is_const1 && is_all_zeros(*producer1)) {
+                graph.replace_node_with_value(node, input0->id());
+                return true;
+            }
+            // 0 + x = x
+            if (is_const0 && is_all_zeros(*producer0)) {
+                graph.replace_node_with_value(node, input1->id());
+                return true;
+            }
+            break;
+
+        case OpType::Sub:
+            // x - 0 = x
+            if (is_const1 && is_all_zeros(*producer1)) {
+                graph.replace_node_with_value(node, input0->id());
                 return true;
             }
             break;
 
         case OpType::Mul:
-            if (is_const1) {
-                Tensor val = producer1->get_tensor_attr("value");
-                // Check if multiplying by 1 or 0
+            // x * 1 = x
+            if (is_const1 && is_all_ones(*producer1)) {
+                graph.replace_node_with_value(node, input0->id());
+                return true;
+            }
+            // 1 * x = x
+            if (is_const0 && is_all_ones(*producer0)) {
+                graph.replace_node_with_value(node, input1->id());
+                return true;
+            }
+            // x * 0 = 0 (redirect to the zero constant)
+            if (is_const1 && is_all_zeros(*producer1)) {
+                graph.replace_node_with_value(node, input1->id());
+                return true;
+            }
+            // 0 * x = 0
+            if (is_const0 && is_all_zeros(*producer0)) {
+                graph.replace_node_with_value(node, input0->id());
+                return true;
+            }
+            break;
+
+        case OpType::Div:
+            // x / 1 = x
+            if (is_const1 && is_all_ones(*producer1)) {
+                graph.replace_node_with_value(node, input0->id());
                 return true;
             }
             break;
@@ -403,19 +672,24 @@ auto AlgebraicSimplificationPass::simplify_binary_op(std::shared_ptr<Node> node,
 }
 
 auto AlgebraicSimplificationPass::simplify_unary_op(std::shared_ptr<Node> node, Graph& graph) -> bool {
-    // Simplify patterns like log(exp(x)) = x
-    if (node->op_type() == OpType::Log && !node->inputs().empty()) {
+    if (node->inputs().empty()) return false;
+
+    // log(exp(x)) = x
+    if (node->op_type() == OpType::Log) {
         auto producer = node->inputs()[0]->node();
-        if (producer && producer->op_type() == OpType::Exp) {
-            // Would replace with identity
+        if (producer && producer->op_type() == OpType::Exp && !producer->inputs().empty()) {
+            // Bypass both log and exp: redirect to exp's input
+            graph.replace_node_with_value(node, producer->inputs()[0]->id());
             return true;
         }
     }
 
-    if (node->op_type() == OpType::Exp && !node->inputs().empty()) {
+    // exp(log(x)) = x
+    if (node->op_type() == OpType::Exp) {
         auto producer = node->inputs()[0]->node();
-        if (producer && producer->op_type() == OpType::Log) {
-            // Would replace with identity
+        if (producer && producer->op_type() == OpType::Log && !producer->inputs().empty()) {
+            // Bypass both exp and log: redirect to log's input
+            graph.replace_node_with_value(node, producer->inputs()[0]->id());
             return true;
         }
     }
@@ -430,28 +704,59 @@ auto AlgebraicSimplificationPass::simplify_unary_op(std::shared_ptr<Node> node, 
 auto ReshapeEliminationPass::run(Graph& graph) -> bool {
     bool modified = false;
 
+    // Collect reshape nodes (we may modify the graph during iteration)
+    std::vector<std::shared_ptr<Node>> reshape_nodes;
     for (const auto& node : graph.nodes()) {
-        if (node->op_type() != OpType::Reshape) continue;
+        if (node->op_type() == OpType::Reshape) {
+            reshape_nodes.push_back(node);
+        }
+    }
+
+    for (auto& node : reshape_nodes) {
+        // Check if node is still in the graph
+        auto& current_nodes = graph.nodes();
+        if (std::find(current_nodes.begin(), current_nodes.end(), node) == current_nodes.end()) {
+            continue;
+        }
 
         if (node->inputs().empty()) continue;
         auto input = node->inputs()[0];
 
-        // Check if reshape is redundant (same shape)
+        // Case 1: Same-shape reshape bypass
+        // If output shape == input shape, the reshape is a no-op
         auto target_shape = node->get_vec_attr("shape");
         if (input->shape() == target_shape) {
-            // Would remove reshape node
+            graph.replace_node_with_value(node, input->id());
             modified = true;
+            continue;
         }
 
-        // Check for consecutive reshapes
+        // Case 2: Consecutive reshapes - merge
+        // reshape(reshape(x, s1), s2) -> reshape(x, s2)
         auto producer = input->node();
-        if (producer && producer->op_type() == OpType::Reshape) {
-            // Would merge reshapes
+        if (producer && producer->op_type() == OpType::Reshape && !producer->inputs().empty()) {
+            // Rewire: this reshape takes the original input of the first reshape
+            auto original_input = producer->inputs()[0];
+            node->replace_input(0, original_input);
             modified = true;
         }
     }
 
     return modified;
+}
+
+// ============================================================================
+// Memory Planning Pass
+// ============================================================================
+
+auto MemoryPlanningPass::run(Graph& graph) -> bool {
+    MemoryPlanner planner;
+    planner.set_alignment(alignment_);
+    plan_ = planner.plan(graph);
+
+    // Memory planning annotates values but does not structurally modify
+    // the graph, so return false to avoid triggering re-optimization.
+    return false;
 }
 
 // ============================================================================
@@ -488,7 +793,24 @@ auto Compiler::optimize(Graph& graph, int max_iterations) -> int {
         }
     }
 
+    // Run memory planning as the final step after all structural passes
+    if (enable_memory_planning_) {
+        memory_plan_ = plan_memory(graph);
+
+        if (verbose_) {
+            std::cout << "MemoryPlanning: " << memory_plan_.num_values_planned << " values planned, "
+                      << memory_plan_.num_values_reused << " sharing buffers, "
+                      << memory_plan_.pool_sizes.size() << " pool buffers, "
+                      << memory_plan_.total_memory << " bytes total\n";
+        }
+    }
+
     return total_changes;
+}
+
+auto Compiler::plan_memory(Graph& graph) -> MemoryPlan {
+    MemoryPlanner planner;
+    return planner.plan(graph);
 }
 
 auto Compiler::run_passes(Graph& graph) -> int {

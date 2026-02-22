@@ -56,7 +56,7 @@ auto Adadelta::initialize_buffers() -> void {
     }
 }
 
-auto Adadelta::step() -> void {
+auto Adadelta::step_impl() -> void {
     for (size_t i = 0; i < parameters_.size(); ++i) {
         auto& param = parameters_[i];
 

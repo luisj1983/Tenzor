@@ -4,6 +4,7 @@
  */
 
 #include "../../include/tenzor/jit/tracer.hpp"
+#include "../../include/tenzor/jit/compiler.hpp"
 #include <sstream>
 #include <iomanip>
 #include <stdexcept>
@@ -326,6 +327,17 @@ auto trace(std::function<std::vector<Variable>(const std::vector<Variable>&)> fu
 
     // End tracing and get graph
     return guard.get_graph(inputs, outputs);
+}
+
+auto trace(std::shared_ptr<nn::Module> module,
+           const Tensor& dummy_input) -> std::shared_ptr<CompiledModule> {
+    if (!module) {
+        throw std::runtime_error("Cannot trace null module");
+    }
+
+    Variable input_var(dummy_input, false);
+    auto graph = trace(module, input_var);
+    return std::make_shared<CompiledModule>(graph);
 }
 
 } // namespace jit

@@ -70,7 +70,7 @@ auto RMSprop::initialize_buffers() -> void {
     }
 }
 
-auto RMSprop::step() -> void {
+auto RMSprop::step_impl() -> void {
     for (size_t i = 0; i < parameters_.size(); ++i) {
         auto& param = parameters_[i];
 

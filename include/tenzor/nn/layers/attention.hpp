@@ -87,6 +87,8 @@ public:
      * @param vdim Value dimension (default: 0, uses embed_dim)
      * @param batch_first If true, input/output tensors are (batch, seq, feature)
      *                    otherwise (seq, batch, feature) (default: false)
+     * @param is_causal If true, applies causal masking inside fused attention
+     *                  kernels instead of requiring an explicit mask (default: false)
      *
      * @throws std::invalid_argument if embed_dim not divisible by num_heads
      * @throws std::invalid_argument if dropout not in [0, 1]
@@ -97,6 +99,8 @@ public:
      *                          false, 0, 0, true);         // Batch-first with dropout
      * MultiheadAttention attn3(512, 8, 0.1, true, false,
      *                          false, 256, 256, false);    // Different K/V dims
+     * MultiheadAttention attn4(512, 8, 0.0, true, false,
+     *                          false, 0, 0, true, true);   // Causal attention
      * @endcode
      */
     MultiheadAttention(int64_t embed_dim,
@@ -107,7 +111,8 @@ public:
                       bool add_zero_attn = false,
                       int64_t kdim = 0,
                       int64_t vdim = 0,
-                      bool batch_first = false);
+                      bool batch_first = false,
+                      bool is_causal = false);
 
     /**
      * @brief Forward pass through multi-head attention.
@@ -182,6 +187,11 @@ public:
      */
     auto head_dim() const -> int64_t { return head_dim_; }
 
+    /**
+     * @brief Get whether causal masking is enabled.
+     */
+    auto is_causal() const -> bool { return is_causal_; }
+
 private:
     int64_t embed_dim_;      ///< Total embedding dimension
     int64_t num_heads_;      ///< Number of attention heads
@@ -191,6 +201,7 @@ private:
     double dropout_;         ///< Dropout probability
     bool batch_first_;       ///< Whether batch dimension is first
     bool add_zero_attn_;     ///< Whether to add zero attention
+    bool is_causal_;         ///< Whether to apply causal masking in fused kernels
 
     // Projection layers
     std::shared_ptr<Linear> q_proj_;    ///< Query projection

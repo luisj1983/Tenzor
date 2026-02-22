@@ -18,6 +18,8 @@
 #include <fstream>
 #include "../core/tensor.hpp"
 #include "../nn/module.hpp"
+#include "../ops/op_id.hpp"
+#include "../jit/tracer.hpp"
 #include "types.hpp"
 
 namespace tenzor {
@@ -70,6 +72,16 @@ public:
     std::string name;                    ///< Value name
     ONNXDataType dtype;                  ///< Data type
     std::vector<int64_t> shape;          ///< Shape (-1 for dynamic dimensions)
+
+    /**
+     * @brief Symbolic names for dynamic dimensions.
+     *
+     * Maps dimension index to a symbolic dim_param string (e.g., "batch_size",
+     * "seq_len"). When a dimension has a dim_param, the ONNX model emits
+     * the symbolic name instead of a fixed integer, enabling dynamic shapes
+     * at runtime.
+     */
+    std::unordered_map<int64_t, std::string> dim_params;
 
     ONNXExportValueInfo() = default;
     ONNXExportValueInfo(const std::string& name, ONNXDataType dtype,
@@ -255,6 +267,56 @@ public:
     ~ONNXExporter() = default;
 
     // ============================================================================
+    // Static Convenience API
+    // ============================================================================
+
+    /**
+     * @brief Export model to ONNX file (static convenience method).
+     *
+     * Traces the model with example inputs and converts the computation graph
+     * to ONNX format. Handles parameter serialization, graph construction,
+     * and binary output.
+     *
+     * @param model Module to export
+     * @param example_inputs Example input tensors for shape tracing
+     * @param output_path Path for the output .onnx file
+     * @param opset_version ONNX opset version (default: 13)
+     *
+     * @code
+     * auto model = std::make_shared<MyModel>();
+     * std::vector<Tensor> inputs = {Tensor({1, 3, 224, 224}, DType::Float32, Device::cpu())};
+     * ONNXExporter::export_model(*model, inputs, "model.onnx");
+     * @endcode
+     */
+    static void export_model(nn::Module& model,
+                             std::vector<Tensor> example_inputs,
+                             const std::string& output_path,
+                             int opset_version = 13);
+
+    /**
+     * @brief Map Tenzor OpId to ONNX operator type string.
+     *
+     * Provides a direct mapping from Tenzor's internal operation identifiers
+     * to the corresponding ONNX operator names.
+     *
+     * @param op Tenzor operation identifier
+     * @return ONNX operator type string (e.g., "Add", "MatMul", "Relu")
+     * @throws std::runtime_error if the OpId has no ONNX mapping
+     */
+    static auto op_to_onnx(OpId op) -> std::string;
+
+    /**
+     * @brief Map Tenzor DType to ONNX data type integer.
+     *
+     * Returns the ONNX TensorProto.DataType integer value for a given
+     * Tenzor DType, as defined in the ONNX specification.
+     *
+     * @param dtype Tenzor data type
+     * @return ONNX data type integer (e.g., Float32 -> 1, Float64 -> 11)
+     */
+    static auto dtype_to_onnx_int(DType dtype) -> int;
+
+    // ============================================================================
     // Model Configuration
     // ============================================================================
 
@@ -302,8 +364,10 @@ public:
      *
      * @param tensor Output tensor
      * @param name Output name
+     * @param dynamic_axes Map of dimension index to axis name for dynamic shapes
      */
-    auto add_output(const Tensor& tensor, const std::string& name) -> void;
+    auto add_output(const Tensor& tensor, const std::string& name,
+                    const std::unordered_map<int64_t, std::string>& dynamic_axes = {}) -> void;
 
     // ============================================================================
     // Tensor Operations
@@ -421,6 +485,118 @@ public:
                             const Tensor& output,
                             const std::string& output_name) -> void;
 
+    /**
+     * @brief Export GroupNorm layer
+     *
+     * For opset >= 18, exports as ONNX GroupNormalization.
+     * For earlier opsets, decomposes into Reshape + InstanceNormalization + Reshape
+     * to achieve the same semantics.
+     *
+     * @param input Input tensor of shape (N, C, *)
+     * @param weight Scale (gamma) tensor of shape (C)
+     * @param bias Shift (beta) tensor of shape (C)
+     * @param num_groups Number of groups to divide channels into
+     * @param eps Epsilon for numerical stability
+     * @param output Output tensor (same shape as input)
+     * @param output_name Output name in ONNX graph
+     */
+    auto export_groupnorm(const Tensor& input, const Tensor& weight,
+                          const Tensor& bias, int64_t num_groups, double eps,
+                          const Tensor& output,
+                          const std::string& output_name) -> void;
+
+    /**
+     * @brief Export LSTM layer
+     *
+     * Exports an LSTM as the ONNX LSTM operator. Handles the weight layout
+     * transform from Tenzor's (i, o, f, g) gate order to ONNX's required
+     * (i, o, f, c) gate order, and packs input-to-hidden and hidden-to-hidden
+     * weights into the ONNX format [num_directions, 4*hidden_size, input_size].
+     *
+     * @param input Input tensor of shape (seq_len, batch, input_size)
+     * @param weight_ih Input-to-hidden weight of shape (4*hidden_size, input_size)
+     * @param weight_hh Hidden-to-hidden weight of shape (4*hidden_size, hidden_size)
+     * @param bias_ih Optional input-to-hidden bias of shape (4*hidden_size)
+     * @param bias_hh Optional hidden-to-hidden bias of shape (4*hidden_size)
+     * @param hidden_size Hidden state size
+     * @param num_layers Number of stacked LSTM layers (only layer 0 exported here)
+     * @param bidirectional Whether the LSTM is bidirectional
+     * @param output Output tensor
+     * @param output_name Output name in ONNX graph
+     */
+    auto export_lstm(const Tensor& input,
+                     const Tensor& weight_ih, const Tensor& weight_hh,
+                     const std::optional<Tensor>& bias_ih,
+                     const std::optional<Tensor>& bias_hh,
+                     int64_t hidden_size, int64_t num_layers,
+                     bool bidirectional,
+                     const Tensor& output,
+                     const std::string& output_name) -> void;
+
+    /**
+     * @brief Export GRU layer
+     *
+     * Exports a GRU as the ONNX GRU operator. Handles the weight layout
+     * transform from Tenzor's (r, z, n) gate order to ONNX's required
+     * (z, r, h) gate order, and packs weights into the ONNX format
+     * [num_directions, 3*hidden_size, input_size].
+     *
+     * @param input Input tensor of shape (seq_len, batch, input_size)
+     * @param weight_ih Input-to-hidden weight of shape (3*hidden_size, input_size)
+     * @param weight_hh Hidden-to-hidden weight of shape (3*hidden_size, hidden_size)
+     * @param bias_ih Optional input-to-hidden bias of shape (3*hidden_size)
+     * @param bias_hh Optional hidden-to-hidden bias of shape (3*hidden_size)
+     * @param hidden_size Hidden state size
+     * @param num_layers Number of stacked GRU layers (only layer 0 exported here)
+     * @param bidirectional Whether the GRU is bidirectional
+     * @param output Output tensor
+     * @param output_name Output name in ONNX graph
+     */
+    auto export_gru(const Tensor& input,
+                    const Tensor& weight_ih, const Tensor& weight_hh,
+                    const std::optional<Tensor>& bias_ih,
+                    const std::optional<Tensor>& bias_hh,
+                    int64_t hidden_size, int64_t num_layers,
+                    bool bidirectional,
+                    const Tensor& output,
+                    const std::string& output_name) -> void;
+
+    /**
+     * @brief Export MultiHeadAttention layer
+     *
+     * Decomposes multi-head attention into ONNX primitives:
+     *   1. Q/K/V linear projections (MatMul + Add)
+     *   2. Reshape + Transpose into multi-head layout
+     *   3. Scaled dot-product attention (MatMul + Div + Softmax + MatMul)
+     *   4. Reshape + output projection (MatMul + Add)
+     *
+     * @param query Query input tensor of shape (N, L, E) or (L, N, E)
+     * @param key Key input tensor of shape (N, S, E) or (S, N, E)
+     * @param value Value input tensor of shape (N, S, E) or (S, N, E)
+     * @param q_proj_weight Query projection weight (E, E)
+     * @param k_proj_weight Key projection weight (E, kdim)
+     * @param v_proj_weight Value projection weight (E, vdim)
+     * @param out_proj_weight Output projection weight (E, E)
+     * @param q_proj_bias Optional query projection bias (E)
+     * @param k_proj_bias Optional key projection bias (E)
+     * @param v_proj_bias Optional value projection bias (E)
+     * @param out_proj_bias Optional output projection bias (E)
+     * @param num_heads Number of attention heads
+     * @param output Output tensor
+     * @param output_name Output name in ONNX graph
+     */
+    auto export_multihead_attention(
+        const Tensor& query, const Tensor& key, const Tensor& value,
+        const Tensor& q_proj_weight, const Tensor& k_proj_weight,
+        const Tensor& v_proj_weight, const Tensor& out_proj_weight,
+        const std::optional<Tensor>& q_proj_bias,
+        const std::optional<Tensor>& k_proj_bias,
+        const std::optional<Tensor>& v_proj_bias,
+        const std::optional<Tensor>& out_proj_bias,
+        int64_t num_heads,
+        const Tensor& output,
+        const std::string& output_name) -> void;
+
     // ============================================================================
     // Activation Functions
     // ============================================================================
@@ -511,6 +687,99 @@ public:
                                    const Tensor& output, const std::string& output_name) -> void;
 
     // ============================================================================
+    // JIT-based Module Export
+    // ============================================================================
+
+    /**
+     * @brief Export a module to ONNX via JIT tracing.
+     *
+     * Traces the module's forward pass with the provided dummy input using
+     * the JIT tracer, producing an IR graph. The graph is then converted
+     * to ONNX format, mapping each JIT node to the corresponding ONNX
+     * operator(s). Module parameters and buffers are exported as ONNX
+     * initializers.
+     *
+     * This method is more general than `export_model()` because it traces
+     * the actual computation rather than relying on structural pattern
+     * matching. It correctly handles arbitrary module architectures
+     * including custom forward logic, control-flow-free branches, and
+     * non-standard layer compositions.
+     *
+     * @param module Module to export (set to eval mode internally)
+     * @param dummy_input Example input tensor for shape/type tracing
+     * @param output_path Path for the output .onnx file
+     *
+     * @code
+     * auto model = std::make_shared<MyNetwork>();
+     * Tensor input({1, 3, 224, 224}, DType::Float32, Device::cpu());
+     * ONNXExporter exporter(13);
+     * exporter.export_module(*model, input, "model.onnx");
+     * @endcode
+     */
+    auto export_module(nn::Module& module, const Tensor& dummy_input,
+                       const std::string& output_path) -> void;
+
+    /**
+     * @brief Convert a JIT IR graph to ONNX nodes in the current graph.
+     *
+     * Iterates over all nodes in the JIT graph and creates corresponding
+     * ONNX export nodes. JIT value IDs are mapped to ONNX tensor names.
+     * Constant tensor attributes (weights, biases, etc.) from JIT nodes
+     * are added as ONNX initializers.
+     *
+     * This is the core conversion routine used by `export_module()` and
+     * can also be called directly if you have a pre-built JIT graph.
+     *
+     * @param graph JIT IR graph to convert
+     */
+    auto convert_jit_graph_to_onnx(const jit::Graph& graph) -> void;
+
+    // ============================================================================
+    // Dynamic Shapes
+    // ============================================================================
+
+    /**
+     * @brief Propagate dynamic shape information through the graph.
+     *
+     * Analyzes inputs and outputs for dimensions marked as dynamic (value -1
+     * with a dim_param string) and propagates those symbolic dimension names
+     * to intermediate value_info entries in the graph. This ensures that
+     * ONNX runtime consumers can correctly handle variable-length dimensions.
+     *
+     * Should be called after all nodes, inputs, and outputs have been added
+     * to the graph, and before export_to_file() or export_to_bytes().
+     */
+    auto propagate_dynamic_shapes() -> void;
+
+    // ============================================================================
+    // Validation
+    // ============================================================================
+
+    /**
+     * @brief Result of ONNX graph validation.
+     */
+    struct ValidationResult {
+        bool valid{true};                    ///< Overall validity
+        std::vector<std::string> errors;     ///< Fatal errors preventing export
+        std::vector<std::string> warnings;   ///< Non-fatal warnings
+    };
+
+    /**
+     * @brief Validate the ONNX graph for correctness.
+     *
+     * Checks the following conditions:
+     * - All node inputs reference a defined value (graph input, initializer, or
+     *   another node's output)
+     * - No duplicate names across inputs, outputs, initializers, and node outputs
+     * - Attribute types are correct for each ONNX operator (int, float, ints, etc.)
+     * - Opset compatibility: operators that require a higher opset version than
+     *   configured are flagged as errors
+     *
+     * @return ValidationResult containing errors and warnings
+     */
+    auto validate() const -> ValidationResult;
+
+    // ============================================================================
     // Export Functions
     // ============================================================================
 
@@ -563,6 +832,26 @@ private:
      * @brief Add constant tensor to graph initializers
      */
     auto add_initializer_tensor(const Tensor& tensor, const std::string& name) -> void;
+
+    /**
+     * @brief Map a JIT OpType to an ONNX operator type string.
+     *
+     * @param op_type JIT operation type
+     * @return ONNX operator string (e.g., "Add", "Conv", "Relu")
+     */
+    static auto jit_op_type_to_onnx(jit::OpType op_type) -> std::string;
+
+    /**
+     * @brief Convert a single JIT node to ONNX node(s).
+     *
+     * Handles attribute mapping, special-case ops (Linear -> Gemm,
+     * Conv2d -> Conv, etc.), and constant tensor initializers.
+     *
+     * @param node JIT IR node
+     * @param value_name_map Mapping from JIT value ID to ONNX tensor name
+     */
+    auto convert_jit_node_to_onnx(const std::shared_ptr<jit::Node>& node,
+                                  std::unordered_map<std::string, std::string>& value_name_map) -> void;
 
     // Friend declaration for high-level export function
     friend auto export_to_onnx(std::shared_ptr<nn::Module> module,

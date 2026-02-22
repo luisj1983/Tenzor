@@ -52,6 +52,7 @@
 #include <tenzor/onnx/importer.hpp>
 #include <tenzor/autograd/ops.hpp>
 #include <tenzor/backend/cpu_caching_allocator.hpp>
+#include <tenzor/utils/error.hpp>
 #include "numpy_interop.hpp"
 #include <thread>
 #include <cstdlib>
@@ -217,6 +218,27 @@ private:
 
 PYBIND11_MODULE(tenzor_core, m) {
     m.doc() = "Tenzor: High-performance tensor library";
+
+    // ========================================================================
+    // Custom Exception Hierarchy
+    // ========================================================================
+    // Register C++ exceptions as Python exceptions so they can be caught with
+    // except tz.ShapeError, etc. Each derives from the base TenzorError which
+    // itself derives from RuntimeError.
+    static auto py_tenzor_error = py::register_exception<tenzor::TenzorException>(
+        m, "TenzorError");
+    py::register_exception<tenzor::ShapeException>(
+        m, "ShapeError", py_tenzor_error.ptr());
+    py::register_exception<tenzor::DTypeException>(
+        m, "DTypeError", py_tenzor_error.ptr());
+    py::register_exception<tenzor::DeviceException>(
+        m, "DeviceError", py_tenzor_error.ptr());
+    py::register_exception<tenzor::AutogradException>(
+        m, "AutogradError", py_tenzor_error.ptr());
+    py::register_exception<tenzor::BackendException>(
+        m, "BackendError", py_tenzor_error.ptr());
+    py::register_exception<tenzor::MemoryException>(
+        m, "MemoryError", py_tenzor_error.ptr());
 
     // Library initialization
     m.def("initialize", &tenzor::initialize,
@@ -567,30 +589,31 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("__mul__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return a * b; })
         .def("__truediv__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return a / b; },
              py::is_operator(), "Element-wise division")
-        // Arithmetic operators - Tensor-Scalar (use scalar tensor {1} and rely on broadcasting)
+        // Arithmetic operators - Tensor-Scalar (use Tensor scalar operators directly)
         .def("__add__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
-             return a + tenzor::full({1}, b, a.dtype(), a.device());
+             return a + static_cast<double>(b);
              }, py::is_operator())
         .def("__radd__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
-             return tenzor::full({1}, b, a.dtype(), a.device()) + a;
+             return a + static_cast<double>(b);  // addition is commutative
              }, py::is_operator())
         .def("__sub__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
-             return a - tenzor::full({1}, b, a.dtype(), a.device());
+             return a - static_cast<double>(b);
              }, py::is_operator())
         .def("__rsub__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
-             return tenzor::full({1}, b, a.dtype(), a.device()) - a;
+             return tenzor::neg(a - static_cast<double>(b));  // b - a = -(a - b)
              }, py::is_operator())
         .def("__mul__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
-             return a * tenzor::full({1}, b, a.dtype(), a.device());
+             return a * static_cast<double>(b);
              }, py::is_operator())
         .def("__rmul__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
-             return tenzor::full({1}, b, a.dtype(), a.device()) * a;
+             return a * static_cast<double>(b);  // multiplication is commutative
              }, py::is_operator())
         .def("__truediv__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
-             return a / tenzor::full({1}, b, a.dtype(), a.device());
+             return a / static_cast<double>(b);
              }, py::is_operator())
         .def("__rtruediv__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
-             return tenzor::full({1}, b, a.dtype(), a.device()) / a;
+             // b / a = b * reciprocal(a)
+             return tenzor::reciprocal(a) * static_cast<double>(b);
              }, py::is_operator())
         .def("__pow__", [](const tenzor::Tensor& a, float exponent) -> tenzor::Tensor {
              return tenzor::pow(a, exponent);
@@ -1360,6 +1383,7 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("backward", &tenzor::Variable::backward,
              py::arg("gradient") = py::none(),
              py::arg("retain_graph") = false,
+             py::arg("create_graph") = false,
              py::call_guard<py::gil_scoped_release>(),
              "Compute gradients via backpropagation")
         // Tensor access - both as property and method for compatibility
@@ -1527,6 +1551,183 @@ PYBIND11_MODULE(tenzor_core, m) {
     };
 
     // Keep the existing set_grad_enabled function, but also allow context manager usage
+
+    // ========================================================================
+    // Custom autograd Function base class
+    // ========================================================================
+    // Enables Python users to define custom differentiable operations:
+    //   class MyReLU(tenzor.autograd.Function):
+    //       @staticmethod
+    //       def forward(ctx, input):
+    //           ctx.save_for_backward(input)
+    //           return tenzor.relu(input)
+    //       @staticmethod
+    //       def backward(ctx, grad_output):
+    //           input, = ctx.saved_tensors
+    //           grad = grad_output * (input > 0).to(tenzor.float32)
+    //           return (grad,)
+
+    // FunctionContext holds saved tensors and metadata for backward
+    struct PyFunctionCtx {
+        std::vector<tenzor::Tensor> saved_tensors_;
+
+        void save_for_backward(py::args tensors) {
+            saved_tensors_.clear();
+            for (auto& t : tensors) {
+                saved_tensors_.push_back(t.cast<tenzor::Tensor>());
+            }
+        }
+
+        py::tuple saved_tensors() const {
+            py::tuple result(saved_tensors_.size());
+            for (size_t i = 0; i < saved_tensors_.size(); ++i) {
+                result[i] = py::cast(saved_tensors_[i]);
+            }
+            return result;
+        }
+    };
+
+    py::class_<PyFunctionCtx>(m, "FunctionCtx",
+        "Context object for custom autograd Functions")
+        .def("save_for_backward", &PyFunctionCtx::save_for_backward,
+             "Save tensors for backward pass")
+        .def_property_readonly("saved_tensors", &PyFunctionCtx::saved_tensors,
+             "Get saved tensors");
+
+    // PyCustomFunction bridges Python custom Functions to C++ autograd graph
+    struct PyCustomFunction : public tenzor::Function {
+        py::object py_forward_fn_;  // Python static forward function
+        py::object py_backward_fn_; // Python static backward function
+        std::shared_ptr<PyFunctionCtx> ctx_;
+
+        PyCustomFunction(py::object forward_fn, py::object backward_fn)
+            : py_forward_fn_(std::move(forward_fn)),
+              py_backward_fn_(std::move(backward_fn)),
+              ctx_(std::make_shared<PyFunctionCtx>()) {}
+
+        auto forward(std::vector<tenzor::Variable> inputs) -> std::vector<tenzor::Variable> override {
+            py::gil_scoped_acquire acquire;
+            // Build args: (ctx, *inputs_as_tensors)
+            py::list args;
+            args.append(py::cast(ctx_));
+            for (auto& v : inputs) {
+                args.append(py::cast(v.tensor()));
+            }
+            auto result = py_forward_fn_(*py::tuple(args));
+
+            // Result can be a single Tensor or tuple of Tensors
+            std::vector<tenzor::Variable> outputs;
+            if (py::isinstance<tenzor::Tensor>(result)) {
+                outputs.emplace_back(result.cast<tenzor::Tensor>(), false);
+            } else {
+                auto result_tuple = result.cast<py::tuple>();
+                for (auto& item : result_tuple) {
+                    outputs.emplace_back(item.cast<tenzor::Tensor>(), false);
+                }
+            }
+            // Save tensors from ctx into C++ Function's saved_tensors_
+            saved_tensors_ = ctx_->saved_tensors_;
+            return outputs;
+        }
+
+        auto backward(std::vector<tenzor::Tensor> grad_outputs) -> std::vector<tenzor::Tensor> override {
+            py::gil_scoped_acquire acquire;
+            // Restore ctx saved tensors
+            ctx_->saved_tensors_ = saved_tensors_;
+
+            py::list args;
+            args.append(py::cast(ctx_));
+            for (auto& g : grad_outputs) {
+                args.append(py::cast(g));
+            }
+            auto result = py_backward_fn_(*py::tuple(args));
+
+            std::vector<tenzor::Tensor> grads;
+            if (py::isinstance<tenzor::Tensor>(result)) {
+                grads.push_back(result.cast<tenzor::Tensor>());
+            } else {
+                auto result_tuple = result.cast<py::tuple>();
+                for (auto& item : result_tuple) {
+                    if (item.is_none()) {
+                        grads.push_back(tenzor::Tensor{});
+                    } else {
+                        grads.push_back(item.cast<tenzor::Tensor>());
+                    }
+                }
+            }
+            return grads;
+        }
+    };
+
+    // The Python-facing autograd.Function class
+    // Usage: class MyFunc(tenzor.autograd.Function):
+    //     @staticmethod
+    //     def forward(ctx, input): ...
+    //     @staticmethod
+    //     def backward(ctx, grad_output): ...
+    //
+    // result = MyFunc.apply(input_var)
+    auto autograd_mod = m.def_submodule("autograd", "Autograd components");
+
+    auto custom_func_cls = py::class_<PyCustomFunction, std::shared_ptr<PyCustomFunction>>(
+        autograd_mod, "_CustomFunctionImpl");
+    (void)custom_func_cls;  // Registration side-effect only
+
+    // Helper: apply() creates a PyCustomFunction, runs forward, wires into autograd
+    autograd_mod.def("apply_custom_function", [](py::object py_cls, py::args inputs) {
+        // Get forward/backward static methods from the class
+        auto forward_fn = py_cls.attr("forward");
+        auto backward_fn = py_cls.attr("backward");
+
+        auto func = std::make_shared<PyCustomFunction>(forward_fn, backward_fn);
+
+        // Convert inputs to Variables
+        std::vector<tenzor::Variable> var_inputs;
+        for (auto& inp : inputs) {
+            if (py::isinstance<tenzor::Variable>(inp)) {
+                var_inputs.push_back(inp.cast<tenzor::Variable>());
+            } else if (py::isinstance<tenzor::Tensor>(inp)) {
+                var_inputs.emplace_back(inp.cast<tenzor::Tensor>(), false);
+            } else {
+                throw std::runtime_error("apply_custom_function: inputs must be Variable or Tensor");
+            }
+        }
+
+        // Run forward
+        auto outputs = func->forward(var_inputs);
+
+        // Wire outputs into autograd graph
+        bool any_requires_grad = false;
+        for (auto& v : var_inputs) {
+            if (v.requires_grad()) {
+                any_requires_grad = true;
+                break;
+            }
+        }
+
+        if (any_requires_grad) {
+            func->set_input_variables(var_inputs);
+            std::vector<std::shared_ptr<tenzor::Function>> next_fns;
+            for (auto& v : var_inputs) {
+                next_fns.push_back(v.grad_fn());
+            }
+            func->set_next_functions(next_fns);
+
+            for (auto& out : outputs) {
+                out.set_requires_grad(true);
+                out.set_grad_fn(func);
+            }
+        }
+
+        if (outputs.size() == 1) {
+            return py::cast(outputs[0]);
+        }
+        py::tuple result_tuple(outputs.size());
+        for (size_t i = 0; i < outputs.size(); ++i) {
+            result_tuple[i] = py::cast(outputs[i]);
+        }
+        return static_cast<py::object>(result_tuple);
+    }, "Apply a custom autograd Function class");
 
     // Neural network
     auto nn = m.def_submodule("nn", "Neural network components");
@@ -3367,7 +3568,8 @@ PYBIND11_MODULE(tenzor_core, m) {
                              py::gil_scoped_acquire acquire;
                              progress_callback(downloaded, total, speed, eta);
                          } catch (const py::error_already_set& e) {
-                             std::cerr << "Error in progress callback: " << e.what() << std::endl;
+                             PyErr_WarnEx(PyExc_RuntimeWarning,
+                                 (std::string("Callback error: ") + e.what()).c_str(), 1);
                          }
                      };
                  }
@@ -3392,7 +3594,8 @@ PYBIND11_MODULE(tenzor_core, m) {
                              py::gil_scoped_acquire acquire;
                              progress_callback(downloaded, total, speed, eta);
                          } catch (const py::error_already_set& e) {
-                             std::cerr << "Error in progress callback: " << e.what() << std::endl;
+                             PyErr_WarnEx(PyExc_RuntimeWarning,
+                                 (std::string("Callback error: ") + e.what()).c_str(), 1);
                          }
                      };
                  }
@@ -3703,8 +3906,14 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("tensor"), py::arg("name"),
              py::arg("dynamic_axes") = std::unordered_map<int64_t, std::string>(),
              "Add model input")
-        .def("add_output", &tenzor::onnx::ONNXExporter::add_output,
+        .def("add_output", [](tenzor::onnx::ONNXExporter& self,
+                               const tenzor::Tensor& tensor,
+                               const std::string& name,
+                               const std::unordered_map<int64_t, std::string>& dynamic_axes) {
+                 self.add_output(tensor, name, dynamic_axes);
+             },
              py::arg("tensor"), py::arg("name"),
+             py::arg("dynamic_axes") = std::unordered_map<int64_t, std::string>(),
              "Add model output")
         .def("export_to_file", &tenzor::onnx::ONNXExporter::export_to_file,
              py::arg("filepath"),

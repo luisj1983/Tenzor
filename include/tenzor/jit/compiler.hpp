@@ -9,16 +9,20 @@
  * - Common subexpression elimination (CSE)
  * - Constant folding
  * - Algebraic simplification
+ * - Memory planning (buffer reuse for intermediate values)
  */
 
 #pragma once
 
 #include <memory>
 #include <vector>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <functional>
 #include "graph.hpp"
+#include "memory_planner.hpp"
+#include "../nn/module.hpp"
 
 namespace tenzor {
 namespace jit {
@@ -307,11 +311,56 @@ public:
 };
 
 /**
+ * @brief Memory planning pass.
+ *
+ * Performs live range analysis and greedy buffer assignment to enable
+ * memory reuse between non-overlapping intermediate values. This pass
+ * should run after all other optimization passes, since it annotates
+ * graph values with buffer assignments based on the final graph topology.
+ *
+ * This pass is not iterative -- it runs once and annotates the graph.
+ * It does not structurally modify the graph (no nodes added or removed),
+ * so it always returns false to prevent re-running of earlier passes.
+ *
+ * Example:
+ * @code
+ * MemoryPlanningPass pass;
+ * pass.run(graph);
+ * // Values now have buffer_id and buffer_offset set
+ * auto plan = pass.memory_plan();
+ * @endcode
+ */
+class MemoryPlanningPass : public Pass {
+public:
+    auto run(Graph& graph) -> bool override;
+    auto name() const -> std::string override { return "MemoryPlanning"; }
+
+    /**
+     * @brief Get the memory plan produced by the last run.
+     *
+     * @return Memory plan (empty if run() has not been called)
+     */
+    auto memory_plan() const -> const MemoryPlan& { return plan_; }
+
+    /**
+     * @brief Set alignment for buffer allocations.
+     *
+     * @param alignment Alignment in bytes (must be power of 2)
+     */
+    auto set_alignment(size_t alignment) -> void { alignment_ = alignment; }
+
+private:
+    MemoryPlan plan_;
+    size_t alignment_{64};
+};
+
+/**
  * @brief Compiler that applies optimization passes.
  *
  * The compiler runs a sequence of passes to transform and optimize
  * the IR graph. Passes are applied in order until convergence or
- * max iterations is reached.
+ * max iterations is reached. After optimization converges, memory
+ * planning is performed as a final step.
  *
  * @code
  * Compiler compiler;
@@ -319,6 +368,7 @@ public:
  * compiler.add_pass(std::make_unique<FuseConvBatchNormPass>());
  * compiler.add_pass(std::make_unique<FuseConvReluPass>());
  * compiler.optimize(graph);
+ * auto plan = compiler.memory_plan();
  * @endcode
  */
 class Compiler {
@@ -369,10 +419,41 @@ public:
      */
     auto set_verbose(bool enable) -> void { verbose_ = enable; }
 
+    /**
+     * @brief Run memory planning after optimization.
+     *
+     * Performs live range analysis and greedy buffer assignment on the
+     * optimized graph. Should be called after optimize() completes.
+     * The resulting plan is stored and can be retrieved via memory_plan().
+     *
+     * @param graph Graph to plan memory for
+     * @return The computed memory plan
+     */
+    auto plan_memory(Graph& graph) -> MemoryPlan;
+
+    /**
+     * @brief Get the memory plan from the last plan_memory() call.
+     *
+     * @return Memory plan (empty if plan_memory() has not been called)
+     */
+    auto memory_plan() const -> const MemoryPlan& { return memory_plan_; }
+
+    /**
+     * @brief Enable or disable memory planning during optimize().
+     *
+     * When enabled, memory planning runs automatically as the final
+     * step of optimize(). Enabled by default.
+     *
+     * @param enable If true, run memory planning after optimization
+     */
+    auto set_memory_planning(bool enable) -> void { enable_memory_planning_ = enable; }
+
 private:
     std::vector<std::unique_ptr<Pass>> passes_;               ///< Optimization passes
     std::unordered_map<std::string, int> pass_stats_;         ///< Pass execution stats
     bool verbose_{false};                                     ///< Verbose logging flag
+    bool enable_memory_planning_{true};                       ///< Memory planning flag
+    MemoryPlan memory_plan_;                                  ///< Cached memory plan
 
     /**
      * @brief Run single pass iteration.
@@ -399,6 +480,233 @@ private:
  * @endcode
  */
 auto optimize_graph(Graph& graph) -> int;
+
+/**
+ * @brief A compiled (traced) module for optimized execution.
+ *
+ * CompiledModule wraps a traced IR graph with a high-level interface
+ * for inference. It supports:
+ * - Running the optimized graph with new inputs
+ * - Saving/loading compiled models to/from disk
+ * - Metadata storage for model versioning and provenance
+ * - Access to the underlying graph for inspection
+ *
+ * Create a CompiledModule by tracing an nn::Module:
+ * @code
+ * auto model = std::make_shared<MyNetwork>();
+ * Variable input(Tensor({1, 3, 224, 224}, DType::Float32, Device::cpu()));
+ * auto compiled = CompiledModule::trace(model, input);
+ * compiled->optimize_for_inference();
+ * auto output = compiled->forward(new_input);
+ * @endcode
+ */
+class CompiledModule {
+public:
+    /**
+     * @brief Trace a module with an example input.
+     *
+     * Records all operations during the module's forward pass and
+     * builds an IR graph that can be optimized and executed.
+     *
+     * @param module Module to trace (set to eval mode internally)
+     * @param example_input Example input for shape and type inference
+     * @return Compiled module wrapping the traced graph
+     */
+    static auto trace(std::shared_ptr<nn::Module> module,
+                      const Variable& example_input) -> std::shared_ptr<CompiledModule>;
+
+    /**
+     * @brief Trace a module with a raw tensor input.
+     *
+     * Convenience overload that wraps the tensor in a Variable.
+     *
+     * @param module Module to trace
+     * @param example_input Example input tensor
+     * @return Compiled module wrapping the traced graph
+     */
+    static auto trace(std::shared_ptr<nn::Module> module,
+                      const Tensor& example_input) -> std::shared_ptr<CompiledModule>;
+
+    /**
+     * @brief Execute the compiled graph with a Variable input.
+     *
+     * Runs the optimized graph using the provided input.
+     *
+     * @param input Input variable
+     * @return Output variable
+     */
+    auto forward(const Variable& input) -> Variable;
+
+    /**
+     * @brief Execute the compiled graph with a raw Tensor input.
+     *
+     * Convenience overload that wraps the tensor in a Variable.
+     *
+     * @param input Input tensor
+     * @return Output variable
+     */
+    auto forward(const Tensor& input) -> Variable;
+
+    /**
+     * @brief Execute the compiled graph with multiple inputs.
+     *
+     * @param inputs Input variables
+     * @return Output variables
+     */
+    auto forward(const std::vector<Variable>& inputs) -> std::vector<Variable>;
+
+    /**
+     * @brief Apply inference optimizations to the graph.
+     *
+     * Runs the full suite of optimization passes: fusion, DCE, CSE,
+     * constant folding, algebraic simplification, reshape elimination,
+     * and memory planning.
+     *
+     * @return Number of optimizations applied
+     */
+    auto optimize_for_inference() -> int;
+
+    /**
+     * @brief Get the underlying IR graph.
+     *
+     * @return Shared pointer to the graph
+     */
+    auto graph() const -> std::shared_ptr<Graph> { return graph_; }
+
+    /**
+     * @brief Get the memory plan for this module.
+     *
+     * Available after optimize_for_inference() has been called.
+     *
+     * @return Memory plan (empty if not yet optimized)
+     */
+    auto memory_plan() const -> const MemoryPlan& { return memory_plan_; }
+
+    /**
+     * @brief Set the memory plan for this module.
+     *
+     * @param plan Memory plan to store
+     */
+    auto set_memory_plan(MemoryPlan plan) -> void { memory_plan_ = std::move(plan); }
+
+    /**
+     * @brief Save compiled module to file.
+     *
+     * Serializes the graph and metadata to a binary file.
+     *
+     * @param path Output file path
+     */
+    auto save(const std::string& path) const -> void;
+
+    /**
+     * @brief Load compiled module from file.
+     *
+     * Deserializes the graph and metadata from a binary file.
+     *
+     * @param path Input file path
+     * @return Loaded compiled module
+     * @throws std::runtime_error if file is invalid or corrupted
+     */
+    static auto load(const std::string& path) -> std::shared_ptr<CompiledModule>;
+
+    /**
+     * @brief Add metadata key-value pair.
+     *
+     * @param key Metadata key
+     * @param value Metadata value
+     */
+    auto add_metadata(const std::string& key, const std::string& value) -> void;
+
+    /**
+     * @brief Get metadata value by key.
+     *
+     * @param key Metadata key
+     * @return Metadata value (empty string if not found)
+     */
+    auto get_metadata(const std::string& key) const -> std::string;
+
+    /**
+     * @brief Check if metadata key exists.
+     *
+     * @param key Metadata key
+     * @return true if key exists
+     */
+    auto has_metadata(const std::string& key) const -> bool;
+
+    /**
+     * @brief Get all metadata.
+     *
+     * @return Map of all metadata key-value pairs
+     */
+    auto all_metadata() const -> const std::unordered_map<std::string, std::string>&;
+
+    /**
+     * @brief Constructor (prefer using static trace/load methods).
+     */
+    CompiledModule() = default;
+
+    /**
+     * @brief Constructor with an existing graph.
+     *
+     * @param graph Pre-built IR graph
+     */
+    explicit CompiledModule(std::shared_ptr<Graph> graph);
+
+private:
+    std::shared_ptr<Graph> graph_;                                   ///< IR graph
+    std::unordered_map<std::string, std::string> metadata_;          ///< Metadata storage
+    MemoryPlan memory_plan_;                                         ///< Memory plan for buffer reuse
+};
+
+// ============================================================================
+// Convenience free functions for working with CompiledModule
+// ============================================================================
+
+/**
+ * @brief Apply inference optimizations to a compiled module.
+ *
+ * Convenience function matching common JIT API patterns.
+ *
+ * @param module Compiled module to optimize
+ * @return Number of optimizations applied
+ */
+auto optimize_for_inference(std::shared_ptr<CompiledModule> module) -> int;
+
+/**
+ * @brief Save a compiled module to file.
+ *
+ * @param module Module to save
+ * @param path Output file path
+ */
+auto save(const std::shared_ptr<CompiledModule>& module, const std::string& path) -> void;
+
+/**
+ * @brief Load a compiled module from file.
+ *
+ * @param path Input file path
+ * @return Loaded compiled module
+ */
+auto load(const std::string& path) -> std::shared_ptr<CompiledModule>;
+
+/**
+ * @brief Add metadata to a compiled module.
+ *
+ * @param module Target module
+ * @param key Metadata key
+ * @param value Metadata value
+ */
+auto add_metadata(const std::shared_ptr<CompiledModule>& module,
+                  const std::string& key, const std::string& value) -> void;
+
+/**
+ * @brief Get metadata from a compiled module.
+ *
+ * @param module Source module
+ * @param key Metadata key
+ * @return Metadata value (empty string if not found)
+ */
+auto get_metadata(const std::shared_ptr<CompiledModule>& module,
+                  const std::string& key) -> std::string;
 
 } // namespace jit
 } // namespace tenzor

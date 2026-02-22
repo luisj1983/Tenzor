@@ -348,6 +348,30 @@ auto trace(std::shared_ptr<nn::Module> module,
 auto trace(std::function<std::vector<Variable>(const std::vector<Variable>&)> func,
            const std::vector<Variable>& inputs) -> std::shared_ptr<Graph>;
 
+// Forward declaration
+class CompiledModule;
+
+/**
+ * @brief Trace a module with a raw Tensor input, returning a CompiledModule.
+ *
+ * Convenience overload that wraps the input in a Variable and returns
+ * a CompiledModule for optimized inference. This is the primary entry
+ * point for JIT compilation.
+ *
+ * @param module Module to trace
+ * @param dummy_input Example input tensor for tracing
+ * @return Compiled module wrapping the traced graph
+ *
+ * @code
+ * auto model = std::make_shared<MyNetwork>();
+ * Tensor input({1, 3, 224, 224}, DType::Float32, Device::cpu());
+ * auto traced = trace(model, input);
+ * traced->forward(new_input);
+ * @endcode
+ */
+auto trace(std::shared_ptr<nn::Module> module,
+           const Tensor& dummy_input) -> std::shared_ptr<CompiledModule>;
+
 /**
  * @brief Helper macros for automatic operation tracing.
  *

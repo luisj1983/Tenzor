@@ -12,6 +12,9 @@ namespace tenzor {
 // Global gradient state
 static std::atomic<bool> grad_enabled{true};
 
+// Thread-local create_graph state for higher-order gradients
+static thread_local bool creating_graph{false};
+
 Variable::Variable(Tensor data, bool requires_grad)
     : impl_(std::make_shared<VariableImpl>(std::move(data), requires_grad)) {
 }
@@ -54,8 +57,9 @@ auto Variable::set_grad(Tensor gradient) -> void {
     impl_->grad_ = std::move(gradient);
 }
 
-auto Variable::backward(std::optional<Tensor> gradient, bool retain_graph) -> void {
-    backward_engine().execute(*this, gradient, retain_graph);
+auto Variable::backward(std::optional<Tensor> gradient, bool retain_graph, bool create_graph) -> void {
+    // create_graph implies retain_graph (we need the graph to differentiate through it)
+    backward_engine().execute(*this, gradient, retain_graph || create_graph, create_graph);
 }
 
 auto Variable::register_hook(std::function<Tensor(const Tensor&)> hook) -> size_t {
@@ -131,6 +135,24 @@ auto is_grad_enabled() -> bool {
 
 auto set_grad_enabled(bool enabled) -> void {
     grad_enabled.store(enabled);
+}
+
+// Higher-order gradient graph creation state
+auto is_creating_graph() -> bool {
+    return creating_graph;
+}
+
+auto set_creating_graph(bool creating) -> void {
+    creating_graph = creating;
+}
+
+// CreateGraphGuard implementation
+CreateGraphGuard::CreateGraphGuard() : prev_state_(is_creating_graph()) {
+    set_creating_graph(true);
+}
+
+CreateGraphGuard::~CreateGraphGuard() {
+    set_creating_graph(prev_state_);
 }
 
 // Arithmetic operators
@@ -211,6 +233,12 @@ auto Variable::operator*(const Variable& other) const -> Variable {
     grad_fn->input_shape_a_ = std::vector<int64_t>(impl_->data_.shape().begin(), impl_->data_.shape().end());
     grad_fn->input_shape_b_ = std::vector<int64_t>(other.impl_->data_.shape().begin(), other.impl_->data_.shape().end());
 
+    // When create_graph is active, also save Variables to preserve graph connections
+    // for higher-order gradient computation
+    if (is_creating_graph()) {
+        grad_fn->save_variables_for_backward({*this, other});
+    }
+
     // Compute result
     auto result = impl_->data_ * other.impl_->data_;
     Variable output(result, impl_->requires_grad_ || other.impl_->requires_grad_);
@@ -238,6 +266,11 @@ auto Variable::operator/(const Variable& other) const -> Variable {
 
     // Save tensors for backward - clone to preserve values
     grad_fn->saved_tensors_ = {impl_->data_.clone(), other.impl_->data_.clone()};
+
+    // When create_graph is active, also save Variables to preserve graph connections
+    if (is_creating_graph()) {
+        grad_fn->save_variables_for_backward({*this, other});
+    }
 
     // Compute result
     auto result = impl_->data_ / other.impl_->data_;

@@ -422,6 +422,23 @@ __global__ void gelu_backward_vectorized_kernel(const float4* __restrict__ grad_
     }
 }
 
+// Vectorized Leaky ReLU backward using float4
+__global__ void leaky_relu_backward_vectorized_kernel(const float4* __restrict__ grad_output,
+                                                       const float4* __restrict__ input,
+                                                       float4* __restrict__ grad_input,
+                                                       int64_t n4, float alpha) {
+    CUDA_GRID_STRIDE_LOOP(idx, n4) {
+        float4 g = __ldg(&grad_output[idx]);
+        float4 x = __ldg(&input[idx]);
+        float4 result;
+        result.x = g.x * (x.x > 0.0f ? 1.0f : alpha);
+        result.y = g.y * (x.y > 0.0f ? 1.0f : alpha);
+        result.z = g.z * (x.z > 0.0f ? 1.0f : alpha);
+        result.w = g.w * (x.w > 0.0f ? 1.0f : alpha);
+        grad_input[idx] = result;
+    }
+}
+
 // Vectorized Swish backward using float4
 __global__ void swish_backward_vectorized_kernel(const float4* __restrict__ grad_output,
                                                   const float4* __restrict__ input,
@@ -2548,9 +2565,37 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
     }
 
     if (input.dtype() == DType::Float32) {
-        int num_blocks = get_num_blocks(n);
-        leaky_relu_backward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            grad_output.data<float>(), input.data<float>(), result.data<float>(), n, alpha);
+        const float* grad_ptr = grad_output.data<float>();
+        const float* input_ptr = input.data<float>();
+        float* result_ptr = result.data<float>();
+
+        if (n >= VECTORIZED_THRESHOLD &&
+            reinterpret_cast<uintptr_t>(grad_ptr) % 16 == 0 &&
+            reinterpret_cast<uintptr_t>(input_ptr) % 16 == 0 &&
+            reinterpret_cast<uintptr_t>(result_ptr) % 16 == 0) {
+
+            int64_t n4 = n / 4;
+            int64_t remainder = n % 4;
+
+            if (n4 > 0) {
+                int num_blocks = get_num_blocks(n4);
+                leaky_relu_backward_vectorized_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const float4*>(grad_ptr),
+                    reinterpret_cast<const float4*>(input_ptr),
+                    reinterpret_cast<float4*>(result_ptr), n4, alpha);
+            }
+
+            if (remainder > 0) {
+                int64_t start = n4 * 4;
+                int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
+                leaky_relu_backward_kernel<float><<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
+                    grad_ptr + start, input_ptr + start, result_ptr + start, remainder, alpha);
+            }
+        } else {
+            int num_blocks = get_num_blocks(n);
+            leaky_relu_backward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                grad_ptr, input_ptr, result_ptr, n, alpha);
+        }
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         leaky_relu_backward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(

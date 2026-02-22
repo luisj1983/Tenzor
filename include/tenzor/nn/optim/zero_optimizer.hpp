@@ -134,7 +134,7 @@ public:
      *
      * @throws std::runtime_error if distributed not initialized
      */
-    auto step() -> void override;
+    auto step_impl() -> void override;
 
     /**
      * @brief Zero all parameter gradients
@@ -572,7 +572,7 @@ public:
      *
      * @throws std::runtime_error if distributed not initialized
      */
-    auto step() -> void override;
+    auto step_impl() -> void override;
 
     /**
      * @brief Register backward hooks for gradient reduce-scatter
@@ -982,7 +982,7 @@ public:
      *
      * @throws std::runtime_error if distributed not initialized
      */
-    auto step() -> void override;
+    auto step_impl() -> void override;
 
     /**
      * @brief Zero gradients

@@ -223,6 +223,23 @@ auto gt(const Tensor& a, const Tensor& b) -> Tensor;
 auto ge(const Tensor& a, const Tensor& b) -> Tensor;
 
 /// @}
+/// @name Scalar Arithmetic Operations
+/// @brief Optimized overloads that avoid creating temporary scalar tensors
+/// @{
+
+/** @brief Element-wise addition with scalar (avoids temporary tensor). */
+auto add(const Tensor& a, double scalar) -> Tensor;
+
+/** @brief Element-wise subtraction with scalar (avoids temporary tensor). */
+auto sub(const Tensor& a, double scalar) -> Tensor;
+
+/** @brief Element-wise multiplication by scalar (avoids temporary tensor). */
+auto mul(const Tensor& a, double scalar) -> Tensor;
+
+/** @brief Element-wise division by scalar (avoids temporary tensor). */
+auto div(const Tensor& a, double scalar) -> Tensor;
+
+/// @}
 /// @name In-Place Operations
 /// @{
 

@@ -9,6 +9,10 @@
 #include "../../include/tenzor/ops/math.hpp"
 #include "../../include/tenzor/ops/reduction.hpp"
 #include "../../include/tenzor/ops/transform.hpp"
+#include "../../include/tenzor/autograd/ops.hpp"
+#include "../../include/tenzor/nn/functional.hpp"
+#include "../../include/tenzor/backend/fast_dispatch.hpp"
+#include "../../include/tenzor/core/shape.hpp"
 #include <algorithm>
 #include <queue>
 #include <sstream>
@@ -73,10 +77,67 @@ auto Graph::remove_node(std::shared_ptr<Node> node) -> void {
         nodes_.erase(it);
     }
 
-    // Clear uses from input values
+    // Remove this specific node from each input value's uses list
+    // (do NOT clear all uses, as other nodes may still reference the value)
     for (auto& input : node->inputs()) {
-        input->clear_uses();
+        input->remove_use(node);
     }
+}
+
+auto Graph::replace_value(const std::string& old_id, const std::string& new_id) -> void {
+    auto old_val = get_value(old_id);
+    auto new_val = get_value(new_id);
+    if (!old_val || !new_val) return;
+
+    // For every node that uses old_val as input, replace with new_val
+    // Collect uses first since we'll be modifying the list
+    std::vector<std::shared_ptr<Node>> consumers;
+    for (const auto& weak_use : old_val->uses()) {
+        if (auto use = weak_use.lock()) {
+            consumers.push_back(use);
+        }
+    }
+
+    for (auto& consumer : consumers) {
+        for (size_t i = 0; i < consumer->inputs().size(); ++i) {
+            if (consumer->inputs()[i]->id() == old_id) {
+                consumer->replace_input(i, new_val);
+            }
+        }
+    }
+
+    // Clear old value's uses since they've all been redirected
+    old_val->clear_uses();
+
+    // Also update graph outputs if they reference the old value
+    for (auto& output : outputs_) {
+        if (output->id() == old_id) {
+            output = new_val;
+        }
+    }
+}
+
+auto Graph::replace_node(std::shared_ptr<Node> old_node, std::shared_ptr<Node> new_node) -> void {
+    // Wire all consumers of old_node's outputs to use new_node's outputs
+    auto& old_outputs = old_node->outputs();
+    auto& new_outputs = new_node->outputs();
+
+    for (size_t i = 0; i < old_outputs.size() && i < new_outputs.size(); ++i) {
+        replace_value(old_outputs[i]->id(), new_outputs[i]->id());
+    }
+
+    // Remove the old node from the graph
+    remove_node(old_node);
+}
+
+auto Graph::replace_node_with_value(std::shared_ptr<Node> node, const std::string& value_id) -> void {
+    // Redirect all consumers of the node's outputs to use the given value
+    for (const auto& output : node->outputs()) {
+        replace_value(output->id(), value_id);
+    }
+
+    // Remove the node from the graph
+    remove_node(node);
 }
 
 auto Graph::topological_sort() -> void {
@@ -151,21 +212,24 @@ auto Graph::infer_types() -> void {
         std::vector<std::vector<int64_t>> output_shapes;
 
         switch (node->op_type()) {
+            // ================================================================
+            // Binary ops: use proper broadcasting
+            // ================================================================
             case OpType::Add:
             case OpType::Sub:
             case OpType::Mul:
             case OpType::Div:
-                // Binary ops: output shape is broadcast result
                 if (input_shapes.size() >= 2) {
-                    // For simplicity, assume same shape (proper broadcasting would be more complex)
-                    output_shapes.push_back(input_shapes[0]);
+                    output_shapes.push_back(
+                        broadcast_shapes(input_shapes[0], input_shapes[1]));
                 }
                 break;
 
+            // ================================================================
+            // Matrix operations
+            // ================================================================
             case OpType::MatMul:
-                // Matrix multiplication: (M, K) @ (K, N) -> (M, N)
                 if (input_shapes.size() >= 2 && input_shapes[0].size() >= 2 && input_shapes[1].size() >= 2) {
-                    auto M = input_shapes[0][input_shapes[0].size() - 2];
                     auto N = input_shapes[1][input_shapes[1].size() - 1];
                     std::vector<int64_t> out_shape = input_shapes[0];
                     out_shape[out_shape.size() - 1] = N;
@@ -173,29 +237,52 @@ auto Graph::infer_types() -> void {
                 }
                 break;
 
+            case OpType::Bmm:
+                // Batch matmul: (B, M, K) @ (B, K, N) -> (B, M, N)
+                if (input_shapes.size() >= 2 && input_shapes[0].size() == 3 && input_shapes[1].size() == 3) {
+                    output_shapes.push_back({input_shapes[0][0], input_shapes[0][1], input_shapes[1][2]});
+                }
+                break;
+
+            // ================================================================
+            // Unary element-wise ops: preserve shape
+            // ================================================================
             case OpType::ReLU:
             case OpType::Sigmoid:
             case OpType::Tanh:
             case OpType::Exp:
             case OpType::Log:
             case OpType::Sqrt:
+            case OpType::Pow:
             case OpType::Abs:
             case OpType::Neg:
-                // Unary ops: preserve input shape
+            case OpType::Clamp:
+            case OpType::Dropout:
                 if (!input_shapes.empty()) {
                     output_shapes.push_back(input_shapes[0]);
                 }
                 break;
 
+            // ================================================================
+            // Softmax / LogSoftmax: preserve shape
+            // ================================================================
+            case OpType::Softmax:
+            case OpType::LogSoftmax:
+                if (!input_shapes.empty()) {
+                    output_shapes.push_back(input_shapes[0]);
+                }
+                break;
+
+            // ================================================================
+            // Shape operations
+            // ================================================================
             case OpType::Reshape:
-                // Reshape: use target shape from attributes
                 if (node->has_attr("shape")) {
                     output_shapes.push_back(node->get_vec_attr("shape"));
                 }
                 break;
 
             case OpType::Transpose:
-                // Transpose: swap two dimensions
                 if (!input_shapes.empty()) {
                     auto shape = input_shapes[0];
                     int64_t dim0 = node->get_int_attr("dim0");
@@ -207,17 +294,80 @@ auto Graph::infer_types() -> void {
                 }
                 break;
 
+            case OpType::Permute:
+                if (!input_shapes.empty() && node->has_attr("dims")) {
+                    auto dims = node->get_vec_attr("dims");
+                    auto& in_shape = input_shapes[0];
+                    std::vector<int64_t> out_shape(dims.size());
+                    for (size_t i = 0; i < dims.size(); ++i) {
+                        if (dims[i] < static_cast<int64_t>(in_shape.size())) {
+                            out_shape[i] = in_shape[dims[i]];
+                        }
+                    }
+                    output_shapes.push_back(out_shape);
+                }
+                break;
+
+            case OpType::Squeeze:
+                if (!input_shapes.empty()) {
+                    auto shape = input_shapes[0];
+                    int64_t dim = node->get_int_attr("dim");
+                    if (dim < static_cast<int64_t>(shape.size()) && shape[dim] == 1) {
+                        shape.erase(shape.begin() + dim);
+                    }
+                    output_shapes.push_back(shape);
+                }
+                break;
+
+            case OpType::Unsqueeze:
+                if (!input_shapes.empty()) {
+                    auto shape = input_shapes[0];
+                    int64_t dim = node->get_int_attr("dim");
+                    if (dim < 0) dim += static_cast<int64_t>(shape.size()) + 1;
+                    if (dim <= static_cast<int64_t>(shape.size())) {
+                        shape.insert(shape.begin() + dim, 1);
+                    }
+                    output_shapes.push_back(shape);
+                }
+                break;
+
+            case OpType::Flatten:
+                if (!input_shapes.empty()) {
+                    auto& in_shape = input_shapes[0];
+                    int64_t start_dim = node->has_attr("start_dim") ? node->get_int_attr("start_dim") : 0;
+                    int64_t end_dim = node->has_attr("end_dim") ? node->get_int_attr("end_dim") : -1;
+                    if (start_dim < 0) start_dim += static_cast<int64_t>(in_shape.size());
+                    if (end_dim < 0) end_dim += static_cast<int64_t>(in_shape.size());
+                    std::vector<int64_t> out_shape;
+                    int64_t flat = 1;
+                    for (int64_t i = 0; i < static_cast<int64_t>(in_shape.size()); ++i) {
+                        if (i < start_dim || i > end_dim) {
+                            out_shape.push_back(in_shape[i]);
+                        } else {
+                            flat *= in_shape[i];
+                            if (i == end_dim) {
+                                out_shape.push_back(flat);
+                            }
+                        }
+                    }
+                    output_shapes.push_back(out_shape);
+                }
+                break;
+
+            // ================================================================
+            // Reductions
+            // ================================================================
             case OpType::Sum:
             case OpType::Mean:
             case OpType::Max:
             case OpType::Min:
-                // Reductions: remove dimension or keep with size 1
                 if (!input_shapes.empty()) {
                     auto shape = input_shapes[0];
                     if (node->has_attr("dim")) {
                         int64_t dim = node->get_int_attr("dim");
                         bool keepdim = node->get_bool_attr("keepdim");
-                        if (dim < static_cast<int64_t>(shape.size())) {
+                        if (dim < 0) dim += static_cast<int64_t>(shape.size());
+                        if (dim >= 0 && dim < static_cast<int64_t>(shape.size())) {
                             if (keepdim) {
                                 shape[dim] = 1;
                             } else {
@@ -225,35 +375,148 @@ auto Graph::infer_types() -> void {
                             }
                         }
                     } else {
-                        // Reduce all: scalar output
-                        shape = {};
+                        shape = {};  // Reduce all: scalar output
                     }
                     output_shapes.push_back(shape);
                 }
                 break;
 
+            // ================================================================
+            // Convolution
+            // ================================================================
             case OpType::Conv2d:
-                // Convolution: complex shape calculation
                 if (!input_shapes.empty()) {
-                    auto shape = input_shapes[0];  // [N, C, H, W]
+                    auto& shape = input_shapes[0];  // [N, C, H, W]
                     int64_t out_channels = node->get_int_attr("out_channels");
                     int64_t kernel_h = node->get_int_attr("kernel_h");
                     int64_t kernel_w = node->get_int_attr("kernel_w");
-                    int64_t stride_h = node->get_int_attr("stride_h");
-                    int64_t stride_w = node->get_int_attr("stride_w");
-                    int64_t padding_h = node->get_int_attr("padding_h");
-                    int64_t padding_w = node->get_int_attr("padding_w");
+                    int64_t stride_h = node->has_attr("stride_h") ? node->get_int_attr("stride_h") : 1;
+                    int64_t stride_w = node->has_attr("stride_w") ? node->get_int_attr("stride_w") : 1;
+                    int64_t padding_h = node->has_attr("padding_h") ? node->get_int_attr("padding_h") : 0;
+                    int64_t padding_w = node->has_attr("padding_w") ? node->get_int_attr("padding_w") : 0;
+                    int64_t dilation_h = node->has_attr("dilation_h") ? node->get_int_attr("dilation_h") : 1;
+                    int64_t dilation_w = node->has_attr("dilation_w") ? node->get_int_attr("dilation_w") : 1;
 
                     if (shape.size() == 4) {
-                        int64_t H_out = (shape[2] + 2 * padding_h - kernel_h) / stride_h + 1;
-                        int64_t W_out = (shape[3] + 2 * padding_w - kernel_w) / stride_w + 1;
+                        int64_t H_out = (shape[2] + 2 * padding_h - dilation_h * (kernel_h - 1) - 1) / stride_h + 1;
+                        int64_t W_out = (shape[3] + 2 * padding_w - dilation_w * (kernel_w - 1) - 1) / stride_w + 1;
                         output_shapes.push_back({shape[0], out_channels, H_out, W_out});
                     }
                 }
                 break;
 
-            default:
-                // For unknown ops, try to preserve input shape
+            // ================================================================
+            // Pooling
+            // ================================================================
+            case OpType::MaxPool2d:
+            case OpType::AvgPool2d:
+                if (!input_shapes.empty() && input_shapes[0].size() == 4) {
+                    auto& shape = input_shapes[0];  // [N, C, H, W]
+                    int64_t kernel = node->get_int_attr("kernel_size");
+                    int64_t stride = node->has_attr("stride") ? node->get_int_attr("stride") : kernel;
+                    int64_t padding = node->has_attr("padding") ? node->get_int_attr("padding") : 0;
+                    int64_t H_out = (shape[2] + 2 * padding - kernel) / stride + 1;
+                    int64_t W_out = (shape[3] + 2 * padding - kernel) / stride + 1;
+                    output_shapes.push_back({shape[0], shape[1], H_out, W_out});
+                }
+                break;
+
+            case OpType::AdaptiveAvgPool2d:
+                if (!input_shapes.empty() && input_shapes[0].size() == 4) {
+                    auto output_size = node->get_vec_attr("output_size");
+                    if (output_size.size() >= 2) {
+                        output_shapes.push_back({input_shapes[0][0], input_shapes[0][1],
+                                                 output_size[0], output_size[1]});
+                    }
+                }
+                break;
+
+            // ================================================================
+            // Normalization: preserve input shape
+            // ================================================================
+            case OpType::BatchNorm2d:
+            case OpType::LayerNorm:
+                if (!input_shapes.empty()) {
+                    output_shapes.push_back(input_shapes[0]);
+                }
+                break;
+
+            // ================================================================
+            // Linear: (*, in_features) -> (*, out_features)
+            // ================================================================
+            case OpType::Linear:
+                if (input_shapes.size() >= 2) {
+                    auto out_shape = input_shapes[0];
+                    // Weight shape is [out_features, in_features]
+                    if (!input_shapes[1].empty()) {
+                        out_shape.back() = input_shapes[1][0];
+                    }
+                    output_shapes.push_back(out_shape);
+                }
+                break;
+
+            // ================================================================
+            // Embedding: (*, ) -> (*, embedding_dim)
+            // ================================================================
+            case OpType::Embedding:
+                if (input_shapes.size() >= 2) {
+                    // input_shapes[0] = weight [num_embeddings, embedding_dim]
+                    // input_shapes[1] = indices [*]
+                    auto out_shape = input_shapes[1];
+                    if (input_shapes[0].size() >= 2) {
+                        out_shape.push_back(input_shapes[0][1]);
+                    }
+                    output_shapes.push_back(out_shape);
+                }
+                break;
+
+            // ================================================================
+            // Indexing
+            // ================================================================
+            case OpType::Slice:
+                if (!input_shapes.empty()) {
+                    auto shape = input_shapes[0];
+                    int64_t dim = node->get_int_attr("dim");
+                    int64_t start = node->get_int_attr("start");
+                    int64_t end = node->get_int_attr("end");
+                    int64_t step = node->has_attr("step") ? node->get_int_attr("step") : 1;
+                    if (dim < static_cast<int64_t>(shape.size())) {
+                        int64_t len = (end - start + step - 1) / step;
+                        shape[dim] = len;
+                    }
+                    output_shapes.push_back(shape);
+                }
+                break;
+
+            case OpType::Cat:
+                if (!input_shapes.empty()) {
+                    int64_t dim = node->has_attr("dim") ? node->get_int_attr("dim") : 0;
+                    auto out_shape = input_shapes[0];
+                    if (dim < static_cast<int64_t>(out_shape.size())) {
+                        int64_t total = 0;
+                        for (auto& s : input_shapes) {
+                            if (dim < static_cast<int64_t>(s.size())) {
+                                total += s[dim];
+                            }
+                        }
+                        out_shape[dim] = total;
+                    }
+                    output_shapes.push_back(out_shape);
+                }
+                break;
+
+            // ================================================================
+            // Constants and I/O markers
+            // ================================================================
+            case OpType::Constant:
+                if (node->has_attr("value")) {
+                    auto& t = node->get_tensor_attr("value");
+                    output_shapes.push_back(std::vector<int64_t>(t.shape().begin(), t.shape().end()));
+                }
+                break;
+
+            case OpType::Input:
+            case OpType::Output:
                 if (!input_shapes.empty()) {
                     output_shapes.push_back(input_shapes[0]);
                 }
@@ -263,6 +526,412 @@ auto Graph::infer_types() -> void {
         // Update output shapes
         for (size_t i = 0; i < node->outputs().size() && i < output_shapes.size(); ++i) {
             node->outputs()[i]->set_shape(output_shapes[i]);
+        }
+    }
+}
+
+// ============================================================================
+// Symbolic shape support
+// ============================================================================
+
+auto Graph::set_symbolic_input_shape(size_t input_idx, SymbolicShape shape) -> void {
+    if (input_idx >= inputs_.size()) {
+        throw std::out_of_range(
+            "Input index " + std::to_string(input_idx) + " out of range (graph has " +
+            std::to_string(inputs_.size()) + " inputs)");
+    }
+    inputs_[input_idx]->set_symbolic_shape(std::move(shape));
+}
+
+auto Graph::infer_symbolic_types() -> void {
+    // Symbolic type inference pass - propagate symbolic shapes through operations.
+    // For each node, we gather the symbolic shapes of all inputs and compute
+    // the symbolic shape of the outputs using the same rules as infer_types().
+    for (const auto& node : nodes_) {
+        // Gather input symbolic shapes. If an input has no symbolic shape set,
+        // derive one from its concrete shape.
+        std::vector<SymbolicShape> input_sym_shapes;
+        for (const auto& input : node->inputs()) {
+            if (input->has_symbolic_shape()) {
+                input_sym_shapes.push_back(input->symbolic_shape());
+            } else {
+                input_sym_shapes.push_back(SymbolicShape::from_concrete(input->shape()));
+            }
+        }
+
+        // Infer output symbolic shapes based on operation type
+        std::vector<SymbolicShape> output_sym_shapes;
+
+        switch (node->op_type()) {
+            // ================================================================
+            // Binary ops: symbolic broadcasting
+            // ================================================================
+            case OpType::Add:
+            case OpType::Sub:
+            case OpType::Mul:
+            case OpType::Div:
+                if (input_sym_shapes.size() >= 2) {
+                    output_sym_shapes.push_back(
+                        broadcast_symbolic_shapes(input_sym_shapes[0], input_sym_shapes[1]));
+                }
+                break;
+
+            // ================================================================
+            // Matrix operations
+            // ================================================================
+            case OpType::MatMul:
+                if (input_sym_shapes.size() >= 2 &&
+                    input_sym_shapes[0].rank() >= 2 &&
+                    input_sym_shapes[1].rank() >= 2) {
+                    // Output shape: same as input[0] except last dim = input[1]'s last dim
+                    SymbolicShape out_shape(input_sym_shapes[0].dims());
+                    out_shape[out_shape.rank() - 1] =
+                        input_sym_shapes[1][input_sym_shapes[1].rank() - 1];
+                    output_sym_shapes.push_back(std::move(out_shape));
+                }
+                break;
+
+            case OpType::Bmm:
+                // Batch matmul: (B, M, K) @ (B, K, N) -> (B, M, N)
+                if (input_sym_shapes.size() >= 2 &&
+                    input_sym_shapes[0].rank() == 3 &&
+                    input_sym_shapes[1].rank() == 3) {
+                    output_sym_shapes.push_back(SymbolicShape({
+                        input_sym_shapes[0][0],
+                        input_sym_shapes[0][1],
+                        input_sym_shapes[1][2]
+                    }));
+                }
+                break;
+
+            // ================================================================
+            // Unary element-wise ops: preserve shape
+            // ================================================================
+            case OpType::ReLU:
+            case OpType::Sigmoid:
+            case OpType::Tanh:
+            case OpType::Exp:
+            case OpType::Log:
+            case OpType::Sqrt:
+            case OpType::Pow:
+            case OpType::Abs:
+            case OpType::Neg:
+            case OpType::Clamp:
+            case OpType::Dropout:
+                if (!input_sym_shapes.empty()) {
+                    output_sym_shapes.push_back(input_sym_shapes[0]);
+                }
+                break;
+
+            // ================================================================
+            // Softmax / LogSoftmax: preserve shape
+            // ================================================================
+            case OpType::Softmax:
+            case OpType::LogSoftmax:
+                if (!input_sym_shapes.empty()) {
+                    output_sym_shapes.push_back(input_sym_shapes[0]);
+                }
+                break;
+
+            // ================================================================
+            // Shape operations
+            // ================================================================
+            case OpType::Reshape:
+                if (node->has_attr("shape")) {
+                    // Reshape target is concrete from the vec_attr
+                    output_sym_shapes.push_back(
+                        SymbolicShape::from_concrete(node->get_vec_attr("shape")));
+                }
+                break;
+
+            case OpType::Transpose:
+                if (!input_sym_shapes.empty()) {
+                    auto sym_shape = input_sym_shapes[0];
+                    int64_t dim0 = node->get_int_attr("dim0");
+                    int64_t dim1 = node->get_int_attr("dim1");
+                    if (dim0 < static_cast<int64_t>(sym_shape.rank()) &&
+                        dim1 < static_cast<int64_t>(sym_shape.rank())) {
+                        std::swap(sym_shape[static_cast<size_t>(dim0)],
+                                  sym_shape[static_cast<size_t>(dim1)]);
+                    }
+                    output_sym_shapes.push_back(std::move(sym_shape));
+                }
+                break;
+
+            case OpType::Permute:
+                if (!input_sym_shapes.empty() && node->has_attr("dims")) {
+                    auto dims = node->get_vec_attr("dims");
+                    auto& in_shape = input_sym_shapes[0];
+                    std::vector<SymbolicDim> out_dims(dims.size());
+                    for (size_t i = 0; i < dims.size(); ++i) {
+                        if (dims[i] < static_cast<int64_t>(in_shape.rank())) {
+                            out_dims[i] = in_shape[static_cast<size_t>(dims[i])];
+                        }
+                    }
+                    output_sym_shapes.push_back(SymbolicShape(std::move(out_dims)));
+                }
+                break;
+
+            case OpType::Squeeze:
+                if (!input_sym_shapes.empty()) {
+                    auto sym_shape = input_sym_shapes[0];
+                    int64_t dim = node->get_int_attr("dim");
+                    if (dim < static_cast<int64_t>(sym_shape.rank())) {
+                        auto& d = sym_shape[static_cast<size_t>(dim)];
+                        // Only squeeze if concrete and equal to 1
+                        if (d.is_concrete() && d.value() == 1) {
+                            sym_shape.erase(static_cast<size_t>(dim));
+                        }
+                    }
+                    output_sym_shapes.push_back(std::move(sym_shape));
+                }
+                break;
+
+            case OpType::Unsqueeze:
+                if (!input_sym_shapes.empty()) {
+                    auto sym_shape = input_sym_shapes[0];
+                    int64_t dim = node->get_int_attr("dim");
+                    if (dim < 0) dim += static_cast<int64_t>(sym_shape.rank()) + 1;
+                    if (dim <= static_cast<int64_t>(sym_shape.rank())) {
+                        sym_shape.insert(static_cast<size_t>(dim), SymbolicDim::concrete(1));
+                    }
+                    output_sym_shapes.push_back(std::move(sym_shape));
+                }
+                break;
+
+            case OpType::Flatten:
+                if (!input_sym_shapes.empty()) {
+                    auto& in_shape = input_sym_shapes[0];
+                    int64_t start_dim = node->has_attr("start_dim") ? node->get_int_attr("start_dim") : 0;
+                    int64_t end_dim = node->has_attr("end_dim") ? node->get_int_attr("end_dim") : -1;
+                    if (start_dim < 0) start_dim += static_cast<int64_t>(in_shape.rank());
+                    if (end_dim < 0) end_dim += static_cast<int64_t>(in_shape.rank());
+
+                    std::vector<SymbolicDim> out_dims;
+                    SymbolicDim flat = SymbolicDim::concrete(1);
+                    for (int64_t i = 0; i < static_cast<int64_t>(in_shape.rank()); ++i) {
+                        if (i < start_dim || i > end_dim) {
+                            out_dims.push_back(in_shape[static_cast<size_t>(i)]);
+                        } else {
+                            flat = flat * in_shape[static_cast<size_t>(i)];
+                            if (i == end_dim) {
+                                out_dims.push_back(flat);
+                            }
+                        }
+                    }
+                    output_sym_shapes.push_back(SymbolicShape(std::move(out_dims)));
+                }
+                break;
+
+            // ================================================================
+            // Reductions
+            // ================================================================
+            case OpType::Sum:
+            case OpType::Mean:
+            case OpType::Max:
+            case OpType::Min:
+                if (!input_sym_shapes.empty()) {
+                    auto sym_shape = input_sym_shapes[0];
+                    if (node->has_attr("dim")) {
+                        int64_t dim = node->get_int_attr("dim");
+                        bool keepdim = node->get_bool_attr("keepdim");
+                        if (dim < 0) dim += static_cast<int64_t>(sym_shape.rank());
+                        if (dim >= 0 && dim < static_cast<int64_t>(sym_shape.rank())) {
+                            if (keepdim) {
+                                sym_shape[static_cast<size_t>(dim)] = SymbolicDim::concrete(1);
+                            } else {
+                                sym_shape.erase(static_cast<size_t>(dim));
+                            }
+                        }
+                    } else {
+                        sym_shape = SymbolicShape();  // Reduce all: scalar output
+                    }
+                    output_sym_shapes.push_back(std::move(sym_shape));
+                }
+                break;
+
+            // ================================================================
+            // Convolution
+            // ================================================================
+            case OpType::Conv2d:
+                if (!input_sym_shapes.empty() && input_sym_shapes[0].rank() == 4) {
+                    auto& in_shape = input_sym_shapes[0];
+                    int64_t out_channels = node->get_int_attr("out_channels");
+                    int64_t kernel_h = node->get_int_attr("kernel_h");
+                    int64_t kernel_w = node->get_int_attr("kernel_w");
+                    int64_t stride_h = node->has_attr("stride_h") ? node->get_int_attr("stride_h") : 1;
+                    int64_t stride_w = node->has_attr("stride_w") ? node->get_int_attr("stride_w") : 1;
+                    int64_t padding_h = node->has_attr("padding_h") ? node->get_int_attr("padding_h") : 0;
+                    int64_t padding_w = node->has_attr("padding_w") ? node->get_int_attr("padding_w") : 0;
+                    int64_t dilation_h = node->has_attr("dilation_h") ? node->get_int_attr("dilation_h") : 1;
+                    int64_t dilation_w = node->has_attr("dilation_w") ? node->get_int_attr("dilation_w") : 1;
+
+                    // Batch dim (N) is symbolic, spatial dims may be symbolic too
+                    SymbolicDim N_dim = in_shape[0];
+                    SymbolicDim H_dim = in_shape[2];
+                    SymbolicDim W_dim = in_shape[3];
+
+                    // H_out = (H + 2*padding - dilation*(kernel-1) - 1) / stride + 1
+                    SymbolicDim padding_h_dim = SymbolicDim::concrete(2 * padding_h);
+                    SymbolicDim kernel_term_h = SymbolicDim::concrete(dilation_h * (kernel_h - 1) + 1);
+                    SymbolicDim stride_h_dim = SymbolicDim::concrete(stride_h);
+                    SymbolicDim H_out = (H_dim + padding_h_dim - kernel_term_h) / stride_h_dim
+                                        + SymbolicDim::concrete(1);
+
+                    SymbolicDim padding_w_dim = SymbolicDim::concrete(2 * padding_w);
+                    SymbolicDim kernel_term_w = SymbolicDim::concrete(dilation_w * (kernel_w - 1) + 1);
+                    SymbolicDim stride_w_dim = SymbolicDim::concrete(stride_w);
+                    SymbolicDim W_out = (W_dim + padding_w_dim - kernel_term_w) / stride_w_dim
+                                        + SymbolicDim::concrete(1);
+
+                    output_sym_shapes.push_back(SymbolicShape({
+                        N_dim,
+                        SymbolicDim::concrete(out_channels),
+                        H_out,
+                        W_out
+                    }));
+                }
+                break;
+
+            // ================================================================
+            // Pooling
+            // ================================================================
+            case OpType::MaxPool2d:
+            case OpType::AvgPool2d:
+                if (!input_sym_shapes.empty() && input_sym_shapes[0].rank() == 4) {
+                    auto& in_shape = input_sym_shapes[0];
+                    int64_t kernel = node->get_int_attr("kernel_size");
+                    int64_t stride = node->has_attr("stride") ? node->get_int_attr("stride") : kernel;
+                    int64_t padding = node->has_attr("padding") ? node->get_int_attr("padding") : 0;
+
+                    SymbolicDim H_dim = in_shape[2];
+                    SymbolicDim W_dim = in_shape[3];
+                    SymbolicDim pad2 = SymbolicDim::concrete(2 * padding);
+                    SymbolicDim k = SymbolicDim::concrete(kernel);
+                    SymbolicDim s = SymbolicDim::concrete(stride);
+                    SymbolicDim one = SymbolicDim::concrete(1);
+
+                    SymbolicDim H_out = (H_dim + pad2 - k) / s + one;
+                    SymbolicDim W_out = (W_dim + pad2 - k) / s + one;
+
+                    output_sym_shapes.push_back(SymbolicShape({
+                        in_shape[0], in_shape[1], H_out, W_out
+                    }));
+                }
+                break;
+
+            case OpType::AdaptiveAvgPool2d:
+                if (!input_sym_shapes.empty() && input_sym_shapes[0].rank() == 4) {
+                    auto output_size = node->get_vec_attr("output_size");
+                    if (output_size.size() >= 2) {
+                        output_sym_shapes.push_back(SymbolicShape({
+                            input_sym_shapes[0][0],
+                            input_sym_shapes[0][1],
+                            SymbolicDim::concrete(output_size[0]),
+                            SymbolicDim::concrete(output_size[1])
+                        }));
+                    }
+                }
+                break;
+
+            // ================================================================
+            // Normalization: preserve input shape
+            // ================================================================
+            case OpType::BatchNorm2d:
+            case OpType::LayerNorm:
+                if (!input_sym_shapes.empty()) {
+                    output_sym_shapes.push_back(input_sym_shapes[0]);
+                }
+                break;
+
+            // ================================================================
+            // Linear: (*, in_features) -> (*, out_features)
+            // ================================================================
+            case OpType::Linear:
+                if (input_sym_shapes.size() >= 2) {
+                    auto out_shape = input_sym_shapes[0];
+                    // Weight shape is [out_features, in_features]
+                    if (input_sym_shapes[1].rank() > 0) {
+                        out_shape[out_shape.rank() - 1] = input_sym_shapes[1][0];
+                    }
+                    output_sym_shapes.push_back(std::move(out_shape));
+                }
+                break;
+
+            // ================================================================
+            // Embedding: (*, ) -> (*, embedding_dim)
+            // ================================================================
+            case OpType::Embedding:
+                if (input_sym_shapes.size() >= 2) {
+                    // input_sym_shapes[0] = weight [num_embeddings, embedding_dim]
+                    // input_sym_shapes[1] = indices [*]
+                    auto out_shape = input_sym_shapes[1];
+                    if (input_sym_shapes[0].rank() >= 2) {
+                        out_shape.push_back(input_sym_shapes[0][1]);
+                    }
+                    output_sym_shapes.push_back(std::move(out_shape));
+                }
+                break;
+
+            // ================================================================
+            // Indexing
+            // ================================================================
+            case OpType::Slice:
+                if (!input_sym_shapes.empty()) {
+                    auto sym_shape = input_sym_shapes[0];
+                    int64_t dim = node->get_int_attr("dim");
+                    int64_t start = node->get_int_attr("start");
+                    int64_t end = node->get_int_attr("end");
+                    int64_t step = node->has_attr("step") ? node->get_int_attr("step") : 1;
+                    if (dim < static_cast<int64_t>(sym_shape.rank())) {
+                        int64_t len = (end - start + step - 1) / step;
+                        sym_shape[static_cast<size_t>(dim)] = SymbolicDim::concrete(len);
+                    }
+                    output_sym_shapes.push_back(std::move(sym_shape));
+                }
+                break;
+
+            case OpType::Cat:
+                if (!input_sym_shapes.empty()) {
+                    int64_t dim = node->has_attr("dim") ? node->get_int_attr("dim") : 0;
+                    auto out_shape = input_sym_shapes[0];
+                    if (dim < static_cast<int64_t>(out_shape.rank())) {
+                        // Sum all dimensions along the cat axis
+                        SymbolicDim total = SymbolicDim::concrete(0);
+                        for (auto& s : input_sym_shapes) {
+                            if (dim < static_cast<int64_t>(s.rank())) {
+                                total = total + s[static_cast<size_t>(dim)];
+                            }
+                        }
+                        out_shape[static_cast<size_t>(dim)] = total;
+                    }
+                    output_sym_shapes.push_back(std::move(out_shape));
+                }
+                break;
+
+            // ================================================================
+            // Constants and I/O markers
+            // ================================================================
+            case OpType::Constant:
+                if (node->has_attr("value")) {
+                    auto& t = node->get_tensor_attr("value");
+                    output_sym_shapes.push_back(
+                        SymbolicShape::from_concrete(
+                            std::vector<int64_t>(t.shape().begin(), t.shape().end())));
+                }
+                break;
+
+            case OpType::Input:
+            case OpType::Output:
+                if (!input_sym_shapes.empty()) {
+                    output_sym_shapes.push_back(input_sym_shapes[0]);
+                }
+                break;
+        }
+
+        // Update output symbolic shapes
+        for (size_t i = 0; i < node->outputs().size() && i < output_sym_shapes.size(); ++i) {
+            node->outputs()[i]->set_symbolic_shape(output_sym_shapes[i]);
         }
     }
 }
@@ -316,6 +985,9 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
     std::vector<Variable> outputs;
 
     switch (node->op_type()) {
+        // ====================================================================
+        // Arithmetic operations
+        // ====================================================================
         case OpType::Add:
             if (input_vars.size() >= 2) {
                 outputs.push_back(input_vars[0] + input_vars[1]);
@@ -340,12 +1012,178 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             }
             break;
 
+        // ====================================================================
+        // Matrix operations
+        // ====================================================================
         case OpType::MatMul:
             if (input_vars.size() >= 2) {
-                outputs.push_back(input_vars[0].matmul(input_vars[1]));
+                outputs.push_back(tenzor::matmul(input_vars[0], input_vars[1]));
             }
             break;
 
+        case OpType::Bmm:
+            if (input_vars.size() >= 2) {
+                outputs.push_back(tenzor::bmm(input_vars[0], input_vars[1]));
+            }
+            break;
+
+        // ====================================================================
+        // Activations
+        // ====================================================================
+        case OpType::ReLU:
+            if (!input_vars.empty()) {
+                outputs.push_back(nn::relu(input_vars[0]));
+            }
+            break;
+
+        case OpType::Sigmoid:
+            if (!input_vars.empty()) {
+                outputs.push_back(nn::sigmoid(input_vars[0]));
+            }
+            break;
+
+        case OpType::Tanh:
+            if (!input_vars.empty()) {
+                outputs.push_back(nn::tanh(input_vars[0]));
+            }
+            break;
+
+        case OpType::Softmax:
+            if (!input_vars.empty()) {
+                int64_t dim = node->has_attr("dim") ? node->get_int_attr("dim") : -1;
+                outputs.push_back(tenzor::softmax(input_vars[0], dim));
+            }
+            break;
+
+        case OpType::LogSoftmax:
+            if (!input_vars.empty()) {
+                int64_t dim = node->has_attr("dim") ? node->get_int_attr("dim") : -1;
+                outputs.push_back(tenzor::log_softmax(input_vars[0], dim));
+            }
+            break;
+
+        // ====================================================================
+        // Pooling (dispatch to backend kernels)
+        // ====================================================================
+        case OpType::MaxPool2d:
+            if (!input_vars.empty()) {
+                OpAttributes pool_attrs;
+                pool_attrs["kernel_size"] = std::to_string(node->get_int_attr("kernel_size"));
+                pool_attrs["stride"] = std::to_string(node->has_attr("stride") ?
+                    node->get_int_attr("stride") : node->get_int_attr("kernel_size"));
+                pool_attrs["padding"] = std::to_string(node->has_attr("padding") ?
+                    node->get_int_attr("padding") : 0);
+                std::vector<Tensor> inputs = {input_vars[0].tensor()};
+                auto result = dispatch(OpId::MaxPool2dForward, inputs, pool_attrs);
+                if (!result.empty()) {
+                    outputs.push_back(Variable(result[0], false));
+                }
+            }
+            break;
+
+        case OpType::AvgPool2d:
+            if (!input_vars.empty()) {
+                OpAttributes pool_attrs;
+                pool_attrs["kernel_size"] = std::to_string(node->get_int_attr("kernel_size"));
+                pool_attrs["stride"] = std::to_string(node->has_attr("stride") ?
+                    node->get_int_attr("stride") : node->get_int_attr("kernel_size"));
+                pool_attrs["padding"] = std::to_string(node->has_attr("padding") ?
+                    node->get_int_attr("padding") : 0);
+                std::vector<Tensor> inputs = {input_vars[0].tensor()};
+                auto result = dispatch(OpId::AvgPool2dForward, inputs, pool_attrs);
+                if (!result.empty()) {
+                    outputs.push_back(Variable(result[0], false));
+                }
+            }
+            break;
+
+        case OpType::AdaptiveAvgPool2d:
+            if (!input_vars.empty()) {
+                OpAttributes pool_attrs;
+                auto output_size = node->get_vec_attr("output_size");
+                if (output_size.size() >= 2) {
+                    pool_attrs["output_h"] = std::to_string(output_size[0]);
+                    pool_attrs["output_w"] = std::to_string(output_size[1]);
+                }
+                std::vector<Tensor> inputs = {input_vars[0].tensor()};
+                auto result = dispatch(OpId::AdaptiveAvgPool2d, inputs, pool_attrs);
+                if (!result.empty()) {
+                    outputs.push_back(Variable(result[0], false));
+                }
+            }
+            break;
+
+        // ====================================================================
+        // Convolution (dispatch to backend kernels)
+        // ====================================================================
+        case OpType::Conv2d:
+            if (input_vars.size() >= 2) {
+                OpAttributes conv_attrs;
+                conv_attrs["stride"] = std::to_string(node->has_attr("stride_h") ?
+                    node->get_int_attr("stride_h") : 1);
+                conv_attrs["padding"] = std::to_string(node->has_attr("padding_h") ?
+                    node->get_int_attr("padding_h") : 0);
+                conv_attrs["dilation"] = std::to_string(node->has_attr("dilation") ?
+                    node->get_int_attr("dilation") : 1);
+                conv_attrs["groups"] = std::to_string(node->has_attr("groups") ?
+                    node->get_int_attr("groups") : 1);
+                std::vector<Tensor> inputs = {input_vars[0].tensor(), input_vars[1].tensor()};
+                if (input_vars.size() >= 3) {
+                    inputs.push_back(input_vars[2].tensor());
+                }
+                auto result = dispatch(OpId::Conv2dForward, inputs, conv_attrs);
+                if (!result.empty()) {
+                    outputs.push_back(Variable(result[0], false));
+                }
+            }
+            break;
+
+        // ====================================================================
+        // Normalization (dispatch to backend kernels)
+        // ====================================================================
+        case OpType::BatchNorm2d:
+            if (!input_vars.empty()) {
+                OpAttributes bn_attrs;
+                bn_attrs["eps"] = std::to_string(node->has_attr("eps") ?
+                    static_cast<double>(node->get_attr("eps")) : 1e-5);
+                bn_attrs["momentum"] = "0.1";
+                bn_attrs["training"] = "0";
+                std::vector<Tensor> inputs;
+                for (auto& iv : input_vars) {
+                    inputs.push_back(iv.tensor());
+                }
+                auto result = dispatch(OpId::BatchNorm2dForward, inputs, bn_attrs);
+                if (!result.empty()) {
+                    outputs.push_back(Variable(result[0], false));
+                }
+            }
+            break;
+
+        case OpType::LayerNorm:
+            if (!input_vars.empty()) {
+                OpAttributes ln_attrs;
+                ln_attrs["eps"] = std::to_string(node->has_attr("eps") ?
+                    static_cast<double>(node->get_attr("eps")) : 1e-5);
+                auto normalized_shape = node->get_vec_attr("normalized_shape");
+                for (size_t i = 0; i < normalized_shape.size(); ++i) {
+                    ln_attrs["normalized_shape_" + std::to_string(i)] =
+                        std::to_string(normalized_shape[i]);
+                }
+                ln_attrs["normalized_shape_size"] = std::to_string(normalized_shape.size());
+                std::vector<Tensor> inputs;
+                for (auto& iv : input_vars) {
+                    inputs.push_back(iv.tensor());
+                }
+                auto result = dispatch(OpId::LayerNorm, inputs, ln_attrs);
+                if (!result.empty()) {
+                    outputs.push_back(Variable(result[0], false));
+                }
+            }
+            break;
+
+        // ====================================================================
+        // Shape operations
+        // ====================================================================
         case OpType::Reshape:
             if (!input_vars.empty()) {
                 auto shape = node->get_vec_attr("shape");
@@ -361,16 +1199,207 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             }
             break;
 
+        case OpType::Permute:
+            if (!input_vars.empty()) {
+                auto dims = node->get_vec_attr("dims");
+                outputs.push_back(tenzor::permute(input_vars[0], dims));
+            }
+            break;
+
+        case OpType::Squeeze:
+            if (!input_vars.empty()) {
+                int64_t dim = node->get_int_attr("dim");
+                outputs.push_back(tenzor::squeeze(input_vars[0], dim));
+            }
+            break;
+
+        case OpType::Unsqueeze:
+            if (!input_vars.empty()) {
+                int64_t dim = node->get_int_attr("dim");
+                auto result = input_vars[0].tensor().unsqueeze(dim);
+                outputs.push_back(Variable(result, false));
+            }
+            break;
+
+        case OpType::Flatten:
+            if (!input_vars.empty()) {
+                int64_t start_dim = node->has_attr("start_dim") ? node->get_int_attr("start_dim") : 0;
+                int64_t end_dim = node->has_attr("end_dim") ? node->get_int_attr("end_dim") : -1;
+                auto result = input_vars[0].tensor().flatten(start_dim, end_dim);
+                outputs.push_back(Variable(result, false));
+            }
+            break;
+
+        // ====================================================================
+        // Reductions
+        // ====================================================================
+        case OpType::Sum:
+            if (!input_vars.empty()) {
+                if (node->has_attr("dim")) {
+                    int64_t dim = node->get_int_attr("dim");
+                    bool keepdim = node->has_attr("keepdim") ? node->get_bool_attr("keepdim") : false;
+                    outputs.push_back(tenzor::sum(input_vars[0], dim, keepdim));
+                } else {
+                    outputs.push_back(tenzor::sum(input_vars[0]));
+                }
+            }
+            break;
+
+        case OpType::Mean:
+            if (!input_vars.empty()) {
+                if (node->has_attr("dim")) {
+                    int64_t dim = node->get_int_attr("dim");
+                    bool keepdim = node->has_attr("keepdim") ? node->get_bool_attr("keepdim") : false;
+                    outputs.push_back(tenzor::mean(input_vars[0], dim, keepdim));
+                } else {
+                    outputs.push_back(tenzor::mean(input_vars[0]));
+                }
+            }
+            break;
+
+        case OpType::Max:
+            if (!input_vars.empty()) {
+                if (node->has_attr("dim")) {
+                    int64_t dim = node->get_int_attr("dim");
+                    bool keepdim = node->has_attr("keepdim") ? node->get_bool_attr("keepdim") : false;
+                    outputs.push_back(tenzor::max(input_vars[0], dim, keepdim));
+                } else {
+                    outputs.push_back(tenzor::max(input_vars[0]));
+                }
+            }
+            break;
+
+        case OpType::Min:
+            if (!input_vars.empty()) {
+                // No autograd min — use raw tensor op and wrap
+                if (node->has_attr("dim")) {
+                    int64_t dim = node->get_int_attr("dim");
+                    bool keepdim = node->has_attr("keepdim") ? node->get_bool_attr("keepdim") : false;
+                    auto result = tenzor::min(input_vars[0].tensor(), dim, keepdim);
+                    outputs.push_back(Variable(result, false));
+                } else {
+                    auto result = tenzor::min(input_vars[0].tensor());
+                    outputs.push_back(Variable(result, false));
+                }
+            }
+            break;
+
+        // ====================================================================
+        // Element-wise math
+        // ====================================================================
+        case OpType::Exp:
+            if (!input_vars.empty()) {
+                outputs.push_back(tenzor::exp(input_vars[0]));
+            }
+            break;
+
+        case OpType::Log:
+            if (!input_vars.empty()) {
+                outputs.push_back(tenzor::log(input_vars[0]));
+            }
+            break;
+
+        case OpType::Sqrt:
+            if (!input_vars.empty()) {
+                auto result = tenzor::sqrt(input_vars[0].tensor());
+                outputs.push_back(Variable(result, false));
+            }
+            break;
+
+        case OpType::Pow:
+            if (!input_vars.empty()) {
+                float exponent = node->get_attr("exponent");
+                auto result = tenzor::pow(input_vars[0].tensor(), exponent);
+                outputs.push_back(Variable(result, false));
+            }
+            break;
+
+        case OpType::Abs:
+            if (!input_vars.empty()) {
+                outputs.push_back(tenzor::abs(input_vars[0]));
+            }
+            break;
+
+        case OpType::Neg:
+            if (!input_vars.empty()) {
+                outputs.push_back(tenzor::neg(input_vars[0]));
+            }
+            break;
+
+        case OpType::Clamp:
+            if (!input_vars.empty()) {
+                float min_val = node->get_attr("min");
+                float max_val = node->get_attr("max");
+                outputs.push_back(tenzor::clamp(input_vars[0], min_val, max_val));
+            }
+            break;
+
+        // ====================================================================
+        // Indexing
+        // ====================================================================
+        case OpType::Slice:
+            if (!input_vars.empty()) {
+                int64_t dim = node->get_int_attr("dim");
+                int64_t start = node->get_int_attr("start");
+                int64_t end = node->get_int_attr("end");
+                int64_t step = node->has_attr("step") ? node->get_int_attr("step") : 1;
+                outputs.push_back(tenzor::slice(input_vars[0], dim, start, end, step));
+            }
+            break;
+
+        case OpType::Cat:
+            if (!input_vars.empty()) {
+                int64_t dim = node->has_attr("dim") ? node->get_int_attr("dim") : 0;
+                outputs.push_back(tenzor::cat(input_vars, dim));
+            }
+            break;
+
+        // ====================================================================
+        // Other
+        // ====================================================================
+        case OpType::Dropout:
+            // In JIT execution, dropout is typically in eval mode (no-op)
+            if (!input_vars.empty()) {
+                outputs.push_back(input_vars[0]);
+            }
+            break;
+
+        case OpType::Linear:
+            if (input_vars.size() >= 2) {
+                if (input_vars.size() >= 3) {
+                    outputs.push_back(tenzor::linear(input_vars[0], input_vars[1], input_vars[2]));
+                } else {
+                    // Linear without bias: y = x @ W^T
+                    outputs.push_back(input_vars[0].matmul(input_vars[1].transpose(0, 1)));
+                }
+            }
+            break;
+
+        case OpType::Embedding:
+            if (input_vars.size() >= 2) {
+                // input_vars[0] = weight table, input_vars[1] = indices
+                std::vector<Tensor> emb_inputs = {input_vars[0].tensor(), input_vars[1].tensor()};
+                auto result = dispatch(OpId::Embedding, emb_inputs, {});
+                if (!result.empty()) {
+                    outputs.push_back(Variable(result[0], false));
+                }
+            }
+            break;
+
+        // ====================================================================
+        // Constants and I/O markers
+        // ====================================================================
         case OpType::Constant:
-            // Constants are stored as tensor attributes
             if (node->has_attr("value")) {
                 Tensor t = node->get_tensor_attr("value");
                 outputs.push_back(Variable(t, false));
             }
             break;
 
-        default:
-            // For unimplemented ops, just pass through first input
+        case OpType::Input:
+        case OpType::Output:
+            // These are graph markers, not executable ops.
+            // Input values are pre-populated; Output values are gathered after.
             if (!input_vars.empty()) {
                 outputs.push_back(input_vars[0]);
             }
@@ -381,6 +1410,16 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
     for (size_t i = 0; i < node->outputs().size() && i < outputs.size(); ++i) {
         value_map[node->outputs()[i]->id()] = outputs[i];
     }
+}
+
+auto Graph::find_nodes_by_type(const std::string& type_name) const -> std::vector<std::shared_ptr<Node>> {
+    std::vector<std::shared_ptr<Node>> result;
+    for (const auto& node : nodes_) {
+        if (op_type_to_string(node->op_type()) == type_name) {
+            result.push_back(node);
+        }
+    }
+    return result;
 }
 
 auto Graph::save(const std::string& path) const -> void {
@@ -404,11 +1443,19 @@ auto Graph::to_string() const -> std::string {
         oss << "    " << node->name() << " [" << op_type_to_string(node->op_type()) << "]\n";
         oss << "      Inputs: ";
         for (const auto& input : node->inputs()) {
-            oss << input->id() << " ";
+            oss << input->id();
+            if (input->has_symbolic_shape()) {
+                oss << input->symbolic_shape().to_string();
+            }
+            oss << " ";
         }
         oss << "\n      Outputs: ";
         for (const auto& output : node->outputs()) {
-            oss << output->id() << " ";
+            oss << output->id();
+            if (output->has_symbolic_shape()) {
+                oss << output->symbolic_shape().to_string();
+            }
+            oss << " ";
         }
         oss << "\n";
     }

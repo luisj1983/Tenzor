@@ -47,9 +47,11 @@ namespace tenzor {
  * engine.execute(loss, std::nullopt);
  * @endcode
  *
- * @note Higher-order gradients (e.g., second-order derivatives) are not
- * currently supported. Saved tensors in the backward pass are raw Tensors
- * (not Variables), so gradients cannot flow through the backward computation.
+ * @note Higher-order gradients (e.g., second-order derivatives) are supported
+ * via the create_graph parameter. When create_graph=true, backward operations
+ * use Variable ops instead of raw Tensor ops, building a new computation graph
+ * that enables computing gradients of gradients (useful for WGAN-GP, MAML,
+ * Hessian computation).
  *
  * @see Variable::backward() for user-facing API
  * @see Function for gradient function interface
@@ -84,7 +86,8 @@ public:
      * // x.grad() now contains computed gradients
      * @endcode
      */
-    auto execute(Variable& root, std::optional<Tensor> gradient, bool retain_graph = false) -> void;
+    auto execute(Variable& root, std::optional<Tensor> gradient,
+                 bool retain_graph = false, bool create_graph = false) -> void;
 
     /**
      * @brief Execute backward pass for multiple roots.
@@ -142,6 +145,18 @@ private:
      * Used when a variable is used multiple times in the computation.
      */
     std::unordered_map<Function*, std::vector<Tensor>> grad_accumulators_;
+
+    /**
+     * @brief Cached topological sort result for retain_graph scenarios.
+     *
+     * When retain_graph=true and backward() is called multiple times
+     * on the same root, reuses the cached sort order.
+     */
+    struct TopoSortCache {
+        Function* root{nullptr};
+        std::vector<std::shared_ptr<Function>> sorted;
+    };
+    TopoSortCache topo_cache_;
 
     /**
      * @brief Accumulate gradient for a function.

@@ -242,6 +242,12 @@ public:
     using BackwardPreHook = std::function<void(Module*, const Variable& grad_output)>;
     using BackwardPostHook = std::function<void(Module*, const Variable& grad_input, const Variable& grad_output)>;
 
+    /// Multi-input forward pre-hook: receives vector of all inputs
+    using ForwardPreHookMulti = std::function<void(Module*, const std::vector<Variable>& inputs)>;
+    /// Multi-input forward post-hook: receives vector of inputs and vector of outputs
+    using ForwardPostHookMulti = std::function<void(Module*, const std::vector<Variable>& inputs,
+                                                     const std::vector<Variable>& outputs)>;
+
     /**
      * @brief Register a forward pre-hook.
      *
@@ -261,6 +267,43 @@ public:
      * @return Hook ID for later removal
      */
     auto register_forward_post_hook(ForwardPostHook hook) -> size_t;
+
+    /**
+     * @brief Register a multi-input forward pre-hook.
+     *
+     * Called before forward with all inputs as a vector. Use for modules
+     * that accept multiple Variable inputs (e.g., attention with q, k, v).
+     *
+     * @param hook Function to call before forward pass
+     * @return Hook ID for later removal
+     */
+    auto register_forward_pre_hook_multi(ForwardPreHookMulti hook) -> size_t;
+
+    /**
+     * @brief Register a multi-input forward post-hook.
+     *
+     * Called after forward with all inputs and outputs as vectors.
+     *
+     * @param hook Function to call after forward pass
+     * @return Hook ID for later removal
+     */
+    auto register_forward_post_hook_multi(ForwardPostHookMulti hook) -> size_t;
+
+    /**
+     * @brief Call all registered multi-input forward pre-hooks.
+     *
+     * @param inputs All input variables
+     */
+    auto call_forward_pre_hooks_multi(const std::vector<Variable>& inputs) -> void;
+
+    /**
+     * @brief Call all registered multi-input forward post-hooks.
+     *
+     * @param inputs All input variables
+     * @param outputs All output variables
+     */
+    auto call_forward_post_hooks_multi(const std::vector<Variable>& inputs,
+                                        const std::vector<Variable>& outputs) -> void;
 
     /**
      * @brief Register a backward pre-hook.
@@ -464,6 +507,8 @@ protected:
     // Hook system storage
     std::vector<ForwardPreHook> forward_pre_hooks_;                               ///< Forward pre-hooks
     std::vector<ForwardPostHook> forward_post_hooks_;                             ///< Forward post-hooks
+    std::vector<ForwardPreHookMulti> forward_pre_hooks_multi_;                    ///< Multi-input forward pre-hooks
+    std::vector<ForwardPostHookMulti> forward_post_hooks_multi_;                  ///< Multi-input forward post-hooks
     std::vector<BackwardPreHook> backward_pre_hooks_;                             ///< Backward pre-hooks
     std::vector<BackwardPostHook> backward_post_hooks_;                           ///< Backward post-hooks
     size_t next_hook_id_{0};                                                      ///< Next hook ID for tracking

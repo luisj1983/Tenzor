@@ -221,8 +221,32 @@ __global__ void maxpool2d_backward_f64(
         int64_t h = max_idx / W;
         int64_t w = max_idx % W;
         int64_t in_idx = ((n * C + c) * H + h) * W + w;
+        double grad_val = grad_output[idx];
 
-        atomicAdd(&grad_input[in_idx], grad_output[idx]);
+#if __CUDA_ARCH__ >= 700
+        // Warp-level pre-reduction: find threads targeting the same in_idx
+        // and sum their values before atomicAdd, reducing contention.
+        // Uses low 32 bits of in_idx for matching (safe for tensors < 2B elements).
+        unsigned int peers = __match_any_sync(0xFFFFFFFF, static_cast<unsigned int>(in_idx));
+        int leader = __ffs(peers) - 1;
+        int lane = threadIdx.x & 31;
+
+        // All matching threads sum their peer values via shuffle
+        double sum = 0.0;
+        unsigned int p = peers;
+        while (p) {
+            int src = __ffs(p) - 1;
+            sum += __shfl_sync(peers, grad_val, src);
+            p &= p - 1;
+        }
+
+        // Only the leader thread does the atomic write
+        if (lane == leader) {
+            atomicAdd(&grad_input[in_idx], sum);
+        }
+#else
+        atomicAdd(&grad_input[in_idx], grad_val);
+#endif
     }
 }
 

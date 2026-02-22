@@ -236,8 +236,16 @@ public:
  */
 class GELU : public Module {
 public:
-    GELU() = default;
+    /**
+     * @brief Construct GELU activation.
+     *
+     * @param approximate Approximation method: "none" for exact erf, "tanh" for fast tanh approximation
+     */
+    explicit GELU(const std::string& approximate = "none");
     auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    std::string approximate_;  ///< "none" or "tanh"
 };
 
 /**
@@ -493,8 +501,10 @@ auto sigmoid(const Variable& input) -> Variable;
 /** @brief Functional tanh: (exp(x) - exp(-x)) / (exp(x) + exp(-x)) */
 auto tanh(const Variable& input) -> Variable;
 
-/** @brief Functional GELU: Gaussian Error Linear Unit */
-auto gelu(const Variable& input) -> Variable;
+/** @brief Functional GELU: Gaussian Error Linear Unit
+ *  @param approximate "none" for exact, "tanh" for fast approximation
+ */
+auto gelu(const Variable& input, const std::string& approximate = "none") -> Variable;
 
 /** @brief Functional softmax along specified dimension */
 auto softmax(const Variable& input, int64_t dim = -1) -> Variable;

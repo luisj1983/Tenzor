@@ -173,6 +173,28 @@ inline std::vector<int64_t> parse_int_list(const OpAttributes& attrs, const std:
         })
 
 /**
+ * @brief Register a unary operation as single-output kernel.
+ * Avoids vector<Tensor> allocation overhead for ops returning one Tensor.
+ */
+#define TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, op_id, kernel_fn) \
+    (table).register_single_output_kernel(::tenzor::OpId::op_id, \
+        [](std::span<const ::tenzor::Tensor> inputs, const ::tenzor::OpAttributes&) \
+            -> ::tenzor::Tensor { \
+            return (kernel_fn)(inputs[0]); \
+        })
+
+/**
+ * @brief Register a binary operation as single-output kernel.
+ * Avoids vector<Tensor> allocation overhead for ops returning one Tensor.
+ */
+#define TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, op_id, kernel_fn) \
+    (table).register_single_output_kernel(::tenzor::OpId::op_id, \
+        [](std::span<const ::tenzor::Tensor> inputs, const ::tenzor::OpAttributes&) \
+            -> ::tenzor::Tensor { \
+            return (kernel_fn)(inputs[0], inputs[1]); \
+        })
+
+/**
  * @brief Register a ternary operation kernel.
  *
  * For kernels with signature: Tensor(const Tensor&, const Tensor&, const Tensor&)
@@ -199,12 +221,11 @@ inline std::vector<int64_t> parse_int_list(const OpAttributes& attrs, const std:
  * @param kernel_fn Inplace kernel function
  */
 #define TENZOR_REGISTER_INPLACE_KERNEL(table, op_id, kernel_fn) \
-    (table).register_kernel(::tenzor::OpId::op_id, \
-        [](std::span<const ::tenzor::Tensor> inputs, const ::tenzor::OpAttributes&) \
-            -> std::vector<::tenzor::Tensor> { \
-            ::tenzor::Tensor result = inputs[0]; \
-            (kernel_fn)(result, inputs[1]); \
-            return {result}; \
+    (table).register_inplace_kernel(::tenzor::OpId::op_id, \
+        [](::tenzor::Tensor& target, std::span<const ::tenzor::Tensor> others, \
+           const ::tenzor::OpAttributes&) -> ::tenzor::Tensor& { \
+            (kernel_fn)(target, others[0]); \
+            return target; \
         })
 
 /**

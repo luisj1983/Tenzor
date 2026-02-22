@@ -16,6 +16,7 @@ set(TENZOR_CORE_SOURCES
     backend/registry.cpp
     backend/dispatch.cpp
     backend/simd_dispatch.cpp
+    backend/runtime_simd.cpp
     backend/dispatch_table.cpp
     ops/op_id.cpp
     ops/creation.cpp
@@ -40,14 +41,19 @@ set(TENZOR_CORE_SOURCES
     nn/serialize.cpp
     nn/checkpoint.cpp
     nn/layers/linear.cpp
+    nn/layers/lazy_linear.cpp
     nn/layers/conv.cpp
     nn/layers/batchnorm.cpp
     nn/layers/dropout.cpp
+    nn/layers/drop_path.cpp
+    nn/layers/rope.cpp
+    nn/layers/alibi.cpp
     nn/layers/pooling.cpp
     nn/layers/normalization.cpp
     nn/layers/flatten.cpp
     nn/layers/embedding.cpp
     nn/layers/attention.cpp
+    nn/layers/gqa_attention.cpp
     nn/layers/transformer.cpp
     nn/layers/rnn.cpp
     nn/layers/lstm.cpp
@@ -64,6 +70,7 @@ set(TENZOR_CORE_SOURCES
     nn/activations/activations.cpp
     nn/loss/losses.cpp
     nn/loss/losses_advanced.cpp
+    nn/loss/contrastive.cpp
     nn/optim/optimizer.cpp
     nn/optim/sgd.cpp
     nn/optim/adam.cpp
@@ -81,6 +88,11 @@ set(TENZOR_CORE_SOURCES
     nn/offload.cpp
     nn/amp/grad_scaler.cpp
     nn/amp/autocast.cpp
+    nn/utils/clip_grad.cpp
+    nn/utils/kv_cache.cpp
+    nn/utils/grad_accumulation.cpp
+    nn/utils/spectral_norm.cpp
+    nn/init.cpp
     nn/parallel/data_parallel.cpp
     # nn/parallel/distributed_data_parallel.cpp  # Disabled - use new distributed API from distributed/ instead
     nn/quantization/quantize.cpp
@@ -127,12 +139,18 @@ set(TENZOR_CORE_SOURCES
     jit/tracer.cpp
     jit/graph.cpp
     jit/compiler.cpp
+    jit/compiled_module.cpp
+    jit/memory_planner.cpp
     jit/serialization.cpp
     nn/compression/pruning.cpp
     nn/compression/distillation.cpp
     distributed/distributed.cpp
     distributed/nccl_backend.cpp
     distributed/gloo_backend.cpp
+    distributed/process_group.cpp
+    distributed/ddp.cpp
+    distributed/launch.cpp
+    distributed/gradient_compression.cpp
 )
 
 # Create core library
@@ -191,11 +209,10 @@ if(TENZOR_BUILD_CUDA)
         CUDA::cudart
     )
 
-    # Link NCCL if available
-    find_library(NCCL_LIBRARY nccl PATHS /usr/lib /usr/local/lib)
-    if(NCCL_LIBRARY)
-        message(STATUS "Found NCCL library: ${NCCL_LIBRARY}")
-        target_link_libraries(tenzor_core PRIVATE ${NCCL_LIBRARY})
+    # Link NCCL if available (uses cmake/FindNCCL.cmake)
+    find_package(NCCL QUIET)
+    if(NCCL_FOUND)
+        target_link_libraries(tenzor_core PRIVATE NCCL::NCCL)
         target_compile_definitions(tenzor_core PRIVATE TENZOR_HAS_NCCL)
     else()
         message(WARNING "NCCL library not found, distributed GPU training will not be available")

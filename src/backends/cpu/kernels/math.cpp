@@ -5,11 +5,13 @@
 #include "gemm_optimized.hpp"
 #include "simd_fast_math.hpp"
 #include "float16_simd.hpp"
+#include "bfloat16_simd.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <algorithm>
 #include <iostream>
 #include <type_traits>
+#include <limits>
 
 // SIMD intrinsics
 #if defined(__AVX512F__)
@@ -519,13 +521,20 @@ static void matmul_microkernel_int32(
     int64_t lda, int64_t ldb, int64_t ldc) {
 
     // Scalar implementation for integer matrix multiplication
+    // Accumulate in int64 to avoid overflow from int32 * int32
     for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
-            int32_t sum = C[i * ldc + j];
+            int64_t sum = static_cast<int64_t>(C[i * ldc + j]);
             for (int64_t k = 0; k < K; ++k) {
-                sum += A[i * lda + k] * B[k * ldb + j];
+                sum += static_cast<int64_t>(A[i * lda + k]) * static_cast<int64_t>(B[k * ldb + j]);
             }
-            C[i * ldc + j] = sum;
+            // Saturate to int32 range
+            if (sum > std::numeric_limits<int32_t>::max()) {
+                sum = std::numeric_limits<int32_t>::max();
+            } else if (sum < std::numeric_limits<int32_t>::min()) {
+                sum = std::numeric_limits<int32_t>::min();
+            }
+            C[i * ldc + j] = static_cast<int32_t>(sum);
         }
     }
 }
@@ -579,19 +588,25 @@ static void matmul_blocked_float16(
     constexpr int64_t TILE_N = 128;
     constexpr int64_t TILE_K = 256;
 
-    // Allocate FP32 workspace
-    alignas(64) float A_fp32[TILE_M * TILE_K];
-    alignas(64) float B_fp32[TILE_K * TILE_N];
-    alignas(64) float C_fp32[TILE_M * TILE_N];
+    // Use heap-allocated thread-local buffers to avoid stack overflow
+    // (stack arrays of 128*256 + 256*128 + 128*128 = ~192KB per thread)
+    static thread_local std::vector<float> A_fp32_buf(TILE_M * TILE_K);
+    static thread_local std::vector<float> B_fp32_buf(TILE_K * TILE_N);
+    static thread_local std::vector<float> C_fp32_buf(TILE_M * TILE_N);
 
     // Zero-initialize output
     std::fill_n(C, M * N, Float16(0.0f));
 
-    #pragma omp parallel for collapse(2) if(M * N > 4096) private(A_fp32, B_fp32, C_fp32)
+    #pragma omp parallel for collapse(2) if(M * N > 65536)
     for (int64_t i0 = 0; i0 < M; i0 += TILE_M) {
         for (int64_t j0 = 0; j0 < N; j0 += TILE_N) {
             int64_t tile_m = std::min(TILE_M, M - i0);
             int64_t tile_n = std::min(TILE_N, N - j0);
+
+            // Thread-local buffer pointers
+            float* A_fp32 = A_fp32_buf.data();
+            float* B_fp32 = B_fp32_buf.data();
+            float* C_fp32 = C_fp32_buf.data();
 
             // Zero C tile accumulator
             std::fill_n(C_fp32, tile_m * tile_n, 0.0f);
@@ -684,31 +699,47 @@ static void matmul_blocked_float16(
 
 // High-performance BFloat16 matrix multiplication
 // Uses scalar conversion BF16→FP32, optimized GEMM, FP32→BF16 conversion back
+// On Sapphire Rapids+, uses native _mm512_dpbf16_ps for direct BF16 dot products
+
+#if defined(__AVX512BF16__) && defined(__AVX512F__)
+
+// ============================================================================
+// AVX-512 BF16 native dot-product matmul (Sapphire Rapids+)
+// ============================================================================
+// Uses _mm512_dpbf16_ps which computes dot products of BF16 pairs with FP32
+// accumulation in a single instruction. Each _mm512_dpbf16_ps processes 32
+// BF16 elements (16 pairs from A and B), accumulating into 16 FP32 lanes.
+//
+// The instruction treats its __m512bh operands as vectors of 16 pairs of BF16
+// values packed into 32-bit words. For each 32-bit lane i:
+//   acc[i] += a_pair[i].lo * b_pair[i].lo + a_pair[i].hi * b_pair[i].hi
+//
+// To use this for matmul, we broadcast pairs of A elements and multiply against
+// contiguous B elements, accumulating into the C row.
+
 static void matmul_blocked_bfloat16(
     const BFloat16* A, const BFloat16* B, BFloat16* C,
     int64_t M, int64_t N, int64_t K
 ) {
-    // Strategy: Convert blocks to FP32, use optimized GEMM, convert back
-    // BFloat16 has no F16C-equivalent SIMD, so conversion is scalar or AVX512-BF16
-
-    // Block sizes for FP32 workspace (fit in L2 cache)
+    // Tile sizes tuned for L2 cache residency with FP32 accumulators
+    // C tile is TILE_M * TILE_N * 4 bytes = 128 * 128 * 4 = 64KB (fits in L2)
     constexpr int64_t TILE_M = 128;
     constexpr int64_t TILE_N = 128;
     constexpr int64_t TILE_K = 256;
 
-    // Allocate FP32 workspace
-    alignas(64) float A_fp32[TILE_M * TILE_K];
-    alignas(64) float B_fp32[TILE_K * TILE_N];
-    alignas(64) float C_fp32[TILE_M * TILE_N];
+    // Thread-local FP32 accumulator for C tile
+    static thread_local std::vector<float> C_fp32_buf_bf16(TILE_M * TILE_N);
 
     // Zero-initialize output
     std::fill_n(C, M * N, BFloat16(0.0f));
 
-    #pragma omp parallel for collapse(2) if(M * N > 4096) private(A_fp32, B_fp32, C_fp32)
+    #pragma omp parallel for collapse(2) if(M * N > 65536)
     for (int64_t i0 = 0; i0 < M; i0 += TILE_M) {
         for (int64_t j0 = 0; j0 < N; j0 += TILE_N) {
             int64_t tile_m = std::min(TILE_M, M - i0);
             int64_t tile_n = std::min(TILE_N, N - j0);
+
+            float* C_fp32 = C_fp32_buf_bf16.data();
 
             // Zero C tile accumulator
             std::fill_n(C_fp32, tile_m * tile_n, 0.0f);
@@ -716,23 +747,165 @@ static void matmul_blocked_bfloat16(
             for (int64_t k0 = 0; k0 < K; k0 += TILE_K) {
                 int64_t tile_k = std::min(TILE_K, K - k0);
 
-                // Convert A tile: BFloat16 → Float32
-                // BFloat16 conversion is a simple left-shift of bits by 16
+                // Native BF16 dot product: process K dimension in steps of 2
+                // _mm512_dpbf16_ps operates on pairs of BF16 values packed
+                // into 32-bit words, so we step through K by 2.
+                for (int64_t i = 0; i < tile_m; ++i) {
+                    const uint16_t* a_row = reinterpret_cast<const uint16_t*>(
+                        A + (i0 + i) * K + k0);
+                    float* c_row = C_fp32 + i * tile_n;
+
+                    // Process N dimension in chunks of 16 (512-bit / 32-bit FP32)
+                    int64_t j = 0;
+                    for (; j + 16 <= tile_n; j += 16) {
+                        // Load current FP32 accumulator for this C[i, j:j+16]
+                        __m512 acc = _mm512_loadu_ps(c_row + j);
+
+                        // Process K pairs: each dpbf16_ps handles 2 K-elements
+                        int64_t k = 0;
+                        for (; k + 2 <= tile_k; k += 2) {
+                            // Broadcast a pair of A[i, k] and A[i, k+1] as a
+                            // 32-bit word (two packed BF16 values) to all lanes
+                            uint32_t a_pair;
+                            std::memcpy(&a_pair, a_row + k, sizeof(uint32_t));
+                            __m512bh a_bf16 = (__m512bh)_mm512_set1_epi32(
+                                static_cast<int>(a_pair));
+
+                            // Load 16 pairs of B[k, j:j+16] and B[k+1, j:j+16]
+                            // interleaved as 32-bit words:
+                            // We need {B[k,j], B[k+1,j]}, {B[k,j+1], B[k+1,j+1]}, ...
+                            // But B is stored row-major, so B[k] and B[k+1] rows
+                            // are in separate memory locations. We load both rows
+                            // and interleave them.
+                            const uint16_t* b_row0 = reinterpret_cast<const uint16_t*>(
+                                B + (k0 + k) * N + j0 + j);
+                            const uint16_t* b_row1 = reinterpret_cast<const uint16_t*>(
+                                B + (k0 + k + 1) * N + j0 + j);
+
+                            // Load 16 BF16 values from each B row
+                            __m256i b0_raw = _mm256_loadu_si256(
+                                reinterpret_cast<const __m256i*>(b_row0));
+                            __m256i b1_raw = _mm256_loadu_si256(
+                                reinterpret_cast<const __m256i*>(b_row1));
+
+                            // Interleave: pack {b0[i], b1[i]} into 32-bit words
+                            // unpacklo/hi on 16-bit elements gives us the
+                            // interleaved pairs we need for dpbf16_ps
+                            __m512i b0_ext = _mm512_cvtepu16_epi32(b0_raw);
+                            __m512i b1_ext = _mm512_cvtepu16_epi32(b1_raw);
+                            __m512i b_interleaved = _mm512_or_si512(
+                                b0_ext, _mm512_slli_epi32(b1_ext, 16));
+                            __m512bh b_bf16 = (__m512bh)b_interleaved;
+
+                            // Native BF16 dot product with FP32 accumulation
+                            acc = _mm512_dpbf16_ps(acc, a_bf16, b_bf16);
+                        }
+
+                        // Handle odd remaining K element (if tile_k is odd)
+                        if (k < tile_k) {
+                            // Single remaining K element: pair it with zero
+                            uint16_t a_val = a_row[k];
+                            uint32_t a_pair_last = static_cast<uint32_t>(a_val);
+                            __m512bh a_bf16 = (__m512bh)_mm512_set1_epi32(
+                                static_cast<int>(a_pair_last));
+
+                            const uint16_t* b_row_last = reinterpret_cast<const uint16_t*>(
+                                B + (k0 + k) * N + j0 + j);
+                            __m256i b_raw = _mm256_loadu_si256(
+                                reinterpret_cast<const __m256i*>(b_row_last));
+                            // Zero-extend B values into low 16 bits of 32-bit words
+                            // (high 16 bits are zero, matching the zero in A's pair)
+                            __m512i b_ext = _mm512_cvtepu16_epi32(b_raw);
+                            __m512bh b_bf16 = (__m512bh)b_ext;
+
+                            acc = _mm512_dpbf16_ps(acc, a_bf16, b_bf16);
+                        }
+
+                        _mm512_storeu_ps(c_row + j, acc);
+                    }
+
+                    // Scalar tail for remaining N columns (< 16)
+                    for (; j < tile_n; ++j) {
+                        float acc_scalar = c_row[j];
+                        for (int64_t k = 0; k < tile_k; ++k) {
+                            float a_val = bfloat16_simd::bf16_to_f32_scalar(a_row[k]);
+                            float b_val = bfloat16_simd::bf16_to_f32_scalar(
+                                reinterpret_cast<const uint16_t*>(
+                                    B + (k0 + k) * N + j0)[j]);
+                            acc_scalar += a_val * b_val;
+                        }
+                        c_row[j] = acc_scalar;
+                    }
+                }
+            }
+
+            // Convert C tile: FP32 → BFloat16 using SIMD batch conversion
+            for (int64_t i = 0; i < tile_m; ++i) {
+                BFloat16* c_row = C + (i0 + i) * N + j0;
+                const float* c32_row = C_fp32 + i * tile_n;
+                bfloat16_simd::convert_f32_to_bf16_batch(c32_row, c_row,
+                    static_cast<size_t>(tile_n));
+            }
+        }
+    }
+}
+
+#else // !(__AVX512BF16__ && __AVX512F__)
+
+// ============================================================================
+// Conversion-based BFloat16 matmul fallback
+// ============================================================================
+// Converts BF16 tiles to FP32 using SIMD (AVX-512/AVX2) or scalar,
+// performs FP32 GEMM via MKL/optimized kernel, converts result back.
+
+static void matmul_blocked_bfloat16(
+    const BFloat16* A, const BFloat16* B, BFloat16* C,
+    int64_t M, int64_t N, int64_t K
+) {
+    // Block sizes for FP32 workspace (fit in L2 cache)
+    constexpr int64_t TILE_M = 128;
+    constexpr int64_t TILE_N = 128;
+    constexpr int64_t TILE_K = 256;
+
+    // Use heap-allocated thread-local buffers to avoid stack overflow
+    static thread_local std::vector<float> A_fp32_buf_bf16(TILE_M * TILE_K);
+    static thread_local std::vector<float> B_fp32_buf_bf16(TILE_K * TILE_N);
+    static thread_local std::vector<float> C_fp32_buf_bf16(TILE_M * TILE_N);
+
+    // Zero-initialize output
+    std::fill_n(C, M * N, BFloat16(0.0f));
+
+    #pragma omp parallel for collapse(2) if(M * N > 65536)
+    for (int64_t i0 = 0; i0 < M; i0 += TILE_M) {
+        for (int64_t j0 = 0; j0 < N; j0 += TILE_N) {
+            int64_t tile_m = std::min(TILE_M, M - i0);
+            int64_t tile_n = std::min(TILE_N, N - j0);
+
+            // Thread-local buffer pointers
+            float* A_fp32 = A_fp32_buf_bf16.data();
+            float* B_fp32 = B_fp32_buf_bf16.data();
+            float* C_fp32 = C_fp32_buf_bf16.data();
+
+            // Zero C tile accumulator
+            std::fill_n(C_fp32, tile_m * tile_n, 0.0f);
+
+            for (int64_t k0 = 0; k0 < K; k0 += TILE_K) {
+                int64_t tile_k = std::min(TILE_K, K - k0);
+
+                // Convert A tile: BFloat16 → Float32 using SIMD batch conversion
                 for (int64_t i = 0; i < tile_m; ++i) {
                     const BFloat16* a_row = A + (i0 + i) * K + k0;
                     float* a32_row = A_fp32 + i * tile_k;
-                    for (int64_t k = 0; k < tile_k; ++k) {
-                        a32_row[k] = static_cast<float>(a_row[k]);
-                    }
+                    bfloat16_simd::convert_bf16_to_f32_batch(a_row, a32_row,
+                        static_cast<size_t>(tile_k));
                 }
 
-                // Convert B tile: BFloat16 → Float32
+                // Convert B tile: BFloat16 → Float32 using SIMD batch conversion
                 for (int64_t k = 0; k < tile_k; ++k) {
                     const BFloat16* b_row = B + (k0 + k) * N + j0;
                     float* b32_row = B_fp32 + k * tile_n;
-                    for (int64_t j = 0; j < tile_n; ++j) {
-                        b32_row[j] = static_cast<float>(b_row[j]);
-                    }
+                    bfloat16_simd::convert_bf16_to_f32_batch(b_row, b32_row,
+                        static_cast<size_t>(tile_n));
                 }
 
                 // Compute FP32 GEMM (accumulate into C_fp32)
@@ -747,17 +920,18 @@ static void matmul_blocked_bfloat16(
 #endif
             }
 
-            // Convert C tile back: Float32 → BFloat16
+            // Convert C tile back: Float32 → BFloat16 using SIMD batch conversion
             for (int64_t i = 0; i < tile_m; ++i) {
                 BFloat16* c_row = C + (i0 + i) * N + j0;
                 const float* c32_row = C_fp32 + i * tile_n;
-                for (int64_t j = 0; j < tile_n; ++j) {
-                    c_row[j] = BFloat16(c32_row[j]);
-                }
+                bfloat16_simd::convert_f32_to_bf16_batch(c32_row, c_row,
+                    static_cast<size_t>(tile_n));
             }
         }
     }
 }
+
+#endif // __AVX512BF16__ && __AVX512F__
 
 // ============================================================================
 // Element-wise Operations Helpers

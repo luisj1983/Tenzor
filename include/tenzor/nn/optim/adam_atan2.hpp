@@ -87,7 +87,7 @@ public:
     /**
      * @brief Perform single optimization step with atan2 update
      */
-    auto step() -> void override;
+    auto step_impl() -> void override;
 
     /**
      * @brief Set new learning rate

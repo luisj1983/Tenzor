@@ -165,7 +165,16 @@ private:
  */
 class CrossEntropyLoss {
 public:
-    explicit CrossEntropyLoss(Reduction reduction = Reduction::Mean);
+    /**
+     * @brief Construct CrossEntropyLoss.
+     *
+     * @param reduction Reduction mode (None, Mean, Sum)
+     * @param label_smoothing Smoothing factor in [0, 1). When > 0, targets become
+     *        (1 - label_smoothing) * one_hot(target) + label_smoothing / num_classes.
+     *        Default 0.0 (no smoothing, matches original behavior).
+     */
+    explicit CrossEntropyLoss(Reduction reduction = Reduction::Mean,
+                              float label_smoothing = 0.0f);
 
     auto forward(const Variable& input, const Tensor& target) -> Variable;
     auto operator()(const Variable& input, const Tensor& target) -> Variable {
@@ -174,6 +183,7 @@ public:
 
 private:
     Reduction reduction_;
+    float label_smoothing_;
 };
 
 /**

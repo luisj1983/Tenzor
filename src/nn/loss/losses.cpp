@@ -10,15 +10,11 @@
 
 namespace tenzor::nn {
 
-// Helper functions for operations that don't have autograd yet
+// Helper functions using Variable's built-in scalar operators
 namespace {
-    // Create a scalar Variable that broadcasts with arithmetic ops
-    auto scalar_var(float value, DType dtype, Device device) -> Variable {
-        return Variable(full({1}, value, dtype, device), false);
-    }
-
+    // scalar - var = -(var - scalar)
     auto scalar_sub(float scalar, const Variable& var) -> Variable {
-        return scalar_var(scalar, var.dtype(), var.device()) - var;
+        return (var - scalar) * -1.0f;
     }
 }
 
@@ -77,12 +73,10 @@ auto BCEWithLogitsLoss::forward(const Variable& input, const Variable& target) -
     auto neg_abs = neg(abs_input);
 
     // Element-wise max(x, 0) = (x + abs(x)) / 2
-    auto two_var = scalar_var(2.0f, input.dtype(), input.device());
-    auto max_val = (input + abs_input) / two_var;
+    auto max_val = (input + abs_input) / 2.0f;
 
     auto xz = input * target;  // x * z
-    auto ones_var = scalar_var(1.0f, input.dtype(), input.device());
-    auto log_term = log(ones_var + exp(neg_abs));
+    auto log_term = log(exp(neg_abs) + 1.0f);
 
     auto loss_unreduced = max_val - xz + log_term;
 
@@ -98,12 +92,15 @@ auto BCEWithLogitsLoss::forward(const Variable& input, const Variable& target) -
 }
 
 // CrossEntropyLoss implementation
-CrossEntropyLoss::CrossEntropyLoss(Reduction reduction) : reduction_(reduction) {}
+CrossEntropyLoss::CrossEntropyLoss(Reduction reduction, float label_smoothing)
+    : reduction_(reduction), label_smoothing_(label_smoothing) {}
 
 auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> Variable {
     // Cross entropy with logits: -log_softmax(input)[target_class]
     // Use the log_softmax function from activations
     auto log_probs = nn::log_softmax(input, 1);  // Compute log_softmax along dim=1
+
+    auto num_classes = input.tensor().shape()[1];
 
     // Handle both one-hot encoded targets (Float32/Float64, shape [N, C]) and class indices (Int64, shape [N])
     Variable one_hot_var;
@@ -122,7 +119,6 @@ auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> V
     } else {
         // Target contains class indices (Int64), need to create one-hot encoding
         auto batch_size = input.tensor().shape()[0];
-        auto num_classes = input.tensor().shape()[1];
 
         // Use backend dispatch for one-hot encoding (avoids GPU→CPU→GPU round-trip)
         OpAttributes oh_attrs;
@@ -141,6 +137,13 @@ auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> V
         }
 
         one_hot_var = Variable(one_hot, false);
+    }
+
+    // Apply label smoothing if enabled:
+    // smoothed_target = (1 - label_smoothing) * one_hot + label_smoothing / num_classes
+    if (label_smoothing_ > 0.0f) {
+        auto smooth_target = one_hot_var * (1.0f - label_smoothing_);
+        one_hot_var = smooth_target + (label_smoothing_ / static_cast<float>(num_classes));
     }
 
     // Compute element-wise product: log_probs * one_hot
@@ -218,16 +221,13 @@ auto SmoothL1Loss::forward(const Variable& input, const Variable& target) -> Var
     // loss = 0.5 * (diff^2) / beta,           if |diff| < beta
     // loss = |diff| - 0.5 * beta,             otherwise
 
-    auto beta_var = scalar_var(static_cast<float>(beta_), input.dtype(), input.device());
-    auto half_var = scalar_var(0.5f, input.dtype(), input.device());
-
     // Exact SmoothL1Loss (Huber loss) without branching:
     //   loss = 0.5 * min(|diff|, beta)^2 / beta + max(|diff| - beta, 0)
     // When |diff| < beta:  0.5 * |diff|^2 / beta + 0
     // When |diff| >= beta: 0.5 * beta + |diff| - beta = |diff| - 0.5 * beta
     auto clamped_abs = clamp(abs_diff, 0.0f, static_cast<float>(beta_));
     auto excess = abs_diff - clamped_abs;  // max(|diff| - beta, 0)
-    auto loss_unreduced = (half_var * clamped_abs * clamped_abs) / beta_var + excess;
+    auto loss_unreduced = (clamped_abs * clamped_abs * 0.5f) / static_cast<float>(beta_) + excess;
 
     switch (reduction_) {
         case Reduction::None:

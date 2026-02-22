@@ -177,13 +177,13 @@ auto my_operation(const Tensor& input, float param) -> Tensor;
 
 ### 2. Implement Dispatcher
 
-Add implementation in corresponding source file:
+Add implementation in corresponding source file using OpId-based dispatch:
 
 ```cpp
 auto my_operation(const Tensor& input, float param) -> Tensor {
     OpAttributes attrs;
     attrs["param"] = std::to_string(param);
-    return Dispatcher::dispatch("my_operation", {input}, attrs)[0];
+    return dispatch<OpId::MyOperation>({input}, attrs)[0];
 }
 ```
 

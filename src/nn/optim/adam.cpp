@@ -16,7 +16,7 @@ Adam::Adam(std::vector<std::shared_ptr<Variable>> params, double lr, double beta
     initialize_buffers();
 }
 
-auto Adam::step() -> void {
+auto Adam::step_impl() -> void {
     step_count_++;
 
     for (size_t i = 0; i < parameters_.size(); ++i) {
@@ -236,7 +236,7 @@ AdamW::AdamW(std::vector<std::shared_ptr<Variable>> params, double lr, double be
     initialize_buffers();
 }
 
-auto AdamW::step() -> void {
+auto AdamW::step_impl() -> void {
     step_count_++;
 
     for (size_t i = 0; i < parameters_.size(); ++i) {
@@ -274,16 +274,21 @@ auto AdamW::step() -> void {
             continue;
         }
 
-        // CPU fallback path
+        // CPU fallback path — use dtype-appropriate scalar tensors to
+        // preserve Float64 precision (static_cast<float> truncates doubles)
+        auto scalar = [&](double value) -> Tensor {
+            return full({1}, value, param.tensor().dtype(), param.tensor().device());
+        };
+
         auto grad_copy = grad.clone();
 
         // Update biased first moment estimate
-        exp_avg_[i] = exp_avg_[i] * static_cast<float>(beta1_) +
-                     grad_copy * static_cast<float>(1.0 - beta1_);
+        exp_avg_[i] = exp_avg_[i] * scalar(beta1_) +
+                     grad_copy * scalar(1.0 - beta1_);
 
         // Update biased second raw moment estimate
-        exp_avg_sq_[i] = exp_avg_sq_[i] * static_cast<float>(beta2_) +
-                        grad_copy * grad_copy * static_cast<float>(1.0 - beta2_);
+        exp_avg_sq_[i] = exp_avg_sq_[i] * scalar(beta2_) +
+                        grad_copy * grad_copy * scalar(1.0 - beta2_);
 
         // Bias correction
         double bias_correction1 = 1.0 - std::pow(beta1_, step_count_);
@@ -300,18 +305,17 @@ auto AdamW::step() -> void {
             denom_base = exp_avg_sq_[i];
         }
 
-        auto denom = sqrt(denom_base) *
-                    static_cast<float>(1.0 / std::sqrt(bias_correction2)) +
-                    static_cast<float>(eps_);
+        auto denom = sqrt(denom_base) * scalar(1.0 / std::sqrt(bias_correction2))
+                    + scalar(eps_);
 
         // Decoupled weight decay (AdamW)
         if (weight_decay_ > 0) {
-            param.tensor() = param.tensor() * static_cast<float>(1.0 - lr_ * weight_decay_);
+            param.tensor() = param.tensor() * scalar(1.0 - lr_ * weight_decay_);
         }
 
         // Update parameters
         param.tensor() = param.tensor() -
-                        div(exp_avg_[i], denom) * static_cast<float>(step_size);
+                        div(exp_avg_[i], denom) * scalar(step_size);
     }
 }
 

@@ -101,7 +101,7 @@ __global__ void check_for_zeros_kernel(const T* data, int64_t n, int* has_zero) 
 // memory, eliminating the explicit D2H memcpy.
 template<typename T>
 inline void check_integer_divisor_for_zeros(const T* data, int64_t n, cudaStream_t stream) {
-#ifndef NDEBUG
+#ifndef TENZOR_SKIP_INTEGER_DIV_CHECK
     // Allocate pinned host memory mapped into device address space —
     // the kernel atomicExch writes directly through PCIe/NVLink without
     // a separate cudaMemcpy D2H transfer
@@ -4402,6 +4402,261 @@ Tensor ge_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
         }
     }
     return ge_kernel(inputs[0], inputs[1], stream);
+}
+
+// ============================================================================
+// Cast (dtype conversion) Kernels
+// ============================================================================
+
+template<typename From, typename To>
+__global__ void cast_element_kernel(const From* input, To* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = static_cast<To>(input[idx]);
+    }
+}
+
+// Specializations for Float16 source (convert via float)
+template<typename To>
+__global__ void cast_from_f16_kernel(const __half* input, To* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = static_cast<To>(__half2float(input[idx]));
+    }
+}
+
+// Specialization for Float16 destination (convert via float)
+template<typename From>
+__global__ void cast_to_f16_kernel(const From* input, __half* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = __float2half(static_cast<float>(input[idx]));
+    }
+}
+
+// Float16 -> Float16 (no-op copy)
+__global__ void cast_f16_to_f16_kernel(const __half* input, __half* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = input[idx];
+    }
+}
+
+// Specializations for BFloat16 source (convert via float)
+template<typename To>
+__global__ void cast_from_bf16_kernel(const __nv_bfloat16* input, To* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = static_cast<To>(__bfloat162float(input[idx]));
+    }
+}
+
+// Specialization for BFloat16 destination (convert via float)
+template<typename From>
+__global__ void cast_to_bf16_kernel(const From* input, __nv_bfloat16* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = __float2bfloat16(static_cast<float>(input[idx]));
+    }
+}
+
+// BFloat16 -> BFloat16 (no-op copy)
+__global__ void cast_bf16_to_bf16_kernel(const __nv_bfloat16* input, __nv_bfloat16* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = input[idx];
+    }
+}
+
+// Float16 -> BFloat16
+__global__ void cast_f16_to_bf16_kernel(const __half* input, __nv_bfloat16* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = __float2bfloat16(__half2float(input[idx]));
+    }
+}
+
+// BFloat16 -> Float16
+__global__ void cast_bf16_to_f16_kernel(const __nv_bfloat16* input, __half* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = __float2half(__bfloat162float(input[idx]));
+    }
+}
+
+/// Helper: launch a cast kernel from a standard (non-half) source type to the target dtype.
+/// Returns the result tensor allocated with target dtype on the same device.
+template<typename SrcT>
+Tensor cast_from_standard(const Tensor& input, DType target_dtype, int64_t n,
+                          dim3 grid, dim3 block, cudaStream_t stream) {
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, target_dtype, input.device());
+    const SrcT* src = input.data<SrcT>();
+
+    switch (target_dtype) {
+        case DType::Float32:
+            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<float>(), n); break;
+        case DType::Float64:
+            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<double>(), n); break;
+        case DType::Float16:
+            cast_to_f16_kernel<<<grid, block, 0, stream>>>(src,
+                reinterpret_cast<__half*>(result.data<Float16>()), n); break;
+        case DType::BFloat16:
+            cast_to_bf16_kernel<<<grid, block, 0, stream>>>(src,
+                reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n); break;
+        case DType::Int8:
+            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<int8_t>(), n); break;
+        case DType::Int16:
+            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<int16_t>(), n); break;
+        case DType::Int32:
+            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<int32_t>(), n); break;
+        case DType::Int64:
+            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<int64_t>(), n); break;
+        case DType::UInt8:
+            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<uint8_t>(), n); break;
+        case DType::UInt16:
+            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<uint16_t>(), n); break;
+        case DType::UInt32:
+            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<uint32_t>(), n); break;
+        case DType::UInt64:
+            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<uint64_t>(), n); break;
+        case DType::Bool:
+            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<bool>(), n); break;
+        default:
+            throw std::runtime_error("cast: unsupported target dtype");
+    }
+    return result;
+}
+
+auto cuda_cast_kernel(const Tensor& input, DType target_dtype, cudaStream_t stream) -> Tensor {
+    if (input.dtype() == target_dtype) {
+        return input;  // No conversion needed
+    }
+
+    int64_t n = input.numel();
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+
+    Tensor result(shape, target_dtype, input.device());
+    DType src_dtype = input.dtype();
+
+    // ---- Float16 source ----
+    if (src_dtype == DType::Float16) {
+        const __half* src = reinterpret_cast<const __half*>(input.data<Float16>());
+        switch (target_dtype) {
+            case DType::Float32:
+                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<float>(), n); break;
+            case DType::Float64:
+                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<double>(), n); break;
+            case DType::Float16:
+                cast_f16_to_f16_kernel<<<grid, block, 0, stream>>>(src,
+                    reinterpret_cast<__half*>(result.data<Float16>()), n); break;
+            case DType::BFloat16:
+                cast_f16_to_bf16_kernel<<<grid, block, 0, stream>>>(src,
+                    reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n); break;
+            case DType::Int8:
+                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<int8_t>(), n); break;
+            case DType::Int16:
+                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<int16_t>(), n); break;
+            case DType::Int32:
+                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<int32_t>(), n); break;
+            case DType::Int64:
+                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<int64_t>(), n); break;
+            case DType::UInt8:
+                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<uint8_t>(), n); break;
+            case DType::UInt16:
+                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<uint16_t>(), n); break;
+            case DType::UInt32:
+                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<uint32_t>(), n); break;
+            case DType::UInt64:
+                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<uint64_t>(), n); break;
+            case DType::Bool:
+                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<bool>(), n); break;
+            default:
+                throw std::runtime_error("cast: unsupported target dtype for Float16 source");
+        }
+    }
+    // ---- BFloat16 source ----
+    else if (src_dtype == DType::BFloat16) {
+        const __nv_bfloat16* src = reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>());
+        switch (target_dtype) {
+            case DType::Float32:
+                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<float>(), n); break;
+            case DType::Float64:
+                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<double>(), n); break;
+            case DType::Float16:
+                cast_bf16_to_f16_kernel<<<grid, block, 0, stream>>>(src,
+                    reinterpret_cast<__half*>(result.data<Float16>()), n); break;
+            case DType::BFloat16:
+                cast_bf16_to_bf16_kernel<<<grid, block, 0, stream>>>(src,
+                    reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n); break;
+            case DType::Int8:
+                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<int8_t>(), n); break;
+            case DType::Int16:
+                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<int16_t>(), n); break;
+            case DType::Int32:
+                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<int32_t>(), n); break;
+            case DType::Int64:
+                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<int64_t>(), n); break;
+            case DType::UInt8:
+                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<uint8_t>(), n); break;
+            case DType::UInt16:
+                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<uint16_t>(), n); break;
+            case DType::UInt32:
+                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<uint32_t>(), n); break;
+            case DType::UInt64:
+                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<uint64_t>(), n); break;
+            case DType::Bool:
+                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<bool>(), n); break;
+            default:
+                throw std::runtime_error("cast: unsupported target dtype for BFloat16 source");
+        }
+    }
+    // ---- Standard source types (non-half) ----
+    else {
+        switch (src_dtype) {
+            case DType::Float32:
+                result = cast_from_standard<float>(input, target_dtype, n, grid, block, stream); break;
+            case DType::Float64:
+                result = cast_from_standard<double>(input, target_dtype, n, grid, block, stream); break;
+            case DType::Int8:
+                result = cast_from_standard<int8_t>(input, target_dtype, n, grid, block, stream); break;
+            case DType::Int16:
+                result = cast_from_standard<int16_t>(input, target_dtype, n, grid, block, stream); break;
+            case DType::Int32:
+                result = cast_from_standard<int32_t>(input, target_dtype, n, grid, block, stream); break;
+            case DType::Int64:
+                result = cast_from_standard<int64_t>(input, target_dtype, n, grid, block, stream); break;
+            case DType::UInt8:
+                result = cast_from_standard<uint8_t>(input, target_dtype, n, grid, block, stream); break;
+            case DType::UInt16:
+                result = cast_from_standard<uint16_t>(input, target_dtype, n, grid, block, stream); break;
+            case DType::UInt32:
+                result = cast_from_standard<uint32_t>(input, target_dtype, n, grid, block, stream); break;
+            case DType::UInt64:
+                result = cast_from_standard<uint64_t>(input, target_dtype, n, grid, block, stream); break;
+            case DType::Bool:
+                result = cast_from_standard<bool>(input, target_dtype, n, grid, block, stream); break;
+            default:
+                throw std::runtime_error("cast: unsupported source dtype");
+        }
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return result;
+}
+
+Tensor cast_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    // Target dtype is passed via attributes
+    auto dtype_it = attrs.find("target_dtype");
+    if (dtype_it == attrs.end()) {
+        throw std::runtime_error("cast: missing 'target_dtype' attribute");
+    }
+    uint64_t dtype_val = 0;
+    std::from_chars(dtype_it->second.data(), dtype_it->second.data() + dtype_it->second.size(), dtype_val);
+    DType target_dtype = static_cast<DType>(dtype_val);
+    return cuda_cast_kernel(inputs[0], target_dtype, stream);
 }
 
 } // namespace cuda

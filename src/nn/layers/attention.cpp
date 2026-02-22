@@ -41,14 +41,16 @@ MultiheadAttention::MultiheadAttention(int64_t embed_dim,
                                      bool add_zero_attn,
                                      int64_t kdim,
                                      int64_t vdim,
-                                     bool batch_first)
+                                     bool batch_first,
+                                     bool is_causal)
     : embed_dim_(embed_dim),
       num_heads_(num_heads),
       kdim_(kdim > 0 ? kdim : embed_dim),
       vdim_(vdim > 0 ? vdim : embed_dim),
       dropout_(dropout),
       batch_first_(batch_first),
-      add_zero_attn_(add_zero_attn) {
+      add_zero_attn_(add_zero_attn),
+      is_causal_(is_causal) {
 
     // Validate parameters
     if (embed_dim_ % num_heads_ != 0) {
@@ -140,10 +142,10 @@ auto MultiheadAttention::scaled_dot_product_attention(
     int64_t seq_len_k = k_shape[2];
 
     // Use fused CPU kernel for inference when conditions allow:
-    // - CPU device, Float32, no mask, no dropout (or eval mode)
+    // - CPU device, Float32, no mask (or is_causal handles masking), no dropout (or eval mode)
     bool can_use_fused = query.device().type == Device::Type::CPU &&
                          query.dtype() == DType::Float32 &&
-                         (!attn_mask.is_valid() || attn_mask.shape().size() == 0) &&  // No attention mask
+                         (is_causal_ || !attn_mask.is_valid() || attn_mask.shape().size() == 0) &&  // No explicit mask needed
                          (dropout_p <= 0.0 || !is_training());  // No dropout needed
 
     if (can_use_fused && !is_training()) {
@@ -171,7 +173,7 @@ auto MultiheadAttention::scaled_dot_product_attention(
             batch_heads,
             seq_len_q, seq_len_k,
             head_dim, head_dim,  // d_k = d_v = head_dim
-            false  // causal = false (can be extended later)
+            is_causal_
         );
 
         // Return result (no attention weights computed in fused path for efficiency)
@@ -222,43 +224,46 @@ auto MultiheadAttention::scaled_dot_product_attention(
         }
     }
 
-    // Fallback: Custom Flash Attention kernel (disabled - doesn't use Tensor Cores)
-    bool can_use_cuda_fused = false;
+    // CPU Flash Attention: O(N) memory via tiled online softmax with fused dropout
+    // Uses OpId::FlashAttention for 4D [batch, num_heads, seq_len, head_dim] tensors
+    // Conditions: CPU, Float32, head_dim <= 256, no explicit attention mask
+    // When is_causal_ is true, the kernel handles causal masking internally (no explicit mask needed)
+    // When is_causal_ is false, we still require no external mask for the flash path
+    // Dropout is handled inside the fused kernel via Philox RNG (no training guard needed)
+    bool can_use_flash_attention = query.device().type == Device::Type::CPU &&
+                                   query.dtype() == DType::Float32 &&
+                                   head_dim <= 256 &&
+                                   (is_causal_ || !attn_mask.is_valid() || attn_mask.shape().size() == 0);
 
-    if (can_use_cuda_fused) {
-        // Flash Attention: O(N) memory instead of O(N^2)
-        float scale_f = 1.0f / std::sqrt(static_cast<float>(head_dim));
+    if (can_use_flash_attention) {
+        try {
+            float scale_f = 1.0f / std::sqrt(static_cast<float>(head_dim));
 
-        // Reshape from (batch, num_heads, seq_len, head_dim) to (batch*num_heads, seq_len, head_dim)
-        int64_t batch_heads = batch_size * num_heads;
-        std::vector<int64_t> reshaped_shape = {batch_heads, seq_len_q, head_dim};
-        std::vector<int64_t> reshaped_k_shape = {batch_heads, seq_len_k, head_dim};
+            // Make tensors contiguous for the kernel
+            Tensor q_contig = query.tensor().is_contiguous() ? query.tensor() : query.tensor().contiguous();
+            Tensor k_contig = key.tensor().is_contiguous() ? key.tensor() : key.tensor().contiguous();
+            Tensor v_contig = value.tensor().is_contiguous() ? value.tensor() : value.tensor().contiguous();
 
-        // Make tensors contiguous for fused kernel
-        Tensor q_contig = query.tensor().is_contiguous() ? query.tensor() : query.tensor().contiguous();
-        Tensor k_contig = key.tensor().is_contiguous() ? key.tensor() : key.tensor().contiguous();
-        Tensor v_contig = value.tensor().is_contiguous() ? value.tensor() : value.tensor().contiguous();
+            // Call Flash Attention via dispatch system (4D tensors directly)
+            // When is_causal_ is true, the kernel applies causal masking internally,
+            // which is more efficient than building and applying an explicit mask tensor
+            // Dropout is fused into the kernel using Philox counter-based RNG
+            OpAttributes attrs;
+            attrs["scale"] = std::to_string(scale_f);
+            attrs["causal"] = is_causal_ ? "true" : "false";
+            attrs["dropout_p"] = std::to_string(static_cast<float>(dropout_p));
+            attrs["is_training"] = is_training() ? "true" : "false";
+            std::vector<Tensor> flash_inputs = {q_contig, k_contig, v_contig};
+            Tensor output = dispatch<OpId::FlashAttention>(flash_inputs, attrs)[0];
 
-        // Reshape to 3D for Flash Attention
-        Tensor q_3d = reshape(q_contig, reshaped_shape);
-        Tensor k_3d = reshape(k_contig, reshaped_k_shape);
-        Tensor v_3d = reshape(v_contig, reshaped_k_shape);
+            Variable attended(output, false);
+            Tensor empty_weights;
+            Variable attn_weights_empty(empty_weights, false);
 
-        // Call Flash Attention via dispatch system
-        OpAttributes attrs;
-        attrs["scale"] = std::to_string(scale_f);
-        std::vector<Tensor> fused_inputs = {q_3d, k_3d, v_3d};
-        Tensor output_3d = dispatch<OpId::FusedAttention>(fused_inputs, attrs)[0];
-
-        // Reshape back to (batch, num_heads, seq_len_q, head_dim)
-        std::vector<int64_t> out_shape = {batch_size, num_heads, seq_len_q, head_dim};
-        Tensor output_4d = reshape(output_3d, out_shape);
-
-        Variable attended(output_4d, false);
-        Tensor empty_weights;
-        Variable attn_weights_empty(empty_weights, false);
-
-        return {attended, attn_weights_empty};
+            return {attended, attn_weights_empty};
+        } catch (const std::exception& e) {
+            // Fall through to standard BMM path if flash attention fails
+        }
     }
 
     // Standard path: Use cuBLAS bmm operations (fast for all cases)
@@ -297,6 +302,30 @@ auto MultiheadAttention::scaled_dot_product_attention(
 
     // Apply attention mask if provided
     if (attn_mask.is_valid() && attn_mask.shape().size() > 0) {
+        // Validate mask shape is broadcastable to scores (batch, num_heads, seq_q, seq_k)
+        auto mask_shape = attn_mask.shape();
+        auto scores_shape = scores.shape();
+        // Mask must be 2D (seq_q, seq_k), 3D (num_heads, seq_q, seq_k),
+        // or 4D (batch, num_heads, seq_q, seq_k) and broadcastable
+        if (mask_shape.size() > 4) {
+            throw std::runtime_error(
+                "Attention mask must be 2D, 3D, or 4D, got " +
+                std::to_string(mask_shape.size()) + "D");
+        }
+        // Validate trailing dimensions match
+        int64_t mask_ndim = static_cast<int64_t>(mask_shape.size());
+        int64_t scores_ndim = static_cast<int64_t>(scores_shape.size());
+        for (int64_t i = 1; i <= std::min(mask_ndim, scores_ndim); ++i) {
+            int64_t mask_dim = mask_shape[mask_ndim - i];
+            int64_t scores_dim = scores_shape[scores_ndim - i];
+            if (mask_dim != 1 && mask_dim != scores_dim) {
+                throw std::runtime_error(
+                    "Attention mask shape is not broadcastable to scores shape. "
+                    "Mask dim " + std::to_string(mask_ndim - i) + " is " +
+                    std::to_string(mask_dim) + " but scores dim is " +
+                    std::to_string(scores_dim));
+            }
+        }
         // Add mask (mask should have -inf for positions to mask out)
         Variable mask_var(attn_mask, false);
         scores = scores + mask_var;

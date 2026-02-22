@@ -158,6 +158,7 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::InstanceNorm)] = "instance_norm";
     names[static_cast<size_t>(OpId::InstanceNormBackward)] = "instance_norm_backward";
     names[static_cast<size_t>(OpId::RMSNormBackward)] = "rms_norm_backward";
+    names[static_cast<size_t>(OpId::BatchNorm2dFusedTraining)] = "batchnorm2d_fused_training";
 
     // Convolution
     names[static_cast<size_t>(OpId::Conv2dForward)] = "conv2d_forward";
@@ -203,6 +204,9 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::FusedConv2dSigmoid)] = "fused_conv2d_sigmoid";
     names[static_cast<size_t>(OpId::FusedConv2dTanh)] = "fused_conv2d_tanh";
     names[static_cast<size_t>(OpId::FusedConv2dSwish)] = "fused_conv2d_swish";
+    names[static_cast<size_t>(OpId::FusedConv2dBnReLU)] = "fused_conv2d_bn_relu";
+    names[static_cast<size_t>(OpId::FusedLayerNormBackward)] = "fused_layer_norm_backward";
+    names[static_cast<size_t>(OpId::FusedAdamAtan2Step)] = "fused_adam_atan2_step";
 
     // Creation
     names[static_cast<size_t>(OpId::Zeros)] = "zeros";
@@ -219,6 +223,11 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::LSTMCellBackward)] = "lstm_cell_backward";
     names[static_cast<size_t>(OpId::GRUCellForward)] = "gru_cell_forward";
     names[static_cast<size_t>(OpId::GRUCellBackward)] = "gru_cell_backward";
+    names[static_cast<size_t>(OpId::LSTMForward)] = "lstm_forward";
+    names[static_cast<size_t>(OpId::GRUForward)] = "gru_forward";
+    names[static_cast<size_t>(OpId::LSTMMultiLayerForward)] = "lstm_multi_layer_forward";
+    names[static_cast<size_t>(OpId::GRUMultiLayerForward)] = "gru_multi_layer_forward";
+    names[static_cast<size_t>(OpId::BiLSTMForward)] = "bilstm_forward";
 
     // Embedding
     names[static_cast<size_t>(OpId::Embedding)] = "embedding";
@@ -243,6 +252,8 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::CumSum)] = "cumsum";
     names[static_cast<size_t>(OpId::CumProd)] = "cumprod";
     names[static_cast<size_t>(OpId::Unique)] = "unique";
+    names[static_cast<size_t>(OpId::FlashAttention)] = "flash_attention";
+    names[static_cast<size_t>(OpId::FlashAttentionBackward)] = "flash_attention_backward";
 
     // 3D Convolution and Pooling
     names[static_cast<size_t>(OpId::Conv3dForward)] = "conv3d_forward";
@@ -253,6 +264,9 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::MaxPool3dBackward)] = "maxpool3d_backward";
     names[static_cast<size_t>(OpId::AvgPool3dForward)] = "avgpool3d_forward";
     names[static_cast<size_t>(OpId::AvgPool3dBackward)] = "avgpool3d_backward";
+
+    // Type Conversion
+    names[static_cast<size_t>(OpId::Cast)] = "cast";
 
     return names;
 }();
@@ -266,8 +280,13 @@ constexpr size_t count_named_ops() {
     return count;
 }
 
+// Count of actual OpId enum values (excluding gap slots).
+// Update this when adding new OpIds to catch missing name entries at compile time.
+inline constexpr size_t EXPECTED_NAMED_OPS = 203;
+
 // If this fires, a new OpId was added without a corresponding name in op_names above
-static_assert(count_named_ops() > 0, "No ops named in op_names array");
+static_assert(count_named_ops() == EXPECTED_NAMED_OPS,
+    "Mismatch: update EXPECTED_NAMED_OPS and add name entry when adding new OpIds");
 
 } // anonymous namespace
 

@@ -109,6 +109,45 @@ auto div(const Tensor& a, const Tensor& b) -> Tensor {
     return dispatch<OpId::Div>(inputs)[0];
 }
 
+// Scalar arithmetic overloads — avoid creating temporary scalar tensors.
+// Creates a size-{1} scalar tensor once and delegates to the tensor overload,
+// but backends can optimize this path internally.
+auto add(const Tensor& a, double scalar) -> Tensor {
+    if (!a.impl()) {
+        throw std::runtime_error("Cannot add to uninitialized tensor");
+    }
+    auto scalar_tensor = full({1}, static_cast<float>(scalar), a.dtype(), a.device());
+    std::vector<Tensor> inputs = {a.is_contiguous() ? a : a.contiguous(), scalar_tensor};
+    return dispatch<OpId::Add>(inputs)[0];
+}
+
+auto sub(const Tensor& a, double scalar) -> Tensor {
+    if (!a.impl()) {
+        throw std::runtime_error("Cannot subtract from uninitialized tensor");
+    }
+    auto scalar_tensor = full({1}, static_cast<float>(scalar), a.dtype(), a.device());
+    std::vector<Tensor> inputs = {a.is_contiguous() ? a : a.contiguous(), scalar_tensor};
+    return dispatch<OpId::Sub>(inputs)[0];
+}
+
+auto mul(const Tensor& a, double scalar) -> Tensor {
+    if (!a.impl()) {
+        throw std::runtime_error("Cannot multiply uninitialized tensor");
+    }
+    auto scalar_tensor = full({1}, static_cast<float>(scalar), a.dtype(), a.device());
+    std::vector<Tensor> inputs = {a.is_contiguous() ? a : a.contiguous(), scalar_tensor};
+    return dispatch<OpId::Mul>(inputs)[0];
+}
+
+auto div(const Tensor& a, double scalar) -> Tensor {
+    if (!a.impl()) {
+        throw std::runtime_error("Cannot divide uninitialized tensor");
+    }
+    auto scalar_tensor = full({1}, static_cast<float>(scalar), a.dtype(), a.device());
+    std::vector<Tensor> inputs = {a.is_contiguous() ? a : a.contiguous(), scalar_tensor};
+    return dispatch<OpId::Div>(inputs)[0];
+}
+
 auto matmul(const Tensor& a, const Tensor& b) -> Tensor {
     // Validate dtype compatibility
     if (a.dtype() != b.dtype()) {

@@ -6,6 +6,7 @@
 #include "tenzor/nn/optim/adadelta.hpp"
 #include <cmath>
 #include <numbers>
+#include <stdexcept>
 
 namespace tenzor::optim {
 
@@ -329,6 +330,58 @@ auto CosineAnnealingLR::set_optimizer_lr(double lr) -> void {
         case OptimizerType::Adadelta:
             optimizer_.adadelta->set_lr(lr);
             break;
+    }
+}
+
+//==============================================================================
+// LinearWarmupScheduler Implementation
+//==============================================================================
+
+LinearWarmupScheduler::LinearWarmupScheduler(Optimizer& optimizer,
+                                           std::shared_ptr<LRScheduler> base_scheduler,
+                                           int64_t warmup_steps,
+                                           double warmup_start_factor)
+    : optimizer_(optimizer),
+      base_scheduler_(std::move(base_scheduler)),
+      warmup_steps_(warmup_steps),
+      warmup_start_factor_(warmup_start_factor),
+      step_count_(0) {
+
+    if (warmup_steps_ < 0) {
+        throw std::invalid_argument(
+            "LinearWarmupScheduler: warmup_steps must be non-negative, got " +
+            std::to_string(warmup_steps_));
+    }
+
+    if (warmup_start_factor_ < 0.0 || warmup_start_factor_ > 1.0) {
+        throw std::invalid_argument(
+            "LinearWarmupScheduler: warmup_start_factor must be in [0, 1], got " +
+            std::to_string(warmup_start_factor_));
+    }
+
+    base_lr_ = optimizer_.get_lr();
+    last_lr_ = base_lr_ * warmup_start_factor_;
+
+    // Set initial LR to the warmup starting LR
+    if (warmup_steps_ > 0) {
+        optimizer_.set_lr(last_lr_);
+    }
+}
+
+auto LinearWarmupScheduler::step() -> void {
+    step_count_++;
+
+    if (step_count_ <= warmup_steps_) {
+        // Linear warmup phase:
+        // lr = base_lr * (start_factor + (1 - start_factor) * step / warmup_steps)
+        double progress = static_cast<double>(step_count_) / static_cast<double>(warmup_steps_);
+        double factor = warmup_start_factor_ + (1.0 - warmup_start_factor_) * progress;
+        last_lr_ = base_lr_ * factor;
+        optimizer_.set_lr(last_lr_);
+    } else {
+        // After warmup: delegate to base scheduler
+        base_scheduler_->step();
+        last_lr_ = base_scheduler_->get_last_lr();
     }
 }
 

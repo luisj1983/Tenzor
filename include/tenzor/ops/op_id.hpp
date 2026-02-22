@@ -298,6 +298,8 @@ enum class OpId : uint16_t {
     CumSum,
     CumProd,
     Unique,
+    FlashAttention = 295,
+    FlashAttentionBackward,
 
     // =========================================================================
     // 3D Convolution and Pooling Operations (301-315)
@@ -310,6 +312,11 @@ enum class OpId : uint16_t {
     MaxPool3dBackward,
     AvgPool3dForward,
     AvgPool3dBackward,
+
+    // =========================================================================
+    // Type Conversion Operations (316-319)
+    // =========================================================================
+    Cast = 316,
 
     // =========================================================================
     // Sentinel (MUST BE LAST)

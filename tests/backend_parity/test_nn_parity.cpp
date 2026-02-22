@@ -18,27 +18,149 @@ using namespace tenzor::testing;
 // ============================================================================
 
 TEST(NNOperationParity, Conv2d_Basic) {
-    GTEST_SKIP() << "nn::functional API not available";
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    nn::Conv2d conv(3, 16, 3, 1, 1);  // 3x3, stride 1, pad 1
+    auto input = randn({1, 3, 8, 8}, DType::Float32, Device::cpu());
+
+    // CPU reference
+    auto ref_output = conv.forward(Variable(input, false)).tensor();
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        nn::Conv2d conv_dev(3, 16, 3, 1, 1);
+        // Copy weights from CPU conv
+        auto params = conv.parameters();
+        auto dev_params = conv_dev.parameters();
+        for (size_t p = 0; p < params.size(); ++p) {
+            dev_params[p]->tensor() = params[p]->tensor().clone();
+        }
+        conv_dev.to(backends[i]);
+        auto input_dev = input.to(backends[i]);
+        auto output = conv_dev.forward(Variable(input_dev, false)).tensor();
+        backends[i].synchronize();
+        EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
+    }
 }
 
 TEST(NNOperationParity, Conv2d_Stride2) {
-    GTEST_SKIP() << "nn::functional API not available";
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    nn::Conv2d conv(3, 16, 3, 2, 1);  // stride 2
+    auto input = randn({1, 3, 16, 16}, DType::Float32, Device::cpu());
+
+    auto ref_output = conv.forward(Variable(input, false)).tensor();
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        nn::Conv2d conv_dev(3, 16, 3, 2, 1);
+        auto params = conv.parameters();
+        auto dev_params = conv_dev.parameters();
+        for (size_t p = 0; p < params.size(); ++p) {
+            dev_params[p]->tensor() = params[p]->tensor().clone();
+        }
+        conv_dev.to(backends[i]);
+        auto input_dev = input.to(backends[i]);
+        auto output = conv_dev.forward(Variable(input_dev, false)).tensor();
+        backends[i].synchronize();
+        EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
+    }
 }
 
 TEST(NNOperationParity, Conv2d_Padding2) {
-    GTEST_SKIP() << "nn::functional API not available";
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    nn::Conv2d conv(3, 16, 5, 1, 2);  // 5x5, pad 2
+    auto input = randn({1, 3, 8, 8}, DType::Float32, Device::cpu());
+
+    auto ref_output = conv.forward(Variable(input, false)).tensor();
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        nn::Conv2d conv_dev(3, 16, 5, 1, 2);
+        auto params = conv.parameters();
+        auto dev_params = conv_dev.parameters();
+        for (size_t p = 0; p < params.size(); ++p) {
+            dev_params[p]->tensor() = params[p]->tensor().clone();
+        }
+        conv_dev.to(backends[i]);
+        auto input_dev = input.to(backends[i]);
+        auto output = conv_dev.forward(Variable(input_dev, false)).tensor();
+        backends[i].synchronize();
+        EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
+    }
 }
 
 TEST(NNOperationParity, Conv2d_Dilation) {
-    GTEST_SKIP() << "nn::functional API not available";
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    nn::Conv2d conv(3, 16, 3, 1, 2, 2);  // dilation=2, pad=2
+    auto input = randn({1, 3, 16, 16}, DType::Float32, Device::cpu());
+
+    auto ref_output = conv.forward(Variable(input, false)).tensor();
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        nn::Conv2d conv_dev(3, 16, 3, 1, 2, 2);
+        auto params = conv.parameters();
+        auto dev_params = conv_dev.parameters();
+        for (size_t p = 0; p < params.size(); ++p) {
+            dev_params[p]->tensor() = params[p]->tensor().clone();
+        }
+        conv_dev.to(backends[i]);
+        auto input_dev = input.to(backends[i]);
+        auto output = conv_dev.forward(Variable(input_dev, false)).tensor();
+        backends[i].synchronize();
+        EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
+    }
 }
 
 TEST(NNOperationParity, Conv2d_Groups) {
-    GTEST_SKIP() << "nn::functional API not available";
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    nn::Conv2d conv(16, 16, 3, 1, 1, 1, 16);  // depthwise: groups=16
+    auto input = randn({1, 16, 8, 8}, DType::Float32, Device::cpu());
+
+    auto ref_output = conv.forward(Variable(input, false)).tensor();
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        nn::Conv2d conv_dev(16, 16, 3, 1, 1, 1, 16);
+        auto params = conv.parameters();
+        auto dev_params = conv_dev.parameters();
+        for (size_t p = 0; p < params.size(); ++p) {
+            dev_params[p]->tensor() = params[p]->tensor().clone();
+        }
+        conv_dev.to(backends[i]);
+        auto input_dev = input.to(backends[i]);
+        auto output = conv_dev.forward(Variable(input_dev, false)).tensor();
+        backends[i].synchronize();
+        EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
+    }
 }
 
 TEST(NNOperationParity, ConvTranspose2d) {
-    GTEST_SKIP() << "nn::functional API not available";
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    nn::ConvTranspose2d conv(16, 3, 4, 2, 1);  // upsample 2x
+    auto input = randn({1, 16, 8, 8}, DType::Float32, Device::cpu());
+
+    auto ref_output = conv.forward(Variable(input, false)).tensor();
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        nn::ConvTranspose2d conv_dev(16, 3, 4, 2, 1);
+        auto params = conv.parameters();
+        auto dev_params = conv_dev.parameters();
+        for (size_t p = 0; p < params.size(); ++p) {
+            dev_params[p]->tensor() = params[p]->tensor().clone();
+        }
+        conv_dev.to(backends[i]);
+        auto input_dev = input.to(backends[i]);
+        auto output = conv_dev.forward(Variable(input_dev, false)).tensor();
+        backends[i].synchronize();
+        EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
+    }
 }
 
 // ============================================================================
@@ -46,25 +168,56 @@ TEST(NNOperationParity, ConvTranspose2d) {
 // ============================================================================
 
 TEST(NNOperationParity, MaxPool2d_2x2) {
-    GTEST_SKIP() << "nn::functional API not available";
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    auto input = randn({1, 16, 8, 8}, DType::Float32, Device::cpu());
+
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        nn::MaxPool2d pool(2);
+        return pool.forward(Variable(inputs[0], false)).tensor();
+    }, {input}, 1e-7f, 1e-9f, "MaxPool2d_2x2");
 }
 
 TEST(NNOperationParity, MaxPool2d_3x3_Stride2) {
-    GTEST_SKIP() << "nn::functional API not available";
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    auto input = randn({1, 16, 16, 16}, DType::Float32, Device::cpu());
+
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        nn::MaxPool2d pool(3, 2, 1);
+        return pool.forward(Variable(inputs[0], false)).tensor();
+    }, {input}, 1e-7f, 1e-9f, "MaxPool2d_3x3_Stride2");
 }
 
 TEST(NNOperationParity, AvgPool2d_2x2) {
-    GTEST_SKIP() << "nn::functional API not available";
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    auto input = randn({1, 16, 8, 8}, DType::Float32, Device::cpu());
+
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        nn::AvgPool2d pool(2);
+        return pool.forward(Variable(inputs[0], false)).tensor();
+    }, {input}, 1e-6f, 1e-8f, "AvgPool2d_2x2");
 }
 
 TEST(NNOperationParity, AdaptiveAvgPool2d) {
-    // Skipped: nn::functional::adaptive_avg_pool2d not available
-    GTEST_SKIP() << "nn::functional API not available";
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    auto input = randn({1, 16, 16, 16}, DType::Float32, Device::cpu());
+
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        nn::AdaptiveAvgPool2d pool(4, 4);
+        return pool.forward(Variable(inputs[0], false)).tensor();
+    }, {input}, 1e-6f, 1e-8f, "AdaptiveAvgPool2d");
 }
 
 TEST(NNOperationParity, AdaptiveMaxPool2d) {
-    // Skipped: nn::functional::adaptive_max_pool2d not available
-    GTEST_SKIP() << "nn::functional API not available";
+    // No AdaptiveMaxPool2d module class available yet
+    GTEST_SKIP() << "AdaptiveMaxPool2d module not available";
 }
 
 // ============================================================================
@@ -72,23 +225,112 @@ TEST(NNOperationParity, AdaptiveMaxPool2d) {
 // ============================================================================
 
 TEST(NNOperationParity, BatchNorm2d_Train) {
-    // Skipped: nn::functional::batch_norm not available
-    GTEST_SKIP() << "nn::functional API not available";
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    nn::BatchNorm2d bn(16);
+    bn.train();
+    auto input = randn({4, 16, 8, 8}, DType::Float32, Device::cpu());
+
+    auto ref_output = bn.forward(Variable(input, false)).tensor();
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        nn::BatchNorm2d bn_dev(16);
+        bn_dev.train();
+        auto params = bn.parameters();
+        auto dev_params = bn_dev.parameters();
+        for (size_t p = 0; p < params.size(); ++p) {
+            dev_params[p]->tensor() = params[p]->tensor().clone();
+        }
+        bn_dev.to(backends[i]);
+        auto input_dev = input.to(backends[i]);
+        auto output = bn_dev.forward(Variable(input_dev, false)).tensor();
+        backends[i].synchronize();
+        EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
+    }
 }
 
 TEST(NNOperationParity, BatchNorm2d_Eval) {
-    // Skipped: nn::functional::batch_norm not available
-    GTEST_SKIP() << "nn::functional API not available";
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    nn::BatchNorm2d bn(16);
+    // Run a training forward to populate running stats
+    auto train_input = randn({4, 16, 8, 8}, DType::Float32, Device::cpu());
+    bn.train();
+    bn.forward(Variable(train_input, false));
+    bn.eval();
+
+    auto input = randn({4, 16, 8, 8}, DType::Float32, Device::cpu());
+    auto ref_output = bn.forward(Variable(input, false)).tensor();
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        nn::BatchNorm2d bn_dev(16);
+        bn_dev.train();
+        auto params = bn.parameters();
+        auto dev_params = bn_dev.parameters();
+        for (size_t p = 0; p < params.size(); ++p) {
+            dev_params[p]->tensor() = params[p]->tensor().clone();
+        }
+        bn_dev.to(backends[i]);
+        // Run training to populate running stats
+        auto train_dev = train_input.to(backends[i]);
+        bn_dev.forward(Variable(train_dev, false));
+        bn_dev.eval();
+
+        auto input_dev = input.to(backends[i]);
+        auto output = bn_dev.forward(Variable(input_dev, false)).tensor();
+        backends[i].synchronize();
+        EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
+    }
 }
 
 TEST(NNOperationParity, LayerNorm) {
-    // Skipped: nn::functional::layer_norm not available
-    GTEST_SKIP() << "nn::functional API not available";
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    nn::LayerNorm ln({64});
+    auto input = randn({4, 64}, DType::Float32, Device::cpu());
+
+    auto ref_output = ln.forward(Variable(input, false)).tensor();
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        nn::LayerNorm ln_dev({64});
+        auto params = ln.parameters();
+        auto dev_params = ln_dev.parameters();
+        for (size_t p = 0; p < params.size(); ++p) {
+            dev_params[p]->tensor() = params[p]->tensor().clone();
+        }
+        ln_dev.to(backends[i]);
+        auto input_dev = input.to(backends[i]);
+        auto output = ln_dev.forward(Variable(input_dev, false)).tensor();
+        backends[i].synchronize();
+        EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
+    }
 }
 
 TEST(NNOperationParity, GroupNorm) {
-    // Skipped: nn::functional::group_norm not available
-    GTEST_SKIP() << "nn::functional API not available";
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    nn::GroupNorm gn(4, 16);  // 4 groups, 16 channels
+    auto input = randn({2, 16, 8, 8}, DType::Float32, Device::cpu());
+
+    auto ref_output = gn.forward(Variable(input, false)).tensor();
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        nn::GroupNorm gn_dev(4, 16);
+        auto params = gn.parameters();
+        auto dev_params = gn_dev.parameters();
+        for (size_t p = 0; p < params.size(); ++p) {
+            dev_params[p]->tensor() = params[p]->tensor().clone();
+        }
+        gn_dev.to(backends[i]);
+        auto input_dev = input.to(backends[i]);
+        auto output = gn_dev.forward(Variable(input_dev, false)).tensor();
+        backends[i].synchronize();
+        EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
+    }
 }
 
 // ============================================================================
@@ -108,8 +350,17 @@ TEST(NNOperationParity, ReLU) {
 }
 
 TEST(NNOperationParity, ReLU6) {
-    // Skipped: nn::relu6 not available
-    GTEST_SKIP() << "nn::relu6 API not available";
+    // ReLU6 can be implemented as clamp(relu(x), 0, 6) but no dedicated nn::relu6
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    auto input = randn({32, 64}, DType::Float32, Device::cpu());
+
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        auto x = Variable(inputs[0], false);
+        auto out = nn::relu(x);
+        return tenzor::clamp(out, 0.0f, 6.0f).tensor();
+    }, {input}, 1e-7f, 1e-9f, "ReLU6");
 }
 
 TEST(NNOperationParity, LeakyReLU) {
@@ -185,12 +436,20 @@ TEST(NNOperationParity, LogSoftmax) {
 }
 
 // ============================================================================
-// Dropout (with fixed seed for reproducibility)
+// Dropout (eval mode - should be identity)
 // ============================================================================
 
 TEST(NNOperationParity, Dropout_Eval) {
-    // Skipped: nn::functional::dropout not available
-    GTEST_SKIP() << "nn::functional::dropout API not available";
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    auto input = randn({32, 64}, DType::Float32, Device::cpu());
+
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        nn::Dropout dropout(0.5);
+        dropout.eval();  // Eval mode: dropout is identity
+        return dropout.forward(Variable(inputs[0], false)).tensor();
+    }, {input}, 1e-7f, 1e-9f, "Dropout_Eval");
 }
 
 // ============================================================================
@@ -198,8 +457,27 @@ TEST(NNOperationParity, Dropout_Eval) {
 // ============================================================================
 
 TEST(NNOperationParity, Embedding) {
-    // Skipped: nn::functional::embedding not available
-    GTEST_SKIP() << "nn::functional::embedding API not available";
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    nn::Embedding emb(100, 32);  // 100 tokens, 32 dims
+    auto indices = (rand({4, 8}, DType::Float32, Device::cpu()) * 100).to(DType::Int64);
+
+    auto ref_output = emb.forward(Variable(indices, false)).tensor();
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        nn::Embedding emb_dev(100, 32);
+        auto params = emb.parameters();
+        auto dev_params = emb_dev.parameters();
+        for (size_t p = 0; p < params.size(); ++p) {
+            dev_params[p]->tensor() = params[p]->tensor().clone();
+        }
+        emb_dev.to(backends[i]);
+        auto indices_dev = indices.to(backends[i]);
+        auto output = emb_dev.forward(Variable(indices_dev, false)).tensor();
+        backends[i].synchronize();
+        EXPECT_TENSORS_CLOSE(ref_output, output, 1e-6f, 1e-8f);
+    }
 }
 
 // ============================================================================

@@ -386,7 +386,16 @@ public:
                 throw std::runtime_error("Invalid CopyKind value");
         }
 
-        cudaError_t err = cudaMemcpy(dst, src, bytes, cuda_kind);
+        cudaError_t err;
+        if (kind == CopyKind::HostToDevice || kind == CopyKind::DeviceToDevice) {
+            // Use async transfer for H2D and D2D — host doesn't need to wait
+            // for the copy to complete, GPU-side ordering is guaranteed by stream.
+            cudaStream_t stream = nullptr;  // default stream
+            err = cudaMemcpyAsync(dst, src, bytes, cuda_kind, stream);
+        } else {
+            // D2H and H2H: use synchronous copy since host needs data immediately
+            err = cudaMemcpy(dst, src, bytes, cuda_kind);
+        }
         if (err != cudaSuccess) {
             // Debug: check pointer attributes
             cudaPointerAttributes dst_attrs, src_attrs;
@@ -1707,7 +1716,17 @@ public:
                 auto dummy_input = zeros(input_shape, inputs[0].dtype(), inputs[0].device());
 
                 #ifdef TENZOR_HAS_CUDNN
-                {
+                // Detect memory format from grad_output strides
+                bool use_nhwc = (inputs[0].memory_format() == MemoryFormat::ChannelsLast) &&
+                                (inputs[0].dtype() != DType::Float64);
+
+                if (use_nhwc) {
+                    auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv2d_backward_nhwc(
+                        inputs[0], dummy_input, inputs[1], stride, padding, dilation, groups,
+                        true, false, false, stream
+                    );
+                    return std::vector<Tensor>{grad_input};
+                } else {
                     auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv2d_backward(
                         inputs[0], dummy_input, inputs[1], stride, padding, dilation, groups,
                         true, false, false, stream
@@ -1754,7 +1773,17 @@ public:
                 auto dummy_weight = zeros(weight_shape, inputs[0].dtype(), inputs[0].device());
 
                 #ifdef TENZOR_HAS_CUDNN
-                {
+                // Detect memory format from input strides (inputs[1] is the original input)
+                bool use_nhwc = (inputs[1].memory_format() == MemoryFormat::ChannelsLast) &&
+                                (inputs[0].dtype() != DType::Float64);
+
+                if (use_nhwc) {
+                    auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv2d_backward_nhwc(
+                        inputs[0], inputs[1], dummy_weight, stride, padding, dilation, groups,
+                        false, true, false, stream
+                    );
+                    return std::vector<Tensor>{grad_weight};
+                } else {
                     auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv2d_backward(
                         inputs[0], inputs[1], dummy_weight, stride, padding, dilation, groups,
                         false, true, false, stream

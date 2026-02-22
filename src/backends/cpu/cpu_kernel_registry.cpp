@@ -300,6 +300,11 @@ namespace cpu {
     auto fused_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
                                 float scale, bool causal) -> Tensor;
 
+    // Flash Attention (with optional fused dropout for training)
+    auto flash_attention_forward(const Tensor& Q, const Tensor& K, const Tensor& V,
+                                  float scale, bool causal,
+                                  float dropout_p = 0.0f, bool is_training = false) -> Tensor;
+
     // Fused Conv2d + Activation variants
     auto fused_conv2d_sigmoid_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
                                       int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
@@ -355,22 +360,18 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     // =========================================================================
     // Arithmetic Operations
     // =========================================================================
-    TENZOR_REGISTER_BINARY_KERNEL(table, Add, cpu::add_kernel);
-    TENZOR_REGISTER_BINARY_KERNEL(table, Sub, cpu::sub_kernel);
-    TENZOR_REGISTER_BINARY_KERNEL(table, Mul, cpu::mul_kernel);
-    TENZOR_REGISTER_BINARY_KERNEL(table, Div, cpu::div_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Add, cpu::add_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Sub, cpu::sub_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Mul, cpu::mul_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Div, cpu::div_kernel);
     TENZOR_REGISTER_BINARY_KERNEL(table, MatMul, cpu::matmul_kernel);
     TENZOR_REGISTER_BINARY_KERNEL(table, Bmm, cpu::bmm_kernel);
-    TENZOR_REGISTER_BINARY_KERNEL(table, Dot, cpu::dot_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Dot, cpu::dot_kernel);
 
     // Single-output registrations for optimized dispatch (no vector allocation)
     // These avoid ~0.5-2us overhead per call from std::vector creation
-    table.register_single_output_kernel(OpId::MatMul, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
-        return cpu::matmul_kernel(inputs[0], inputs[1]);
-    });
-    table.register_single_output_kernel(OpId::Bmm, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
-        return cpu::bmm_kernel(inputs[0], inputs[1]);
-    });
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, MatMul, cpu::matmul_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Bmm, cpu::bmm_kernel);
 
     // Inplace operations
     TENZOR_REGISTER_INPLACE_KERNEL(table, AddInplace, cpu::add_inplace_kernel);
@@ -452,16 +453,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     // =========================================================================
     // Element-wise Math Operations
     // =========================================================================
-    TENZOR_REGISTER_UNARY_KERNEL(table, Sqrt, cpu::sqrt_kernel);
-    TENZOR_REGISTER_UNARY_KERNEL(table, Neg, cpu::neg_kernel);
-    TENZOR_REGISTER_UNARY_KERNEL(table, Abs, cpu::abs_kernel);
-    TENZOR_REGISTER_UNARY_KERNEL(table, Sign, cpu::sign_kernel);
-    TENZOR_REGISTER_UNARY_KERNEL(table, Log, cpu::log_kernel);
-    TENZOR_REGISTER_UNARY_KERNEL(table, Exp, cpu::exp_kernel);
-    TENZOR_REGISTER_UNARY_KERNEL(table, Reciprocal, cpu::reciprocal_kernel);
-    TENZOR_REGISTER_UNARY_KERNEL(table, Floor, cpu::floor_kernel);
-    TENZOR_REGISTER_UNARY_KERNEL(table, Ceil, cpu::ceil_kernel);
-    TENZOR_REGISTER_UNARY_KERNEL(table, Round, cpu::round_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Sqrt, cpu::sqrt_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Neg, cpu::neg_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Abs, cpu::abs_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Sign, cpu::sign_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Log, cpu::log_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Exp, cpu::exp_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Reciprocal, cpu::reciprocal_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Floor, cpu::floor_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Ceil, cpu::ceil_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Round, cpu::round_kernel);
 
     table.register_single_output_kernel(OpId::Pow, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         float exponent = parse_attr<float>(attrs, "exponent", 2.0f);
@@ -487,42 +488,42 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     // =========================================================================
     // Trigonometric Operations
     // =========================================================================
-    TENZOR_REGISTER_UNARY_KERNEL(table, Sin, cpu::sin_kernel);
-    TENZOR_REGISTER_UNARY_KERNEL(table, Cos, cpu::cos_kernel);
-    TENZOR_REGISTER_UNARY_KERNEL(table, Tan, cpu::tan_kernel);
-    TENZOR_REGISTER_UNARY_KERNEL(table, Asin, cpu::asin_kernel);
-    TENZOR_REGISTER_UNARY_KERNEL(table, Acos, cpu::acos_kernel);
-    TENZOR_REGISTER_UNARY_KERNEL(table, Atan, cpu::atan_kernel);
-    TENZOR_REGISTER_UNARY_KERNEL(table, Sinh, cpu::sinh_kernel);
-    TENZOR_REGISTER_UNARY_KERNEL(table, Cosh, cpu::cosh_kernel);
-    TENZOR_REGISTER_UNARY_KERNEL(table, Tanh, cpu::tanh_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Sin, cpu::sin_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Cos, cpu::cos_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Tan, cpu::tan_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Asin, cpu::asin_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Acos, cpu::acos_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Atan, cpu::atan_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Sinh, cpu::sinh_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Cosh, cpu::cosh_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Tanh, cpu::tanh_kernel);
 
     // =========================================================================
     // Comparison Operations
     // =========================================================================
-    TENZOR_REGISTER_BINARY_KERNEL(table, Eq, cpu::eq_kernel);
-    TENZOR_REGISTER_BINARY_KERNEL(table, Ne, cpu::ne_kernel);
-    TENZOR_REGISTER_BINARY_KERNEL(table, Lt, cpu::lt_kernel);
-    TENZOR_REGISTER_BINARY_KERNEL(table, Le, cpu::le_kernel);
-    TENZOR_REGISTER_BINARY_KERNEL(table, Gt, cpu::gt_kernel);
-    TENZOR_REGISTER_BINARY_KERNEL(table, Ge, cpu::ge_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Eq, cpu::eq_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Ne, cpu::ne_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Lt, cpu::lt_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Le, cpu::le_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Gt, cpu::gt_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Ge, cpu::ge_kernel);
 
     // =========================================================================
     // Activation Functions
     // =========================================================================
-    TENZOR_REGISTER_UNARY_KERNEL(table, ReLU, cpu::relu_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, ReLU, cpu::relu_kernel);
     TENZOR_REGISTER_BINARY_KERNEL(table, ReLUBackward, cpu::relu_backward_kernel);
-    TENZOR_REGISTER_UNARY_KERNEL(table, Sigmoid, cpu::sigmoid_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Sigmoid, cpu::sigmoid_kernel);
     TENZOR_REGISTER_BINARY_KERNEL(table, SigmoidBackward, cpu::sigmoid_backward_kernel);
-    TENZOR_REGISTER_UNARY_KERNEL(table, TanhActivation, cpu::tanh_kernel);  // Uses same kernel as Tanh
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, TanhActivation, cpu::tanh_kernel);  // Uses same kernel as Tanh
     TENZOR_REGISTER_BINARY_KERNEL(table, TanhBackward, cpu::tanh_backward_kernel);
-    TENZOR_REGISTER_UNARY_KERNEL(table, Gelu, cpu::gelu_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Gelu, cpu::gelu_kernel);
     TENZOR_REGISTER_BINARY_KERNEL(table, GeluBackward, cpu::gelu_backward_kernel);
-    TENZOR_REGISTER_UNARY_KERNEL(table, Swish, cpu::swish_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Swish, cpu::swish_kernel);
     TENZOR_REGISTER_BINARY_KERNEL(table, SwishBackward, cpu::swish_backward_kernel);
-    TENZOR_REGISTER_UNARY_KERNEL(table, Selu, cpu::selu_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Selu, cpu::selu_kernel);
     TENZOR_REGISTER_BINARY_KERNEL(table, SeluBackward, cpu::selu_backward_kernel);
-    TENZOR_REGISTER_UNARY_KERNEL(table, Mish, cpu::mish_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Mish, cpu::mish_kernel);
     TENZOR_REGISTER_BINARY_KERNEL(table, MishBackward, cpu::mish_backward_kernel);
 
     table.register_single_output_kernel(OpId::LeakyReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -1243,6 +1244,17 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         float scale = parse_attr<float>(attrs, "scale", 1.0f);
         bool causal = parse_attr<bool>(attrs, "causal", false);
         return std::vector<Tensor>{cpu::fused_attention_kernel(inputs[0], inputs[1], inputs[2], scale, causal)};
+    });
+
+    // =========================================================================
+    // Flash Attention (O(N) memory, tiled online softmax)
+    // =========================================================================
+    table.register_kernel(OpId::FlashAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float scale = parse_attr<float>(attrs, "scale", 1.0f);
+        bool causal = parse_attr<bool>(attrs, "causal", false);
+        float dropout_p = parse_attr<float>(attrs, "dropout_p", 0.0f);
+        bool is_training = parse_attr<bool>(attrs, "is_training", false);
+        return std::vector<Tensor>{cpu::flash_attention_forward(inputs[0], inputs[1], inputs[2], scale, causal, dropout_p, is_training)};
     });
 
     // =========================================================================

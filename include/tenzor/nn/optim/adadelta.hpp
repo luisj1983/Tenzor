@@ -129,7 +129,7 @@ public:
      *
      * @pre Gradients must be computed via backward()
      */
-    auto step() -> void override;
+    auto step_impl() -> void override;
 
     /**
      * @brief Zero all parameter gradients

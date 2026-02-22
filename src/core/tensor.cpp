@@ -130,11 +130,12 @@ auto Tensor::data() -> T* {
                 std::string(dtype_name(impl_->dtype)) + ")");
         }
     }
-    // Bounds check: ensure offset doesn't exceed storage
-    if (impl_->offset > 0) {
+    // Bounds check: ensure offset + numel fits within storage
+    {
         size_t storage_elements = impl_->storage->size_bytes() / tenzor::dtype_size(impl_->dtype);
-        if (static_cast<size_t>(impl_->offset) >= storage_elements) {
-            throw std::out_of_range("Tensor data access: offset exceeds storage bounds");
+        size_t required = static_cast<size_t>(impl_->offset) + static_cast<size_t>(numel());
+        if (required > storage_elements) {
+            throw std::out_of_range("Tensor data access: offset + numel exceeds storage bounds");
         }
     }
     // For byte-level access types, scale offset by dtype size so pointer arithmetic
@@ -164,11 +165,12 @@ auto Tensor::data() const -> const T* {
                 std::string(dtype_name(impl_->dtype)) + ")");
         }
     }
-    // Bounds check: ensure offset doesn't exceed storage
-    if (impl_->offset > 0) {
+    // Bounds check: ensure offset + numel fits within storage
+    {
         size_t storage_elements = impl_->storage->size_bytes() / tenzor::dtype_size(impl_->dtype);
-        if (static_cast<size_t>(impl_->offset) >= storage_elements) {
-            throw std::out_of_range("Tensor data access: offset exceeds storage bounds");
+        size_t required = static_cast<size_t>(impl_->offset) + static_cast<size_t>(numel());
+        if (required > storage_elements) {
+            throw std::out_of_range("Tensor data access: offset + numel exceeds storage bounds");
         }
     }
     // For byte-level access types, scale offset by dtype size so pointer arithmetic
@@ -337,8 +339,20 @@ auto Tensor::to(DType dtype) const -> Tensor {
         return *this;
     }
 
-    // TODO: Try OpId::Cast on the current device before CPU round-trip once
-    // a Cast kernel is registered in GPU backends. For now, convert on CPU.
+    // Try GPU-side Cast kernel to avoid costly CPU round-trip (GPU -> CPU -> cast -> GPU).
+    // If a Cast kernel is registered for the current device, dispatch directly on-device.
+    if (impl_->device.type != Device::Type::CPU &&
+        is_op_supported(OpId::Cast, impl_->device.type)) {
+        // Ensure contiguous layout for the cast kernel
+        Tensor src = is_contiguous() ? *this : contiguous();
+        OpAttributes attrs;
+        attrs["target_dtype"] = std::to_string(static_cast<uint8_t>(dtype));
+        Tensor result = dispatch_single(OpId::Cast, std::span<const Tensor>(&src, 1), attrs);
+        result.impl_->requires_grad = impl_->requires_grad;
+        return result;
+    }
+
+    // Fallback: convert on CPU (for CPU tensors or backends without Cast kernel)
     const bool was_on_gpu = impl_->device.type != Device::Type::CPU;
     Tensor cpu_tensor = was_on_gpu ? cpu() : *this;
 
@@ -471,17 +485,21 @@ auto Tensor::clone() const -> Tensor {
         return *this;
     }
 
+    // Ensure source is contiguous before memcpy — non-contiguous tensors
+    // (after transpose, slice with stride) have gaps that memcpy would corrupt
+    Tensor src = is_contiguous() ? *this : contiguous();
+
     // Create new tensor with same shape, dtype, and device
     Tensor result(impl_->shape, impl_->dtype, impl_->device);
     result.impl_->requires_grad = impl_->requires_grad;
 
-    // Copy data — use data_ptr() to account for storage offset (e.g. sliced tensors)
-    const size_t size_bytes = numel() * dtype_size();
+    // Copy data from contiguous source
+    const size_t size_bytes = src.numel() * src.dtype_size();
 
     if (impl_->device.type == Device::Type::CPU) {
         // CPU copy
         std::memcpy(result.impl_->storage->data(),
-                    data_ptr(),
+                    src.data_ptr(),
                     size_bytes);
     } else {
         // Device copy
@@ -490,7 +508,7 @@ auto Tensor::clone() const -> Tensor {
             throw std::runtime_error("Backend not available for device");
         }
         backend->copy(result.impl_->storage->data(),
-                      data_ptr(),
+                      src.data_ptr(),
                       size_bytes,
                       CopyKind::DeviceToDevice);
     }
@@ -538,62 +556,80 @@ auto Tensor::operator/(const Tensor& other) const -> Tensor {
     return tenzor::div(*this, other);
 }
 
-// Scalar operations — use size-{1} tensor and let broadcasting handle expansion
+// Scalar operations — dispatch to optimized scalar overloads
 auto Tensor::operator+(double scalar) const -> Tensor {
-    if (!impl_) return *this;
-    auto scalar_tensor = full({1}, scalar, impl_->dtype, impl_->device);
-    return *this + scalar_tensor;
+    return tenzor::add(*this, scalar);
 }
 
 auto Tensor::operator-(double scalar) const -> Tensor {
-    if (!impl_) return *this;
-    auto scalar_tensor = full({1}, scalar, impl_->dtype, impl_->device);
-    return *this - scalar_tensor;
+    return tenzor::sub(*this, scalar);
 }
 
 auto Tensor::operator*(double scalar) const -> Tensor {
-    if (!impl_) return *this;
-    auto scalar_tensor = full({1}, scalar, impl_->dtype, impl_->device);
-    return *this * scalar_tensor;
+    return tenzor::mul(*this, scalar);
 }
 
 auto Tensor::operator/(double scalar) const -> Tensor {
-    if (!impl_) return *this;
-    auto scalar_tensor = full({1}, scalar, impl_->dtype, impl_->device);
-    return *this / scalar_tensor;
+    return tenzor::div(*this, scalar);
 }
 
 // In-place operations — dispatch through in-place kernels so views/aliases see updates
+// If the other operand shares storage with this tensor (e.g. a += a),
+// clone it first to avoid undefined behavior from reading and writing
+// the same buffer simultaneously.
 auto Tensor::operator+=(const Tensor& other) -> Tensor& {
     auto& table = DispatchTableRegistry::get_table(impl_->device.type);
-    std::array<Tensor, 1> others = {other};
+    bool aliased = impl_ && other.impl_ && impl_->storage && other.impl_->storage &&
+                   impl_->storage.get() == other.impl_->storage.get();
+    std::array<Tensor, 1> others = {aliased ? other.clone() : other};
     table.dispatch_inplace(OpId::AddInplace, *this, others);
     return *this;
 }
 
 auto Tensor::operator-=(const Tensor& other) -> Tensor& {
     auto& table = DispatchTableRegistry::get_table(impl_->device.type);
-    std::array<Tensor, 1> others = {other};
+    bool aliased = impl_ && other.impl_ && impl_->storage && other.impl_->storage &&
+                   impl_->storage.get() == other.impl_->storage.get();
+    std::array<Tensor, 1> others = {aliased ? other.clone() : other};
     table.dispatch_inplace(OpId::SubInplace, *this, others);
     return *this;
 }
 
 auto Tensor::operator*=(const Tensor& other) -> Tensor& {
     auto& table = DispatchTableRegistry::get_table(impl_->device.type);
-    std::array<Tensor, 1> others = {other};
+    bool aliased = impl_ && other.impl_ && impl_->storage && other.impl_->storage &&
+                   impl_->storage.get() == other.impl_->storage.get();
+    std::array<Tensor, 1> others = {aliased ? other.clone() : other};
     table.dispatch_inplace(OpId::MulInplace, *this, others);
     return *this;
 }
 
 auto Tensor::operator/=(const Tensor& other) -> Tensor& {
     auto& table = DispatchTableRegistry::get_table(impl_->device.type);
-    std::array<Tensor, 1> others = {other};
+    bool aliased = impl_ && other.impl_ && impl_->storage && other.impl_->storage &&
+                   impl_->storage.get() == other.impl_->storage.get();
+    std::array<Tensor, 1> others = {aliased ? other.clone() : other};
     table.dispatch_inplace(OpId::DivInplace, *this, others);
     return *this;
 }
 
 auto Tensor::fill_(float value) -> Tensor& {
     if (!impl_) {
+        return *this;
+    }
+
+    // Non-contiguous tensors: make contiguous copy, fill it, copy data back
+    if (!is_contiguous()) {
+        Tensor contig = contiguous();
+        contig.fill_(value);
+        // Copy filled data back into our storage at correct offset
+        const size_t size_bytes = numel() * dtype_size();
+        if (device().type == Device::Type::CPU) {
+            std::memcpy(data_ptr(), contig.data_ptr(), size_bytes);
+        } else {
+            auto* backend = backend_registry().get_backend(device().type);
+            backend->copy(data_ptr(), contig.data_ptr(), size_bytes, CopyKind::DeviceToDevice);
+        }
         return *this;
     }
 

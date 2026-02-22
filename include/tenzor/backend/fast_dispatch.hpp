@@ -24,9 +24,131 @@
 #include <stdexcept>
 #include "../core/tensor.hpp"
 #include "../ops/op_id.hpp"
+#include "../nn/amp/autocast.hpp"
 #include "dispatch_table.hpp"
 
 namespace tenzor {
+
+// =============================================================================
+// Autocast Op Classification (O(1) lookup via bitset)
+// =============================================================================
+
+namespace detail {
+
+/// Compute-heavy ops that benefit from lower precision (Float16/BFloat16).
+/// These are typically matmul-like or convolution-like operations.
+inline bool is_autocast_compute_heavy(OpId op) {
+    switch (op) {
+        case OpId::MatMul:
+        case OpId::Bmm:
+        case OpId::Dot:
+        case OpId::Linear:
+        case OpId::Conv2dForward:
+        case OpId::Conv3dForward:
+        case OpId::ConvTranspose2dForward:
+        case OpId::DepthwiseConv2d:
+        case OpId::LSTMForward:
+        case OpId::LSTMCellForward:
+        case OpId::LSTMMultiLayerForward:
+        case OpId::BiLSTMForward:
+        case OpId::GRUForward:
+        case OpId::GRUCellForward:
+        case OpId::GRUMultiLayerForward:
+        case OpId::FusedLinearReLU:
+        case OpId::FusedConv2dReLU:
+        case OpId::FusedConv2dBnReLU:
+        case OpId::FusedAttention:
+        case OpId::FlashAttention:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/// Stability-critical ops that must stay in Float32 for numerical correctness.
+inline bool is_autocast_stability_critical(OpId op) {
+    switch (op) {
+        case OpId::Softmax:
+        case OpId::LogSoftmax:
+        case OpId::BatchNorm2dForward:
+        case OpId::BatchNorm2dFusedTraining:
+        case OpId::LayerNorm:
+        case OpId::GroupNorm:
+        case OpId::InstanceNorm:
+        case OpId::FusedLayerNorm:
+        case OpId::FusedRMSNorm:
+        case OpId::FusedSoftmaxCrossEntropy:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/// Apply autocast to inputs: returns a vector of (possibly cast) tensors.
+/// Only allocates if casting is actually needed.
+inline std::vector<Tensor> autocast_inputs(
+    OpId op, std::span<const Tensor> inputs)
+{
+    if (!nn::amp::Autocast::is_enabled() || inputs.empty()) {
+        return {};  // empty = no casting needed, use originals
+    }
+
+    auto target_dtype = nn::amp::Autocast::get_dtype();
+    if (!target_dtype.has_value()) {
+        return {};
+    }
+
+    // Stability-critical: promote all half-precision inputs to Float32
+    if (is_autocast_stability_critical(op)) {
+        bool needs_promote = false;
+        for (const auto& t : inputs) {
+            if (t.dtype() == DType::Float16 || t.dtype() == DType::BFloat16) {
+                needs_promote = true;
+                break;
+            }
+        }
+        if (!needs_promote) return {};
+
+        std::vector<Tensor> promoted;
+        promoted.reserve(inputs.size());
+        for (const auto& t : inputs) {
+            if (t.dtype() == DType::Float16 || t.dtype() == DType::BFloat16) {
+                promoted.push_back(t.to(DType::Float32));
+            } else {
+                promoted.push_back(t);
+            }
+        }
+        return promoted;
+    }
+
+    // Compute-heavy: cast Float32 inputs to target half-precision dtype
+    if (is_autocast_compute_heavy(op)) {
+        DType target = target_dtype.value();
+        bool needs_cast = false;
+        for (const auto& t : inputs) {
+            if (t.dtype() == DType::Float32) {
+                needs_cast = true;
+                break;
+            }
+        }
+        if (!needs_cast) return {};
+
+        std::vector<Tensor> casted;
+        casted.reserve(inputs.size());
+        for (const auto& t : inputs) {
+            if (t.dtype() == DType::Float32) {
+                casted.push_back(t.to(target));
+            } else {
+                casted.push_back(t);
+            }
+        }
+        return casted;
+    }
+
+    return {};  // Other ops: no casting
+}
+
+} // namespace detail
 
 /**
  * @brief Determine device type from input tensors.
@@ -82,9 +204,13 @@ inline std::vector<Tensor> dispatch(
     std::span<const Tensor> inputs,
     const OpAttributes& attrs = {})
 {
-    Device::Type device_type = get_dispatch_device(inputs);
+    // Apply autocast if enabled (no-op when disabled — just a thread-local bool check)
+    auto casted = detail::autocast_inputs(op, inputs);
+    std::span<const Tensor> effective_inputs = casted.empty() ? inputs : std::span<const Tensor>(casted);
+
+    Device::Type device_type = get_dispatch_device(effective_inputs);
     const auto& table = DispatchTableRegistry::get_table_const(device_type);
-    return table.dispatch(op, inputs, attrs);
+    return table.dispatch(op, effective_inputs, attrs);
 }
 
 /**
@@ -135,9 +261,13 @@ inline Tensor dispatch_single(
     std::span<const Tensor> inputs,
     const OpAttributes& attrs = {})
 {
-    Device::Type device_type = get_dispatch_device(inputs);
+    // Apply autocast if enabled
+    auto casted = detail::autocast_inputs(op, inputs);
+    std::span<const Tensor> effective_inputs = casted.empty() ? inputs : std::span<const Tensor>(casted);
+
+    Device::Type device_type = get_dispatch_device(effective_inputs);
     const auto& table = DispatchTableRegistry::get_table_const(device_type);
-    return table.dispatch_single(op, inputs, attrs);
+    return table.dispatch_single(op, effective_inputs, attrs);
 }
 
 /**

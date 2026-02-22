@@ -80,6 +80,30 @@ public:
     virtual auto all_reduce(Tensor& tensor, ReduceOp op) -> void = 0;
 
     /**
+     * @brief Asynchronous all-reduce on a caller-provided CUDA stream.
+     *
+     * Launches the all-reduce without synchronizing. The caller is
+     * responsible for synchronization via CUDA events. The default
+     * implementation falls back to the synchronous all_reduce().
+     *
+     * @param tensor Tensor to reduce in-place
+     * @param op Reduction operation
+     * @param stream CUDA stream (as void*) to launch the operation on
+     */
+    virtual auto all_reduce_async(Tensor& tensor, ReduceOp op,
+                                  void* stream) -> void {
+        (void)stream;
+        all_reduce(tensor, op);
+    }
+
+    /**
+     * @brief Check if this backend supports async stream-based operations.
+     *
+     * @return true for GPU backends (NCCL), false for CPU backends (Gloo)
+     */
+    virtual auto supports_async_stream() const -> bool { return false; }
+
+    /**
      * @brief Reduce tensor to destination rank.
      */
     virtual auto reduce(Tensor& tensor, int dst_rank, ReduceOp op) -> void = 0;
@@ -167,6 +191,25 @@ public:
      * @param op Reduction operation
      */
     auto all_reduce(Tensor& tensor, ReduceOp op = ReduceOp::SUM) -> void;
+
+    /**
+     * @brief Asynchronous all-reduce on a caller-provided CUDA stream.
+     *
+     * Launches the all-reduce without synchronizing. The caller is
+     * responsible for synchronization via CUDA events.
+     *
+     * @param tensor Tensor to reduce (modified in-place)
+     * @param op Reduction operation
+     * @param stream CUDA stream (as void*) to launch the operation on
+     */
+    auto all_reduce_async(Tensor& tensor, ReduceOp op, void* stream) -> void;
+
+    /**
+     * @brief Check if the underlying backend supports async stream operations.
+     *
+     * @return true for GPU backends (NCCL), false for CPU backends (Gloo)
+     */
+    auto supports_async_stream() const -> bool;
 
     /**
      * @brief Reduce tensor to destination rank.

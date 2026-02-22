@@ -88,7 +88,7 @@ auto Adagrad::effective_lr() const -> double {
     return lr_ / (1.0 + step_count_ * lr_decay_);
 }
 
-auto Adagrad::step() -> void {
+auto Adagrad::step_impl() -> void {
     step_count_++;
     double current_lr = effective_lr();
 

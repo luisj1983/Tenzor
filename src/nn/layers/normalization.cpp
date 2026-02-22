@@ -466,7 +466,13 @@ public:
             // Check if variance is essentially zero (which causes numerical instability)
             // When all inputs are identical (variance ~0), gradients should be zero
             // because small changes to input don't change the normalized output
-            bool zero_variance = (inv_std > 100.0f);  // inv_std = 1/sqrt(var+eps), large value means var≈0
+            float inv_n = 1.0f / static_cast<float>(N);
+            float sum_sq = 0.0f;
+            for (int64_t i = 0; i < N; i++) {
+                sum_sq += input_data[b * N + i] * input_data[b * N + i];
+            }
+            float var = (sum_sq * inv_n) - (mu * mu);
+            bool zero_variance = (var < static_cast<float>(eps_));
 
             if (zero_variance) {
                 // With zero variance, input gradients should be zero

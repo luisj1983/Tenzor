@@ -887,6 +887,93 @@ target_link_libraries(test_caching_allocator PRIVATE
 
 tenzor_discover_tests(test_caching_allocator DISCOVERY_TIMEOUT 30)
 
+# ============================================================================
+# Phase 6 Tests - Improved Test Coverage
+# ============================================================================
+
+# Empty tensor edge cases
+add_executable(test_empty_tensors
+    unit/test_empty_tensors.cpp
+)
+
+target_link_libraries(test_empty_tensors PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+tenzor_discover_tests(test_empty_tensors DISCOVERY_TIMEOUT 30)
+
+# View and slice semantics
+add_executable(test_view_slice_semantics
+    unit/test_view_slice_semantics.cpp
+)
+
+target_link_libraries(test_view_slice_semantics PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+tenzor_discover_tests(test_view_slice_semantics DISCOVERY_TIMEOUT 30)
+
+# Broadcasting edge cases
+add_executable(test_broadcasting_edge_cases
+    unit/test_broadcasting_edge_cases.cpp
+)
+
+target_link_libraries(test_broadcasting_edge_cases PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+tenzor_discover_tests(test_broadcasting_edge_cases DISCOVERY_TIMEOUT 30)
+
+# Numerical precision tests
+add_executable(test_numerical_precision
+    unit/test_numerical_precision.cpp
+)
+
+target_link_libraries(test_numerical_precision PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+tenzor_discover_tests(test_numerical_precision DISCOVERY_TIMEOUT 30)
+
+# DType conversion chain tests
+add_executable(test_dtype_conversion_chains
+    unit/test_dtype_conversion_chains.cpp
+)
+
+target_link_libraries(test_dtype_conversion_chains PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+tenzor_discover_tests(test_dtype_conversion_chains DISCOVERY_TIMEOUT 30)
+
+# Autograd edge cases
+add_executable(test_autograd_edge_cases
+    autograd/test_autograd_edge_cases.cpp
+)
+
+target_link_libraries(test_autograd_edge_cases PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+tenzor_discover_tests(test_autograd_edge_cases DISCOVERY_TIMEOUT 30)
+
+add_executable(test_higher_order_gradients
+    autograd/test_higher_order_gradients.cpp
+)
+
+target_link_libraries(test_higher_order_gradients PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+tenzor_discover_tests(test_higher_order_gradients DISCOVERY_TIMEOUT 30)
+
 # CUDA-specific tests
 if(TENZOR_BUILD_CUDA)
     find_package(CUDAToolkit REQUIRED)

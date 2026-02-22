@@ -25,6 +25,9 @@
     #if defined(__AVX512F__) && defined(__AVX512BW__)
         #define TENZOR_BF16_AVX512
     #endif
+    #if defined(__AVX512BF16__) && defined(__AVX512F__)
+        #define TENZOR_BF16_AVX512_NATIVE
+    #endif
 #endif
 
 namespace tenzor {
@@ -455,6 +458,83 @@ inline float dot_bf16(const uint16_t* a, const uint16_t* b, size_t n) {
 #endif
 
     return sum;
+}
+
+// ============================================================================
+// Batch BFloat16 <-> Float32 Conversion Helpers
+// ============================================================================
+
+/**
+ * @brief Batch convert BFloat16 array to Float32 array using SIMD bit-shift
+ *
+ * BFloat16 is the upper 16 bits of Float32, so conversion is a zero-extend
+ * and shift left by 16. Processes 16 elements at a time (AVX-512) or 8 at
+ * a time (AVX2) with scalar fallback for remainder and non-SIMD targets.
+ *
+ * @param src  Source BFloat16 array
+ * @param dst  Destination float array (must hold at least n elements)
+ * @param n    Number of elements to convert
+ */
+inline void convert_bf16_to_f32_batch(const BFloat16* src, float* dst, size_t n) {
+    const uint16_t* raw = reinterpret_cast<const uint16_t*>(src);
+    size_t i = 0;
+
+#ifdef TENZOR_BF16_AVX512
+    for (; i + 16 <= n; i += 16) {
+        __m512 vals = cvt_bf16_to_f32_avx512(raw + i);
+        _mm512_storeu_ps(dst + i, vals);
+    }
+#endif // TENZOR_BF16_AVX512
+
+#ifdef TENZOR_BF16_AVX2
+    for (; i + 8 <= n; i += 8) {
+        // Load 8 BF16 values as 16-bit integers
+        __m128i bf16_vals = _mm_loadu_si128(reinterpret_cast<const __m128i*>(raw + i));
+        // Zero-extend to 32-bit and shift left by 16 to reconstruct FP32
+        __m256i extended = _mm256_cvtepu16_epi32(bf16_vals);
+        __m256i shifted = _mm256_slli_epi32(extended, 16);
+        __m256 fp32_vals = _mm256_castsi256_ps(shifted);
+        _mm256_storeu_ps(dst + i, fp32_vals);
+    }
+#endif // TENZOR_BF16_AVX2
+
+    for (; i < n; ++i) {
+        dst[i] = static_cast<float>(src[i]);
+    }
+}
+
+/**
+ * @brief Batch convert Float32 array to BFloat16 array with round-to-nearest-even
+ *
+ * Uses SIMD rounding bias to achieve correct round-to-nearest-even behavior.
+ * Processes 16 elements at a time (AVX-512) or 8 at a time (AVX2) with scalar
+ * fallback for remainder and non-SIMD targets.
+ *
+ * @param src  Source float array
+ * @param dst  Destination BFloat16 array (must hold at least n elements)
+ * @param n    Number of elements to convert
+ */
+inline void convert_f32_to_bf16_batch(const float* src, BFloat16* dst, size_t n) {
+    uint16_t* raw = reinterpret_cast<uint16_t*>(dst);
+    size_t i = 0;
+
+#ifdef TENZOR_BF16_AVX512
+    for (; i + 16 <= n; i += 16) {
+        __m512 fp32_vals = _mm512_loadu_ps(src + i);
+        cvt_f32_to_bf16_avx512(fp32_vals, raw + i);
+    }
+#endif // TENZOR_BF16_AVX512
+
+#ifdef TENZOR_BF16_AVX2
+    for (; i + 8 <= n; i += 8) {
+        __m256 fp32_vals = _mm256_loadu_ps(src + i);
+        cvt_f32_to_bf16_avx2(fp32_vals, raw + i);
+    }
+#endif // TENZOR_BF16_AVX2
+
+    for (; i < n; ++i) {
+        dst[i] = BFloat16(src[i]);
+    }
 }
 
 } // namespace bfloat16_simd

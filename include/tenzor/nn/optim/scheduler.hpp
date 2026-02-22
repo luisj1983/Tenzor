@@ -825,5 +825,85 @@ private:
     auto set_optimizer_lr(double lr) -> void;
 };
 
+/**
+ * @brief Linear warmup scheduler wrapping any base scheduler.
+ *
+ * Applies a linear warmup from warmup_start_factor * base_lr to base_lr
+ * over warmup_steps steps, then delegates to the wrapped base scheduler.
+ *
+ * During warmup (step < warmup_steps):
+ * \f[
+ * \eta_t = \eta_0 \cdot \left(\text{start\_factor} + \frac{1 - \text{start\_factor}}{\text{warmup\_steps}} \cdot t\right)
+ * \f]
+ *
+ * After warmup (step >= warmup_steps):
+ * Delegates to the base scheduler's step().
+ *
+ * **Use Cases:**
+ * - Transformer training (warmup is critical for Adam)
+ * - Preventing early divergence with large learning rates
+ * - Combining with any existing scheduler
+ *
+ * @code
+ * // Cosine annealing with linear warmup
+ * auto base_scheduler = std::make_shared<CosineAnnealingLR>(optimizer, 100);
+ * LinearWarmupScheduler scheduler(optimizer, base_scheduler, 1000, 0.01);
+ * // First 1000 steps: linear ramp from 0.01*lr to lr
+ * // After 1000 steps: cosine annealing from lr to 0
+ * for (int step = 0; step < total_steps; ++step) {
+ *     train_one_batch();
+ *     scheduler.step();
+ * }
+ * @endcode
+ *
+ * @see CosineAnnealingLR, StepLR
+ */
+class LinearWarmupScheduler : public LRScheduler {
+public:
+    /**
+     * @brief Construct linear warmup scheduler wrapping a base scheduler.
+     *
+     * @param optimizer Reference to the optimizer (used to set LR directly during warmup)
+     * @param base_scheduler Base scheduler to use after warmup completes
+     * @param warmup_steps Number of steps for linear warmup
+     * @param warmup_start_factor Starting factor (LR starts at base_lr * factor, default: 0.0)
+     *
+     * @throws std::invalid_argument if warmup_steps < 0
+     * @throws std::invalid_argument if warmup_start_factor not in [0, 1]
+     */
+    LinearWarmupScheduler(Optimizer& optimizer,
+                         std::shared_ptr<LRScheduler> base_scheduler,
+                         int64_t warmup_steps,
+                         double warmup_start_factor = 0.0);
+
+    /**
+     * @brief Step the scheduler.
+     *
+     * During warmup: linearly interpolates learning rate.
+     * After warmup: delegates to base scheduler.
+     */
+    auto step() -> void override;
+
+    auto get_last_lr() const -> double override { return last_lr_; }
+
+    /** @brief Get the current step count. */
+    auto get_step_count() const -> int64_t { return step_count_; }
+
+    /** @brief Check if still in warmup phase. */
+    auto in_warmup() const -> bool { return step_count_ < warmup_steps_; }
+
+    /** @brief Get the warmup steps count. */
+    auto warmup_steps() const -> int64_t { return warmup_steps_; }
+
+private:
+    Optimizer& optimizer_;
+    std::shared_ptr<LRScheduler> base_scheduler_;
+    int64_t warmup_steps_;
+    double warmup_start_factor_;
+    double base_lr_;
+    double last_lr_;
+    int64_t step_count_{0};
+};
+
 } // namespace optim
 } // namespace tenzor

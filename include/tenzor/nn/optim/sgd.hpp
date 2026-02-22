@@ -84,7 +84,7 @@ public:
         bool nesterov = false);
 
     /** @brief Perform single SGD step with momentum */
-    auto step() -> void override;
+    auto step_impl() -> void override;
 
     /** @brief Set new learning rate */
     auto set_lr(double lr) -> void;

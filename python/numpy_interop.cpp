@@ -3,10 +3,48 @@
 #include <stdexcept>
 #include <cstring>
 #include <sstream>
-#include <iostream>
 
 namespace tenzor {
 namespace numpy {
+
+namespace {
+
+// Try to get ml_dtypes.bfloat16 numpy dtype. Returns the dtype object on
+// success, or py::none() if ml_dtypes is not installed.
+auto get_ml_dtypes_bfloat16() -> py::object {
+    static py::object cached = py::none();
+    static bool tried = false;
+    if (!tried) {
+        tried = true;
+        try {
+            auto ml_dtypes = py::module_::import("ml_dtypes");
+            cached = py::dtype::from_args(ml_dtypes.attr("bfloat16"));
+        } catch (const py::error_already_set&) {
+            // ml_dtypes not installed — cached stays as py::none()
+        }
+    }
+    return cached;
+}
+
+// If the tensor dtype is BFloat16, try to reinterpret a uint16 NumPy array
+// as ml_dtypes.bfloat16. Issues a warning if ml_dtypes is unavailable.
+auto apply_bfloat16_dtype(py::array result, DType dtype) -> py::array {
+    if (dtype != DType::BFloat16) {
+        return result;
+    }
+    auto bf16_dtype = get_ml_dtypes_bfloat16();
+    if (!bf16_dtype.is_none()) {
+        // View the uint16 data as bfloat16 (same binary layout, zero-copy)
+        return result.attr("view")(bf16_dtype);
+    }
+    PyErr_WarnEx(PyExc_UserWarning,
+        "ml_dtypes package not available; BFloat16 tensor is exposed as raw "
+        "uint16 bits. Install ml_dtypes for proper bfloat16 NumPy support: "
+        "pip install ml_dtypes", 1);
+    return result;
+}
+
+} // anonymous namespace
 
 // DType to NumPy format mapping
 auto dtype_to_numpy_format(DType dtype) -> std::string {
@@ -14,8 +52,8 @@ auto dtype_to_numpy_format(DType dtype) -> std::string {
         case DType::Float32: return py::format_descriptor<float>::format();
         case DType::Float64: return py::format_descriptor<double>::format();
         case DType::Float16: return "e";  // NumPy native float16 format string
-        // BFloat16 is represented as uint16 in NumPy since NumPy has no native bfloat16 dtype.
-        // Users can interpret the raw bits via ml_dtypes.bfloat16 or manual bit manipulation.
+        // BFloat16: format string is always uint16 (same binary layout).
+        // The actual ml_dtypes dtype is applied in tensor_to_numpy() when available.
         case DType::BFloat16: return py::format_descriptor<uint16_t>::format();
         case DType::Int8: return py::format_descriptor<int8_t>::format();
         case DType::Int16: return py::format_descriptor<int16_t>::format();
@@ -142,7 +180,7 @@ auto tensor_to_numpy(const Tensor& tensor) -> py::array {
         size_t total_bytes = cpu_tensor.numel() * element_size;
         std::memcpy(dst, src, total_bytes);
 
-        return result;
+        return apply_bfloat16_dtype(result, dtype);
     }
 
     // CPU tensor - zero-copy path sharing storage with the tensor.
@@ -163,14 +201,15 @@ auto tensor_to_numpy(const Tensor& tensor) -> py::array {
             // Strided view exceeds storage — fall back to contiguous copy.
             // This can happen with advanced slicing that creates views with
             // strides exceeding the underlying storage bounds.
-            std::cerr << "[tenzor] Warning: strided tensor view exceeds storage bounds, "
-                         "falling back to contiguous copy for NumPy conversion\n";
+            PyErr_WarnEx(PyExc_RuntimeWarning,
+                "Strided tensor view exceeds storage bounds, "
+                "falling back to contiguous copy for NumPy conversion", 1);
             Tensor contiguous = tensor.contiguous();
             py::array result(py::dtype(format), np_shape);
             void* src = const_cast<void*>(contiguous.impl()->storage->data());
             void* dst = result.mutable_data();
             std::memcpy(dst, src, contiguous.numel() * element_size);
-            return result;
+            return apply_bfloat16_dtype(result, dtype);
         }
 
         // Account for storage offset
@@ -185,7 +224,8 @@ auto tensor_to_numpy(const Tensor& tensor) -> py::array {
         });
 
         // Create NumPy array with shared memory and original strides
-        return py::array(py::dtype(format), np_shape, np_strides, data_ptr, capsule);
+        py::array result(py::dtype(format), np_shape, np_strides, data_ptr, capsule);
+        return apply_bfloat16_dtype(result, dtype);
     }
 }
 
