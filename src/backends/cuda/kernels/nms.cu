@@ -201,6 +201,7 @@ extern "C" void nms_cuda(const float* boxes, const float* scores,
         int iota_block = 256;
         int iota_grid = (num_boxes + iota_block - 1) / iota_block;
         nms_iota_kernel<<<iota_grid, iota_block, 0, stream>>>(d_indices_in, num_boxes);
+        CUDA_CHECK(cudaGetLastError());
     }
 
     // Sort descending (highest score first) using CUB DeviceRadixSort
@@ -230,6 +231,7 @@ extern "C" void nms_cuda(const float* boxes, const float* scores,
     const int threads_per_block = 256;
     nms_kernel<<<num_boxes, threads_per_block, 0, stream>>>(
         boxes, d_sorted_indices, d_suppression_mask, num_boxes, iou_threshold);
+    CUDA_CHECK(cudaGetLastError());
 
     // Allocate device-side num_keep scalar
     tenzor::backend::CachedMemoryGuard d_num_keep_guard(sizeof(int64_t));

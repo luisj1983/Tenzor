@@ -387,6 +387,7 @@ auto unfold_cuda(const Tensor& input,
             kernel_size, stride, padding, dilation,
             out_h, out_w
         );
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         unfold_kernel<double><<<grid, block>>>(
             input.data<double>(),
@@ -395,6 +396,7 @@ auto unfold_cuda(const Tensor& input,
             kernel_size, stride, padding, dilation,
             out_h, out_w
         );
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("unfold_cuda: Unsupported dtype");
     }
@@ -448,6 +450,7 @@ auto fold_cuda(const Tensor& input,
             kernel_size, stride, padding, dilation,
             out_h, out_w
         );
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         fold_kernel<double><<<grid, block>>>(
             input.data<double>(),
@@ -456,6 +459,7 @@ auto fold_cuda(const Tensor& input,
             kernel_size, stride, padding, dilation,
             out_h, out_w
         );
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("fold_cuda: Unsupported dtype");
     }
@@ -494,18 +498,21 @@ auto interpolate_cuda(const Tensor& input,
                 output.data<float>(),
                 batch, channels, in_h, in_w, out_h, out_w
             );
+            CUDA_CHECK(cudaGetLastError());
         } else if (input.dtype() == DType::Float64) {
             interpolate_nearest_kernel<double><<<grid, block>>>(
                 input.data<double>(),
                 output.data<double>(),
                 batch, channels, in_h, in_w, out_h, out_w
             );
+            CUDA_CHECK(cudaGetLastError());
         } else if (input.dtype() == DType::Float16) {
             interpolate_nearest_kernel<__half><<<grid, block>>>(
                 reinterpret_cast<const __half*>(input.data_ptr()),
                 reinterpret_cast<__half*>(output.data_ptr()),
                 batch, channels, in_h, in_w, out_h, out_w
             );
+            CUDA_CHECK(cudaGetLastError());
         } else {
             throw std::runtime_error("interpolate_cuda: Unsupported dtype");
         }
@@ -517,6 +524,7 @@ auto interpolate_cuda(const Tensor& input,
                 batch, channels, in_h, in_w, out_h, out_w,
                 align_corners
             );
+            CUDA_CHECK(cudaGetLastError());
         } else if (input.dtype() == DType::Float64) {
             interpolate_bilinear_kernel<double><<<grid, block>>>(
                 input.data<double>(),
@@ -524,6 +532,7 @@ auto interpolate_cuda(const Tensor& input,
                 batch, channels, in_h, in_w, out_h, out_w,
                 align_corners
             );
+            CUDA_CHECK(cudaGetLastError());
         } else if (input.dtype() == DType::Float16) {
             interpolate_bilinear_kernel<__half><<<grid, block>>>(
                 reinterpret_cast<const __half*>(input.data_ptr()),
@@ -531,6 +540,7 @@ auto interpolate_cuda(const Tensor& input,
                 batch, channels, in_h, in_w, out_h, out_w,
                 align_corners
             );
+            CUDA_CHECK(cudaGetLastError());
         } else {
             throw std::runtime_error("interpolate_cuda: Unsupported dtype");
         }
@@ -542,6 +552,7 @@ auto interpolate_cuda(const Tensor& input,
                 batch, channels, in_h, in_w, out_h, out_w,
                 align_corners
             );
+            CUDA_CHECK(cudaGetLastError());
         } else if (input.dtype() == DType::Float64) {
             interpolate_bicubic_kernel<double><<<grid, block>>>(
                 input.data<double>(),
@@ -549,6 +560,7 @@ auto interpolate_cuda(const Tensor& input,
                 batch, channels, in_h, in_w, out_h, out_w,
                 align_corners
             );
+            CUDA_CHECK(cudaGetLastError());
         } else if (input.dtype() == DType::Float16) {
             interpolate_bicubic_kernel<__half><<<grid, block>>>(
                 reinterpret_cast<const __half*>(input.data_ptr()),
@@ -556,6 +568,7 @@ auto interpolate_cuda(const Tensor& input,
                 batch, channels, in_h, in_w, out_h, out_w,
                 align_corners
             );
+            CUDA_CHECK(cudaGetLastError());
         } else {
             throw std::runtime_error("interpolate_cuda: Unsupported dtype");
         }
@@ -645,10 +658,12 @@ auto box_iou_cuda(const Tensor& boxes1, const Tensor& boxes2, int iou_type) -> T
         box_iou_kernel<float><<<grid, block>>>(
             boxes1.data<float>(), boxes2.data<float>(), output.data<float>(),
             N, M, iou_type);
+            CUDA_CHECK(cudaGetLastError());
     } else if (boxes1.dtype() == DType::Float64) {
         box_iou_kernel<double><<<grid, block>>>(
             boxes1.data<double>(), boxes2.data<double>(), output.data<double>(),
             N, M, iou_type);
+            CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("box_iou_cuda: unsupported dtype");
     }

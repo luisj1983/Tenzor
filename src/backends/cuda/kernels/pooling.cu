@@ -122,11 +122,13 @@ auto maxpool2d_forward_kernel(const Tensor& input, int64_t kernel_size,
         maxpool2d_forward_impl<float><<<grid, block, 0, stream>>>(
             input.data<float>(), output.data<float>(), indices.data<int64_t>(),
             N, C, H, W, H_out, W_out, kernel_size, stride, padding, dilation);
+            CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         auto [grid, block] = optimal_launch_config(maxpool2d_forward_impl<double>, total);
         maxpool2d_forward_impl<double><<<grid, block, 0, stream>>>(
             input.data<double>(), output.data<double>(), indices.data<int64_t>(),
             N, C, H, W, H_out, W_out, kernel_size, stride, padding, dilation);
+            CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         auto [grid, block] = optimal_launch_config(maxpool2d_forward_impl<__half>, total);
         maxpool2d_forward_impl<__half><<<grid, block, 0, stream>>>(
@@ -134,6 +136,7 @@ auto maxpool2d_forward_kernel(const Tensor& input, int64_t kernel_size,
             reinterpret_cast<__half*>(output.data<Float16>()),
             indices.data<int64_t>(),
             N, C, H, W, H_out, W_out, kernel_size, stride, padding, dilation);
+            CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         auto [grid, block] = optimal_launch_config(maxpool2d_forward_impl<__nv_bfloat16>, total);
         maxpool2d_forward_impl<__nv_bfloat16><<<grid, block, 0, stream>>>(
@@ -141,10 +144,12 @@ auto maxpool2d_forward_kernel(const Tensor& input, int64_t kernel_size,
             reinterpret_cast<__nv_bfloat16*>(output.data<BFloat16>()),
             indices.data<int64_t>(),
             N, C, H, W, H_out, W_out, kernel_size, stride, padding, dilation);
+            CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("maxpool2d_forward_kernel: unsupported dtype");
     }
 
+    CUDA_CHECK(cudaGetLastError());
     return {output, indices};
 }
 
@@ -287,6 +292,7 @@ auto maxpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
         maxpool2d_backward_f32<<<grid_out, block_out, 0, stream>>>(
             grad_output.data<float>(), indices.data<int64_t>(), grad_input.data<float>(),
             N, C, H, W, H_out, W_out);
+        CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float64) {
         Tensor grad_input = create_zeros_cuda(input_shape, DType::Float64, grad_output.device());
@@ -294,6 +300,7 @@ auto maxpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
         maxpool2d_backward_f64<<<grid_out, block_out, 0, stream>>>(
             grad_output.data<double>(), indices.data<int64_t>(), grad_input.data<double>(),
             N, C, H, W, H_out, W_out);
+        CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
         // Accumulate in float32 then convert back
@@ -305,17 +312,21 @@ auto maxpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
             auto [grid_conv, block_conv] = optimal_launch_config(convert_to_f32<__half>, total_out);
             convert_to_f32<__half><<<grid_conv, block_conv, 0, stream>>>(
                 reinterpret_cast<const __half*>(grad_output.data<Float16>()), go_f32.data<float>(), total_out);
+                CUDA_CHECK(cudaGetLastError());
         } else {
             auto [grid_conv, block_conv] = optimal_launch_config(convert_to_f32<__nv_bfloat16>, total_out);
             convert_to_f32<__nv_bfloat16><<<grid_conv, block_conv, 0, stream>>>(
                 reinterpret_cast<const __nv_bfloat16*>(grad_output.data<BFloat16>()), go_f32.data<float>(), total_out);
+                CUDA_CHECK(cudaGetLastError());
         }
+        CUDA_CHECK(cudaGetLastError());
 
         // Run backward in float32
         auto [grid_bwd, block_bwd] = optimal_launch_config(maxpool2d_backward_f32, total_out);
         maxpool2d_backward_f32<<<grid_bwd, block_bwd, 0, stream>>>(
             go_f32.data<float>(), indices.data<int64_t>(), grad_f32.data<float>(),
             N, C, H, W, H_out, W_out);
+        CUDA_CHECK(cudaGetLastError());
 
         // Convert result back
         Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
@@ -323,11 +334,14 @@ auto maxpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
             auto [grid_back, block_back] = optimal_launch_config(convert_f32_to<__half>, total_in);
             convert_f32_to<__half><<<grid_back, block_back, 0, stream>>>(
                 grad_f32.data<float>(), reinterpret_cast<__half*>(grad_input.data<Float16>()), total_in);
+                CUDA_CHECK(cudaGetLastError());
         } else {
             auto [grid_back, block_back] = optimal_launch_config(convert_f32_to<__nv_bfloat16>, total_in);
             convert_f32_to<__nv_bfloat16><<<grid_back, block_back, 0, stream>>>(
                 grad_f32.data<float>(), reinterpret_cast<__nv_bfloat16*>(grad_input.data<BFloat16>()), total_in);
+                CUDA_CHECK(cudaGetLastError());
         }
+        CUDA_CHECK(cudaGetLastError());
         return grad_input;
     }
 
@@ -400,27 +414,32 @@ auto avgpool2d_forward_kernel(const Tensor& input, int64_t kernel_size,
         avgpool2d_forward_impl<float><<<grid, block, 0, stream>>>(
             input.data<float>(), output.data<float>(),
             N, C, H, W, H_out, W_out, kernel_size, stride, padding);
+            CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         auto [grid, block] = optimal_launch_config(avgpool2d_forward_impl<double>, total);
         avgpool2d_forward_impl<double><<<grid, block, 0, stream>>>(
             input.data<double>(), output.data<double>(),
             N, C, H, W, H_out, W_out, kernel_size, stride, padding);
+            CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         auto [grid, block] = optimal_launch_config(avgpool2d_forward_impl<__half>, total);
         avgpool2d_forward_impl<__half><<<grid, block, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(output.data<Float16>()),
             N, C, H, W, H_out, W_out, kernel_size, stride, padding);
+            CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         auto [grid, block] = optimal_launch_config(avgpool2d_forward_impl<__nv_bfloat16>, total);
         avgpool2d_forward_impl<__nv_bfloat16><<<grid, block, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(output.data<BFloat16>()),
             N, C, H, W, H_out, W_out, kernel_size, stride, padding);
+            CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("avgpool2d_forward_kernel: unsupported dtype");
     }
 
+    CUDA_CHECK(cudaGetLastError());
     return output;
 }
 
@@ -540,6 +559,7 @@ auto avgpool2d_backward_kernel(const Tensor& grad_output,
         avgpool2d_backward_f32<<<grid_out, block_out, 0, stream>>>(
             grad_output.data<float>(), grad_input.data<float>(),
             N, C, H, W, H_out, W_out, kernel_size, stride, padding);
+        CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float64) {
         Tensor grad_input = create_zeros_cuda(input_shape, DType::Float64, grad_output.device());
@@ -547,6 +567,7 @@ auto avgpool2d_backward_kernel(const Tensor& grad_output,
         avgpool2d_backward_f64<<<grid_out, block_out, 0, stream>>>(
             grad_output.data<double>(), grad_input.data<double>(),
             N, C, H, W, H_out, W_out, kernel_size, stride, padding);
+        CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
         // Accumulate in float32 then convert back
@@ -557,27 +578,34 @@ auto avgpool2d_backward_kernel(const Tensor& grad_output,
             auto [grid_conv, block_conv] = optimal_launch_config(convert_to_f32<__half>, total_out);
             convert_to_f32<__half><<<grid_conv, block_conv, 0, stream>>>(
                 reinterpret_cast<const __half*>(grad_output.data<Float16>()), go_f32.data<float>(), total_out);
+                CUDA_CHECK(cudaGetLastError());
         } else {
             auto [grid_conv, block_conv] = optimal_launch_config(convert_to_f32<__nv_bfloat16>, total_out);
             convert_to_f32<__nv_bfloat16><<<grid_conv, block_conv, 0, stream>>>(
                 reinterpret_cast<const __nv_bfloat16*>(grad_output.data<BFloat16>()), go_f32.data<float>(), total_out);
+                CUDA_CHECK(cudaGetLastError());
         }
+        CUDA_CHECK(cudaGetLastError());
 
         auto [grid_bwd, block_bwd] = optimal_launch_config(avgpool2d_backward_f32, total_out);
         avgpool2d_backward_f32<<<grid_bwd, block_bwd, 0, stream>>>(
             go_f32.data<float>(), grad_f32.data<float>(),
             N, C, H, W, H_out, W_out, kernel_size, stride, padding);
+        CUDA_CHECK(cudaGetLastError());
 
         Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
         if (grad_output.dtype() == DType::Float16) {
             auto [grid_back, block_back] = optimal_launch_config(convert_f32_to<__half>, total_in);
             convert_f32_to<__half><<<grid_back, block_back, 0, stream>>>(
                 grad_f32.data<float>(), reinterpret_cast<__half*>(grad_input.data<Float16>()), total_in);
+                CUDA_CHECK(cudaGetLastError());
         } else {
             auto [grid_back, block_back] = optimal_launch_config(convert_f32_to<__nv_bfloat16>, total_in);
             convert_f32_to<__nv_bfloat16><<<grid_back, block_back, 0, stream>>>(
                 grad_f32.data<float>(), reinterpret_cast<__nv_bfloat16*>(grad_input.data<BFloat16>()), total_in);
+                CUDA_CHECK(cudaGetLastError());
         }
+        CUDA_CHECK(cudaGetLastError());
         return grad_input;
     }
 

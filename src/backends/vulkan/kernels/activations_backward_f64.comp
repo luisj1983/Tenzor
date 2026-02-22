@@ -16,7 +16,50 @@ layout(push_constant) uniform PushConstants {
     double alpha;    // For leaky_relu_backward (stored as double for alignment)
 } params;
 
-const double PI = 3.14159265359;
+const double PI = 3.141592653589793;
+
+// Double-precision exp using range reduction
+double exp_d(double x) {
+    if (x != x) return x;  // NaN
+    if (x > 709.0) return 1.0e308;
+    if (x < -745.0) return 0.0;
+
+    double ln2 = 0.6931471805599453;
+    double k_dbl = floor(x / ln2 + 0.5);
+    double r = x - k_dbl * ln2;
+    int k = int(clamp(k_dbl, -1100.0, 1100.0));
+
+    // exp(r) via degree-13 Taylor polynomial (Horner's method)
+    // |r| <= ln(2)/2, error bound < r^14/14! < 1e-19
+    double exp_r = 1.0 + r * (1.0 + r * (0.5 + r * (1.0/6.0 + r * (1.0/24.0 + r * (1.0/120.0 +
+        r * (1.0/720.0 + r * (1.0/5040.0 + r * (1.0/40320.0 + r * (1.0/362880.0 +
+        r * (1.0/3628800.0 + r * (1.0/39916800.0 + r * (1.0/479001600.0 +
+        r * (1.0/6227020800.0)))))))))))));
+
+
+    double pow2 = 1.0;
+    int abs_k = (k >= 0) ? k : -k;
+    double base = 2.0;
+    while (abs_k > 0) {
+        if ((abs_k & 1) != 0) pow2 *= base;
+        base *= base;
+        abs_k >>= 1;
+    }
+
+    return (k >= 0) ? (exp_r * pow2) : (exp_r / pow2);
+}
+
+// Double-precision tanh using exp_d
+double tanh_d(double x) {
+    if (x != x) return x;  // NaN
+    if (x > 20.0) return 1.0;
+    if (x < -20.0) return -1.0;
+    if (x >= -9.0 && x <= 9.0) {
+        return double(tanh(float(x)));
+    }
+    double e2x = exp_d(2.0 * x);
+    return (e2x - 1.0) / (e2x + 1.0);
+}
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
@@ -50,7 +93,7 @@ void main() {
 
         case 4: { // gelu_backward: Complex formula with tanh derivative
             // val is the input
-            const double sqrt_2_over_pi = 0.7978845608;
+            const double sqrt_2_over_pi = 0.7978845608028654;
             const double coeff = 0.044715;
 
             double x = val;
@@ -58,7 +101,7 @@ void main() {
             double x_cubed = x_sq * x;
 
             double inner = sqrt_2_over_pi * (x + coeff * x_cubed);
-            double tanh_inner = double(tanh(float(inner)));
+            double tanh_inner = tanh_d(inner);
             double sech_sq = 1.0 - tanh_inner * tanh_inner;
 
             double derivative = 0.5 * (1.0 + tanh_inner) +

@@ -5,6 +5,10 @@
 
 #include <cuda_runtime.h>
 #include <cstdint>
+#include <stdexcept>
+#include <string>
+
+#define CUDA_CHECK(call) do { cudaError_t err = (call); if (err != cudaSuccess) { throw std::runtime_error(std::string("CUDA error at ") + __FILE__ + ":" + std::to_string(__LINE__) + " - " + cudaGetErrorString(err)); } } while(0)
 
 // Include WMMA for Tensor Core support (Turing+)
 #if __CUDA_ARCH__ >= 750 || !defined(__CUDA_ARCH__)
@@ -108,11 +112,7 @@ auto quantized_linear_cuda(
         batch_size, in_features, out_features,
         combined_scale, input_zp, weight_zp
     );
-
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        // Error handling would go here
-    }
+    CUDA_CHECK(cudaGetLastError());
 }
 
 /**

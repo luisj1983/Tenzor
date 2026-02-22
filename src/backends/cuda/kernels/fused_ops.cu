@@ -7,11 +7,11 @@
 #include <cub/cub.cuh>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/backend/caching_allocator.hpp"
+#include "../cublas_handle_pool.hpp"
 #include <stdexcept>
 #include <cmath>
 #include <algorithm>
 #include <vector>
-#include <mutex>
 
 namespace tenzor {
 namespace cuda {
@@ -38,14 +38,29 @@ inline std::vector<int64_t> to_vector(const std::span<const int64_t>& s) {
     return std::vector<int64_t>(s.begin(), s.end());
 }
 
-// Single-thread kernel to scale a scalar value in device memory
-__global__ void scale_scalar_kernel(float* val, float scale) {
-    *val *= scale;
+// Error checking macro
+#define CUDA_CHECK(call) \
+    do { \
+        cudaError_t error = call; \
+        if (error != cudaSuccess) { \
+            throw std::runtime_error( \
+                std::string("CUDA error at ") + __FILE__ + ":" + \
+                std::to_string(__LINE__) + " - " + cudaGetErrorString(error) \
+            ); \
+        } \
+    } while(0)
+
+// Scale a scalar value in device memory using host round-trip (eliminates 1-thread kernel launch)
+inline void scale_scalar_host(float* d_val, float scale) {
+    float host_val;
+    CUDA_CHECK(cudaMemcpy(&host_val, d_val, sizeof(float), cudaMemcpyDeviceToHost));
+    host_val *= scale;
+    CUDA_CHECK(cudaMemcpy(d_val, &host_val, sizeof(float), cudaMemcpyHostToDevice));
 }
 
-// Single-thread kernel to set a scalar value in device memory (avoids synchronous cudaMemcpy)
-__global__ void set_scalar_kernel(float* dst, float value) {
-    *dst = value;
+// Set a scalar value in device memory using cudaMemcpy (eliminates 1-thread kernel launch)
+inline void set_scalar_host(float* d_dst, float value) {
+    CUDA_CHECK(cudaMemcpy(d_dst, &value, sizeof(float), cudaMemcpyHostToDevice));
 }
 
 // Helper for computing (optionally scaled) sum of a 1D tensor on GPU
@@ -70,59 +85,24 @@ inline Tensor cuda_sum_device(const Tensor& t, float scale = 1.0f) {
     // Run sum
     cub::DeviceReduce::Sum(d_temp_storage, temp_storage_bytes, data, d_out, n);
 
-    // Apply scale on device if needed (avoids D2H-compute-H2D round-trip)
+    // Apply scale if needed
     if (scale != 1.0f) {
-        scale_scalar_kernel<<<1, 1>>>(d_out, scale);
+        scale_scalar_host(d_out, scale);
     }
 
     return result;
 }
 
-// Helper to create scalar tensor on device — uses device kernel to avoid pipeline stall
+// Helper to create scalar tensor on device
 inline Tensor create_scalar_tensor(float value, DType dtype, Device device) {
     Tensor t({1}, dtype, device);
-    set_scalar_kernel<<<1, 1>>>(static_cast<float*>(t.data_ptr()), value);
+    set_scalar_host(static_cast<float*>(t.data_ptr()), value);
     return t;
 }
-
-// Error checking macro
-#define CUDA_CHECK(call) \
-    do { \
-        cudaError_t error = call; \
-        if (error != cudaSuccess) { \
-            throw std::runtime_error( \
-                std::string("CUDA error at ") + __FILE__ + ":" + \
-                std::to_string(__LINE__) + " - " + cudaGetErrorString(error) \
-            ); \
-        } \
-    } while(0)
 
 // ==============================================================================
 // Fused Linear + ReLU: cuBLAS matmul + fused bias+ReLU kernel
 // ==============================================================================
-
-// Cached cuBLAS handle for fused ops
-static cublasHandle_t fused_ops_cublas_handle = nullptr;
-static std::mutex fused_ops_cublas_mutex;
-
-static void cleanup_fused_ops_cublas() {
-    if (fused_ops_cublas_handle) {
-        cublasDestroy(fused_ops_cublas_handle);
-        fused_ops_cublas_handle = nullptr;
-    }
-}
-
-static cublasHandle_t get_fused_ops_cublas_handle() {
-    if (fused_ops_cublas_handle == nullptr) {
-        std::lock_guard<std::mutex> lock(fused_ops_cublas_mutex);
-        if (fused_ops_cublas_handle == nullptr) {
-            cublasCreate(&fused_ops_cublas_handle);
-            cublasSetMathMode(fused_ops_cublas_handle, CUBLAS_TF32_TENSOR_OP_MATH);
-            std::atexit(cleanup_fused_ops_cublas);
-        }
-    }
-    return fused_ops_cublas_handle;
-}
 
 /**
  * @brief Fused bias + ReLU kernel: out[i] = max(0, out[i] + bias[i % out_features])
@@ -184,7 +164,7 @@ auto fused_linear_relu_cuda(
     Tensor output(output_shape, input.dtype(), input.device());
 
     // Get cuBLAS handle
-    auto handle = get_fused_ops_cublas_handle();
+    auto handle = CuBLASHandlePool::get();
 
     // cuBLAS uses column-major, so we compute: output^T = weight * input^T
     // which in row-major is: output = input @ weight^T
@@ -243,17 +223,21 @@ auto fused_linear_relu_cuda(
         if (bias) {
             bias_relu_kernel<<<blocks, block_size>>>(
                 output.data<float>(), bias->data<float>(), total_elements, out_features);
+            CUDA_CHECK(cudaGetLastError());
         } else {
             relu_inplace_kernel<<<blocks, block_size>>>(
                 output.data<float>(), total_elements);
+            CUDA_CHECK(cudaGetLastError());
         }
     } else if (input.dtype() == DType::Float64) {
         if (bias) {
             bias_relu_kernel<<<blocks, block_size>>>(
                 output.data<double>(), bias->data<double>(), total_elements, out_features);
+            CUDA_CHECK(cudaGetLastError());
         } else {
             relu_inplace_kernel<<<blocks, block_size>>>(
                 output.data<double>(), total_elements);
+            CUDA_CHECK(cudaGetLastError());
         }
     } else if (input.dtype() == DType::Float16) {
         if (bias) {
@@ -261,9 +245,11 @@ auto fused_linear_relu_cuda(
                 reinterpret_cast<__half*>(output.data_ptr()),
                 reinterpret_cast<const __half*>(bias->data_ptr()),
                 total_elements, out_features);
+            CUDA_CHECK(cudaGetLastError());
         } else {
             relu_inplace_kernel<<<blocks, block_size>>>(
                 reinterpret_cast<__half*>(output.data_ptr()), total_elements);
+            CUDA_CHECK(cudaGetLastError());
         }
     } else if (input.dtype() == DType::BFloat16) {
         if (bias) {
@@ -271,9 +257,11 @@ auto fused_linear_relu_cuda(
                 reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
                 reinterpret_cast<const __nv_bfloat16*>(bias->data_ptr()),
                 total_elements, out_features);
+            CUDA_CHECK(cudaGetLastError());
         } else {
             relu_inplace_kernel<<<blocks, block_size>>>(
                 reinterpret_cast<__nv_bfloat16*>(output.data_ptr()), total_elements);
+            CUDA_CHECK(cudaGetLastError());
         }
     }
 
@@ -378,6 +366,7 @@ auto fused_batchnorm_relu_cuda(
             spatial_size,
             eps
         );
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_batchnorm_relu_kernel<double>, 0, 0);
@@ -394,6 +383,7 @@ auto fused_batchnorm_relu_cuda(
             spatial_size,
             static_cast<double>(eps)
         );
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_batchnorm_relu_kernel<__half>, 0, 0);
@@ -410,6 +400,7 @@ auto fused_batchnorm_relu_cuda(
             spatial_size,
             __float2half(eps)
         );
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_batchnorm_relu_kernel<__nv_bfloat16>, 0, 0);
@@ -426,6 +417,7 @@ auto fused_batchnorm_relu_cuda(
             spatial_size,
             __float2bfloat16(eps)
         );
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("fused_batchnorm_relu_cuda: Unsupported dtype");
     }
@@ -520,6 +512,7 @@ auto fused_softmax_cross_entropy_cuda(
             batch_size,
             num_classes
         );
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("fused_softmax_cross_entropy_cuda: Only Float32 supported");
     }
@@ -572,6 +565,7 @@ auto fused_add_relu_cuda(const Tensor& a, const Tensor& b) -> Tensor {
             result.data<float>(),
             n
         );
+        CUDA_CHECK(cudaGetLastError());
     } else if (a.dtype() == DType::Float64) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_add_relu_kernel<double>, 0, 0);
@@ -582,6 +576,7 @@ auto fused_add_relu_cuda(const Tensor& a, const Tensor& b) -> Tensor {
             result.data<double>(),
             n
         );
+        CUDA_CHECK(cudaGetLastError());
     } else if (a.dtype() == DType::Float16) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_add_relu_kernel<__half>, 0, 0);
@@ -592,6 +587,7 @@ auto fused_add_relu_cuda(const Tensor& a, const Tensor& b) -> Tensor {
             reinterpret_cast<__half*>(result.data_ptr()),
             n
         );
+        CUDA_CHECK(cudaGetLastError());
     } else if (a.dtype() == DType::BFloat16) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_add_relu_kernel<__nv_bfloat16>, 0, 0);
@@ -602,6 +598,7 @@ auto fused_add_relu_cuda(const Tensor& a, const Tensor& b) -> Tensor {
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()),
             n
         );
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("fused_add_relu_cuda: Unsupported dtype");
     }
@@ -724,6 +721,7 @@ auto fused_gelu_cuda(const Tensor& input) -> Tensor {
             output.data<float>(),
             n
         );
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_gelu_kernel<double>, 0, 0);
@@ -733,6 +731,7 @@ auto fused_gelu_cuda(const Tensor& input) -> Tensor {
             output.data<double>(),
             n
         );
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_gelu_kernel<__half>, 0, 0);
@@ -742,6 +741,7 @@ auto fused_gelu_cuda(const Tensor& input) -> Tensor {
             reinterpret_cast<__half*>(output.data_ptr()),
             n
         );
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_gelu_kernel<__nv_bfloat16>, 0, 0);
@@ -751,6 +751,7 @@ auto fused_gelu_cuda(const Tensor& input) -> Tensor {
             reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
             n
         );
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("fused_gelu_cuda: Unsupported dtype");
     }
@@ -879,6 +880,7 @@ auto fused_layer_norm_cuda(
             norm_size,
             eps
         );
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         fused_layer_norm_kernel<double, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
             input.data<double>(),
@@ -891,6 +893,7 @@ auto fused_layer_norm_cuda(
             norm_size,
             static_cast<double>(eps)
         );
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         fused_layer_norm_kernel<__half, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
             reinterpret_cast<const __half*>(input.data_ptr()),
@@ -903,6 +906,7 @@ auto fused_layer_norm_cuda(
             norm_size,
             __float2half(eps)
         );
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         fused_layer_norm_kernel<__nv_bfloat16, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
@@ -915,6 +919,7 @@ auto fused_layer_norm_cuda(
             norm_size,
             __float2bfloat16(eps)
         );
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("fused_layer_norm_cuda: Unsupported dtype");
     }
@@ -1050,6 +1055,7 @@ auto fused_layer_norm_backward_cuda(
             batch_size,
             norm_size
         );
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         fused_layer_norm_backward_kernel<double, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
             grad_output.data<double>(),
@@ -1063,6 +1069,7 @@ auto fused_layer_norm_backward_cuda(
             batch_size,
             norm_size
         );
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         fused_layer_norm_backward_kernel<__half, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
             reinterpret_cast<const __half*>(grad_output.data_ptr()),
@@ -1076,6 +1083,7 @@ auto fused_layer_norm_backward_cuda(
             batch_size,
             norm_size
         );
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         fused_layer_norm_backward_kernel<__nv_bfloat16, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
             reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
@@ -1089,6 +1097,7 @@ auto fused_layer_norm_backward_cuda(
             batch_size,
             norm_size
         );
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("fused_layer_norm_backward_cuda: Unsupported dtype");
     }
@@ -1240,6 +1249,7 @@ auto fused_rms_norm_cuda(
             norm_size,
             eps
         );
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("fused_rms_norm_cuda: Only Float32 supported");
     }
@@ -1343,6 +1353,7 @@ auto fused_rms_norm_backward_cuda(
             batch_size,
             norm_size
         );
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("fused_rms_norm_backward_cuda: Only Float32 supported");
     }
@@ -1485,6 +1496,7 @@ auto fused_conv2d_bn_relu_cuda(
             eps,
             bias != nullptr
         );
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("fused_conv2d_bn_relu_cuda: Only Float32 supported");
     }
@@ -1586,6 +1598,7 @@ auto fused_matmul_add_cuda(
             K,
             bias != nullptr
         );
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("fused_matmul_add_cuda: Only Float32 supported");
     }
@@ -1658,6 +1671,7 @@ auto fused_elementwise_chain_cuda(
             n,
             op_type
         );
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("fused_elementwise_chain_cuda: Only Float32 supported");
     }
@@ -2197,26 +2211,31 @@ auto fused_attention_cuda(
         flash_attention_v2_kernel<64, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
             Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(),
             static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
+        CUDA_CHECK(cudaGetLastError());
     } else if (head_dim == 128) {
         size_t smem_size = compute_smem_size(128);
         flash_attention_v2_kernel<128, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
             Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(),
             static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
+        CUDA_CHECK(cudaGetLastError());
     } else if (head_dim == 32) {
         size_t smem_size = compute_smem_size(32);
         flash_attention_v2_kernel<32, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
             Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(),
             static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
+        CUDA_CHECK(cudaGetLastError());
     } else if (head_dim == 80) {
         size_t smem_size = compute_smem_size(80);
         flash_attention_v2_kernel<80, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
             Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(),
             static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
+        CUDA_CHECK(cudaGetLastError());
     } else if (head_dim == 96) {
         size_t smem_size = compute_smem_size(96);
         flash_attention_v2_kernel<96, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
             Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(),
             static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         // Fallback to naive kernel for non-standard head_dim
         constexpr int NAIVE_BLOCK_SIZE = 256;
@@ -2233,6 +2252,7 @@ auto fused_attention_cuda(
             head_dim,
             scale
         );
+        CUDA_CHECK(cudaGetLastError());
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -2520,6 +2540,7 @@ auto fused_adam_step_cuda(
                 bias_correction1, bias_correction2,
                 amsgrad, decoupled_weight_decay
             );
+            CUDA_CHECK(cudaGetLastError());
         } else {
             int blocks = (numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
             blocks = clamp_blocks(blocks);
@@ -2534,6 +2555,7 @@ auto fused_adam_step_cuda(
                 bias_correction1, bias_correction2,
                 amsgrad, decoupled_weight_decay
             );
+            CUDA_CHECK(cudaGetLastError());
         }
     } else if (param.dtype() == DType::Float64) {
         double* max_sq_ptr = (amsgrad && max_exp_avg_sq) ? max_exp_avg_sq->data<double>() : nullptr;
@@ -2562,6 +2584,7 @@ auto fused_adam_step_cuda(
                 bias_correction1, bias_correction2,
                 amsgrad, decoupled_weight_decay
             );
+            CUDA_CHECK(cudaGetLastError());
         } else {
             int blocks = (numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
             blocks = clamp_blocks(blocks);
@@ -2576,6 +2599,7 @@ auto fused_adam_step_cuda(
                 bias_correction1, bias_correction2,
                 amsgrad, decoupled_weight_decay
             );
+            CUDA_CHECK(cudaGetLastError());
         }
     } else {
         throw std::runtime_error("fused_adam_step_cuda: Only Float32 and Float64 supported");
@@ -2662,6 +2686,7 @@ auto fused_sgd_step_cuda(
             numel, lr, momentum, weight_decay, dampening,
             nesterov, momentum_buffer != nullptr
         );
+        CUDA_CHECK(cudaGetLastError());
     } else if (param.dtype() == DType::Float64) {
         double* momentum_ptr = momentum_buffer ? momentum_buffer->data<double>() : nullptr;
 
@@ -2672,6 +2697,7 @@ auto fused_sgd_step_cuda(
             numel, lr, momentum, weight_decay, dampening,
             nesterov, momentum_buffer != nullptr
         );
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("fused_sgd_step_cuda: Only Float32 and Float64 supported");
     }
@@ -2785,12 +2811,14 @@ auto fused_softmax_cross_entropy_cuda(
             loss.data<float>(),
             compute_grad ? grad_logits.data<float>() : nullptr,
             batch_size, num_classes, compute_grad);
+        CUDA_CHECK(cudaGetLastError());
     } else if (logits.dtype() == DType::Float64) {
         fused_softmax_cross_entropy_kernel<double><<<batch_size, block_size, shared_mem>>>(
             logits.data<double>(), targets.data<int64_t>(),
             loss.data<double>(),
             compute_grad ? grad_logits.data<double>() : nullptr,
             batch_size, num_classes, compute_grad);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("fused_softmax_cross_entropy: unsupported dtype");
     }
@@ -2872,12 +2900,14 @@ auto fused_rmsprop_step_cuda(
             (centered && grad_avg) ? grad_avg->data<float>() : nullptr,
             (momentum > 0.0f && momentum_buffer) ? momentum_buffer->data<float>() : nullptr,
             lr, alpha, eps, weight_decay, momentum, centered, n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (param.dtype() == DType::Float64) {
         fused_rmsprop_step_kernel<double><<<num_blocks, block_size, 0, stream>>>(
             param.data<double>(), grad.data<double>(), square_avg.data<double>(),
             (centered && grad_avg) ? grad_avg->data<double>() : nullptr,
             (momentum > 0.0f && momentum_buffer) ? momentum_buffer->data<double>() : nullptr,
             lr, alpha, eps, weight_decay, momentum, centered, n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("fused_rmsprop_step: unsupported dtype");
     }
@@ -2936,10 +2966,12 @@ auto fused_adadelta_step_cuda(
         fused_adadelta_step_kernel<float><<<num_blocks, block_size, 0, stream>>>(
             param.data<float>(), grad.data<float>(), square_avg.data<float>(), acc_delta.data<float>(),
             rho, eps, lr, weight_decay, n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (param.dtype() == DType::Float64) {
         fused_adadelta_step_kernel<double><<<num_blocks, block_size, 0, stream>>>(
             param.data<double>(), grad.data<double>(), square_avg.data<double>(), acc_delta.data<double>(),
             rho, eps, lr, weight_decay, n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("fused_adadelta_step: unsupported dtype");
     }
@@ -2992,10 +3024,12 @@ auto fused_adagrad_step_cuda(
         fused_adagrad_step_kernel<float><<<num_blocks, block_size, 0, stream>>>(
             param.data<float>(), grad.data<float>(), sum_sq.data<float>(),
             lr, lr_decay, eps, weight_decay, step, n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (param.dtype() == DType::Float64) {
         fused_adagrad_step_kernel<double><<<num_blocks, block_size, 0, stream>>>(
             param.data<double>(), grad.data<double>(), sum_sq.data<double>(),
             lr, lr_decay, eps, weight_decay, step, n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("fused_adagrad_step: unsupported dtype");
     }
@@ -3099,6 +3133,7 @@ auto fused_adam_atan2_step_cuda(
             lr, beta1, beta2, eps, weight_decay,
             bias_correction1, bias_correction2, amsgrad
         );
+        CUDA_CHECK(cudaGetLastError());
     } else if (param.dtype() == DType::Float64) {
         double* max_sq_ptr = (amsgrad && max_exp_avg_sq) ? max_exp_avg_sq->data<double>() : nullptr;
 
@@ -3109,6 +3144,7 @@ auto fused_adam_atan2_step_cuda(
             lr, beta1, beta2, eps, weight_decay,
             bias_correction1, bias_correction2, amsgrad
         );
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("fused_adam_atan2_step_cuda: Only Float32 and Float64 supported");
     }

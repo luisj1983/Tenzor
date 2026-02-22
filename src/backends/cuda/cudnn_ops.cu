@@ -3,6 +3,7 @@
 #include "tenzor/backend/cudnn_wrapper.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/shape.hpp"
+#include "cuda_error.hpp"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
@@ -34,8 +35,9 @@ __global__ void fp16_saturate_kernel(__half* data, int64_t n) {
 static void fp16_saturate(Float16* data, int64_t n, cudaStream_t stream) {
     if (n <= 0) return;
     const int block = 256;
-    const int grid = std::min((int)((n + block - 1) / block), 65535);
+    const int grid = std::min((int)((n + block - 1) / block), 2147483647);
     fp16_saturate_kernel<<<grid, block, 0, stream>>>(reinterpret_cast<__half*>(data), n);
+    CUDA_CHECK(cudaGetLastError());
 }
 
 // ============================================================================
@@ -181,7 +183,7 @@ auto nchw_to_nhwc(const Tensor& input, cudaStream_t stream) -> Tensor {
 
     const int64_t total = batch * channels * height * width;
     const int block_size = 256;
-    const int grid_size = std::min(static_cast<int>((total + block_size - 1) / block_size), 65535);
+    const int grid_size = std::min(static_cast<int>((total + block_size - 1) / block_size), 2147483647);
 
     if (input.dtype() == DType::Float32) {
         nchw_to_nhwc_kernel<float><<<grid_size, block_size, 0, stream>>>(
@@ -201,6 +203,7 @@ auto nchw_to_nhwc(const Tensor& input, cudaStream_t stream) -> Tensor {
     } else {
         throw std::runtime_error("nchw_to_nhwc: unsupported dtype");
     }
+    CUDA_CHECK(cudaGetLastError());
 
     return output;
 }
@@ -225,7 +228,7 @@ auto nhwc_to_nchw(const Tensor& input, int64_t channels, cudaStream_t stream) ->
 
     const int64_t total = batch * channels * height * width;
     const int block_size = 256;
-    const int grid_size = std::min(static_cast<int>((total + block_size - 1) / block_size), 65535);
+    const int grid_size = std::min(static_cast<int>((total + block_size - 1) / block_size), 2147483647);
 
     if (input.dtype() == DType::Float32) {
         nhwc_to_nchw_kernel<float><<<grid_size, block_size, 0, stream>>>(
@@ -245,6 +248,7 @@ auto nhwc_to_nchw(const Tensor& input, int64_t channels, cudaStream_t stream) ->
     } else {
         throw std::runtime_error("nhwc_to_nchw: unsupported dtype");
     }
+    CUDA_CHECK(cudaGetLastError());
 
     return output;
 }
@@ -269,7 +273,7 @@ auto filter_nchw_to_nhwc(const Tensor& weight, cudaStream_t stream) -> Tensor {
 
     const int64_t total = out_channels * in_channels * kernel_h * kernel_w;
     const int block_size = 256;
-    const int grid_size = std::min(static_cast<int>((total + block_size - 1) / block_size), 65535);
+    const int grid_size = std::min(static_cast<int>((total + block_size - 1) / block_size), 2147483647);
 
     if (weight.dtype() == DType::Float32) {
         filter_nchw_to_nhwc_kernel<float><<<grid_size, block_size, 0, stream>>>(
@@ -289,6 +293,7 @@ auto filter_nchw_to_nhwc(const Tensor& weight, cudaStream_t stream) -> Tensor {
     } else {
         throw std::runtime_error("filter_nchw_to_nhwc: unsupported dtype");
     }
+    CUDA_CHECK(cudaGetLastError());
 
     return output;
 }
@@ -354,7 +359,7 @@ auto to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* str
 
     const int64_t total = N * C * H * W;
     const int block_size = 256;
-    const int grid_size = std::min(static_cast<int>((total + block_size - 1) / block_size), 65535);
+    const int grid_size = std::min(static_cast<int>((total + block_size - 1) / block_size), 2147483647);
 
     // Choose conversion direction
     if (format == MemoryFormat::ChannelsLast) {
@@ -408,6 +413,7 @@ auto to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* str
             throw std::runtime_error("to_memory_format_kernel: unsupported dtype for Contiguous");
         }
     }
+    CUDA_CHECK(cudaGetLastError());
 
     return output;
 }
@@ -1949,7 +1955,7 @@ auto cudnn_conv2d_backward_nhwc(
         int64_t gw_k = gw_shape[0], gw_kh = gw_shape[1], gw_kw = gw_shape[2], gw_c = gw_shape[3];
         const int64_t total = gw_k * gw_c * gw_kh * gw_kw;
         const int block_size = 256;
-        const int grid_size = std::min(static_cast<int>((total + block_size - 1) / block_size), 65535);
+        const int grid_size = std::min(static_cast<int>((total + block_size - 1) / block_size), 2147483647);
 
         // Reuse existing kernel with swapped interpretation
         if (weight.dtype() == DType::Float32) {
@@ -1970,6 +1976,7 @@ auto cudnn_conv2d_backward_nhwc(
                 gw_k, gw_c, gw_kh, gw_kw
             );
         }
+        CUDA_CHECK(cudaGetLastError());
     }
 
     // Compute gradient w.r.t. bias
@@ -3511,6 +3518,7 @@ auto cudnn_layer_norm_forward(
     } else {
         throw std::runtime_error("cudnn_layer_norm_forward: unsupported dtype");
     }
+    CUDA_CHECK(cudaGetLastError());
 
     return {output, mean_tensor, inv_std_tensor};
 }
@@ -3648,6 +3656,7 @@ auto cudnn_layer_norm_backward(
     } else {
         throw std::runtime_error("cudnn_layer_norm_backward: unsupported dtype");
     }
+    CUDA_CHECK(cudaGetLastError());
 
     return {grad_input, grad_weight, grad_bias};
 }

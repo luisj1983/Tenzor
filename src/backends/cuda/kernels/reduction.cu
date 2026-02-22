@@ -10,6 +10,16 @@
 #include <stdexcept>
 #include <cub/cub.cuh>
 
+#define CUDA_CHECK(call) \
+    do { \
+        cudaError_t err = call; \
+        if (err != cudaSuccess) { \
+            fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
+                    cudaGetErrorString(err)); \
+            exit(EXIT_FAILURE); \
+        } \
+    } while(0)
+
 namespace tenzor {
 namespace cuda {
 
@@ -1096,6 +1106,7 @@ template<typename T>
 static void launch_full_reduction_sum(const T* d_input, T* d_output, int64_t n, cudaStream_t stream = nullptr) {
     if (n == 0) {
         fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, T(0));
+        CUDA_CHECK(cudaGetLastError());
         return;
     }
 
@@ -1109,6 +1120,7 @@ static void launch_full_reduction_sum(const T* d_input, T* d_output, int64_t n, 
 
     if (num_blocks == 1) {
         sum_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+        CUDA_CHECK(cudaGetLastError());
         // Check for kernel launch errors
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {
@@ -1119,6 +1131,7 @@ static void launch_full_reduction_sum(const T* d_input, T* d_output, int64_t n, 
         backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(T));
         auto* d_temp = static_cast<T*>(d_temp_guard.get());
         sum_reduce_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+        CUDA_CHECK(cudaGetLastError());
         // Check for kernel launch errors
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {
@@ -1154,11 +1167,14 @@ static void launch_full_reduction_max(const T* d_input, T* d_output, int64_t n, 
 
     if (num_blocks == 1) {
         max_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(T));
         auto* d_temp = static_cast<T*>(d_temp_guard.get());
         max_reduce_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+        CUDA_CHECK(cudaGetLastError());
         max_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
+        CUDA_CHECK(cudaGetLastError());
     }
 }
 
@@ -1177,11 +1193,14 @@ static void launch_full_reduction_min(const T* d_input, T* d_output, int64_t n, 
 
     if (num_blocks == 1) {
         min_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(T));
         auto* d_temp = static_cast<T*>(d_temp_guard.get());
         min_reduce_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+        CUDA_CHECK(cudaGetLastError());
         min_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
+        CUDA_CHECK(cudaGetLastError());
     }
 }
 
@@ -1215,6 +1234,7 @@ static void launch_dim_reduction_sum(
     sum_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
+    CUDA_CHECK(cudaGetLastError());
 }
 
 template<typename T>
@@ -1245,6 +1265,7 @@ static void launch_dim_reduction_max(
     max_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
+    CUDA_CHECK(cudaGetLastError());
 }
 
 template<typename T>
@@ -1275,6 +1296,7 @@ static void launch_dim_reduction_min(
     min_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
+    CUDA_CHECK(cudaGetLastError());
 }
 
 // ============================================================================
@@ -1295,11 +1317,14 @@ static void launch_full_reduction_max_half(const __half* d_input, __half* d_outp
 
     if (num_blocks == 1) {
         max_reduce_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(__half));
         auto* d_temp = static_cast<__half*>(d_temp_guard.get());
         max_reduce_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+        CUDA_CHECK(cudaGetLastError());
         max_reduce_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
+        CUDA_CHECK(cudaGetLastError());
     }
 }
 
@@ -1317,11 +1342,14 @@ static void launch_full_reduction_min_half(const __half* d_input, __half* d_outp
 
     if (num_blocks == 1) {
         min_reduce_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(__half));
         auto* d_temp = static_cast<__half*>(d_temp_guard.get());
         min_reduce_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+        CUDA_CHECK(cudaGetLastError());
         min_reduce_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
+        CUDA_CHECK(cudaGetLastError());
     }
 }
 
@@ -1352,6 +1380,7 @@ static void launch_dim_reduction_max_half(
     max_along_dim_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
+    CUDA_CHECK(cudaGetLastError());
 }
 
 static void launch_dim_reduction_min_half(
@@ -1381,6 +1410,7 @@ static void launch_dim_reduction_min_half(
     min_along_dim_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
+    CUDA_CHECK(cudaGetLastError());
 }
 
 // ============================================================================
@@ -1401,11 +1431,14 @@ static void launch_full_reduction_max_bf16(const __nv_bfloat16* d_input, __nv_bf
 
     if (num_blocks == 1) {
         max_reduce_kernel_bf16<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(__nv_bfloat16));
         auto* d_temp = static_cast<__nv_bfloat16*>(d_temp_guard.get());
         max_reduce_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+        CUDA_CHECK(cudaGetLastError());
         max_reduce_kernel_bf16<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
+        CUDA_CHECK(cudaGetLastError());
     }
 }
 
@@ -1423,11 +1456,14 @@ static void launch_full_reduction_min_bf16(const __nv_bfloat16* d_input, __nv_bf
 
     if (num_blocks == 1) {
         min_reduce_kernel_bf16<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(__nv_bfloat16));
         auto* d_temp = static_cast<__nv_bfloat16*>(d_temp_guard.get());
         min_reduce_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+        CUDA_CHECK(cudaGetLastError());
         min_reduce_kernel_bf16<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
+        CUDA_CHECK(cudaGetLastError());
     }
 }
 
@@ -1458,6 +1494,7 @@ static void launch_dim_reduction_max_bf16(
     max_along_dim_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
+    CUDA_CHECK(cudaGetLastError());
 }
 
 static void launch_dim_reduction_min_bf16(
@@ -1487,6 +1524,7 @@ static void launch_dim_reduction_min_bf16(
     min_along_dim_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
+    CUDA_CHECK(cudaGetLastError());
 }
 
 // ============================================================================
@@ -1692,18 +1730,22 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t st
         auto* data = sum_result.data<float>();
         const float scale = 1.0f / static_cast<float>(count);
         scale_kernel<<<grid_size, block_size, 0, stream>>>(data, n, scale);
+        CUDA_CHECK(cudaGetLastError());
     } else if (dtype == DType::Float64) {
         auto* data = sum_result.data<double>();
         const double scale = 1.0 / static_cast<double>(count);
         scale_kernel<<<grid_size, block_size, 0, stream>>>(data, n, scale);
+        CUDA_CHECK(cudaGetLastError());
     } else if (dtype == DType::Float16) {
         auto* data = reinterpret_cast<__half*>(sum_result.data_ptr());
         const __half scale = __float2half(1.0f / static_cast<float>(count));
         scale_kernel<<<grid_size, block_size, 0, stream>>>(data, n, scale);
+        CUDA_CHECK(cudaGetLastError());
     } else {  // BFloat16
         auto* data = reinterpret_cast<__nv_bfloat16*>(sum_result.data_ptr());
         const __nv_bfloat16 scale = __float2bfloat16(1.0f / static_cast<float>(count));
         scale_kernel<<<grid_size, block_size, 0, stream>>>(data, n, scale);
+        CUDA_CHECK(cudaGetLastError());
     }
 
 #ifndef NDEBUG
@@ -2742,6 +2784,7 @@ static void launch_full_argmax(const T* d_input, int64_t* d_output, int64_t n, c
 
     if (n == 1) {
         fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, int64_t(0));
+        CUDA_CHECK(cudaGetLastError());
         return;
     }
 
@@ -2749,14 +2792,17 @@ static void launch_full_argmax(const T* d_input, int64_t* d_output, int64_t n, c
 
     if (num_blocks == 1) {
         argmax_full_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         // Two-phase GPU-only reduction
         backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(int64_t));
         auto* d_temp = static_cast<int64_t*>(d_temp_guard.get());
         argmax_full_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+        CUDA_CHECK(cudaGetLastError());
 
         // Phase 2: compare block results entirely on GPU
         argmax_final_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, d_output, num_blocks);
+        CUDA_CHECK(cudaGetLastError());
     }
 }
 // Helper function to launch argmin reduction
@@ -2768,6 +2814,7 @@ static void launch_full_argmin(const T* d_input, int64_t* d_output, int64_t n, c
 
     if (n == 1) {
         fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, int64_t(0));
+        CUDA_CHECK(cudaGetLastError());
         return;
     }
 
@@ -2775,14 +2822,17 @@ static void launch_full_argmin(const T* d_input, int64_t* d_output, int64_t n, c
 
     if (num_blocks == 1) {
         argmin_full_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         // Two-phase GPU-only reduction
         backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(int64_t));
         auto* d_temp = static_cast<int64_t*>(d_temp_guard.get());
         argmin_full_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+        CUDA_CHECK(cudaGetLastError());
 
         // Phase 2: compare block results entirely on GPU
         argmin_final_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, d_output, num_blocks);
+        CUDA_CHECK(cudaGetLastError());
     }
 }
 
@@ -2816,6 +2866,7 @@ static void launch_dim_argmax(
     argmax_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
+    CUDA_CHECK(cudaGetLastError());
 }
 
 // Helper function for dimensional argmin
@@ -2847,6 +2898,7 @@ static void launch_dim_argmin(
     argmin_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
+    CUDA_CHECK(cudaGetLastError());
 }
 
 // ============================================================================
@@ -2860,6 +2912,7 @@ static void launch_full_argmax_half(const __half* d_input, int64_t* d_output, in
 
     if (n == 1) {
         fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, int64_t(0));
+        CUDA_CHECK(cudaGetLastError());
         return;
     }
 
@@ -2867,14 +2920,17 @@ static void launch_full_argmax_half(const __half* d_input, int64_t* d_output, in
 
     if (num_blocks == 1) {
         argmax_full_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         // Two-phase GPU-only reduction
         backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(int64_t));
         auto* d_temp = static_cast<int64_t*>(d_temp_guard.get());
         argmax_full_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+        CUDA_CHECK(cudaGetLastError());
 
         // Phase 2: compare block results entirely on GPU
         argmax_final_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, d_output, num_blocks);
+        CUDA_CHECK(cudaGetLastError());
     }
 }
 
@@ -2885,6 +2941,7 @@ static void launch_full_argmin_half(const __half* d_input, int64_t* d_output, in
 
     if (n == 1) {
         fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, int64_t(0));
+        CUDA_CHECK(cudaGetLastError());
         return;
     }
 
@@ -2892,14 +2949,17 @@ static void launch_full_argmin_half(const __half* d_input, int64_t* d_output, in
 
     if (num_blocks == 1) {
         argmin_full_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         // Two-phase GPU-only reduction
         backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(int64_t));
         auto* d_temp = static_cast<int64_t*>(d_temp_guard.get());
         argmin_full_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+        CUDA_CHECK(cudaGetLastError());
 
         // Phase 2: compare block results entirely on GPU
         argmin_final_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, d_output, num_blocks);
+        CUDA_CHECK(cudaGetLastError());
     }
 }
 
@@ -2931,6 +2991,7 @@ static void launch_dim_argmax_half(
     argmax_along_dim_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
+    CUDA_CHECK(cudaGetLastError());
 }
 
 static void launch_dim_argmin_half(
@@ -2960,6 +3021,7 @@ static void launch_dim_argmin_half(
     argmin_along_dim_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
+    CUDA_CHECK(cudaGetLastError());
 }
 
 // ============================================================================
@@ -2973,6 +3035,7 @@ static void launch_full_argmax_bf16(const __nv_bfloat16* d_input, int64_t* d_out
 
     if (n == 1) {
         fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, int64_t(0));
+        CUDA_CHECK(cudaGetLastError());
         return;
     }
 
@@ -2980,14 +3043,17 @@ static void launch_full_argmax_bf16(const __nv_bfloat16* d_input, int64_t* d_out
 
     if (num_blocks == 1) {
         argmax_full_kernel_bf16<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         // Two-phase GPU-only reduction
         backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(int64_t));
         auto* d_temp = static_cast<int64_t*>(d_temp_guard.get());
         argmax_full_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+        CUDA_CHECK(cudaGetLastError());
 
         // Phase 2: compare block results entirely on GPU
         argmax_final_kernel_bf16<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, d_output, num_blocks);
+        CUDA_CHECK(cudaGetLastError());
     }
 }
 
@@ -2998,6 +3064,7 @@ static void launch_full_argmin_bf16(const __nv_bfloat16* d_input, int64_t* d_out
 
     if (n == 1) {
         fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, int64_t(0));
+        CUDA_CHECK(cudaGetLastError());
         return;
     }
 
@@ -3005,14 +3072,17 @@ static void launch_full_argmin_bf16(const __nv_bfloat16* d_input, int64_t* d_out
 
     if (num_blocks == 1) {
         argmin_full_kernel_bf16<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         // Two-phase GPU-only reduction
         backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(int64_t));
         auto* d_temp = static_cast<int64_t*>(d_temp_guard.get());
         argmin_full_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+        CUDA_CHECK(cudaGetLastError());
 
         // Phase 2: compare block results entirely on GPU
         argmin_final_kernel_bf16<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, d_output, num_blocks);
+        CUDA_CHECK(cudaGetLastError());
     }
 }
 
@@ -3043,6 +3113,7 @@ static void launch_dim_argmax_bf16(
     argmax_along_dim_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
+    CUDA_CHECK(cudaGetLastError());
 }
 
 static void launch_dim_argmin_bf16(
@@ -3072,6 +3143,7 @@ static void launch_dim_argmin_bf16(
     argmin_along_dim_kernel_bf16<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
+    CUDA_CHECK(cudaGetLastError());
 }
 
 // Public API for argmax
@@ -3442,6 +3514,7 @@ template<typename T>
 static void launch_full_reduction_prod(const T* d_input, T* d_output, int64_t n, cudaStream_t stream = nullptr) {
     if (n == 0) {
         fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, T(1));
+        CUDA_CHECK(cudaGetLastError());
         return;
     }
 
@@ -3455,14 +3528,17 @@ static void launch_full_reduction_prod(const T* d_input, T* d_output, int64_t n,
 
     if (num_blocks == 1) {
         prod_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         // Phase 1: Reduce to num_blocks intermediate results
         backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(T));
         auto* d_temp = static_cast<T*>(d_temp_guard.get());
         prod_reduce_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+        CUDA_CHECK(cudaGetLastError());
 
         // Phase 2: Final reduction
         prod_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
+        CUDA_CHECK(cudaGetLastError());
     }
 }
 
@@ -3495,6 +3571,7 @@ static void launch_dim_reduction_prod(
     prod_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
         d_input, d_output, meta, ndim, dim, output_size, dim_size
     );
+    CUDA_CHECK(cudaGetLastError());
 }
 
 // Public API for prod (product reduction)
@@ -3732,11 +3809,13 @@ template<typename T>
 static void launch_variance_computation(const T* d_input, T* d_output, int64_t n, int64_t correction, cudaStream_t stream = nullptr) {
     if (n == 0) {
         fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, T(0));
+        CUDA_CHECK(cudaGetLastError());
         return;
     }
 
     if (n == 1) {
         fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, T(0));
+        CUDA_CHECK(cudaGetLastError());
         return;
     }
 
@@ -3753,12 +3832,14 @@ static void launch_variance_computation(const T* d_input, T* d_output, int64_t n
     // Phase 1: Per-block Welford reduction
     welford_variance_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
         d_input, d_block_means, d_block_m2s, d_block_counts, n);
+    CUDA_CHECK(cudaGetLastError());
 
     // Phase 2: Merge block results — parallel tree reduction with 256 threads
     constexpr int FINALIZE_THREADS = 256;
     size_t welford_smem = FINALIZE_THREADS * (2 * sizeof(T) + sizeof(int64_t));
     welford_finalize_kernel<<<1, FINALIZE_THREADS, welford_smem, stream>>>(
         d_block_means, d_block_m2s, d_block_counts, d_output, num_blocks, correction);
+    CUDA_CHECK(cudaGetLastError());
 }
 
 // Public API for variance
@@ -3898,6 +3979,7 @@ auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
             Tensor output(output_shape, dtype, device);
             auto* output_data = output.data<float>();
             sum_reduce_sqrt_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(var_data, output_data, 1);
+            CUDA_CHECK(cudaGetLastError());
 
 #ifndef NDEBUG
             cudaStreamSynchronize(stream);
@@ -3918,6 +4000,7 @@ auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
             Tensor output(output_shape, dtype, device);
             auto* output_data = output.data<double>();
             sum_reduce_sqrt_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(var_data, output_data, 1);
+            CUDA_CHECK(cudaGetLastError());
 
 #ifndef NDEBUG
             cudaStreamSynchronize(stream);
@@ -4162,10 +4245,12 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, cudaSt
             norm_along_dim_kernel<float><<<blocks, BLOCK, 0, stream>>>(
                 input.data<float>(), output.data<float>(), meta,
                 ndim, actual_dim, output_size, dim_size, p);
+            CUDA_CHECK(cudaGetLastError());
         } else if (input.dtype() == DType::Float64) {
             norm_along_dim_kernel<double><<<blocks, BLOCK, 0, stream>>>(
                 input.data<double>(), output.data<double>(), meta,
                 ndim, actual_dim, output_size, dim_size, p);
+            CUDA_CHECK(cudaGetLastError());
         } else {
             throw std::runtime_error("norm: only Float32 and Float64 are supported");
         }
@@ -4207,11 +4292,14 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, cudaSt
                 // L1 norm
                 if (num_blocks == 1) {
                     l1_norm_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, output_data, n);
+                    CUDA_CHECK(cudaGetLastError());
                 } else {
                     backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(float));
                     auto* d_temp = static_cast<float*>(d_temp_guard.get());
                     l1_norm_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n);
+                    CUDA_CHECK(cudaGetLastError());
                     sum_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, num_blocks);
+                    CUDA_CHECK(cudaGetLastError());
                 }
             } else if (p == 2.0f) {
                 // L2 norm — fused sqrt into final reduction
@@ -4220,12 +4308,16 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, cudaSt
                     backend::CachedMemoryGuard d_temp_guard(sizeof(float));
                     auto* d_temp = static_cast<float*>(d_temp_guard.get());
                     l2_norm_squared_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n);
+                    CUDA_CHECK(cudaGetLastError());
                     sum_reduce_sqrt_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, 1);
+                    CUDA_CHECK(cudaGetLastError());
                 } else {
                     backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(float));
                     auto* d_temp = static_cast<float*>(d_temp_guard.get());
                     l2_norm_squared_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n);
+                    CUDA_CHECK(cudaGetLastError());
                     sum_reduce_sqrt_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, num_blocks);
+                    CUDA_CHECK(cudaGetLastError());
                 }
             } else {
                 // General Lp norm — fused pow into final reduction
@@ -4233,12 +4325,16 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, cudaSt
                     backend::CachedMemoryGuard d_temp_guard(sizeof(float));
                     auto* d_temp = static_cast<float*>(d_temp_guard.get());
                     lp_norm_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n, p);
+                    CUDA_CHECK(cudaGetLastError());
                     sum_reduce_pow_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, 1, 1.0f / p);
+                    CUDA_CHECK(cudaGetLastError());
                 } else {
                     backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(float));
                     auto* d_temp = static_cast<float*>(d_temp_guard.get());
                     lp_norm_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n, p);
+                    CUDA_CHECK(cudaGetLastError());
                     sum_reduce_pow_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, num_blocks, 1.0f / p);
+                    CUDA_CHECK(cudaGetLastError());
                 }
             }
 
@@ -4255,11 +4351,14 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, cudaSt
                 // L1 norm
                 if (num_blocks == 1) {
                     l1_norm_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, output_data, n);
+                    CUDA_CHECK(cudaGetLastError());
                 } else {
                     backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(double));
                     auto* d_temp = static_cast<double*>(d_temp_guard.get());
                     l1_norm_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n);
+                    CUDA_CHECK(cudaGetLastError());
                     sum_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, num_blocks);
+                    CUDA_CHECK(cudaGetLastError());
                 }
             } else if (p == 2.0f) {
                 // L2 norm — fused sqrt into final reduction
@@ -4267,12 +4366,16 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, cudaSt
                     backend::CachedMemoryGuard d_temp_guard(sizeof(double));
                     auto* d_temp = static_cast<double*>(d_temp_guard.get());
                     l2_norm_squared_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n);
+                    CUDA_CHECK(cudaGetLastError());
                     sum_reduce_sqrt_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, 1);
+                    CUDA_CHECK(cudaGetLastError());
                 } else {
                     backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(double));
                     auto* d_temp = static_cast<double*>(d_temp_guard.get());
                     l2_norm_squared_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n);
+                    CUDA_CHECK(cudaGetLastError());
                     sum_reduce_sqrt_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, num_blocks);
+                    CUDA_CHECK(cudaGetLastError());
                 }
             } else {
                 // General Lp norm — fused pow into final reduction
@@ -4280,12 +4383,16 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, cudaSt
                     backend::CachedMemoryGuard d_temp_guard(sizeof(double));
                     auto* d_temp = static_cast<double*>(d_temp_guard.get());
                     lp_norm_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n, p);
+                    CUDA_CHECK(cudaGetLastError());
                     sum_reduce_pow_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, 1, static_cast<double>(1.0 / p));
+                    CUDA_CHECK(cudaGetLastError());
                 } else {
                     backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(double));
                     auto* d_temp = static_cast<double*>(d_temp_guard.get());
                     lp_norm_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n, p);
+                    CUDA_CHECK(cudaGetLastError());
                     sum_reduce_pow_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, num_blocks, static_cast<double>(1.0 / p));
+                    CUDA_CHECK(cudaGetLastError());
                 }
             }
 
@@ -4369,6 +4476,7 @@ static void launch_argsort(const T* d_input, int64_t* d_output, int64_t n, bool 
 
     if (n == 1) {
         fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, int64_t(0));
+        CUDA_CHECK(cudaGetLastError());
         return;
     }
 
@@ -4378,6 +4486,7 @@ static void launch_argsort(const T* d_input, int64_t* d_output, int64_t n, bool 
         while (block_size < n) block_size *= 2;
         if (block_size > MAX_BLOCK_SIZE) block_size = MAX_BLOCK_SIZE;
         argsort_kernel<<<1, block_size, 0, stream>>>(d_input, d_output, n, descending);
+        CUDA_CHECK(cudaGetLastError());
         return;
     }
 
@@ -4388,6 +4497,7 @@ static void launch_argsort(const T* d_input, int64_t* d_output, int64_t n, bool 
     // Initialize indices 0..n-1
     int init_blocks = (n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
     iota_kernel<<<init_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_indices_in, n);
+    CUDA_CHECK(cudaGetLastError());
 
     // Allocate output keys buffer
     backend::CachedMemoryGuard d_keys_out_guard(n * sizeof(T));
@@ -4438,6 +4548,7 @@ auto argsort_kernel(const Tensor& input, int64_t dim, bool descending, cudaStrea
             const __half* d_half = reinterpret_cast<const __half*>(input.data_ptr());
             int blocks = (n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
             half_to_float_kernel<<<blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_half, d_float_buf, n);
+            CUDA_CHECK(cudaGetLastError());
             launch_argsort(d_float_buf, output.data<int64_t>(), n, descending, stream);
             break;
         }

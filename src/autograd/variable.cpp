@@ -63,8 +63,13 @@ auto Variable::backward(std::optional<Tensor> gradient, bool retain_graph, bool 
 }
 
 auto Variable::register_hook(std::function<Tensor(const Tensor&)> hook) -> size_t {
-    impl_->hooks_.push_back(std::move(hook));
-    return impl_->hooks_.size() - 1;
+    size_t id = impl_->next_hook_id_++;
+    impl_->hooks_[id] = std::move(hook);
+    return id;
+}
+
+auto Variable::unregister_hook(size_t hook_id) -> bool {
+    return impl_->hooks_.erase(hook_id) > 0;
 }
 
 auto Variable::retain_grad() -> void {

@@ -45,6 +45,7 @@ inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
     do { \
         auto [grid_, block_] = optimal_launch_config(kernel, n); \
         kernel<<<grid_, block_, 0, stream>>>(__VA_ARGS__); \
+        CUDA_CHECK(cudaGetLastError()); \
     } while(0)
 
 // ============================================================================
@@ -132,7 +133,8 @@ auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index,
         else \
             index_select_kernel_impl<T, int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
                 input.data<T>(), index.data<int64_t>(), output.data<T>(), \
-                num_indices, dim_size, outer_size, inner_size, total_output)
+                num_indices, dim_size, outer_size, inner_size, total_output); \
+        CUDA_CHECK(cudaGetLastError())
 
     switch (input.dtype()) {
         case DType::Float32: LAUNCH_INDEX_SELECT(float); break;
@@ -154,6 +156,7 @@ auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                     index.data<int64_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
                     num_indices, dim_size, outer_size, inner_size, total_output);
+            CUDA_CHECK(cudaGetLastError());
             break;
         case DType::BFloat16:
             if (idx_is_int32)
@@ -168,6 +171,7 @@ auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                     index.data<int64_t>(),
                     reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
                     num_indices, dim_size, outer_size, inner_size, total_output);
+            CUDA_CHECK(cudaGetLastError());
             break;
         default:
             throw std::runtime_error("index_select: unsupported dtype");
@@ -262,7 +266,8 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index,
         else \
             gather_kernel_impl<T, int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
                 input.data<T>(), index.data<int64_t>(), output.data<T>(), \
-                outer_size, dim_size, inner_size, index_dim_size, total_output)
+                outer_size, dim_size, inner_size, index_dim_size, total_output); \
+        CUDA_CHECK(cudaGetLastError())
 
     switch (input.dtype()) {
         case DType::Float32: LAUNCH_GATHER(float); break;
@@ -284,6 +289,7 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                     index.data<int64_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
                     outer_size, dim_size, inner_size, index_dim_size, total_output);
+            CUDA_CHECK(cudaGetLastError());
             break;
         case DType::BFloat16:
             if (idx_is_int32)
@@ -298,6 +304,7 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                     index.data<int64_t>(),
                     reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
                     outer_size, dim_size, inner_size, index_dim_size, total_output);
+            CUDA_CHECK(cudaGetLastError());
             break;
         default:
             throw std::runtime_error("gather: unsupported dtype");
@@ -437,6 +444,7 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
     #define LAUNCH_SCATTER(T) \
         copy_kernel_impl<T><<<num_blocks_copy, BLOCK_SIZE, 0, stream>>>( \
             input.data<T>(), output.data<T>(), total_input); \
+        CUDA_CHECK(cudaGetLastError()); \
         CUDA_CHECK(cudaStreamSynchronize(stream)); \
         if (idx_is_int32) \
             scatter_values_kernel_impl<T, int32_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>( \
@@ -445,7 +453,8 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
         else \
             scatter_values_kernel_impl<T, int64_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>( \
                 index.data<int64_t>(), src.data<T>(), output.data<T>(), \
-                outer_size, dim_size, inner_size, index_dim_size, total_scatter)
+                outer_size, dim_size, inner_size, index_dim_size, total_scatter); \
+        CUDA_CHECK(cudaGetLastError())
 
     switch (input.dtype()) {
         case DType::Float32: LAUNCH_SCATTER(float); break;
@@ -458,6 +467,7 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
             copy_kernel_impl<__half><<<num_blocks_copy, BLOCK_SIZE, 0, stream>>>(
                 reinterpret_cast<const __half*>(input.data_ptr()),
                 reinterpret_cast<__half*>(output.data_ptr()), total_input);
+            CUDA_CHECK(cudaGetLastError());
             CUDA_CHECK(cudaStreamSynchronize(stream));
             if (idx_is_int32)
                 scatter_values_kernel_impl<__half, int32_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>(
@@ -471,11 +481,13 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                     reinterpret_cast<const __half*>(src.data_ptr()),
                     reinterpret_cast<__half*>(output.data_ptr()),
                     outer_size, dim_size, inner_size, index_dim_size, total_scatter);
+            CUDA_CHECK(cudaGetLastError());
             break;
         case DType::BFloat16:
             copy_kernel_impl<__nv_bfloat16><<<num_blocks_copy, BLOCK_SIZE, 0, stream>>>(
                 reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
                 reinterpret_cast<__nv_bfloat16*>(output.data_ptr()), total_input);
+            CUDA_CHECK(cudaGetLastError());
             CUDA_CHECK(cudaStreamSynchronize(stream));
             if (idx_is_int32)
                 scatter_values_kernel_impl<__nv_bfloat16, int32_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>(
@@ -489,6 +501,7 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                     reinterpret_cast<const __nv_bfloat16*>(src.data_ptr()),
                     reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
                     outer_size, dim_size, inner_size, index_dim_size, total_scatter);
+            CUDA_CHECK(cudaGetLastError());
             break;
         default:
             throw std::runtime_error("scatter: unsupported dtype");
@@ -612,6 +625,7 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask, double value,
             masked_fill_kernel_impl<T>, n); \
         masked_fill_kernel_impl<T><<<grid_size, block_size, 0, stream>>>( \
             input.data<T>(), mask_ptr, static_cast<T>(cast_val), output.data<T>(), n); \
+        CUDA_CHECK(cudaGetLastError()); \
     } while(0)
 
     switch (input.dtype()) {
@@ -629,6 +643,7 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask, double value,
                 reinterpret_cast<const __half*>(input.data_ptr()),
                 mask_ptr, fill_val,
                 reinterpret_cast<__half*>(output.data_ptr()), n);
+            CUDA_CHECK(cudaGetLastError());
             break;
         }
         case DType::BFloat16: {
@@ -639,6 +654,7 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask, double value,
                 reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
                 mask_ptr, fill_val,
                 reinterpret_cast<__nv_bfloat16*>(output.data_ptr()), n);
+            CUDA_CHECK(cudaGetLastError());
             break;
         }
         default:
@@ -685,6 +701,7 @@ auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y,
             where_kernel_impl<T>, n); \
         where_kernel_impl<T><<<grid_size, block_size, 0, stream>>>( \
             cond_ptr, x.data<T>(), y.data<T>(), output.data<T>(), n); \
+        CUDA_CHECK(cudaGetLastError()); \
     } while(0)
 
     switch (x.dtype()) {
@@ -702,6 +719,7 @@ auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y,
                 reinterpret_cast<const __half*>(x.data_ptr()),
                 reinterpret_cast<const __half*>(y.data_ptr()),
                 reinterpret_cast<__half*>(output.data_ptr()), n);
+            CUDA_CHECK(cudaGetLastError());
             break;
         }
         case DType::BFloat16: {
@@ -712,6 +730,7 @@ auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y,
                 reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()),
                 reinterpret_cast<const __nv_bfloat16*>(y.data_ptr()),
                 reinterpret_cast<__nv_bfloat16*>(output.data_ptr()), n);
+            CUDA_CHECK(cudaGetLastError());
             break;
         }
         default:
@@ -782,12 +801,14 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
             embedding_kernel_impl<T, int32_t><<<grid_size, block_size, 0, stream>>>( \
                 weight.data<T>(), indices.data<int32_t>(), output.data<T>(), \
                 num_indices, embedding_dim); \
+            CUDA_CHECK(cudaGetLastError()); \
         } else { \
             auto [grid_size, block_size] = optimal_launch_config( \
                 embedding_kernel_impl<T, int64_t>, total_elements); \
             embedding_kernel_impl<T, int64_t><<<grid_size, block_size, 0, stream>>>( \
                 weight.data<T>(), indices.data<int64_t>(), output.data<T>(), \
                 num_indices, embedding_dim); \
+            CUDA_CHECK(cudaGetLastError()); \
         }
 
     switch (weight.dtype()) {
@@ -802,6 +823,7 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
                     indices.data<int32_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
                     num_indices, embedding_dim);
+                CUDA_CHECK(cudaGetLastError());
             } else {
                 auto [grid_size, block_size] = optimal_launch_config(
                     embedding_kernel_impl<__half, int64_t>, total_elements);
@@ -810,6 +832,7 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
                     indices.data<int64_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
                     num_indices, embedding_dim);
+                CUDA_CHECK(cudaGetLastError());
             }
             break;
         case DType::BFloat16:
@@ -821,6 +844,7 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
                     indices.data<int32_t>(),
                     reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
                     num_indices, embedding_dim);
+                CUDA_CHECK(cudaGetLastError());
             } else {
                 auto [grid_size, block_size] = optimal_launch_config(
                     embedding_kernel_impl<__nv_bfloat16, int64_t>, total_elements);
@@ -829,6 +853,7 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
                     indices.data<int64_t>(),
                     reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
                     num_indices, embedding_dim);
+                CUDA_CHECK(cudaGetLastError());
             }
             break;
         default:
@@ -969,7 +994,8 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
         else \
             embedding_backward_kernel_impl<T, int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
                 grad_output.data<T>(), indices.data<int64_t>(), grad_weight.data<T>(), \
-                num_indices, embedding_dim)
+                num_indices, embedding_dim); \
+        CUDA_CHECK(cudaGetLastError())
 
     switch (grad_output.dtype()) {
         case DType::Float32: LAUNCH_EMBEDDING_BWD(float); break;
@@ -987,6 +1013,7 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
                     indices.data<int64_t>(),
                     reinterpret_cast<__half*>(grad_weight.data_ptr()),
                     num_indices, embedding_dim);
+            CUDA_CHECK(cudaGetLastError());
             break;
         case DType::BFloat16:
             if (idx_is_int32)
@@ -1001,6 +1028,7 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
                     indices.data<int64_t>(),
                     reinterpret_cast<__nv_bfloat16*>(grad_weight.data_ptr()),
                     num_indices, embedding_dim);
+            CUDA_CHECK(cudaGetLastError());
             break;
         default:
             throw std::runtime_error("embedding_backward: unsupported dtype");
@@ -1046,10 +1074,12 @@ auto one_hot_kernel(const Tensor& indices, int64_t num_classes,
         case DType::Int32:
             one_hot_kernel_impl<int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                 indices.data<int32_t>(), output.data<float>(), batch_size, num_classes);
+            CUDA_CHECK(cudaGetLastError());
             break;
         case DType::Int64:
             one_hot_kernel_impl<int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                 indices.data<int64_t>(), output.data<float>(), batch_size, num_classes);
+            CUDA_CHECK(cudaGetLastError());
             break;
         default:
             throw std::runtime_error("one_hot: unsupported index dtype (expected Int32 or Int64)");
@@ -1136,7 +1166,8 @@ auto nonzero_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     // Launch flag kernel based on dtype
     #define LAUNCH_NONZERO_FLAG(T) \
         nonzero_flag_kernel<T><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
-            input.data<T>(), d_flags, n)
+            input.data<T>(), d_flags, n); \
+        CUDA_CHECK(cudaGetLastError())
 
     switch (input.dtype()) {
         case DType::Float32: LAUNCH_NONZERO_FLAG(float); break;
@@ -1149,10 +1180,12 @@ auto nonzero_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
         case DType::Float16:
             nonzero_flag_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                 reinterpret_cast<const __half*>(input.data_ptr()), d_flags, n);
+            CUDA_CHECK(cudaGetLastError());
             break;
         case DType::BFloat16:
             nonzero_flag_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                 reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()), d_flags, n);
+            CUDA_CHECK(cudaGetLastError());
             break;
         default:
             throw std::runtime_error("nonzero: unsupported dtype");
@@ -1245,6 +1278,7 @@ auto take_kernel(const Tensor& input, const Tensor& indices, cudaStream_t stream
         take_kernel_impl<T><<<grid_size, block_size, 0, stream>>>( \
             input.data<T>(), indices.data<int64_t>(), output.data<T>(), \
             input_size, indices_size); \
+        CUDA_CHECK(cudaGetLastError()); \
     } while(0)
 
     switch (input.dtype()) {
@@ -1262,6 +1296,7 @@ auto take_kernel(const Tensor& input, const Tensor& indices, cudaStream_t stream
                 indices.data<int64_t>(),
                 reinterpret_cast<__half*>(output.data_ptr()),
                 input_size, indices_size);
+            CUDA_CHECK(cudaGetLastError());
             break;
         }
         case DType::BFloat16: {
@@ -1272,6 +1307,7 @@ auto take_kernel(const Tensor& input, const Tensor& indices, cudaStream_t stream
                 indices.data<int64_t>(),
                 reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
                 input_size, indices_size);
+            CUDA_CHECK(cudaGetLastError());
             break;
         }
         default:
@@ -1537,31 +1573,37 @@ auto put_kernel(Tensor& input, const Tensor& indices, const Tensor& source,
             put_kernel_impl<float><<<blocks, BLOCK_SIZE, 0, stream>>>(
                 output.data<float>(), indices.data<int64_t>(), source.data<float>(),
                 num_indices, total_size, accumulate);
+            CUDA_CHECK(cudaGetLastError());
             break;
         case DType::Float64:
             put_kernel_impl<double><<<blocks, BLOCK_SIZE, 0, stream>>>(
                 output.data<double>(), indices.data<int64_t>(), source.data<double>(),
                 num_indices, total_size, accumulate);
+            CUDA_CHECK(cudaGetLastError());
             break;
         case DType::Int32:
             put_kernel_impl<int32_t><<<blocks, BLOCK_SIZE, 0, stream>>>(
                 output.data<int32_t>(), indices.data<int64_t>(), source.data<int32_t>(),
                 num_indices, total_size, accumulate);
+            CUDA_CHECK(cudaGetLastError());
             break;
         case DType::Int64:
             put_kernel_impl<int64_t><<<blocks, BLOCK_SIZE, 0, stream>>>(
                 output.data<int64_t>(), indices.data<int64_t>(), source.data<int64_t>(),
                 num_indices, total_size, accumulate);
+            CUDA_CHECK(cudaGetLastError());
             break;
         case DType::Int8:
             put_kernel_impl<int8_t><<<blocks, BLOCK_SIZE, 0, stream>>>(
                 output.data<int8_t>(), indices.data<int64_t>(), source.data<int8_t>(),
                 num_indices, total_size, accumulate);
+            CUDA_CHECK(cudaGetLastError());
             break;
         case DType::UInt8:
             put_kernel_impl<uint8_t><<<blocks, BLOCK_SIZE, 0, stream>>>(
                 output.data<uint8_t>(), indices.data<int64_t>(), source.data<uint8_t>(),
                 num_indices, total_size, accumulate);
+            CUDA_CHECK(cudaGetLastError());
             break;
         case DType::Float16:
             put_kernel_impl<__half><<<blocks, BLOCK_SIZE, 0, stream>>>(
@@ -1569,6 +1611,7 @@ auto put_kernel(Tensor& input, const Tensor& indices, const Tensor& source,
                 indices.data<int64_t>(),
                 reinterpret_cast<const __half*>(source.data_ptr()),
                 num_indices, total_size, accumulate);
+            CUDA_CHECK(cudaGetLastError());
             break;
         case DType::BFloat16:
             put_kernel_impl<__nv_bfloat16><<<blocks, BLOCK_SIZE, 0, stream>>>(
@@ -1576,6 +1619,7 @@ auto put_kernel(Tensor& input, const Tensor& indices, const Tensor& source,
                 indices.data<int64_t>(),
                 reinterpret_cast<const __nv_bfloat16*>(source.data_ptr()),
                 num_indices, total_size, accumulate);
+            CUDA_CHECK(cudaGetLastError());
             break;
         default:
             throw std::runtime_error("put_kernel: unsupported dtype");

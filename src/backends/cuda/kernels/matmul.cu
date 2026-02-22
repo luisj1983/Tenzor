@@ -10,9 +10,9 @@
 
 #ifdef TENZOR_HAS_CUBLAS
 #include <cublas_v2.h>
+#include "../cublas_handle_pool.hpp"
 #endif
 
-#include <mutex>
 #include <random>
 
 namespace tenzor {
@@ -964,35 +964,13 @@ __global__ void batched_matmul_tiled_bf16_kernel(
 
 #ifdef TENZOR_HAS_CUBLAS
 
-// Thread-safe cuBLAS handle management
-static cublasHandle_t cublas_handle = nullptr;
-static std::mutex cublas_mutex;
-
-cublasHandle_t get_cublas_handle() {
-    // Double-checked locking pattern for thread-safe initialization
-    if (cublas_handle == nullptr) {
-        std::lock_guard<std::mutex> lock(cublas_mutex);
-        // Check again after acquiring lock
-        if (cublas_handle == nullptr) {
-            cublasStatus_t status = cublasCreate(&cublas_handle);
-            if (status != CUBLAS_STATUS_SUCCESS) {
-                throw std::runtime_error("Failed to create cuBLAS handle");
-            }
-            // Enable TF32 Tensor Core acceleration for FP32 operations
-            // This provides significant speedup on Ampere+ GPUs (SM >= 8.0)
-            // TF32 uses 19-bit precision which is sufficient for most ML workloads
-            cublasSetMathMode(cublas_handle, CUBLAS_TF32_TENSOR_OP_MATH);
-        }
-    }
-    return cublas_handle;
-}
 
 // Use cuBLAS for large matrices with Tensor Core acceleration (TF32)
 void matmul_cublas_f32(
     const float* A, const float* B, float* C,
     int64_t M, int64_t N, int64_t K) {
 
-    cublasHandle_t handle = get_cublas_handle();
+    cublasHandle_t handle = CuBLASHandlePool::get();
 
     // cuBLAS uses column-major order, we use row-major
     // To compute C = A @ B in row-major, we compute C^T = B^T @ A^T
@@ -1027,7 +1005,7 @@ void matmul_cublas_f64(
     const double* A, const double* B, double* C,
     int64_t M, int64_t N, int64_t K) {
 
-    cublasHandle_t handle = get_cublas_handle();
+    cublasHandle_t handle = CuBLASHandlePool::get();
 
     const double alpha = 1.0;
     const double beta = 0.0;
@@ -1055,7 +1033,7 @@ void batched_matmul_cublas_f32(
     int64_t batch_size, int64_t M, int64_t N, int64_t K,
     int64_t stride_a, int64_t stride_b, int64_t stride_c) {
 
-    cublasHandle_t handle = get_cublas_handle();
+    cublasHandle_t handle = CuBLASHandlePool::get();
 
     const float alpha = 1.0f;
     const float beta = 0.0f;
@@ -1087,7 +1065,7 @@ void batched_matmul_cublas_f64(
     int64_t batch_size, int64_t M, int64_t N, int64_t K,
     int64_t stride_a, int64_t stride_b, int64_t stride_c) {
 
-    cublasHandle_t handle = get_cublas_handle();
+    cublasHandle_t handle = CuBLASHandlePool::get();
 
     const double alpha = 1.0;
     const double beta = 0.0;
@@ -1115,7 +1093,7 @@ void matmul_cublas_bf16(
     const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
     int64_t M, int64_t N, int64_t K) {
 
-    cublasHandle_t handle = get_cublas_handle();
+    cublasHandle_t handle = CuBLASHandlePool::get();
 
     // cuBLAS uses column-major order, we use row-major
     // To compute C = A @ B in row-major, we compute C^T = B^T @ A^T
@@ -1152,7 +1130,7 @@ void batched_matmul_cublas_bf16(
     int64_t batch_size, int64_t M, int64_t N, int64_t K,
     int64_t stride_a, int64_t stride_b, int64_t stride_c) {
 
-    cublasHandle_t handle = get_cublas_handle();
+    cublasHandle_t handle = CuBLASHandlePool::get();
 
     const float alpha = 1.0f;
     const float beta = 0.0f;
@@ -1273,6 +1251,7 @@ void matmul_f16(
                   (M + WMMA_M - 1) / WMMA_M);
 
         matmul_tensor_core_f16_kernel<<<grid, block, 0, stream>>>(A, B, C, M, N, K);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         // Fall back to standard tiled kernel for non-aligned dimensions
         // Use smaller tile size (16x16 block) to reduce resource usage
@@ -1282,6 +1261,7 @@ void matmul_f16(
 
         matmul_tiled_f16_kernel<TILE_SIZE_F16, TILE_SIZE_F16, TILE_SIZE_K>
             <<<grid, block, 0, stream>>>(A, B, C, M, N, K, K, N, N);
+            CUDA_CHECK(cudaGetLastError());
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -1406,6 +1386,7 @@ void batched_matmul_f16(
         batched_matmul_tensor_core_f16_kernel<<<grid, block, 0, stream>>>(
             A, B, C, batch_size, M, N, K,
             stride_a, stride_b, stride_c);
+            CUDA_CHECK(cudaGetLastError());
     } else {
         // Batched tiled F16 kernel using blockIdx.z for batch indexing
         dim3 block(TILE_SIZE_F16, TILE_SIZE_F16);
@@ -1419,6 +1400,7 @@ void batched_matmul_f16(
                 M, N, K,
                 K, N, N,  // lda, ldb, ldc for row-major
                 stride_a, stride_b, stride_c);
+                CUDA_CHECK(cudaGetLastError());
     }
 
     CUDA_CHECK(cudaGetLastError());

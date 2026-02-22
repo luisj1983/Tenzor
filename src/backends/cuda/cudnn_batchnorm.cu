@@ -12,6 +12,7 @@
 #ifdef TENZOR_HAS_CUDNN
 
 #include "tenzor/backend/cudnn_wrapper.hpp"
+#include "cuda_error.hpp"
 #include "tenzor/core/tensor.hpp"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -387,6 +388,7 @@ auto cudnn_batchnorm2d_forward_training(
             running_var_f32.data<float>(),
             reinterpret_cast<__half*>(running_var.data_ptr()),
             stat_n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         // For BF16 input, cuDNN requires FP32 for all BN parameters
         const float alpha = 1.0f;
@@ -432,6 +434,7 @@ auto cudnn_batchnorm2d_forward_training(
             running_var_f32.data<float>(),
             reinterpret_cast<__nv_bfloat16*>(running_var.data_ptr()),
             stat_n);
+        CUDA_CHECK(cudaGetLastError());
     }
 
     cudnnDestroyTensorDescriptor(bn_desc);

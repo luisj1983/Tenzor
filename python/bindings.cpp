@@ -1407,14 +1407,21 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("zero_grad", &tenzor::Variable::zero_grad,
              "Zero the gradient")
         // Hook registration — wrap Python callable to acquire GIL during backward
-        .def("register_hook", [](tenzor::Variable& self, py::function hook) {
-            auto cpp_hook = [hook](const tenzor::Tensor& grad) -> tenzor::Tensor {
+        .def("register_hook", [](tenzor::Variable& self, py::object hook) {
+            py::object hook_ref = hook;  // explicit refcount increment
+            auto cpp_hook = [hook_ref](const tenzor::Tensor& grad) -> tenzor::Tensor {
                 py::gil_scoped_acquire acquire;
-                py::object result = hook(grad);
-                return result.cast<tenzor::Tensor>();
+                try {
+                    py::object result = hook_ref(grad);
+                    return result.cast<tenzor::Tensor>();
+                } catch (py::error_already_set& e) {
+                    throw;  // Re-raise Python exceptions properly
+                }
             };
             return self.register_hook(cpp_hook);
         }, py::arg("hook"), "Register a backward hook function")
+        .def("unregister_hook", &tenzor::Variable::unregister_hook,
+             py::arg("hook_id"), "Remove a previously registered backward hook")
         .def("retain_grad", &tenzor::Variable::retain_grad,
              "Enable gradient retention for non-leaf variables")
         .def_property_readonly("retains_grad", &tenzor::Variable::retains_grad,
@@ -1873,51 +1880,75 @@ PYBIND11_MODULE(tenzor_core, m) {
         // Hook system (PyTorch-compatible naming)
         // ====================================================================
         // Forward hooks - called after forward pass with input and output
-        .def("register_forward_hook", [](tenzor::nn::Module& self, py::function hook) {
-            return self.register_forward_post_hook([hook](tenzor::nn::Module* m, const tenzor::Variable& input, const tenzor::Variable& output) {
+        .def("register_forward_hook", [](tenzor::nn::Module& self, py::object hook) {
+            py::object hook_ref = hook;
+            return self.register_forward_post_hook([hook_ref](tenzor::nn::Module* m, const tenzor::Variable& input, const tenzor::Variable& output) {
                 py::gil_scoped_acquire acquire;
-                // Call with PyTorch-compatible signature: hook(module, input, output)
-                // PyTorch passes tuples for input, we pass the Variable directly
-                hook(m, input, output);
+                try {
+                    hook_ref(m, input, output);
+                } catch (py::error_already_set&) {
+                    throw;
+                }
             });
         }, py::arg("hook"),
            "Register hook called after forward pass (PyTorch-compatible)")
-        .def("register_forward_pre_hook", [](tenzor::nn::Module& self, py::function hook) {
-            return self.register_forward_pre_hook([hook](tenzor::nn::Module* m, const tenzor::Variable& input) {
+        .def("register_forward_pre_hook", [](tenzor::nn::Module& self, py::object hook) {
+            py::object hook_ref = hook;
+            return self.register_forward_pre_hook([hook_ref](tenzor::nn::Module* m, const tenzor::Variable& input) {
                 py::gil_scoped_acquire acquire;
-                // Call with signature: hook(module, input)
-                hook(m, input);
+                try {
+                    hook_ref(m, input);
+                } catch (py::error_already_set&) {
+                    throw;
+                }
             });
         }, py::arg("hook"),
            "Register hook called before forward pass")
-        // Backward hooks - NOTE: These require integration with autograd
-        // For now, backward hooks can be triggered manually via call_backward_hooks()
-        .def("register_backward_hook", [](tenzor::nn::Module& self, py::function hook) {
-            return self.register_backward_post_hook([hook](tenzor::nn::Module* m, const tenzor::Variable& grad_input, const tenzor::Variable& grad_output) {
+        .def("register_backward_hook", [](tenzor::nn::Module& self, py::object hook) {
+            py::object hook_ref = hook;
+            return self.register_backward_post_hook([hook_ref](tenzor::nn::Module* m, const tenzor::Variable& grad_input, const tenzor::Variable& grad_output) {
                 py::gil_scoped_acquire acquire;
-                hook(m, grad_input, grad_output);
+                try {
+                    hook_ref(m, grad_input, grad_output);
+                } catch (py::error_already_set&) {
+                    throw;
+                }
             });
         }, py::arg("hook"),
            "Register hook called after backward pass (PyTorch-compatible)")
-        .def("register_full_backward_hook", [](tenzor::nn::Module& self, py::function hook) {
-            return self.register_backward_post_hook([hook](tenzor::nn::Module* m, const tenzor::Variable& grad_input, const tenzor::Variable& grad_output) {
+        .def("register_full_backward_hook", [](tenzor::nn::Module& self, py::object hook) {
+            py::object hook_ref = hook;
+            return self.register_backward_post_hook([hook_ref](tenzor::nn::Module* m, const tenzor::Variable& grad_input, const tenzor::Variable& grad_output) {
                 py::gil_scoped_acquire acquire;
-                hook(m, grad_input, grad_output);
+                try {
+                    hook_ref(m, grad_input, grad_output);
+                } catch (py::error_already_set&) {
+                    throw;
+                }
             });
         }, py::arg("hook"),
            "Register hook called after backward pass with full gradients")
-        .def("register_full_backward_pre_hook", [](tenzor::nn::Module& self, py::function hook) {
-            return self.register_backward_pre_hook([hook](tenzor::nn::Module* m, const tenzor::Variable& grad_output) {
+        .def("register_full_backward_pre_hook", [](tenzor::nn::Module& self, py::object hook) {
+            py::object hook_ref = hook;
+            return self.register_backward_pre_hook([hook_ref](tenzor::nn::Module* m, const tenzor::Variable& grad_output) {
                 py::gil_scoped_acquire acquire;
-                hook(m, grad_output);
+                try {
+                    hook_ref(m, grad_output);
+                } catch (py::error_already_set&) {
+                    throw;
+                }
             });
         }, py::arg("hook"),
            "Register hook called before backward pass")
-        // Keep original names for compatibility (using new signatures)
-        .def("register_forward_post_hook", [](tenzor::nn::Module& self, py::function hook) {
-            return self.register_forward_post_hook([hook](tenzor::nn::Module* m, const tenzor::Variable& input, const tenzor::Variable& output) {
+        .def("register_forward_post_hook", [](tenzor::nn::Module& self, py::object hook) {
+            py::object hook_ref = hook;
+            return self.register_forward_post_hook([hook_ref](tenzor::nn::Module* m, const tenzor::Variable& input, const tenzor::Variable& output) {
                 py::gil_scoped_acquire acquire;
-                hook(m, input, output);
+                try {
+                    hook_ref(m, input, output);
+                } catch (py::error_already_set&) {
+                    throw;
+                }
             });
         }, py::arg("hook"),
            "Register hook called after forward pass")

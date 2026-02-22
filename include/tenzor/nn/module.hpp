@@ -504,13 +504,13 @@ protected:
     std::unordered_map<std::string, std::shared_ptr<Variable>> buffers_;          ///< Named buffers (stable addresses)
     std::unordered_map<std::string, std::shared_ptr<Module>> submodules_;         ///< Named submodules
 
-    // Hook system storage
-    std::vector<ForwardPreHook> forward_pre_hooks_;                               ///< Forward pre-hooks
-    std::vector<ForwardPostHook> forward_post_hooks_;                             ///< Forward post-hooks
-    std::vector<ForwardPreHookMulti> forward_pre_hooks_multi_;                    ///< Multi-input forward pre-hooks
-    std::vector<ForwardPostHookMulti> forward_post_hooks_multi_;                  ///< Multi-input forward post-hooks
-    std::vector<BackwardPreHook> backward_pre_hooks_;                             ///< Backward pre-hooks
-    std::vector<BackwardPostHook> backward_post_hooks_;                           ///< Backward post-hooks
+    // Hook system storage (keyed by hook ID for O(1) removal)
+    std::unordered_map<size_t, ForwardPreHook> forward_pre_hooks_;                ///< Forward pre-hooks
+    std::unordered_map<size_t, ForwardPostHook> forward_post_hooks_;              ///< Forward post-hooks
+    std::unordered_map<size_t, ForwardPreHookMulti> forward_pre_hooks_multi_;     ///< Multi-input forward pre-hooks
+    std::unordered_map<size_t, ForwardPostHookMulti> forward_post_hooks_multi_;   ///< Multi-input forward post-hooks
+    std::unordered_map<size_t, BackwardPreHook> backward_pre_hooks_;              ///< Backward pre-hooks
+    std::unordered_map<size_t, BackwardPostHook> backward_post_hooks_;            ///< Backward post-hooks
     size_t next_hook_id_{0};                                                      ///< Next hook ID for tracking
     bool has_forward_hooks_{false};                                               ///< True if this module has forward hooks
     bool has_backward_hooks_{false};                                              ///< True if this module has backward hooks
@@ -520,7 +520,7 @@ protected:
      * @param input The input variable being passed to forward
      */
     auto call_own_forward_pre_hooks(const Variable& input) -> void {
-        for (auto& hook : forward_pre_hooks_) {
+        for (auto& [id, hook] : forward_pre_hooks_) {
             hook(this, input);
         }
     }
@@ -531,7 +531,7 @@ protected:
      * @param output The output variable produced by forward
      */
     auto call_own_forward_post_hooks(const Variable& input, const Variable& output) -> void {
-        for (auto& hook : forward_post_hooks_) {
+        for (auto& [id, hook] : forward_post_hooks_) {
             hook(this, input, output);
         }
     }

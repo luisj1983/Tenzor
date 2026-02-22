@@ -26,19 +26,19 @@ double exp_d(double x) {
     if (x > 709.0) return 1.0e308;
     if (x < -745.0) return 0.0;
 
-    // For moderate values that fit in float range, use float exp
-    if (x >= -87.0 && x <= 88.0) {
-        return double(exp(float(x)));
-    }
-
     // Range reduction: exp(x) = 2^k * exp(r) where x = k*ln(2) + r
     double ln2 = 0.6931471805599453;
     double k_dbl = floor(x / ln2 + 0.5);
     double r = x - k_dbl * ln2;
     int k = int(clamp(k_dbl, -1100.0, 1100.0));
 
-    // exp(r) where |r| <= ln(2)/2, use float exp
-    double exp_r = double(exp(float(r)));
+    // exp(r) via degree-13 Taylor polynomial (Horner's method)
+    // |r| <= ln(2)/2, error bound < r^14/14! < 1e-19
+    double exp_r = 1.0 + r * (1.0 + r * (0.5 + r * (1.0/6.0 + r * (1.0/24.0 + r * (1.0/120.0 +
+        r * (1.0/720.0 + r * (1.0/5040.0 + r * (1.0/40320.0 + r * (1.0/362880.0 +
+        r * (1.0/3628800.0 + r * (1.0/39916800.0 + r * (1.0/479001600.0 +
+        r * (1.0/6227020800.0)))))))))))));
+
 
     // Compute 2^|k| using O(log(k)) binary exponentiation
     double pow2 = 1.0;

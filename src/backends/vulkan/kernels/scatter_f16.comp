@@ -1,0 +1,147 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Scatter operation for Float16: scatter elements along specified dimension
+// Float16 elements are packed 2 per 32-bit word in uint buffers
+// Uses atomic operations for the packed output buffer
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };       // Packed F16 pairs (source)
+layout(binding = 1) buffer Indices { int indices[]; };          // Scatter indices
+layout(binding = 2) buffer Output { uint output_data[]; };     // Packed F16 pairs (destination, uint for atomics)
+layout(binding = 3) buffer Values { uint values[]; };          // Packed F16 pairs (values to scatter)
+
+layout(push_constant) uniform PushConstants {
+    uint input_size;       // Size of input/indices (in elements)
+    uint output_size;      // Total output size (in elements)
+    uint dim;              // Dimension to scatter along
+    uint dim_size;         // Size of the dimension being scattered to (output)
+    uint input_dim_size;   // Size of the dimension in input/values tensor
+    uint inner_size;       // Product of dimensions after dim
+    uint outer_size;       // Product of dimensions before dim
+    uint reduction;        // 0=none, 1=add, 2=multiply
+    uint use_values;       // 0=use input_data, 1=use values buffer
+} params;
+
+// Read a single Float16 element from packed uint32 array
+float readF16FromInput(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint half_offset = (element_idx % 2) * 16;
+    uint bits = (input_data[word_idx] >> half_offset) & 0xFFFFu;
+    return unpackHalf2x16(bits).x;
+}
+
+float readF16FromValues(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint half_offset = (element_idx % 2) * 16;
+    uint bits = (values[word_idx] >> half_offset) & 0xFFFFu;
+    return unpackHalf2x16(bits).x;
+}
+
+float readF16FromOutput(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint half_offset = (element_idx % 2) * 16;
+    uint bits = (output_data[word_idx] >> half_offset) & 0xFFFFu;
+    return unpackHalf2x16(bits).x;
+}
+
+// Write a single Float16 element to packed output using CAS loop
+// Two separate atomicAnd/atomicOr would race when multiple threads
+// scatter to the same element (OR of bits instead of last-writer-wins).
+void writeF16(uint element_idx, float value) {
+    uint word_idx = element_idx / 2;
+    uint half_offset = (element_idx % 2) * 16;
+    uint new_bits = packHalf2x16(vec2(value, 0.0)) & 0xFFFFu;
+    uint mask = 0xFFFFu << half_offset;
+
+    uint old_word = output_data[word_idx];
+    for (int attempt = 0; attempt < 1024; ++attempt) {
+        uint new_word = (old_word & ~mask) | (new_bits << half_offset);
+        uint result = atomicCompSwap(output_data[word_idx], old_word, new_word);
+        if (result == old_word) return;
+        old_word = result;
+    }
+}
+
+// Atomic add for Float16 using CAS loop on the uint32 word
+void atomicAddF16(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_offset = (element_idx % 2) * 16;
+
+    uint old_word = output_data[word_idx];
+    for (int attempt = 0; attempt < 1024; ++attempt) {
+        // Extract current F16 value
+        uint old_bits = (old_word >> half_offset) & 0xFFFFu;
+        float old_val = unpackHalf2x16(old_bits).x;
+        float new_val = old_val + val;
+        uint new_bits = packHalf2x16(vec2(new_val, 0.0)) & 0xFFFFu;
+
+        // Build new word with updated half
+        uint new_word = (old_word & ~(0xFFFFu << half_offset)) | (new_bits << half_offset);
+        uint result = atomicCompSwap(output_data[word_idx], old_word, new_word);
+        if (result == old_word) return;
+        old_word = result;
+    }
+}
+
+// Atomic multiply for Float16 using CAS loop
+void atomicMulF16(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_offset = (element_idx % 2) * 16;
+
+    uint old_word = output_data[word_idx];
+    for (int attempt = 0; attempt < 1024; ++attempt) {
+        uint old_bits = (old_word >> half_offset) & 0xFFFFu;
+        float old_val = unpackHalf2x16(old_bits).x;
+        float new_val = old_val * val;
+        uint new_bits = packHalf2x16(vec2(new_val, 0.0)) & 0xFFFFu;
+
+        uint new_word = (old_word & ~(0xFFFFu << half_offset)) | (new_bits << half_offset);
+        uint result = atomicCompSwap(output_data[word_idx], old_word, new_word);
+        if (result == old_word) return;
+        old_word = result;
+    }
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.input_size) {
+        return;
+    }
+
+    // Decompose input index based on VALUES tensor shape
+    uint outer_idx = idx / (params.inner_size * params.input_dim_size);
+    uint remainder = idx % (params.inner_size * params.input_dim_size);
+    uint inner_idx = remainder % params.inner_size;
+
+    // Get the scatter destination index
+    int scatter_idx = indices[idx];
+
+    // Bounds check
+    if (scatter_idx < 0 || scatter_idx >= int(params.dim_size)) {
+        return;
+    }
+
+    // Compute output index
+    uint out_idx = outer_idx * (params.dim_size * params.inner_size) +
+                   uint(scatter_idx) * params.inner_size +
+                   inner_idx;
+
+    // Get value to scatter
+    float value;
+    if (params.use_values > 0) {
+        value = readF16FromValues(idx);
+    } else {
+        value = readF16FromInput(idx);
+    }
+
+    // Perform scatter with reduction
+    if (params.reduction == 0) {
+        writeF16(out_idx, value);
+    } else if (params.reduction == 1) {
+        atomicAddF16(out_idx, value);
+    } else if (params.reduction == 2) {
+        atomicMulF16(out_idx, value);
+    }
+}

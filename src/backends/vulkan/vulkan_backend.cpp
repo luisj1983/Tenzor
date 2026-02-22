@@ -8732,16 +8732,123 @@ auto VulkanBackend::dispatchEmbedding(const Tensor& weight, const Tensor& indice
 
 auto VulkanBackend::dispatchGather(const Tensor& input, int64_t dim, const Tensor& indices) -> Tensor {
     auto indices_shape = indices.shape();
+    auto input_shape = input.shape();
     int32_t device_id = input.device().index;
+
+    // Handle empty tensors
+    if (input.numel() == 0 || indices.numel() == 0) {
+        std::vector<int64_t> out_shape(indices_shape.begin(), indices_shape.end());
+        return Tensor(out_shape, input.dtype(), input.device());
+    }
+
     bool is_float64 = (input.dtype() == DType::Float64);
-    std::string shader_name = is_float64 ? "gather_f64" : "gather";
+    bool is_float16 = (input.dtype() == DType::Float16);
+    std::string shader_name = is_float64 ? "gather_f64"
+                            : is_float16 ? "gather_f16"
+                            : "gather";
     auto* pipeline = getPipeline(shader_name, device_id);
+
+    // Normalize dimension
+    int64_t ndim = input.ndim();
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::invalid_argument("Gather: dimension out of range");
+    }
 
     std::vector<int64_t> out_shape(indices_shape.begin(), indices_shape.end());
     Tensor output(out_shape, input.dtype(), input.device());
 
+    // Convert Int64 indices to Int32 for shader compatibility
+    Tensor indices_int32 = indices;
+    if (indices.dtype() == DType::Int64) {
+        std::vector<int64_t> idx_shape(indices_shape.begin(), indices_shape.end());
+        indices_int32 = Tensor(idx_shape, DType::Int32, indices.device());
+
+        auto* cast_pipeline = getPipeline("cast_int64_to_int32", device_id);
+        VkBuffer buf_in = getVulkanBuffer(indices.data_ptr());
+        VkBuffer buf_out = getVulkanBuffer(indices_int32.data_ptr());
+        size_t size_in = indices.numel() * sizeof(int64_t);
+        size_t size_out = indices_int32.numel() * sizeof(int32_t);
+
+        std::vector<std::pair<uint32_t, VkBuffer>> cast_bindings = {
+            {0, buf_in}, {1, buf_out}
+        };
+        std::vector<size_t> cast_sizes = {size_in, size_out};
+        VkDescriptorSet cast_ds = allocateAndWriteDescriptorSet(device_id, cast_pipeline, cast_bindings, cast_sizes);
+
+        struct { uint32_t n_elements; } cast_pc;
+        cast_pc.n_elements = static_cast<uint32_t>(indices.numel());
+
+        uint32_t cast_groups = (cast_pc.n_elements + 255) / 256;
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cast_pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cast_pipeline->layout(), 0, 1, &cast_ds, 0, nullptr);
+        vkCmdPushConstants(cmd, cast_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(cast_pc), &cast_pc);
+        vkCmdDispatch(cmd, cast_groups, 1, 1);
+        insertComputeBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+        synchronize(device_id);
+    }
+
+    // Get Vulkan buffers
+    VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
+    VkBuffer buffer_indices = getVulkanBuffer(indices_int32.data_ptr());
+    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
+
+    size_t buffer_size_input = input.numel() * input.dtype_size();
+    size_t buffer_size_indices = indices_int32.numel() * sizeof(int32_t);
+    size_t buffer_size_output = output.numel() * output.dtype_size();
+
+    // Set up descriptor set with all buffers
+    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        {0, buffer_input},
+        {1, buffer_indices},
+        {2, buffer_output}
+    };
+    std::vector<size_t> sizes = {
+        buffer_size_input,
+        buffer_size_indices,
+        buffer_size_output
+    };
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    // Calculate gather parameters
+    uint32_t dim_size = static_cast<uint32_t>(input_shape[dim]);
+    uint32_t inner_size = 1;
+    for (int64_t d = dim + 1; d < ndim; ++d) {
+        inner_size *= static_cast<uint32_t>(input_shape[d]);
+    }
+    uint32_t outer_size = 1;
+    for (int64_t d = 0; d < dim; ++d) {
+        outer_size *= static_cast<uint32_t>(input_shape[d]);
+    }
+
+    // Push constants matching shader layout
+    struct PushConstants {
+        uint32_t input_size;
+        uint32_t output_size;
+        uint32_t dim;
+        uint32_t dim_size;
+        uint32_t inner_size;
+        uint32_t outer_size;
+    } push_constants;
+
+    push_constants.input_size = static_cast<uint32_t>(input.numel());
+    push_constants.output_size = static_cast<uint32_t>(output.numel());
+    push_constants.dim = static_cast<uint32_t>(dim);
+    push_constants.dim_size = dim_size;
+    push_constants.inner_size = inner_size;
+    push_constants.outer_size = outer_size;
+
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &push_constants);
 
     uint32_t workgroups = (output.numel() + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
@@ -8775,7 +8882,9 @@ auto VulkanBackend::dispatchScatter(const Tensor& input, int64_t dim, const Tens
     }
 
     // Select shader based on dtype
-    const char* shader_name = (input.dtype() == DType::Float64) ? "scatter_f64" : "scatter";
+    const char* shader_name = (input.dtype() == DType::Float64) ? "scatter_f64"
+                            : (input.dtype() == DType::Float16) ? "scatter_f16"
+                            : "scatter";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     // Normalize dimension

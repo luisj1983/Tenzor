@@ -187,11 +187,11 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                 }
 
                 // Apply hooks (access through impl_ for handle pattern)
-                // Copy hooks vector to local before iterating -- a hook may
+                // Copy hooks map to local before iterating -- a hook may
                 // modify the hooks list (register/unregister) during iteration
                 if (var.impl_ && !var.impl_->hooks_.empty()) {
                     auto hooks_copy = var.impl_->hooks_;
-                    for (auto& hook : hooks_copy) {
+                    for (auto& [id, hook] : hooks_copy) {
                         grad_to_apply = hook(grad_to_apply);
                     }
                 }
@@ -400,8 +400,9 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
 
                 Tensor grad_to_apply = input_grads[i];
 
-                if (var.impl_) {
-                    for (auto& hook : var.impl_->hooks_) {
+                if (var.impl_ && !var.impl_->hooks_.empty()) {
+                    auto hooks_copy = var.impl_->hooks_;
+                    for (auto& [id, hook] : hooks_copy) {
                         grad_to_apply = hook(grad_to_apply);
                     }
                 }

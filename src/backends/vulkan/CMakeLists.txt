@@ -109,8 +109,10 @@ set(SHADERS
     embedding_f64
     gather
     gather_f64
+    gather_f16
     scatter
     scatter_f64
+    scatter_f16
     index_select
     # Shape operations (NEW - 9 critical operations)
     fill

@@ -65,6 +65,7 @@ inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
     do { \
         auto [grid_, block_] = optimal_launch_config(kernel, n); \
         kernel<<<grid_, block_, 0, stream>>>(__VA_ARGS__); \
+        CUDA_CHECK(cudaGetLastError()); \
     } while(0)
 
 // Metadata struct passed by value to kernels (avoids cudaMalloc for shape/stride arrays)
@@ -131,41 +132,50 @@ auto contiguous_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
         contiguous_kernel_impl<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<float>(), result.data<float>(),
             meta, ndim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         contiguous_kernel_impl<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<double>(), result.data<double>(),
             meta, ndim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         contiguous_kernel_impl<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()),
             meta, ndim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         contiguous_kernel_impl<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()),
             meta, ndim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Int32) {
         contiguous_kernel_impl<int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<int32_t>(), result.data<int32_t>(),
             meta, ndim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Int64) {
         contiguous_kernel_impl<int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<int64_t>(), result.data<int64_t>(),
             meta, ndim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Int8) {
         contiguous_kernel_impl<int8_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<int8_t>(), result.data<int8_t>(),
             meta, ndim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::UInt8) {
         contiguous_kernel_impl<uint8_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<uint8_t>(), result.data<uint8_t>(),
             meta, ndim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Bool) {
         contiguous_kernel_impl<bool><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const bool*>(input.data_ptr()),
             reinterpret_cast<bool*>(result.data_ptr()),
             meta, ndim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Contiguous: unsupported dtype");
     }
@@ -471,46 +481,55 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, cudaStream_t strea
             reinterpret_cast<float**>(d_input_ptrs), output.data<float>(),
             d_input_shapes, d_output_shape, d_output_strides, d_offsets,
             num_tensors, ndim, dim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
     } else if (tensors[0].dtype() == DType::Float64) {
         cat_kernel_impl<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<double**>(d_input_ptrs), output.data<double>(),
             d_input_shapes, d_output_shape, d_output_strides, d_offsets,
             num_tensors, ndim, dim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
     } else if (tensors[0].dtype() == DType::Int32) {
         cat_kernel_impl<int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<int32_t**>(d_input_ptrs), output.data<int32_t>(),
             d_input_shapes, d_output_shape, d_output_strides, d_offsets,
             num_tensors, ndim, dim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
     } else if (tensors[0].dtype() == DType::Int64) {
         cat_kernel_impl<int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<int64_t**>(d_input_ptrs), output.data<int64_t>(),
             d_input_shapes, d_output_shape, d_output_strides, d_offsets,
             num_tensors, ndim, dim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
     } else if (tensors[0].dtype() == DType::Float16) {
         cat_kernel_impl<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<__half**>(d_input_ptrs), reinterpret_cast<__half*>(output.data_ptr()),
             d_input_shapes, d_output_shape, d_output_strides, d_offsets,
             num_tensors, ndim, dim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
     } else if (tensors[0].dtype() == DType::BFloat16) {
         cat_kernel_impl<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<__nv_bfloat16**>(d_input_ptrs), reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
             d_input_shapes, d_output_shape, d_output_strides, d_offsets,
             num_tensors, ndim, dim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
     } else if (tensors[0].dtype() == DType::Int8) {
         cat_kernel_impl<int8_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<int8_t**>(d_input_ptrs), output.data<int8_t>(),
             d_input_shapes, d_output_shape, d_output_strides, d_offsets,
             num_tensors, ndim, dim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
     } else if (tensors[0].dtype() == DType::UInt8) {
         cat_kernel_impl<uint8_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<uint8_t**>(d_input_ptrs), output.data<uint8_t>(),
             d_input_shapes, d_output_shape, d_output_strides, d_offsets,
             num_tensors, ndim, dim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
     } else if (tensors[0].dtype() == DType::Bool) {
         cat_kernel_impl<bool><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<bool**>(d_input_ptrs), reinterpret_cast<bool*>(output.data_ptr()),
             d_input_shapes, d_output_shape, d_output_strides, d_offsets,
             num_tensors, ndim, dim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Concatenation: unsupported dtype");
     }
@@ -598,14 +617,17 @@ auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, cud
         repeat_kernel_device<<<grid, block, 0, stream>>>(
             input.data<float>(), output.data<float>(),
             d_input_shape, d_input_strides, d_repeats, ndim, n);
+            CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         repeat_kernel_device<<<grid, block, 0, stream>>>(
             input.data<double>(), output.data<double>(),
             d_input_shape, d_input_strides, d_repeats, ndim, n);
+            CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         repeat_kernel_device<<<grid, block, 0, stream>>>(
             input.data<Float16>(), output.data<Float16>(),
             d_input_shape, d_input_strides, d_repeats, ndim, n);
+            CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("repeat operation only supports Float32, Float64, and Float16 dtypes");
     }
@@ -757,19 +779,24 @@ auto slice_kernel(
     if (input.dtype() == DType::Float32) {
         slice_kernel_impl<float><<<num_blocks, block_size, 0, stream>>>(
             input.data<float>(), output.data<float>(), meta, ndim, total);
+            CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         slice_kernel_impl<double><<<num_blocks, block_size, 0, stream>>>(
             input.data<double>(), output.data<double>(), meta, ndim, total);
+            CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         slice_kernel_impl<__half><<<num_blocks, block_size, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(output.data_ptr()), meta, ndim, total);
+            CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Int32) {
         slice_kernel_impl<int32_t><<<num_blocks, block_size, 0, stream>>>(
             input.data<int32_t>(), output.data<int32_t>(), meta, ndim, total);
+            CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Int64) {
         slice_kernel_impl<int64_t><<<num_blocks, block_size, 0, stream>>>(
             input.data<int64_t>(), output.data<int64_t>(), meta, ndim, total);
+            CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("slice: unsupported dtype");
     }
@@ -975,15 +1002,19 @@ auto to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* str
         if (input.dtype() == DType::Float32) {
             nchw_to_nhwc_transform<float><<<grid_size, block_size, 0, stream>>>(
                 input.data<float>(), output.data<float>(), N, C, H, W);
+                CUDA_CHECK(cudaGetLastError());
         } else if (input.dtype() == DType::Float16) {
             nchw_to_nhwc_transform<Float16><<<grid_size, block_size, 0, stream>>>(
                 input.data<Float16>(), output.data<Float16>(), N, C, H, W);
+                CUDA_CHECK(cudaGetLastError());
         } else if (input.dtype() == DType::Float64) {
             nchw_to_nhwc_transform<double><<<grid_size, block_size, 0, stream>>>(
                 input.data<double>(), output.data<double>(), N, C, H, W);
+                CUDA_CHECK(cudaGetLastError());
         } else if (input.dtype() == DType::BFloat16) {
             nchw_to_nhwc_transform<BFloat16><<<grid_size, block_size, 0, stream>>>(
                 input.data<BFloat16>(), output.data<BFloat16>(), N, C, H, W);
+                CUDA_CHECK(cudaGetLastError());
         } else {
             throw std::runtime_error("to_memory_format_kernel: unsupported dtype for ChannelsLast");
         }
@@ -991,19 +1022,25 @@ auto to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* str
         if (input.dtype() == DType::Float32) {
             nhwc_to_nchw_transform<float><<<grid_size, block_size, 0, stream>>>(
                 input.data<float>(), output.data<float>(), N, C, H, W);
+                CUDA_CHECK(cudaGetLastError());
         } else if (input.dtype() == DType::Float16) {
             nhwc_to_nchw_transform<Float16><<<grid_size, block_size, 0, stream>>>(
                 input.data<Float16>(), output.data<Float16>(), N, C, H, W);
+                CUDA_CHECK(cudaGetLastError());
         } else if (input.dtype() == DType::Float64) {
             nhwc_to_nchw_transform<double><<<grid_size, block_size, 0, stream>>>(
                 input.data<double>(), output.data<double>(), N, C, H, W);
+                CUDA_CHECK(cudaGetLastError());
         } else if (input.dtype() == DType::BFloat16) {
             nhwc_to_nchw_transform<BFloat16><<<grid_size, block_size, 0, stream>>>(
                 input.data<BFloat16>(), output.data<BFloat16>(), N, C, H, W);
+                CUDA_CHECK(cudaGetLastError());
         } else {
             throw std::runtime_error("to_memory_format_kernel: unsupported dtype for Contiguous");
         }
     }
+
+    CUDA_CHECK(cudaGetLastError());
 
     return output;
 }

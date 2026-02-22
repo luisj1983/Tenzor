@@ -329,6 +329,7 @@ auto lstm_cell_forward_kernel(
             c_out.data<float>(),
             batch_size,
             hidden_size);
+            CUDA_CHECK(cudaGetLastError());
     } else if (gates.dtype() == DType::Float64) {
         lstm_cell_forward_fused<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             gates.data<double>(),
@@ -337,6 +338,7 @@ auto lstm_cell_forward_kernel(
             c_out.data<double>(),
             batch_size,
             hidden_size);
+            CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("LSTM only supports Float32 and Float64");
     }
@@ -379,6 +381,7 @@ auto lstm_cell_backward_kernel(
             grad_c_prev.data<float>(),
             batch_size,
             hidden_size);
+            CUDA_CHECK(cudaGetLastError());
     } else if (gates.dtype() == DType::Float64) {
         lstm_cell_backward_fused<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             grad_h.data<double>(),
@@ -390,6 +393,7 @@ auto lstm_cell_backward_kernel(
             grad_c_prev.data<double>(),
             batch_size,
             hidden_size);
+            CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("LSTM backward only supports Float32 and Float64");
     }

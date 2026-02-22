@@ -12,6 +12,76 @@ layout(push_constant) uniform PushConstants {
     uint op;         // Operation: 0=sinh, 1=cosh, 2=tanh
 } params;
 
+// Double-precision exp using range reduction
+double exp_d(double x) {
+    if (x != x) return x;  // NaN
+    if (x > 709.0) return 1.0e308;
+    if (x < -745.0) return 0.0;
+
+    // Range reduction: exp(x) = 2^k * exp(r)
+    double ln2 = 0.6931471805599453;
+    double k_dbl = floor(x / ln2 + 0.5);
+    double r = x - k_dbl * ln2;
+    int k = int(clamp(k_dbl, -1100.0, 1100.0));
+
+    // exp(r) via degree-13 Taylor polynomial (Horner's method)
+    // |r| <= ln(2)/2, error bound < r^14/14! < 1e-19
+    double exp_r = 1.0 + r * (1.0 + r * (0.5 + r * (1.0/6.0 + r * (1.0/24.0 + r * (1.0/120.0 +
+        r * (1.0/720.0 + r * (1.0/5040.0 + r * (1.0/40320.0 + r * (1.0/362880.0 +
+        r * (1.0/3628800.0 + r * (1.0/39916800.0 + r * (1.0/479001600.0 +
+        r * (1.0/6227020800.0)))))))))))));
+
+
+    // Compute 2^|k| via binary exponentiation
+    double pow2 = 1.0;
+    int abs_k = (k >= 0) ? k : -k;
+    double base = 2.0;
+    while (abs_k > 0) {
+        if ((abs_k & 1) != 0) pow2 *= base;
+        base *= base;
+        abs_k >>= 1;
+    }
+
+    return (k >= 0) ? (exp_r * pow2) : (exp_r / pow2);
+}
+
+// Double-precision sinh: (exp(x) - exp(-x)) / 2
+double sinh_d(double x) {
+    if (x != x) return x;  // NaN
+    // For moderate values, use float sinh
+    if (x >= -87.0 && x <= 87.0) {
+        return double(sinh(float(x)));
+    }
+    double ep = exp_d(x);
+    double em = exp_d(-x);
+    return (ep - em) * 0.5;
+}
+
+// Double-precision cosh: (exp(x) + exp(-x)) / 2
+double cosh_d(double x) {
+    if (x != x) return x;  // NaN
+    // For moderate values, use float cosh
+    if (x >= -87.0 && x <= 87.0) {
+        return double(cosh(float(x)));
+    }
+    double ep = exp_d(x);
+    double em = exp_d(-x);
+    return (ep + em) * 0.5;
+}
+
+// Double-precision tanh: (exp(2x) - 1) / (exp(2x) + 1)
+double tanh_d(double x) {
+    if (x != x) return x;  // NaN
+    if (x > 20.0) return 1.0;
+    if (x < -20.0) return -1.0;
+    // For moderate values, use float tanh
+    if (x >= -9.0 && x <= 9.0) {
+        return double(tanh(float(x)));
+    }
+    double e2x = exp_d(2.0 * x);
+    return (e2x - 1.0) / (e2x + 1.0);
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
 
@@ -21,16 +91,15 @@ void main() {
 
     double val = input_data[idx];
 
-    // GLSL hyperbolic functions operate on float; cast through float for computation
     switch (params.op) {
         case 0: // sinh
-            output_data[idx] = double(sinh(float(val)));
+            output_data[idx] = sinh_d(val);
             break;
         case 1: // cosh
-            output_data[idx] = double(cosh(float(val)));
+            output_data[idx] = cosh_d(val);
             break;
         case 2: // tanh
-            output_data[idx] = double(tanh(float(val)));
+            output_data[idx] = tanh_d(val);
             break;
         default:
             output_data[idx] = 0.0;

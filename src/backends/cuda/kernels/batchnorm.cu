@@ -1244,11 +1244,13 @@ auto group_norm_forward_kernel(
             input.data<float>(), weight.data<float>(), bias.data<float>(),
             output.data<float>(), mean_out.data<float>(), inv_std_out.data<float>(),
             N, C, HW, num_groups, channels_per_group, eps);
+            CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         group_norm_forward_kernel<double><<<num_group_instances, block_size, 0, stream>>>(
             input.data<double>(), weight.data<double>(), bias.data<double>(),
             output.data<double>(), mean_out.data<double>(), inv_std_out.data<double>(),
             N, C, HW, num_groups, channels_per_group, eps);
+            CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         // Mixed precision: compute in Float32, convert back
         // Create Float32 temporaries
@@ -1314,12 +1316,14 @@ auto group_norm_backward_kernel(
             mean_saved.data<float>(), inv_std_saved.data<float>(),
             grad_input.data<float>(), grad_weight.data<float>(), grad_bias.data<float>(),
             N, C, HW, num_groups, channels_per_group);
+            CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         group_norm_backward_kernel<double><<<num_group_instances, block_size, 0, stream>>>(
             grad_output.data<double>(), input.data<double>(), weight.data<double>(),
             mean_saved.data<double>(), inv_std_saved.data<double>(),
             grad_input.data<double>(), grad_weight.data<double>(), grad_bias.data<double>(),
             N, C, HW, num_groups, channels_per_group);
+            CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         // Mixed precision: compute in Float32, convert back
         Tensor grad_out_f32 = grad_output.to(DType::Float32);

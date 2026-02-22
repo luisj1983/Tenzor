@@ -20,6 +20,7 @@
 #include <mutex>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "cublas_handle_pool.hpp"
 
 namespace tenzor {
 namespace cuda {
@@ -61,46 +62,17 @@ inline const char* cublas_status_to_string(cublasStatus_t status) {
     } \
 } while(0)
 
-// ============================================================================
-// cuBLAS Handle Manager (Thread-Safe Singleton)
-// ============================================================================
+#define CUDA_CHECK(call) do { \
+    cudaError_t err = (call); \
+    if (err != cudaSuccess) { \
+        throw std::runtime_error( \
+            std::string("CUDA error: ") + cudaGetErrorString(err) + \
+            " at " + __FILE__ + ":" + std::to_string(__LINE__) \
+        ); \
+    } \
+} while(0)
 
-class CuBLASHandleManager {
-public:
-    static cublasHandle_t get_handle() {
-        static CuBLASHandleManager instance;
-        return instance.handle_;
-    }
-
-    static void set_stream(cudaStream_t stream) {
-        CUBLAS_CHECK(cublasSetStream(get_handle(), stream));
-    }
-
-    static void set_math_mode(cublasMath_t mode) {
-        CUBLAS_CHECK(cublasSetMathMode(get_handle(), mode));
-    }
-
-private:
-    CuBLASHandleManager() {
-        CUBLAS_CHECK(cublasCreate(&handle_));
-        // Enable Tensor Core operations by default
-        #if CUDA_VERSION >= 9000
-        CUBLAS_CHECK(cublasSetMathMode(handle_, CUBLAS_TENSOR_OP_MATH));
-        #endif
-    }
-
-    ~CuBLASHandleManager() {
-        if (handle_) {
-            cublasDestroy(handle_);
-        }
-    }
-
-    // Prevent copying
-    CuBLASHandleManager(const CuBLASHandleManager&) = delete;
-    CuBLASHandleManager& operator=(const CuBLASHandleManager&) = delete;
-
-    cublasHandle_t handle_ = nullptr;
-};
+// cuBLAS handle management via centralized CuBLASHandlePool (cublas_handle_pool.hpp)
 
 // ============================================================================
 // Data Type Conversion Utilities
@@ -179,10 +151,7 @@ void cublas_gemm_ex(
     bool transpose_b = false
 ) {
     // Get cuBLAS handle and set stream
-    cublasHandle_t handle = CuBLASHandleManager::get_handle();
-    if (stream) {
-        CuBLASHandleManager::set_stream(stream);
-    }
+    cublasHandle_t handle = CuBLASHandlePool::get(stream);
 
     // Convert data types
     cudaDataType_t cuda_dtype = dtype_to_cuda(dtype);
@@ -283,10 +252,7 @@ void cublas_batched_gemm_ex(
     cudaStream_t stream = nullptr
 ) {
     // Get cuBLAS handle and set stream
-    cublasHandle_t handle = CuBLASHandleManager::get_handle();
-    if (stream) {
-        CuBLASHandleManager::set_stream(stream);
-    }
+    cublasHandle_t handle = CuBLASHandlePool::get(stream);
 
     // Convert data types
     cudaDataType_t cuda_dtype = dtype_to_cuda(dtype);
@@ -381,10 +347,7 @@ void cublas_batched_gemm_scaled(
     DType dtype,
     cudaStream_t stream = nullptr
 ) {
-    cublasHandle_t handle = CuBLASHandleManager::get_handle();
-    if (stream) {
-        CuBLASHandleManager::set_stream(stream);
-    }
+    cublasHandle_t handle = CuBLASHandlePool::get(stream);
 
     cudaDataType_t cuda_dtype = dtype_to_cuda(dtype);
     cudaDataType_t compute_type = select_compute_type(dtype);
@@ -765,10 +728,7 @@ auto linear_kernel(
     Tensor output(out_shape, input_c.dtype(), input_c.device());
 
     // Get cuBLAS handle and set stream
-    cublasHandle_t handle = CuBLASHandleManager::get_handle();
-    if (stream) {
-        CuBLASHandleManager::set_stream(stream);
-    }
+    cublasHandle_t handle = CuBLASHandlePool::get(stream);
 
     // Perform GEMM: output = input @ weight.T
     // In row-major: C[M,N] = A[M,K] @ B[N,K].T
@@ -820,7 +780,7 @@ auto linear_kernel(
                                                    bias_add_kernel_vec4, 0, 0);
                 int blocks = std::min(
                     static_cast<int>((total / 4 + block_size - 1) / block_size),
-                    65535
+                    2147483647
                 );
                 bias_add_kernel_vec4<<<blocks, block_size, 0, stream>>>(
                     output.data<float>(),
@@ -833,7 +793,7 @@ auto linear_kernel(
                                                    bias_add_kernel<float>, 0, 0);
                 int blocks = std::min(
                     static_cast<int>((total + block_size - 1) / block_size),
-                    65535
+                    2147483647
                 );
                 bias_add_kernel<float><<<blocks, block_size, 0, stream>>>(
                     output.data<float>(),
@@ -873,7 +833,7 @@ auto linear_kernel(
                                                bias_add_kernel<double>, 0, 0);
             int blocks = std::min(
                 static_cast<int>((total + block_size - 1) / block_size),
-                65535
+                2147483647
             );
             bias_add_kernel<double><<<blocks, block_size, 0, stream>>>(
                 output.data<double>(),
@@ -918,7 +878,7 @@ auto linear_kernel(
                                                bias_add_kernel<__half>, 0, 0);
             int blocks = std::min(
                 static_cast<int>((total + block_size - 1) / block_size),
-                65535
+                2147483647
             );
             bias_add_kernel<__half><<<blocks, block_size, 0, stream>>>(
                 reinterpret_cast<__half*>(output.data_ptr()),
@@ -963,7 +923,7 @@ auto linear_kernel(
                                                bias_add_kernel<__nv_bfloat16>, 0, 0);
             int blocks = std::min(
                 static_cast<int>((total + block_size - 1) / block_size),
-                65535
+                2147483647
             );
             bias_add_kernel<__nv_bfloat16><<<blocks, block_size, 0, stream>>>(
                 reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
@@ -975,6 +935,9 @@ auto linear_kernel(
     } else {
         throw std::runtime_error("linear_kernel: Unsupported dtype");
     }
+
+    // Check for errors from bias_add kernel launches
+    CUDA_CHECK(cudaGetLastError());
 
     return output;
 }
@@ -1026,10 +989,7 @@ auto linear_backward_kernel(
     Tensor grad_weight({out_features, in_features}, weight_c.dtype(), weight_c.device());
     Tensor grad_bias({out_features}, grad_out_c.dtype(), grad_out_c.device());
 
-    cublasHandle_t handle = CuBLASHandleManager::get_handle();
-    if (stream) {
-        CuBLASHandleManager::set_stream(stream);
-    }
+    cublasHandle_t handle = CuBLASHandlePool::get(stream);
 
     if (input_c.dtype() == DType::Float32) {
         const float alpha = 1.0f;
@@ -1272,6 +1232,9 @@ auto linear_backward_kernel(
     } else {
         throw std::runtime_error("linear_backward_kernel: Unsupported dtype");
     }
+
+    // Check for errors from bias_grad_reduce kernel launches
+    CUDA_CHECK(cudaGetLastError());
 
     return {grad_input, grad_weight, grad_bias};
 }

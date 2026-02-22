@@ -367,62 +367,85 @@ auto Sequential::load_state_dict(const std::unordered_map<std::string, Tensor>& 
 // ============================================================================
 
 auto Module::register_forward_pre_hook(ForwardPreHook hook) -> size_t {
-    forward_pre_hooks_.push_back(std::move(hook));
-    has_forward_hooks_ = true;  // Enable hook calling in forward()
-    return next_hook_id_++;
+    auto id = next_hook_id_++;
+    forward_pre_hooks_.emplace(id, std::move(hook));
+    has_forward_hooks_ = true;
+    return id;
 }
 
 auto Module::register_forward_post_hook(ForwardPostHook hook) -> size_t {
-    forward_post_hooks_.push_back(std::move(hook));
-    has_forward_hooks_ = true;  // Enable hook calling in forward()
-    return next_hook_id_++;
+    auto id = next_hook_id_++;
+    forward_post_hooks_.emplace(id, std::move(hook));
+    has_forward_hooks_ = true;
+    return id;
 }
 
 auto Module::register_forward_pre_hook_multi(ForwardPreHookMulti hook) -> size_t {
-    forward_pre_hooks_multi_.push_back(std::move(hook));
+    auto id = next_hook_id_++;
+    forward_pre_hooks_multi_.emplace(id, std::move(hook));
     has_forward_hooks_ = true;
-    return next_hook_id_++;
+    return id;
 }
 
 auto Module::register_forward_post_hook_multi(ForwardPostHookMulti hook) -> size_t {
-    forward_post_hooks_multi_.push_back(std::move(hook));
+    auto id = next_hook_id_++;
+    forward_post_hooks_multi_.emplace(id, std::move(hook));
     has_forward_hooks_ = true;
-    return next_hook_id_++;
+    return id;
 }
 
 auto Module::call_forward_pre_hooks_multi(const std::vector<Variable>& inputs) -> void {
-    for (auto& hook : forward_pre_hooks_multi_) {
+    for (auto& [id, hook] : forward_pre_hooks_multi_) {
         hook(this, inputs);
     }
 }
 
 auto Module::call_forward_post_hooks_multi(const std::vector<Variable>& inputs,
                                             const std::vector<Variable>& outputs) -> void {
-    for (auto& hook : forward_post_hooks_multi_) {
+    for (auto& [id, hook] : forward_post_hooks_multi_) {
         hook(this, inputs, outputs);
     }
 }
 
 auto Module::register_backward_pre_hook(BackwardPreHook hook) -> size_t {
-    backward_pre_hooks_.push_back(std::move(hook));
-    has_backward_hooks_ = true;  // Enable backward hook wrapping in forward()
-    return next_hook_id_++;
+    auto id = next_hook_id_++;
+    backward_pre_hooks_.emplace(id, std::move(hook));
+    has_backward_hooks_ = true;
+    return id;
 }
 
 auto Module::register_backward_post_hook(BackwardPostHook hook) -> size_t {
-    backward_post_hooks_.push_back(std::move(hook));
-    has_backward_hooks_ = true;  // Enable backward hook wrapping in forward()
-    return next_hook_id_++;
+    auto id = next_hook_id_++;
+    backward_post_hooks_.emplace(id, std::move(hook));
+    has_backward_hooks_ = true;
+    return id;
 }
 
 auto Module::remove_hook(size_t hook_id) -> void {
-    // Note: Simple implementation - for production, would track hook IDs properly
-    // For now, we don't implement removal as hooks are registered once and kept
-    (void)hook_id;  // Suppress unused parameter warning
+    // Search all hook maps and erase by ID
+    if (forward_pre_hooks_.erase(hook_id) ||
+        forward_post_hooks_.erase(hook_id) ||
+        forward_pre_hooks_multi_.erase(hook_id) ||
+        forward_post_hooks_multi_.erase(hook_id)) {
+        // Removed a forward hook — update flag if no forward hooks remain
+        has_forward_hooks_ = !forward_pre_hooks_.empty() ||
+                             !forward_post_hooks_.empty() ||
+                             !forward_pre_hooks_multi_.empty() ||
+                             !forward_post_hooks_multi_.empty();
+        return;
+    }
+
+    if (backward_pre_hooks_.erase(hook_id) ||
+        backward_post_hooks_.erase(hook_id)) {
+        // Removed a backward hook — update flag if no backward hooks remain
+        has_backward_hooks_ = !backward_pre_hooks_.empty() ||
+                              !backward_post_hooks_.empty();
+        return;
+    }
 }
 
 auto Module::call_forward_pre_hooks(const Variable& input) -> void {
-    for (auto& hook : forward_pre_hooks_) {
+    for (auto& [id, hook] : forward_pre_hooks_) {
         hook(this, input);
     }
     // Recursively call hooks on submodules
@@ -438,7 +461,7 @@ auto Module::call_forward_pre_hooks() -> void {
 }
 
 auto Module::call_forward_post_hooks(const Variable& input, const Variable& output) -> void {
-    for (auto& hook : forward_post_hooks_) {
+    for (auto& [id, hook] : forward_post_hooks_) {
         hook(this, input, output);
     }
     // Recursively call hooks on submodules
@@ -454,7 +477,7 @@ auto Module::call_forward_post_hooks() -> void {
 }
 
 auto Module::call_backward_pre_hooks(const Variable& grad_output) -> void {
-    for (auto& hook : backward_pre_hooks_) {
+    for (auto& [id, hook] : backward_pre_hooks_) {
         hook(this, grad_output);
     }
     // Recursively call hooks on submodules
@@ -464,7 +487,7 @@ auto Module::call_backward_pre_hooks(const Variable& grad_output) -> void {
 }
 
 auto Module::call_backward_post_hooks(const Variable& grad_input, const Variable& grad_output) -> void {
-    for (auto& hook : backward_post_hooks_) {
+    for (auto& [id, hook] : backward_post_hooks_) {
         hook(this, grad_input, grad_output);
     }
     // Recursively call hooks on submodules
@@ -495,7 +518,7 @@ auto ModuleHookFunction::backward(std::vector<Tensor> grad_outputs) -> std::vect
     Variable grad_output_var(grad_outputs[0], false);
 
     // Call backward pre-hooks
-    for (auto& hook : module_->backward_pre_hooks_) {
+    for (auto& [id, hook] : module_->backward_pre_hooks_) {
         hook(module_, grad_output_var);
     }
 
@@ -503,7 +526,7 @@ auto ModuleHookFunction::backward(std::vector<Tensor> grad_outputs) -> std::vect
     Variable grad_input_var = grad_output_var;
 
     // Call backward post-hooks
-    for (auto& hook : module_->backward_post_hooks_) {
+    for (auto& [id, hook] : module_->backward_post_hooks_) {
         hook(module_, grad_input_var, grad_output_var);
     }
 

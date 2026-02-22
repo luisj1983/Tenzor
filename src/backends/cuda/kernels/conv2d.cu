@@ -8,7 +8,16 @@
 #include <stdexcept>
 #include <vector>
 #include <iostream>
-#include <mutex>
+
+// Define CUBLAS_CHECK before pool header so the header's #ifndef guard uses our version
+#define CUBLAS_CHECK(call) do { \
+    cublasStatus_t status = call; \
+    if (status != CUBLAS_STATUS_SUCCESS) { \
+        throw std::runtime_error(std::string("cuBLAS error: ") + std::to_string(status)); \
+    } \
+} while(0)
+
+#include "../cublas_handle_pool.hpp"
 
 namespace tenzor {
 namespace cuda {
@@ -21,13 +30,6 @@ namespace cuda {
     cudaError_t err = call; \
     if (err != cudaSuccess) { \
         throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(err)); \
-    } \
-} while(0)
-
-#define CUBLAS_CHECK(call) do { \
-    cublasStatus_t status = call; \
-    if (status != CUBLAS_STATUS_SUCCESS) { \
-        throw std::runtime_error(std::string("cuBLAS error: ") + std::to_string(status)); \
     } \
 } while(0)
 
@@ -101,31 +103,6 @@ __device__ __host__ inline Float16 from_cuda_half(const __half& x) {
     return Float16(__half_as_ushort(x));
 }
 
-// ============================================================================
-// Cached cuBLAS Handle (avoids ~100μs create/destroy overhead per call)
-// ============================================================================
-
-static cublasHandle_t conv2d_cublas_handle = nullptr;
-static std::mutex conv2d_cublas_mutex;
-
-static void cleanup_conv2d_cublas() {
-    if (conv2d_cublas_handle) {
-        cublasDestroy(conv2d_cublas_handle);
-        conv2d_cublas_handle = nullptr;
-    }
-}
-
-static cublasHandle_t get_conv2d_cublas_handle() {
-    if (conv2d_cublas_handle == nullptr) {
-        std::lock_guard<std::mutex> lock(conv2d_cublas_mutex);
-        if (conv2d_cublas_handle == nullptr) {
-            CUBLAS_CHECK(cublasCreate(&conv2d_cublas_handle));
-            cublasSetMathMode(conv2d_cublas_handle, CUBLAS_TF32_TENSOR_OP_MATH);
-            std::atexit(cleanup_conv2d_cublas);
-        }
-    }
-    return conv2d_cublas_handle;
-}
 
 // ============================================================================
 // NHWC to NCHW Transpose Kernel
@@ -858,8 +835,7 @@ auto conv2d_forward_kernel(
         // while maintaining numerical stability through FP32 accumulation (matching cuDNN).
         CUDA_CHECK(cudaMemsetAsync(output.data_ptr(), 0, output.numel() * sizeof(Float16), stream));
 
-        cublasHandle_t cublas_handle = get_conv2d_cublas_handle();
-        CUBLAS_CHECK(cublasSetStream(cublas_handle, stream));
+        cublasHandle_t cublas_handle = CuBLASHandlePool::get(stream);
 
         int64_t out_channels_per_group = out_channels / groups;
 
@@ -951,8 +927,7 @@ auto conv2d_forward_kernel(
     CUDA_CHECK(cudaMemsetAsync(output.data<float>(), 0, output.numel() * sizeof(float), stream));
 
     // Get cached cuBLAS handle (avoids per-call create/destroy overhead)
-    cublasHandle_t cublas_handle = get_conv2d_cublas_handle();
-    CUBLAS_CHECK(cublasSetStream(cublas_handle, stream));
+    cublasHandle_t cublas_handle = CuBLASHandlePool::get(stream);
 
     // Process each group separately
     int64_t out_channels_per_group = out_channels / groups;
@@ -1345,8 +1320,7 @@ auto conv2d_backward_kernel(
     }
 
     // Get cached cuBLAS handle (avoids per-call create/destroy overhead)
-    cublasHandle_t cublas_handle = get_conv2d_cublas_handle();
-    CUBLAS_CHECK(cublasSetStream(cublas_handle, stream));
+    cublasHandle_t cublas_handle = CuBLASHandlePool::get(stream);
 
     int64_t out_channels_per_group = out_channels / groups;
     int64_t col_rows = batch * out_h * out_w;
@@ -1748,6 +1722,7 @@ auto conv_transpose2d_forward_kernel(
             in_channels_per_group, out_channels_per_group,
             has_bias
         );
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         // Float64 path
         const double* input_ptr = input.data<double>();
@@ -1764,6 +1739,7 @@ auto conv_transpose2d_forward_kernel(
             in_channels_per_group, out_channels_per_group,
             has_bias
         );
+        CUDA_CHECK(cudaGetLastError());
     } else {
         // Float32 path (default)
         const float* input_ptr = input.data<float>();
@@ -1780,6 +1756,7 @@ auto conv_transpose2d_forward_kernel(
             in_channels_per_group, out_channels_per_group,
             has_bias
         );
+        CUDA_CHECK(cudaGetLastError());
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -1918,6 +1895,7 @@ auto depthwise_conv2d_forward_kernel(
             batch, channels, in_h, in_w, out_h, out_w,
             kernel_h, kernel_w, stride, stride, padding, padding,
             dilation, dilation, has_bias);
+            CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         depthwise_conv2d_forward_kernel_impl<double><<<num_blocks, block_size, 0, stream>>>(
             input.data<double>(), weight.data<double>(),
@@ -1926,6 +1904,7 @@ auto depthwise_conv2d_forward_kernel(
             batch, channels, in_h, in_w, out_h, out_w,
             kernel_h, kernel_w, stride, stride, padding, padding,
             dilation, dilation, has_bias);
+            CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         depthwise_conv2d_forward_kernel_f16<<<num_blocks, block_size, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data_ptr()),
@@ -1935,6 +1914,7 @@ auto depthwise_conv2d_forward_kernel(
             batch, channels, in_h, in_w, out_h, out_w,
             kernel_h, kernel_w, stride, stride, padding, padding,
             dilation, dilation, has_bias);
+            CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("depthwise_conv2d_forward: unsupported dtype");
     }

@@ -17,6 +17,8 @@
 #include <vector>
 #include <stdexcept>
 
+#define CUDA_CHECK(call) do { cudaError_t err = (call); if (err != cudaSuccess) { throw std::runtime_error(std::string("CUDA error at ") + __FILE__ + ":" + std::to_string(__LINE__) + " - " + cudaGetErrorString(err)); } } while(0)
+
 namespace tenzor {
 namespace cuda {
 
@@ -58,6 +60,7 @@ static void launch_add_bias(T* output, const T* bias,
     int block = 256;
     int grid = (total + block - 1) / block;
     add_bias_kernel<<<grid, block, 0, stream>>>(output, bias, batch, features);
+    CUDA_CHECK(cudaGetLastError());
 }
 
 // ============================================================================
@@ -279,11 +282,13 @@ auto gru_forward_cuda(
                 gates_ih_t.data<float>(), gates_hh.data<float>(),
                 h_prev.data<float>(), h_out.data<float>(),
                 batch, hidden);
+            CUDA_CHECK(cudaGetLastError());
         } else if (input.dtype() == DType::Float64) {
             gru_cell_fused_kernel<double><<<grid, block, 0, stream>>>(
                 gates_ih_t.data<double>(), gates_hh.data<double>(),
                 h_prev.data<double>(), h_out.data<double>(),
                 batch, hidden);
+            CUDA_CHECK(cudaGetLastError());
         }
 
         cudaMemcpyAsync(
@@ -486,10 +491,12 @@ auto bilstm_forward_cuda(
         reverse_sequence_kernel<float><<<grid, block, 0, stream>>>(
             input.data<float>(), input_rev.data<float>(),
             seq_len, batch, shape[2]);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         reverse_sequence_kernel<double><<<grid, block, 0, stream>>>(
             input.data<double>(), input_rev.data<double>(),
             seq_len, batch, shape[2]);
+        CUDA_CHECK(cudaGetLastError());
     }
 
     Tensor h0_bwd = h0.slice(0, 1, 2).squeeze(0).contiguous();
@@ -506,10 +513,12 @@ auto bilstm_forward_cuda(
         reverse_sequence_kernel<float><<<grid, block, 0, stream>>>(
             bwd_result[0].data<float>(), bwd_output_rev.data<float>(),
             seq_len, batch, hidden);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         reverse_sequence_kernel<double><<<grid, block, 0, stream>>>(
             bwd_result[0].data<double>(), bwd_output_rev.data<double>(),
             seq_len, batch, hidden);
+        CUDA_CHECK(cudaGetLastError());
     }
 
     // Concatenate forward and backward outputs along hidden dim: (seq_len, batch, 2*hidden)
@@ -524,10 +533,12 @@ auto bilstm_forward_cuda(
             bilstm_concat_kernel<float><<<concat_grid, concat_block, 0, stream>>>(
                 fwd_result[0].data<float>(), bwd_output_rev.data<float>(),
                 output.data<float>(), seq_len, batch, hidden);
+            CUDA_CHECK(cudaGetLastError());
         } else if (input.dtype() == DType::Float64) {
             bilstm_concat_kernel<double><<<concat_grid, concat_block, 0, stream>>>(
                 fwd_result[0].data<double>(), bwd_output_rev.data<double>(),
                 output.data<double>(), seq_len, batch, hidden);
+            CUDA_CHECK(cudaGetLastError());
         }
     }
 

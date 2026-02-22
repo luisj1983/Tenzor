@@ -16,6 +16,10 @@
         }                                                                      \
     } while (0)
 
+// Check for errors from the most recent kernel launch.
+// Must be called after every <<<>>> launch to catch async errors eagerly.
+#define CUDA_POST_LAUNCH_CHECK() CUDA_CHECK(cudaGetLastError())
+
 #ifdef TENZOR_HAS_CUBLAS
 #include <cublas_v2.h>
 #define CUBLAS_CHECK(call)                                                     \

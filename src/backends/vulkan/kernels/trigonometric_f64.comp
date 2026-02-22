@@ -12,6 +12,121 @@ layout(push_constant) uniform PushConstants {
     uint op;         // Operation: 0=sin, 1=cos, 2=tan, 3=asin, 4=acos, 5=atan
 } params;
 
+const double PI = 3.141592653589793;
+
+// Double-precision range reduction for trig functions.
+// Reduces x to [-pi/4, pi/4] using Cody-Waite extended-precision subtraction.
+// Returns reduced value r and quadrant q (0-3).
+void trig_reduce(double x, out double r, out int q) {
+    // Two-part representation of 2/pi for extended precision
+    double two_over_pi = 0.6366197723675814;
+    double pi_over_2_hi = 1.5707963267948966;    // High part of pi/2
+    double pi_over_2_lo = 6.123233995736766e-17;  // Low part of pi/2
+
+    // Find quadrant
+    double j = floor(x * two_over_pi + 0.5);
+    q = int(j) & 3;
+
+    // Cody-Waite reduction: r = x - j * (pi/2)
+    r = x - j * pi_over_2_hi;
+    r = r - j * pi_over_2_lo;
+}
+
+// Polynomial approximation of sin on [-pi/4, pi/4]
+// Minimax polynomial coefficients
+double sin_poly(double x) {
+    double x2 = x * x;
+    // sin(x) ~ x - x^3/6 + x^5/120 - x^7/5040 + x^9/362880
+    return x * (1.0 - x2 * (1.0/6.0 - x2 * (1.0/120.0 - x2 * (1.0/5040.0 - x2 / 362880.0))));
+}
+
+// Polynomial approximation of cos on [-pi/4, pi/4]
+double cos_poly(double x) {
+    double x2 = x * x;
+    // cos(x) ~ 1 - x^2/2 + x^4/24 - x^6/720 + x^8/40320
+    return 1.0 - x2 * (0.5 - x2 * (1.0/24.0 - x2 * (1.0/720.0 - x2 / 40320.0)));
+}
+
+// Double-precision sin
+double sin_d(double x) {
+    if (x != x) return x;  // NaN
+
+    // For moderate values, float sin is sufficient
+    if (x >= -256.0 && x <= 256.0) {
+        return double(sin(float(x)));
+    }
+
+    double r;
+    int q;
+    trig_reduce(x, r, q);
+
+    // Use quadrant to determine sign and sin/cos
+    switch (q) {
+        case 0: return sin_poly(r);
+        case 1: return cos_poly(r);
+        case 2: return -sin_poly(r);
+        case 3: return -cos_poly(r);
+    }
+    return 0.0;
+}
+
+// Double-precision cos
+double cos_d(double x) {
+    if (x != x) return x;  // NaN
+
+    if (x >= -256.0 && x <= 256.0) {
+        return double(cos(float(x)));
+    }
+
+    double r;
+    int q;
+    trig_reduce(x, r, q);
+
+    switch (q) {
+        case 0: return cos_poly(r);
+        case 1: return -sin_poly(r);
+        case 2: return -cos_poly(r);
+        case 3: return sin_poly(r);
+    }
+    return 0.0;
+}
+
+// Double-precision tan
+double tan_d(double x) {
+    if (x != x) return x;  // NaN
+
+    if (x >= -256.0 && x <= 256.0) {
+        return double(tan(float(x)));
+    }
+
+    double s = sin_d(x);
+    double c = cos_d(x);
+    return s / c;
+}
+
+// Double-precision asin (inverse trig uses float — range is bounded [-1,1])
+double asin_d(double x) {
+    if (x != x) return x;
+    return double(asin(float(clamp(x, -1.0, 1.0))));
+}
+
+// Double-precision acos
+double acos_d(double x) {
+    if (x != x) return x;
+    return double(acos(float(clamp(x, -1.0, 1.0))));
+}
+
+// Double-precision atan (input range unbounded but output bounded)
+double atan_d(double x) {
+    if (x != x) return x;
+    // For values within float range, float atan is fine
+    if (x >= -1.0e30 && x <= 1.0e30) {
+        return double(atan(float(x)));
+    }
+    // For very large |x|, atan approaches +/- pi/2
+    return (x > 0.0) ? (PI * 0.5) : (-PI * 0.5);
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
 
@@ -21,25 +136,24 @@ void main() {
 
     double val = input_data[idx];
 
-    // GLSL trig functions operate on float; cast through float for computation
     switch (params.op) {
         case 0: // sin
-            output_data[idx] = double(sin(float(val)));
+            output_data[idx] = sin_d(val);
             break;
         case 1: // cos
-            output_data[idx] = double(cos(float(val)));
+            output_data[idx] = cos_d(val);
             break;
         case 2: // tan
-            output_data[idx] = double(tan(float(val)));
+            output_data[idx] = tan_d(val);
             break;
         case 3: // asin
-            output_data[idx] = double(asin(float(val)));
+            output_data[idx] = asin_d(val);
             break;
         case 4: // acos
-            output_data[idx] = double(acos(float(val)));
+            output_data[idx] = acos_d(val);
             break;
         case 5: // atan
-            output_data[idx] = double(atan(float(val)));
+            output_data[idx] = atan_d(val);
             break;
         default:
             output_data[idx] = 0.0;

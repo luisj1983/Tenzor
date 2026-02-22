@@ -14,6 +14,37 @@ layout(push_constant) uniform PushConstants {
     uint n;  // Number of elements
 } params;
 
+// Double-precision exp using range reduction
+double exp_d(double x) {
+    if (x != x) return x;  // NaN
+    if (x > 709.0) return 1.0e308;
+    if (x < -745.0) return 0.0;
+
+    double ln2 = 0.6931471805599453;
+    double k_dbl = floor(x / ln2 + 0.5);
+    double r = x - k_dbl * ln2;
+    int k = int(clamp(k_dbl, -1100.0, 1100.0));
+
+    // exp(r) via degree-13 Taylor polynomial (Horner's method)
+    // |r| <= ln(2)/2, error bound < r^14/14! < 1e-19
+    double exp_r = 1.0 + r * (1.0 + r * (0.5 + r * (1.0/6.0 + r * (1.0/24.0 + r * (1.0/120.0 +
+        r * (1.0/720.0 + r * (1.0/5040.0 + r * (1.0/40320.0 + r * (1.0/362880.0 +
+        r * (1.0/3628800.0 + r * (1.0/39916800.0 + r * (1.0/479001600.0 +
+        r * (1.0/6227020800.0)))))))))))));
+
+
+    double pow2 = 1.0;
+    int abs_k = (k >= 0) ? k : -k;
+    double base = 2.0;
+    while (abs_k > 0) {
+        if ((abs_k & 1) != 0) pow2 *= base;
+        base *= base;
+        abs_k >>= 1;
+    }
+
+    return (k >= 0) ? (exp_r * pow2) : (exp_r / pow2);
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
 
@@ -24,8 +55,8 @@ void main() {
     double x = input_data[idx];
     double g_out = grad_output[idx];
 
-    // Compute sigmoid(x) - use float for exp to avoid precision issues
-    double sigmoid_x = 1.0 / (1.0 + double(exp(float(-x))));
+    // Compute sigmoid(x) using double-precision exp
+    double sigmoid_x = 1.0 / (1.0 + exp_d(-x));
 
     // Compute swish derivative: sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x))
     double swish_derivative = sigmoid_x + x * sigmoid_x * (1.0 - sigmoid_x);

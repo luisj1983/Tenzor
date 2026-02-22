@@ -333,6 +333,7 @@ auto gru_cell_forward_kernel(
             h_out.data<float>(),
             batch_size,
             hidden_size);
+            CUDA_CHECK(cudaGetLastError());
     } else if (reset_gates.dtype() == DType::Float64) {
         gru_cell_forward_fused<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reset_gates.data<double>(),
@@ -343,6 +344,7 @@ auto gru_cell_forward_kernel(
             h_out.data<double>(),
             batch_size,
             hidden_size);
+            CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("GRU only supports Float32 and Float64");
     }
@@ -401,6 +403,7 @@ auto gru_cell_backward_kernel(
             outputs.grad_h_prev.data<float>(),
             batch_size,
             hidden_size);
+            CUDA_CHECK(cudaGetLastError());
     } else if (grad_h.dtype() == DType::Float64) {
         gru_cell_backward_fused<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             grad_h.data<double>(),
@@ -416,6 +419,7 @@ auto gru_cell_backward_kernel(
             outputs.grad_h_prev.data<double>(),
             batch_size,
             hidden_size);
+            CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("GRU backward only supports Float32 and Float64");
     }

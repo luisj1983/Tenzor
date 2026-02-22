@@ -11,6 +11,7 @@
 
 #include <cuda_runtime.h>
 #include <algorithm>
+#include <unordered_map>
 #include <utility>
 
 namespace tenzor {
@@ -20,8 +21,8 @@ namespace cuda {
  * @brief Compute optimal grid and block dimensions using CUDA occupancy API.
  *
  * Uses cudaOccupancyMaxPotentialBlockSize to determine the block size
- * that maximizes occupancy for a given kernel. Falls back to 256 if
- * the API call fails.
+ * that maximizes occupancy for a given kernel. Results are cached per
+ * kernel function pointer to avoid repeated API calls.
  *
  * @tparam KernelFunc CUDA kernel function type
  * @param kernel Pointer to the CUDA kernel function
@@ -33,14 +34,24 @@ template<typename KernelFunc>
 inline std::pair<int, int> optimal_launch_config(
     KernelFunc kernel, int64_t num_elements, size_t dynamic_smem = 0)
 {
-    int min_grid_size = 0;
-    int block_size = 256;  // fallback
+    // Cache block size per kernel function pointer to avoid repeated
+    // cudaOccupancyMaxPotentialBlockSize calls (~10-100us each)
+    static thread_local std::unordered_map<const void*, int> block_cache;
+    const void* key = reinterpret_cast<const void*>(kernel);
 
-    cudaError_t err = cudaOccupancyMaxPotentialBlockSize(
-        &min_grid_size, &block_size, kernel, dynamic_smem, 0);
-
-    if (err != cudaSuccess) {
-        block_size = 256;  // fallback on error
+    int block_size;
+    auto it = block_cache.find(key);
+    if (it != block_cache.end()) {
+        block_size = it->second;
+    } else {
+        int min_grid_size = 0;
+        block_size = 256;  // fallback
+        cudaError_t err = cudaOccupancyMaxPotentialBlockSize(
+            &min_grid_size, &block_size, kernel, dynamic_smem, 0);
+        if (err != cudaSuccess) {
+            block_size = 256;  // fallback on error
+        }
+        block_cache[key] = block_size;
     }
 
     int num_blocks = static_cast<int>(

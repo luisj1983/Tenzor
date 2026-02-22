@@ -44,6 +44,7 @@ inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
     do { \
         auto [grid_, block_] = optimal_launch_config(kernel, n); \
         kernel<<<grid_, block_, 0, stream>>>(__VA_ARGS__); \
+        CUDA_CHECK(cudaGetLastError()); \
     } while(0)
 
 // Variant with dynamic shared memory
@@ -51,6 +52,7 @@ inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
     do { \
         auto [grid_, block_] = optimal_launch_config(kernel, n, smem); \
         kernel<<<grid_, block_, smem, stream>>>(__VA_ARGS__); \
+        CUDA_CHECK(cudaGetLastError()); \
     } while(0)
 
 // ============================================================================
@@ -1663,6 +1665,7 @@ auto relu_inplace_kernel(Tensor& input, cudaStream_t stream) -> void {
                 int num_blocks = get_num_blocks(n4);
                 relu_inplace_vectorized_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                     reinterpret_cast<float4*>(data_ptr), n4);
+                CUDA_CHECK(cudaGetLastError());
             }
 
             if (remainder > 0) {
@@ -1670,23 +1673,28 @@ auto relu_inplace_kernel(Tensor& input, cudaStream_t stream) -> void {
                 int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
                 relu_inplace_remainder_kernel<<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
                     data_ptr, start, n);
+                CUDA_CHECK(cudaGetLastError());
             }
         } else {
             int num_blocks = get_num_blocks(n);
             relu_inplace_cuda_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(data_ptr, n);
+            CUDA_CHECK(cudaGetLastError());
         }
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         relu_inplace_cuda_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = get_num_blocks(n);
         relu_inplace_cuda_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<__half*>(input.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         int num_blocks = get_num_blocks(n);
         relu_inplace_cuda_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<__nv_bfloat16*>(input.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("ReLU inplace only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -1707,15 +1715,19 @@ auto sigmoid_inplace_kernel(Tensor& input, cudaStream_t stream) -> void {
     if (input.dtype() == DType::Float32) {
         sigmoid_inplace_cuda_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<float>(), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         sigmoid_inplace_cuda_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         sigmoid_inplace_cuda_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<__half*>(input.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         sigmoid_inplace_cuda_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<__nv_bfloat16*>(input.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Sigmoid inplace only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -1736,15 +1748,19 @@ auto tanh_inplace_kernel(Tensor& input, cudaStream_t stream) -> void {
     if (input.dtype() == DType::Float32) {
         tanh_inplace_cuda_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<float>(), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         tanh_inplace_cuda_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         tanh_inplace_cuda_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<__half*>(input.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         tanh_inplace_cuda_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<__nv_bfloat16*>(input.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Tanh inplace only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -1765,15 +1781,19 @@ auto leaky_relu_inplace_kernel(Tensor& input, float alpha, cudaStream_t stream) 
     if (input.dtype() == DType::Float32) {
         leaky_relu_inplace_cuda_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<float>(), alpha, n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         leaky_relu_inplace_cuda_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<double>(), static_cast<double>(alpha), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         leaky_relu_inplace_fp16_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<__half*>(input.data_ptr()), alpha, n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         leaky_relu_inplace_cuda_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<__nv_bfloat16*>(input.data_ptr()), __float2bfloat16(alpha), n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("LeakyReLU inplace only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -1794,15 +1814,19 @@ auto gelu_inplace_kernel(Tensor& input, cudaStream_t stream) -> void {
     if (input.dtype() == DType::Float32) {
         gelu_inplace_cuda_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<float>(), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         gelu_inplace_cuda_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         gelu_inplace_cuda_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<__half*>(input.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         gelu_inplace_cuda_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<__nv_bfloat16*>(input.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("GELU inplace only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -1844,6 +1868,7 @@ auto relu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
                 relu_forward_vectorized_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                     reinterpret_cast<const float4*>(input_ptr),
                     reinterpret_cast<float4*>(result_ptr), n4);
+                CUDA_CHECK(cudaGetLastError());
             }
 
             if (remainder > 0) {
@@ -1851,27 +1876,32 @@ auto relu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
                 int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
                 relu_forward_remainder_kernel<<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
                     input_ptr, result_ptr, start, n);
+                CUDA_CHECK(cudaGetLastError());
             }
         } else {
             // Fallback to scalar kernel
             int num_blocks = get_num_blocks(n);
             relu_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                 input_ptr, result_ptr, n);
+            CUDA_CHECK(cudaGetLastError());
         }
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         relu_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<double>(), result.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = get_num_blocks(n);
         relu_forward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         int num_blocks = get_num_blocks(n);
         relu_forward_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("ReLU only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -1910,6 +1940,7 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
                 reinterpret_cast<const float4*>(grad_ptr),
                 reinterpret_cast<const float4*>(input_ptr),
                 reinterpret_cast<float4*>(result_ptr), n4);
+            CUDA_CHECK(cudaGetLastError());
         }
 
         // Handle remainder elements
@@ -1918,23 +1949,27 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
             int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
             relu_backward_remainder_kernel<<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
                 grad_ptr, input_ptr, result_ptr, start, n);
+            CUDA_CHECK(cudaGetLastError());
         }
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         relu_backward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output.data<double>(), input.data<double>(), result.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = get_num_blocks(n);
         relu_backward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(grad_output.data_ptr()),
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         int num_blocks = get_num_blocks(n);
         relu_backward_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("ReLU backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -1974,6 +2009,7 @@ auto sigmoid_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
                 sigmoid_forward_vectorized_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                     reinterpret_cast<const float4*>(input_ptr),
                     reinterpret_cast<float4*>(result_ptr), n4);
+                CUDA_CHECK(cudaGetLastError());
             }
 
             if (remainder > 0) {
@@ -1981,26 +2017,31 @@ auto sigmoid_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
                 int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
                 sigmoid_forward_remainder_kernel<<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
                     input_ptr, result_ptr, start, n);
+                CUDA_CHECK(cudaGetLastError());
             }
         } else {
             int num_blocks = get_num_blocks(n);
             sigmoid_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                 input_ptr, result_ptr, n);
+            CUDA_CHECK(cudaGetLastError());
         }
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         sigmoid_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<double>(), result.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = get_num_blocks(n);
         sigmoid_forward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         int num_blocks = get_num_blocks(n);
         sigmoid_forward_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Sigmoid only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -2042,6 +2083,7 @@ auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input, cud
                     reinterpret_cast<const float4*>(grad_ptr),
                     reinterpret_cast<const float4*>(input_ptr),
                     reinterpret_cast<float4*>(result_ptr), n4);
+                CUDA_CHECK(cudaGetLastError());
             }
 
             if (remainder > 0) {
@@ -2049,28 +2091,33 @@ auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input, cud
                 int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
                 sigmoid_backward_kernel<float><<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
                     grad_ptr + start, input_ptr + start, result_ptr + start, remainder);
+                CUDA_CHECK(cudaGetLastError());
             }
         } else {
             int num_blocks = get_num_blocks(n);
             sigmoid_backward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                 grad_ptr, input_ptr, result_ptr, n);
+            CUDA_CHECK(cudaGetLastError());
         }
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         sigmoid_backward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output.data<double>(), input.data<double>(), result.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = get_num_blocks(n);
         sigmoid_backward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(grad_output.data_ptr()),
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         int num_blocks = get_num_blocks(n);
         sigmoid_backward_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Sigmoid backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -2109,6 +2156,7 @@ auto swish_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
                 swish_forward_vectorized_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                     reinterpret_cast<const float4*>(input_ptr),
                     reinterpret_cast<float4*>(result_ptr), n4);
+                CUDA_CHECK(cudaGetLastError());
             }
 
             if (remainder > 0) {
@@ -2116,26 +2164,31 @@ auto swish_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
                 int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
                 swish_forward_remainder_kernel<<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
                     input_ptr, result_ptr, start, n);
+                CUDA_CHECK(cudaGetLastError());
             }
         } else {
             int num_blocks = get_num_blocks(n);
             swish_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                 input_ptr, result_ptr, n);
+            CUDA_CHECK(cudaGetLastError());
         }
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         swish_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<double>(), result.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = get_num_blocks(n);
         swish_forward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         int num_blocks = get_num_blocks(n);
         swish_forward_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Swish only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -2177,6 +2230,7 @@ auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaS
                     reinterpret_cast<const float4*>(grad_ptr),
                     reinterpret_cast<const float4*>(input_ptr),
                     reinterpret_cast<float4*>(result_ptr), n4);
+                CUDA_CHECK(cudaGetLastError());
             }
 
             if (remainder > 0) {
@@ -2184,28 +2238,33 @@ auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaS
                 int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
                 swish_backward_cuda_kernel<float><<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
                     grad_ptr + start, input_ptr + start, result_ptr + start, remainder);
+                CUDA_CHECK(cudaGetLastError());
             }
         } else {
             int num_blocks = get_num_blocks(n);
             swish_backward_cuda_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                 grad_ptr, input_ptr, result_ptr, n);
+            CUDA_CHECK(cudaGetLastError());
         }
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         swish_backward_cuda_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output.data<double>(), input.data<double>(), result.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = get_num_blocks(n);
         swish_backward_cuda_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(grad_output.data_ptr()),
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         int num_blocks = get_num_blocks(n);
         swish_backward_cuda_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Swish backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -2244,6 +2303,7 @@ auto tanh_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
                 tanh_forward_vectorized_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                     reinterpret_cast<const float4*>(input_ptr),
                     reinterpret_cast<float4*>(result_ptr), n4);
+                CUDA_CHECK(cudaGetLastError());
             }
 
             if (remainder > 0) {
@@ -2251,26 +2311,31 @@ auto tanh_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
                 int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
                 tanh_forward_remainder_kernel<<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
                     input_ptr, result_ptr, start, n);
+                CUDA_CHECK(cudaGetLastError());
             }
         } else {
             int num_blocks = get_num_blocks(n);
             tanh_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                 input_ptr, result_ptr, n);
+            CUDA_CHECK(cudaGetLastError());
         }
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         tanh_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<double>(), result.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = get_num_blocks(n);
         tanh_forward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         int num_blocks = get_num_blocks(n);
         tanh_forward_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Tanh only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -2312,6 +2377,7 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
                     reinterpret_cast<const float4*>(grad_ptr),
                     reinterpret_cast<const float4*>(input_ptr),
                     reinterpret_cast<float4*>(result_ptr), n4);
+                CUDA_CHECK(cudaGetLastError());
             }
 
             if (remainder > 0) {
@@ -2319,28 +2385,33 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
                 int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
                 tanh_backward_kernel<float><<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
                     grad_ptr + start, input_ptr + start, result_ptr + start, remainder);
+                CUDA_CHECK(cudaGetLastError());
             }
         } else {
             int num_blocks = get_num_blocks(n);
             tanh_backward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                 grad_ptr, input_ptr, result_ptr, n);
+            CUDA_CHECK(cudaGetLastError());
         }
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         tanh_backward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output.data<double>(), input.data<double>(), result.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = get_num_blocks(n);
         tanh_backward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(grad_output.data_ptr()),
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         int num_blocks = get_num_blocks(n);
         tanh_backward_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Tanh backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -2379,6 +2450,7 @@ auto gelu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
                 gelu_forward_vectorized_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                     reinterpret_cast<const float4*>(input_ptr),
                     reinterpret_cast<float4*>(result_ptr), n4);
+                CUDA_CHECK(cudaGetLastError());
             }
 
             if (remainder > 0) {
@@ -2386,26 +2458,31 @@ auto gelu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
                 int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
                 gelu_forward_remainder_kernel<<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
                     input_ptr, result_ptr, start, n);
+                CUDA_CHECK(cudaGetLastError());
             }
         } else {
             int num_blocks = get_num_blocks(n);
             gelu_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                 input_ptr, result_ptr, n);
+            CUDA_CHECK(cudaGetLastError());
         }
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         gelu_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<double>(), result.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = get_num_blocks(n);
         gelu_forward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         int num_blocks = get_num_blocks(n);
         gelu_forward_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("GELU only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -2447,6 +2524,7 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
                     reinterpret_cast<const float4*>(grad_ptr),
                     reinterpret_cast<const float4*>(input_ptr),
                     reinterpret_cast<float4*>(result_ptr), n4);
+                CUDA_CHECK(cudaGetLastError());
             }
 
             if (remainder > 0) {
@@ -2454,28 +2532,33 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
                 int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
                 gelu_backward_kernel<float><<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
                     grad_ptr + start, input_ptr + start, result_ptr + start, remainder);
+                CUDA_CHECK(cudaGetLastError());
             }
         } else {
             int num_blocks = get_num_blocks(n);
             gelu_backward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                 grad_ptr, input_ptr, result_ptr, n);
+            CUDA_CHECK(cudaGetLastError());
         }
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         gelu_backward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output.data<double>(), input.data<double>(), result.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = get_num_blocks(n);
         gelu_backward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(grad_output.data_ptr()),
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         int num_blocks = get_num_blocks(n);
         gelu_backward_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("GELU backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -2514,6 +2597,7 @@ auto leaky_relu_kernel(const Tensor& input, float alpha, cudaStream_t stream) ->
                 leaky_relu_forward_vectorized_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                     reinterpret_cast<const float4*>(input_ptr),
                     reinterpret_cast<float4*>(result_ptr), n4, alpha);
+                CUDA_CHECK(cudaGetLastError());
             }
 
             if (remainder > 0) {
@@ -2521,26 +2605,31 @@ auto leaky_relu_kernel(const Tensor& input, float alpha, cudaStream_t stream) ->
                 int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
                 leaky_relu_forward_remainder_kernel<<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
                     input_ptr, result_ptr, start, n, alpha);
+                CUDA_CHECK(cudaGetLastError());
             }
         } else {
             int num_blocks = get_num_blocks(n);
             leaky_relu_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                 input_ptr, result_ptr, n, alpha);
+            CUDA_CHECK(cudaGetLastError());
         }
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         leaky_relu_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<double>(), result.data<double>(), n, static_cast<double>(alpha));
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = get_num_blocks(n);
         leaky_relu_forward_fp16_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()), n, alpha);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         int num_blocks = get_num_blocks(n);
         leaky_relu_forward_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()), n, __float2bfloat16(alpha));
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Leaky ReLU only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -2583,6 +2672,7 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
                     reinterpret_cast<const float4*>(grad_ptr),
                     reinterpret_cast<const float4*>(input_ptr),
                     reinterpret_cast<float4*>(result_ptr), n4, alpha);
+                CUDA_CHECK(cudaGetLastError());
             }
 
             if (remainder > 0) {
@@ -2590,28 +2680,33 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
                 int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
                 leaky_relu_backward_kernel<float><<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
                     grad_ptr + start, input_ptr + start, result_ptr + start, remainder, alpha);
+                CUDA_CHECK(cudaGetLastError());
             }
         } else {
             int num_blocks = get_num_blocks(n);
             leaky_relu_backward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                 grad_ptr, input_ptr, result_ptr, n, alpha);
+            CUDA_CHECK(cudaGetLastError());
         }
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         leaky_relu_backward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output.data<double>(), input.data<double>(), result.data<double>(), n, static_cast<double>(alpha));
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = get_num_blocks(n);
         leaky_relu_backward_fp16_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(grad_output.data_ptr()),
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()), n, alpha);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         int num_blocks = get_num_blocks(n);
         leaky_relu_backward_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()), n, __float2bfloat16(alpha));
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Leaky ReLU backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -2639,20 +2734,24 @@ auto elu_kernel(const Tensor& input, float alpha, cudaStream_t stream) -> Tensor
         int num_blocks = get_num_blocks(n);
         elu_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<float>(), result.data<float>(), n, alpha);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         elu_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<double>(), result.data<double>(), n, alpha);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = get_num_blocks(n);
         elu_forward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()), n, alpha);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         int num_blocks = get_num_blocks(n);
         elu_forward_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()), n, alpha);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("ELU only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -2680,22 +2779,26 @@ auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float a
         int num_blocks = get_num_blocks(n);
         elu_backward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output.data<float>(), input.data<float>(), result.data<float>(), n, alpha);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         elu_backward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output.data<double>(), input.data<double>(), result.data<double>(), n, alpha);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = get_num_blocks(n);
         elu_backward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(grad_output.data_ptr()),
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()), n, alpha);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         int num_blocks = get_num_blocks(n);
         elu_backward_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()), n, alpha);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("ELU backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -2723,20 +2826,24 @@ auto selu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
         int num_blocks = get_num_blocks(n);
         selu_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<float>(), result.data<float>(), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         selu_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<double>(), result.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = get_num_blocks(n);
         selu_forward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         int num_blocks = get_num_blocks(n);
         selu_forward_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("SELU only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -2764,22 +2871,26 @@ auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
         int num_blocks = get_num_blocks(n);
         selu_backward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output.data<float>(), input.data<float>(), result.data<float>(), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         selu_backward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output.data<double>(), input.data<double>(), result.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = get_num_blocks(n);
         selu_backward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(grad_output.data_ptr()),
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         int num_blocks = get_num_blocks(n);
         selu_backward_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("SELU backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -2807,20 +2918,24 @@ auto mish_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
         int num_blocks = get_num_blocks(n);
         mish_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<float>(), result.data<float>(), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         mish_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<double>(), result.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = get_num_blocks(n);
         mish_forward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         int num_blocks = get_num_blocks(n);
         mish_forward_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Mish only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -2848,22 +2963,26 @@ auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
         int num_blocks = get_num_blocks(n);
         mish_backward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output.data<float>(), input.data<float>(), result.data<float>(), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         mish_backward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output.data<double>(), input.data<double>(), result.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = get_num_blocks(n);
         mish_backward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(grad_output.data_ptr()),
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         int num_blocks = get_num_blocks(n);
         mish_backward_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Mish backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -2891,20 +3010,24 @@ auto softplus_kernel(const Tensor& input, float beta, float threshold, cudaStrea
         int num_blocks = get_num_blocks(n);
         softplus_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<float>(), result.data<float>(), n, beta, threshold);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         softplus_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<double>(), result.data<double>(), n, beta, threshold);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = get_num_blocks(n);
         softplus_forward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()), n, beta, threshold);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         int num_blocks = get_num_blocks(n);
         softplus_forward_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()), n, beta, threshold);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Softplus only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -2932,22 +3055,26 @@ auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, fl
         int num_blocks = get_num_blocks(n);
         softplus_backward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output.data<float>(), input.data<float>(), result.data<float>(), n, beta, threshold);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         softplus_backward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output.data<double>(), input.data<double>(), result.data<double>(), n, beta, threshold);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = get_num_blocks(n);
         softplus_backward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(grad_output.data_ptr()),
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()), n, beta, threshold);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         int num_blocks = get_num_blocks(n);
         softplus_backward_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()), n, beta, threshold);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Softplus backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -3002,11 +3129,13 @@ auto softmax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Te
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(float);
         softmax_forward_kernel<float><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             input.data<float>(), result.data<float>(), batch_size, dim_size);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = batch_size;
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(double);
         softmax_forward_kernel<double><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             input.data<double>(), result.data<double>(), batch_size, dim_size);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = batch_size;
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(__half);
@@ -3014,6 +3143,7 @@ auto softmax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Te
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()),
             batch_size, dim_size);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         int num_blocks = batch_size;
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(__nv_bfloat16);
@@ -3021,6 +3151,7 @@ auto softmax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Te
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()),
             batch_size, dim_size);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Softmax only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -3061,11 +3192,13 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(float);
         softmax_backward_kernel<float><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             grad_output.data<float>(), output.data<float>(), result.data<float>(), batch_size, dim_size);
+        CUDA_CHECK(cudaGetLastError());
     } else if (output.dtype() == DType::Float64) {
         int num_blocks = batch_size;
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(double);
         softmax_backward_kernel<double><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             grad_output.data<double>(), output.data<double>(), result.data<double>(), batch_size, dim_size);
+        CUDA_CHECK(cudaGetLastError());
     } else if (output.dtype() == DType::Float16) {
         int num_blocks = batch_size;
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(__half);
@@ -3074,6 +3207,7 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
             reinterpret_cast<const __half*>(output.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()),
             batch_size, dim_size);
+        CUDA_CHECK(cudaGetLastError());
     } else if (output.dtype() == DType::BFloat16) {
         int num_blocks = batch_size;
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(__nv_bfloat16);
@@ -3082,6 +3216,7 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
             reinterpret_cast<const __nv_bfloat16*>(output.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()),
             batch_size, dim_size);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Softmax backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -3121,11 +3256,13 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(float);
         log_softmax_forward_kernel<float><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             input.data<float>(), result.data<float>(), batch_size, dim_size);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = batch_size;
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(double);
         log_softmax_forward_kernel<double><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             input.data<double>(), result.data<double>(), batch_size, dim_size);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = batch_size;
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(__half);
@@ -3133,6 +3270,7 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()),
             batch_size, dim_size);
+        CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         int num_blocks = batch_size;
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(__nv_bfloat16);
@@ -3140,6 +3278,7 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()),
             batch_size, dim_size);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Log Softmax only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -3179,11 +3318,13 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(float);
         log_softmax_backward_kernel<float><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             grad_output.data<float>(), output.data<float>(), result.data<float>(), batch_size, dim_size);
+        CUDA_CHECK(cudaGetLastError());
     } else if (output.dtype() == DType::Float64) {
         int num_blocks = batch_size;
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(double);
         log_softmax_backward_kernel<double><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             grad_output.data<double>(), output.data<double>(), result.data<double>(), batch_size, dim_size);
+        CUDA_CHECK(cudaGetLastError());
     } else if (output.dtype() == DType::Float16) {
         int num_blocks = batch_size;
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(__half);
@@ -3192,6 +3333,7 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
             reinterpret_cast<const __half*>(output.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()),
             batch_size, dim_size);
+        CUDA_CHECK(cudaGetLastError());
     } else if (output.dtype() == DType::BFloat16) {
         int num_blocks = batch_size;
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(__nv_bfloat16);
@@ -3200,6 +3342,7 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
             reinterpret_cast<const __nv_bfloat16*>(output.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()),
             batch_size, dim_size);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Log Softmax backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
@@ -3408,11 +3551,13 @@ auto dropout_forward_kernel(const Tensor& input, float p, bool training, cudaStr
             dropout_forward_kernel_impl<float><<<num_blocks, block_size, 0, stream>>>(
                 input.data<float>(), output.data<float>(), mask.data<uint8_t>(),
                 n, p, scale, seed);
+            CUDA_CHECK(cudaGetLastError());
             break;
         case DType::Float64:
             dropout_forward_kernel_impl<double><<<num_blocks, block_size, 0, stream>>>(
                 input.data<double>(), output.data<double>(), mask.data<uint8_t>(),
                 n, p, scale, seed);
+            CUDA_CHECK(cudaGetLastError());
             break;
         case DType::Float16:
             dropout_forward_kernel_f16<<<num_blocks, block_size, 0, stream>>>(
@@ -3420,6 +3565,7 @@ auto dropout_forward_kernel(const Tensor& input, float p, bool training, cudaStr
                 reinterpret_cast<__half*>(output.data_ptr()),
                 mask.data<uint8_t>(),
                 n, p, scale, seed);
+            CUDA_CHECK(cudaGetLastError());
             break;
         default:
             throw std::runtime_error("dropout_forward: unsupported dtype");
@@ -3451,11 +3597,13 @@ auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, floa
             dropout_backward_kernel_impl<float><<<num_blocks, block_size, 0, stream>>>(
                 grad_output.data<float>(), mask.data<uint8_t>(), grad_input.data<float>(),
                 n, scale);
+            CUDA_CHECK(cudaGetLastError());
             break;
         case DType::Float64:
             dropout_backward_kernel_impl<double><<<num_blocks, block_size, 0, stream>>>(
                 grad_output.data<double>(), mask.data<uint8_t>(), grad_input.data<double>(),
                 n, scale);
+            CUDA_CHECK(cudaGetLastError());
             break;
         case DType::Float16:
             dropout_backward_kernel_f16<<<num_blocks, block_size, 0, stream>>>(
@@ -3463,6 +3611,7 @@ auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, floa
                 mask.data<uint8_t>(),
                 reinterpret_cast<__half*>(grad_input.data_ptr()),
                 n, scale);
+            CUDA_CHECK(cudaGetLastError());
             break;
         default:
             throw std::runtime_error("dropout_backward: unsupported dtype");

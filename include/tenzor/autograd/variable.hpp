@@ -11,6 +11,7 @@
 #include <memory>
 #include <optional>
 #include <functional>
+#include <unordered_map>
 #include "../core/tensor.hpp"
 
 namespace tenzor {
@@ -68,8 +69,11 @@ struct VariableImpl {
     /// Whether to retain gradient for non-leaf variables (consider atomic if modified concurrently)
     bool retain_grad_{false};
 
-    /// Backward hooks (requires synchronization for modifications)
-    std::vector<std::function<Tensor(const Tensor&)>> hooks_;
+    /// Backward hooks keyed by ID (requires synchronization for modifications)
+    std::unordered_map<size_t, std::function<Tensor(const Tensor&)>> hooks_;
+
+    /// Next hook ID for register_hook
+    size_t next_hook_id_{0};
 
     // Note: No mutex included in initial implementation (Option B from design doc).
     // Users responsible for external synchronization if accessing Variable handles
@@ -300,6 +304,14 @@ public:
      * @endcode
      */
     auto register_hook(std::function<Tensor(const Tensor&)> hook) -> size_t;
+
+    /**
+     * @brief Remove a previously registered backward hook.
+     *
+     * @param hook_id Handle returned by register_hook()
+     * @return true if the hook was found and removed
+     */
+    auto unregister_hook(size_t hook_id) -> bool;
 
     /**
      * @brief Enable gradient retention for non-leaf variables.
