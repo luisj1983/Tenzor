@@ -238,7 +238,8 @@ public:
 
     ComputePipeline(VkDevice device, const std::vector<uint32_t>& shaderCode,
                    const std::vector<VkDescriptorSetLayoutBinding>& bindings,
-                   const std::vector<VkPushConstantRange>& pushConstants = {})
+                   const std::vector<VkPushConstantRange>& pushConstants = {},
+                   VkPipelineCache pipelineCache = VK_NULL_HANDLE)
         : device_(device) {
 
         // Create shader module
@@ -283,7 +284,7 @@ public:
         pipelineInfo.stage = shaderStageInfo;
         pipelineInfo.layout = pipelineLayout_;
 
-        checkVk(vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo,
+        checkVk(vkCreateComputePipelines(device, pipelineCache, 1, &pipelineInfo,
                                         nullptr, &pipeline_),
                 "Failed to create compute pipeline");
 

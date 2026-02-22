@@ -13,9 +13,11 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cuda_bf16.h>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/backend/caching_allocator.hpp"
+#include "cuda_launch_utils.cuh"
 #include <stdexcept>
 #include <vector>
 #include <cub/cub.cuh>
@@ -24,14 +26,8 @@
 namespace tenzor {
 namespace cuda {
 
-// CUDA Helper macros
-#define CUDA_CHECK(call) \
-    do { \
-        cudaError_t err = call; \
-        if (err != cudaSuccess) { \
-            throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(err)); \
-        } \
-    } while(0)
+// Centralized error checking
+#include "../cuda_error.hpp"
 
 #define CUDA_GRID_STRIDE_LOOP(i, n) \
     for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; \
@@ -41,11 +37,15 @@ namespace cuda {
 constexpr int BLOCK_SIZE = 256;
 
 inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
-    int num_blocks = (n + block_size - 1) / block_size;
-    // Ensure at least 1 block to avoid CUDA invalid argument error
-    // Grid-stride loop will naturally handle n=0 by not executing any iterations
-    return std::max(1, std::min(num_blocks, 65535));
+    return compute_grid_size(n, block_size);
 }
+
+// Occupancy-based kernel launch: replaces hardcoded BLOCK_SIZE with per-kernel optimal config
+#define LAUNCH_KERNEL(kernel, n, stream, ...) \
+    do { \
+        auto [grid_, block_] = optimal_launch_config(kernel, n); \
+        kernel<<<grid_, block_, 0, stream>>>(__VA_ARGS__); \
+    } while(0)
 
 // ============================================================================
 // index_select kernel
@@ -69,8 +69,10 @@ __global__ void index_select_kernel_impl(
         int64_t index_pos = temp % num_indices;
         int64_t outer_idx = temp / num_indices;
 
-        // Get the actual index value
+        // Get the actual index value with bounds handling
         int64_t selected_idx = static_cast<int64_t>(indices[index_pos]);
+        if (selected_idx < 0) selected_idx += dim_size;
+        selected_idx = max(int64_t(0), min(selected_idx, dim_size - 1));
 
         // Compute input offset
         int64_t input_offset = outer_idx * dim_size * inner_size +
@@ -151,6 +153,20 @@ auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                     reinterpret_cast<const __half*>(input.data_ptr()),
                     index.data<int64_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
+                    num_indices, dim_size, outer_size, inner_size, total_output);
+            break;
+        case DType::BFloat16:
+            if (idx_is_int32)
+                index_select_kernel_impl<__nv_bfloat16, int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+                    index.data<int32_t>(),
+                    reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+                    num_indices, dim_size, outer_size, inner_size, total_output);
+            else
+                index_select_kernel_impl<__nv_bfloat16, int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+                    index.data<int64_t>(),
+                    reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
                     num_indices, dim_size, outer_size, inner_size, total_output);
             break;
         default:
@@ -267,6 +283,20 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                     reinterpret_cast<const __half*>(input.data_ptr()),
                     index.data<int64_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
+                    outer_size, dim_size, inner_size, index_dim_size, total_output);
+            break;
+        case DType::BFloat16:
+            if (idx_is_int32)
+                gather_kernel_impl<__nv_bfloat16, int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+                    index.data<int32_t>(),
+                    reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+                    outer_size, dim_size, inner_size, index_dim_size, total_output);
+            else
+                gather_kernel_impl<__nv_bfloat16, int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+                    index.data<int64_t>(),
+                    reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
                     outer_size, dim_size, inner_size, index_dim_size, total_output);
             break;
         default:
@@ -407,6 +437,7 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
     #define LAUNCH_SCATTER(T) \
         copy_kernel_impl<T><<<num_blocks_copy, BLOCK_SIZE, 0, stream>>>( \
             input.data<T>(), output.data<T>(), total_input); \
+        CUDA_CHECK(cudaStreamSynchronize(stream)); \
         if (idx_is_int32) \
             scatter_values_kernel_impl<T, int32_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>( \
                 index.data<int32_t>(), src.data<T>(), output.data<T>(), \
@@ -427,6 +458,7 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
             copy_kernel_impl<__half><<<num_blocks_copy, BLOCK_SIZE, 0, stream>>>(
                 reinterpret_cast<const __half*>(input.data_ptr()),
                 reinterpret_cast<__half*>(output.data_ptr()), total_input);
+            CUDA_CHECK(cudaStreamSynchronize(stream));
             if (idx_is_int32)
                 scatter_values_kernel_impl<__half, int32_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>(
                     index.data<int32_t>(),
@@ -438,6 +470,24 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                     index.data<int64_t>(),
                     reinterpret_cast<const __half*>(src.data_ptr()),
                     reinterpret_cast<__half*>(output.data_ptr()),
+                    outer_size, dim_size, inner_size, index_dim_size, total_scatter);
+            break;
+        case DType::BFloat16:
+            copy_kernel_impl<__nv_bfloat16><<<num_blocks_copy, BLOCK_SIZE, 0, stream>>>(
+                reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+                reinterpret_cast<__nv_bfloat16*>(output.data_ptr()), total_input);
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+            if (idx_is_int32)
+                scatter_values_kernel_impl<__nv_bfloat16, int32_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>(
+                    index.data<int32_t>(),
+                    reinterpret_cast<const __nv_bfloat16*>(src.data_ptr()),
+                    reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+                    outer_size, dim_size, inner_size, index_dim_size, total_scatter);
+            else
+                scatter_values_kernel_impl<__nv_bfloat16, int64_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>(
+                    index.data<int64_t>(),
+                    reinterpret_cast<const __nv_bfloat16*>(src.data_ptr()),
+                    reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
                     outer_size, dim_size, inner_size, index_dim_size, total_scatter);
             break;
         default:
@@ -502,6 +552,7 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask,
         case DType::Int8:    RUN_FLAGGED_SELECT(int8_t); break;
         case DType::UInt8:   RUN_FLAGGED_SELECT(uint8_t); break;
         case DType::Float16: RUN_FLAGGED_SELECT(__half); break;
+        case DType::BFloat16: RUN_FLAGGED_SELECT(__nv_bfloat16); break;
         default:
             throw std::runtime_error("masked_select: unsupported dtype");
     }
@@ -553,14 +604,15 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask, double value,
 
     if (n == 0) return output;
 
-    int num_blocks = get_num_blocks(n);
-
     // Handle mask broadcasting if needed (assume same shape for now)
     const bool* mask_ptr = reinterpret_cast<const bool*>(mask.data_ptr());
 
-    #define LAUNCH_MASKED_FILL(T, cast_val) \
-        masked_fill_kernel_impl<T><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
-            input.data<T>(), mask_ptr, static_cast<T>(cast_val), output.data<T>(), n)
+    #define LAUNCH_MASKED_FILL(T, cast_val) do { \
+        auto [grid_size, block_size] = optimal_launch_config( \
+            masked_fill_kernel_impl<T>, n); \
+        masked_fill_kernel_impl<T><<<grid_size, block_size, 0, stream>>>( \
+            input.data<T>(), mask_ptr, static_cast<T>(cast_val), output.data<T>(), n); \
+    } while(0)
 
     switch (input.dtype()) {
         case DType::Float32: LAUNCH_MASKED_FILL(float, value); break;
@@ -571,10 +623,22 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask, double value,
         case DType::UInt8:   LAUNCH_MASKED_FILL(uint8_t, value); break;
         case DType::Float16: {
             __half fill_val = __float2half(static_cast<float>(value));
-            masked_fill_kernel_impl<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            auto [grid_size, block_size] = optimal_launch_config(
+                masked_fill_kernel_impl<__half>, n);
+            masked_fill_kernel_impl<__half><<<grid_size, block_size, 0, stream>>>(
                 reinterpret_cast<const __half*>(input.data_ptr()),
                 mask_ptr, fill_val,
                 reinterpret_cast<__half*>(output.data_ptr()), n);
+            break;
+        }
+        case DType::BFloat16: {
+            __nv_bfloat16 fill_val = __float2bfloat16(static_cast<float>(value));
+            auto [grid_size, block_size] = optimal_launch_config(
+                masked_fill_kernel_impl<__nv_bfloat16>, n);
+            masked_fill_kernel_impl<__nv_bfloat16><<<grid_size, block_size, 0, stream>>>(
+                reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+                mask_ptr, fill_val,
+                reinterpret_cast<__nv_bfloat16*>(output.data_ptr()), n);
             break;
         }
         default:
@@ -614,13 +678,14 @@ auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y,
 
     if (n == 0) return output;
 
-    int num_blocks = get_num_blocks(n);
-
     const bool* cond_ptr = reinterpret_cast<const bool*>(condition.data_ptr());
 
-    #define LAUNCH_WHERE(T) \
-        where_kernel_impl<T><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
-            cond_ptr, x.data<T>(), y.data<T>(), output.data<T>(), n)
+    #define LAUNCH_WHERE(T) do { \
+        auto [grid_size, block_size] = optimal_launch_config( \
+            where_kernel_impl<T>, n); \
+        where_kernel_impl<T><<<grid_size, block_size, 0, stream>>>( \
+            cond_ptr, x.data<T>(), y.data<T>(), output.data<T>(), n); \
+    } while(0)
 
     switch (x.dtype()) {
         case DType::Float32: LAUNCH_WHERE(float); break;
@@ -629,13 +694,26 @@ auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y,
         case DType::Int64:   LAUNCH_WHERE(int64_t); break;
         case DType::Int8:    LAUNCH_WHERE(int8_t); break;
         case DType::UInt8:   LAUNCH_WHERE(uint8_t); break;
-        case DType::Float16:
-            where_kernel_impl<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+        case DType::Float16: {
+            auto [grid_size, block_size] = optimal_launch_config(
+                where_kernel_impl<__half>, n);
+            where_kernel_impl<__half><<<grid_size, block_size, 0, stream>>>(
                 cond_ptr,
                 reinterpret_cast<const __half*>(x.data_ptr()),
                 reinterpret_cast<const __half*>(y.data_ptr()),
                 reinterpret_cast<__half*>(output.data_ptr()), n);
             break;
+        }
+        case DType::BFloat16: {
+            auto [grid_size, block_size] = optimal_launch_config(
+                where_kernel_impl<__nv_bfloat16>, n);
+            where_kernel_impl<__nv_bfloat16><<<grid_size, block_size, 0, stream>>>(
+                cond_ptr,
+                reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()),
+                reinterpret_cast<const __nv_bfloat16*>(y.data_ptr()),
+                reinterpret_cast<__nv_bfloat16*>(output.data_ptr()), n);
+            break;
+        }
         default:
             throw std::runtime_error("where: unsupported dtype");
     }
@@ -690,7 +768,6 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
     if (num_indices == 0) return output;
 
     int64_t total_elements = num_indices * embedding_dim;
-    int num_blocks = get_num_blocks(total_elements);
 
     bool idx_is_int32 = (indices.dtype() == DType::Int32);
     bool idx_is_int64 = (indices.dtype() == DType::Int64);
@@ -699,31 +776,60 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
     }
 
     #define LAUNCH_EMBEDDING(T) \
-        if (idx_is_int32) \
-            embedding_kernel_impl<T, int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
+        if (idx_is_int32) { \
+            auto [grid_size, block_size] = optimal_launch_config( \
+                embedding_kernel_impl<T, int32_t>, total_elements); \
+            embedding_kernel_impl<T, int32_t><<<grid_size, block_size, 0, stream>>>( \
                 weight.data<T>(), indices.data<int32_t>(), output.data<T>(), \
                 num_indices, embedding_dim); \
-        else \
-            embedding_kernel_impl<T, int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
+        } else { \
+            auto [grid_size, block_size] = optimal_launch_config( \
+                embedding_kernel_impl<T, int64_t>, total_elements); \
+            embedding_kernel_impl<T, int64_t><<<grid_size, block_size, 0, stream>>>( \
                 weight.data<T>(), indices.data<int64_t>(), output.data<T>(), \
-                num_indices, embedding_dim)
+                num_indices, embedding_dim); \
+        }
 
     switch (weight.dtype()) {
         case DType::Float32: LAUNCH_EMBEDDING(float); break;
         case DType::Float64: LAUNCH_EMBEDDING(double); break;
         case DType::Float16:
-            if (idx_is_int32)
-                embedding_kernel_impl<__half, int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            if (idx_is_int32) {
+                auto [grid_size, block_size] = optimal_launch_config(
+                    embedding_kernel_impl<__half, int32_t>, total_elements);
+                embedding_kernel_impl<__half, int32_t><<<grid_size, block_size, 0, stream>>>(
                     reinterpret_cast<const __half*>(weight.data_ptr()),
                     indices.data<int32_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
                     num_indices, embedding_dim);
-            else
-                embedding_kernel_impl<__half, int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            } else {
+                auto [grid_size, block_size] = optimal_launch_config(
+                    embedding_kernel_impl<__half, int64_t>, total_elements);
+                embedding_kernel_impl<__half, int64_t><<<grid_size, block_size, 0, stream>>>(
                     reinterpret_cast<const __half*>(weight.data_ptr()),
                     indices.data<int64_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
                     num_indices, embedding_dim);
+            }
+            break;
+        case DType::BFloat16:
+            if (idx_is_int32) {
+                auto [grid_size, block_size] = optimal_launch_config(
+                    embedding_kernel_impl<__nv_bfloat16, int32_t>, total_elements);
+                embedding_kernel_impl<__nv_bfloat16, int32_t><<<grid_size, block_size, 0, stream>>>(
+                    reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr()),
+                    indices.data<int32_t>(),
+                    reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+                    num_indices, embedding_dim);
+            } else {
+                auto [grid_size, block_size] = optimal_launch_config(
+                    embedding_kernel_impl<__nv_bfloat16, int64_t>, total_elements);
+                embedding_kernel_impl<__nv_bfloat16, int64_t><<<grid_size, block_size, 0, stream>>>(
+                    reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr()),
+                    indices.data<int64_t>(),
+                    reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+                    num_indices, embedding_dim);
+            }
             break;
         default:
             throw std::runtime_error("embedding: unsupported dtype");
@@ -793,6 +899,40 @@ __global__ void embedding_backward_fp16_kernel_impl(
     }
 }
 
+// Separate BF16 backward kernel — atomicAdd(__nv_bfloat16) requires SM >= 80
+template<typename IndexT>
+__global__ void embedding_backward_bf16_kernel_impl(
+    const __nv_bfloat16* grad_output,
+    const IndexT* indices,
+    __nv_bfloat16* grad_weight,
+    int64_t num_indices,
+    int64_t embedding_dim) {
+
+    int64_t total_elements = num_indices * embedding_dim;
+
+    CUDA_GRID_STRIDE_LOOP(idx, total_elements) {
+        int64_t i = idx / embedding_dim;
+        int64_t j = idx % embedding_dim;
+
+        int64_t token_idx = static_cast<int64_t>(indices[i]);
+#if __CUDA_ARCH__ >= 800
+        atomicAdd(&grad_weight[token_idx * embedding_dim + j], grad_output[idx]);
+#else
+        // Fallback for SM < 80: CAS-based atomic add via float conversion
+        float val = __bfloat162float(grad_output[idx]);
+        unsigned int* addr = reinterpret_cast<unsigned int*>(&grad_weight[(token_idx * embedding_dim + j) & ~1]);
+        unsigned int old_val, new_val;
+        do {
+            old_val = *addr;
+            __nv_bfloat16* h = reinterpret_cast<__nv_bfloat16*>(&old_val);
+            __nv_bfloat16 result = __float2bfloat16(__bfloat162float(h[(token_idx * embedding_dim + j) & 1]) + val);
+            new_val = old_val;
+            reinterpret_cast<__nv_bfloat16*>(&new_val)[(token_idx * embedding_dim + j) & 1] = result;
+        } while (atomicCAS(addr, old_val, new_val) != old_val);
+#endif
+    }
+}
+
 auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
                                int64_t num_embeddings, cudaStream_t stream) -> Tensor {
     // grad_output: [*, embedding_dim]
@@ -846,6 +986,20 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
                     reinterpret_cast<const __half*>(grad_output.data_ptr()),
                     indices.data<int64_t>(),
                     reinterpret_cast<__half*>(grad_weight.data_ptr()),
+                    num_indices, embedding_dim);
+            break;
+        case DType::BFloat16:
+            if (idx_is_int32)
+                embedding_backward_bf16_kernel_impl<int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
+                    indices.data<int32_t>(),
+                    reinterpret_cast<__nv_bfloat16*>(grad_weight.data_ptr()),
+                    num_indices, embedding_dim);
+            else
+                embedding_backward_bf16_kernel_impl<int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
+                    indices.data<int64_t>(),
+                    reinterpret_cast<__nv_bfloat16*>(grad_weight.data_ptr()),
                     num_indices, embedding_dim);
             break;
         default:
@@ -932,6 +1086,22 @@ __global__ void nonzero_flag_kernel<__half>(
     }
 }
 
+// Specialization for __nv_bfloat16
+template<>
+__global__ void nonzero_flag_kernel<__nv_bfloat16>(
+    const __nv_bfloat16* input,
+    int64_t* flags,
+    int64_t n) {
+
+    CUDA_GRID_STRIDE_LOOP(i, n) {
+#if __CUDA_ARCH__ >= 800
+        flags[i] = (__hne(input[i], __float2bfloat16(0.0f))) ? 1 : 0;
+#else
+        flags[i] = (__bfloat162float(input[i]) != 0.0f) ? 1 : 0;
+#endif
+    }
+}
+
 // Decompose compacted flat indices into multi-dimensional indices
 __global__ void decompose_flat_indices_kernel(
     const int64_t* flat_indices,
@@ -979,6 +1149,10 @@ auto nonzero_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
         case DType::Float16:
             nonzero_flag_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                 reinterpret_cast<const __half*>(input.data_ptr()), d_flags, n);
+            break;
+        case DType::BFloat16:
+            nonzero_flag_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()), d_flags, n);
             break;
         default:
             throw std::runtime_error("nonzero: unsupported dtype");
@@ -1065,32 +1239,46 @@ auto take_kernel(const Tensor& input, const Tensor& indices, cudaStream_t stream
 
     if (indices_size == 0) return output;
 
-    int blocks = get_num_blocks(indices_size);
+    #define LAUNCH_TAKE(T) do { \
+        auto [grid_size, block_size] = optimal_launch_config( \
+            take_kernel_impl<T>, indices_size); \
+        take_kernel_impl<T><<<grid_size, block_size, 0, stream>>>( \
+            input.data<T>(), indices.data<int64_t>(), output.data<T>(), \
+            input_size, indices_size); \
+    } while(0)
 
     switch (input.dtype()) {
-        case DType::Float32:
-            take_kernel_impl<float><<<blocks, BLOCK_SIZE, 0, stream>>>(
-                input.data<float>(), indices.data<int64_t>(), output.data<float>(),
+        case DType::Float32: LAUNCH_TAKE(float); break;
+        case DType::Float64: LAUNCH_TAKE(double); break;
+        case DType::Int32:   LAUNCH_TAKE(int32_t); break;
+        case DType::Int64:   LAUNCH_TAKE(int64_t); break;
+        case DType::Int8:    LAUNCH_TAKE(int8_t); break;
+        case DType::UInt8:   LAUNCH_TAKE(uint8_t); break;
+        case DType::Float16: {
+            auto [grid_size, block_size] = optimal_launch_config(
+                take_kernel_impl<__half>, indices_size);
+            take_kernel_impl<__half><<<grid_size, block_size, 0, stream>>>(
+                reinterpret_cast<const __half*>(input.data_ptr()),
+                indices.data<int64_t>(),
+                reinterpret_cast<__half*>(output.data_ptr()),
                 input_size, indices_size);
             break;
-        case DType::Float64:
-            take_kernel_impl<double><<<blocks, BLOCK_SIZE, 0, stream>>>(
-                input.data<double>(), indices.data<int64_t>(), output.data<double>(),
+        }
+        case DType::BFloat16: {
+            auto [grid_size, block_size] = optimal_launch_config(
+                take_kernel_impl<__nv_bfloat16>, indices_size);
+            take_kernel_impl<__nv_bfloat16><<<grid_size, block_size, 0, stream>>>(
+                reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+                indices.data<int64_t>(),
+                reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
                 input_size, indices_size);
             break;
-        case DType::Int32:
-            take_kernel_impl<int32_t><<<blocks, BLOCK_SIZE, 0, stream>>>(
-                input.data<int32_t>(), indices.data<int64_t>(), output.data<int32_t>(),
-                input_size, indices_size);
-            break;
-        case DType::Int64:
-            take_kernel_impl<int64_t><<<blocks, BLOCK_SIZE, 0, stream>>>(
-                input.data<int64_t>(), indices.data<int64_t>(), output.data<int64_t>(),
-                input_size, indices_size);
-            break;
+        }
         default:
             throw std::runtime_error("take_kernel: unsupported dtype");
     }
+
+    #undef LAUNCH_TAKE
 
     CUDA_CHECK(cudaGetLastError());
     return output;
@@ -1119,6 +1307,77 @@ __global__ void put_kernel_impl(
         if (target_idx >= 0 && target_idx < total_size) {
             if (accumulate) {
                 atomicAdd(&output[target_idx], source[idx]);
+            } else {
+                output[target_idx] = source[idx];
+            }
+        }
+    }
+}
+
+// Specialization for int8_t — atomicAdd not available, use CAS on containing int
+template<>
+__global__ void put_kernel_impl<int8_t>(
+    int8_t* __restrict__ output,
+    const int64_t* __restrict__ indices,
+    const int8_t* __restrict__ source,
+    int64_t num_indices,
+    int64_t total_size,
+    bool accumulate
+) {
+    CUDA_GRID_STRIDE_LOOP(idx, num_indices) {
+        int64_t target_idx = indices[idx];
+        if (target_idx < 0) {
+            target_idx += total_size;
+        }
+        if (target_idx >= 0 && target_idx < total_size) {
+            if (accumulate) {
+                // CAS loop on the aligned 32-bit word containing this byte
+                unsigned int byte_offset = static_cast<unsigned int>(target_idx) & 3u;
+                unsigned int* addr = reinterpret_cast<unsigned int*>(
+                    reinterpret_cast<char*>(output) + (target_idx - byte_offset));
+                unsigned int old_val, new_val;
+                do {
+                    old_val = *addr;
+                    int8_t cur = static_cast<int8_t>((old_val >> (byte_offset * 8)) & 0xFF);
+                    int8_t sum = static_cast<int8_t>(cur + source[idx]);
+                    new_val = (old_val & ~(0xFFu << (byte_offset * 8))) |
+                              (static_cast<unsigned int>(static_cast<uint8_t>(sum)) << (byte_offset * 8));
+                } while (atomicCAS(addr, old_val, new_val) != old_val);
+            } else {
+                output[target_idx] = source[idx];
+            }
+        }
+    }
+}
+
+// Specialization for uint8_t — same CAS approach
+template<>
+__global__ void put_kernel_impl<uint8_t>(
+    uint8_t* __restrict__ output,
+    const int64_t* __restrict__ indices,
+    const uint8_t* __restrict__ source,
+    int64_t num_indices,
+    int64_t total_size,
+    bool accumulate
+) {
+    CUDA_GRID_STRIDE_LOOP(idx, num_indices) {
+        int64_t target_idx = indices[idx];
+        if (target_idx < 0) {
+            target_idx += total_size;
+        }
+        if (target_idx >= 0 && target_idx < total_size) {
+            if (accumulate) {
+                unsigned int byte_offset = static_cast<unsigned int>(target_idx) & 3u;
+                unsigned int* addr = reinterpret_cast<unsigned int*>(
+                    reinterpret_cast<char*>(output) + (target_idx - byte_offset));
+                unsigned int old_val, new_val;
+                do {
+                    old_val = *addr;
+                    uint8_t cur = static_cast<uint8_t>((old_val >> (byte_offset * 8)) & 0xFF);
+                    uint8_t sum = static_cast<uint8_t>(cur + source[idx]);
+                    new_val = (old_val & ~(0xFFu << (byte_offset * 8))) |
+                              (static_cast<unsigned int>(sum) << (byte_offset * 8));
+                } while (atomicCAS(addr, old_val, new_val) != old_val);
             } else {
                 output[target_idx] = source[idx];
             }
@@ -1187,6 +1446,82 @@ __global__ void put_kernel_impl<int64_t>(
     }
 }
 
+// Specialization for __half atomicAdd in put
+template<>
+__global__ void put_kernel_impl<__half>(
+    __half* __restrict__ output,
+    const int64_t* __restrict__ indices,
+    const __half* __restrict__ source,
+    int64_t num_indices,
+    int64_t total_size,
+    bool accumulate
+) {
+    CUDA_GRID_STRIDE_LOOP(idx, num_indices) {
+        int64_t target_idx = indices[idx];
+        if (target_idx < 0) {
+            target_idx += total_size;
+        }
+        if (target_idx >= 0 && target_idx < total_size) {
+            if (accumulate) {
+#if __CUDA_ARCH__ >= 700
+                atomicAdd(&output[target_idx], source[idx]);
+#else
+                float val = __half2float(source[idx]);
+                unsigned int* addr = reinterpret_cast<unsigned int*>(&output[target_idx & ~1]);
+                unsigned int old_val, new_val;
+                do {
+                    old_val = *addr;
+                    __half* h = reinterpret_cast<__half*>(&old_val);
+                    __half result = __float2half(__half2float(h[target_idx & 1]) + val);
+                    new_val = old_val;
+                    reinterpret_cast<__half*>(&new_val)[target_idx & 1] = result;
+                } while (atomicCAS(addr, old_val, new_val) != old_val);
+#endif
+            } else {
+                output[target_idx] = source[idx];
+            }
+        }
+    }
+}
+
+// Specialization for __nv_bfloat16 atomicAdd in put
+template<>
+__global__ void put_kernel_impl<__nv_bfloat16>(
+    __nv_bfloat16* __restrict__ output,
+    const int64_t* __restrict__ indices,
+    const __nv_bfloat16* __restrict__ source,
+    int64_t num_indices,
+    int64_t total_size,
+    bool accumulate
+) {
+    CUDA_GRID_STRIDE_LOOP(idx, num_indices) {
+        int64_t target_idx = indices[idx];
+        if (target_idx < 0) {
+            target_idx += total_size;
+        }
+        if (target_idx >= 0 && target_idx < total_size) {
+            if (accumulate) {
+#if __CUDA_ARCH__ >= 800
+                atomicAdd(&output[target_idx], source[idx]);
+#else
+                float val = __bfloat162float(source[idx]);
+                unsigned int* addr = reinterpret_cast<unsigned int*>(&output[target_idx & ~1]);
+                unsigned int old_val, new_val;
+                do {
+                    old_val = *addr;
+                    __nv_bfloat16* h = reinterpret_cast<__nv_bfloat16*>(&old_val);
+                    __nv_bfloat16 result = __float2bfloat16(__bfloat162float(h[target_idx & 1]) + val);
+                    new_val = old_val;
+                    reinterpret_cast<__nv_bfloat16*>(&new_val)[target_idx & 1] = result;
+                } while (atomicCAS(addr, old_val, new_val) != old_val);
+#endif
+            } else {
+                output[target_idx] = source[idx];
+            }
+        }
+    }
+}
+
 auto put_kernel(Tensor& input, const Tensor& indices, const Tensor& source,
                 bool accumulate, cudaStream_t stream) -> Tensor {
     Tensor output = input.clone();
@@ -1216,6 +1551,30 @@ auto put_kernel(Tensor& input, const Tensor& indices, const Tensor& source,
         case DType::Int64:
             put_kernel_impl<int64_t><<<blocks, BLOCK_SIZE, 0, stream>>>(
                 output.data<int64_t>(), indices.data<int64_t>(), source.data<int64_t>(),
+                num_indices, total_size, accumulate);
+            break;
+        case DType::Int8:
+            put_kernel_impl<int8_t><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                output.data<int8_t>(), indices.data<int64_t>(), source.data<int8_t>(),
+                num_indices, total_size, accumulate);
+            break;
+        case DType::UInt8:
+            put_kernel_impl<uint8_t><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                output.data<uint8_t>(), indices.data<int64_t>(), source.data<uint8_t>(),
+                num_indices, total_size, accumulate);
+            break;
+        case DType::Float16:
+            put_kernel_impl<__half><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                reinterpret_cast<__half*>(output.data_ptr()),
+                indices.data<int64_t>(),
+                reinterpret_cast<const __half*>(source.data_ptr()),
+                num_indices, total_size, accumulate);
+            break;
+        case DType::BFloat16:
+            put_kernel_impl<__nv_bfloat16><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+                indices.data<int64_t>(),
+                reinterpret_cast<const __nv_bfloat16*>(source.data_ptr()),
                 num_indices, total_size, accumulate);
             break;
         default:

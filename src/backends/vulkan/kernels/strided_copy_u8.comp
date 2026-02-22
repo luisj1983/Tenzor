@@ -1,0 +1,77 @@
+#version 450
+
+// Strided copy operation for UInt8/Bool/Int8: copy non-contiguous tensor to contiguous layout
+// Byte-sized elements are packed 4 per uint32, accessed via bitwise operations
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };   // Packed bytes (4 per uint32)
+layout(binding = 1) buffer Output { uint output_data[]; };  // Packed bytes (4 per uint32)
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint ndims;
+    uint base_offset;
+    uvec4 shape_0_3;
+    uvec4 shape_4_7;
+    ivec4 strides_0_3;
+    ivec4 strides_4_7;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    // Each thread handles one byte element
+    if (idx >= params.n_elements) {
+        return;
+    }
+
+    uint remaining = idx;
+    int src_offset = int(params.base_offset);
+
+    uint shape[8];
+    int strides[8];
+    shape[0] = params.shape_0_3.x;
+    shape[1] = params.shape_0_3.y;
+    shape[2] = params.shape_0_3.z;
+    shape[3] = params.shape_0_3.w;
+    shape[4] = params.shape_4_7.x;
+    shape[5] = params.shape_4_7.y;
+    shape[6] = params.shape_4_7.z;
+    shape[7] = params.shape_4_7.w;
+    strides[0] = params.strides_0_3.x;
+    strides[1] = params.strides_0_3.y;
+    strides[2] = params.strides_0_3.z;
+    strides[3] = params.strides_0_3.w;
+    strides[4] = params.strides_4_7.x;
+    strides[5] = params.strides_4_7.y;
+    strides[6] = params.strides_4_7.z;
+    strides[7] = params.strides_4_7.w;
+
+    for (int dim = int(params.ndims) - 1; dim >= 0; dim--) {
+        uint dim_idx = remaining % shape[dim];
+        remaining /= shape[dim];
+        src_offset += int(dim_idx) * strides[dim];
+    }
+
+    // Read source byte from packed uint32
+    uint src_word_idx = uint(src_offset) / 4;
+    uint src_byte_idx = uint(src_offset) % 4;
+    uint src_packed = input_data[src_word_idx];
+    uint src_val = (src_packed >> (src_byte_idx * 8)) & 0xFFu;
+
+    // Write to destination packed uint32 using atomic CAS to avoid race conditions.
+    // Four threads writing to different bytes of the same word must not corrupt
+    // each other's data.
+    uint dst_word_idx = idx / 4;
+    uint dst_byte_idx = idx % 4;
+    uint shift = dst_byte_idx * 8;
+    uint mask = 0xFFu << shift;
+
+    uint old_val = output_data[dst_word_idx];
+    uint new_val, expected;
+    do {
+        expected = old_val;
+        new_val = (expected & ~mask) | (src_val << shift);
+        old_val = atomicCompSwap(output_data[dst_word_idx], expected, new_val);
+    } while (old_val != expected);
+}

@@ -189,6 +189,29 @@ inline std::vector<Tensor> dispatch_to_device(
 }
 
 /**
+ * @brief Dispatch inplace operation on target tensor.
+ *
+ * Routes to the inplace kernel directly, avoiding const_cast.
+ * The target tensor is modified in-place.
+ *
+ * @param op Operation identifier (should be an inplace op)
+ * @param target The tensor to modify in-place
+ * @param others Additional input tensors
+ * @param attrs Operation attributes
+ * @return Reference to the modified target tensor
+ */
+inline Tensor& dispatch_inplace(
+    OpId op,
+    Tensor& target,
+    std::span<const Tensor> others,
+    const OpAttributes& attrs = {})
+{
+    Device::Type device_type = target.device().type;
+    auto& table = DispatchTableRegistry::get_table(device_type);
+    return table.dispatch_inplace(op, target, others, attrs);
+}
+
+/**
  * @brief Check if an operation is supported on a device type.
  *
  * @param op Operation identifier

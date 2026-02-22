@@ -160,6 +160,18 @@ public:
     auto unload_backend(std::string_view name) -> bool;
 
     /**
+     * @brief Get the dlopen handle for the most recently loaded library.
+     *
+     * Returns the handle from the last load_backend() call, which can be
+     * used for dlsym() without needing a second RTLD_NOLOAD dlopen.
+     *
+     * @return Library handle or nullptr if no libraries loaded
+     */
+    auto last_library_handle() const -> void* {
+        return loaded_libraries_.empty() ? nullptr : loaded_libraries_.back();
+    }
+
+    /**
      * @brief Perform ordered shutdown of all backends.
      *
      * Destroys backends in reverse dependency order and dlcloses all loaded

@@ -1,5 +1,27 @@
 @PACKAGE_INIT@
 
+set(TENZOR_VERSION "@PROJECT_VERSION@")
+
+# Backend availability flags (set at configure time)
+set(Tenzor_CUDA_FOUND @TENZOR_BUILD_CUDA@)
+set(Tenzor_ROCM_FOUND @TENZOR_BUILD_ROCM@)
+set(Tenzor_ONEAPI_FOUND @TENZOR_BUILD_ONEAPI@)
+set(Tenzor_VULKAN_FOUND @TENZOR_BUILD_VULKAN@)
+set(Tenzor_METAL_FOUND @TENZOR_BUILD_METAL@)
+set(Tenzor_WEBGPU_FOUND @TENZOR_BUILD_WEBGPU@)
+
+# Find required dependencies
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+
+# Component checking: allow find_package(Tenzor COMPONENTS CUDA Vulkan ...)
+foreach(_comp ${Tenzor_FIND_COMPONENTS})
+    if(NOT Tenzor_${_comp}_FOUND)
+        set(Tenzor_FOUND FALSE)
+        set(Tenzor_NOT_FOUND_MESSAGE "Required component '${_comp}' not available")
+    endif()
+endforeach()
+
 include("${CMAKE_CURRENT_LIST_DIR}/TenzorTargets.cmake")
 
 check_required_components(Tenzor)

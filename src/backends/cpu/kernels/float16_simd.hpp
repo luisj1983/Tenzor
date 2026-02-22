@@ -14,6 +14,9 @@
 #include <cstdint>
 #include <cstddef>
 #include <cmath>
+#include <cstring>
+#include <algorithm>
+#include "tenzor/core/dtype.hpp"
 
 #if defined(__x86_64__) || defined(_M_X64)
     #include <immintrin.h>
@@ -118,10 +121,13 @@ inline void add_f16(const uint16_t* a, const uint16_t* b, uint16_t* out, size_t 
 #endif
 
 #else
-    // Scalar fallback (no F16C)
+    // Scalar fallback (no F16C) — use Float16 struct for software conversion
     for (size_t i = 0; i < n; ++i) {
-        // Software F16 conversion would go here
-        // For now, assume Float16 class handles this
+        Float16 fa, fb;
+        std::memcpy(&fa, &a[i], sizeof(uint16_t));
+        std::memcpy(&fb, &b[i], sizeof(uint16_t));
+        Float16 result(static_cast<float>(fa) + static_cast<float>(fb));
+        std::memcpy(&out[i], &result, sizeof(uint16_t));
     }
 #endif
 }
@@ -161,6 +167,14 @@ inline void sub_f16(const uint16_t* a, const uint16_t* b, uint16_t* out, size_t 
     }
 #endif
 
+#else
+    for (size_t i = 0; i < n; ++i) {
+        Float16 fa, fb;
+        std::memcpy(&fa, &a[i], sizeof(uint16_t));
+        std::memcpy(&fb, &b[i], sizeof(uint16_t));
+        Float16 result(static_cast<float>(fa) - static_cast<float>(fb));
+        std::memcpy(&out[i], &result, sizeof(uint16_t));
+    }
 #endif
 }
 
@@ -199,6 +213,14 @@ inline void mul_f16(const uint16_t* a, const uint16_t* b, uint16_t* out, size_t 
     }
 #endif
 
+#else
+    for (size_t i = 0; i < n; ++i) {
+        Float16 fa, fb;
+        std::memcpy(&fa, &a[i], sizeof(uint16_t));
+        std::memcpy(&fb, &b[i], sizeof(uint16_t));
+        Float16 result(static_cast<float>(fa) * static_cast<float>(fb));
+        std::memcpy(&out[i], &result, sizeof(uint16_t));
+    }
 #endif
 }
 
@@ -237,6 +259,14 @@ inline void div_f16(const uint16_t* a, const uint16_t* b, uint16_t* out, size_t 
     }
 #endif
 
+#else
+    for (size_t i = 0; i < n; ++i) {
+        Float16 fa, fb;
+        std::memcpy(&fa, &a[i], sizeof(uint16_t));
+        std::memcpy(&fb, &b[i], sizeof(uint16_t));
+        Float16 result(static_cast<float>(fa) / static_cast<float>(fb));
+        std::memcpy(&out[i], &result, sizeof(uint16_t));
+    }
 #endif
 }
 
@@ -280,6 +310,15 @@ inline void fma_f16(const uint16_t* a, const uint16_t* b, const uint16_t* c,
     }
 #endif
 
+#else
+    for (size_t i = 0; i < n; ++i) {
+        Float16 fa, fb, fc;
+        std::memcpy(&fa, &a[i], sizeof(uint16_t));
+        std::memcpy(&fb, &b[i], sizeof(uint16_t));
+        std::memcpy(&fc, &c[i], sizeof(uint16_t));
+        Float16 result(static_cast<float>(fa) * static_cast<float>(fb) + static_cast<float>(fc));
+        std::memcpy(&out[i], &result, sizeof(uint16_t));
+    }
 #endif
 }
 
@@ -318,6 +357,13 @@ inline void sqrt_f16(const uint16_t* a, uint16_t* out, size_t n) {
     }
 #endif
 
+#else
+    for (size_t i = 0; i < n; ++i) {
+        Float16 fa;
+        std::memcpy(&fa, &a[i], sizeof(uint16_t));
+        Float16 result(std::sqrt(static_cast<float>(fa)));
+        std::memcpy(&out[i], &result, sizeof(uint16_t));
+    }
 #endif
 }
 
@@ -354,6 +400,13 @@ inline void relu_f16(const uint16_t* a, uint16_t* out, size_t n) {
     }
 #endif
 
+#else
+    for (size_t i = 0; i < n; ++i) {
+        Float16 fa;
+        std::memcpy(&fa, &a[i], sizeof(uint16_t));
+        Float16 result(std::max(0.0f, static_cast<float>(fa)));
+        std::memcpy(&out[i], &result, sizeof(uint16_t));
+    }
 #endif
 }
 
@@ -390,6 +443,13 @@ inline void scale_f16(const uint16_t* a, float scalar, uint16_t* out, size_t n) 
     }
 #endif
 
+#else
+    for (size_t i = 0; i < n; ++i) {
+        Float16 fa;
+        std::memcpy(&fa, &a[i], sizeof(uint16_t));
+        Float16 result(static_cast<float>(fa) * scalar);
+        std::memcpy(&out[i], &result, sizeof(uint16_t));
+    }
 #endif
 }
 
@@ -440,7 +500,13 @@ inline float sum_f16(const uint16_t* a, size_t n) {
 
     return sum;
 #else
-    return 0.0f;
+    float sum = 0.0f;
+    for (size_t i = 0; i < n; ++i) {
+        Float16 fa;
+        std::memcpy(&fa, &a[i], sizeof(uint16_t));
+        sum += static_cast<float>(fa);
+    }
+    return sum;
 #endif
 }
 
@@ -488,7 +554,14 @@ inline float dot_f16(const uint16_t* a, const uint16_t* b, size_t n) {
 
     return sum;
 #else
-    return 0.0f;
+    float sum = 0.0f;
+    for (size_t i = 0; i < n; ++i) {
+        Float16 fa, fb;
+        std::memcpy(&fa, &a[i], sizeof(uint16_t));
+        std::memcpy(&fb, &b[i], sizeof(uint16_t));
+        sum += static_cast<float>(fa) * static_cast<float>(fb);
+    }
+    return sum;
 #endif
 }
 
@@ -513,6 +586,15 @@ inline void gemm_f16_transB(
         for (int64_t j = 0; j < N; ++j) {
             float sum = dot_f16(A + i * K, B + j * K, K);
             C[i * N + j] = _cvtss_sh(sum, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+        }
+    }
+#else
+    #pragma omp parallel for if(M * N > 1000)
+    for (int64_t i = 0; i < M; ++i) {
+        for (int64_t j = 0; j < N; ++j) {
+            float sum = dot_f16(A + i * K, B + j * K, K);
+            Float16 result(sum);
+            std::memcpy(&C[i * N + j], &result, sizeof(uint16_t));
         }
     }
 #endif

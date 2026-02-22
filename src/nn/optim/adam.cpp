@@ -31,44 +31,55 @@ auto Adam::step() -> void {
             grad.device().type == Device::Type::CUDA &&
             (param.tensor().dtype() == DType::Float32 || param.tensor().dtype() == DType::Float64)) {
 
-            // Prepare inputs for dispatch
+            // Pack numeric params into a Float64 tensor to avoid string conversion overhead.
+            // Layout: [lr, beta1, beta2, eps, weight_decay, step, decoupled, amsgrad]
+            Tensor param_tensor({8}, DType::Float64, Device::cpu());
+            auto* p = param_tensor.data<double>();
+            p[0] = lr_;
+            p[1] = beta1_;
+            p[2] = beta2_;
+            p[3] = eps_;
+            p[4] = weight_decay_;
+            p[5] = static_cast<double>(step_count_);
+            p[6] = 0.0;  // decoupled = false (L2 regularization for Adam)
+            p[7] = amsgrad_ ? 1.0 : 0.0;
+
+            // Prepare inputs: [param, grad, exp_avg, exp_avg_sq, packed_params, max_exp_avg_sq?]
             std::vector<Tensor> inputs = {
-                param.tensor(), grad, exp_avg_[i], exp_avg_sq_[i]
+                param.tensor(), grad, exp_avg_[i], exp_avg_sq_[i], param_tensor
             };
             if (amsgrad_ && i < max_exp_avg_sq_.size()) {
                 inputs.push_back(max_exp_avg_sq_[i]);
             }
 
-            // Prepare attributes (use double precision for Float64 accuracy)
             OpAttributes attrs;
-            attrs["lr"] = std::to_string(lr_);
-            attrs["beta1"] = std::to_string(beta1_);
-            attrs["beta2"] = std::to_string(beta2_);
-            attrs["eps"] = std::to_string(eps_);
-            attrs["weight_decay"] = std::to_string(weight_decay_);
-            attrs["step"] = std::to_string(step_count_);
-            attrs["decoupled"] = "false";  // L2 regularization for Adam
-            attrs["amsgrad"] = amsgrad_ ? "true" : "false";
-
-            dispatch(OpId::FusedAdamStep, inputs, attrs);
+            // Use dispatch_to_device to bypass device check: packed_params is a
+            // small CPU tensor read by the host-side kernel lambda, while the
+            // other inputs live on CUDA.
+            dispatch_to_device(OpId::FusedAdamStep, Device::Type::CUDA, inputs, attrs);
             continue;
         }
 
-        // CPU fallback path
+        // CPU fallback path — use dtype-appropriate scalar tensors to
+        // preserve Float64 precision (static_cast<float> truncates doubles)
+        auto scalar = [&](double value) -> Tensor {
+            return full({1}, value, param.tensor().dtype(), param.tensor().device());
+        };
+
         auto grad_copy = grad.clone();
 
         // Weight decay
         if (weight_decay_ > 0.0) {
-            grad_copy = grad_copy + param.tensor() * static_cast<float>(weight_decay_);
+            grad_copy = grad_copy + param.tensor() * scalar(weight_decay_);
         }
 
         // Update biased first moment estimate
-        exp_avg_[i] = exp_avg_[i] * static_cast<float>(beta1_) +
-                     grad_copy * static_cast<float>(1.0 - beta1_);
+        exp_avg_[i] = exp_avg_[i] * scalar(beta1_) +
+                     grad_copy * scalar(1.0 - beta1_);
 
         // Update biased second raw moment estimate
-        exp_avg_sq_[i] = exp_avg_sq_[i] * static_cast<float>(beta2_) +
-                        grad_copy * grad_copy * static_cast<float>(1.0 - beta2_);
+        exp_avg_sq_[i] = exp_avg_sq_[i] * scalar(beta2_) +
+                        grad_copy * grad_copy * scalar(1.0 - beta2_);
 
         // Bias correction
         double bias_correction1 = 1.0 - std::pow(beta1_, step_count_);
@@ -76,14 +87,21 @@ auto Adam::step() -> void {
 
         double step_size = lr_ / bias_correction1;
 
-        // Compute denominator
-        auto denom = sqrt(exp_avg_sq_[i]) *
-                    static_cast<float>(1.0 / std::sqrt(bias_correction2)) +
-                    static_cast<float>(eps_);
+        // Compute denominator: use max of second moment if AMSGrad is enabled
+        Tensor denom_base;
+        if (amsgrad_ && i < max_exp_avg_sq_.size()) {
+            max_exp_avg_sq_[i] = maximum(max_exp_avg_sq_[i], exp_avg_sq_[i]);
+            denom_base = max_exp_avg_sq_[i];
+        } else {
+            denom_base = exp_avg_sq_[i];
+        }
+
+        auto denom = sqrt(denom_base) * scalar(1.0 / std::sqrt(bias_correction2))
+                    + scalar(eps_);
 
         // Update parameters
         param.tensor() = param.tensor() -
-                        div(exp_avg_[i], denom) * static_cast<float>(step_size);
+                        div(exp_avg_[i], denom) * scalar(step_size);
     }
 }
 
@@ -139,6 +157,11 @@ auto Adam::state_dict() const -> std::unordered_map<std::string, Tensor> {
         state["exp_avg_sq_" + std::to_string(i)] = exp_avg_sq_[i].clone();
     }
 
+    // Save AMSGrad max second moment buffers
+    for (size_t i = 0; i < max_exp_avg_sq_.size(); ++i) {
+        state["max_exp_avg_sq_" + std::to_string(i)] = max_exp_avg_sq_[i].clone();
+    }
+
     return state;
 }
 
@@ -168,6 +191,20 @@ auto Adam::load_state_dict(const std::unordered_map<std::string, Tensor>& state)
         weight_decay_ = state.at("weight_decay").data<double>()[0];
     }
 
+    // Validate momentum buffer counts match current parameter count
+    size_t saved_count = 0;
+    for (const auto& [key, _] : state) {
+        if (key.starts_with("exp_avg_") && !key.starts_with("exp_avg_sq_")) {
+            ++saved_count;
+        }
+    }
+    if (saved_count > 0 && saved_count != exp_avg_.size()) {
+        throw std::runtime_error(
+            "Adam::load_state_dict: momentum buffer count mismatch - "
+            "saved " + std::to_string(saved_count) + " but have " +
+            std::to_string(exp_avg_.size()) + " parameters");
+    }
+
     // Load momentum buffers
     for (size_t i = 0; i < exp_avg_.size(); ++i) {
         std::string exp_avg_key = "exp_avg_" + std::to_string(i);
@@ -179,6 +216,14 @@ auto Adam::load_state_dict(const std::unordered_map<std::string, Tensor>& state)
 
         if (state.count(exp_avg_sq_key)) {
             exp_avg_sq_[i] = state.at(exp_avg_sq_key).clone();
+        }
+    }
+
+    // Load AMSGrad max second moment buffers
+    for (size_t i = 0; i < max_exp_avg_sq_.size(); ++i) {
+        std::string key = "max_exp_avg_sq_" + std::to_string(i);
+        if (state.count(key)) {
+            max_exp_avg_sq_[i] = state.at(key).clone();
         }
     }
 }
@@ -246,8 +291,16 @@ auto AdamW::step() -> void {
 
         double step_size = lr_ / bias_correction1;
 
-        // Compute denominator
-        auto denom = sqrt(exp_avg_sq_[i]) *
+        // Compute denominator: use max of second moment if AMSGrad is enabled
+        Tensor denom_base;
+        if (amsgrad_ && i < max_exp_avg_sq_.size()) {
+            max_exp_avg_sq_[i] = maximum(max_exp_avg_sq_[i], exp_avg_sq_[i]);
+            denom_base = max_exp_avg_sq_[i];
+        } else {
+            denom_base = exp_avg_sq_[i];
+        }
+
+        auto denom = sqrt(denom_base) *
                     static_cast<float>(1.0 / std::sqrt(bias_correction2)) +
                     static_cast<float>(eps_);
 
@@ -314,6 +367,11 @@ auto AdamW::state_dict() const -> std::unordered_map<std::string, Tensor> {
         state["exp_avg_sq_" + std::to_string(i)] = exp_avg_sq_[i].clone();
     }
 
+    // Save AMSGrad max second moment buffers
+    for (size_t i = 0; i < max_exp_avg_sq_.size(); ++i) {
+        state["max_exp_avg_sq_" + std::to_string(i)] = max_exp_avg_sq_[i].clone();
+    }
+
     return state;
 }
 
@@ -354,6 +412,14 @@ auto AdamW::load_state_dict(const std::unordered_map<std::string, Tensor>& state
 
         if (state.count(exp_avg_sq_key)) {
             exp_avg_sq_[i] = state.at(exp_avg_sq_key).clone();
+        }
+    }
+
+    // Load AMSGrad max second moment buffers
+    for (size_t i = 0; i < max_exp_avg_sq_.size(); ++i) {
+        std::string key = "max_exp_avg_sq_" + std::to_string(i);
+        if (state.count(key)) {
+            max_exp_avg_sq_[i] = state.at(key).clone();
         }
     }
 }

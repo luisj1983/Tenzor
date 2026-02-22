@@ -12,6 +12,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/backend/registry.hpp"
+#include "tenzor/backend/loader.hpp"
 #include <stdexcept>
 #include <cmath>
 #include <random>
@@ -224,7 +225,8 @@ auto WindowAttention::get_relative_position_bias() const -> Tensor {
         attrs["num_positions"] = std::to_string(num_positions);
         attrs["num_heads"] = std::to_string(num_heads_);
         std::vector<Tensor> inputs = {bias_flat, index_on_device};
-        auto results = operation_registry().dispatch("gather_relative_position_bias", inputs, attrs);
+        auto* backend = backend_registry().get_backend(target_device.type);
+        auto results = backend->dispatch("gather_relative_position_bias", inputs, attrs);
         auto bias = results[0];
 
         // Permute to (num_heads, num_positions, num_positions)
@@ -315,15 +317,21 @@ auto WindowAttention::forward(const Variable& input, const Tensor& mask) -> Vari
     attn = attn + Variable(bias, false);
 
     // Apply attention mask if provided
-    if (mask.numel() > 0) {
-        // TODO: Fix mask broadcasting for batched attention
-        // The mask currently has incompatible shapes for broadcasting with batched attention
-        // Temporarily skip mask application to unblock matmul fix
-        // Will need to properly expand mask from (num_windows, N, N) to (B, num_heads, N, N)
-        // where B = batch_size * num_windows
-        //
-        // auto mask_expanded = mask.unsqueeze(1);
-        // attn = attn + Variable(mask_expanded, false);
+    if (mask.is_valid() && mask.numel() > 0) {
+        // mask shape: (num_windows, N, N)
+        // attn shape: (B, num_heads, N, N) where B = batch_size * num_windows
+        int64_t num_windows = mask.shape()[0];
+        int64_t batch_size = B / num_windows;
+
+        // Reshape attn: (B, nH, N, N) -> (batch_size, num_windows, nH, N, N)
+        attn = attn.reshape({batch_size, num_windows, num_heads_, N, N});
+
+        // Reshape mask: (num_windows, N, N) -> (1, num_windows, 1, N, N) for broadcasting
+        auto mask_expanded = mask.unsqueeze(0).unsqueeze(2);  // (1, num_windows, 1, N, N)
+        attn = attn + Variable(mask_expanded, false);
+
+        // Reshape back: (batch_size, num_windows, nH, N, N) -> (B, nH, N, N)
+        attn = attn.reshape({B, num_heads_, N, N});
     }
 
     // Softmax

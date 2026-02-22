@@ -148,17 +148,21 @@ inline void softmax_row(
             sum_val += exp_val;
         }
 
-        // Step 3: Normalize
-        __m256 vinv_sum = _mm256_set1_ps(1.0f / sum_val);
-        i = 0;
-        for (; i + 8 <= size; i += 8) {
-            __m256 v = _mm256_loadu_ps(output + i);
-            v = _mm256_mul_ps(v, vinv_sum);
-            _mm256_storeu_ps(output + i, v);
-        }
-        float inv_sum = 1.0f / sum_val;
-        for (; i < size; ++i) {
-            output[i] *= inv_sum;
+        // Step 3: Normalize (guard against all-masked rows where sum is zero)
+        if (sum_val > 0.0f) {
+            __m256 vinv_sum = _mm256_set1_ps(1.0f / sum_val);
+            i = 0;
+            for (; i + 8 <= size; i += 8) {
+                __m256 v = _mm256_loadu_ps(output + i);
+                v = _mm256_mul_ps(v, vinv_sum);
+                _mm256_storeu_ps(output + i, v);
+            }
+            float inv_sum = 1.0f / sum_val;
+            for (; i < size; ++i) {
+                output[i] *= inv_sum;
+            }
+        } else {
+            std::memset(output, 0, size * sizeof(float));
         }
         return;
     }
@@ -176,9 +180,13 @@ inline void softmax_row(
         sum_exp += output[i];
     }
 
-    float inv_sum = 1.0f / sum_exp;
-    for (int64_t i = 0; i < size; ++i) {
-        output[i] *= inv_sum;
+    if (sum_exp > 0.0f) {
+        float inv_sum = 1.0f / sum_exp;
+        for (int64_t i = 0; i < size; ++i) {
+            output[i] *= inv_sum;
+        }
+    } else {
+        std::memset(output, 0, size * sizeof(float));
     }
 }
 
@@ -455,7 +463,14 @@ inline void attention_output(
  *
  * output = softmax(Q @ K^T / sqrt(d_k)) @ V
  */
-inline void scaled_dot_product_attention(
+/**
+ * @brief Flash Attention: tiled SDPA with online softmax.
+ *
+ * Memory: O(Bc * d) per query row instead of O(seq_q * seq_k).
+ * Processes K/V in blocks of Bc columns, maintaining running max and
+ * sum-of-exp to compute numerically stable softmax incrementally.
+ */
+inline void flash_attention(
     const float* Q,
     const float* K,
     const float* V,
@@ -469,7 +484,157 @@ inline void scaled_dot_product_attention(
 ) {
     float scale = 1.0f / std::sqrt(static_cast<float>(d_k));
 
-    // Allocate temporary buffer for attention scores
+    // Block size for K/V tiling (tuned for L1/L2 cache)
+    constexpr int64_t Bc = 64;
+
+    #pragma omp parallel if(batch_heads > 1)
+    {
+        // Per-thread scratch buffers
+        std::vector<float> scores_block(Bc);   // scores for one query row against Bc keys
+        std::vector<float> new_output(d_v);    // accumulator for output row
+
+        #pragma omp for
+        for (int64_t bh = 0; bh < batch_heads; ++bh) {
+            const float* q_bh = Q + bh * seq_q * d_k;
+            const float* k_bh = K + bh * seq_k * d_k;
+            const float* v_bh = V + bh * seq_k * d_v;
+            float* o_bh = output + bh * seq_q * d_v;
+
+            for (int64_t i = 0; i < seq_q; ++i) {
+                const float* qi = q_bh + i * d_k;
+                float* oi = o_bh + i * d_v;
+
+                // Initialize running statistics
+                float row_max = -std::numeric_limits<float>::infinity();
+                float row_sum = 0.0f;
+                std::memset(oi, 0, d_v * sizeof(float));
+
+                // Determine effective key range for causal masking
+                int64_t key_end = causal ? std::min(i + 1, seq_k) : seq_k;
+
+                // Process K/V in blocks of Bc
+                for (int64_t j0 = 0; j0 < key_end; j0 += Bc) {
+                    int64_t block_end = std::min(j0 + Bc, key_end);
+                    int64_t block_len = block_end - j0;
+
+                    // Compute scores for this block: s[j] = qi . kj * scale
+                    for (int64_t j = 0; j < block_len; ++j) {
+                        const float* kj = k_bh + (j0 + j) * d_k;
+                        float dot = 0.0f;
+#ifdef TENZOR_ATTENTION_AVX2
+                        int64_t d = 0;
+                        __m256 acc = _mm256_setzero_ps();
+                        for (; d + 8 <= d_k; d += 8) {
+                            __m256 vq = _mm256_loadu_ps(qi + d);
+                            __m256 vk = _mm256_loadu_ps(kj + d);
+                            acc = _mm256_fmadd_ps(vq, vk, acc);
+                        }
+                        dot = hsum_avx2(acc);
+                        for (; d < d_k; ++d) {
+                            dot += qi[d] * kj[d];
+                        }
+#else
+                        for (int64_t d = 0; d < d_k; ++d) {
+                            dot += qi[d] * kj[d];
+                        }
+#endif
+                        scores_block[j] = dot * scale;
+                    }
+
+                    // Online softmax update:
+                    // Find block max
+                    float block_max = -std::numeric_limits<float>::infinity();
+                    for (int64_t j = 0; j < block_len; ++j) {
+                        block_max = std::max(block_max, scores_block[j]);
+                    }
+
+                    // Compute new global max and correction factor
+                    float prev_max = row_max;
+                    row_max = std::max(row_max, block_max);
+
+                    // Rescale previous accumulations
+                    float correction = std::exp(prev_max - row_max);
+                    row_sum *= correction;
+                    for (int64_t d = 0; d < d_v; ++d) {
+                        oi[d] *= correction;
+                    }
+
+                    // Accumulate this block's contribution
+                    for (int64_t j = 0; j < block_len; ++j) {
+                        float w = std::exp(scores_block[j] - row_max);
+                        row_sum += w;
+
+                        const float* vj = v_bh + (j0 + j) * d_v;
+#ifdef TENZOR_ATTENTION_AVX2
+                        __m256 vw = _mm256_set1_ps(w);
+                        int64_t d = 0;
+                        for (; d + 8 <= d_v; d += 8) {
+                            __m256 vo = _mm256_loadu_ps(oi + d);
+                            __m256 vv = _mm256_loadu_ps(vj + d);
+                            vo = _mm256_fmadd_ps(vw, vv, vo);
+                            _mm256_storeu_ps(oi + d, vo);
+                        }
+                        for (; d < d_v; ++d) {
+                            oi[d] += w * vj[d];
+                        }
+#else
+                        for (int64_t d = 0; d < d_v; ++d) {
+                            oi[d] += w * vj[d];
+                        }
+#endif
+                    }
+                }
+
+                // Final normalization: output /= sum
+                if (row_sum > 0.0f) {
+                    float inv_sum = 1.0f / row_sum;
+#ifdef TENZOR_ATTENTION_AVX2
+                    __m256 vs = _mm256_set1_ps(inv_sum);
+                    int64_t d = 0;
+                    for (; d + 8 <= d_v; d += 8) {
+                        __m256 vo = _mm256_loadu_ps(oi + d);
+                        vo = _mm256_mul_ps(vo, vs);
+                        _mm256_storeu_ps(oi + d, vo);
+                    }
+                    for (; d < d_v; ++d) {
+                        oi[d] *= inv_sum;
+                    }
+#else
+                    for (int64_t d = 0; d < d_v; ++d) {
+                        oi[d] *= inv_sum;
+                    }
+#endif
+                }
+            }
+        }
+    }
+}
+
+inline void scaled_dot_product_attention(
+    const float* Q,
+    const float* K,
+    const float* V,
+    float* output,
+    int64_t batch_heads,
+    int64_t seq_q,
+    int64_t seq_k,
+    int64_t d_k,
+    int64_t d_v,
+    bool causal = false
+) {
+    // Use Flash Attention (O(N) memory) for sequences longer than threshold,
+    // or when the full scores matrix would be very large.
+    // For short sequences, the overhead of online softmax isn't worth it.
+    constexpr int64_t FLASH_THRESHOLD = 1024;
+
+    if (seq_k > FLASH_THRESHOLD || seq_q > FLASH_THRESHOLD) {
+        flash_attention(Q, K, V, output, batch_heads, seq_q, seq_k, d_k, d_v, causal);
+        return;
+    }
+
+    // Original O(N^2) path for short sequences (lower overhead)
+    float scale = 1.0f / std::sqrt(static_cast<float>(d_k));
+
     auto scores_buffer = acquire_buffer<float>(batch_heads * seq_q * seq_k);
     float* scores = scores_buffer.data();
 
@@ -483,7 +648,7 @@ inline void scaled_dot_product_attention(
             float* s = scores + bh * seq_q * seq_k;
             for (int64_t i = 0; i < seq_q; ++i) {
                 for (int64_t j = i + 1; j < seq_k; ++j) {
-                    s[i * seq_k + j] = -1e9f;  // Mask future positions
+                    s[i * seq_k + j] = -1e9f;
                 }
             }
         }

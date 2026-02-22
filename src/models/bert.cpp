@@ -153,7 +153,7 @@ BertEncoder::BertEncoder(const BertConfig& config)
 }
 
 auto BertEncoder::prepare_attention_mask(const Tensor& mask, int64_t seq_len) -> Tensor {
-    if (mask.numel() == 0) {
+    if (!mask.is_valid() || mask.numel() == 0) {
         return Tensor{};
     }
 

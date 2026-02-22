@@ -1,0 +1,39 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Hyperbolic functions for Float64: sinh, cosh, tanh
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer InputBuffer { double input_data[]; };
+layout(binding = 1) buffer OutputBuffer { double output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of elements
+    uint op;         // Operation: 0=sinh, 1=cosh, 2=tanh
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n) {
+        return;
+    }
+
+    double val = input_data[idx];
+
+    // GLSL hyperbolic functions operate on float; cast through float for computation
+    switch (params.op) {
+        case 0: // sinh
+            output_data[idx] = double(sinh(float(val)));
+            break;
+        case 1: // cosh
+            output_data[idx] = double(cosh(float(val)));
+            break;
+        case 2: // tanh
+            output_data[idx] = double(tanh(float(val)));
+            break;
+        default:
+            output_data[idx] = 0.0;
+            break;
+    }
+}

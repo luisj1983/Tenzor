@@ -1,12 +1,13 @@
 #version 450
-#extension GL_EXT_shader_atomic_float : enable
 
 // Scatter operation: scatter elements along specified dimension
+// Uses uint buffer for output to support CAS-loop atomics without requiring
+// GL_EXT_shader_atomic_float (following the same pattern as scatter_f64.comp).
 layout(local_size_x = 256) in;
 
 layout(binding = 0) buffer Input { float input_data[]; };       // Source data
 layout(binding = 1) buffer Indices { int indices[]; };          // Scatter indices
-layout(binding = 2) buffer Output { float output_data[]; };     // Destination
+layout(binding = 2) buffer Output { uint output_data[]; };      // Destination (uint for atomic CAS)
 layout(binding = 3) buffer Values { float values[]; };          // Values to scatter (optional)
 
 layout(push_constant) uniform PushConstants {
@@ -20,6 +21,35 @@ layout(push_constant) uniform PushConstants {
     uint reduction;        // 0=none, 1=add, 2=multiply
     uint use_values;       // 0=use input_data, 1=use values buffer
 } params;
+
+// Atomic add for float using compare-and-swap loop (bounded to prevent hangs)
+void atomicAddFloat(uint idx, float val) {
+    uint old_bits = output_data[idx];
+    uint new_bits;
+    for (int attempt = 0; attempt < 1024; ++attempt) {
+        float old_val = uintBitsToFloat(old_bits);
+        new_bits = floatBitsToUint(old_val + val);
+        uint result = atomicCompSwap(output_data[idx], old_bits, new_bits);
+        if (result == old_bits) return;
+        old_bits = result;
+    }
+    // Last-resort direct write (better than hanging indefinitely)
+    output_data[idx] = new_bits;
+}
+
+// Atomic multiply for float using compare-and-swap loop (bounded to prevent hangs)
+void atomicMulFloat(uint idx, float val) {
+    uint old_bits = output_data[idx];
+    uint new_bits;
+    for (int attempt = 0; attempt < 1024; ++attempt) {
+        float old_val = uintBitsToFloat(old_bits);
+        new_bits = floatBitsToUint(old_val * val);
+        uint result = atomicCompSwap(output_data[idx], old_bits, new_bits);
+        if (result == old_bits) return;
+        old_bits = result;
+    }
+    output_data[idx] = new_bits;
+}
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
@@ -57,13 +87,12 @@ void main() {
     // Perform scatter with reduction
     if (params.reduction == 0) {
         // Direct assignment (may have race conditions with overlapping indices)
-        output_data[out_idx] = value;
+        output_data[out_idx] = floatBitsToUint(value);
     } else if (params.reduction == 1) {
-        // Add (atomic)
-        atomicAdd(output_data[out_idx], value);
+        // Atomic add via CAS loop
+        atomicAddFloat(out_idx, value);
     } else if (params.reduction == 2) {
-        // Multiply (not atomic - approximation)
-        // Note: Vulkan doesn't have atomic multiply, so this is an approximation
-        output_data[out_idx] *= value;
+        // Atomic multiply via CAS loop
+        atomicMulFloat(out_idx, value);
     }
 }

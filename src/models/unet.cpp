@@ -5,6 +5,7 @@
 
 #include "tenzor/models/unet.hpp"
 #include "tenzor/nn/activations/activations.hpp"
+#include "tenzor/nn/layers/segmentation.hpp"  // For nn::upsample_bilinear()
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/vision.hpp"
 #include "tenzor/autograd/ops.hpp"  // For gradient-aware cat()
@@ -117,9 +118,8 @@ auto Up::forward(const Variable& input, const Variable& skip) -> Variable
         int64_t target_h = skip_shape[2];
         int64_t target_w = skip_shape[3];
 
-        // Upsample using bilinear interpolation
-        x = Variable(ops::interpolate(input.tensor(), {target_h, target_w}, "bilinear"),
-                    input.requires_grad());
+        // Upsample using bilinear interpolation with proper autograd support
+        x = nn::upsample_bilinear(input, target_h, target_w);
 
         // Apply 1x1 conv to reduce channels
         x = up_->forward(x);

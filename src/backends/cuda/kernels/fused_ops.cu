@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
+#include <cublas_v2.h>
 #include <cub/cub.cuh>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/backend/caching_allocator.hpp"
@@ -10,6 +11,7 @@
 #include <cmath>
 #include <algorithm>
 #include <vector>
+#include <mutex>
 
 namespace tenzor {
 namespace cuda {
@@ -18,7 +20,7 @@ namespace cuda {
 inline int clamp_blocks(int64_t blocks) {
     // Ensure at least 1 block to avoid CUDA invalid argument error
     // Grid-stride loop will naturally handle n=0 by not executing any iterations
-    int64_t clamped = std::min(blocks, static_cast<int64_t>(65535));
+    int64_t clamped = std::min(blocks, static_cast<int64_t>(2147483647));  // 2^31-1
     return static_cast<int>(clamped > 0 ? clamped : 1);
 }
 
@@ -96,99 +98,78 @@ inline Tensor create_scalar_tensor(float value, DType dtype, Device device) {
     } while(0)
 
 // ==============================================================================
-// Fused Linear + ReLU CUDA Kernel
+// Fused Linear + ReLU: cuBLAS matmul + fused bias+ReLU kernel
 // ==============================================================================
 
+// Cached cuBLAS handle for fused ops
+static cublasHandle_t fused_ops_cublas_handle = nullptr;
+static std::mutex fused_ops_cublas_mutex;
+
+static void cleanup_fused_ops_cublas() {
+    if (fused_ops_cublas_handle) {
+        cublasDestroy(fused_ops_cublas_handle);
+        fused_ops_cublas_handle = nullptr;
+    }
+}
+
+static cublasHandle_t get_fused_ops_cublas_handle() {
+    if (fused_ops_cublas_handle == nullptr) {
+        std::lock_guard<std::mutex> lock(fused_ops_cublas_mutex);
+        if (fused_ops_cublas_handle == nullptr) {
+            cublasCreate(&fused_ops_cublas_handle);
+            cublasSetMathMode(fused_ops_cublas_handle, CUBLAS_TF32_TENSOR_OP_MATH);
+            std::atexit(cleanup_fused_ops_cublas);
+        }
+    }
+    return fused_ops_cublas_handle;
+}
+
 /**
- * @brief CUDA kernel for fused linear + ReLU
- *
- * Computes: out = max(0, input @ weight.T + bias)
- * Uses grid-stride loop for large tensors.
+ * @brief Fused bias + ReLU kernel: out[i] = max(0, out[i] + bias[i % out_features])
  */
 template<typename T>
-__global__ void fused_linear_relu_kernel(
-    const T* input,
-    const T* weight,
-    const T* bias,
+__global__ void bias_relu_kernel(
     T* output,
-    int64_t batch_size,
-    int64_t in_features,
-    int64_t out_features,
-    bool has_bias
+    const T* bias,
+    int64_t total_elements,
+    int64_t out_features
 ) {
-    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int64_t total_elements = batch_size * out_features;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t stride = blockDim.x * gridDim.x;
-
-    for (int64_t idx = tid; idx < total_elements; idx += stride) {
-        int64_t b = idx / out_features;
-        int64_t o = idx % out_features;
-
-        T sum = 0;
-        for (int64_t i = 0; i < in_features; ++i) {
-            sum += input[b * in_features + i] * weight[o * in_features + i];
-        }
-
-        if (has_bias) {
-            sum += bias[o];
-        }
-
-        // ReLU
-        output[idx] = (sum > T(0)) ? sum : T(0);
+    for (int64_t i = idx; i < total_elements; i += stride) {
+        T val = output[i] + bias[i % out_features];
+        output[i] = (val > T(0)) ? val : T(0);
     }
 }
 
 /**
- * @brief Specialized kernel for BFloat16 with float accumulation
- *
- * BFloat16 has only 7 bits of mantissa, so accumulating in BFloat16
- * leads to significant precision loss. This kernel reads BFloat16
- * inputs, accumulates in float, and writes BFloat16 output.
+ * @brief ReLU-only kernel (no bias): out[i] = max(0, out[i])
  */
-__global__ void fused_linear_relu_bf16_kernel(
-    const __nv_bfloat16* input,
-    const __nv_bfloat16* weight,
-    const __nv_bfloat16* bias,
-    __nv_bfloat16* output,
-    int64_t batch_size,
-    int64_t in_features,
-    int64_t out_features,
-    bool has_bias
+template<typename T>
+__global__ void relu_inplace_kernel(
+    T* output,
+    int64_t total_elements
 ) {
-    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int64_t total_elements = batch_size * out_features;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t stride = blockDim.x * gridDim.x;
-
-    for (int64_t idx = tid; idx < total_elements; idx += stride) {
-        int64_t b = idx / out_features;
-        int64_t o = idx % out_features;
-
-        // Accumulate in float for precision
-        float sum = 0.0f;
-        for (int64_t i = 0; i < in_features; ++i) {
-            float in_val = __bfloat162float(input[b * in_features + i]);
-            float w_val = __bfloat162float(weight[o * in_features + i]);
-            sum += in_val * w_val;
-        }
-
-        if (has_bias) {
-            sum += __bfloat162float(bias[o]);
-        }
-
-        // ReLU and convert back to BFloat16
-        output[idx] = __float2bfloat16(sum > 0.0f ? sum : 0.0f);
+    for (int64_t i = idx; i < total_elements; i += stride) {
+        T val = output[i];
+        output[i] = (val > T(0)) ? val : T(0);
     }
 }
 
 /**
  * @brief Fused linear + ReLU host function
+ *
+ * Uses cuBLAS GemmEx for the matmul (uses Tensor Cores when available),
+ * followed by a lightweight fused bias+ReLU kernel.
  */
 auto fused_linear_relu_cuda(
     const Tensor& input,
     const Tensor& weight,
     const Tensor* bias
 ) -> Tensor {
-    // Flatten input to 2D
+    // Flatten input to 2D: [batch_size, in_features]
     auto input_shape = input.shape();
     int64_t batch_size = 1;
     for (size_t i = 0; i < input_shape.size() - 1; ++i) {
@@ -200,75 +181,100 @@ auto fused_linear_relu_cuda(
     // Create output tensor
     std::vector<int64_t> output_shape(input_shape.begin(), input_shape.end() - 1);
     output_shape.push_back(out_features);
-    Tensor output = create_cuda_zeros(output_shape, input.dtype(), input.device());
+    Tensor output(output_shape, input.dtype(), input.device());
 
-    // Launch kernel
-    int64_t total_elements = batch_size * out_features;
-    int min_grid_size, block_size;
+    // Get cuBLAS handle
+    auto handle = get_fused_ops_cublas_handle();
+
+    // cuBLAS uses column-major, so we compute: output^T = weight * input^T
+    // which in row-major is: output = input @ weight^T
+    int M = static_cast<int>(out_features);   // rows of weight
+    int N = static_cast<int>(batch_size);      // cols of input^T
+    int K = static_cast<int>(in_features);     // shared dim
 
     if (input.dtype() == DType::Float32) {
-        cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
-                                           fused_linear_relu_kernel<float>, 0, 0);
-        int blocks = clamp_blocks((total_elements + block_size - 1) / block_size);
-        const float* bias_ptr = bias ? bias->data<float>() : nullptr;
-        fused_linear_relu_kernel<<<blocks, block_size>>>(
-            input.data<float>(),
-            weight.data<float>(),
-            bias_ptr,
-            output.data<float>(),
-            batch_size,
-            in_features,
-            out_features,
-            bias != nullptr
-        );
+        float alpha = 1.0f, beta_val = 0.0f;
+        cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                    M, N, K,
+                    &alpha,
+                    weight.data<float>(), K,      // weight: [out_features, in_features] row-major = [K, M] col-major
+                    input.data<float>(), K,       // input: [batch_size, in_features] row-major = [K, N] col-major
+                    &beta_val,
+                    output.data<float>(), M);     // output: [batch_size, out_features] row-major = [M, N] col-major
     } else if (input.dtype() == DType::Float64) {
-        cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
-                                           fused_linear_relu_kernel<double>, 0, 0);
-        int blocks = clamp_blocks((total_elements + block_size - 1) / block_size);
-        const double* bias_ptr = bias ? bias->data<double>() : nullptr;
-        fused_linear_relu_kernel<<<blocks, block_size>>>(
-            input.data<double>(),
-            weight.data<double>(),
-            bias_ptr,
-            output.data<double>(),
-            batch_size,
-            in_features,
-            out_features,
-            bias != nullptr
-        );
+        double alpha = 1.0, beta_val = 0.0;
+        cublasDgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                    M, N, K,
+                    &alpha,
+                    weight.data<double>(), K,
+                    input.data<double>(), K,
+                    &beta_val,
+                    output.data<double>(), M);
     } else if (input.dtype() == DType::Float16) {
-        cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
-                                           fused_linear_relu_kernel<__half>, 0, 0);
-        int blocks = clamp_blocks((total_elements + block_size - 1) / block_size);
-        const __half* bias_ptr = bias ? reinterpret_cast<const __half*>(bias->data_ptr()) : nullptr;
-        fused_linear_relu_kernel<<<blocks, block_size>>>(
-            reinterpret_cast<const __half*>(input.data_ptr()),
-            reinterpret_cast<const __half*>(weight.data_ptr()),
-            bias_ptr,
-            reinterpret_cast<__half*>(output.data_ptr()),
-            batch_size,
-            in_features,
-            out_features,
-            bias != nullptr
-        );
+        __half alpha = __float2half(1.0f), beta_val = __float2half(0.0f);
+        cublasHgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                    M, N, K,
+                    &alpha,
+                    reinterpret_cast<const __half*>(weight.data_ptr()), K,
+                    reinterpret_cast<const __half*>(input.data_ptr()), K,
+                    &beta_val,
+                    reinterpret_cast<__half*>(output.data_ptr()), M);
     } else if (input.dtype() == DType::BFloat16) {
-        cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
-                                           fused_linear_relu_bf16_kernel, 0, 0);
-        int blocks = clamp_blocks((total_elements + block_size - 1) / block_size);
-        const __nv_bfloat16* bias_ptr = bias ? reinterpret_cast<const __nv_bfloat16*>(bias->data_ptr()) : nullptr;
-        // Use specialized kernel with float accumulation for BFloat16
-        fused_linear_relu_bf16_kernel<<<blocks, block_size>>>(
-            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
-            reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr()),
-            bias_ptr,
-            reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
-            batch_size,
-            in_features,
-            out_features,
-            bias != nullptr
-        );
+        // Use GemmEx with BFloat16 input and Float32 compute
+        float alpha = 1.0f, beta_val = 0.0f;
+        cublasGemmEx(handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                     M, N, K,
+                     &alpha,
+                     weight.data_ptr(), CUDA_R_16BF, K,
+                     input.data_ptr(), CUDA_R_16BF, K,
+                     &beta_val,
+                     output.data_ptr(), CUDA_R_16BF, M,
+                     CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
     } else {
         throw std::runtime_error("fused_linear_relu_cuda: Unsupported dtype");
+    }
+
+    // Launch fused bias+ReLU or ReLU-only kernel
+    int64_t total_elements = batch_size * out_features;
+    int block_size = 256;
+    int blocks = clamp_blocks((total_elements + block_size - 1) / block_size);
+
+    if (input.dtype() == DType::Float32) {
+        if (bias) {
+            bias_relu_kernel<<<blocks, block_size>>>(
+                output.data<float>(), bias->data<float>(), total_elements, out_features);
+        } else {
+            relu_inplace_kernel<<<blocks, block_size>>>(
+                output.data<float>(), total_elements);
+        }
+    } else if (input.dtype() == DType::Float64) {
+        if (bias) {
+            bias_relu_kernel<<<blocks, block_size>>>(
+                output.data<double>(), bias->data<double>(), total_elements, out_features);
+        } else {
+            relu_inplace_kernel<<<blocks, block_size>>>(
+                output.data<double>(), total_elements);
+        }
+    } else if (input.dtype() == DType::Float16) {
+        if (bias) {
+            bias_relu_kernel<<<blocks, block_size>>>(
+                reinterpret_cast<__half*>(output.data_ptr()),
+                reinterpret_cast<const __half*>(bias->data_ptr()),
+                total_elements, out_features);
+        } else {
+            relu_inplace_kernel<<<blocks, block_size>>>(
+                reinterpret_cast<__half*>(output.data_ptr()), total_elements);
+        }
+    } else if (input.dtype() == DType::BFloat16) {
+        if (bias) {
+            bias_relu_kernel<<<blocks, block_size>>>(
+                reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+                reinterpret_cast<const __nv_bfloat16*>(bias->data_ptr()),
+                total_elements, out_features);
+        } else {
+            relu_inplace_kernel<<<blocks, block_size>>>(
+                reinterpret_cast<__nv_bfloat16*>(output.data_ptr()), total_elements);
+        }
     }
 
     CUDA_CHECK(cudaGetLastError());

@@ -3,6 +3,7 @@
 #include <stdexcept>
 #include <cstring>
 #include <sstream>
+#include <iostream>
 
 namespace tenzor {
 namespace numpy {
@@ -13,7 +14,9 @@ auto dtype_to_numpy_format(DType dtype) -> std::string {
         case DType::Float32: return py::format_descriptor<float>::format();
         case DType::Float64: return py::format_descriptor<double>::format();
         case DType::Float16: return "e";  // NumPy native float16 format string
-        case DType::BFloat16: return py::format_descriptor<uint16_t>::format(); // Store as uint16 bits
+        // BFloat16 is represented as uint16 in NumPy since NumPy has no native bfloat16 dtype.
+        // Users can interpret the raw bits via ml_dtypes.bfloat16 or manual bit manipulation.
+        case DType::BFloat16: return py::format_descriptor<uint16_t>::format();
         case DType::Int8: return py::format_descriptor<int8_t>::format();
         case DType::Int16: return py::format_descriptor<int16_t>::format();
         case DType::Int32: return py::format_descriptor<int32_t>::format();
@@ -36,10 +39,21 @@ auto numpy_dtype_to_tenzor(const py::array& arr) -> DType {
     auto kind = dtype.kind();
     auto itemsize = dtype.itemsize();
 
-    // Check for BFloat16 by name (ml_dtypes.bfloat16 shows as kind='V', itemsize=2)
-    std::string dtype_name = py::str(dtype);
-    if (dtype_name.find("bfloat16") != std::string::npos) {
-        return DType::BFloat16;
+    // Check for BFloat16 (ml_dtypes.bfloat16 shows as kind='V', itemsize=2)
+    if (kind == 'V' && itemsize == 2) {
+        try {
+            auto ml_dtypes = py::module_::import("ml_dtypes");
+            auto bf16_dtype = ml_dtypes.attr("bfloat16");
+            if (dtype.equal(py::dtype::from_args(bf16_dtype))) {
+                return DType::BFloat16;
+            }
+        } catch (const py::error_already_set&) {
+            // ml_dtypes not available — fall back to string matching
+            std::string dtype_name = py::str(dtype);
+            if (dtype_name.find("bfloat16") != std::string::npos) {
+                return DType::BFloat16;
+            }
+        }
     }
 
     // Floating-point types
@@ -71,15 +85,9 @@ auto numpy_dtype_to_tenzor(const py::array& arr) -> DType {
         if (itemsize == 8) return DType::Complex64;
         if (itemsize == 16) return DType::Complex128;
     }
-    // Void types (used for structured/custom dtypes like bfloat16)
-    else if (kind == 'V' && itemsize == 2) {
-        // This is likely bfloat16 from ml_dtypes
-        return DType::BFloat16;
-    }
-
     std::ostringstream oss;
     oss << "Unsupported NumPy dtype: kind=" << kind << ", itemsize=" << itemsize
-        << ", name=" << dtype_name;
+        << ", name=" << py::str(dtype).cast<std::string>();
     throw std::runtime_error(oss.str());
 }
 
@@ -88,8 +96,8 @@ auto get_numpy_itemsize(const py::array& arr) -> size_t {
 }
 
 auto can_zero_copy_tensor_to_numpy(const Tensor& tensor) -> bool {
-    // Zero-copy only possible for CPU tensors that are contiguous
-    return tensor.device().type == Device::Type::CPU && tensor.is_contiguous();
+    // Zero-copy possible for all CPU tensors (NumPy supports strided arrays)
+    return tensor.device().type == Device::Type::CPU;
 }
 
 auto can_zero_copy_numpy_to_tensor(const py::array& arr) -> bool {
@@ -137,38 +145,47 @@ auto tensor_to_numpy(const Tensor& tensor) -> py::array {
         return result;
     }
 
-    // CPU tensor - attempt zero-copy if contiguous
-    if (tensor.is_contiguous()) {
-        // Zero-copy path: share memory with tensor
-        void* data_ptr = const_cast<void*>(tensor.impl()->storage->data());
+    // CPU tensor - zero-copy path sharing storage with the tensor.
+    // Works for both contiguous and non-contiguous (strided) tensors since
+    // NumPy natively supports strided arrays.
+    {
+        // Validate that max accessible offset falls within storage bounds
+        int64_t max_offset = tensor.impl()->offset;
+        for (size_t d = 0; d < shape.size(); ++d) {
+            if (shape[d] > 0) {
+                max_offset += (shape[d] - 1) * strides[d];
+            }
+        }
+        int64_t storage_elements = static_cast<int64_t>(
+            tensor.impl()->storage->size_bytes() / element_size);
 
-        // Create capsule for memory management
-        // The capsule will keep the tensor's storage alive by incrementing shared_ptr refcount
-        // We need to create a new shared_ptr copy that will be owned by the capsule
-        auto storage_ptr = new std::shared_ptr<Storage>(tensor.impl()->storage);
+        if (max_offset >= storage_elements) {
+            // Strided view exceeds storage — fall back to contiguous copy.
+            // This can happen with advanced slicing that creates views with
+            // strides exceeding the underlying storage bounds.
+            std::cerr << "[tenzor] Warning: strided tensor view exceeds storage bounds, "
+                         "falling back to contiguous copy for NumPy conversion\n";
+            Tensor contiguous = tensor.contiguous();
+            py::array result(py::dtype(format), np_shape);
+            void* src = const_cast<void*>(contiguous.impl()->storage->data());
+            void* dst = result.mutable_data();
+            std::memcpy(dst, src, contiguous.numel() * element_size);
+            return result;
+        }
 
+        // Account for storage offset
+        auto* base_ptr = static_cast<char*>(
+            const_cast<void*>(tensor.impl()->storage->data()));
+        void* data_ptr = base_ptr + tensor.impl()->offset * element_size;
+
+        // Create capsule that keeps the tensor's storage alive via shared_ptr refcount.
+        auto* storage_ptr = new std::shared_ptr<Storage>(tensor.impl()->storage);
         py::capsule capsule(storage_ptr, [](void* ptr) {
-            // Destructor is called when NumPy array is deallocated
-            // Delete the shared_ptr copy, which decrements the refcount
             delete static_cast<std::shared_ptr<Storage>*>(ptr);
         });
 
-        // Create NumPy array with shared memory
+        // Create NumPy array with shared memory and original strides
         return py::array(py::dtype(format), np_shape, np_strides, data_ptr, capsule);
-    } else {
-        // Non-contiguous CPU tensor - must copy
-        Tensor contiguous_tensor = tensor.contiguous();
-
-        // Create NumPy array
-        py::array result(py::dtype(format), np_shape);
-
-        // Copy data
-        void* src = const_cast<void*>(contiguous_tensor.impl()->storage->data());
-        void* dst = result.mutable_data();
-        size_t total_bytes = contiguous_tensor.numel() * element_size;
-        std::memcpy(dst, src, total_bytes);
-
-        return result;
     }
 }
 
@@ -193,58 +210,23 @@ auto numpy_to_tensor(py::array arr, Device device) -> Tensor {
     // Create tensor with requested device
     Tensor tensor(shape, dtype, device);
 
-    // Check if we can do zero-copy (CPU device, contiguous array)
-    bool can_zero_copy = (device.type == Device::Type::CPU) &&
-                         can_zero_copy_numpy_to_tensor(arr);
+    // Always copy data from NumPy to Tensor for memory safety
+    // (NumPy and Tensor have independent lifetime management)
+    void* tensor_data = tensor.impl()->storage->data();
 
-    if (can_zero_copy) {
-        // Zero-copy path: share memory with NumPy array
-        // Note: This is tricky because we need to ensure the NumPy array stays alive
-        // For safety, we'll create a shared_ptr that holds a Python reference
-
-        void* numpy_data = arr.mutable_data();
+    if (can_zero_copy_numpy_to_tensor(arr)) {
+        // C-contiguous array — direct memcpy
         size_t size_bytes = numel * dtype_size(dtype);
-
-        // For now, we'll copy the data for safety
-        // True zero-copy would require custom storage implementation
-        // which is complex to implement safely with Python's GIL
-        void* tensor_data = tensor.impl()->storage->data();
-        std::memcpy(tensor_data, numpy_data, size_bytes);
-
-        return tensor;
+        std::memcpy(tensor_data, arr.data(), size_bytes);
     } else {
-        // Copy path: copy data from NumPy to tensor
-
-        // Request buffer from NumPy array
-        py::buffer_info buf = arr.request();
-        void* numpy_data = buf.ptr;
-
-        // Get tensor data pointer
-        void* tensor_data = tensor.impl()->storage->data();
-
-        // If array is C-contiguous, we can copy directly
-        if (can_zero_copy_numpy_to_tensor(arr)) {
-            size_t size_bytes = numel * dtype_size(dtype);
-            std::memcpy(tensor_data, numpy_data, size_bytes);
-        } else {
-            // Non-contiguous array - need to copy element by element
-            // or convert to contiguous first
-            py::array contiguous = py::array::ensure(arr, py::array::c_style);
-            py::buffer_info contiguous_buf = contiguous.request();
-            void* contiguous_data = contiguous_buf.ptr;
-            size_t size_bytes = numel * dtype_size(dtype);
-            std::memcpy(tensor_data, contiguous_data, size_bytes);
-        }
-
-        // If target device is CUDA, we need to copy to GPU
-        if (device.type == Device::Type::CUDA) {
-            // The tensor constructor already placed it on the correct device
-            // and the backend will handle the CPU-to-GPU transfer
-            // (assuming the backend is properly implemented)
-        }
-
-        return tensor;
+        // Non-contiguous array — make contiguous copy first
+        py::array contiguous = py::array::ensure(arr, py::array::c_style);
+        py::buffer_info contiguous_buf = contiguous.request();
+        size_t size_bytes = numel * dtype_size(dtype);
+        std::memcpy(tensor_data, contiguous_buf.ptr, size_bytes);
     }
+
+    return tensor;
 }
 
 } // namespace numpy

@@ -15,6 +15,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <span>
 #include <vector>
 #include <stdexcept>
@@ -107,6 +108,9 @@ struct alignas(64) BackendDispatchTable {
 
     /// Backend instance (for memory operations, synchronization)
     Backend* backend{nullptr};
+
+    /// Set to true after all kernels are registered; dispatch checks this
+    std::atomic<bool> ready{false};
 
     /**
      * @brief Register a kernel for an operation.
@@ -222,23 +226,24 @@ struct alignas(64) BackendDispatchTable {
         std::span<const Tensor> inputs,
         const OpAttributes& attrs) const
     {
-        auto fn = kernels[static_cast<size_t>(op)];
+        if (!ready.load(std::memory_order_acquire)) [[unlikely]] {
+            throw std::runtime_error("Backend dispatch table not ready (backend not initialized)");
+        }
+        auto idx = static_cast<size_t>(op);
+        if (idx >= kernels.size()) [[unlikely]] {
+            throw_unsupported(op);
+        }
+        auto fn = kernels[idx];
         if (fn) [[likely]] {
             return fn(inputs, attrs);
         }
         // Fallback to single-output kernel (wrap result in vector)
-        auto single_fn = single_output_kernels[static_cast<size_t>(op)];
+        auto single_fn = single_output_kernels[idx];
         if (single_fn) {
             return {single_fn(inputs, attrs)};
         }
-        // Fallback to inplace kernel (for AddInplace, SubInplace, etc.)
-        auto inplace_fn = inplace_kernels[static_cast<size_t>(op)];
-        if (inplace_fn && !inputs.empty()) {
-            // Cast away const since inplace ops are expected to modify first input
-            Tensor& target = const_cast<Tensor&>(inputs[0]);
-            auto others = inputs.subspan(1);
-            return {inplace_fn(target, others, attrs)};
-        }
+        // Inplace kernels must be called explicitly via dispatch_inplace()
+        // to avoid const_cast UB. Do not fall through to inplace kernels here.
         throw_unsupported(op);
     }
 
@@ -259,12 +264,19 @@ struct alignas(64) BackendDispatchTable {
         std::span<const Tensor> inputs,
         const OpAttributes& attrs = {}) const
     {
-        auto fn = single_output_kernels[static_cast<size_t>(op)];
+        if (!ready.load(std::memory_order_acquire)) [[unlikely]] {
+            throw std::runtime_error("Backend dispatch table not ready (backend not initialized)");
+        }
+        auto idx = static_cast<size_t>(op);
+        if (idx >= single_output_kernels.size()) [[unlikely]] {
+            throw_unsupported(op);
+        }
+        auto fn = single_output_kernels[idx];
         if (fn) [[likely]] {
             return fn(inputs, attrs);
         }
         // Fall back to multi-output dispatch if no single-output kernel
-        auto multi_fn = kernels[static_cast<size_t>(op)];
+        auto multi_fn = kernels[idx];
         if (!multi_fn) [[unlikely]] {
             throw_unsupported(op);
         }
@@ -289,7 +301,14 @@ struct alignas(64) BackendDispatchTable {
         std::span<const Tensor> others,
         const OpAttributes& attrs = {}) const
     {
-        auto fn = inplace_kernels[static_cast<size_t>(op)];
+        if (!ready.load(std::memory_order_acquire)) [[unlikely]] {
+            throw std::runtime_error("Backend dispatch table not ready (backend not initialized)");
+        }
+        auto idx = static_cast<size_t>(op);
+        if (idx >= inplace_kernels.size()) [[unlikely]] {
+            throw_unsupported(op);
+        }
+        auto fn = inplace_kernels[idx];
         if (!fn) [[unlikely]] {
             throw_unsupported(op);
         }
@@ -346,8 +365,21 @@ public:
      */
     static void register_backend(Device::Type type, Backend* backend) noexcept {
         auto& table = tables_[static_cast<size_t>(type)];
+        table.ready.store(false, std::memory_order_release);
         table.device_type = type;
         table.backend = backend;
+    }
+
+    /**
+     * @brief Mark a backend's dispatch table as ready for use.
+     *
+     * Must be called after register_kernels() completes. Dispatch checks
+     * this flag to avoid reading partially-initialized kernel tables.
+     *
+     * @param type Device type to mark as ready
+     */
+    static void mark_ready(Device::Type type) noexcept {
+        tables_[static_cast<size_t>(type)].ready.store(true, std::memory_order_release);
     }
 
     /**

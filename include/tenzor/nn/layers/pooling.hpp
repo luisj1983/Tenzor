@@ -186,5 +186,43 @@ private:
     int64_t output_w_;  ///< Target output width
 };
 
+/**
+ * @brief 3D max pooling layer.
+ *
+ * Shape: Input (N, C, D, H, W) -> Output (N, C, D_out, H_out, W_out)
+ */
+class MaxPool3d : public Module {
+public:
+    MaxPool3d(int64_t kernel_size,
+             int64_t stride = -1,
+             int64_t padding = 0);
+
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    int64_t kernel_size_;
+    int64_t stride_;
+    int64_t padding_;
+};
+
+/**
+ * @brief 3D average pooling layer.
+ *
+ * Shape: Input (N, C, D, H, W) -> Output (N, C, D_out, H_out, W_out)
+ */
+class AvgPool3d : public Module {
+public:
+    AvgPool3d(int64_t kernel_size,
+             int64_t stride = -1,
+             int64_t padding = 0);
+
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    int64_t kernel_size_;
+    int64_t stride_;
+    int64_t padding_;
+};
+
 } // namespace nn
 } // namespace tenzor

@@ -8,6 +8,8 @@
 #include <cuda_bf16.h>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "cuda_launch_utils.cuh"
+#include "../cuda_error.hpp"
 #include <stdexcept>
 #include <vector>
 #include <utility>
@@ -34,7 +36,7 @@ __device__ inline void dev_store(__nv_bfloat16* p, int64_t i, float v) { p[i] = 
 // ============================================================================
 
 static inline int clamp_grid(int64_t blocks) {
-    int64_t clamped = std::min(blocks, static_cast<int64_t>(65535));
+    int64_t clamped = std::min(blocks, static_cast<int64_t>(2147483647));  // 2^31-1
     return static_cast<int>(clamped > 0 ? clamped : 1);
 }
 
@@ -114,24 +116,27 @@ auto maxpool2d_forward_kernel(const Tensor& input, int64_t kernel_size,
     Tensor indices({N, C, H_out, W_out}, DType::Int64, input.device());
 
     int64_t total = N * C * H_out * W_out;
-    int grid = clamp_grid((total + POOL_BLOCK - 1) / POOL_BLOCK);
 
     if (input.dtype() == DType::Float32) {
-        maxpool2d_forward_impl<float><<<grid, POOL_BLOCK, 0, stream>>>(
+        auto [grid, block] = optimal_launch_config(maxpool2d_forward_impl<float>, total);
+        maxpool2d_forward_impl<float><<<grid, block, 0, stream>>>(
             input.data<float>(), output.data<float>(), indices.data<int64_t>(),
             N, C, H, W, H_out, W_out, kernel_size, stride, padding, dilation);
     } else if (input.dtype() == DType::Float64) {
-        maxpool2d_forward_impl<double><<<grid, POOL_BLOCK, 0, stream>>>(
+        auto [grid, block] = optimal_launch_config(maxpool2d_forward_impl<double>, total);
+        maxpool2d_forward_impl<double><<<grid, block, 0, stream>>>(
             input.data<double>(), output.data<double>(), indices.data<int64_t>(),
             N, C, H, W, H_out, W_out, kernel_size, stride, padding, dilation);
     } else if (input.dtype() == DType::Float16) {
-        maxpool2d_forward_impl<__half><<<grid, POOL_BLOCK, 0, stream>>>(
+        auto [grid, block] = optimal_launch_config(maxpool2d_forward_impl<__half>, total);
+        maxpool2d_forward_impl<__half><<<grid, block, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(output.data<Float16>()),
             indices.data<int64_t>(),
             N, C, H, W, H_out, W_out, kernel_size, stride, padding, dilation);
     } else if (input.dtype() == DType::BFloat16) {
-        maxpool2d_forward_impl<__nv_bfloat16><<<grid, POOL_BLOCK, 0, stream>>>(
+        auto [grid, block] = optimal_launch_config(maxpool2d_forward_impl<__nv_bfloat16>, total);
+        maxpool2d_forward_impl<__nv_bfloat16><<<grid, block, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(output.data<BFloat16>()),
             indices.data<int64_t>(),
@@ -167,8 +172,32 @@ __global__ void maxpool2d_backward_f32(
         int64_t h = max_idx / W;
         int64_t w = max_idx % W;
         int64_t in_idx = ((n * C + c) * H + h) * W + w;
+        float grad_val = grad_output[idx];
 
-        atomicAdd(&grad_input[in_idx], grad_output[idx]);
+#if __CUDA_ARCH__ >= 700
+        // Warp-level pre-reduction: find threads targeting the same in_idx
+        // and sum their values before atomicAdd, reducing contention.
+        // Uses low 32 bits of in_idx for matching (safe for tensors < 2B elements).
+        unsigned int peers = __match_any_sync(0xFFFFFFFF, static_cast<unsigned int>(in_idx));
+        int leader = __ffs(peers) - 1;
+        int lane = threadIdx.x & 31;
+
+        // All matching threads sum their peer values via shuffle
+        float sum = 0.0f;
+        unsigned int p = peers;
+        while (p) {
+            int src = __ffs(p) - 1;
+            sum += __shfl_sync(peers, grad_val, src);
+            p &= p - 1;
+        }
+
+        // Only the leader thread does the atomic write
+        if (lane == leader) {
+            atomicAdd(&grad_input[in_idx], sum);
+        }
+#else
+        atomicAdd(&grad_input[in_idx], grad_val);
+#endif
     }
 }
 
@@ -227,18 +256,18 @@ auto maxpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
 
     int64_t total_out = N * C * H_out * W_out;
     int64_t total_in = N * C * H * W;
-    int grid_out = clamp_grid((total_out + POOL_BLOCK - 1) / POOL_BLOCK);
-    int grid_in = clamp_grid((total_in + POOL_BLOCK - 1) / POOL_BLOCK);
 
     if (grad_output.dtype() == DType::Float32) {
         Tensor grad_input = create_zeros_cuda(input_shape, DType::Float32, grad_output.device());
-        maxpool2d_backward_f32<<<grid_out, POOL_BLOCK, 0, stream>>>(
+        auto [grid_out, block_out] = optimal_launch_config(maxpool2d_backward_f32, total_out);
+        maxpool2d_backward_f32<<<grid_out, block_out, 0, stream>>>(
             grad_output.data<float>(), indices.data<int64_t>(), grad_input.data<float>(),
             N, C, H, W, H_out, W_out);
         return grad_input;
     } else if (grad_output.dtype() == DType::Float64) {
         Tensor grad_input = create_zeros_cuda(input_shape, DType::Float64, grad_output.device());
-        maxpool2d_backward_f64<<<grid_out, POOL_BLOCK, 0, stream>>>(
+        auto [grid_out, block_out] = optimal_launch_config(maxpool2d_backward_f64, total_out);
+        maxpool2d_backward_f64<<<grid_out, block_out, 0, stream>>>(
             grad_output.data<double>(), indices.data<int64_t>(), grad_input.data<double>(),
             N, C, H, W, H_out, W_out);
         return grad_input;
@@ -249,25 +278,30 @@ auto maxpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
 
         // Convert grad_output to float32
         if (grad_output.dtype() == DType::Float16) {
-            convert_to_f32<__half><<<clamp_grid((total_out + POOL_BLOCK - 1) / POOL_BLOCK), POOL_BLOCK, 0, stream>>>(
+            auto [grid_conv, block_conv] = optimal_launch_config(convert_to_f32<__half>, total_out);
+            convert_to_f32<__half><<<grid_conv, block_conv, 0, stream>>>(
                 reinterpret_cast<const __half*>(grad_output.data<Float16>()), go_f32.data<float>(), total_out);
         } else {
-            convert_to_f32<__nv_bfloat16><<<clamp_grid((total_out + POOL_BLOCK - 1) / POOL_BLOCK), POOL_BLOCK, 0, stream>>>(
+            auto [grid_conv, block_conv] = optimal_launch_config(convert_to_f32<__nv_bfloat16>, total_out);
+            convert_to_f32<__nv_bfloat16><<<grid_conv, block_conv, 0, stream>>>(
                 reinterpret_cast<const __nv_bfloat16*>(grad_output.data<BFloat16>()), go_f32.data<float>(), total_out);
         }
 
         // Run backward in float32
-        maxpool2d_backward_f32<<<grid_out, POOL_BLOCK, 0, stream>>>(
+        auto [grid_bwd, block_bwd] = optimal_launch_config(maxpool2d_backward_f32, total_out);
+        maxpool2d_backward_f32<<<grid_bwd, block_bwd, 0, stream>>>(
             go_f32.data<float>(), indices.data<int64_t>(), grad_f32.data<float>(),
             N, C, H, W, H_out, W_out);
 
         // Convert result back
         Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
         if (grad_output.dtype() == DType::Float16) {
-            convert_f32_to<__half><<<grid_in, POOL_BLOCK, 0, stream>>>(
+            auto [grid_back, block_back] = optimal_launch_config(convert_f32_to<__half>, total_in);
+            convert_f32_to<__half><<<grid_back, block_back, 0, stream>>>(
                 grad_f32.data<float>(), reinterpret_cast<__half*>(grad_input.data<Float16>()), total_in);
         } else {
-            convert_f32_to<__nv_bfloat16><<<grid_in, POOL_BLOCK, 0, stream>>>(
+            auto [grid_back, block_back] = optimal_launch_config(convert_f32_to<__nv_bfloat16>, total_in);
+            convert_f32_to<__nv_bfloat16><<<grid_back, block_back, 0, stream>>>(
                 grad_f32.data<float>(), reinterpret_cast<__nv_bfloat16*>(grad_input.data<BFloat16>()), total_in);
         }
         return grad_input;
@@ -336,23 +370,26 @@ auto avgpool2d_forward_kernel(const Tensor& input, int64_t kernel_size,
     Tensor output({N, C, H_out, W_out}, input.dtype(), input.device());
 
     int64_t total = N * C * H_out * W_out;
-    int grid = clamp_grid((total + POOL_BLOCK - 1) / POOL_BLOCK);
 
     if (input.dtype() == DType::Float32) {
-        avgpool2d_forward_impl<float><<<grid, POOL_BLOCK, 0, stream>>>(
+        auto [grid, block] = optimal_launch_config(avgpool2d_forward_impl<float>, total);
+        avgpool2d_forward_impl<float><<<grid, block, 0, stream>>>(
             input.data<float>(), output.data<float>(),
             N, C, H, W, H_out, W_out, kernel_size, stride, padding);
     } else if (input.dtype() == DType::Float64) {
-        avgpool2d_forward_impl<double><<<grid, POOL_BLOCK, 0, stream>>>(
+        auto [grid, block] = optimal_launch_config(avgpool2d_forward_impl<double>, total);
+        avgpool2d_forward_impl<double><<<grid, block, 0, stream>>>(
             input.data<double>(), output.data<double>(),
             N, C, H, W, H_out, W_out, kernel_size, stride, padding);
     } else if (input.dtype() == DType::Float16) {
-        avgpool2d_forward_impl<__half><<<grid, POOL_BLOCK, 0, stream>>>(
+        auto [grid, block] = optimal_launch_config(avgpool2d_forward_impl<__half>, total);
+        avgpool2d_forward_impl<__half><<<grid, block, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(output.data<Float16>()),
             N, C, H, W, H_out, W_out, kernel_size, stride, padding);
     } else if (input.dtype() == DType::BFloat16) {
-        avgpool2d_forward_impl<__nv_bfloat16><<<grid, POOL_BLOCK, 0, stream>>>(
+        auto [grid, block] = optimal_launch_config(avgpool2d_forward_impl<__nv_bfloat16>, total);
+        avgpool2d_forward_impl<__nv_bfloat16><<<grid, block, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(output.data<BFloat16>()),
             N, C, H, W, H_out, W_out, kernel_size, stride, padding);
@@ -472,18 +509,18 @@ auto avgpool2d_backward_kernel(const Tensor& grad_output,
 
     int64_t total_out = N * C * H_out * W_out;
     int64_t total_in = N * C * H * W;
-    int grid_out = clamp_grid((total_out + POOL_BLOCK - 1) / POOL_BLOCK);
-    int grid_in = clamp_grid((total_in + POOL_BLOCK - 1) / POOL_BLOCK);
 
     if (grad_output.dtype() == DType::Float32) {
         Tensor grad_input = create_zeros_cuda(input_shape, DType::Float32, grad_output.device());
-        avgpool2d_backward_f32<<<grid_out, POOL_BLOCK, 0, stream>>>(
+        auto [grid_out, block_out] = optimal_launch_config(avgpool2d_backward_f32, total_out);
+        avgpool2d_backward_f32<<<grid_out, block_out, 0, stream>>>(
             grad_output.data<float>(), grad_input.data<float>(),
             N, C, H, W, H_out, W_out, kernel_size, stride, padding);
         return grad_input;
     } else if (grad_output.dtype() == DType::Float64) {
         Tensor grad_input = create_zeros_cuda(input_shape, DType::Float64, grad_output.device());
-        avgpool2d_backward_f64<<<grid_out, POOL_BLOCK, 0, stream>>>(
+        auto [grid_out, block_out] = optimal_launch_config(avgpool2d_backward_f64, total_out);
+        avgpool2d_backward_f64<<<grid_out, block_out, 0, stream>>>(
             grad_output.data<double>(), grad_input.data<double>(),
             N, C, H, W, H_out, W_out, kernel_size, stride, padding);
         return grad_input;
@@ -493,23 +530,28 @@ auto avgpool2d_backward_kernel(const Tensor& grad_output,
         Tensor go_f32({N, C, H_out, W_out}, DType::Float32, grad_output.device());
 
         if (grad_output.dtype() == DType::Float16) {
-            convert_to_f32<__half><<<clamp_grid((total_out + POOL_BLOCK - 1) / POOL_BLOCK), POOL_BLOCK, 0, stream>>>(
+            auto [grid_conv, block_conv] = optimal_launch_config(convert_to_f32<__half>, total_out);
+            convert_to_f32<__half><<<grid_conv, block_conv, 0, stream>>>(
                 reinterpret_cast<const __half*>(grad_output.data<Float16>()), go_f32.data<float>(), total_out);
         } else {
-            convert_to_f32<__nv_bfloat16><<<clamp_grid((total_out + POOL_BLOCK - 1) / POOL_BLOCK), POOL_BLOCK, 0, stream>>>(
+            auto [grid_conv, block_conv] = optimal_launch_config(convert_to_f32<__nv_bfloat16>, total_out);
+            convert_to_f32<__nv_bfloat16><<<grid_conv, block_conv, 0, stream>>>(
                 reinterpret_cast<const __nv_bfloat16*>(grad_output.data<BFloat16>()), go_f32.data<float>(), total_out);
         }
 
-        avgpool2d_backward_f32<<<grid_out, POOL_BLOCK, 0, stream>>>(
+        auto [grid_bwd, block_bwd] = optimal_launch_config(avgpool2d_backward_f32, total_out);
+        avgpool2d_backward_f32<<<grid_bwd, block_bwd, 0, stream>>>(
             go_f32.data<float>(), grad_f32.data<float>(),
             N, C, H, W, H_out, W_out, kernel_size, stride, padding);
 
         Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
         if (grad_output.dtype() == DType::Float16) {
-            convert_f32_to<__half><<<grid_in, POOL_BLOCK, 0, stream>>>(
+            auto [grid_back, block_back] = optimal_launch_config(convert_f32_to<__half>, total_in);
+            convert_f32_to<__half><<<grid_back, block_back, 0, stream>>>(
                 grad_f32.data<float>(), reinterpret_cast<__half*>(grad_input.data<Float16>()), total_in);
         } else {
-            convert_f32_to<__nv_bfloat16><<<grid_in, POOL_BLOCK, 0, stream>>>(
+            auto [grid_back, block_back] = optimal_launch_config(convert_f32_to<__nv_bfloat16>, total_in);
+            convert_f32_to<__nv_bfloat16><<<grid_back, block_back, 0, stream>>>(
                 grad_f32.data<float>(), reinterpret_cast<__nv_bfloat16*>(grad_input.data<BFloat16>()), total_in);
         }
         return grad_input;

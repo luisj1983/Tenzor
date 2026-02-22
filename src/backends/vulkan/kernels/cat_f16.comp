@@ -1,0 +1,81 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Concatenate operation for Float16: join tensors along a dimension
+// Float16 elements are packed 2 per uint32
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input0 { uint input0_data[]; };
+layout(binding = 1) buffer Input1 { uint input1_data[]; };
+layout(binding = 2) buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;        // Total output elements (in float16 count)
+    uint cat_dim;           // Dimension to concatenate along
+    uint ndim;              // Number of dimensions
+    uint output_shape[8];   // Output shape (max 8 dims)
+    uint input0_dim_size;   // Size of input0 along cat_dim
+    uint input1_dim_size;   // Size of input1 along cat_dim
+    uint outer_size;        // Product of dimensions before cat_dim
+    uint inner_size;        // Product of dimensions after cat_dim
+} params;
+
+// Helper to read float16 from packed uint
+float16_t readF16(uint packed, uint offset) {
+    uint bits = (packed >> (offset * 16)) & 0xFFFFu;
+    return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
+}
+
+// Helper to pack two float16 values
+uint packF16Pair(float16_t v0, float16_t v1) {
+    uint bits0 = packHalf2x16(vec2(float(v0), 0.0)) & 0xFFFFu;
+    uint bits1 = packHalf2x16(vec2(float(v1), 0.0)) & 0xFFFFu;
+    return bits0 | (bits1 << 16);
+}
+
+// Read a single float16 element from input0 at the given element index
+float16_t readFromInput0(uint element_idx) {
+    uint pair_idx = element_idx / 2;
+    uint offset = element_idx % 2;
+    return readF16(input0_data[pair_idx], offset);
+}
+
+// Read a single float16 element from input1 at the given element index
+float16_t readFromInput1(uint element_idx) {
+    uint pair_idx = element_idx / 2;
+    uint offset = element_idx % 2;
+    return readF16(input1_data[pair_idx], offset);
+}
+
+// Read from the appropriate input based on cat position
+float16_t readElement(uint idx) {
+    uint inner_idx = idx % params.inner_size;
+    uint temp = idx / params.inner_size;
+    uint cat_pos = temp % (params.input0_dim_size + params.input1_dim_size);
+    uint outer_idx = temp / (params.input0_dim_size + params.input1_dim_size);
+
+    if (cat_pos < params.input0_dim_size) {
+        uint input_idx = outer_idx * params.input0_dim_size * params.inner_size +
+                        cat_pos * params.inner_size + inner_idx;
+        return readFromInput0(input_idx);
+    } else {
+        uint cat_pos_in = cat_pos - params.input0_dim_size;
+        uint input_idx = outer_idx * params.input1_dim_size * params.inner_size +
+                        cat_pos_in * params.inner_size + inner_idx;
+        return readFromInput1(input_idx);
+    }
+}
+
+void main() {
+    // Process 2 elements per thread (packed F16 pair)
+    uint pair_idx = gl_GlobalInvocationID.x;
+    uint idx0 = pair_idx * 2;
+    uint idx1 = pair_idx * 2 + 1;
+
+    if (idx0 >= params.n_elements) return;
+
+    float16_t val0 = readElement(idx0);
+    float16_t val1 = (idx1 < params.n_elements) ? readElement(idx1) : float16_t(0.0);
+
+    output_data[pair_idx] = packF16Pair(val0, val1);
+}

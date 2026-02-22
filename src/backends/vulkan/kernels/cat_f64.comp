@@ -1,0 +1,48 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Concatenate operation for Float64: join tensors along a dimension
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input0 { float64_t input0_data[]; };
+layout(binding = 1) buffer Input1 { float64_t input1_data[]; };
+layout(binding = 2) buffer Output { float64_t output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;        // Total output elements
+    uint cat_dim;           // Dimension to concatenate along
+    uint ndim;              // Number of dimensions
+    uint output_shape[8];   // Output shape (max 8 dims)
+    uint input0_dim_size;   // Size of input0 along cat_dim
+    uint input1_dim_size;   // Size of input1 along cat_dim
+    uint outer_size;        // Product of dimensions before cat_dim
+    uint inner_size;        // Product of dimensions after cat_dim
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    // Calculate position in concatenation dimension
+    uint inner_idx = idx % params.inner_size;
+    uint temp = idx / params.inner_size;
+    uint cat_pos = temp % (params.input0_dim_size + params.input1_dim_size);
+    uint outer_idx = temp / (params.input0_dim_size + params.input1_dim_size);
+
+    // Determine which input tensor to read from
+    float64_t value;
+    if (cat_pos < params.input0_dim_size) {
+        uint input0_idx = outer_idx * params.input0_dim_size * params.inner_size +
+                         cat_pos * params.inner_size +
+                         inner_idx;
+        value = input0_data[input0_idx];
+    } else {
+        uint cat_pos_in_input1 = cat_pos - params.input0_dim_size;
+        uint input1_idx = outer_idx * params.input1_dim_size * params.inner_size +
+                         cat_pos_in_input1 * params.inner_size +
+                         inner_idx;
+        value = input1_data[input1_idx];
+    }
+
+    output_data[idx] = value;
+}

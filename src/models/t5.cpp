@@ -210,11 +210,11 @@ auto T5Attention::forward(const Variable& hidden_states,
 
     // Add relative position bias
     Tensor bias = position_bias;
-    if (!position_bias.numel() && has_relative_attention_bias_) {
+    if ((!position_bias.is_valid() || !position_bias.numel()) && has_relative_attention_bias_) {
         bias = compute_bias(seq_len, kv_seq_len);
     }
 
-    if (bias.numel() > 0) {
+    if (bias.is_valid() && bias.numel() > 0) {
         // Expand bias to batch dimension: [num_heads, q_len, kv_len] -> [batch, num_heads, q_len, kv_len]
         // Create on CPU for data filling, then transfer to target device
         Device bias_device = bias.device();
@@ -252,7 +252,7 @@ auto T5Attention::forward(const Variable& hidden_states,
     }
 
     // Apply attention mask if provided
-    if (attention_mask.numel() > 0) {
+    if (attention_mask.is_valid() && attention_mask.numel() > 0) {
         scores = scores + Variable(attention_mask, false);
     }
 
@@ -556,7 +556,7 @@ auto T5Decoder::forward(const Variable& decoder_input_ids,
 
     // Combine with provided mask if exists
     Tensor combined_mask = causal_mask;
-    if (decoder_attention_mask.numel() > 0) {
+    if (decoder_attention_mask.is_valid() && decoder_attention_mask.numel() > 0) {
         // Combine causal mask with padding mask
         combined_mask = causal_mask;  // For now, just use causal mask
     }

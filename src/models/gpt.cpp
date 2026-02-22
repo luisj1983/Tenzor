@@ -203,7 +203,7 @@ auto GPT2Model::forward(const Variable& input_ids,
     // Create causal mask if not provided
     // Use hidden_states dtype to ensure dtype compatibility
     Tensor causal_mask = attention_mask;
-    if (attention_mask.numel() == 0) {
+    if (!attention_mask.is_valid() || attention_mask.numel() == 0) {
         causal_mask = create_causal_attention_mask(seq_len, input_ids.tensor().device(),
                                                     hidden_states.tensor().dtype());
     }

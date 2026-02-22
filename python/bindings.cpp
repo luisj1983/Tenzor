@@ -3,6 +3,7 @@
 #include <pybind11/numpy.h>
 #include <pybind11/functional.h>
 #include <iostream>
+#include <sstream>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/ops/indexing.hpp>
 #include <tenzor/ops/advanced.hpp>
@@ -23,6 +24,7 @@
 #include <tenzor/nn/callbacks.hpp>
 #include <tenzor/nn/training.hpp>
 #include <tenzor/nn/checkpoint.hpp>
+#include <tenzor/backend/cuda_graph.hpp>
 #include <tenzor/nn/mixed_precision.hpp>
 #include <tenzor/nn/amp/grad_scaler.hpp>
 #include <tenzor/nn/amp/autocast.hpp>
@@ -235,6 +237,33 @@ PYBIND11_MODULE(tenzor_core, m) {
         auto* cuda_backend = loader.get_backend("cuda");
         return cuda_backend ? cuda_backend->device_count() : 0;
     }, "Get number of available CUDA devices");
+
+    // CUDA Graph capture and replay
+    py::class_<tenzor::CUDAGraph>(m, "CUDAGraph",
+        "Captures a sequence of CUDA operations into a graph for fast replay.\n"
+        "Shapes must be fixed during capture. No host-device sync during capture.")
+        .def(py::init([](int32_t device_id) {
+            auto graph = tenzor::CUDAGraph::create(device_id);
+            if (!graph) {
+                throw std::runtime_error("CUDA not available or invalid device_id");
+            }
+            return graph;
+        }), py::arg("device_id") = 0)
+        .def("begin_capture", &tenzor::CUDAGraph::begin_capture,
+             "Begin capturing CUDA operations")
+        .def("end_capture", &tenzor::CUDAGraph::end_capture,
+             "End capture and compile the graph")
+        .def("replay", &tenzor::CUDAGraph::replay,
+             "Replay the captured graph")
+        .def("is_ready", &tenzor::CUDAGraph::is_ready,
+             "Check if graph has been captured and is ready for replay")
+        .def("__enter__", [](tenzor::CUDAGraph& self) -> tenzor::CUDAGraph& {
+            self.begin_capture();
+            return self;
+        })
+        .def("__exit__", [](tenzor::CUDAGraph& self, py::object, py::object, py::object) {
+            self.end_capture();
+        });
 
     // Vulkan device availability
     m.def("vulkan_is_available", []() {
@@ -459,7 +488,8 @@ PYBIND11_MODULE(tenzor_core, m) {
              "Get the memory format of the tensor (contiguous_format or channels_last)")
         .def("to", py::overload_cast<tenzor::Device>(&tenzor::Tensor::to, py::const_),
              py::arg("device"),
-             "Move tensor to specified device")
+             "Move tensor to specified device",
+             py::call_guard<py::gil_scoped_release>())
         .def("to", py::overload_cast<tenzor::MemoryFormat>(&tenzor::Tensor::to, py::const_),
              py::arg("memory_format"),
              "Convert tensor to specified memory format (e.g., channels_last for NHWC)")
@@ -524,8 +554,9 @@ PYBIND11_MODULE(tenzor_core, m) {
                 case tenzor::DType::Complex128:
                     return py::cast(t.item<std::complex<double>>());
                 case tenzor::DType::Float16:
+                    return py::cast(static_cast<float>(t.data<tenzor::Float16>()[0]));
                 case tenzor::DType::BFloat16:
-                    throw std::runtime_error("Float16 and BFloat16 dtypes not yet supported for item()");
+                    return py::cast(static_cast<float>(t.data<tenzor::BFloat16>()[0]));
                 default:
                     throw std::runtime_error("Unsupported dtype for item()");
             }
@@ -536,44 +567,70 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("__mul__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return a * b; })
         .def("__truediv__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return a / b; },
              py::is_operator(), "Element-wise division")
-        // Arithmetic operators - Tensor-Scalar
+        // Arithmetic operators - Tensor-Scalar (use scalar tensor {1} and rely on broadcasting)
         .def("__add__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
-             auto s = a.shape();
-             return a + tenzor::full(std::vector<int64_t>(s.begin(), s.end()), b, a.dtype(), a.device());
+             return a + tenzor::full({1}, b, a.dtype(), a.device());
              }, py::is_operator())
         .def("__radd__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
-             auto s = a.shape();
-             return tenzor::full(std::vector<int64_t>(s.begin(), s.end()), b, a.dtype(), a.device()) + a;
+             return tenzor::full({1}, b, a.dtype(), a.device()) + a;
              }, py::is_operator())
         .def("__sub__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
-             auto s = a.shape();
-             return a - tenzor::full(std::vector<int64_t>(s.begin(), s.end()), b, a.dtype(), a.device());
+             return a - tenzor::full({1}, b, a.dtype(), a.device());
              }, py::is_operator())
         .def("__rsub__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
-             auto s = a.shape();
-             return tenzor::full(std::vector<int64_t>(s.begin(), s.end()), b, a.dtype(), a.device()) - a;
+             return tenzor::full({1}, b, a.dtype(), a.device()) - a;
              }, py::is_operator())
         .def("__mul__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
-             auto s = a.shape();
-             return a * tenzor::full(std::vector<int64_t>(s.begin(), s.end()), b, a.dtype(), a.device());
+             return a * tenzor::full({1}, b, a.dtype(), a.device());
              }, py::is_operator())
         .def("__rmul__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
-             auto s = a.shape();
-             return tenzor::full(std::vector<int64_t>(s.begin(), s.end()), b, a.dtype(), a.device()) * a;
+             return tenzor::full({1}, b, a.dtype(), a.device()) * a;
              }, py::is_operator())
         .def("__truediv__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
-             auto s = a.shape();
-             return a / tenzor::full(std::vector<int64_t>(s.begin(), s.end()), b, a.dtype(), a.device());
+             return a / tenzor::full({1}, b, a.dtype(), a.device());
              }, py::is_operator())
         .def("__rtruediv__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
-             auto s = a.shape();
-             return tenzor::full(std::vector<int64_t>(s.begin(), s.end()), b, a.dtype(), a.device()) / a;
+             return tenzor::full({1}, b, a.dtype(), a.device()) / a;
              }, py::is_operator())
         .def("__pow__", [](const tenzor::Tensor& a, float exponent) -> tenzor::Tensor {
              return tenzor::pow(a, exponent);
              }, py::is_operator(), "Element-wise power")
         .def("__neg__", [](const tenzor::Tensor& a) -> tenzor::Tensor { return tenzor::neg(a); },
              py::is_operator(), "Unary negation")
+        // Comparison operators
+        .def("__eq__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::eq(a, b); },
+             py::is_operator())
+        .def("__ne__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::ne(a, b); },
+             py::is_operator())
+        .def("__lt__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::lt(a, b); },
+             py::is_operator())
+        .def("__le__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::le(a, b); },
+             py::is_operator())
+        .def("__gt__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::gt(a, b); },
+             py::is_operator())
+        .def("__ge__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::ge(a, b); },
+             py::is_operator())
+        // Container protocol
+        .def("__len__", [](const tenzor::Tensor& t) -> int64_t {
+             if (t.ndim() == 0) throw py::value_error("len() of a 0-d tensor");
+             return t.shape()[0];
+             })
+        .def("__bool__", [](const tenzor::Tensor& t) -> bool {
+             if (t.numel() != 1) throw py::value_error(
+                 "The truth value of a Tensor with more than one element is ambiguous");
+             return t.item<float>() != 0.0f;
+             })
+        .def("__str__", [](const tenzor::Tensor& t) {
+             std::ostringstream ss;
+             ss << "Tensor(shape=[";
+             for (size_t i = 0; i < t.shape().size(); ++i) {
+                 if (i > 0) ss << ", ";
+                 ss << t.shape()[i];
+             }
+             ss << "], dtype=" << tenzor::dtype_name(t.dtype())
+                << ", device=" << t.device().to_string() << ")";
+             return ss.str();
+             })
         // Math methods
         .def("exp", [](const tenzor::Tensor& t) { return tenzor::exp(t); },
              "Element-wise exponential")
@@ -632,7 +689,15 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("to", py::overload_cast<tenzor::DType>(&tenzor::Tensor::to, py::const_),
              py::arg("dtype"), "Convert to different dtype")
         .def("__repr__", [](const tenzor::Tensor& t) {
-            return "Tensor(shape=[...])";
+            std::ostringstream ss;
+            ss << "Tensor(shape=[";
+            for (size_t i = 0; i < t.shape().size(); ++i) {
+                if (i > 0) ss << ", ";
+                ss << t.shape()[i];
+            }
+            ss << "], dtype=" << tenzor::dtype_name(t.dtype())
+               << ", device=" << t.device().to_string() << ")";
+            return ss.str();
         })
         // Python-style indexing
         .def("__getitem__", [](const tenzor::Tensor& self, py::object key) -> tenzor::Tensor {
@@ -648,7 +713,8 @@ PYBIND11_MODULE(tenzor_core, m) {
                     idx += shape[0];
                 }
                 if (idx < 0 || idx >= shape[0]) {
-                    throw std::out_of_range("Index out of range");
+                    throw std::out_of_range(
+                        "Index " + std::to_string(idx) + " out of range for dimension 0 with size " + std::to_string(shape[0]));
                 }
                 // Return slice along first dimension (squeeze will remove dim if size is 1)
                 auto sliced = self.slice(0, idx, idx + 1);
@@ -668,12 +734,10 @@ PYBIND11_MODULE(tenzor_core, m) {
                     throw std::runtime_error("Cannot slice scalar tensor");
                 }
                 if (!slice_obj.compute(shape[0], &start, &stop, &step, &length)) {
-                    throw std::runtime_error("Invalid slice");
+                    throw std::runtime_error(
+                        "Invalid slice for dimension 0 with size " + std::to_string(shape[0]));
                 }
-                if (step != 1) {
-                    throw std::runtime_error("Slice step not supported yet");
-                }
-                return self.slice(0, start, stop);
+                return self.slice(0, start, stop, step);
             }
             // Handle tuple of indices/slices (basic implementation)
             else if (py::isinstance<py::tuple>(key)) {
@@ -707,17 +771,22 @@ PYBIND11_MODULE(tenzor_core, m) {
                             throw std::out_of_range("Too many indices");
                         }
                         if (!slice_obj.compute(shape[dim], &start, &stop, &step, &length)) {
-                            throw std::runtime_error("Invalid slice");
+                            throw std::runtime_error(
+                                "Invalid slice for dimension " + std::to_string(dim) + " with size " + std::to_string(shape[dim]));
                         }
-                        if (step != 1) {
-                            throw std::runtime_error("Slice step not supported yet");
-                        }
-                        result = result.slice(dim, start, stop);
+                        result = result.slice(dim, start, stop, step);
                     }
                 }
                 return result;
             }
-            throw std::runtime_error("Unsupported index type");
+            // Handle boolean/integer tensor indexing
+            if (py::isinstance<tenzor::Tensor>(key)) {
+                auto mask = key.cast<tenzor::Tensor>();
+                if (mask.dtype() == tenzor::DType::Bool) {
+                    return tenzor::masked_select(self, mask);
+                }
+            }
+            throw std::runtime_error("Unsupported index type: expected int, slice, or Tensor");
         }, py::arg("key"), "Get tensor slice or element")
         .def("__setitem__", [](tenzor::Tensor& self, py::object key, py::object value) {
             // Helper function to convert Python value to tensor
@@ -892,7 +961,19 @@ PYBIND11_MODULE(tenzor_core, m) {
                 }
 
                 if (!can_broadcast) {
-                    throw std::runtime_error("Shape mismatch: cannot broadcast source shape to destination shape");
+                    // Include actual shapes in error for easier debugging
+                    auto fmt_shape = [](std::span<const int64_t> s) {
+                        std::string r = "[";
+                        for (size_t i = 0; i < s.size(); ++i) {
+                            if (i > 0) r += ", ";
+                            r += std::to_string(s[i]);
+                        }
+                        return r + "]";
+                    };
+                    throw std::runtime_error(
+                        "Shape mismatch: cannot broadcast source shape " +
+                        fmt_shape(src_shape) + " to destination shape " +
+                        fmt_shape(dst_shape));
                 }
 
                 // Implement proper broadcasting copy
@@ -1115,12 +1196,14 @@ PYBIND11_MODULE(tenzor_core, m) {
     m.def("matmul", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
          return tenzor::matmul(a, b);
          }, "Matrix multiplication",
-         py::arg("a"), py::arg("b"));
+         py::arg("a"), py::arg("b"),
+         py::call_guard<py::gil_scoped_release>());
 
     m.def("bmm", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
          return tenzor::bmm(a, b);
          }, "Batched matrix multiplication",
-         py::arg("a"), py::arg("b"));
+         py::arg("a"), py::arg("b"),
+         py::call_guard<py::gil_scoped_release>());
 
     // Math operations - using lambda wrappers for overloaded functions
     m.def("exp", [](const tenzor::Tensor& t) { return tenzor::exp(t); },
@@ -1148,7 +1231,8 @@ PYBIND11_MODULE(tenzor_core, m) {
          }, "Sum reduction (Tensor)",
          py::arg("input"),
          py::arg("dim") = py::none(),
-         py::arg("keepdim") = false);
+         py::arg("keepdim") = false,
+         py::call_guard<py::gil_scoped_release>());
     m.def("sum", [](const tenzor::Variable& input, std::optional<int64_t> dim, bool keepdim) {
          return tenzor::sum(input, dim, keepdim);
          }, "Sum reduction with autograd (Variable)",
@@ -1160,7 +1244,8 @@ PYBIND11_MODULE(tenzor_core, m) {
          }, "Mean reduction (Tensor)",
          py::arg("input"),
          py::arg("dim") = py::none(),
-         py::arg("keepdim") = false);
+         py::arg("keepdim") = false,
+         py::call_guard<py::gil_scoped_release>());
     m.def("mean", [](const tenzor::Variable& input, std::optional<int64_t> dim, bool keepdim) {
          return tenzor::mean(input, dim, keepdim);
          }, "Mean reduction with autograd (Variable)",
@@ -1275,6 +1360,7 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("backward", &tenzor::Variable::backward,
              py::arg("gradient") = py::none(),
              py::arg("retain_graph") = false,
+             py::call_guard<py::gil_scoped_release>(),
              "Compute gradients via backpropagation")
         // Tensor access - both as property and method for compatibility
         .def_property_readonly("data", py::overload_cast<>(&tenzor::Variable::tensor, py::const_))
@@ -1296,10 +1382,15 @@ PYBIND11_MODULE(tenzor_core, m) {
              "Set requires_grad in-place")
         .def("zero_grad", &tenzor::Variable::zero_grad,
              "Zero the gradient")
-        // Hook registration
-        .def("register_hook", &tenzor::Variable::register_hook,
-             py::arg("hook"),
-             "Register a backward hook function")
+        // Hook registration — wrap Python callable to acquire GIL during backward
+        .def("register_hook", [](tenzor::Variable& self, py::function hook) {
+            auto cpp_hook = [hook](const tenzor::Tensor& grad) -> tenzor::Tensor {
+                py::gil_scoped_acquire acquire;
+                py::object result = hook(grad);
+                return result.cast<tenzor::Tensor>();
+            };
+            return self.register_hook(cpp_hook);
+        }, py::arg("hook"), "Register a backward hook function")
         .def("retain_grad", &tenzor::Variable::retain_grad,
              "Enable gradient retention for non-leaf variables")
         .def_property_readonly("retains_grad", &tenzor::Variable::retains_grad,
@@ -1338,8 +1429,21 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("__rmul__", [](const tenzor::Variable& a, float b) {
             return a * b;
         }, py::is_operator())
+        .def("__sub__", [](const tenzor::Variable& a, float b) {
+            return a - b;
+        }, py::is_operator())
+        .def("__rsub__", [](const tenzor::Variable& a, float b) {
+            // b - a = -(a - b)
+            return (a - b) * -1.0f;
+        }, py::is_operator())
         .def("__truediv__", [](const tenzor::Variable& a, float b) {
             return a / b;
+        }, py::is_operator())
+        .def("__rtruediv__", [](const tenzor::Variable& a, float b) {
+            // b / a: create scalar variable with value b, divide by a
+            auto b_var = tenzor::Variable(
+                tenzor::full({}, static_cast<double>(b), a.dtype(), a.device()), false);
+            return b_var / a;
         }, py::is_operator())
         .def("__neg__", [](const tenzor::Variable& a) {
             return a * -1.0f;
@@ -1518,7 +1622,11 @@ PYBIND11_MODULE(tenzor_core, m) {
             } else if (device == "cuda" || device.rfind("cuda:", 0) == 0) {
                 int device_id = 0;
                 if (device.size() > 5) {
-                    device_id = std::stoi(device.substr(5));
+                    try {
+                        device_id = std::stoi(device.substr(5));
+                    } catch (const std::exception&) {
+                        throw std::runtime_error("Invalid CUDA device ID in: " + device);
+                    }
                 }
                 self.cuda(device_id);
             } else {
@@ -1746,6 +1854,18 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("groups") = 1,
              py::arg("bias") = true);
 
+    py::class_<tenzor::nn::Conv3d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::Conv3d>>(nn, "Conv3d")
+        .def(py::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, bool>(),
+             py::arg("in_channels"),
+             py::arg("out_channels"),
+             py::arg("kernel_size"),
+             py::arg("stride") = 1,
+             py::arg("padding") = 0,
+             py::arg("dilation") = 1,
+             py::arg("groups") = 1,
+             py::arg("bias") = true);
+
     // Normalization layers
     py::class_<tenzor::nn::BatchNorm2d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::BatchNorm2d>>(nn, "BatchNorm2d")
@@ -1795,6 +1915,30 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("eps") = 1e-5,
              py::arg("affine") = true);
 
+    py::class_<tenzor::nn::InstanceNorm2d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::InstanceNorm2d>>(nn, "InstanceNorm2d")
+        .def(py::init<int64_t, double, bool>(),
+             py::arg("num_features"),
+             py::arg("eps") = 1e-5,
+             py::arg("affine") = true)
+        .def("__repr__", [](const tenzor::nn::InstanceNorm2d& self) {
+            auto params = const_cast<tenzor::nn::InstanceNorm2d&>(self).own_parameters();
+            int64_t size = params.empty() ? 0 : params[0]->tensor().numel();
+            return "InstanceNorm2d(" + std::to_string(size) + ")";
+        });
+
+    py::class_<tenzor::nn::InstanceNorm1d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::InstanceNorm1d>>(nn, "InstanceNorm1d")
+        .def(py::init<int64_t, double, bool>(),
+             py::arg("num_features"),
+             py::arg("eps") = 1e-5,
+             py::arg("affine") = true)
+        .def("__repr__", [](const tenzor::nn::InstanceNorm1d& self) {
+            auto params = const_cast<tenzor::nn::InstanceNorm1d&>(self).own_parameters();
+            int64_t size = params.empty() ? 0 : params[0]->tensor().numel();
+            return "InstanceNorm1d(" + std::to_string(size) + ")";
+        });
+
     py::class_<tenzor::nn::RMSNorm, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::RMSNorm>>(nn, "RMSNorm")
         .def(py::init<int64_t, double>(),
@@ -1836,6 +1980,20 @@ PYBIND11_MODULE(tenzor_core, m) {
 
     py::class_<tenzor::nn::AvgPool2d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::AvgPool2d>>(nn, "AvgPool2d")
+        .def(py::init<int64_t, int64_t, int64_t>(),
+             py::arg("kernel_size"),
+             py::arg("stride") = -1,
+             py::arg("padding") = 0);
+
+    py::class_<tenzor::nn::MaxPool3d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::MaxPool3d>>(nn, "MaxPool3d")
+        .def(py::init<int64_t, int64_t, int64_t>(),
+             py::arg("kernel_size"),
+             py::arg("stride") = -1,
+             py::arg("padding") = 0);
+
+    py::class_<tenzor::nn::AvgPool3d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::AvgPool3d>>(nn, "AvgPool3d")
         .def(py::init<int64_t, int64_t, int64_t>(),
              py::arg("kernel_size"),
              py::arg("stride") = -1,
@@ -2307,6 +2465,19 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("delta") = 1.0, py::arg("reduction") = "mean")
         .def("forward", &tenzor::nn::HuberLoss::forward)
         .def("__call__", &tenzor::nn::HuberLoss::operator());
+
+    py::class_<tenzor::nn::CTCLoss>(nn, "CTCLoss",
+        "Connectionist Temporal Classification loss for sequence-to-sequence tasks")
+        .def(py::init<const std::string&, int64_t, bool>(),
+             py::arg("reduction") = "mean",
+             py::arg("blank") = 0,
+             py::arg("zero_infinity") = false)
+        .def("forward", &tenzor::nn::CTCLoss::forward,
+             py::arg("log_probs"), py::arg("targets"),
+             py::arg("input_lengths"), py::arg("target_lengths"))
+        .def("__call__", &tenzor::nn::CTCLoss::operator(),
+             py::arg("log_probs"), py::arg("targets"),
+             py::arg("input_lengths"), py::arg("target_lengths"));
 
     // Functional loss functions
     nn.def("mse_loss", &tenzor::nn::mse_loss, "MSE loss function",
@@ -3193,6 +3364,7 @@ PYBIND11_MODULE(tenzor_core, m) {
                      callback = [progress_callback](size_t downloaded, size_t total,
                                                     double speed, double eta) {
                          try {
+                             py::gil_scoped_acquire acquire;
                              progress_callback(downloaded, total, speed, eta);
                          } catch (const py::error_already_set& e) {
                              std::cerr << "Error in progress callback: " << e.what() << std::endl;
@@ -3217,6 +3389,7 @@ PYBIND11_MODULE(tenzor_core, m) {
                      callback = [progress_callback](size_t downloaded, size_t total,
                                                     double speed, double eta) {
                          try {
+                             py::gil_scoped_acquire acquire;
                              progress_callback(downloaded, total, speed, eta);
                          } catch (const py::error_already_set& e) {
                              std::cerr << "Error in progress callback: " << e.what() << std::endl;

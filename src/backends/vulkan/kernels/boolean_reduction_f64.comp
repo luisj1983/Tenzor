@@ -1,0 +1,50 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Boolean reductions for Float64: all, any
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { float64_t input_data[]; };   // Treating as boolean (0 or non-zero)
+layout(binding = 1) buffer Output { int output_data[]; };       // Boolean result
+
+layout(push_constant) uniform PushConstants {
+    uint n;              // Total number of elements
+    uint reduce_size;    // Size of dimension to reduce
+    uint outer_size;     // Size of outer dimensions
+    uint op;             // 0=all, 1=any
+} params;
+
+shared int shared_data[256];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint gid = gl_GlobalInvocationID.x;
+    uint wid = gl_WorkGroupID.x;
+
+    // Convert to boolean
+    int value;
+    if (gid < params.n) {
+        value = (input_data[gid] != float64_t(0.0)) ? 1 : 0;
+    } else {
+        value = (params.op == 0) ? 1 : 0; // all: true, any: false
+    }
+    shared_data[tid] = value;
+    barrier();
+
+    // Parallel reduction
+    for (uint s = 128; s > 0; s >>= 1) {
+        if (tid < s && (gid + s) < params.n) {
+            if (params.op == 0) { // all
+                shared_data[tid] = shared_data[tid] & shared_data[tid + s];
+            } else { // any
+                shared_data[tid] = shared_data[tid] | shared_data[tid + s];
+            }
+        }
+        barrier();
+    }
+
+    // Write result
+    if (tid == 0) {
+        output_data[wid] = shared_data[0];
+    }
+}

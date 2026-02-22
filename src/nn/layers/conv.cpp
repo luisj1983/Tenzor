@@ -51,10 +51,11 @@ auto im2col_cpu(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
     int64_t out_h = calculate_output_size(height, kernel_h, stride_h, padding_h, dilation);
     int64_t out_w = calculate_output_size(width, kernel_w, stride_w, padding_w, dilation);
 
-    auto col = zeros({batch, channels * kernel_h * kernel_w, out_h * out_w}, input.dtype(), input.device());
-
-    const float* input_data = input.data<float>();
-    float* col_data = col.data<float>();
+    // Convert to Float32 for im2col computation (matches PyTorch CPU conv fallback behavior)
+    Tensor input_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
+    auto col_f32 = zeros({batch, channels * kernel_h * kernel_w, out_h * out_w}, DType::Float32, input.device());
+    const float* input_data = input_f32.data<float>();
+    float* col_data = col_f32.data<float>();
 
     for (int64_t b = 0; b < batch; ++b) {
         for (int64_t c = 0; c < channels; ++c) {
@@ -86,7 +87,8 @@ auto im2col_cpu(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
         }
     }
 
-    return col;
+    // Convert back to original dtype if needed
+    return (input.dtype() != DType::Float32) ? col_f32.to(input.dtype()) : col_f32;
 }
 
 auto im2col_cpu(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
@@ -103,10 +105,11 @@ auto col2im_cpu(const Tensor& col, int64_t channels, int64_t height, int64_t wid
     int64_t out_h = calculate_output_size(height, kernel_h, stride_h, padding_h, dilation);
     int64_t out_w = calculate_output_size(width, kernel_w, stride_w, padding_w, dilation);
 
-    auto output = zeros({batch, channels, height, width}, col.dtype(), col.device());
-
-    const float* col_data = col.data<float>();
-    float* output_data = output.data<float>();
+    // Convert to Float32 for col2im computation (matches PyTorch CPU conv fallback behavior)
+    Tensor col_f32 = (col.dtype() != DType::Float32) ? col.to(DType::Float32) : col;
+    auto output_f32 = zeros({batch, channels, height, width}, DType::Float32, col.device());
+    const float* col_data = col_f32.data<float>();
+    float* output_data = output_f32.data<float>();
 
     for (int64_t b = 0; b < batch; ++b) {
         for (int64_t c = 0; c < channels; ++c) {
@@ -135,7 +138,8 @@ auto col2im_cpu(const Tensor& col, int64_t channels, int64_t height, int64_t wid
         }
     }
 
-    return output;
+    // Convert back to original dtype if needed
+    return (col.dtype() != DType::Float32) ? output_f32.to(col.dtype()) : output_f32;
 }
 
 auto col2im_cpu(const Tensor& col, int64_t channels, int64_t height, int64_t width,
@@ -198,107 +202,6 @@ public:
             return {backward_result[0], backward_result[1], backward_result[2]};
         }
         return {backward_result[0], backward_result[1]};
-
-        /*
-        // Old CPU fallback implementation - replaced with backend call above
-        Tensor grad_input = zeros({batch, in_channels, height, width}, input.dtype());
-        int64_t out_channels_per_group = out_channels / groups_;
-
-        auto grad_shape = grad_output.shape();
-        int64_t out_h = grad_shape[2];
-        int64_t out_w = grad_shape[3];
-
-        for (int64_t g = 0; g < groups_; ++g) {
-            int64_t in_start = g * in_channels_per_group;
-            int64_t out_start = g * out_channels_per_group;
-
-            auto grad_slice = zeros({batch, out_channels_per_group, out_h, out_w});
-            const float* grad_data = grad_output.data<float>();
-            float* grad_slice_data = grad_slice.data<float>();
-
-            for (int64_t b = 0; b < batch; ++b) {
-                for (int64_t oc = 0; oc < out_channels_per_group; ++oc) {
-                    for (int64_t h = 0; h < out_h; ++h) {
-                        for (int64_t w = 0; w < out_w; ++w) {
-                            int64_t src_idx = b * (out_channels * out_h * out_w) +
-                                            (out_start + oc) * (out_h * out_w) +
-                                            h * out_w + w;
-                            int64_t dst_idx = b * (out_channels_per_group * out_h * out_w) +
-                                            oc * (out_h * out_w) +
-                                            h * out_w + w;
-                            grad_slice_data[dst_idx] = grad_data[src_idx];
-                        }
-                    }
-                }
-            }
-
-            auto weight_slice = zeros({out_channels_per_group, in_channels_per_group, kernel_h, kernel_w});
-            const float* weight_data = weight.data<float>();
-            float* weight_slice_data = weight_slice.data<float>();
-
-            for (int64_t oc = 0; oc < out_channels_per_group; ++oc) {
-                for (int64_t ic = 0; ic < in_channels_per_group; ++ic) {
-                    for (int64_t kh = 0; kh < kernel_h; ++kh) {
-                        for (int64_t kw = 0; kw < kernel_w; ++kw) {
-                            int64_t src_idx = (out_start + oc) * (in_channels_per_group * kernel_h * kernel_w) +
-                                            ic * (kernel_h * kernel_w) +
-                                            kh * kernel_w + kw;
-                            int64_t dst_idx = oc * (in_channels_per_group * kernel_h * kernel_w) +
-                                            ic * (kernel_h * kernel_w) +
-                                            kh * kernel_w + kw;
-                            weight_slice_data[dst_idx] = weight_data[src_idx];
-                        }
-                    }
-                }
-            }
-
-            auto grad_reshaped = grad_slice.reshape({batch, out_channels_per_group, out_h * out_w});
-            auto weight_reshaped = weight_slice.reshape({out_channels_per_group, in_channels_per_group * kernel_h * kernel_w});
-
-            auto grad_col = zeros({batch, in_channels_per_group * kernel_h * kernel_w, out_h * out_w});
-            float* grad_col_data = grad_col.data<float>();
-
-            for (int64_t b = 0; b < batch; ++b) {
-                auto grad_b = zeros({out_channels_per_group, out_h * out_w});
-                const float* grad_reshaped_data = grad_reshaped.data<float>();
-                float* grad_b_data = grad_b.data<float>();
-
-                int64_t slice_size = out_channels_per_group * out_h * out_w;
-                for (int64_t i = 0; i < slice_size; ++i) {
-                    grad_b_data[i] = grad_reshaped_data[b * slice_size + i];
-                }
-
-                auto weight_t = weight_reshaped.transpose(0, 1).contiguous();
-                auto grad_col_b = matmul(weight_t, grad_b);
-
-                const float* src = grad_col_b.data<float>();
-                float* dst = grad_col_data + b * in_channels_per_group * kernel_h * kernel_w * out_h * out_w;
-                std::copy_n(src, in_channels_per_group * kernel_h * kernel_w * out_h * out_w, dst);
-            }
-
-            auto grad_input_slice = col2im_cpu(grad_col, in_channels_per_group, height, width,
-                                               kernel_h, kernel_w, stride_, padding_, dilation_);
-
-            const float* grad_input_slice_data = grad_input_slice.data<float>();
-            float* grad_input_data = grad_input.data<float>();
-
-            for (int64_t b = 0; b < batch; ++b) {
-                for (int64_t ic = 0; ic < in_channels_per_group; ++ic) {
-                    for (int64_t h = 0; h < height; ++h) {
-                        for (int64_t w = 0; w < width; ++w) {
-                            int64_t src_idx = b * (in_channels_per_group * height * width) +
-                                            ic * (height * width) +
-                                            h * width + w;
-                            int64_t dst_idx = b * (in_channels * height * width) +
-                                            (in_start + ic) * (height * width) +
-                                            h * width + w;
-                            grad_input_data[dst_idx] += grad_input_slice_data[src_idx];
-                        }
-                    }
-                }
-            }
-        }
-        */
     }
 
 private:
@@ -803,23 +706,22 @@ public:
         }
 
         // grad_weight: For ConvTranspose2d, the weight gradient involves correlating
-        // the input with grad_output. We dispatch to conv2d_backward with swapped roles:
+        // the input with grad_output. We dispatch to conv2d_backward_weight with swapped roles:
         // input (to ConvTranspose2d) acts as grad_output, and grad_output acts as input.
-        OpAttributes backward_attrs = {
+        OpAttributes weight_grad_attrs = {
             {"stride", std::to_string(stride_)},
             {"padding", std::to_string(padding_)},
             {"dilation", std::to_string(dilation_)},
             {"groups", std::to_string(groups_)},
-            {"compute_grad_input", "0"},
-            {"compute_grad_weight", "1"},
-            {"compute_grad_bias", "0"}
+            {"weight_shape", std::to_string(weight_shape[0]) + "," +
+                             std::to_string(weight_shape[1]) + "," +
+                             std::to_string(weight_shape[2]) + "," +
+                             std::to_string(weight_shape[3])}
         };
 
         // Swap roles: input as grad_output, grad_output as input for weight gradient
-        std::vector<Tensor> weight_grad_inputs = {input, grad_output, weight};
-        auto weight_grad_result = backend->dispatch("conv2d_backward", weight_grad_inputs, backward_attrs);
-
-        // With compute_grad_input=0, the result vector has grad_weight at index 0
+        std::vector<Tensor> weight_grad_inputs = {input, grad_output};
+        auto weight_grad_result = backend->dispatch("conv2d_backward_weight", weight_grad_inputs, weight_grad_attrs);
         Tensor grad_weight = weight_grad_result[0];
 
         if (has_bias) {
@@ -859,15 +761,13 @@ ConvTranspose2d::ConvTranspose2d(int64_t in_channels, int64_t out_channels, int6
     int64_t fan_in = in_channels * kernel_size * kernel_size;
     float std_init = std::sqrt(2.0f / fan_in);
     auto weight_tensor = randn(weight_shape) * std_init;
-    weight_ = Variable(weight_tensor, true);
-    register_parameter("weight", weight_);
+    register_parameter("weight", Variable(weight_tensor, true));
 
     if (bias) {
         std::vector<int64_t> bias_shape = {out_channels};
         float bound = 1.0f / std::sqrt(static_cast<float>(fan_in));
         auto bias_tensor = (randn(bias_shape) * 2.0f * bound) - bound;
-        bias_ = Variable(bias_tensor, true);
-        register_parameter("bias", *bias_);
+        register_parameter("bias", Variable(bias_tensor, true));
     }
 }
 
@@ -991,16 +891,234 @@ auto ConvTranspose2d::reset_parameters() -> void {
 
     std::vector<int64_t> weight_shape = {in_channels_, out_channels_ / groups_, kernel_size_, kernel_size_};
     auto new_weight_tensor = randn(weight_shape) * std;
-    weight_ = Variable(new_weight_tensor, true);
-    parameters_["weight"] = std::make_shared<Variable>(weight_);
+    parameters_["weight"] = std::make_shared<Variable>(new_weight_tensor, true);
 
-    if (bias_.has_value()) {
+    auto bias_it = parameters_.find("bias");
+    if (bias_it != parameters_.end()) {
         std::vector<int64_t> bias_shape = {out_channels_};
         float bound = 1.0f / std::sqrt(static_cast<float>(fan_in));
         auto new_bias_tensor = (randn(bias_shape) * 2.0f * bound) - bound;
-        bias_ = Variable(new_bias_tensor, true);
-        parameters_["bias"] = std::make_shared<Variable>(*bias_);
+        bias_it->second = std::make_shared<Variable>(new_bias_tensor, true);
     }
+}
+
+// ============================================================================
+// Conv3d Implementation
+// ============================================================================
+
+class Conv3dBackward : public Function {
+public:
+    Conv3dBackward(int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+                   std::vector<Tensor> tensors_to_save)
+        : stride_(stride), padding_(padding), dilation_(dilation), groups_(groups) {
+        saved_tensors_ = std::move(tensors_to_save);
+    }
+
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+        throw std::runtime_error("Conv3dBackward::forward should not be called");
+    }
+
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        const Tensor& grad_output = grad_outputs[0];
+        const Tensor& input = saved_tensors_[0];
+        const Tensor& weight = saved_tensors_[1];
+
+        std::vector<Tensor> tensors_for_dispatch = {grad_output};
+        auto* backend = Dispatcher::get_backend(tensors_for_dispatch);
+
+        bool has_bias = saved_tensors_.size() > 2;
+
+        OpAttributes backward_attrs = {
+            {"stride", std::to_string(stride_)},
+            {"padding", std::to_string(padding_)},
+            {"dilation", std::to_string(dilation_)},
+            {"groups", std::to_string(groups_)},
+            {"compute_grad_input", "1"},
+            {"compute_grad_weight", "1"},
+            {"compute_grad_bias", has_bias ? "1" : "0"}
+        };
+
+        std::vector<Tensor> backward_inputs = {grad_output, input, weight};
+        auto backward_result = backend->dispatch(
+            "conv3d_backward",
+            backward_inputs,
+            backward_attrs
+        );
+
+        if (has_bias) {
+            return {backward_result[0], backward_result[1], backward_result[2]};
+        }
+        return {backward_result[0], backward_result[1]};
+    }
+
+private:
+    int64_t stride_;
+    int64_t padding_;
+    int64_t dilation_;
+    int64_t groups_;
+};
+
+Conv3d::Conv3d(int64_t in_channels, int64_t out_channels, int64_t kernel_size,
+              int64_t stride, int64_t padding, int64_t dilation,
+              int64_t groups, bool bias)
+    : in_channels_(in_channels), out_channels_(out_channels),
+      kernel_size_(kernel_size), stride_(stride),
+      padding_(padding), dilation_(dilation), groups_(groups <= 0 ? 1 : groups) {
+
+    if (groups_ <= 0) {
+        groups_ = 1;
+    }
+    if (in_channels % groups_ != 0) {
+        throw std::invalid_argument("in_channels must be divisible by groups");
+    }
+    if (out_channels % groups_ != 0) {
+        throw std::invalid_argument("out_channels must be divisible by groups");
+    }
+
+    // Weight shape: (C_out, C_in/groups, K, K, K)
+    std::vector<int64_t> weight_shape = {out_channels, in_channels / groups_,
+                                         kernel_size, kernel_size, kernel_size};
+    int64_t fan_in = (in_channels / groups_) * kernel_size * kernel_size * kernel_size;
+    float std_init = std::sqrt(2.0f / fan_in);
+    auto weight_tensor = randn(weight_shape) * std_init;
+    auto weight_init = Variable(weight_tensor, true);
+    register_parameter("weight", weight_init);
+
+    if (bias) {
+        std::vector<int64_t> bias_shape = {out_channels};
+        auto bias_init = Variable(zeros(bias_shape), true);
+        register_parameter("bias", bias_init);
+    }
+}
+
+auto Conv3d::forward_impl(const Variable& input) -> Variable {
+    auto input_shape = input.shape();
+    if (input_shape.size() != 5) {
+        throw std::invalid_argument("Conv3d expects 5D input [batch, channels, depth, height, width]");
+    }
+
+    int64_t in_channels = input_shape[1];
+    int64_t depth = input_shape[2];
+    int64_t height = input_shape[3];
+    int64_t width = input_shape[4];
+
+    if (in_channels != in_channels_) {
+        throw std::invalid_argument("Input channels mismatch");
+    }
+
+    int64_t out_d = calculate_output_size(depth, kernel_size_, stride_, padding_, dilation_);
+    int64_t out_h = calculate_output_size(height, kernel_size_, stride_, padding_, dilation_);
+    int64_t out_w = calculate_output_size(width, kernel_size_, stride_, padding_, dilation_);
+
+    if (out_d <= 0 || out_h <= 0 || out_w <= 0) {
+        throw std::runtime_error(
+            "Invalid Conv3d configuration: output dimensions are non-positive (out_d=" +
+            std::to_string(out_d) + ", out_h=" + std::to_string(out_h) +
+            ", out_w=" + std::to_string(out_w) + ")");
+    }
+
+    auto& weight = *parameters_["weight"];
+    auto bias_it = parameters_.find("bias");
+    Device original_device = input.tensor().device();
+
+    // Match weight dtype/device to input
+    Variable weight_matched = weight;
+    bool weight_needs_conversion = (input.dtype() != weight.dtype()) ||
+                                   (input.tensor().device().type != weight.tensor().device().type);
+    if (weight_needs_conversion) {
+        auto weight_converted = weight.tensor();
+        if (input.tensor().device().type != weight.tensor().device().type) {
+            weight_converted = weight_converted.to(original_device);
+        }
+        if (input.dtype() != weight_converted.dtype()) {
+            weight_converted = weight_converted.to(input.dtype());
+        }
+        weight_matched = Variable(weight_converted, weight.requires_grad());
+        weight_matched.set_grad_fn(weight.grad_fn());
+    }
+
+    const Tensor* bias_ptr = nullptr;
+    Variable bias_matched;
+    if (bias_it != parameters_.end()) {
+        auto& bias = *bias_it->second;
+        bool bias_needs_conversion = (input.dtype() != bias.dtype()) ||
+                                     (input.tensor().device().type != bias.tensor().device().type);
+        if (bias_needs_conversion) {
+            auto bias_converted = bias.tensor();
+            if (input.tensor().device().type != bias.tensor().device().type) {
+                bias_converted = bias_converted.to(original_device);
+            }
+            if (input.dtype() != bias_converted.dtype()) {
+                bias_converted = bias_converted.to(input.dtype());
+            }
+            bias_matched = Variable(bias_converted, bias.requires_grad());
+            bias_matched.set_grad_fn(bias.grad_fn());
+            bias_ptr = &bias_matched.tensor();
+        } else {
+            bias_ptr = &bias.tensor();
+        }
+    }
+
+    // Backend dispatch
+    std::vector<Tensor> tensors_for_dispatch = {input.tensor()};
+    auto* backend = Dispatcher::get_backend(tensors_for_dispatch);
+
+    std::vector<Tensor> inputs_vec = {input.tensor(), weight_matched.tensor()};
+    if (bias_ptr != nullptr) {
+        inputs_vec.push_back(*bias_ptr);
+    }
+
+    OpAttributes forward_attrs = {
+        {"stride", std::to_string(stride_)},
+        {"padding", std::to_string(padding_)},
+        {"dilation", std::to_string(dilation_)},
+        {"groups", std::to_string(groups_)}
+    };
+    auto output_result = backend->dispatch(
+        "conv3d_forward",
+        std::span<const Tensor>(inputs_vec),
+        forward_attrs
+    );
+    auto output = output_result[0];
+
+    auto result = Variable(output, input.requires_grad() || weight.requires_grad());
+
+    if (input.requires_grad() || weight.requires_grad()) {
+        std::vector<Tensor> tensors_to_save;
+        if (bias_ptr != nullptr) {
+            tensors_to_save = {input.tensor(), weight_matched.tensor(), *bias_ptr};
+        } else {
+            tensors_to_save = {input.tensor(), weight_matched.tensor()};
+        }
+
+        auto backward_fn = std::make_shared<Conv3dBackward>(
+            stride_, padding_, dilation_, groups_, std::move(tensors_to_save));
+
+        result.set_grad_fn(backward_fn);
+
+        std::vector<Variable> input_vars = {input, *parameters_["weight"]};
+        if (bias_it != parameters_.end()) {
+            input_vars.push_back(*bias_it->second);
+        }
+        backward_fn->set_input_variables(input_vars);
+
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        if (input.grad_fn()) {
+            next_funcs.push_back(input.grad_fn());
+        }
+        backward_fn->set_next_functions(next_funcs);
+    }
+
+    return result;
+}
+
+auto Conv3d::reset_parameters() -> void {
+    int64_t fan_in = in_channels_ / groups_ * kernel_size_ * kernel_size_ * kernel_size_;
+    float std = std::sqrt(2.0f / fan_in);
+    auto new_weight = randn({out_channels_, in_channels_ / groups_,
+                            kernel_size_, kernel_size_, kernel_size_}) * std;
+    auto weight_ = Variable(new_weight, true);
+    parameters_["weight"] = std::make_shared<Variable>(weight_);
 }
 
 } // namespace tenzor::nn

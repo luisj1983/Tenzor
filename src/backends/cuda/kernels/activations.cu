@@ -9,6 +9,7 @@
 #include <chrono>
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/backend/backend.hpp"  // For OpAttributes (dispatch wrappers)
+#include "cuda_launch_utils.cuh"
 #include <stdexcept>
 #include <vector>
 #include <charconv>  // For std::from_chars (dispatch wrappers)
@@ -21,16 +22,8 @@ namespace cuda {
 // CUDA Helper Functions
 // ============================================================================
 
-// Error checking macro
-#define CUDA_CHECK(call) \
-    do { \
-        cudaError_t err = call; \
-        if (err != cudaSuccess) { \
-            fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
-                    cudaGetErrorString(err)); \
-            exit(EXIT_FAILURE); \
-        } \
-    } while(0)
+// Centralized error checking
+#include "../cuda_error.hpp"
 
 // Grid-stride loop helper
 #define CUDA_GRID_STRIDE_LOOP(i, n) \
@@ -38,16 +31,27 @@ namespace cuda {
          i < (n); \
          i += blockDim.x * gridDim.x)
 
-// Optimal block size for element-wise operations
+// Default block size for element-wise operations (used as fallback)
 constexpr int BLOCK_SIZE = 256;
 
 // Calculate grid size for element-wise operations
 inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
-    int num_blocks = (n + block_size - 1) / block_size;
-    // Ensure at least 1 block to avoid CUDA invalid argument error
-    // Grid-stride loop will naturally handle n=0 by not executing any iterations
-    return num_blocks > 0 ? num_blocks : 1;
+    return compute_grid_size(n, block_size);
 }
+
+// Occupancy-based kernel launch: replaces hardcoded BLOCK_SIZE with per-kernel optimal config
+#define LAUNCH_KERNEL(kernel, n, stream, ...) \
+    do { \
+        auto [grid_, block_] = optimal_launch_config(kernel, n); \
+        kernel<<<grid_, block_, 0, stream>>>(__VA_ARGS__); \
+    } while(0)
+
+// Variant with dynamic shared memory
+#define LAUNCH_KERNEL_SMEM(kernel, n, smem, stream, ...) \
+    do { \
+        auto [grid_, block_] = optimal_launch_config(kernel, n, smem); \
+        kernel<<<grid_, block_, smem, stream>>>(__VA_ARGS__); \
+    } while(0)
 
 // ============================================================================
 // Half-precision (Float16) Device Helper Functions
@@ -447,29 +451,29 @@ __global__ void swish_backward_vectorized_kernel(const float4* __restrict__ grad
 // Host functions
 extern "C" {
     void relu_forward_float(const float* input, float* output, int64_t n) {
-        int num_blocks = get_num_blocks(n);
-        relu_forward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(input, output, n);
+        auto [grid_size, block_size] = optimal_launch_config(relu_forward_kernel<float>, n);
+        relu_forward_kernel<float><<<grid_size, block_size>>>(input, output, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void relu_forward_double(const double* input, double* output, int64_t n) {
-        int num_blocks = get_num_blocks(n);
-        relu_forward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(input, output, n);
+        auto [grid_size, block_size] = optimal_launch_config(relu_forward_kernel<double>, n);
+        relu_forward_kernel<double><<<grid_size, block_size>>>(input, output, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void relu_backward_float(const float* grad_output, const float* input,
                             float* grad_input, int64_t n) {
-        int num_blocks = get_num_blocks(n);
-        relu_backward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(
+        auto [grid_size, block_size] = optimal_launch_config(relu_backward_kernel<float>, n);
+        relu_backward_kernel<float><<<grid_size, block_size>>>(
             grad_output, input, grad_input, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void relu_backward_double(const double* grad_output, const double* input,
                              double* grad_input, int64_t n) {
-        int num_blocks = get_num_blocks(n);
-        relu_backward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(
+        auto [grid_size, block_size] = optimal_launch_config(relu_backward_kernel<double>, n);
+        relu_backward_kernel<double><<<grid_size, block_size>>>(
             grad_output, input, grad_input, n);
         CUDA_CHECK(cudaGetLastError());
     }
@@ -545,29 +549,29 @@ __global__ void swish_backward_cuda_kernel(const T* grad_output, const T* input,
 // Host functions
 extern "C" {
     void sigmoid_forward_float(const float* input, float* output, int64_t n) {
-        int num_blocks = get_num_blocks(n);
-        sigmoid_forward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(input, output, n);
+        auto [grid_size, block_size] = optimal_launch_config(sigmoid_forward_kernel<float>, n);
+        sigmoid_forward_kernel<float><<<grid_size, block_size>>>(input, output, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void sigmoid_forward_double(const double* input, double* output, int64_t n) {
-        int num_blocks = get_num_blocks(n);
-        sigmoid_forward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(input, output, n);
+        auto [grid_size, block_size] = optimal_launch_config(sigmoid_forward_kernel<double>, n);
+        sigmoid_forward_kernel<double><<<grid_size, block_size>>>(input, output, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void sigmoid_backward_float(const float* grad_output, const float* input,
                                float* grad_input, int64_t n) {
-        int num_blocks = get_num_blocks(n);
-        sigmoid_backward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(
+        auto [grid_size, block_size] = optimal_launch_config(sigmoid_backward_kernel<float>, n);
+        sigmoid_backward_kernel<float><<<grid_size, block_size>>>(
             grad_output, input, grad_input, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void sigmoid_backward_double(const double* grad_output, const double* input,
                                 double* grad_input, int64_t n) {
-        int num_blocks = get_num_blocks(n);
-        sigmoid_backward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(
+        auto [grid_size, block_size] = optimal_launch_config(sigmoid_backward_kernel<double>, n);
+        sigmoid_backward_kernel<double><<<grid_size, block_size>>>(
             grad_output, input, grad_input, n);
         CUDA_CHECK(cudaGetLastError());
     }
@@ -634,29 +638,29 @@ __global__ void tanh_backward_kernel<__nv_bfloat16>(const __nv_bfloat16* grad_ou
 // Host functions
 extern "C" {
     void tanh_forward_float(const float* input, float* output, int64_t n) {
-        int num_blocks = get_num_blocks(n);
-        tanh_forward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(input, output, n);
+        auto [grid_size, block_size] = optimal_launch_config(tanh_forward_kernel<float>, n);
+        tanh_forward_kernel<float><<<grid_size, block_size>>>(input, output, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void tanh_forward_double(const double* input, double* output, int64_t n) {
-        int num_blocks = get_num_blocks(n);
-        tanh_forward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(input, output, n);
+        auto [grid_size, block_size] = optimal_launch_config(tanh_forward_kernel<double>, n);
+        tanh_forward_kernel<double><<<grid_size, block_size>>>(input, output, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void tanh_backward_float(const float* grad_output, const float* input,
                             float* grad_input, int64_t n) {
-        int num_blocks = get_num_blocks(n);
-        tanh_backward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(
+        auto [grid_size, block_size] = optimal_launch_config(tanh_backward_kernel<float>, n);
+        tanh_backward_kernel<float><<<grid_size, block_size>>>(
             grad_output, input, grad_input, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void tanh_backward_double(const double* grad_output, const double* input,
                              double* grad_input, int64_t n) {
-        int num_blocks = get_num_blocks(n);
-        tanh_backward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(
+        auto [grid_size, block_size] = optimal_launch_config(tanh_backward_kernel<double>, n);
+        tanh_backward_kernel<double><<<grid_size, block_size>>>(
             grad_output, input, grad_input, n);
         CUDA_CHECK(cudaGetLastError());
     }
@@ -796,29 +800,29 @@ __global__ void gelu_backward_kernel<__nv_bfloat16>(const __nv_bfloat16* grad_ou
 // Host functions
 extern "C" {
     void gelu_forward_float(const float* input, float* output, int64_t n) {
-        int num_blocks = get_num_blocks(n);
-        gelu_forward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(input, output, n);
+        auto [grid_size, block_size] = optimal_launch_config(gelu_forward_kernel<float>, n);
+        gelu_forward_kernel<float><<<grid_size, block_size>>>(input, output, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void gelu_forward_double(const double* input, double* output, int64_t n) {
-        int num_blocks = get_num_blocks(n);
-        gelu_forward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(input, output, n);
+        auto [grid_size, block_size] = optimal_launch_config(gelu_forward_kernel<double>, n);
+        gelu_forward_kernel<double><<<grid_size, block_size>>>(input, output, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void gelu_backward_float(const float* grad_output, const float* input,
                             float* grad_input, int64_t n) {
-        int num_blocks = get_num_blocks(n);
-        gelu_backward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(
+        auto [grid_size, block_size] = optimal_launch_config(gelu_backward_kernel<float>, n);
+        gelu_backward_kernel<float><<<grid_size, block_size>>>(
             grad_output, input, grad_input, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void gelu_backward_double(const double* grad_output, const double* input,
                              double* grad_input, int64_t n) {
-        int num_blocks = get_num_blocks(n);
-        gelu_backward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(
+        auto [grid_size, block_size] = optimal_launch_config(gelu_backward_kernel<double>, n);
+        gelu_backward_kernel<double><<<grid_size, block_size>>>(
             grad_output, input, grad_input, n);
         CUDA_CHECK(cudaGetLastError());
     }
@@ -869,32 +873,28 @@ __global__ void leaky_relu_backward_fp16_kernel(const __half* grad_output, const
 extern "C" {
     void leaky_relu_forward_float(const float* input, float* output,
                                  int64_t n, float alpha) {
-        int num_blocks = get_num_blocks(n);
-        leaky_relu_forward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(
+        LAUNCH_KERNEL(leaky_relu_forward_kernel<float>, n, nullptr,
             input, output, n, alpha);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void leaky_relu_forward_double(const double* input, double* output,
                                   int64_t n, double alpha) {
-        int num_blocks = get_num_blocks(n);
-        leaky_relu_forward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(
+        LAUNCH_KERNEL(leaky_relu_forward_kernel<double>, n, nullptr,
             input, output, n, alpha);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void leaky_relu_backward_float(const float* grad_output, const float* input,
                                   float* grad_input, int64_t n, float alpha) {
-        int num_blocks = get_num_blocks(n);
-        leaky_relu_backward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(
+        LAUNCH_KERNEL(leaky_relu_backward_kernel<float>, n, nullptr,
             grad_output, input, grad_input, n, alpha);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void leaky_relu_backward_double(const double* grad_output, const double* input,
                                    double* grad_input, int64_t n, double alpha) {
-        int num_blocks = get_num_blocks(n);
-        leaky_relu_backward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(
+        LAUNCH_KERNEL(leaky_relu_backward_kernel<double>, n, nullptr,
             grad_output, input, grad_input, n, alpha);
         CUDA_CHECK(cudaGetLastError());
     }
@@ -926,29 +926,25 @@ __global__ void elu_backward_kernel(const T* grad_output, const T* input,
 
 extern "C" {
     void elu_forward_float(const float* input, float* output, int64_t n, float alpha) {
-        int num_blocks = get_num_blocks(n);
-        elu_forward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(input, output, n, alpha);
+        LAUNCH_KERNEL(elu_forward_kernel<float>, n, nullptr, input, output, n, alpha);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void elu_forward_double(const double* input, double* output, int64_t n, float alpha) {
-        int num_blocks = get_num_blocks(n);
-        elu_forward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(input, output, n, alpha);
+        LAUNCH_KERNEL(elu_forward_kernel<double>, n, nullptr, input, output, n, alpha);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void elu_backward_float(const float* grad_output, const float* input,
                             float* grad_input, int64_t n, float alpha) {
-        int num_blocks = get_num_blocks(n);
-        elu_backward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(
+        LAUNCH_KERNEL(elu_backward_kernel<float>, n, nullptr,
             grad_output, input, grad_input, n, alpha);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void elu_backward_double(const double* grad_output, const double* input,
                              double* grad_input, int64_t n, float alpha) {
-        int num_blocks = get_num_blocks(n);
-        elu_backward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(
+        LAUNCH_KERNEL(elu_backward_kernel<double>, n, nullptr,
             grad_output, input, grad_input, n, alpha);
         CUDA_CHECK(cudaGetLastError());
     }

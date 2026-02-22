@@ -68,11 +68,24 @@ option(TENZOR_BUILD_EXAMPLES "Build examples" ON)
 # Coverage build type
 option(TENZOR_ENABLE_COVERAGE "Enable coverage reporting" OFF)
 
+# Sanitizer options
+option(TENZOR_ENABLE_ASAN "Enable AddressSanitizer" OFF)
+option(TENZOR_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
+option(TENZOR_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
+
+if(TENZOR_ENABLE_ASAN AND TENZOR_ENABLE_TSAN)
+    message(FATAL_ERROR "AddressSanitizer and ThreadSanitizer are mutually exclusive")
+endif()
+
+# Static analysis
+option(TENZOR_ENABLE_CLANG_TIDY "Enable clang-tidy static analysis" OFF)
+
+# Export compile_commands.json for IDE integration and clang-tidy
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # Global compiler flags
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Wall -Wextra -pedantic -march=native)
-    # Disable specific warnings for stub implementations
-    add_compile_options(-Wno-unused-parameter -Wno-unused-variable)
 
     # Enable coverage if requested
     if(TENZOR_ENABLE_COVERAGE)
@@ -80,21 +93,51 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         add_compile_options(--coverage -fprofile-arcs -ftest-coverage)
         add_link_options(--coverage)
     endif()
+
+    # Sanitizers
+    if(TENZOR_ENABLE_ASAN)
+        message(STATUS "AddressSanitizer enabled")
+        add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
+        add_link_options(-fsanitize=address)
+    endif()
+
+    if(TENZOR_ENABLE_TSAN)
+        message(STATUS "ThreadSanitizer enabled")
+        add_compile_options(-fsanitize=thread)
+        add_link_options(-fsanitize=thread)
+    endif()
+
+    if(TENZOR_ENABLE_UBSAN)
+        message(STATUS "UndefinedBehaviorSanitizer enabled")
+        add_compile_options(-fsanitize=undefined -fno-omit-frame-pointer)
+        add_link_options(-fsanitize=undefined)
+    endif()
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
     add_compile_options(/W4 /arch:AVX2)
 endif()
 
+# clang-tidy integration
+if(TENZOR_ENABLE_CLANG_TIDY)
+    find_program(CLANG_TIDY_EXE NAMES "clang-tidy")
+    if(CLANG_TIDY_EXE)
+        message(STATUS "clang-tidy found: ${CLANG_TIDY_EXE}")
+        set(CMAKE_CXX_CLANG_TIDY "${CLANG_TIDY_EXE}")
+    else()
+        message(WARNING "clang-tidy requested but not found")
+    endif()
+endif()
+
 # Set output directories - all binaries and libraries in bin/
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # For multi-configuration generators (Visual Studio, Xcode)
 foreach(CONFIG ${CMAKE_CONFIGURATION_TYPES})
     string(TOUPPER ${CONFIG} CONFIG_UPPER)
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${CONFIG_UPPER} ${CMAKE_BINARY_DIR}/bin)
-    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${CONFIG_UPPER} ${CMAKE_SOURCE_DIR}/bin)
-    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${CONFIG_UPPER} ${CMAKE_SOURCE_DIR}/bin)
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${CONFIG_UPPER} ${CMAKE_BINARY_DIR}/bin)
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${CONFIG_UPPER} ${CMAKE_BINARY_DIR}/bin)
 endforeach()
 
 # Set RPATH so executables can find shared libraries in same directory
@@ -128,6 +171,10 @@ if(TENZOR_BUILD_PYTHON)
         )
 
         target_link_libraries(tenzor_python PRIVATE tenzor_core tenzor_backend_cpu)
+
+        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+            target_compile_options(tenzor_python PRIVATE -Wno-unused-parameter)
+        endif()
 
         set_target_properties(tenzor_python PROPERTIES
             OUTPUT_NAME "tenzor_core"

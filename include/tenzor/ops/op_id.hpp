@@ -300,6 +300,18 @@ enum class OpId : uint16_t {
     Unique,
 
     // =========================================================================
+    // 3D Convolution and Pooling Operations (301-315)
+    // =========================================================================
+    Conv3dForward = 301,
+    Conv3dBackwardInput,
+    Conv3dBackwardWeight,
+    Conv3dBackwardBias,
+    MaxPool3dForward,
+    MaxPool3dBackward,
+    AvgPool3dForward,
+    AvgPool3dBackward,
+
+    // =========================================================================
     // Sentinel (MUST BE LAST)
     // =========================================================================
     OP_COUNT

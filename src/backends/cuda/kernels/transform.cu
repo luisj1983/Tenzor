@@ -5,6 +5,7 @@
 #include "tenzor/backend/caching_allocator.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/shape.hpp"
+#include "cuda_launch_utils.cuh"
 #include <stdexcept>
 #include <vector>
 #include <cstring>
@@ -42,7 +43,7 @@ inline void compute_launch_config_1d(int64_t n, dim3& grid, dim3& block) {
     constexpr int threads_per_block = 256;
     block = dim3(threads_per_block);
     int64_t num_blocks = (n + threads_per_block - 1) / threads_per_block;
-    num_blocks = std::min(num_blocks, static_cast<int64_t>(65535));
+    num_blocks = std::min(num_blocks, static_cast<int64_t>(2147483647));  // 2^31-1
     // Ensure at least 1 block to avoid CUDA invalid argument error
     // Grid-stride loop will naturally handle n=0 by not executing any iterations
     grid = dim3(num_blocks > 0 ? static_cast<unsigned int>(num_blocks) : 1);
@@ -56,8 +57,15 @@ inline void compute_launch_config_1d(int64_t n, dim3& grid, dim3& block) {
 constexpr int BLOCK_SIZE = 256;
 
 inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
-    return (n + block_size - 1) / block_size;
+    return compute_grid_size(n, block_size);
 }
+
+// Occupancy-based kernel launch: replaces hardcoded BLOCK_SIZE with per-kernel optimal config
+#define LAUNCH_KERNEL(kernel, n, stream, ...) \
+    do { \
+        auto [grid_, block_] = optimal_launch_config(kernel, n); \
+        kernel<<<grid_, block_, 0, stream>>>(__VA_ARGS__); \
+    } while(0)
 
 // Metadata struct passed by value to kernels (avoids cudaMalloc for shape/stride arrays)
 struct TransformMeta {
@@ -961,7 +969,7 @@ auto to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* str
 
     const int64_t total = N * C * H * W;
     const int block_size = 256;
-    const int grid_size = std::min(static_cast<int>((total + block_size - 1) / block_size), 65535);
+    const int grid_size = std::min(static_cast<int>((total + block_size - 1) / block_size), 2147483647);
 
     if (format == MemoryFormat::ChannelsLast) {
         if (input.dtype() == DType::Float32) {

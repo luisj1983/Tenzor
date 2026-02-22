@@ -52,7 +52,9 @@ public:
      * @param affine If true, learn scale and shift parameters (default: true)
      * @param track_running_stats If true, track running mean/var (default: true)
      *
-     * @note Momentum is used as: running_stat = (1-momentum)*running_stat + momentum*batch_stat
+     * @note Momentum convention: running_stat = (1-momentum)*running_stat + momentum*batch_stat.
+     *       This matches PyTorch's convention where momentum=0.1 means 10% of the new batch
+     *       statistics are blended in. A momentum of 0.0 means running stats are never updated.
      */
     BatchNorm2d(int64_t num_features,
                 double eps = 1e-5,

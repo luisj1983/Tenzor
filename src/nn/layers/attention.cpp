@@ -143,7 +143,7 @@ auto MultiheadAttention::scaled_dot_product_attention(
     // - CPU device, Float32, no mask, no dropout (or eval mode)
     bool can_use_fused = query.device().type == Device::Type::CPU &&
                          query.dtype() == DType::Float32 &&
-                         attn_mask.shape().size() == 0 &&  // No attention mask
+                         (!attn_mask.is_valid() || attn_mask.shape().size() == 0) &&  // No attention mask
                          (dropout_p <= 0.0 || !is_training());  // No dropout needed
 
     if (can_use_fused && !is_training()) {
@@ -296,7 +296,7 @@ auto MultiheadAttention::scaled_dot_product_attention(
     scores = scores * scale_var;
 
     // Apply attention mask if provided
-    if (attn_mask.shape().size() > 0) {
+    if (attn_mask.is_valid() && attn_mask.shape().size() > 0) {
         // Add mask (mask should have -inf for positions to mask out)
         Variable mask_var(attn_mask, false);
         scores = scores + mask_var;
@@ -372,12 +372,12 @@ auto MultiheadAttention::forward(const Variable& query,
     // Prepare attention mask
     Tensor combined_mask;
 
-    if (attn_mask.shape().size() > 0) {
+    if (attn_mask.is_valid() && attn_mask.shape().size() > 0) {
         combined_mask = attn_mask;
     }
 
     // Add key padding mask if provided
-    if (key_padding_mask.shape().size() > 0) {
+    if (key_padding_mask.is_valid() && key_padding_mask.shape().size() > 0) {
         // key_padding_mask: (batch, seq_len_k)
         // Need to broadcast to (batch, 1, 1, seq_len_k) then to (batch, num_heads, seq_len_q, seq_len_k)
         std::vector<int64_t> mask_shape = {batch_size, 1, 1, seq_len_k};

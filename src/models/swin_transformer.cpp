@@ -151,12 +151,12 @@ auto SwinTransformerBlock::forward_impl(const Variable& input) -> Variable {
     // Partition windows
     auto x_windows = window_partition(x, window_size_);
 
-    // Window attention - compute mask dynamically with correct device
-    // Keep mask as Float32 for numerical stability
+    // Window attention - compute mask dynamically with correct device and dtype
     Tensor mask;
     if (shift_size_ > 0) {
         auto input_device = input.tensor().device();
-        mask = create_shifted_window_mask(H, W, window_size_, shift_size_, input_device, DType::Float32);
+        auto input_dtype = input.tensor().dtype();
+        mask = create_shifted_window_mask(H, W, window_size_, shift_size_, input_device, input_dtype);
     }
     auto attn_windows = attn_->forward(x_windows, mask);
 

@@ -1,0 +1,26 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Linspace for Float64: generate linearly-spaced values from start to end
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Output { double output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_steps;
+    uint _pad;           // Padding to align double to 8 bytes
+    double start;
+    double end_val;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_steps) return;
+
+    if (params.num_steps == 1) {
+        output_data[idx] = params.start;
+    } else {
+        double t = double(idx) / double(params.num_steps - 1);
+        output_data[idx] = params.start + t * (params.end_val - params.start);
+    }
+}

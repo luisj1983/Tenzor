@@ -45,10 +45,36 @@
 // For simple ops, the per-element work is tiny, so we need large tensors
 // to amortize thread creation/join overhead (~50-100μs per parallel region).
 // With AVX-512 processing 16 floats/cycle, we need ~100K+ elements to benefit.
-constexpr size_t OMP_THRESHOLD_SIMPLE = 131072;  // 128K elements for add, mul, relu
-constexpr size_t OMP_THRESHOLD_MEDIUM = 65536;   // 64K for sigmoid, tanh
-constexpr size_t OMP_THRESHOLD_COMPLEX = 16384;  // 16K for softmax, layernorm
-constexpr size_t OMP_THRESHOLD_MATMUL = 1024;    // matrix operations (high compute/element)
+struct OmpThresholds {
+    size_t simple;
+    size_t medium;
+    size_t complex;
+    size_t matmul;
+};
+
+// Function-local static guarantees thread-safe lazy initialization (C++11+),
+// avoiding potential issues with file-scope static init ordering.
+static auto get_omp_thresholds() -> const OmpThresholds& {
+    static const OmpThresholds t = [] {
+        int n = 1;
+#ifdef _OPENMP
+        n = omp_get_max_threads();
+#endif
+        return OmpThresholds{
+            std::max(size_t(65536), size_t(16384) * n),
+            std::max(size_t(32768), size_t(8192) * n),
+            std::max(size_t(8192), size_t(2048) * n),
+            1024
+        };
+    }();
+    return t;
+}
+
+// Convenience macros — delegate to lazy-init function
+#define OMP_THRESHOLD_SIMPLE  (get_omp_thresholds().simple)
+#define OMP_THRESHOLD_MEDIUM  (get_omp_thresholds().medium)
+#define OMP_THRESHOLD_COMPLEX (get_omp_thresholds().complex)
+#define OMP_THRESHOLD_MATMUL  (get_omp_thresholds().matmul)
 
 namespace tenzor {
 
@@ -333,10 +359,10 @@ static bool onednn_matmul_f32(
     const float* A, const float* B, float* C,
     int64_t M, int64_t N, int64_t K) {
 
-    // oneDNN matmul has higher overhead than MKL SGEMM even with caching
-    // Only use for very large matrices where oneDNN's memory handling helps
-    // MKL is 5-10x faster for most common matrix sizes
-    if (M < 4096 || N < 4096 || K < 2048) {
+    // oneDNN matmul benefits over MKL SGEMM for medium-to-large matrices.
+    // Threshold lowered from 4096x4096x2048 to 512x512x512 — benchmark validated
+    // that primitive caching amortizes oneDNN's setup cost for this size range.
+    if (M < 512 || N < 512 || K < 512) {
         return false;  // Fall back to MKL/custom GEMM
     }
 
@@ -504,7 +530,7 @@ static void matmul_microkernel_int32(
     }
 }
 
-// Cache-blocked matrix multiplication (Int32)
+// Cache-blocked matrix multiplication (Int32) with OpenMP parallelization
 static void matmul_blocked_int32(
     const int32_t* A, const int32_t* B, int32_t* C,
     int64_t M, int64_t N, int64_t K) {
@@ -512,11 +538,11 @@ static void matmul_blocked_int32(
     // Zero-initialize output
     std::fill_n(C, M * N, 0);
 
-    // Cache-friendly blocked algorithm
+    // Cache-friendly blocked algorithm with OpenMP parallelization over row blocks
+    #pragma omp parallel for collapse(2) if(M * N > 10000)
     for (int64_t ii = 0; ii < M; ii += BLOCK_SIZE_M) {
-        int64_t i_end = std::min(ii + static_cast<int64_t>(BLOCK_SIZE_M), M);
-
         for (int64_t jj = 0; jj < N; jj += BLOCK_SIZE_N) {
+            int64_t i_end = std::min(ii + static_cast<int64_t>(BLOCK_SIZE_M), M);
             int64_t j_end = std::min(jj + static_cast<int64_t>(BLOCK_SIZE_N), N);
 
             for (int64_t kk = 0; kk < K; kk += BLOCK_SIZE_K) {

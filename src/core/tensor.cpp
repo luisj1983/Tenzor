@@ -5,11 +5,14 @@
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/dispatch_table.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "tenzor/utils/error.hpp"
 #include <numeric>
 #include <algorithm>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <type_traits>
 #include <stdexcept>
 
@@ -53,11 +56,10 @@ auto TensorImpl::numel() const -> int64_t {
 }
 
 auto TensorImpl::is_contiguous() const -> bool {
-    // A tensor is contiguous if:
-    // 1. Its strides match the expected row-major strides for its shape
-    // 2. It starts at offset 0 in the storage buffer (no slicing offset)
+    // A tensor is contiguous if its strides match the expected row-major strides.
+    // Offset does not affect contiguity — a slice can be contiguous at a non-zero offset.
     auto expected_strides = compute_strides(shape);
-    return (strides == expected_strides) && (offset == 0);
+    return strides == expected_strides;
 }
 
 // Tensor implementation
@@ -71,34 +73,33 @@ auto Tensor::empty_uninitialized(std::vector<int64_t> shape, DType dtype, Device
     return t;
 }
 
-auto Tensor::shape() const noexcept -> std::span<const int64_t> {
-    if (!impl_) return {};
+auto Tensor::shape() const -> std::span<const int64_t> {
+    if (!impl_) throw std::runtime_error("Operation on uninitialized tensor");
     return impl_->shape;
 }
 
-auto Tensor::strides() const noexcept -> std::span<const int64_t> {
-    if (!impl_) return {};
+auto Tensor::strides() const -> std::span<const int64_t> {
+    if (!impl_) throw std::runtime_error("Operation on uninitialized tensor");
     return impl_->strides;
 }
 
-auto Tensor::ndim() const noexcept -> int64_t {
-    if (!impl_) return 0;
+auto Tensor::ndim() const -> int64_t {
+    if (!impl_) throw std::runtime_error("Operation on uninitialized tensor");
     return static_cast<int64_t>(impl_->shape.size());
 }
 
-auto Tensor::numel() const noexcept -> int64_t {
-    if (!impl_) return 0;
+auto Tensor::numel() const -> int64_t {
+    if (!impl_) throw std::runtime_error("Operation on uninitialized tensor");
     return impl_->numel();
 }
 
-auto Tensor::dtype() const noexcept -> DType {
-    if (!impl_) return DType::Float32;
+auto Tensor::dtype() const -> DType {
+    if (!impl_) throw std::runtime_error("Operation on uninitialized tensor");
     return impl_->dtype;
 }
 
-auto Tensor::device() const noexcept -> const Device& {
-    static const Device default_device = Device::cpu();
-    if (!impl_) return default_device;
+auto Tensor::device() const -> const Device& {
+    if (!impl_) throw std::runtime_error("Operation on uninitialized tensor");
     return impl_->device;
 }
 
@@ -125,10 +126,26 @@ auto Tensor::data() -> T* {
                   !std::is_same_v<CleanT, unsigned char> && !std::is_same_v<CleanT, signed char>) {
         constexpr DType expected_dtype = type_to_dtype_v<CleanT>;
         if (impl_->dtype != expected_dtype) {
-            throw std::runtime_error("Type mismatch: requested type does not match tensor dtype");
+            throw DTypeException("Type mismatch: requested type does not match tensor dtype (expected " +
+                std::string(dtype_name(impl_->dtype)) + ")");
         }
     }
-    return static_cast<T*>(impl_->storage->data()) + impl_->offset;
+    // Bounds check: ensure offset doesn't exceed storage
+    if (impl_->offset > 0) {
+        size_t storage_elements = impl_->storage->size_bytes() / tenzor::dtype_size(impl_->dtype);
+        if (static_cast<size_t>(impl_->offset) >= storage_elements) {
+            throw std::out_of_range("Tensor data access: offset exceeds storage bounds");
+        }
+    }
+    // For byte-level access types, scale offset by dtype size so pointer arithmetic
+    // advances by the correct number of bytes (offset is in elements, not bytes)
+    if constexpr (std::is_same_v<CleanT, uint8_t> || std::is_same_v<CleanT, char> ||
+                  std::is_same_v<CleanT, unsigned char> || std::is_same_v<CleanT, signed char>) {
+        auto* base = static_cast<uint8_t*>(impl_->storage->data());
+        return reinterpret_cast<T*>(base + impl_->offset * tenzor::dtype_size(impl_->dtype));
+    } else {
+        return static_cast<T*>(impl_->storage->data()) + impl_->offset;
+    }
 }
 
 template<typename T>
@@ -143,10 +160,26 @@ auto Tensor::data() const -> const T* {
                   !std::is_same_v<CleanT, unsigned char> && !std::is_same_v<CleanT, signed char>) {
         constexpr DType expected_dtype = type_to_dtype_v<CleanT>;
         if (impl_->dtype != expected_dtype) {
-            throw std::runtime_error("Type mismatch: requested type does not match tensor dtype");
+            throw DTypeException("Type mismatch: requested type does not match tensor dtype (expected " +
+                std::string(dtype_name(impl_->dtype)) + ")");
         }
     }
-    return static_cast<const T*>(impl_->storage->data()) + impl_->offset;
+    // Bounds check: ensure offset doesn't exceed storage
+    if (impl_->offset > 0) {
+        size_t storage_elements = impl_->storage->size_bytes() / tenzor::dtype_size(impl_->dtype);
+        if (static_cast<size_t>(impl_->offset) >= storage_elements) {
+            throw std::out_of_range("Tensor data access: offset exceeds storage bounds");
+        }
+    }
+    // For byte-level access types, scale offset by dtype size so pointer arithmetic
+    // advances by the correct number of bytes (offset is in elements, not bytes)
+    if constexpr (std::is_same_v<CleanT, uint8_t> || std::is_same_v<CleanT, char> ||
+                  std::is_same_v<CleanT, unsigned char> || std::is_same_v<CleanT, signed char>) {
+        const auto* base = static_cast<const uint8_t*>(impl_->storage->data());
+        return reinterpret_cast<const T*>(base + impl_->offset * tenzor::dtype_size(impl_->dtype));
+    } else {
+        return static_cast<const T*>(impl_->storage->data()) + impl_->offset;
+    }
 }
 
 // Explicit instantiations
@@ -184,204 +217,42 @@ template auto Tensor::data<const unsigned char>() const -> const unsigned char*;
 template auto Tensor::data<const signed char>() const -> const signed char*;
 template auto Tensor::data<const int>() const -> const int*;
 
-// Template instantiations for item<T>() - extract scalar from single-element tensor
-template<> auto Tensor::item<float>() const -> float {
+// Generic item<T>() implementation — replaces 14 copy-pasted specializations
+template<typename T>
+requires ScalarType<T>
+auto Tensor::item() const -> T {
     if (numel() != 1) {
         throw std::runtime_error("item() only works for single-element tensors");
     }
-    if (dtype() != DType::Float32) {
-        throw std::runtime_error("Type mismatch: tensor dtype is not Float32");
+    constexpr DType expected = type_to_dtype<T>::value;
+    if (dtype() != expected) {
+        throw std::runtime_error(
+            std::string("Type mismatch: tensor dtype is ") +
+            std::string(dtype_name(dtype())) + " but item<" +
+            std::string(dtype_name(expected)) + ">() was called");
     }
-    // For GPU tensors, copy to CPU first
     if (device().type != Device::Type::CPU) {
         auto cpu_tensor = cpu();
-        return *cpu_tensor.data<float>();
+        return *cpu_tensor.data<T>();
     }
-    return *data<float>();
+    return *data<T>();
 }
 
-template<> auto Tensor::item<Float16>() const -> Float16 {
-    if (numel() != 1) {
-        throw std::runtime_error("item() only works for single-element tensors");
-    }
-    if (dtype() != DType::Float16) {
-        throw std::runtime_error("Type mismatch: tensor dtype is not Float16");
-    }
-    // For GPU tensors, copy to CPU first
-    if (device().type != Device::Type::CPU) {
-        auto cpu_tensor = cpu();
-        return *cpu_tensor.data<Float16>();
-    }
-    return *data<Float16>();
-}
-
-template<> auto Tensor::item<double>() const -> double {
-    if (numel() != 1) {
-        throw std::runtime_error("item() only works for single-element tensors");
-    }
-    if (dtype() != DType::Float64) {
-        throw std::runtime_error("Type mismatch: tensor dtype is not Float64");
-    }
-    if (device().type != Device::Type::CPU) {
-        auto cpu_tensor = cpu();
-        return *cpu_tensor.data<double>();
-    }
-    return *data<double>();
-}
-
-template<> auto Tensor::item<int32_t>() const -> int32_t {
-    if (numel() != 1) {
-        throw std::runtime_error("item() only works for single-element tensors");
-    }
-    if (dtype() != DType::Int32) {
-        throw std::runtime_error("Type mismatch: tensor dtype is not Int32");
-    }
-    if (device().type != Device::Type::CPU) {
-        auto cpu_tensor = cpu();
-        return *cpu_tensor.data<int32_t>();
-    }
-    return *data<int32_t>();
-}
-
-template<> auto Tensor::item<int64_t>() const -> int64_t {
-    if (numel() != 1) {
-        throw std::runtime_error("item() only works for single-element tensors");
-    }
-    if (dtype() != DType::Int64) {
-        throw std::runtime_error("Type mismatch: tensor dtype is not Int64");
-    }
-    if (device().type != Device::Type::CPU) {
-        auto cpu_tensor = cpu();
-        return *cpu_tensor.data<int64_t>();
-    }
-    return *data<int64_t>();
-}
-
-template<> auto Tensor::item<int16_t>() const -> int16_t {
-    if (numel() != 1) {
-        throw std::runtime_error("item() only works for single-element tensors");
-    }
-    if (dtype() != DType::Int16) {
-        throw std::runtime_error("Type mismatch: tensor dtype is not Int16");
-    }
-    if (device().type != Device::Type::CPU) {
-        auto cpu_tensor = cpu();
-        return *reinterpret_cast<const int16_t*>(cpu_tensor.impl_->storage->data());
-    }
-    return *reinterpret_cast<const int16_t*>(impl_->storage->data());
-}
-
-template<> auto Tensor::item<int8_t>() const -> int8_t {
-    if (numel() != 1) {
-        throw std::runtime_error("item() only works for single-element tensors");
-    }
-    if (dtype() != DType::Int8) {
-        throw std::runtime_error("Type mismatch: tensor dtype is not Int8");
-    }
-    if (device().type != Device::Type::CPU) {
-        auto cpu_tensor = cpu();
-        return *reinterpret_cast<const int8_t*>(cpu_tensor.impl_->storage->data());
-    }
-    return *reinterpret_cast<const int8_t*>(impl_->storage->data());
-}
-
-template<> auto Tensor::item<uint8_t>() const -> uint8_t {
-    if (numel() != 1) {
-        throw std::runtime_error("item() only works for single-element tensors");
-    }
-    if (dtype() != DType::UInt8) {
-        throw std::runtime_error("Type mismatch: tensor dtype is not UInt8");
-    }
-    if (device().type != Device::Type::CPU) {
-        auto cpu_tensor = cpu();
-        return *cpu_tensor.data<uint8_t>();
-    }
-    return *data<uint8_t>();
-}
-
-template<> auto Tensor::item<uint16_t>() const -> uint16_t {
-    if (numel() != 1) {
-        throw std::runtime_error("item() only works for single-element tensors");
-    }
-    if (dtype() != DType::UInt16) {
-        throw std::runtime_error("Type mismatch: tensor dtype is not UInt16");
-    }
-    if (device().type != Device::Type::CPU) {
-        auto cpu_tensor = cpu();
-        return *reinterpret_cast<const uint16_t*>(cpu_tensor.impl_->storage->data());
-    }
-    return *reinterpret_cast<const uint16_t*>(impl_->storage->data());
-}
-
-template<> auto Tensor::item<uint32_t>() const -> uint32_t {
-    if (numel() != 1) {
-        throw std::runtime_error("item() only works for single-element tensors");
-    }
-    if (dtype() != DType::UInt32) {
-        throw std::runtime_error("Type mismatch: tensor dtype is not UInt32");
-    }
-    if (device().type != Device::Type::CPU) {
-        auto cpu_tensor = cpu();
-        return *reinterpret_cast<const uint32_t*>(cpu_tensor.impl_->storage->data());
-    }
-    return *reinterpret_cast<const uint32_t*>(impl_->storage->data());
-}
-
-template<> auto Tensor::item<uint64_t>() const -> uint64_t {
-    if (numel() != 1) {
-        throw std::runtime_error("item() only works for single-element tensors");
-    }
-    if (dtype() != DType::UInt64) {
-        throw std::runtime_error("Type mismatch: tensor dtype is not UInt64");
-    }
-    if (device().type != Device::Type::CPU) {
-        auto cpu_tensor = cpu();
-        return *reinterpret_cast<const uint64_t*>(cpu_tensor.impl_->storage->data());
-    }
-    return *reinterpret_cast<const uint64_t*>(impl_->storage->data());
-}
-
-template<> auto Tensor::item<bool>() const -> bool {
-    if (numel() != 1) {
-        throw std::runtime_error("item() only works for single-element tensors");
-    }
-    if (dtype() != DType::Bool) {
-        throw std::runtime_error("Type mismatch: tensor dtype is not Bool");
-    }
-    if (device().type != Device::Type::CPU) {
-        auto cpu_tensor = cpu();
-        return *cpu_tensor.data<bool>();
-    }
-    return *data<bool>();
-}
-
-template<> auto Tensor::item<std::complex<float>>() const -> std::complex<float> {
-    if (numel() != 1) {
-        throw std::runtime_error("item() only works for single-element tensors");
-    }
-    if (dtype() != DType::Complex64) {
-        throw std::runtime_error("Type mismatch: tensor dtype is not Complex64");
-    }
-    if (device().type != Device::Type::CPU) {
-        auto cpu_tensor = cpu();
-        return *reinterpret_cast<const std::complex<float>*>(cpu_tensor.impl_->storage->data());
-    }
-    return *reinterpret_cast<const std::complex<float>*>(impl_->storage->data());
-}
-
-template<> auto Tensor::item<std::complex<double>>() const -> std::complex<double> {
-    if (numel() != 1) {
-        throw std::runtime_error("item() only works for single-element tensors");
-    }
-    if (dtype() != DType::Complex128) {
-        throw std::runtime_error("Type mismatch: tensor dtype is not Complex128");
-    }
-    if (device().type != Device::Type::CPU) {
-        auto cpu_tensor = cpu();
-        return *reinterpret_cast<const std::complex<double>*>(cpu_tensor.impl_->storage->data());
-    }
-    return *reinterpret_cast<const std::complex<double>*>(impl_->storage->data());
-}
+// Explicit instantiations for all scalar types
+template auto Tensor::item<float>() const -> float;
+template auto Tensor::item<Float16>() const -> Float16;
+template auto Tensor::item<double>() const -> double;
+template auto Tensor::item<int32_t>() const -> int32_t;
+template auto Tensor::item<int64_t>() const -> int64_t;
+template auto Tensor::item<int16_t>() const -> int16_t;
+template auto Tensor::item<int8_t>() const -> int8_t;
+template auto Tensor::item<uint8_t>() const -> uint8_t;
+template auto Tensor::item<uint16_t>() const -> uint16_t;
+template auto Tensor::item<uint32_t>() const -> uint32_t;
+template auto Tensor::item<uint64_t>() const -> uint64_t;
+template auto Tensor::item<bool>() const -> bool;
+template auto Tensor::item<std::complex<float>>() const -> std::complex<float>;
+template auto Tensor::item<std::complex<double>>() const -> std::complex<double>;
 
 // Core tensor operation implementations
 auto Tensor::to(Device device) const -> Tensor {
@@ -397,82 +268,10 @@ auto Tensor::to(Device device) const -> Tensor {
     // For same-device non-contiguous GPU tensors, we need special handling
     // Fall through to the code below that handles non-contiguous GPU tensors
 
-    // Special handling for non-contiguous GPU tensors:
-    // Transfer to CPU first (with stride handling), then transfer to target device
+    // Non-contiguous GPU tensors: make contiguous on-device first (single GPU kernel),
+    // then fall through to the normal contiguous transfer path below.
     if (!is_contiguous() && impl_->device.type != Device::Type::CPU) {
-        // Step 1: Create CPU tensor
-        Tensor cpu_result(impl_->shape, impl_->dtype, Device::cpu());
-        cpu_result.impl_->requires_grad = impl_->requires_grad;
-
-        // Step 2: Copy from GPU to CPU with stride handling
-        // We need to copy element-by-element due to non-contiguous layout
-        const size_t size_bytes = numel() * dtype_size();
-        std::vector<uint8_t> temp_buffer(size_bytes);
-
-        // Get backend
-        auto* src_backend = backend_registry().get_backend(impl_->device.type);
-        if (!src_backend) {
-            throw std::runtime_error("Backend not available for source device");
-        }
-
-        // CRITICAL: Synchronize GPU before reading buffer to ensure all writes complete
-        src_backend->synchronize(impl_->device.index);
-
-        // Copy entire GPU buffer to temp (includes padding/non-contiguous data)
-        const size_t total_bytes = impl_->storage->size_bytes();
-        std::vector<uint8_t> gpu_buffer(total_bytes);
-        src_backend->copy(gpu_buffer.data(), impl_->storage->data(),
-                         total_bytes, CopyKind::DeviceToHost);
-
-        // Now rearrange into contiguous layout on CPU
-        const int64_t ndims = ndim();
-        const size_t element_size = dtype_size();
-        std::vector<int64_t> indices(ndims, 0);
-        int64_t dst_offset = 0;
-
-        for (int64_t i = 0; i < numel(); ++i) {
-            int64_t src_offset = impl_->offset;
-            for (int64_t dim = 0; dim < ndims; ++dim) {
-                src_offset += indices[dim] * impl_->strides[dim];
-            }
-
-            std::memcpy(temp_buffer.data() + dst_offset * element_size,
-                       gpu_buffer.data() + src_offset * element_size,
-                       element_size);
-
-            ++dst_offset;
-
-            for (int64_t dim = ndims - 1; dim >= 0; --dim) {
-                if (++indices[dim] < impl_->shape[dim]) {
-                    break;
-                }
-                indices[dim] = 0;
-            }
-        }
-
-        // Copy contiguous data to CPU tensor
-        std::memcpy(cpu_result.impl_->storage->data(), temp_buffer.data(), size_bytes);
-
-        // Step 3: If target is also CPU, we're done
-        if (device.type == Device::Type::CPU) {
-            return cpu_result;
-        }
-
-        // Step 4: Transfer contiguous CPU tensor to target device
-        Tensor result(cpu_result.impl_->shape, cpu_result.impl_->dtype, device);
-        result.impl_->requires_grad = cpu_result.impl_->requires_grad;
-
-        auto* dst_backend = backend_registry().get_backend(device.type);
-        if (!dst_backend) {
-            throw std::runtime_error("Backend not available for target device");
-        }
-
-        dst_backend->copy(result.impl_->storage->data(),
-                         cpu_result.impl_->storage->data(),
-                         size_bytes,
-                         CopyKind::HostToDevice);
-
-        return result;
+        return contiguous().to(device);
     }
 
     // Normal path: tensor is contiguous or on CPU
@@ -538,8 +337,8 @@ auto Tensor::to(DType dtype) const -> Tensor {
         return *this;
     }
 
-    // For dtype conversion, we need to work on CPU for element-wise conversion
-    // If tensor is on GPU, move to CPU first
+    // TODO: Try OpId::Cast on the current device before CPU round-trip once
+    // a Cast kernel is registered in GPU backends. For now, convert on CPU.
     const bool was_on_gpu = impl_->device.type != Device::Type::CPU;
     Tensor cpu_tensor = was_on_gpu ? cpu() : *this;
 
@@ -676,13 +475,13 @@ auto Tensor::clone() const -> Tensor {
     Tensor result(impl_->shape, impl_->dtype, impl_->device);
     result.impl_->requires_grad = impl_->requires_grad;
 
-    // Copy data
+    // Copy data — use data_ptr() to account for storage offset (e.g. sliced tensors)
     const size_t size_bytes = numel() * dtype_size();
 
     if (impl_->device.type == Device::Type::CPU) {
         // CPU copy
         std::memcpy(result.impl_->storage->data(),
-                    impl_->storage->data(),
+                    data_ptr(),
                     size_bytes);
     } else {
         // Device copy
@@ -691,7 +490,7 @@ auto Tensor::clone() const -> Tensor {
             throw std::runtime_error("Backend not available for device");
         }
         backend->copy(result.impl_->storage->data(),
-                      impl_->storage->data(),
+                      data_ptr(),
                       size_bytes,
                       CopyKind::DeviceToDevice);
     }
@@ -700,7 +499,9 @@ auto Tensor::clone() const -> Tensor {
 }
 
 auto Tensor::detach() const -> Tensor {
-    auto result = clone();
+    // Share storage (zero-copy) like view() — no need to copy data
+    Tensor result;
+    result.impl_ = std::make_shared<TensorImpl>(*impl_);
     result.impl_->requires_grad = false;
     return result;
 }
@@ -737,61 +538,57 @@ auto Tensor::operator/(const Tensor& other) const -> Tensor {
     return tenzor::div(*this, other);
 }
 
-// Scalar operations - use tensor path for device-agnostic execution
-auto Tensor::operator+(float scalar) const -> Tensor {
+// Scalar operations — use size-{1} tensor and let broadcasting handle expansion
+auto Tensor::operator+(double scalar) const -> Tensor {
     if (!impl_) return *this;
-
-    // Create scalar tensor and use element-wise add
-    auto scalar_tensor = full(std::vector<int64_t>(impl_->shape.begin(), impl_->shape.end()),
-                             scalar, impl_->dtype, impl_->device);
+    auto scalar_tensor = full({1}, scalar, impl_->dtype, impl_->device);
     return *this + scalar_tensor;
 }
 
-auto Tensor::operator-(float scalar) const -> Tensor {
+auto Tensor::operator-(double scalar) const -> Tensor {
     if (!impl_) return *this;
-
-    // Create scalar tensor and use element-wise sub
-    auto scalar_tensor = full(std::vector<int64_t>(impl_->shape.begin(), impl_->shape.end()),
-                             scalar, impl_->dtype, impl_->device);
+    auto scalar_tensor = full({1}, scalar, impl_->dtype, impl_->device);
     return *this - scalar_tensor;
 }
 
-auto Tensor::operator*(float scalar) const -> Tensor {
+auto Tensor::operator*(double scalar) const -> Tensor {
     if (!impl_) return *this;
-
-    // Create scalar tensor and use element-wise mul
-    auto scalar_tensor = full(std::vector<int64_t>(impl_->shape.begin(), impl_->shape.end()),
-                             scalar, impl_->dtype, impl_->device);
+    auto scalar_tensor = full({1}, scalar, impl_->dtype, impl_->device);
     return *this * scalar_tensor;
 }
 
-auto Tensor::operator/(float scalar) const -> Tensor {
+auto Tensor::operator/(double scalar) const -> Tensor {
     if (!impl_) return *this;
-
-    // Create scalar tensor and use element-wise div
-    auto scalar_tensor = full(std::vector<int64_t>(impl_->shape.begin(), impl_->shape.end()),
-                             scalar, impl_->dtype, impl_->device);
+    auto scalar_tensor = full({1}, scalar, impl_->dtype, impl_->device);
     return *this / scalar_tensor;
 }
 
-// In-place operations
+// In-place operations — dispatch through in-place kernels so views/aliases see updates
 auto Tensor::operator+=(const Tensor& other) -> Tensor& {
-    *this = *this + other;
+    auto& table = DispatchTableRegistry::get_table(impl_->device.type);
+    std::array<Tensor, 1> others = {other};
+    table.dispatch_inplace(OpId::AddInplace, *this, others);
     return *this;
 }
 
 auto Tensor::operator-=(const Tensor& other) -> Tensor& {
-    *this = *this - other;
+    auto& table = DispatchTableRegistry::get_table(impl_->device.type);
+    std::array<Tensor, 1> others = {other};
+    table.dispatch_inplace(OpId::SubInplace, *this, others);
     return *this;
 }
 
 auto Tensor::operator*=(const Tensor& other) -> Tensor& {
-    *this = *this * other;
+    auto& table = DispatchTableRegistry::get_table(impl_->device.type);
+    std::array<Tensor, 1> others = {other};
+    table.dispatch_inplace(OpId::MulInplace, *this, others);
     return *this;
 }
 
 auto Tensor::operator/=(const Tensor& other) -> Tensor& {
-    *this = *this / other;
+    auto& table = DispatchTableRegistry::get_table(impl_->device.type);
+    std::array<Tensor, 1> others = {other};
+    table.dispatch_inplace(OpId::DivInplace, *this, others);
     return *this;
 }
 
@@ -802,17 +599,18 @@ auto Tensor::fill_(float value) -> Tensor& {
 
     const int64_t n = numel();
 
-    // For non-CPU devices, create a CPU tensor, fill it, then copy to this tensor
+    // For non-CPU devices, create a CPU tensor, fill it, then copy into existing storage
     if (device().type != Device::Type::CPU) {
         // Create CPU tensor with same shape and dtype
         std::vector<int64_t> shape_vec(shape().begin(), shape().end());
         Tensor cpu_tensor(shape_vec, dtype(), Device::cpu());
         cpu_tensor.fill_(value);  // Recursively fill on CPU
 
-        // Copy the filled data to this tensor's device
-        Tensor filled = cpu_tensor.to(device());
-        // Copy the storage
-        impl_->storage = filled.impl_->storage;
+        // Copy filled data into this tensor's existing storage (preserves aliased views)
+        auto* backend = backend_registry().get_backend(device().type);
+        const size_t size_bytes = numel() * dtype_size();
+        backend->copy(impl_->storage->data(), cpu_tensor.impl_->storage->data(),
+                     size_bytes, CopyKind::HostToDevice);
         return *this;
     }
 
@@ -858,6 +656,36 @@ auto Tensor::fill_(float value) -> Tensor& {
             Float16 f16_value(value);
             for (int64_t i = 0; i < n; ++i) {
                 ptr[i] = f16_value;
+            }
+            break;
+        }
+        case DType::BFloat16: {
+            BFloat16* ptr = data<BFloat16>();
+            BFloat16 bf16_value(value);
+            for (int64_t i = 0; i < n; ++i) {
+                ptr[i] = bf16_value;
+            }
+            break;
+        }
+        case DType::Int8: {
+            int8_t* ptr = data<int8_t>();
+            for (int64_t i = 0; i < n; ++i) {
+                ptr[i] = static_cast<int8_t>(value);
+            }
+            break;
+        }
+        case DType::Int16: {
+            int16_t* ptr = data<int16_t>();
+            for (int64_t i = 0; i < n; ++i) {
+                ptr[i] = static_cast<int16_t>(value);
+            }
+            break;
+        }
+        case DType::Bool: {
+            bool* ptr = data<bool>();
+            bool bool_value = (value != 0.0f);
+            for (int64_t i = 0; i < n; ++i) {
+                ptr[i] = bool_value;
             }
             break;
         }
@@ -1305,6 +1133,30 @@ auto Tensor::slice(int64_t dim, int64_t start, int64_t end, int64_t step) const 
     // Update stride if step != 1
     if (step != 1) {
         result.impl_->strides[dim] *= step;
+    }
+
+    // Validate that the slice doesn't exceed storage bounds
+    int64_t max_offset = result.impl_->offset;
+    // Calculate the furthest element this slice can access (with overflow checks)
+    for (int64_t d = 0; d < static_cast<int64_t>(result.impl_->shape.size()); ++d) {
+        if (result.impl_->shape[d] > 0) {
+            int64_t extent = result.impl_->shape[d] - 1;
+            int64_t stride = result.impl_->strides[d];
+            // Check multiplication overflow
+            if (stride != 0 && extent > std::numeric_limits<int64_t>::max() / std::abs(stride)) {
+                throw std::overflow_error("Slice offset computation overflows int64_t");
+            }
+            int64_t delta = extent * stride;
+            // Check addition overflow
+            if (delta > 0 && max_offset > std::numeric_limits<int64_t>::max() - delta) {
+                throw std::overflow_error("Slice offset computation overflows int64_t");
+            }
+            max_offset += delta;
+        }
+    }
+    int64_t storage_elements = static_cast<int64_t>(result.impl_->storage->size_bytes() / tenzor::dtype_size(result.impl_->dtype));
+    if (max_offset >= storage_elements) {
+        throw std::out_of_range("Slice offset exceeds storage bounds");
     }
 
     return result;

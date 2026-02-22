@@ -168,6 +168,11 @@ if(OpenMP_CXX_FOUND)
     target_link_libraries(tenzor_core PUBLIC OpenMP::OpenMP_CXX)
 endif()
 
+# Suppress unused parameter warnings for interface/callback functions
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(tenzor_core PRIVATE -Wno-unused-parameter)
+endif()
+
 # Add compiler definitions
 target_compile_definitions(tenzor_core PRIVATE
     TENZOR_VERSION="${PROJECT_VERSION}"

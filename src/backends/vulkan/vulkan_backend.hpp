@@ -79,6 +79,8 @@ private:
         VkPhysicalDeviceMemoryProperties memoryProperties;
         std::unique_ptr<vulkan::DescriptorPool> descriptorPool;
         bool canPreserveDenormsF32 = false;  // Whether GPU supports denormal preservation for float32
+        bool hasAtomicInt64 = false;          // Whether GPU supports VK_EXT_shader_atomic_int64
+        VkPipelineCache pipelineCache = VK_NULL_HANDLE;  // Persistent pipeline cache
 
         // Fence-based async synchronization
         VkFence pendingFence = VK_NULL_HANDLE;  // Fence for last submitted work

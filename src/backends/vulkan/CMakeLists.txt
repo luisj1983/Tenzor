@@ -71,7 +71,9 @@ set(SHADERS
     indexing
     # Math functions
     trigonometric
+    trigonometric_f64
     hyperbolic
+    hyperbolic_f64
     # Vision operations
     im2col
     col2im
@@ -96,13 +98,17 @@ set(SHADERS
     argmax_argmin
     argmax_argmin_i32
     variance_std
+    variance_std_f64
     prod_reduction
     prod_reduction_i32
     boolean_reduction
+    boolean_reduction_f64
     # Indexing operations
     embedding
+    embedding_f16
     embedding_f64
     gather
+    gather_f64
     scatter
     scatter_f64
     index_select
@@ -133,8 +139,11 @@ set(SHADERS
     expand_f64
     expand_f16
     cat
+    cat_f64
+    cat_f16
     clamp
     clamp_f64
+    clamp_f16
     # BatchNorm2d operations
     batchnorm2d_forward
     batchnorm2d_backward
@@ -155,6 +164,7 @@ set(SHADERS
     full_f16
     full_i8
     ones
+    ones_f64
     ones_f16
     ones_i8
     ones_uint8
@@ -187,6 +197,7 @@ set(SHADERS
     strided_copy
     strided_copy_f64
     strided_copy_f16
+    strided_copy_u8
     random
     random_f64
     random_f16
@@ -276,8 +287,11 @@ set(SHADERS
     cast_int64_to_int32
     # Creation operations
     arange
+    arange_f64
     linspace
+    linspace_f64
     eye
+    eye_f64
     # Phase 4: Fused optimizer kernels
     fused_rmsprop_step
     fused_adadelta_step

@@ -34,14 +34,18 @@ import os as _os
 # This prevents OpenMP from initializing with too many threads
 if 'OMP_NUM_THREADS' not in _os.environ:
     try:
-        # Detect physical cores on Linux
-        with open('/sys/devices/system/cpu/cpu0/topology/thread_siblings_list') as f:
-            siblings = f.read().strip()
-            threads_per_core = siblings.count(',') + 1
-            logical_cores = _os.cpu_count() or 1
-            physical_cores = max(1, logical_cores // threads_per_core)
-            _os.environ['OMP_NUM_THREADS'] = str(physical_cores)
-    except (OSError, IOError):
+        import multiprocessing as _mp
+        physical_cores = _mp.cpu_count() or 1
+        # On Linux, try to detect hyperthreading to get physical core count
+        try:
+            with open('/sys/devices/system/cpu/cpu0/topology/thread_siblings_list') as f:
+                siblings = len(f.read().strip().split(','))
+                if siblings > 1:
+                    physical_cores = max(1, physical_cores // siblings)
+        except (OSError, IOError):
+            pass  # Non-Linux: use cpu_count() directly
+        _os.environ['OMP_NUM_THREADS'] = str(max(1, physical_cores))
+    except Exception:
         pass  # Use default if detection fails
 
 # Import C++ core module first
@@ -75,6 +79,11 @@ __all__ = [
     "Device",
     "DeviceType",
     "dtype",
+
+    # Autograd
+    "backward",
+    "requires_grad",
+    "is_grad_enabled",
 
     # Tensor creation
     "zeros",
@@ -127,6 +136,5 @@ __all__ = [
     "no_grad",
     "enable_grad",
     "set_grad_enabled",
-    "is_grad_enabled",
     "initialize",
 ]

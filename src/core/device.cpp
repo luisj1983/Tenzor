@@ -1,8 +1,18 @@
 #include "tenzor/core/device.hpp"
 #include "tenzor/backend/loader.hpp"
+#include "tenzor/utils/error.hpp"
 #include <stdexcept>
 
 namespace tenzor {
+
+// Parse device index from string suffix and validate it's non-negative
+static auto parse_device_index(std::string_view str, size_t prefix_len) -> int {
+    int idx = std::stoi(std::string(str.substr(prefix_len)));
+    if (idx < 0) {
+        throw DeviceException("Device index must be non-negative, got: " + std::to_string(idx));
+    }
+    return idx;
+}
 
 auto Device::from_string(std::string_view str) -> Device {
     if (str == "cpu") {
@@ -10,36 +20,30 @@ auto Device::from_string(std::string_view str) -> Device {
     }
 
     if (str.starts_with("cuda:")) {
-        int idx = std::stoi(std::string(str.substr(5)));
-        return Device::cuda(idx);
+        return Device::cuda(parse_device_index(str, 5));
     }
 
     if (str.starts_with("rocm:")) {
-        int idx = std::stoi(std::string(str.substr(5)));
-        return Device::rocm(idx);
+        return Device::rocm(parse_device_index(str, 5));
     }
 
     if (str.starts_with("oneapi:")) {
-        int idx = std::stoi(std::string(str.substr(7)));
-        return Device::oneapi(idx);
+        return Device::oneapi(parse_device_index(str, 7));
     }
 
     if (str.starts_with("vulkan:")) {
-        int idx = std::stoi(std::string(str.substr(7)));
-        return Device::vulkan(idx);
+        return Device::vulkan(parse_device_index(str, 7));
     }
 
     if (str.starts_with("metal:")) {
-        int idx = std::stoi(std::string(str.substr(6)));
-        return Device::metal(idx);
+        return Device::metal(parse_device_index(str, 6));
     }
 
     if (str.starts_with("webgpu:")) {
-        int idx = std::stoi(std::string(str.substr(7)));
-        return Device::webgpu(idx);
+        return Device::webgpu(parse_device_index(str, 7));
     }
 
-    throw std::invalid_argument("Invalid device string: " + std::string(str));
+    throw DeviceException("Invalid device string: " + std::string(str));
 }
 
 auto Device::synchronize() const -> void {

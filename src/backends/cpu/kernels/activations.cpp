@@ -21,9 +21,9 @@
 // OpenMP parallelization threshold - tuned to balance thread overhead vs parallelism benefit
 constexpr size_t ACTIVATION_OMP_THRESHOLD = 65536;  // 64K elements
 
-// oneDNN threshold - use oneDNN for tensors larger than this
-// Higher threshold to amortize primitive creation overhead (~1-5ms)
-constexpr size_t ONEDNN_ACTIVATION_THRESHOLD = 262144;  // 256K elements
+// oneDNN threshold - use oneDNN for tensors larger than this.
+// Lowered from 256K to 64K — primitive caching amortizes setup cost.
+constexpr size_t ONEDNN_ACTIVATION_THRESHOLD = 65536;  // 64K elements
 
 // SIMD intrinsics
 #if defined(__AVX512F__)
@@ -55,11 +55,12 @@ struct EltwiseCacheKey {
     size_t n;
     float alpha, beta;
     bool is_backward;
+    DType dtype;
 
     bool operator==(const EltwiseCacheKey& other) const {
         return algo == other.algo && n == other.n &&
                alpha == other.alpha && beta == other.beta &&
-               is_backward == other.is_backward;
+               is_backward == other.is_backward && dtype == other.dtype;
     }
 };
 
@@ -70,6 +71,7 @@ struct EltwiseCacheKeyHash {
         h ^= std::hash<float>{}(k.alpha) + 0x9e3779b9 + (h << 6) + (h >> 2);
         h ^= std::hash<float>{}(k.beta) + 0x9e3779b9 + (h << 6) + (h >> 2);
         h ^= std::hash<bool>{}(k.is_backward) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<int>{}(static_cast<int>(k.dtype)) + 0x9e3779b9 + (h << 6) + (h >> 2);
         return h;
     }
 };
@@ -118,9 +120,10 @@ static thread_local EltwisePrimitiveCache g_eltwise_cache;
 struct SoftmaxCacheKey {
     std::vector<int64_t> dims;
     int64_t axis;
+    DType dtype;
 
     bool operator==(const SoftmaxCacheKey& other) const {
-        return dims == other.dims && axis == other.axis;
+        return dims == other.dims && axis == other.axis && dtype == other.dtype;
     }
 };
 
@@ -130,6 +133,7 @@ struct SoftmaxCacheKeyHash {
         for (auto d : k.dims) {
             h ^= std::hash<int64_t>{}(d) + 0x9e3779b9 + (h << 6) + (h >> 2);
         }
+        h ^= std::hash<int>{}(static_cast<int>(k.dtype)) + 0x9e3779b9 + (h << 6) + (h >> 2);
         return h;
     }
 };
@@ -185,7 +189,7 @@ static bool onednn_eltwise_forward(
         auto& stream = g_activation_stream;
 
         // Create cache key
-        EltwiseCacheKey cache_key{alg, n, alpha, beta, false};
+        EltwiseCacheKey cache_key{alg, n, alpha, beta, false, DType::Float32};
 
         // Try to get cached primitive
         auto cached = g_eltwise_cache.get(cache_key);
@@ -237,7 +241,7 @@ static bool onednn_eltwise_backward(
         auto& stream = g_activation_stream;
 
         // Create cache key (is_backward = true)
-        EltwiseCacheKey cache_key{alg, n, alpha, beta, true};
+        EltwiseCacheKey cache_key{alg, n, alpha, beta, true, DType::Float32};
 
         auto cached = g_eltwise_cache.get(cache_key);
 
@@ -295,7 +299,7 @@ static bool onednn_softmax_forward(
         auto& stream = g_activation_stream;
 
         // Create cache key
-        SoftmaxCacheKey cache_key{shape, axis};
+        SoftmaxCacheKey cache_key{shape, axis, DType::Float32};
 
         auto cached = g_softmax_cache.get(cache_key);
 
@@ -434,10 +438,21 @@ auto relu_kernel(const Tensor& input) -> Tensor {
         const size_t simd_width = 8;
         __m512d zero = _mm512_setzero_pd();
 
-        for (; i + simd_width <= n; i += simd_width) {
-            __m512d x = _mm512_loadu_pd(in_data + i);
-            __m512d result = _mm512_max_pd(x, zero);
-            _mm512_storeu_pd(out_data + i, result);
+        if (n >= ACTIVATION_OMP_THRESHOLD) {
+            #pragma omp parallel for schedule(static)
+            for (size_t j = 0; j < n / simd_width; ++j) {
+                size_t idx = j * simd_width;
+                __m512d x = _mm512_loadu_pd(in_data + idx);
+                __m512d result = _mm512_max_pd(x, zero);
+                _mm512_storeu_pd(out_data + idx, result);
+            }
+            i = (n / simd_width) * simd_width;
+        } else {
+            for (; i + simd_width <= n; i += simd_width) {
+                __m512d x = _mm512_loadu_pd(in_data + i);
+                __m512d result = _mm512_max_pd(x, zero);
+                _mm512_storeu_pd(out_data + i, result);
+            }
         }
 
         for (; i < n; ++i) {
@@ -448,18 +463,36 @@ auto relu_kernel(const Tensor& input) -> Tensor {
         const size_t simd_width = 4;
         __m256d zero = _mm256_setzero_pd();
 
-        for (; i + simd_width <= n; i += simd_width) {
-            __m256d x = _mm256_loadu_pd(in_data + i);
-            __m256d result = _mm256_max_pd(x, zero);
-            _mm256_storeu_pd(out_data + i, result);
+        if (n >= ACTIVATION_OMP_THRESHOLD) {
+            #pragma omp parallel for schedule(static)
+            for (size_t j = 0; j < n / simd_width; ++j) {
+                size_t idx = j * simd_width;
+                __m256d x = _mm256_loadu_pd(in_data + idx);
+                __m256d result = _mm256_max_pd(x, zero);
+                _mm256_storeu_pd(out_data + idx, result);
+            }
+            i = (n / simd_width) * simd_width;
+        } else {
+            for (; i + simd_width <= n; i += simd_width) {
+                __m256d x = _mm256_loadu_pd(in_data + i);
+                __m256d result = _mm256_max_pd(x, zero);
+                _mm256_storeu_pd(out_data + i, result);
+            }
         }
 
         for (; i < n; ++i) {
             out_data[i] = std::max(0.0, in_data[i]);
         }
 #else
-        for (size_t i = 0; i < n; ++i) {
-            out_data[i] = std::max(0.0, in_data[i]);
+        if (n >= ACTIVATION_OMP_THRESHOLD) {
+            #pragma omp parallel for schedule(static)
+            for (size_t i = 0; i < n; ++i) {
+                out_data[i] = std::max(0.0, in_data[i]);
+            }
+        } else {
+            for (size_t i = 0; i < n; ++i) {
+                out_data[i] = std::max(0.0, in_data[i]);
+            }
         }
 #endif
     } else if (input.dtype() == DType::Float16) {

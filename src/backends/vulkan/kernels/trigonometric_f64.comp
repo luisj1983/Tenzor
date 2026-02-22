@@ -1,0 +1,48 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Trigonometric functions for Float64: sin, cos, tan, asin, acos, atan
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer InputBuffer { double input_data[]; };
+layout(binding = 1) buffer OutputBuffer { double output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of elements
+    uint op;         // Operation: 0=sin, 1=cos, 2=tan, 3=asin, 4=acos, 5=atan
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n) {
+        return;
+    }
+
+    double val = input_data[idx];
+
+    // GLSL trig functions operate on float; cast through float for computation
+    switch (params.op) {
+        case 0: // sin
+            output_data[idx] = double(sin(float(val)));
+            break;
+        case 1: // cos
+            output_data[idx] = double(cos(float(val)));
+            break;
+        case 2: // tan
+            output_data[idx] = double(tan(float(val)));
+            break;
+        case 3: // asin
+            output_data[idx] = double(asin(float(val)));
+            break;
+        case 4: // acos
+            output_data[idx] = double(acos(float(val)));
+            break;
+        case 5: // atan
+            output_data[idx] = double(atan(float(val)));
+            break;
+        default:
+            output_data[idx] = 0.0;
+            break;
+    }
+}

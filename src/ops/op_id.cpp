@@ -244,8 +244,30 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::CumProd)] = "cumprod";
     names[static_cast<size_t>(OpId::Unique)] = "unique";
 
+    // 3D Convolution and Pooling
+    names[static_cast<size_t>(OpId::Conv3dForward)] = "conv3d_forward";
+    names[static_cast<size_t>(OpId::Conv3dBackwardInput)] = "conv3d_backward_input";
+    names[static_cast<size_t>(OpId::Conv3dBackwardWeight)] = "conv3d_backward_weight";
+    names[static_cast<size_t>(OpId::Conv3dBackwardBias)] = "conv3d_backward_bias";
+    names[static_cast<size_t>(OpId::MaxPool3dForward)] = "maxpool3d_forward";
+    names[static_cast<size_t>(OpId::MaxPool3dBackward)] = "maxpool3d_backward";
+    names[static_cast<size_t>(OpId::AvgPool3dForward)] = "avgpool3d_forward";
+    names[static_cast<size_t>(OpId::AvgPool3dBackward)] = "avgpool3d_backward";
+
     return names;
 }();
+
+// Compile-time check: count named ops to catch forgotten entries when adding new OpIds
+constexpr size_t count_named_ops() {
+    size_t count = 0;
+    for (const auto& name : op_names) {
+        if (name != "unknown") ++count;
+    }
+    return count;
+}
+
+// If this fires, a new OpId was added without a corresponding name in op_names above
+static_assert(count_named_ops() > 0, "No ops named in op_names array");
 
 } // anonymous namespace
 

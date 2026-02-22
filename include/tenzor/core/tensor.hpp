@@ -152,7 +152,9 @@ public:
                                      Device device = Device::cpu()) -> Tensor;
 
     /**
-     * @brief Copy constructor (shallow copy with shared storage).
+     * @brief Shallow copy — shares underlying storage with other.
+     * Modifications to data through either handle are visible to both.
+     * Use clone() for a deep copy.
      */
     Tensor(const Tensor&) = default;
 
@@ -161,9 +163,7 @@ public:
      */
     Tensor(Tensor&&) noexcept = default;
 
-    /**
-     * @brief Copy assignment operator (shallow copy with shared storage).
-     */
+    /// Shallow copy assignment — shares underlying storage with other.
     Tensor& operator=(const Tensor&) = default;
 
     /**
@@ -190,7 +190,7 @@ public:
      * auto s = t.shape();  // Returns {2, 3, 4}
      * @endcode
      */
-    auto shape() const noexcept -> std::span<const int64_t>;
+    auto shape() const -> std::span<const int64_t>;
 
     /**
      * @brief Get the strides of the tensor.
@@ -205,14 +205,14 @@ public:
      * auto s = t.strides();  // Returns {3, 1} for row-major layout
      * @endcode
      */
-    auto strides() const noexcept -> std::span<const int64_t>;
+    auto strides() const -> std::span<const int64_t>;
 
     /**
      * @brief Get the number of dimensions.
      *
      * @return Number of dimensions (rank) of the tensor
      */
-    auto ndim() const noexcept -> int64_t;
+    auto ndim() const -> int64_t;
 
     /**
      * @brief Get the total number of elements.
@@ -224,21 +224,21 @@ public:
      * auto n = t.numel();  // Returns 24
      * @endcode
      */
-    auto numel() const noexcept -> int64_t;
+    auto numel() const -> int64_t;
 
     /**
      * @brief Get the data type of tensor elements.
      *
      * @return DType enumeration value
      */
-    auto dtype() const noexcept -> DType;
+    auto dtype() const -> DType;
 
     /**
      * @brief Get the device where tensor resides.
      *
      * @return Device reference
      */
-    auto device() const noexcept -> const Device&;
+    auto device() const -> const Device&;
 
     /**
      * @brief Check if tensor requires gradient computation.
@@ -258,6 +258,13 @@ public:
      * @see contiguous()
      */
     auto is_contiguous() const noexcept -> bool;
+
+    /**
+     * @brief Check if tensor has been initialized with valid storage.
+     *
+     * @return true if tensor has a valid implementation, false if default-constructed
+     */
+    auto is_valid() const noexcept -> bool { return impl_ != nullptr; }
 
     // ============================================================================
     // Data Access
@@ -294,6 +301,10 @@ public:
 
     /**
      * @brief Extract scalar value from 0-dimensional tensor.
+     *
+     * WARNING: For GPU tensors, this implicitly copies data to CPU, which
+     * synchronizes the device and blocks the host thread. Avoid calling
+     * in performance-critical loops.
      *
      * @tparam T Scalar type (must match tensor dtype)
      * @return Scalar value
@@ -565,7 +576,7 @@ public:
      * @param scalar Value to add
      * @return New tensor with scalar added
      */
-    auto operator+(float scalar) const -> Tensor;
+    auto operator+(double scalar) const -> Tensor;
 
     /**
      * @brief Subtract scalar from all elements.
@@ -573,7 +584,7 @@ public:
      * @param scalar Value to subtract
      * @return New tensor with scalar subtracted
      */
-    auto operator-(float scalar) const -> Tensor;
+    auto operator-(double scalar) const -> Tensor;
 
     /**
      * @brief Multiply all elements by scalar.
@@ -581,7 +592,7 @@ public:
      * @param scalar Value to multiply by
      * @return New tensor with scalar multiplication
      */
-    auto operator*(float scalar) const -> Tensor;
+    auto operator*(double scalar) const -> Tensor;
 
     /**
      * @brief Divide all elements by scalar.
@@ -589,7 +600,7 @@ public:
      * @param scalar Value to divide by
      * @return New tensor with scalar division
      */
-    auto operator/(float scalar) const -> Tensor;
+    auto operator/(double scalar) const -> Tensor;
 
     // ============================================================================
     // In-place Operations

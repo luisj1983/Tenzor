@@ -1,0 +1,52 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Embedding lookup for Float16 data
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer EmbeddingTable { float16_t embeddings[]; };  // (num_embeddings x embedding_dim)
+layout(binding = 1) buffer Indices { int indices[]; };                   // (batch_size x seq_len)
+layout(binding = 2) buffer OutputData { float16_t output_data[]; };     // (batch_size x seq_len x embedding_dim)
+
+layout(push_constant) uniform PushConstants {
+    uint num_embeddings;
+    uint embedding_dim;
+    uint num_indices;
+    uint padding_idx;     // Index to treat as padding (set to UINT_MAX if none)
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.num_indices) {
+        return;
+    }
+
+    int embedding_idx = indices[idx];
+
+    // Handle padding
+    if (embedding_idx == int(params.padding_idx)) {
+        // Zero out embedding for padding index
+        for (uint i = 0; i < params.embedding_dim; i++) {
+            output_data[idx * params.embedding_dim + i] = float16_t(0.0);
+        }
+        return;
+    }
+
+    // Bounds check
+    if (embedding_idx < 0 || embedding_idx >= int(params.num_embeddings)) {
+        // Invalid index - zero out
+        for (uint i = 0; i < params.embedding_dim; i++) {
+            output_data[idx * params.embedding_dim + i] = float16_t(0.0);
+        }
+        return;
+    }
+
+    // Copy embedding
+    uint src_base = uint(embedding_idx) * params.embedding_dim;
+    uint dst_base = idx * params.embedding_dim;
+
+    for (uint i = 0; i < params.embedding_dim; i++) {
+        output_data[dst_base + i] = embeddings[src_base + i];
+    }
+}

@@ -15,6 +15,23 @@
 #include <numeric>
 #include <unordered_map>
 #include <cstring>
+#include <functional>
+#include <type_traits>
+
+// Hash specializations for Float16/BFloat16 so they work with std::unordered_map
+template<>
+struct std::hash<tenzor::Float16> {
+    size_t operator()(const tenzor::Float16& v) const noexcept {
+        return std::hash<float>{}(static_cast<float>(v));
+    }
+};
+
+template<>
+struct std::hash<tenzor::BFloat16> {
+    size_t operator()(const tenzor::BFloat16& v) const noexcept {
+        return std::hash<float>{}(static_cast<float>(v));
+    }
+};
 
 namespace tenzor {
 
@@ -296,7 +313,13 @@ auto unique(const Tensor& input,
         // Sort if requested
         if (sorted_output) {
             std::sort(value_info.begin(), value_info.end(),
-                [](const auto& a, const auto& b) { return a.first < b.first; });
+                [](const auto& a, const auto& b) {
+                    if constexpr (std::is_same_v<T, Float16> || std::is_same_v<T, BFloat16>) {
+                        return static_cast<float>(a.first) < static_cast<float>(b.first);
+                    } else {
+                        return a.first < b.first;
+                    }
+                });
         }
 
         // Create unique values tensor
@@ -349,8 +372,12 @@ auto unique(const Tensor& input,
             return process_unique(static_cast<int64_t*>(nullptr));
         case DType::Bool:
             return process_unique(static_cast<bool*>(nullptr));
+        case DType::Float16:
+            return process_unique(static_cast<Float16*>(nullptr));
+        case DType::BFloat16:
+            return process_unique(static_cast<BFloat16*>(nullptr));
         default:
-            throw std::runtime_error("unique only supports Float32, Float64, Int32, Int64, and Bool dtypes");
+            throw std::runtime_error("unique: unsupported dtype");
     }
 }
 

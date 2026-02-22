@@ -17,6 +17,31 @@
 
 namespace tenzor {
 
+// Validate that two shapes are broadcast-compatible
+static void validate_broadcast_shapes(const char* op_name,
+                                       std::span<const int64_t> a_shape,
+                                       std::span<const int64_t> b_shape) {
+    // Walk from trailing dimensions
+    auto a_it = a_shape.rbegin();
+    auto b_it = b_shape.rbegin();
+    for (; a_it != a_shape.rend() && b_it != b_shape.rend(); ++a_it, ++b_it) {
+        if (*a_it != *b_it && *a_it != 1 && *b_it != 1) {
+            std::string a_str = "[", b_str = "[";
+            for (size_t i = 0; i < a_shape.size(); ++i) {
+                if (i) a_str += ",";
+                a_str += std::to_string(a_shape[i]);
+            }
+            for (size_t i = 0; i < b_shape.size(); ++i) {
+                if (i) b_str += ",";
+                b_str += std::to_string(b_shape[i]);
+            }
+            throw std::invalid_argument(
+                std::string(op_name) + ": shapes " + a_str + "] and " + b_str +
+                "] are not broadcast-compatible");
+        }
+    }
+}
+
 // Math operation implementations - dispatched to backend kernels
 
 auto add(const Tensor& a, const Tensor& b) -> Tensor {
@@ -24,6 +49,13 @@ auto add(const Tensor& a, const Tensor& b) -> Tensor {
     if (!a.impl() || !b.impl()) {
         throw std::runtime_error("Cannot add uninitialized tensors");
     }
+    // Validate dtype compatibility
+    if (a.dtype() != b.dtype()) {
+        throw std::invalid_argument("add: dtype mismatch (" +
+            std::string(dtype_name(a.dtype())) + " vs " +
+            std::string(dtype_name(b.dtype())) + ")");
+    }
+    validate_broadcast_shapes("add", a.shape(), b.shape());
     // Ensure tensors are contiguous before element-wise operation
     // Permute and reshape can create non-contiguous views
     Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
@@ -33,6 +65,13 @@ auto add(const Tensor& a, const Tensor& b) -> Tensor {
 }
 
 auto sub(const Tensor& a, const Tensor& b) -> Tensor {
+    // Validate dtype compatibility
+    if (a.dtype() != b.dtype()) {
+        throw std::invalid_argument("sub: dtype mismatch (" +
+            std::string(dtype_name(a.dtype())) + " vs " +
+            std::string(dtype_name(b.dtype())) + ")");
+    }
+    validate_broadcast_shapes("sub", a.shape(), b.shape());
     // Ensure tensors are contiguous before element-wise operation
     Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
     Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
@@ -41,6 +80,13 @@ auto sub(const Tensor& a, const Tensor& b) -> Tensor {
 }
 
 auto mul(const Tensor& a, const Tensor& b) -> Tensor {
+    // Validate dtype compatibility
+    if (a.dtype() != b.dtype()) {
+        throw std::invalid_argument("mul: dtype mismatch (" +
+            std::string(dtype_name(a.dtype())) + " vs " +
+            std::string(dtype_name(b.dtype())) + ")");
+    }
+    validate_broadcast_shapes("mul", a.shape(), b.shape());
     // Ensure tensors are contiguous before element-wise operation
     Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
     Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
@@ -49,6 +95,13 @@ auto mul(const Tensor& a, const Tensor& b) -> Tensor {
 }
 
 auto div(const Tensor& a, const Tensor& b) -> Tensor {
+    // Validate dtype compatibility
+    if (a.dtype() != b.dtype()) {
+        throw std::invalid_argument("div: dtype mismatch (" +
+            std::string(dtype_name(a.dtype())) + " vs " +
+            std::string(dtype_name(b.dtype())) + ")");
+    }
+    validate_broadcast_shapes("div", a.shape(), b.shape());
     // Ensure tensors are contiguous before element-wise operation
     Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
     Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
@@ -57,6 +110,12 @@ auto div(const Tensor& a, const Tensor& b) -> Tensor {
 }
 
 auto matmul(const Tensor& a, const Tensor& b) -> Tensor {
+    // Validate dtype compatibility
+    if (a.dtype() != b.dtype()) {
+        throw std::invalid_argument("matmul: dtype mismatch (" +
+            std::string(dtype_name(a.dtype())) + " vs " +
+            std::string(dtype_name(b.dtype())) + ")");
+    }
     // Handle batched matrix multiplication (3D+ tensors)
     if (a.shape().size() >= 3 && b.shape().size() >= 3) {
         // Both are batched - use bmm
@@ -69,6 +128,12 @@ auto matmul(const Tensor& a, const Tensor& b) -> Tensor {
 }
 
 auto bmm(const Tensor& a, const Tensor& b) -> Tensor {
+    // Validate dtype compatibility
+    if (a.dtype() != b.dtype()) {
+        throw std::invalid_argument("bmm: dtype mismatch (" +
+            std::string(dtype_name(a.dtype())) + " vs " +
+            std::string(dtype_name(b.dtype())) + ")");
+    }
     // Validate inputs are 3D
     if (a.shape().size() != 3 || b.shape().size() != 3) {
         throw std::runtime_error(
@@ -98,15 +163,21 @@ auto bmm(const Tensor& a, const Tensor& b) -> Tensor {
 }
 
 auto dot(const Tensor& a, const Tensor& b) -> Tensor {
+    // Validate dtype compatibility
+    if (a.dtype() != b.dtype()) {
+        throw std::invalid_argument("dot: dtype mismatch (" +
+            std::string(dtype_name(a.dtype())) + " vs " +
+            std::string(dtype_name(b.dtype())) + ")");
+    }
     std::vector<Tensor> inputs = {a, b};
     return dispatch<OpId::Dot>(inputs)[0];
 }
 
 auto pow(const Tensor& input, float exponent) -> Tensor {
     OpAttributes attrs;
-    // Use scientific notation to preserve precision
+    // Use full float precision (9 significant digits for IEEE 754 float)
     char exp_buf[32];
-    snprintf(exp_buf, sizeof(exp_buf), "%.9e", exponent);
+    snprintf(exp_buf, sizeof(exp_buf), "%.9g", static_cast<double>(exponent));
     attrs["exponent"] = std::string(exp_buf);
     std::vector<Tensor> inputs = {input};
     return dispatch(OpId::Pow, inputs, attrs)[0];
@@ -173,33 +244,19 @@ auto sigmoid(const Tensor& input) -> Tensor {
 }
 
 auto minimum(const Tensor& a, const Tensor& b) -> Tensor {
-    // minimum(a, b) = (a + b - abs(a - b)) / 2
+    // minimum(a, b) = where(a <= b, a, b)
     Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
     Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
-    auto sum_ab = add(a_contiguous, b_contiguous);
-    auto diff_ab = sub(a_contiguous, b_contiguous);
-    auto abs_diff = abs(diff_ab);
-    auto numerator = sub(sum_ab, abs_diff);
-    // Divide by 2 using scalar multiplication
-    auto shape_span = numerator.shape();
-    std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
-    auto half = full(shape_vec, 0.5f, numerator.dtype(), numerator.device());
-    return mul(numerator, half);
+    auto mask = le(a_contiguous, b_contiguous);
+    return where(mask, a_contiguous, b_contiguous);
 }
 
 auto maximum(const Tensor& a, const Tensor& b) -> Tensor {
-    // maximum(a, b) = (a + b + abs(a - b)) / 2
+    // maximum(a, b) = where(a >= b, a, b)
     Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
     Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
-    auto sum_ab = add(a_contiguous, b_contiguous);
-    auto diff_ab = sub(a_contiguous, b_contiguous);
-    auto abs_diff = abs(diff_ab);
-    auto numerator = add(sum_ab, abs_diff);
-    // Divide by 2 using scalar multiplication
-    auto shape_span = numerator.shape();
-    std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
-    auto half = full(shape_vec, 0.5f, numerator.dtype(), numerator.device());
-    return mul(numerator, half);
+    auto mask = ge(a_contiguous, b_contiguous);
+    return where(mask, a_contiguous, b_contiguous);
 }
 
 auto floor(const Tensor& input) -> Tensor {
@@ -219,10 +276,9 @@ auto round(const Tensor& input) -> Tensor {
 
 auto clamp(const Tensor& input, float min, float max) -> Tensor {
     OpAttributes attrs;
-    // Use scientific notation to preserve precision
     char min_buf[32], max_buf[32];
-    snprintf(min_buf, sizeof(min_buf), "%.9e", min);
-    snprintf(max_buf, sizeof(max_buf), "%.9e", max);
+    snprintf(min_buf, sizeof(min_buf), "%.9g", static_cast<double>(min));
+    snprintf(max_buf, sizeof(max_buf), "%.9g", static_cast<double>(max));
     attrs["min"] = std::string(min_buf);
     attrs["max"] = std::string(max_buf);
     std::vector<Tensor> inputs = {input};
@@ -232,7 +288,7 @@ auto clamp(const Tensor& input, float min, float max) -> Tensor {
 auto clamp_min(const Tensor& input, float min) -> Tensor {
     OpAttributes attrs;
     char min_buf[32];
-    snprintf(min_buf, sizeof(min_buf), "%.9e", min);
+    snprintf(min_buf, sizeof(min_buf), "%.9g", static_cast<double>(min));
     attrs["min"] = std::string(min_buf);
     std::vector<Tensor> inputs = {input};
     return dispatch(OpId::ClampMin, inputs, attrs)[0];
@@ -241,7 +297,7 @@ auto clamp_min(const Tensor& input, float min) -> Tensor {
 auto clamp_max(const Tensor& input, float max) -> Tensor {
     OpAttributes attrs;
     char max_buf[32];
-    snprintf(max_buf, sizeof(max_buf), "%.9e", max);
+    snprintf(max_buf, sizeof(max_buf), "%.9g", static_cast<double>(max));
     attrs["max"] = std::string(max_buf);
     std::vector<Tensor> inputs = {input};
     return dispatch(OpId::ClampMax, inputs, attrs)[0];
@@ -321,84 +377,97 @@ auto ge(const Tensor& a, const Tensor& b) -> Tensor {
     return dispatch<OpId::Ge>(inputs)[0];
 }
 
+// Helper to validate in-place operations don't break autograd
+static void check_inplace_autograd(const Tensor& self) {
+    if (self.requires_grad()) {
+        throw std::runtime_error(
+            "In-place operation not allowed on a tensor that requires grad. "
+            "Use the non-inplace version instead.");
+    }
+}
+
 // In-place operations
 auto add_(Tensor& self, const Tensor& other) -> Tensor& {
+    check_inplace_autograd(self);
+    // Validate dtype compatibility
+    if (self.dtype() != other.dtype()) {
+        throw std::invalid_argument("add_: dtype mismatch (" +
+            std::string(dtype_name(self.dtype())) + " vs " +
+            std::string(dtype_name(other.dtype())) + ")");
+    }
     // Ensure self is contiguous for in-place modification
     if (!self.is_contiguous()) {
         throw std::runtime_error("In-place add requires contiguous tensor");
     }
 
     Tensor other_contiguous = other.is_contiguous() ? other : other.contiguous();
-    std::vector<Tensor> inputs = {self, other_contiguous};
+    std::array<Tensor, 1> others = {other_contiguous};
 
-    // Dispatch to backend in-place operation
-    auto result = dispatch<OpId::AddInplace>(inputs);
-
-    // Result should be same tensor modified in-place
-    // Copy result data back to self if backend created new tensor
-    if (result[0].data_ptr() != self.data_ptr()) {
-        self = result[0];
-    }
+    // Dispatch directly to inplace kernel (no const_cast needed)
+    dispatch_inplace(OpId::AddInplace, self, others);
 
     return self;
 }
 
 auto mul_(Tensor& self, const Tensor& other) -> Tensor& {
+    check_inplace_autograd(self);
+    // Validate dtype compatibility
+    if (self.dtype() != other.dtype()) {
+        throw std::invalid_argument("mul_: dtype mismatch (" +
+            std::string(dtype_name(self.dtype())) + " vs " +
+            std::string(dtype_name(other.dtype())) + ")");
+    }
     // Ensure self is contiguous for in-place modification
     if (!self.is_contiguous()) {
         throw std::runtime_error("In-place mul requires contiguous tensor");
     }
 
     Tensor other_contiguous = other.is_contiguous() ? other : other.contiguous();
-    std::vector<Tensor> inputs = {self, other_contiguous};
+    std::array<Tensor, 1> others = {other_contiguous};
 
-    // Dispatch to backend in-place operation
-    auto result = dispatch<OpId::MulInplace>(inputs);
-
-    // Result should be same tensor modified in-place
-    if (result[0].data_ptr() != self.data_ptr()) {
-        self = result[0];
-    }
+    dispatch_inplace(OpId::MulInplace, self, others);
 
     return self;
 }
 
 auto sub_(Tensor& self, const Tensor& other) -> Tensor& {
+    check_inplace_autograd(self);
+    // Validate dtype compatibility
+    if (self.dtype() != other.dtype()) {
+        throw std::invalid_argument("sub_: dtype mismatch (" +
+            std::string(dtype_name(self.dtype())) + " vs " +
+            std::string(dtype_name(other.dtype())) + ")");
+    }
     // Ensure self is contiguous for in-place modification
     if (!self.is_contiguous()) {
         throw std::runtime_error("In-place sub requires contiguous tensor");
     }
 
     Tensor other_contiguous = other.is_contiguous() ? other : other.contiguous();
-    std::vector<Tensor> inputs = {self, other_contiguous};
+    std::array<Tensor, 1> others = {other_contiguous};
 
-    // Dispatch to backend in-place operation
-    auto result = dispatch<OpId::SubInplace>(inputs);
-
-    // Result should be same tensor modified in-place
-    if (result[0].data_ptr() != self.data_ptr()) {
-        self = result[0];
-    }
+    dispatch_inplace(OpId::SubInplace, self, others);
 
     return self;
 }
 
 auto div_(Tensor& self, const Tensor& other) -> Tensor& {
+    check_inplace_autograd(self);
+    // Validate dtype compatibility
+    if (self.dtype() != other.dtype()) {
+        throw std::invalid_argument("div_: dtype mismatch (" +
+            std::string(dtype_name(self.dtype())) + " vs " +
+            std::string(dtype_name(other.dtype())) + ")");
+    }
     // Ensure self is contiguous for in-place modification
     if (!self.is_contiguous()) {
         throw std::runtime_error("In-place div requires contiguous tensor");
     }
 
     Tensor other_contiguous = other.is_contiguous() ? other : other.contiguous();
-    std::vector<Tensor> inputs = {self, other_contiguous};
+    std::array<Tensor, 1> others = {other_contiguous};
 
-    // Dispatch to backend in-place operation
-    auto result = dispatch<OpId::DivInplace>(inputs);
-
-    // Result should be same tensor modified in-place
-    if (result[0].data_ptr() != self.data_ptr()) {
-        self = result[0];
-    }
+    dispatch_inplace(OpId::DivInplace, self, others);
 
     return self;
 }

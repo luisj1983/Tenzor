@@ -10,6 +10,8 @@
 #pragma once
 
 #include "../module.hpp"
+#include <string>
+#include <stdexcept>
 
 namespace tenzor {
 namespace nn {
@@ -29,10 +31,41 @@ namespace nn {
  * - None: Use for custom per-element processing
  */
 enum class Reduction {
-    None,   ///< No reduction, return per-element loss
-    Mean,   ///< Average reduction (divide by number of elements)
-    Sum     ///< Sum reduction (sum all losses)
+    None,       ///< No reduction, return per-element loss
+    Mean,       ///< Average reduction (divide by number of elements)
+    Sum,        ///< Sum reduction (sum all losses)
+    BatchMean   ///< Sum over elements, divide by batch size (standard for KL divergence)
 };
+
+/**
+ * @brief Parse a reduction mode string to enum.
+ *
+ * Provides backward compatibility for loss classes that accept string arguments.
+ *
+ * @param s Reduction mode string ("none", "mean", "sum", "batchmean")
+ * @return Corresponding Reduction enum value
+ * @throws std::invalid_argument if string is not recognized
+ */
+inline auto parse_reduction(const std::string& s) -> Reduction {
+    if (s == "none") return Reduction::None;
+    if (s == "mean") return Reduction::Mean;
+    if (s == "sum") return Reduction::Sum;
+    if (s == "batchmean") return Reduction::BatchMean;
+    throw std::invalid_argument("Unknown reduction mode: " + s);
+}
+
+/**
+ * @brief Convert a Reduction enum to its string representation.
+ */
+inline auto reduction_to_string(Reduction r) -> std::string {
+    switch (r) {
+        case Reduction::None: return "none";
+        case Reduction::Mean: return "mean";
+        case Reduction::Sum: return "sum";
+        case Reduction::BatchMean: return "batchmean";
+    }
+    return "mean";
+}
 
 /**
  * @brief Mean Squared Error (MSE) Loss
@@ -491,6 +524,8 @@ auto l1_loss(const Variable& input, const Variable& target,
 class KLDivLoss {
 public:
     explicit KLDivLoss(const std::string& reduction = "mean", bool log_target = false);
+    explicit KLDivLoss(Reduction reduction, bool log_target = false)
+        : KLDivLoss(reduction_to_string(reduction), log_target) {}
 
     auto forward(const Variable& input, const Variable& target) -> Variable;
     auto operator()(const Variable& input, const Variable& target) -> Variable {
@@ -556,6 +591,8 @@ class FocalLoss {
 public:
     explicit FocalLoss(double alpha = 1.0, double gamma = 2.0,
                       const std::string& reduction = "mean");
+    FocalLoss(double alpha, double gamma, Reduction reduction)
+        : FocalLoss(alpha, gamma, reduction_to_string(reduction)) {}
 
     auto forward(const Variable& input, const Variable& target) -> Variable;
     auto operator()(const Variable& input, const Variable& target) -> Variable {
@@ -617,6 +654,8 @@ private:
 class DiceLoss {
 public:
     explicit DiceLoss(double smooth = 1.0, const std::string& reduction = "mean");
+    DiceLoss(double smooth, Reduction reduction)
+        : DiceLoss(smooth, reduction_to_string(reduction)) {}
 
     auto forward(const Variable& input, const Variable& target) -> Variable;
     auto operator()(const Variable& input, const Variable& target) -> Variable {
@@ -680,6 +719,8 @@ private:
 class HuberLoss {
 public:
     explicit HuberLoss(double delta = 1.0, const std::string& reduction = "mean");
+    HuberLoss(double delta, Reduction reduction)
+        : HuberLoss(delta, reduction_to_string(reduction)) {}
 
     auto forward(const Variable& input, const Variable& target) -> Variable;
     auto operator()(const Variable& input, const Variable& target) -> Variable {
@@ -716,6 +757,56 @@ auto dice_loss(const Variable& input, const Variable& target,
 auto huber_loss(const Variable& input, const Variable& target,
                double delta = 1.0,
                const std::string& reduction = "mean") -> Variable;
+
+/** @brief Functional Huber loss computation */
+
+/**
+ * @brief Connectionist Temporal Classification (CTC) Loss.
+ *
+ * Used for sequence-to-sequence problems where the alignment between
+ * input and target is unknown (e.g., speech recognition, OCR).
+ *
+ * The algorithm uses dynamic programming in log-space for numerical stability.
+ *
+ * Input:
+ * - log_probs: (T, N, C) - log probabilities of each class at each timestep
+ * - targets: (N, S) - target sequences (class indices, 0 = blank by default)
+ * - input_lengths: (N,) - length of each input sequence
+ * - target_lengths: (N,) - length of each target sequence
+ *
+ * @code
+ * CTCLoss ctc("mean", 0);
+ * auto loss = ctc(log_probs_var, targets, input_lengths, target_lengths);
+ * @endcode
+ */
+class CTCLoss {
+public:
+    /**
+     * @brief Construct CTC loss.
+     *
+     * @param reduction Reduction mode: "mean", "sum", or "none"
+     * @param blank Index of blank label (default: 0)
+     * @param zero_infinity If true, set infinite losses to zero (default: false)
+     */
+    explicit CTCLoss(const std::string& reduction = "mean",
+                     int64_t blank = 0,
+                     bool zero_infinity = false);
+    CTCLoss(Reduction reduction, int64_t blank = 0, bool zero_infinity = false)
+        : CTCLoss(reduction_to_string(reduction), blank, zero_infinity) {}
+
+    auto forward(const Variable& log_probs, const Tensor& targets,
+                 const Tensor& input_lengths, const Tensor& target_lengths) -> Variable;
+
+    auto operator()(const Variable& log_probs, const Tensor& targets,
+                   const Tensor& input_lengths, const Tensor& target_lengths) -> Variable {
+        return forward(log_probs, targets, input_lengths, target_lengths);
+    }
+
+private:
+    std::string reduction_;
+    int64_t blank_;
+    bool zero_infinity_;
+};
 
 /** @} */ // end of functional_advanced_losses group
 

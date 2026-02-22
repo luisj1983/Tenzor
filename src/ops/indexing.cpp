@@ -2,7 +2,8 @@
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/creation.hpp"
-#include <iostream>
+#include "tenzor/core/dtype.hpp"
+#include <cstdint>
 
 namespace tenzor {
 
@@ -82,15 +83,31 @@ auto nonzero(const Tensor& input) -> Tensor {
         return results[0];
     }
 
-    // CPU fallback
+    // CPU fallback — dtype-aware nonzero check
     auto input_cpu = input.to(Device::cpu());
-    const float* data = static_cast<const float*>(input_cpu.data_ptr());
     int64_t numel = input.numel();
+
+    // Lambda to check if element at flat_idx is nonzero, dispatched by dtype
+    auto is_nonzero = [&](int64_t flat_idx) -> bool {
+        switch (input_cpu.dtype()) {
+            case DType::Float32: return static_cast<const float*>(input_cpu.data_ptr())[flat_idx] != 0.0f;
+            case DType::Float64: return static_cast<const double*>(input_cpu.data_ptr())[flat_idx] != 0.0;
+            case DType::Int32:   return static_cast<const int32_t*>(input_cpu.data_ptr())[flat_idx] != 0;
+            case DType::Int64:   return static_cast<const int64_t*>(input_cpu.data_ptr())[flat_idx] != 0;
+            case DType::Int16:   return static_cast<const int16_t*>(input_cpu.data_ptr())[flat_idx] != 0;
+            case DType::Int8:    return static_cast<const int8_t*>(input_cpu.data_ptr())[flat_idx] != 0;
+            case DType::UInt8:   return static_cast<const uint8_t*>(input_cpu.data_ptr())[flat_idx] != 0;
+            case DType::Bool:    return static_cast<const bool*>(input_cpu.data_ptr())[flat_idx];
+            case DType::Float16: return static_cast<float>(static_cast<const Float16*>(input_cpu.data_ptr())[flat_idx]) != 0.0f;
+            case DType::BFloat16: return static_cast<float>(static_cast<const BFloat16*>(input_cpu.data_ptr())[flat_idx]) != 0.0f;
+            default: return static_cast<const float*>(input_cpu.data_ptr())[flat_idx] != 0.0f;
+        }
+    };
 
     std::vector<std::vector<int64_t>> indices;
 
     for (int64_t flat_idx = 0; flat_idx < numel; ++flat_idx) {
-        if (std::abs(data[flat_idx]) > 1e-10f) {
+        if (is_nonzero(flat_idx)) {
             std::vector<int64_t> multi_idx(ndim);
             int64_t remaining = flat_idx;
             for (int64_t d = ndim - 1; d >= 0; --d) {

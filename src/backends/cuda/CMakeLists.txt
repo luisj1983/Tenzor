@@ -42,6 +42,7 @@ set(CUDA_BACKEND_SOURCES
     cudnn_ops.cu
     cudnn_batchnorm.cu
     cudnn_sdpa.cpp
+    cuda_graph.cpp
 )
 
 # Create CUDA backend shared library
@@ -155,28 +156,65 @@ else()
     message(WARNING "CUDA Backend: Building without cuDNN. Conv2d, pooling, softmax, batchnorm, and layernorm will use custom CUDA kernels with reduced performance. Install cuDNN for optimal performance.")
 endif()
 
-# CUDA architecture flags
-# Detect GPU architecture or use common ones
+# CUDA architecture flags - auto-detect when possible
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    # Set common GPU architectures
-    # 70 = Volta (V100), 75 = Turing (RTX 20xx), 80 = Ampere (A100, RTX 30xx),
-    # 86 = Ampere (RTX 3090), 89 = Ada Lovelace (RTX 40xx), 90 = Hopper (H100),
-    # 120 ()= Blackwell (RTX 50xx)
-    set(CMAKE_CUDA_ARCHITECTURES "70;75;80;86;89;90;120")
-    message(STATUS "CUDA Backend: Building for architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+    # Priority 1: CMake 3.24+ native detection
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24")
+        set(CMAKE_CUDA_ARCHITECTURES "native")
+        message(STATUS "CUDA Backend: Auto-detecting native GPU architecture (CMake 3.24+)")
+    else()
+        # Priority 2: Detect via nvidia-smi
+        find_program(NVIDIA_SMI nvidia-smi)
+        if(NVIDIA_SMI)
+            execute_process(
+                COMMAND nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits
+                OUTPUT_VARIABLE GPU_COMPUTE_CAPS
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET
+                RESULT_VARIABLE NVIDIA_SMI_RESULT
+            )
+            if(NVIDIA_SMI_RESULT EQUAL 0 AND GPU_COMPUTE_CAPS)
+                # Convert "8.6\n7.5" to "86;75" (remove dots, deduplicate)
+                string(REPLACE "\n" ";" GPU_COMPUTE_LIST "${GPU_COMPUTE_CAPS}")
+                set(DETECTED_ARCHS "")
+                foreach(CAP ${GPU_COMPUTE_LIST})
+                    string(STRIP "${CAP}" CAP)
+                    string(REPLACE "." "" ARCH "${CAP}")
+                    list(APPEND DETECTED_ARCHS "${ARCH}")
+                endforeach()
+                list(REMOVE_DUPLICATES DETECTED_ARCHS)
+                set(CMAKE_CUDA_ARCHITECTURES "${DETECTED_ARCHS}")
+                message(STATUS "CUDA Backend: Detected GPU architecture(s) via nvidia-smi: ${CMAKE_CUDA_ARCHITECTURES}")
+            else()
+                # nvidia-smi failed (e.g., no GPU present at build time)
+                set(CMAKE_CUDA_ARCHITECTURES "70;75;80;86;89;90;120")
+                message(STATUS "CUDA Backend: nvidia-smi failed, using default architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+            endif()
+        else()
+            # Priority 3: Fallback to common architectures
+            set(CMAKE_CUDA_ARCHITECTURES "70;75;80;86;89;90;120")
+            message(STATUS "CUDA Backend: No detection available, using default architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+        endif()
+    endif()
 else()
     message(STATUS "CUDA Backend: Using user-specified architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 endif()
+
+# --use_fast_math trades precision for speed: enables __fdividef, __expf etc.
+# and flushes denormals to zero. Disable for stricter IEEE-754 compliance
+# in inference workloads where bit-exact results matter.
+option(TENZOR_CUDA_FAST_MATH "Enable --use_fast_math for CUDA kernels (faster but less precise)" ON)
 
 # CUDA compiler options
 target_compile_options(tenzor_backend_cuda PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:
         --expt-relaxed-constexpr
         --expt-extended-lambda
-        --use_fast_math
+        $<$<BOOL:${TENZOR_CUDA_FAST_MATH}>:--use_fast_math>
         --ftz=false
         --generate-line-info
     >
+    $<$<COMPILE_LANGUAGE:CXX>:-Wno-unused-parameter>
 )
 
 # Set compute capability definitions

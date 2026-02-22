@@ -894,8 +894,11 @@ TEST_P(PruningMultiDTypeTest, PrunedModelGradients) {
     auto input = create_random_tensor({8, 64});
     auto output = linear->forward(Variable(input, true));
 
+    // backward() on non-scalar output requires an explicit gradient
+    auto grad = ones_like(output.tensor());
+
     EXPECT_NO_THROW({
-        output.backward();
+        output.backward(grad);
     });
 }
 

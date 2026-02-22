@@ -1,0 +1,20 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Arange for Float64: generate sequential values [start, start+step, start+2*step, ...]
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Output { double output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+    uint _pad;           // Padding to align double to 8 bytes
+    double start;
+    double step;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_elements) return;
+    output_data[idx] = params.start + double(idx) * params.step;
+}

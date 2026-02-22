@@ -13,8 +13,13 @@ auto Dispatcher::dispatch(const std::string& op_name,
         throw DeviceException("All input tensors must be on the same device");
     }
 
-    // Dispatch via registry - handles device-to-kernel mapping automatically
-    return operation_registry().dispatch(op_name, inputs, attrs);
+    // Route to the appropriate backend's dispatch method directly
+    auto device_type = inputs.empty() ? Device::Type::CPU : inputs[0].device().type;
+    auto* backend = backend_registry().get_backend(device_type);
+    if (!backend) {
+        throw std::runtime_error("No backend registered for device type");
+    }
+    return backend->dispatch(op_name, inputs, attrs);
 }
 
 auto Dispatcher::get_backend(std::span<const Tensor> tensors) -> Backend* {

@@ -503,36 +503,31 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_inplace_kernel(OpId::MulInplace, cuda::mul_inplace_dispatch);
     table.register_inplace_kernel(OpId::DivInplace, cuda::div_inplace_dispatch);
 
-    // Inplace activation operations
-    table.register_kernel(OpId::ReLUInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        Tensor input = inputs[0];  // Copy to allow modification
-        cuda::relu_inplace_kernel(input, get_cuda_stream(attrs));
-        return std::vector<Tensor>{input};
+    // Inplace activation operations (using InplaceKernelFn - no tensor copy)
+    table.register_inplace_kernel(OpId::ReLUInplace, [](Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs) -> Tensor& {
+        cuda::relu_inplace_kernel(target, get_cuda_stream(attrs));
+        return target;
     });
 
-    table.register_kernel(OpId::SigmoidInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        Tensor input = inputs[0];
-        cuda::sigmoid_inplace_kernel(input, get_cuda_stream(attrs));
-        return std::vector<Tensor>{input};
+    table.register_inplace_kernel(OpId::SigmoidInplace, [](Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs) -> Tensor& {
+        cuda::sigmoid_inplace_kernel(target, get_cuda_stream(attrs));
+        return target;
     });
 
-    table.register_kernel(OpId::TanhInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        Tensor input = inputs[0];
-        cuda::tanh_inplace_kernel(input, get_cuda_stream(attrs));
-        return std::vector<Tensor>{input};
+    table.register_inplace_kernel(OpId::TanhInplace, [](Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs) -> Tensor& {
+        cuda::tanh_inplace_kernel(target, get_cuda_stream(attrs));
+        return target;
     });
 
-    table.register_kernel(OpId::LeakyReLUInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_inplace_kernel(OpId::LeakyReLUInplace, [](Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs) -> Tensor& {
         float alpha = parse_attr<float>(attrs, "alpha", 0.01f);
-        Tensor input = inputs[0];
-        cuda::leaky_relu_inplace_kernel(input, alpha, get_cuda_stream(attrs));
-        return std::vector<Tensor>{input};
+        cuda::leaky_relu_inplace_kernel(target, alpha, get_cuda_stream(attrs));
+        return target;
     });
 
-    table.register_kernel(OpId::GeluInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        Tensor input = inputs[0];
-        cuda::gelu_inplace_kernel(input, get_cuda_stream(attrs));
-        return std::vector<Tensor>{input};
+    table.register_inplace_kernel(OpId::GeluInplace, [](Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs) -> Tensor& {
+        cuda::gelu_inplace_kernel(target, get_cuda_stream(attrs));
+        return target;
     });
 
     // =========================================================================
@@ -1080,23 +1075,42 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // Fused Adam Optimizer Step (single kernel launch for all Adam operations)
     // =========================================================================
     table.register_kernel(OpId::FusedAdamStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // inputs: [param, grad, exp_avg, exp_avg_sq, max_exp_avg_sq (optional)]
-        // attrs: lr, beta1, beta2, eps, weight_decay, step, decoupled, amsgrad
-        double lr = parse_attr<double>(attrs, "lr", 0.001);
-        double beta1 = parse_attr<double>(attrs, "beta1", 0.9);
-        double beta2 = parse_attr<double>(attrs, "beta2", 0.999);
-        double eps = parse_attr<double>(attrs, "eps", 1e-8);
-        double weight_decay = parse_attr<double>(attrs, "weight_decay", 0.0);
-        int64_t step = parse_attr<int64_t>(attrs, "step", 1);
-        bool decoupled = parse_attr<bool>(attrs, "decoupled", false);
-        bool amsgrad = parse_attr<bool>(attrs, "amsgrad", false);
+        // inputs: [param, grad, exp_avg, exp_avg_sq, packed_params, max_exp_avg_sq (optional)]
+        // packed_params is a CPU Float64 tensor: [lr, beta1, beta2, eps, weight_decay, step, decoupled, amsgrad]
+        double lr, beta1, beta2, eps, weight_decay;
+        int64_t step;
+        bool decoupled, amsgrad;
+
+        if (inputs.size() >= 5 && inputs[4].dtype() == DType::Float64 && inputs[4].numel() == 8) {
+            // New packed-tensor path: read typed values directly (no string parsing)
+            const double* p = inputs[4].data<double>();
+            lr = p[0];
+            beta1 = p[1];
+            beta2 = p[2];
+            eps = p[3];
+            weight_decay = p[4];
+            step = static_cast<int64_t>(p[5]);
+            decoupled = p[6] != 0.0;
+            amsgrad = p[7] != 0.0;
+        } else {
+            // Legacy string-attribute path (backwards compatibility)
+            lr = parse_attr<double>(attrs, "lr", 0.001);
+            beta1 = parse_attr<double>(attrs, "beta1", 0.9);
+            beta2 = parse_attr<double>(attrs, "beta2", 0.999);
+            eps = parse_attr<double>(attrs, "eps", 1e-8);
+            weight_decay = parse_attr<double>(attrs, "weight_decay", 0.0);
+            step = parse_attr<int64_t>(attrs, "step", 1);
+            decoupled = parse_attr<bool>(attrs, "decoupled", false);
+            amsgrad = parse_attr<bool>(attrs, "amsgrad", false);
+        }
 
         // Cast away const for in-place modification
         Tensor& param = const_cast<Tensor&>(inputs[0]);
         Tensor& exp_avg = const_cast<Tensor&>(inputs[2]);
         Tensor& exp_avg_sq = const_cast<Tensor&>(inputs[3]);
-        Tensor* max_exp_avg_sq = (amsgrad && inputs.size() > 4)
-            ? &const_cast<Tensor&>(inputs[4]) : nullptr;
+        // max_exp_avg_sq follows packed_params tensor (index 5) if amsgrad
+        Tensor* max_exp_avg_sq = (amsgrad && inputs.size() > 5)
+            ? &const_cast<Tensor&>(inputs[5]) : nullptr;
 
         cuda::fused_adam_step_cuda(
             param, inputs[1], exp_avg, exp_avg_sq,
@@ -1462,8 +1476,9 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return cuda::adaptive_avg_pool2d_forward(inputs[0], output_h, output_w, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::AdaptiveAvgPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t H_in = parse_attr<int64_t>(attrs, "input_h", 0);
-        int64_t W_in = parse_attr<int64_t>(attrs, "input_w", 0);
+        // Autograd sends "H_in" and "W_in"; also support "input_h"/"input_w" for compatibility
+        int64_t H_in = parse_attr<int64_t>(attrs, "H_in", parse_attr<int64_t>(attrs, "input_h", 0));
+        int64_t W_in = parse_attr<int64_t>(attrs, "W_in", parse_attr<int64_t>(attrs, "input_w", 0));
         return cuda::adaptive_avg_pool2d_backward(inputs[0], H_in, W_in, get_cuda_stream(attrs));
     });
     table.register_kernel(OpId::AdaptiveMaxPool2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {

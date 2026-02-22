@@ -47,6 +47,10 @@ namespace tenzor {
  * engine.execute(loss, std::nullopt);
  * @endcode
  *
+ * @note Higher-order gradients (e.g., second-order derivatives) are not
+ * currently supported. Saved tensors in the backward pass are raw Tensors
+ * (not Variables), so gradients cannot flow through the backward computation.
+ *
  * @see Variable::backward() for user-facing API
  * @see Function for gradient function interface
  */

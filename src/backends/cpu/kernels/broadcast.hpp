@@ -2,6 +2,7 @@
 
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/shape.hpp"
+#include <type_traits>
 #include <vector>
 #include <algorithm>
 #include <stdexcept>
@@ -98,7 +99,53 @@ inline std::vector<int64_t> compute_broadcast_strides(std::span<const int64_t> s
     return strides;
 }
 
+// SIMD fast path for scalar-broadcast: one operand is a single element,
+// the other is contiguous. Avoids per-element index computation.
+template<typename Op>
+bool try_scalar_broadcast_f32(const float* a_data, const float* b_data, float* c_data,
+                               std::span<const int64_t> shape_a,
+                               std::span<const int64_t> shape_b,
+                               int64_t total_elements, Op op) {
+    // Check if b is a scalar (size-1 tensor) and a is the full tensor
+    auto is_scalar = [](std::span<const int64_t> shape) {
+        int64_t numel = 1;
+        for (auto d : shape) numel *= d;
+        return numel == 1;
+    };
+
+    const float* vec_data = nullptr;
+    float scalar_val = 0.0f;
+    bool scalar_is_rhs = false;
+
+    if (is_scalar(shape_b)) {
+        vec_data = a_data;
+        scalar_val = b_data[0];
+        scalar_is_rhs = true;
+    } else if (is_scalar(shape_a)) {
+        vec_data = b_data;
+        scalar_val = a_data[0];
+        scalar_is_rhs = false;
+    } else {
+        return false;  // Neither operand is scalar
+    }
+
+    // Simple loop — the compiler auto-vectorizes for basic ops (add, mul, etc.)
+    // and we avoid the expensive per-element index computation entirely.
+    if (scalar_is_rhs) {
+        for (int64_t i = 0; i < total_elements; ++i) {
+            c_data[i] = op(vec_data[i], scalar_val);
+        }
+    } else {
+        for (int64_t i = 0; i < total_elements; ++i) {
+            c_data[i] = op(scalar_val, vec_data[i]);
+        }
+    }
+    return true;
+}
+
 // Generic broadcast operation template
+// Precondition: c_data must point to contiguous memory of size product(output_shape).
+// This is always satisfied because the dispatcher allocates a fresh contiguous output tensor.
 template<typename T, typename Op>
 void broadcast_op(const T* a_data, const T* b_data, T* c_data,
                   std::span<const int64_t> shape_a,
@@ -106,31 +153,38 @@ void broadcast_op(const T* a_data, const T* b_data, T* c_data,
                   std::span<const int64_t> output_shape,
                   Op op) {
 
-    auto strides_a = compute_broadcast_strides(shape_a, output_shape);
-    auto strides_b = compute_broadcast_strides(shape_b, output_shape);
-
     int64_t total_elements = 1;
     for (auto dim : output_shape) {
         total_elements *= dim;
     }
 
-    // Iterate over all output elements
-    for (int64_t out_idx = 0; out_idx < total_elements; ++out_idx) {
-        // Convert flat index to multi-dimensional index
-        int64_t idx_a = 0;
-        int64_t idx_b = 0;
-        int64_t tmp = out_idx;
-
-        for (size_t i = 0; i < output_shape.size(); ++i) {
-            int64_t coord = tmp % output_shape[output_shape.size() - 1 - i];
-            tmp /= output_shape[output_shape.size() - 1 - i];
-
-            int64_t stride_idx = output_shape.size() - 1 - i;
-            idx_a += coord * strides_a[stride_idx];
-            idx_b += coord * strides_b[stride_idx];
+    // Fast path: scalar broadcast with contiguous memory (avoids index computation)
+    if constexpr (std::is_same_v<T, float>) {
+        if (try_scalar_broadcast_f32(a_data, b_data, c_data, shape_a, shape_b, total_elements, op)) {
+            return;
         }
+    }
 
+    auto strides_a = compute_broadcast_strides(shape_a, output_shape);
+    auto strides_b = compute_broadcast_strides(shape_b, output_shape);
+
+    // Use carry-based coordinate tracking instead of modulo/divide per element
+    const size_t ndim = output_shape.size();
+    std::vector<int64_t> coords(ndim, 0);
+
+    for (int64_t out_idx = 0; out_idx < total_elements; ++out_idx) {
+        int64_t idx_a = 0, idx_b = 0;
+        for (size_t d = 0; d < ndim; ++d) {
+            idx_a += coords[d] * strides_a[d];
+            idx_b += coords[d] * strides_b[d];
+        }
         c_data[out_idx] = op(a_data[idx_a], b_data[idx_b]);
+
+        // Increment coordinates with carry (replaces modulo/divide)
+        for (int d = static_cast<int>(ndim) - 1; d >= 0; --d) {
+            if (++coords[d] < output_shape[d]) break;
+            coords[d] = 0;
+        }
     }
 }
 
@@ -150,23 +204,21 @@ void broadcast_op(const TIn* a_data, const TIn* b_data, TOut* c_data,
         total_elements *= dim;
     }
 
-    // Iterate over all output elements
+    const size_t ndim = output_shape.size();
+    std::vector<int64_t> coords(ndim, 0);
+
     for (int64_t out_idx = 0; out_idx < total_elements; ++out_idx) {
-        // Convert flat index to multi-dimensional index
-        int64_t idx_a = 0;
-        int64_t idx_b = 0;
-        int64_t tmp = out_idx;
-
-        for (size_t i = 0; i < output_shape.size(); ++i) {
-            int64_t coord = tmp % output_shape[output_shape.size() - 1 - i];
-            tmp /= output_shape[output_shape.size() - 1 - i];
-
-            int64_t stride_idx = output_shape.size() - 1 - i;
-            idx_a += coord * strides_a[stride_idx];
-            idx_b += coord * strides_b[stride_idx];
+        int64_t idx_a = 0, idx_b = 0;
+        for (size_t d = 0; d < ndim; ++d) {
+            idx_a += coords[d] * strides_a[d];
+            idx_b += coords[d] * strides_b[d];
         }
-
         c_data[out_idx] = op(a_data[idx_a], b_data[idx_b]);
+
+        for (int d = static_cast<int>(ndim) - 1; d >= 0; --d) {
+            if (++coords[d] < output_shape[d]) break;
+            coords[d] = 0;
+        }
     }
 }
 
@@ -187,21 +239,20 @@ void broadcast_op_inplace(T* a_data, const T* b_data,
         total_elements *= dim;
     }
 
-    // Iterate over all elements of a
+    const size_t ndim = shape_a.size();
+    std::vector<int64_t> coords(ndim, 0);
+
     for (int64_t out_idx = 0; out_idx < total_elements; ++out_idx) {
-        // Convert flat index to multi-dimensional index for b
         int64_t idx_b = 0;
-        int64_t tmp = out_idx;
-
-        for (size_t i = 0; i < shape_a.size(); ++i) {
-            int64_t coord = tmp % shape_a[shape_a.size() - 1 - i];
-            tmp /= shape_a[shape_a.size() - 1 - i];
-
-            int64_t stride_idx = shape_a.size() - 1 - i;
-            idx_b += coord * strides_b[stride_idx];
+        for (size_t d = 0; d < ndim; ++d) {
+            idx_b += coords[d] * strides_b[d];
         }
-
         a_data[out_idx] = op(a_data[out_idx], b_data[idx_b]);
+
+        for (int d = static_cast<int>(ndim) - 1; d >= 0; --d) {
+            if (++coords[d] < shape_a[d]) break;
+            coords[d] = 0;
+        }
     }
 }
 

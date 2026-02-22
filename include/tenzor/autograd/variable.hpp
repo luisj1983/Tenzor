@@ -89,6 +89,10 @@ struct VariableImpl {
  * - Leaf/non-leaf variable distinction
  * - Gradient accumulation for leaf variables
  *
+ * Thread safety: Variable is NOT thread-safe. Forward and backward passes
+ * that share Variables must run on the same thread. Use separate Variable
+ * instances per thread for concurrent computation.
+ *
  * @code
  * // Create variables that require gradients
  * Variable x(Tensor({2, 3}, DType::Float32, Device::cpu()), true);
@@ -444,6 +448,10 @@ public:
      */
     auto operator*(float scalar) const -> Variable;
     auto operator*(double scalar) const -> Variable;
+
+    /** @brief Subtract scalar from variable. */
+    auto operator-(float scalar) const -> Variable;
+    auto operator-(double scalar) const -> Variable;
 
     /** @brief Divide variable by scalar. */
     auto operator/(float scalar) const -> Variable;

@@ -6,6 +6,7 @@
 #include <vector>
 #include <algorithm>
 #include <cstring>
+#include <limits>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -124,6 +125,10 @@ inline BFloat16& operator/=(BFloat16& a, const BFloat16& b) {
 // Calculate output size for convolution
 inline int64_t calculate_output_size(int64_t input_size, int64_t kernel_size,
                                      int64_t stride, int64_t padding, int64_t dilation) {
+    if (dilation > 0 && kernel_size > 1 &&
+        dilation > std::numeric_limits<int64_t>::max() / (kernel_size - 1)) {
+        throw std::invalid_argument("Conv2d: dilation * (kernel_size - 1) would overflow");
+    }
     return (input_size + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
 }
 
@@ -385,6 +390,7 @@ struct Conv2dCacheKey {
     int64_t out_channels, in_channels_per_group, kernel_h, kernel_w;
     int64_t stride, padding, dilation, groups;
     bool has_bias;
+    DType dtype;
     // Note: weight_ptr removed from key - weights may change in-place (optimizer updates)
     // Weight data is refreshed on every cache hit via set_data_handle + reorder.
 
@@ -396,7 +402,7 @@ struct Conv2dCacheKey {
                kernel_h == other.kernel_h && kernel_w == other.kernel_w &&
                stride == other.stride && padding == other.padding &&
                dilation == other.dilation && groups == other.groups &&
-               has_bias == other.has_bias;
+               has_bias == other.has_bias && dtype == other.dtype;
     }
 };
 
@@ -418,6 +424,7 @@ struct Conv2dCacheKeyHash {
         hash_combine(std::hash<int64_t>{}(k.dilation));
         hash_combine(std::hash<int64_t>{}(k.groups));
         hash_combine(std::hash<bool>{}(k.has_bias));
+        hash_combine(std::hash<int>{}(static_cast<int>(k.dtype)));
         return h;
     }
 };
@@ -438,6 +445,7 @@ struct Conv2dCachedPrimitive {
     dnnl::memory src_reorder_mem;       // Scratch for source reorder (if needed)
     dnnl::memory dst_reorder_mem;       // Scratch for destination reorder (if needed)
     bool scratch_initialized{false};    // Whether scratch buffers are allocated
+    const void* cached_weight_ptr{nullptr}; // Last weight data pointer (skip reorder if unchanged)
 };
 
 // Thread-local cache with LRU eviction (max 32 entries per thread)
@@ -533,7 +541,7 @@ static bool conv2d_forward_onednn(
             batch, in_channels, height, width,
             out_channels, in_channels_per_group, kernel_h, kernel_w,
             stride, padding, dilation, groups,
-            bias != nullptr
+            bias != nullptr, input.dtype()
         };
 
         // Try to get cached primitive
@@ -631,8 +639,8 @@ static bool conv2d_forward_onednn(
             g_conv2d_cache.put(cache_key, cached);
         }
 
-        // Always refresh weight data - weights may have been updated by optimizer
-        {
+        // Refresh weight data only if the data pointer changed (optimizer updated weights)
+        if (weight.data_ptr() != cached->cached_weight_ptr) {
             auto weights_mem_user = dnnl::memory(cached->weights_md_user, engine, const_cast<float*>(weight.data<float>()));
             if (cached->need_weights_reorder) {
                 dnnl::reorder(weights_mem_user, cached->weights_mem).execute(stream, weights_mem_user, cached->weights_mem);
@@ -640,6 +648,7 @@ static bool conv2d_forward_onednn(
             } else {
                 cached->weights_mem.set_data_handle(const_cast<float*>(weight.data<float>()));
             }
+            cached->cached_weight_ptr = weight.data_ptr();
         }
 
         // Execute convolution using cached primitive
@@ -782,6 +791,186 @@ void conv2d_forward_impl(
         // Add bias if present
         if (bias) {
             const T* bias_data = bias->data<T>();
+            #pragma omp parallel for collapse(3) if(batch * out_channels * spatial > 10000)
+            for (int64_t b = 0; b < batch; ++b) {
+                for (int64_t c = 0; c < out_channels; ++c) {
+                    for (int64_t s = 0; s < spatial; ++s) {
+                        output_data[b * (out_channels * spatial) + c * spatial + s] += bias_data[c];
+                    }
+                }
+            }
+        }
+
+        return;
+    }
+
+    // =========================================================================
+    // Winograd F(2x2, 3x3) fast path for 3x3 convolutions
+    // Reduces multiplications from 9 to 4 per 2x2 output tile
+    // =========================================================================
+    if (kernel_h == 3 && kernel_w == 3 && stride == 1 && dilation == 1 && groups == 1) {
+        const T* input_data = input.data<T>();
+        const T* weight_data = weight.data<T>();
+        T* output_data = output.data<T>();
+
+        // Winograd F(2,3): transforms 4x4 input tile -> 4x4, 3x3 filter -> 4x4
+        // Element-wise multiply in transform domain, then inverse transform to 2x2 output
+
+        // Number of 2x2 output tiles
+        int64_t tile_h = (out_h + 1) / 2;
+        int64_t tile_w = (out_w + 1) / 2;
+        int64_t num_tiles = tile_h * tile_w;
+
+        // Pre-transform all filters: G * g * G^T for each (oc, ic) pair
+        // G is the 4x3 filter transform matrix for F(2,3):
+        // G = [[1,    0,    0   ],
+        //      [0.5,  0.5,  0.5 ],
+        //      [0.5, -0.5,  0.5 ],
+        //      [0,    0,    1   ]]
+        int64_t C_in = in_channels;
+        int64_t C_out = out_channels;
+        std::vector<T> U(C_out * C_in * 16);  // 4x4 per filter
+
+        #pragma omp parallel for collapse(2) if(C_out * C_in > 64)
+        for (int64_t oc = 0; oc < C_out; ++oc) {
+            for (int64_t ic = 0; ic < C_in; ++ic) {
+                const T* g_ptr = weight_data + (oc * C_in + ic) * 9;
+                T* u_ptr = U.data() + (oc * C_in + ic) * 16;
+
+                // g is 3x3 filter: g[r][s]
+                // Compute temp = G * g  (4x3 * 3x3 = 4x3)
+                T temp[4][3];
+                for (int s = 0; s < 3; ++s) {
+                    temp[0][s] = g_ptr[0 * 3 + s];
+                    temp[1][s] = static_cast<T>(0.5) * (g_ptr[0 * 3 + s] + g_ptr[1 * 3 + s] + g_ptr[2 * 3 + s]);
+                    temp[2][s] = static_cast<T>(0.5) * (g_ptr[0 * 3 + s] - g_ptr[1 * 3 + s] + g_ptr[2 * 3 + s]);
+                    temp[3][s] = g_ptr[2 * 3 + s];
+                }
+                // Compute U = temp * G^T  (4x3 * 3x4 = 4x4)
+                for (int r = 0; r < 4; ++r) {
+                    u_ptr[r * 4 + 0] = temp[r][0];
+                    u_ptr[r * 4 + 1] = static_cast<T>(0.5) * (temp[r][0] + temp[r][1] + temp[r][2]);
+                    u_ptr[r * 4 + 2] = static_cast<T>(0.5) * (temp[r][0] - temp[r][1] + temp[r][2]);
+                    u_ptr[r * 4 + 3] = temp[r][2];
+                }
+            }
+        }
+
+        // Padded input height/width for tile extraction
+        int64_t padded_h = height + 2 * padding;
+        int64_t padded_w = width + 2 * padding;
+
+        // Process each batch
+        #pragma omp parallel if(batch * num_tiles > 64)
+        {
+            // Per-thread buffers
+            std::vector<T> V(C_in * 16);   // Transformed input tiles for one tile position
+            std::vector<T> M(C_out * 16);  // Element-wise product result
+
+            #pragma omp for
+            for (int64_t b = 0; b < batch; ++b) {
+                for (int64_t th = 0; th < tile_h; ++th) {
+                    for (int64_t tw = 0; tw < tile_w; ++tw) {
+                        // Extract and transform 4x4 input tile for each input channel
+                        // B^T * d * B where B^T is the 4x4 input transform:
+                        // B^T = [[1,  0, -1,  0],
+                        //        [0,  1,  1,  0],
+                        //        [0, -1,  1,  0],
+                        //        [0,  1,  0, -1]]
+                        int64_t tile_start_h = th * 2 - padding;
+                        int64_t tile_start_w = tw * 2 - padding;
+
+                        for (int64_t ic = 0; ic < C_in; ++ic) {
+                            // Load 4x4 tile from input (with zero-padding for out-of-bounds)
+                            T d[4][4];
+                            for (int r = 0; r < 4; ++r) {
+                                for (int s = 0; s < 4; ++s) {
+                                    int64_t ih = tile_start_h + r;
+                                    int64_t iw = tile_start_w + s;
+                                    if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
+                                        d[r][s] = input_data[b * (C_in * height * width) +
+                                                            ic * (height * width) +
+                                                            ih * width + iw];
+                                    } else {
+                                        d[r][s] = T{};
+                                    }
+                                }
+                            }
+
+                            // Compute B^T * d (4x4 * 4x4 = 4x4)
+                            T temp[4][4];
+                            for (int s = 0; s < 4; ++s) {
+                                temp[0][s] = d[0][s] - d[2][s];
+                                temp[1][s] = d[1][s] + d[2][s];
+                                temp[2][s] = -d[1][s] + d[2][s];
+                                temp[3][s] = d[1][s] - d[3][s];
+                            }
+                            // Compute V = temp * B (4x4 * 4x4 = 4x4)
+                            T* v_ptr = V.data() + ic * 16;
+                            for (int r = 0; r < 4; ++r) {
+                                v_ptr[r * 4 + 0] = temp[r][0] - temp[r][2];
+                                v_ptr[r * 4 + 1] = temp[r][1] + temp[r][2];
+                                v_ptr[r * 4 + 2] = -temp[r][1] + temp[r][2];
+                                v_ptr[r * 4 + 3] = temp[r][1] - temp[r][3];
+                            }
+                        }
+
+                        // Element-wise multiply and accumulate: M[oc][i] = sum_ic U[oc][ic][i] * V[ic][i]
+                        for (int64_t oc = 0; oc < C_out; ++oc) {
+                            T* m_ptr = M.data() + oc * 16;
+                            for (int i = 0; i < 16; ++i) {
+                                m_ptr[i] = T{};
+                            }
+                            for (int64_t ic = 0; ic < C_in; ++ic) {
+                                const T* u_ptr = U.data() + (oc * C_in + ic) * 16;
+                                const T* v_ptr = V.data() + ic * 16;
+                                for (int i = 0; i < 16; ++i) {
+                                    m_ptr[i] += u_ptr[i] * v_ptr[i];
+                                }
+                            }
+                        }
+
+                        // Inverse transform: A^T * M * A  -> 2x2 output tile
+                        // A^T = [[1, 1,  1, 0],
+                        //        [0, 1, -1, -1]]
+                        for (int64_t oc = 0; oc < C_out; ++oc) {
+                            T* m_ptr = M.data() + oc * 16;
+
+                            // Compute A^T * M (2x4 * 4x4 = 2x4)
+                            T temp2[2][4];
+                            for (int s = 0; s < 4; ++s) {
+                                temp2[0][s] = m_ptr[0 * 4 + s] + m_ptr[1 * 4 + s] + m_ptr[2 * 4 + s];
+                                temp2[1][s] = m_ptr[1 * 4 + s] - m_ptr[2 * 4 + s] - m_ptr[3 * 4 + s];
+                            }
+                            // Compute output = temp2 * A (2x4 * 4x2 = 2x2)
+                            T out[2][2];
+                            out[0][0] = temp2[0][0] + temp2[0][1] + temp2[0][2];
+                            out[0][1] = temp2[0][1] - temp2[0][2] - temp2[0][3];
+                            out[1][0] = temp2[1][0] + temp2[1][1] + temp2[1][2];
+                            out[1][1] = temp2[1][1] - temp2[1][2] - temp2[1][3];
+
+                            // Write output tile (handle boundary for odd output sizes)
+                            for (int r = 0; r < 2; ++r) {
+                                for (int s = 0; s < 2; ++s) {
+                                    int64_t oh = th * 2 + r;
+                                    int64_t ow = tw * 2 + s;
+                                    if (oh < out_h && ow < out_w) {
+                                        output_data[b * (C_out * out_h * out_w) +
+                                                   oc * (out_h * out_w) +
+                                                   oh * out_w + ow] = out[r][s];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Add bias if present
+        if (bias) {
+            const T* bias_data = bias->data<T>();
+            int64_t spatial = out_h * out_w;
             #pragma omp parallel for collapse(3) if(batch * out_channels * spatial > 10000)
             for (int64_t b = 0; b < batch; ++b) {
                 for (int64_t c = 0; c < out_channels; ++c) {

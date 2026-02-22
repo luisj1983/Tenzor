@@ -1,0 +1,69 @@
+#include "tenzor/backend/cuda_graph.hpp"
+#include "cuda_graph.hpp"
+#include <cuda_runtime.h>
+#include <stdexcept>
+#include <string>
+
+namespace tenzor {
+
+/**
+ * @brief Concrete CUDA Graph implementation using cudaGraph_t.
+ */
+class CUDAGraphImpl : public CUDAGraph {
+public:
+    explicit CUDAGraphImpl(int32_t device_id) : device_id_(device_id) {
+        cudaSetDevice(device_id_);
+        auto err = cudaStreamCreate(&stream_);
+        if (err != cudaSuccess) {
+            throw std::runtime_error(
+                std::string("CUDAGraph: failed to create stream: ") +
+                cudaGetErrorString(err));
+        }
+    }
+
+    ~CUDAGraphImpl() override {
+        if (capture_.is_capturing()) {
+            // Abort capture to avoid leaving stream in bad state
+            cudaGraph_t dummy = nullptr;
+            cudaStreamEndCapture(stream_, &dummy);
+            if (dummy) cudaGraphDestroy(dummy);
+        }
+        if (stream_) {
+            cudaStreamDestroy(stream_);
+        }
+    }
+
+    void begin_capture() override {
+        cudaSetDevice(device_id_);
+        capture_.begin_capture(stream_);
+    }
+
+    void end_capture() override {
+        capture_.end_capture();
+    }
+
+    void replay() override {
+        cudaSetDevice(device_id_);
+        capture_.replay(stream_);
+    }
+
+    bool is_ready() const override {
+        return capture_.is_ready();
+    }
+
+private:
+    int32_t device_id_;
+    cudaStream_t stream_ = nullptr;
+    cuda::CUDAGraphCapture capture_;
+};
+
+auto CUDAGraph::create(int32_t device_id) -> std::unique_ptr<CUDAGraph> {
+    int device_count = 0;
+    cudaGetDeviceCount(&device_count);
+    if (device_count == 0 || device_id >= device_count) {
+        return nullptr;
+    }
+    return std::make_unique<CUDAGraphImpl>(device_id);
+}
+
+} // namespace tenzor

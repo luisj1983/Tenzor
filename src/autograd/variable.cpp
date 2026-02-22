@@ -343,6 +343,33 @@ auto Variable::operator*(double scalar) const -> Variable {
     return *this * scalar_var;
 }
 
+// Scalar subtraction operators
+auto Variable::operator-(float scalar) const -> Variable {
+    return *this - static_cast<double>(scalar);
+}
+
+auto Variable::operator-(double scalar) const -> Variable {
+    Device original_device = device();
+
+    // Always create scalar tensors on CPU first to avoid CUDA pointer dereference
+    Tensor scalar_tensor({}, dtype(), Device::cpu());
+    if (dtype() == DType::Float64) {
+        scalar_tensor.data<double>()[0] = scalar;
+    } else if (dtype() == DType::Float16) {
+        scalar_tensor.data<Float16>()[0] = Float16(static_cast<float>(scalar));
+    } else {
+        scalar_tensor.data<float>()[0] = static_cast<float>(scalar);
+    }
+
+    // Transfer to original device if needed
+    if (original_device != Device::cpu()) {
+        scalar_tensor = scalar_tensor.to(original_device);
+    }
+
+    Variable scalar_var(scalar_tensor, false);
+    return *this - scalar_var;
+}
+
 // Scalar division operators
 auto Variable::operator/(float scalar) const -> Variable {
     return *this / static_cast<double>(scalar);

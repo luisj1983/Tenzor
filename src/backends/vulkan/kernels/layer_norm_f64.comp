@@ -19,11 +19,6 @@ layout(push_constant) uniform PushConstants {
 shared double shared_sum[256];
 shared double shared_sum_sq[256];
 
-// Helper: sqrt for double using float precision
-double sqrt_d(double x) {
-    return double(sqrt(float(x)));
-}
-
 void main() {
     uint tid = gl_LocalInvocationID.x;
     uint batch_idx = gl_WorkGroupID.x;
@@ -71,7 +66,7 @@ void main() {
     }
 
     double variance = shared_sum_sq[0] / double(params.normalized_shape);
-    double inv_std = 1.0 / sqrt_d(variance + double(params.epsilon));
+    double inv_std = 1.0 / sqrt(variance + double(params.epsilon));
     barrier();
 
     // Step 3: Normalize and apply affine transformation

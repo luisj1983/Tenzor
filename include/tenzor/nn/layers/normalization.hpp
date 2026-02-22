@@ -172,6 +172,97 @@ private:
 };
 
 /**
+ * @brief Instance Normalization for 2D inputs (4D tensors).
+ *
+ * Normalizes each channel independently across spatial dimensions for each
+ * sample in the batch. Equivalent to GroupNorm with num_groups = num_channels.
+ *
+ * Shape:
+ * - Input: (N, C, H, W)
+ * - Output: Same as input
+ * - Weight (gamma): (C) if affine=true
+ * - Bias (beta): (C) if affine=true
+ *
+ * @code
+ * InstanceNorm2d in(64);  // 64 channels
+ * Variable x(Tensor({batch, 64, 32, 32}, DType::Float32, Device::cpu()), true);
+ * Variable normalized = in.forward(x);
+ * @endcode
+ *
+ * @see GroupNorm for group normalization
+ * @see BatchNorm2d for batch normalization
+ */
+class InstanceNorm2d : public Module {
+public:
+    /**
+     * @brief Construct 2D instance normalization.
+     *
+     * @param num_features Number of channels (C dimension)
+     * @param eps Small constant for numerical stability (default: 1e-5)
+     * @param affine If true, learn affine parameters (default: true)
+     */
+    InstanceNorm2d(int64_t num_features,
+                   double eps = 1e-5,
+                   bool affine = true);
+
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    int64_t num_features_;
+    double eps_;
+    bool affine_;
+
+    Variable weight_;
+    Variable bias_;
+
+    auto reset_parameters() -> void;
+};
+
+/**
+ * @brief Instance Normalization for 1D inputs (3D tensors).
+ *
+ * Normalizes each channel independently for each sample in the batch.
+ * For 1D temporal data of shape (N, C, L).
+ *
+ * Shape:
+ * - Input: (N, C, L)
+ * - Output: Same as input
+ * - Weight (gamma): (C) if affine=true
+ * - Bias (beta): (C) if affine=true
+ *
+ * @code
+ * InstanceNorm1d in(64);  // 64 channels
+ * Variable x(Tensor({batch, 64, 100}, DType::Float32, Device::cpu()), true);
+ * Variable normalized = in.forward(x);
+ * @endcode
+ */
+class InstanceNorm1d : public Module {
+public:
+    /**
+     * @brief Construct 1D instance normalization.
+     *
+     * @param num_features Number of channels (C dimension)
+     * @param eps Small constant for numerical stability (default: 1e-5)
+     * @param affine If true, learn affine parameters (default: true)
+     */
+    InstanceNorm1d(int64_t num_features,
+                   double eps = 1e-5,
+                   bool affine = true);
+
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    int64_t num_features_;
+    double eps_;
+    bool affine_;
+
+    Variable weight_;
+    Variable bias_;
+
+    auto reset_parameters() -> void;
+};
+
+/**
  * @brief Root Mean Square Layer Normalization.
  *
  * Simplified variant of LayerNorm that only uses root mean square for

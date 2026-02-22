@@ -4,6 +4,7 @@
 #include "tenzor/ops/op_id.hpp"
 #include <sstream>
 #include <cstring>
+#include <limits>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -125,6 +126,10 @@ auto cat(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
 
     // Output stride at concatenation dimension
     int64_t out_dim_stride = inner_size;  // Elements between adjacent slices at dim
+    // Overflow check: out_shape[dim] * inner_size
+    if (inner_size > 0 && out_shape[dim] > std::numeric_limits<int64_t>::max() / inner_size) {
+        throw std::overflow_error("cat: output tensor size overflows int64_t");
+    }
     int64_t out_slice_size = out_shape[dim] * inner_size;  // Full slice size for one outer index
 
     char* out_base = reinterpret_cast<char*>(output.data<uint8_t>());

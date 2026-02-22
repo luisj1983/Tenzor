@@ -36,82 +36,49 @@ constexpr int64_t REDUCTION_OMP_THRESHOLD = 65536;  // 64K elements
 // Horizontal sum of 16 floats in AVX-512 register -> single float
 __attribute__((target("avx512f")))
 static inline float hsum_avx512(__m512 v) {
-    // Reduce 512 bits -> 256 bits
-    __m256 lo = _mm512_castps512_ps256(v);
-    __m256 hi = _mm512_extractf32x8_ps(v, 1);
-    __m256 sum256 = _mm256_add_ps(lo, hi);
-
-    // Reduce 256 bits -> 128 bits
-    __m128 lo128 = _mm256_castps256_ps128(sum256);
-    __m128 hi128 = _mm256_extractf128_ps(sum256, 1);
-    __m128 sum128 = _mm_add_ps(lo128, hi128);
-
-    // Horizontal add within 128 bits
-    sum128 = _mm_hadd_ps(sum128, sum128);
-    sum128 = _mm_hadd_ps(sum128, sum128);
-
-    return _mm_cvtss_f32(sum128);
+    return _mm512_reduce_add_ps(v);
 }
 
 // Horizontal max of 16 floats in AVX-512 register -> single float
 __attribute__((target("avx512f")))
 static inline float hmax_avx512(__m512 v) {
-    __m256 lo = _mm512_castps512_ps256(v);
-    __m256 hi = _mm512_extractf32x8_ps(v, 1);
-    __m256 max256 = _mm256_max_ps(lo, hi);
-
-    __m128 lo128 = _mm256_castps256_ps128(max256);
-    __m128 hi128 = _mm256_extractf128_ps(max256, 1);
-    __m128 max128 = _mm_max_ps(lo128, hi128);
-
-    // Shuffle and max to reduce 4 floats to 1
-    __m128 shuf = _mm_shuffle_ps(max128, max128, _MM_SHUFFLE(2, 3, 0, 1));
-    max128 = _mm_max_ps(max128, shuf);
-    shuf = _mm_shuffle_ps(max128, max128, _MM_SHUFFLE(1, 0, 3, 2));
-    max128 = _mm_max_ps(max128, shuf);
-
-    return _mm_cvtss_f32(max128);
+    return _mm512_reduce_max_ps(v);
 }
 
 // Horizontal min of 16 floats in AVX-512 register -> single float
 __attribute__((target("avx512f")))
 static inline float hmin_avx512(__m512 v) {
-    __m256 lo = _mm512_castps512_ps256(v);
-    __m256 hi = _mm512_extractf32x8_ps(v, 1);
-    __m256 min256 = _mm256_min_ps(lo, hi);
-
-    __m128 lo128 = _mm256_castps256_ps128(min256);
-    __m128 hi128 = _mm256_extractf128_ps(min256, 1);
-    __m128 min128 = _mm_min_ps(lo128, hi128);
-
-    __m128 shuf = _mm_shuffle_ps(min128, min128, _MM_SHUFFLE(2, 3, 0, 1));
-    min128 = _mm_min_ps(min128, shuf);
-    shuf = _mm_shuffle_ps(min128, min128, _MM_SHUFFLE(1, 0, 3, 2));
-    min128 = _mm_min_ps(min128, shuf);
-
-    return _mm_cvtss_f32(min128);
+    return _mm512_reduce_min_ps(v);
 }
 
-// AVX-512 vectorized sum for float32
+// AVX-512 vectorized sum for float32 with Kahan compensation
 __attribute__((target("avx512f")))
 static float simd_sum_f32_avx512(const float* data, int64_t n) {
     constexpr int64_t VEC_SIZE = 16;
     const int64_t vec_end = (n / VEC_SIZE) * VEC_SIZE;
 
     __m512 vsum = _mm512_setzero_ps();
+    __m512 vcomp = _mm512_setzero_ps();  // Kahan compensation
 
-    // Main vectorized loop - process 16 floats at a time
+    // Main vectorized loop with Kahan summation
     for (int64_t i = 0; i < vec_end; i += VEC_SIZE) {
         __m512 v = _mm512_loadu_ps(data + i);
-        vsum = _mm512_add_ps(vsum, v);
+        __m512 y = _mm512_sub_ps(v, vcomp);
+        __m512 t = _mm512_add_ps(vsum, y);
+        vcomp = _mm512_sub_ps(_mm512_sub_ps(t, vsum), y);
+        vsum = t;
     }
 
     // Horizontal sum of vector accumulator
     float sum = hsum_avx512(vsum);
+    float comp = hsum_avx512(vcomp);
 
-    // Handle remaining elements
+    // Handle remaining elements with scalar Kahan
     for (int64_t i = vec_end; i < n; i++) {
-        sum += data[i];
+        float y = data[i] - comp;
+        float t = sum + y;
+        comp = (t - sum) - y;
+        sum = t;
     }
 
     return sum;
@@ -216,26 +183,34 @@ static inline float hmin_avx2(__m256 v) {
     return _mm_cvtss_f32(min128);
 }
 
-// AVX2 vectorized sum for float32
+// AVX2 vectorized sum for float32 with Kahan compensation
 __attribute__((target("avx2")))
 static float simd_sum_f32_avx2(const float* data, int64_t n) {
     constexpr int64_t VEC_SIZE = 8;
     const int64_t vec_end = (n / VEC_SIZE) * VEC_SIZE;
 
     __m256 vsum = _mm256_setzero_ps();
+    __m256 vcomp = _mm256_setzero_ps();  // Kahan compensation
 
-    // Main vectorized loop - process 8 floats at a time
+    // Main vectorized loop with Kahan summation
     for (int64_t i = 0; i < vec_end; i += VEC_SIZE) {
         __m256 v = _mm256_loadu_ps(data + i);
-        vsum = _mm256_add_ps(vsum, v);
+        __m256 y = _mm256_sub_ps(v, vcomp);
+        __m256 t = _mm256_add_ps(vsum, y);
+        vcomp = _mm256_sub_ps(_mm256_sub_ps(t, vsum), y);
+        vsum = t;
     }
 
     // Horizontal sum of vector accumulator
     float sum = hsum_avx2(vsum);
+    float comp = hsum_avx2(vcomp);
 
-    // Handle remaining elements
+    // Handle remaining elements with scalar Kahan
     for (int64_t i = vec_end; i < n; i++) {
-        sum += data[i];
+        float y = data[i] - comp;
+        float t = sum + y;
+        comp = (t - sum) - y;
+        sum = t;
     }
 
     return sum;
@@ -292,6 +267,286 @@ static float simd_min_f32_avx2(const float* data, int64_t n) {
 #endif // TENZOR_REDUCTION_AVX2
 
 // ============================================================================
+// Float64 SIMD Reductions
+// ============================================================================
+
+#ifdef TENZOR_REDUCTION_AVX512
+
+// Horizontal sum of 8 doubles in AVX-512 register
+__attribute__((target("avx512f")))
+static inline double hsum_avx512_f64(__m512d v) {
+    __m256d lo = _mm512_castpd512_pd256(v);
+    __m256d hi = _mm512_extractf64x4_pd(v, 1);
+    __m256d sum256 = _mm256_add_pd(lo, hi);
+    __m128d lo128 = _mm256_castpd256_pd128(sum256);
+    __m128d hi128 = _mm256_extractf128_pd(sum256, 1);
+    __m128d sum128 = _mm_add_pd(lo128, hi128);
+    sum128 = _mm_hadd_pd(sum128, sum128);
+    return _mm_cvtsd_f64(sum128);
+}
+
+__attribute__((target("avx512f")))
+static double simd_sum_f64_avx512(const double* data, int64_t n) {
+    constexpr int64_t VEC_SIZE = 8;
+    const int64_t vec_end = (n / VEC_SIZE) * VEC_SIZE;
+    __m512d vsum = _mm512_setzero_pd();
+    __m512d vcomp = _mm512_setzero_pd();  // Kahan compensation
+    for (int64_t i = 0; i < vec_end; i += VEC_SIZE) {
+        __m512d v = _mm512_loadu_pd(data + i);
+        __m512d y = _mm512_sub_pd(v, vcomp);
+        __m512d t = _mm512_add_pd(vsum, y);
+        vcomp = _mm512_sub_pd(_mm512_sub_pd(t, vsum), y);
+        vsum = t;
+    }
+    double sum = hsum_avx512_f64(vsum);
+    double comp = hsum_avx512_f64(vcomp);
+    for (int64_t i = vec_end; i < n; i++) {
+        double y = data[i] - comp;
+        double t = sum + y;
+        comp = (t - sum) - y;
+        sum = t;
+    }
+    return sum;
+}
+
+__attribute__((target("avx512f")))
+static double simd_max_f64_avx512(const double* data, int64_t n) {
+    if (n == 0) return -std::numeric_limits<double>::infinity();
+    constexpr int64_t VEC_SIZE = 8;
+    const int64_t vec_end = (n / VEC_SIZE) * VEC_SIZE;
+    __m512d vmax = _mm512_set1_pd(-std::numeric_limits<double>::infinity());
+    for (int64_t i = 0; i < vec_end; i += VEC_SIZE) {
+        __m512d v = _mm512_loadu_pd(data + i);
+        vmax = _mm512_max_pd(vmax, v);
+    }
+    double max_val = _mm512_reduce_max_pd(vmax);
+    for (int64_t i = vec_end; i < n; i++) {
+        if (data[i] > max_val) max_val = data[i];
+    }
+    return max_val;
+}
+
+__attribute__((target("avx512f")))
+static double simd_min_f64_avx512(const double* data, int64_t n) {
+    if (n == 0) return std::numeric_limits<double>::infinity();
+    constexpr int64_t VEC_SIZE = 8;
+    const int64_t vec_end = (n / VEC_SIZE) * VEC_SIZE;
+    __m512d vmin = _mm512_set1_pd(std::numeric_limits<double>::infinity());
+    for (int64_t i = 0; i < vec_end; i += VEC_SIZE) {
+        __m512d v = _mm512_loadu_pd(data + i);
+        vmin = _mm512_min_pd(vmin, v);
+    }
+    double min_val = _mm512_reduce_min_pd(vmin);
+    for (int64_t i = vec_end; i < n; i++) {
+        if (data[i] < min_val) min_val = data[i];
+    }
+    return min_val;
+}
+
+#endif // TENZOR_REDUCTION_AVX512 (Float64)
+
+#ifdef TENZOR_REDUCTION_AVX2
+
+// Horizontal sum of 4 doubles in AVX register
+__attribute__((target("avx2")))
+static inline double hsum_avx2_f64(__m256d v) {
+    __m128d lo = _mm256_castpd256_pd128(v);
+    __m128d hi = _mm256_extractf128_pd(v, 1);
+    __m128d sum128 = _mm_add_pd(lo, hi);
+    sum128 = _mm_hadd_pd(sum128, sum128);
+    return _mm_cvtsd_f64(sum128);
+}
+
+// Horizontal max of 4 doubles in AVX register
+__attribute__((target("avx2")))
+static inline double hmax_avx2_f64(__m256d v) {
+    __m128d lo = _mm256_castpd256_pd128(v);
+    __m128d hi = _mm256_extractf128_pd(v, 1);
+    __m128d max128 = _mm_max_pd(lo, hi);
+    __m128d shuf = _mm_shuffle_pd(max128, max128, 1);
+    max128 = _mm_max_pd(max128, shuf);
+    return _mm_cvtsd_f64(max128);
+}
+
+// Horizontal min of 4 doubles in AVX register
+__attribute__((target("avx2")))
+static inline double hmin_avx2_f64(__m256d v) {
+    __m128d lo = _mm256_castpd256_pd128(v);
+    __m128d hi = _mm256_extractf128_pd(v, 1);
+    __m128d min128 = _mm_min_pd(lo, hi);
+    __m128d shuf = _mm_shuffle_pd(min128, min128, 1);
+    min128 = _mm_min_pd(min128, shuf);
+    return _mm_cvtsd_f64(min128);
+}
+
+__attribute__((target("avx2")))
+static double simd_sum_f64_avx2(const double* data, int64_t n) {
+    constexpr int64_t VEC_SIZE = 4;
+    const int64_t vec_end = (n / VEC_SIZE) * VEC_SIZE;
+    __m256d vsum = _mm256_setzero_pd();
+    __m256d vcomp = _mm256_setzero_pd();  // Kahan compensation
+    for (int64_t i = 0; i < vec_end; i += VEC_SIZE) {
+        __m256d v = _mm256_loadu_pd(data + i);
+        __m256d y = _mm256_sub_pd(v, vcomp);
+        __m256d t = _mm256_add_pd(vsum, y);
+        vcomp = _mm256_sub_pd(_mm256_sub_pd(t, vsum), y);
+        vsum = t;
+    }
+    double sum = hsum_avx2_f64(vsum);
+    double comp = hsum_avx2_f64(vcomp);
+    for (int64_t i = vec_end; i < n; i++) {
+        double y = data[i] - comp;
+        double t = sum + y;
+        comp = (t - sum) - y;
+        sum = t;
+    }
+    return sum;
+}
+
+__attribute__((target("avx2")))
+static double simd_max_f64_avx2(const double* data, int64_t n) {
+    if (n == 0) return -std::numeric_limits<double>::infinity();
+    constexpr int64_t VEC_SIZE = 4;
+    const int64_t vec_end = (n / VEC_SIZE) * VEC_SIZE;
+    __m256d vmax = _mm256_set1_pd(-std::numeric_limits<double>::infinity());
+    for (int64_t i = 0; i < vec_end; i += VEC_SIZE) {
+        __m256d v = _mm256_loadu_pd(data + i);
+        vmax = _mm256_max_pd(vmax, v);
+    }
+    double max_val = hmax_avx2_f64(vmax);
+    for (int64_t i = vec_end; i < n; i++) {
+        if (data[i] > max_val) max_val = data[i];
+    }
+    return max_val;
+}
+
+__attribute__((target("avx2")))
+static double simd_min_f64_avx2(const double* data, int64_t n) {
+    if (n == 0) return std::numeric_limits<double>::infinity();
+    constexpr int64_t VEC_SIZE = 4;
+    const int64_t vec_end = (n / VEC_SIZE) * VEC_SIZE;
+    __m256d vmin = _mm256_set1_pd(std::numeric_limits<double>::infinity());
+    for (int64_t i = 0; i < vec_end; i += VEC_SIZE) {
+        __m256d v = _mm256_loadu_pd(data + i);
+        vmin = _mm256_min_pd(vmin, v);
+    }
+    double min_val = hmin_avx2_f64(vmin);
+    for (int64_t i = vec_end; i < n; i++) {
+        if (data[i] < min_val) min_val = data[i];
+    }
+    return min_val;
+}
+
+#endif // TENZOR_REDUCTION_AVX2 (Float64)
+
+// Parallel SIMD sum for Float64
+static double parallel_simd_sum_f64(const double* data, int64_t n) {
+    if (n == 0) return 0.0;
+    if (n < REDUCTION_OMP_THRESHOLD) {
+#ifdef TENZOR_REDUCTION_AVX512
+        return simd_sum_f64_avx512(data, n);
+#elif defined(TENZOR_REDUCTION_AVX2)
+        return simd_sum_f64_avx2(data, n);
+#else
+        double sum = 0.0;
+        for (int64_t i = 0; i < n; i++) sum += data[i];
+        return sum;
+#endif
+    }
+    double total_sum = 0.0;
+    #pragma omp parallel reduction(+:total_sum)
+    {
+        int tid = omp_get_thread_num();
+        int nthreads = omp_get_num_threads();
+        int64_t chunk_size = (n + nthreads - 1) / nthreads;
+        int64_t start = tid * chunk_size;
+        int64_t end = std::min(start + chunk_size, n);
+        if (start < end) {
+#ifdef TENZOR_REDUCTION_AVX512
+            total_sum = simd_sum_f64_avx512(data + start, end - start);
+#elif defined(TENZOR_REDUCTION_AVX2)
+            total_sum = simd_sum_f64_avx2(data + start, end - start);
+#else
+            for (int64_t i = start; i < end; i++) total_sum += data[i];
+#endif
+        }
+    }
+    return total_sum;
+}
+
+// Parallel SIMD max for Float64
+static double parallel_simd_max_f64(const double* data, int64_t n) {
+    if (n == 0) return -std::numeric_limits<double>::infinity();
+    if (n < REDUCTION_OMP_THRESHOLD) {
+#ifdef TENZOR_REDUCTION_AVX512
+        return simd_max_f64_avx512(data, n);
+#elif defined(TENZOR_REDUCTION_AVX2)
+        return simd_max_f64_avx2(data, n);
+#else
+        double max_val = data[0];
+        for (int64_t i = 1; i < n; i++) if (data[i] > max_val) max_val = data[i];
+        return max_val;
+#endif
+    }
+    double global_max = -std::numeric_limits<double>::infinity();
+    #pragma omp parallel reduction(max:global_max)
+    {
+        int tid = omp_get_thread_num();
+        int nthreads = omp_get_num_threads();
+        int64_t chunk_size = (n + nthreads - 1) / nthreads;
+        int64_t start = tid * chunk_size;
+        int64_t end = std::min(start + chunk_size, n);
+        if (start < end) {
+#ifdef TENZOR_REDUCTION_AVX512
+            global_max = simd_max_f64_avx512(data + start, end - start);
+#elif defined(TENZOR_REDUCTION_AVX2)
+            global_max = simd_max_f64_avx2(data + start, end - start);
+#else
+            global_max = data[start];
+            for (int64_t i = start + 1; i < end; i++) if (data[i] > global_max) global_max = data[i];
+#endif
+        }
+    }
+    return global_max;
+}
+
+// Parallel SIMD min for Float64
+static double parallel_simd_min_f64(const double* data, int64_t n) {
+    if (n == 0) return std::numeric_limits<double>::infinity();
+    if (n < REDUCTION_OMP_THRESHOLD) {
+#ifdef TENZOR_REDUCTION_AVX512
+        return simd_min_f64_avx512(data, n);
+#elif defined(TENZOR_REDUCTION_AVX2)
+        return simd_min_f64_avx2(data, n);
+#else
+        double min_val = data[0];
+        for (int64_t i = 1; i < n; i++) if (data[i] < min_val) min_val = data[i];
+        return min_val;
+#endif
+    }
+    double global_min = std::numeric_limits<double>::infinity();
+    #pragma omp parallel reduction(min:global_min)
+    {
+        int tid = omp_get_thread_num();
+        int nthreads = omp_get_num_threads();
+        int64_t chunk_size = (n + nthreads - 1) / nthreads;
+        int64_t start = tid * chunk_size;
+        int64_t end = std::min(start + chunk_size, n);
+        if (start < end) {
+#ifdef TENZOR_REDUCTION_AVX512
+            global_min = simd_min_f64_avx512(data + start, end - start);
+#elif defined(TENZOR_REDUCTION_AVX2)
+            global_min = simd_min_f64_avx2(data + start, end - start);
+#else
+            global_min = data[start];
+            for (int64_t i = start + 1; i < end; i++) if (data[i] < global_min) global_min = data[i];
+#endif
+        }
+    }
+    return global_min;
+}
+
+// ============================================================================
 // Parallel SIMD Reduction - combines OpenMP with SIMD for best performance
 // ============================================================================
 
@@ -327,9 +582,9 @@ static float parallel_simd_sum_f32(const float* data, int64_t n) {
 
         if (start < end) {
 #ifdef TENZOR_REDUCTION_AVX512
-            total_sum = simd_sum_f32_avx512(data + start, end - start);
+            total_sum += simd_sum_f32_avx512(data + start, end - start);
 #elif defined(TENZOR_REDUCTION_AVX2)
-            total_sum = simd_sum_f32_avx2(data + start, end - start);
+            total_sum += simd_sum_f32_avx2(data + start, end - start);
 #else
             for (int64_t i = start; i < end; i++) {
                 total_sum += data[i];
@@ -502,6 +757,12 @@ auto sum_impl<float>(const float* input_data, int64_t n) -> float {
     return parallel_simd_sum_f32(input_data, n);
 }
 
+// Specialization for double - uses SIMD vectorized reduction
+template<>
+auto sum_impl<double>(const double* input_data, int64_t n) -> double {
+    return parallel_simd_sum_f64(input_data, n);
+}
+
 // Sum along a specific dimension
 template<typename T>
 void sum_along_dim(const T* input_data,
@@ -628,17 +889,20 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             auto* output_data = output.data<BFloat16>();
 
             if (dim == REDUCE_ALL) {
-                // Full reduction - compute in Float32 for precision
+                // Full reduction - Kahan compensated summation in Float32
                 const int64_t n = input.numel();
                 float sum = 0.0f;
+                float compensation = 0.0f;
 
-                #pragma omp parallel for reduction(+:sum) if(n > REDUCTION_OMP_THRESHOLD)
                 for (int64_t i = 0; i < n; i++) {
-                    sum += static_cast<float>(input_data[i]);
+                    float y = static_cast<float>(input_data[i]) - compensation;
+                    float t = sum + y;
+                    compensation = (t - sum) - y;
+                    sum = t;
                 }
                 output_data[0] = BFloat16(sum);
             } else {
-                // Dimensional reduction - compute in Float32
+                // Dimensional reduction - Kahan compensated in Float32
                 const int64_t shape_ndim = static_cast<int64_t>(input_shape.size());
                 const int64_t dim_size = input_shape[dim];
 
@@ -661,15 +925,19 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                         tmp /= input_shape[d];
                     }
 
-                    // Sum along dimension - accumulation in Float32
+                    // Kahan compensated sum along dimension
                     float sum = 0.0f;
+                    float compensation = 0.0f;
                     for (int64_t i = 0; i < dim_size; i++) {
                         indices[dim] = i;
                         int64_t in_idx = 0;
                         for (int64_t d = 0; d < shape_ndim; d++) {
                             in_idx += indices[d] * input_strides[d];
                         }
-                        sum += static_cast<float>(input_data[in_idx]);
+                        float y = static_cast<float>(input_data[in_idx]) - compensation;
+                        float t = sum + y;
+                        compensation = (t - sum) - y;
+                        sum = t;
                     }
                     output_data[out_idx] = BFloat16(sum);
                 }
@@ -828,6 +1096,12 @@ template<>
 auto max_impl<float>(const float* input_data, int64_t n) -> float {
     if (n == 0) throw std::runtime_error("max: input tensor is empty");
     return parallel_simd_max_f32(input_data, n);
+}
+
+template<>
+auto max_impl<double>(const double* input_data, int64_t n) -> double {
+    if (n == 0) throw std::runtime_error("max: input tensor is empty");
+    return parallel_simd_max_f64(input_data, n);
 }
 
 // Max along a specific dimension
@@ -1040,6 +1314,12 @@ template<>
 auto min_impl<float>(const float* input_data, int64_t n) -> float {
     if (n == 0) throw std::runtime_error("min: input tensor is empty");
     return parallel_simd_min_f32(input_data, n);
+}
+
+template<>
+auto min_impl<double>(const double* input_data, int64_t n) -> double {
+    if (n == 0) throw std::runtime_error("min: input tensor is empty");
+    return parallel_simd_min_f64(input_data, n);
 }
 
 // Min along a specific dimension
@@ -2010,30 +2290,22 @@ void var_along_dim(const T* input_data,
             tmp /= input_shape[d];
         }
 
-        // Pass 1: compute mean
-        T sum = T(0);
+        // Single-pass Welford's algorithm for numerically stable variance
+        T mean = T(0);
+        T M2 = T(0);
         for (int64_t i = 0; i < dim_size; i++) {
             indices[dim] = i;
             int64_t in_idx = 0;
             for (int64_t d = 0; d < ndim; d++) {
                 in_idx += indices[d] * input_strides[d];
             }
-            sum += input_data[in_idx];
+            T x = input_data[in_idx];
+            T delta = x - mean;
+            mean += delta / static_cast<T>(i + 1);
+            T delta2 = x - mean;
+            M2 += delta * delta2;
         }
-        T mean = sum / static_cast<T>(dim_size);
-
-        // Pass 2: compute variance
-        T var_sum = T(0);
-        for (int64_t i = 0; i < dim_size; i++) {
-            indices[dim] = i;
-            int64_t in_idx = 0;
-            for (int64_t d = 0; d < ndim; d++) {
-                in_idx += indices[d] * input_strides[d];
-            }
-            T diff = input_data[in_idx] - mean;
-            var_sum += diff * diff;
-        }
-        output_data[out_idx] = var_sum / static_cast<T>(divisor);
+        output_data[out_idx] = M2 / static_cast<T>(divisor);
     }
 }
 

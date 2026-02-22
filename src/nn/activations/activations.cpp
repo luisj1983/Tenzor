@@ -4,6 +4,8 @@
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/indexing.hpp"
+#include "tenzor/ops/math.hpp"
 #include <iostream>
 
 namespace tenzor::nn {
@@ -142,14 +144,16 @@ public:
         auto& output = saved_tensors()[0];  // ELU output
 
         // ELU(x) = x if x > 0 else alpha * (exp(x) - 1)
-        // d(ELU)/dx = 1 if x > 0 else alpha * exp(x) = output + alpha if x <= 0
+        // d(ELU)/dx = 1 if x > 0, alpha * exp(x) = output + alpha if x <= 0
 
         auto shape_vec = std::vector<int64_t>(output.shape().begin(), output.shape().end());
-        auto alpha_tensor = ones(shape_vec, output.dtype(), output.device()) * alpha_;
+        auto zero = zeros(shape_vec, output.dtype(), output.device());
+        auto one_tensor = ones(shape_vec, output.dtype(), output.device());
+        auto alpha_tensor = one_tensor * alpha_;
 
-        // For x > 0: grad = 1 (but output = x, so we use dispatcher for proper gradient)
-        // For x <= 0: grad = output + alpha (since output = alpha * (exp(x) - 1), so output + alpha = alpha * exp(x))
-        auto grad_elu = output + alpha_tensor;
+        // Piecewise gradient: 1 for x>0, output+alpha for x<=0
+        auto condition = gt(output, zero);
+        auto grad_elu = where(condition, one_tensor, output + alpha_tensor);
 
         std::vector<Tensor> result;
         result.push_back(grad_output * grad_elu);
@@ -176,14 +180,16 @@ public:
         const double alpha = 1.6732632423543772848170429916717;
 
         // SELU(x) = scale * (x if x > 0 else alpha * (exp(x) - 1))
-        // d(SELU)/dx = scale if x > 0 else scale * alpha * exp(x)
+        // d(SELU)/dx = scale if x > 0, scale * alpha * exp(x) if x <= 0
 
         auto shape_vec = std::vector<int64_t>(output.shape().begin(), output.shape().end());
+        auto zero = zeros(shape_vec, output.dtype(), output.device());
+        auto scale_tensor = ones(shape_vec, output.dtype(), output.device()) * scale;
         auto scale_alpha_tensor = ones(shape_vec, output.dtype(), output.device()) * (scale * alpha);
 
-        // For x > 0: grad = scale
-        // For x <= 0: grad = output + scale * alpha
-        auto grad_selu = output + scale_alpha_tensor;
+        // Piecewise gradient: scale for x>0, output+scale*alpha for x<=0
+        auto condition = gt(output, zero);
+        auto grad_selu = where(condition, scale_tensor, output + scale_alpha_tensor);
 
         std::vector<Tensor> result;
         result.push_back(grad_output * grad_selu);
@@ -568,13 +574,7 @@ auto relu_(Tensor& input) -> Tensor& {
         throw std::runtime_error("In-place relu requires contiguous tensor");
     }
 
-    std::vector<Tensor> inputs = {input};
-    auto result = dispatch(OpId::ReLUInplace, inputs);
-
-    // Result should be same tensor modified in-place
-    if (result[0].data_ptr() != input.data_ptr()) {
-        input = result[0];
-    }
+    dispatch_inplace(OpId::ReLUInplace, input, std::span<const Tensor>{});
 
     return input;
 }
@@ -584,13 +584,7 @@ auto sigmoid_(Tensor& input) -> Tensor& {
         throw std::runtime_error("In-place sigmoid requires contiguous tensor");
     }
 
-    std::vector<Tensor> inputs = {input};
-    auto result = dispatch(OpId::SigmoidInplace, inputs);
-
-    // Result should be same tensor modified in-place
-    if (result[0].data_ptr() != input.data_ptr()) {
-        input = result[0];
-    }
+    dispatch_inplace(OpId::SigmoidInplace, input, std::span<const Tensor>{});
 
     return input;
 }
@@ -600,13 +594,7 @@ auto tanh_(Tensor& input) -> Tensor& {
         throw std::runtime_error("In-place tanh requires contiguous tensor");
     }
 
-    std::vector<Tensor> inputs = {input};
-    auto result = dispatch(OpId::TanhInplace, inputs);
-
-    // Result should be same tensor modified in-place
-    if (result[0].data_ptr() != input.data_ptr()) {
-        input = result[0];
-    }
+    dispatch_inplace(OpId::TanhInplace, input, std::span<const Tensor>{});
 
     return input;
 }
@@ -616,15 +604,9 @@ auto leaky_relu_(Tensor& input, double negative_slope) -> Tensor& {
         throw std::runtime_error("In-place leaky_relu requires contiguous tensor");
     }
 
-    std::vector<Tensor> inputs = {input};
     OpAttributes attrs;
     attrs["negative_slope"] = negative_slope;
-    auto result = dispatch(OpId::LeakyReLUInplace, inputs, attrs);
-
-    // Result should be same tensor modified in-place
-    if (result[0].data_ptr() != input.data_ptr()) {
-        input = result[0];
-    }
+    dispatch_inplace(OpId::LeakyReLUInplace, input, std::span<const Tensor>{}, attrs);
 
     return input;
 }
@@ -634,13 +616,7 @@ auto gelu_(Tensor& input) -> Tensor& {
         throw std::runtime_error("In-place gelu requires contiguous tensor");
     }
 
-    std::vector<Tensor> inputs = {input};
-    auto result = dispatch(OpId::GeluInplace, inputs);
-
-    // Result should be same tensor modified in-place
-    if (result[0].data_ptr() != input.data_ptr()) {
-        input = result[0];
-    }
+    dispatch_inplace(OpId::GeluInplace, input, std::span<const Tensor>{});
 
     return input;
 }

@@ -108,12 +108,20 @@ __device__ __host__ inline Float16 from_cuda_half(const __half& x) {
 static cublasHandle_t conv2d_cublas_handle = nullptr;
 static std::mutex conv2d_cublas_mutex;
 
+static void cleanup_conv2d_cublas() {
+    if (conv2d_cublas_handle) {
+        cublasDestroy(conv2d_cublas_handle);
+        conv2d_cublas_handle = nullptr;
+    }
+}
+
 static cublasHandle_t get_conv2d_cublas_handle() {
     if (conv2d_cublas_handle == nullptr) {
         std::lock_guard<std::mutex> lock(conv2d_cublas_mutex);
         if (conv2d_cublas_handle == nullptr) {
             CUBLAS_CHECK(cublasCreate(&conv2d_cublas_handle));
             cublasSetMathMode(conv2d_cublas_handle, CUBLAS_TF32_TENSOR_OP_MATH);
+            std::atexit(cleanup_conv2d_cublas);
         }
     }
     return conv2d_cublas_handle;

@@ -6,6 +6,7 @@
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "tenzor/utils/error.hpp"
 #include <cmath>
 
 namespace tenzor {
@@ -87,10 +88,12 @@ static auto reduce_grad_for_broadcasting(const Tensor& grad, const std::vector<i
             result = tenzor::sum(result, 0, false);  // Sum and remove dimension
         }
     } else if (ndim_diff < 0) {
-        // grad has FEWER dimensions than target - broadcast by adding dimensions
-        // This happens when gradient was reduced to scalar but target has shape
-        // We need to broadcast the scalar to target shape
-        return expand(result, target_shape);
+        // grad has FEWER dimensions than target — this indicates an autograd graph bug
+        // (gradient should never have fewer dimensions than the variable it flows to)
+        throw std::runtime_error(
+            "Autograd bug: gradient has fewer dimensions (" +
+            std::to_string(grad_shape_vec.size()) + ") than target shape (" +
+            std::to_string(target_shape.size()) + ")");
     }
 
     // Now result and target should have same ndim
@@ -297,6 +300,9 @@ auto SumBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     const auto& input = saved_tensors_[0];
     const auto& grad_output = grad_outputs[0];
 
+    TENZOR_CHECK_SHAPE(input.numel() > 0,
+        "SumBackward: cannot compute gradient of sum over empty tensor");
+
     auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
 
     if (!dim_.has_value()) {
@@ -346,6 +352,9 @@ auto MeanBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
     } else {
         n_elements = input.numel();
     }
+
+    TENZOR_CHECK_SHAPE(n_elements > 0,
+        "MeanBackward: cannot compute mean of empty tensor (0 elements)");
 
     // Use double for scale calculation to preserve precision for Float64 tensors
     double scale = 1.0 / static_cast<double>(n_elements);
@@ -473,21 +482,14 @@ auto SoftmaxBackward::forward(std::vector<Variable> inputs) -> std::vector<Varia
 }
 
 auto SoftmaxBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    // Softmax backward: dL/dx = y * (dL/dy - sum(dL/dy * y))
+    // Use backend-optimized softmax_backward kernel via dispatch
     const auto& output = saved_tensors_[0];  // y = softmax(x)
     const auto& grad_output = grad_outputs[0];  // dL/dy
 
-    // Compute dL/dy * y (element-wise)
-    auto grad_y_prod = mul(grad_output, output);
-
-    // Sum along the softmax dimension
-    auto grad_y_sum = tenzor::sum(grad_y_prod, dim_, true);
-
-    // Compute dL/dy - sum(dL/dy * y) (broadcast)
-    auto grad_centered = sub(grad_output, grad_y_sum);
-
-    // Multiply by y to get final gradient
-    auto grad_input = mul(grad_centered, output);
+    OpAttributes attrs;
+    attrs["dim"] = std::to_string(dim_);
+    std::vector<Tensor> inputs = {grad_output, output};
+    auto grad_input = dispatch(OpId::SoftmaxBackward, inputs, attrs)[0];
 
     return {grad_input};
 }
@@ -553,6 +555,9 @@ auto MaxBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     const auto& output = saved_tensors_[1];
     const auto& grad_output = grad_outputs[0];
 
+    TENZOR_CHECK_SHAPE(input.numel() > 0,
+        "MaxBackward: cannot compute gradient of max over empty tensor");
+
     auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
 
     if (!dim_.has_value()) {
@@ -570,7 +575,15 @@ auto MaxBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
         // Create mask where input == output (within epsilon)
         auto diff = sub(input, output_expanded);
         auto abs_diff = abs(diff);
-        auto epsilon = full(input_shape_vec, 1e-7f, input.dtype(), input.device());
+        // Select epsilon appropriate for the tensor's precision
+        double eps_val;
+        switch (input.dtype()) {
+            case DType::Float64:  eps_val = 1e-12; break;
+            case DType::Float16:
+            case DType::BFloat16: eps_val = 1e-3; break;
+            default:              eps_val = 1e-7; break;
+        }
+        auto epsilon = full(input_shape_vec, eps_val, input.dtype(), input.device());
         auto mask_bool = lt(abs_diff, epsilon);
         // Convert boolean mask to float for gradient computation
         auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
@@ -609,7 +622,15 @@ auto MaxBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
         auto diff = sub(input, out_expanded);
         auto abs_diff = abs(diff);
 
-        auto epsilon = full(input_shape_vec, 1e-7f, input.dtype(), input.device());
+        // Select epsilon appropriate for the tensor's precision
+        double eps_val2;
+        switch (input.dtype()) {
+            case DType::Float64:  eps_val2 = 1e-12; break;
+            case DType::Float16:
+            case DType::BFloat16: eps_val2 = 1e-3; break;
+            default:              eps_val2 = 1e-7; break;
+        }
+        auto epsilon = full(input_shape_vec, eps_val2, input.dtype(), input.device());
         auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
         auto scaled_diff = div(abs_diff, epsilon);
         auto clamped = clamp(scaled_diff, 0.0f, 1.0f);
@@ -830,11 +851,11 @@ auto UpsampleBilinearBackward::backward(std::vector<Tensor> grad_outputs) -> std
     // Create gradient tensor for input (all zeros initially) in Float32
     auto grad_input = zeros({N, C, input_h_, input_w_}, DType::Float32, Device::cpu());
 
-    // Calculate scaling factors (same as forward pass)
-    float scale_h = static_cast<float>(input_h_) / output_h_;
-    float scale_w = static_cast<float>(input_w_) / output_w_;
+    // Calculate scaling factors (align_corners=false convention)
+    float scale_h = static_cast<float>(input_h_) / static_cast<float>(output_h_);
+    float scale_w = static_cast<float>(input_w_) / static_cast<float>(output_w_);
 
-    // Accumulate gradients using nearest neighbor logic
+    // Distribute gradients using bilinear interpolation weights
     auto* grad_in_ptr = grad_input.data<float>();
     const auto* grad_out_ptr = grad_output.data<float>();
 
@@ -842,18 +863,32 @@ auto UpsampleBilinearBackward::backward(std::vector<Tensor> grad_outputs) -> std
         for (int64_t c = 0; c < C; ++c) {
             for (int64_t h = 0; h < H_out; ++h) {
                 for (int64_t w = 0; w < W_out; ++w) {
-                    // Find source input pixel (nearest neighbor)
-                    int64_t in_h = static_cast<int64_t>(h * scale_h);
-                    int64_t in_w = static_cast<int64_t>(w * scale_w);
+                    // Map output pixel to input coordinate (align_corners=false)
+                    float src_h = (h + 0.5f) * scale_h - 0.5f;
+                    float src_w = (w + 0.5f) * scale_w - 0.5f;
 
-                    in_h = std::min(in_h, input_h_ - 1);
-                    in_w = std::min(in_w, input_w_ - 1);
+                    // Bounding input pixels
+                    int64_t h0 = static_cast<int64_t>(std::floor(src_h));
+                    int64_t w0 = static_cast<int64_t>(std::floor(src_w));
+                    int64_t h1 = h0 + 1;
+                    int64_t w1 = w0 + 1;
 
-                    // Accumulate gradient to source pixel
-                    int64_t out_idx = ((n * C + c) * H_out + h) * W_out + w;
-                    int64_t in_idx = ((n * C + c) * input_h_ + in_h) * input_w_ + in_w;
+                    // Interpolation weights from fractional part
+                    float fh = src_h - h0;
+                    float fw = src_w - w0;
 
-                    grad_in_ptr[in_idx] += grad_out_ptr[out_idx];
+                    float grad_val = grad_out_ptr[((n * C + c) * H_out + h) * W_out + w];
+                    int64_t base = (n * C + c) * input_h_;
+
+                    // Accumulate weighted gradient to each of the 4 neighbors
+                    if (h0 >= 0 && h0 < input_h_ && w0 >= 0 && w0 < input_w_)
+                        grad_in_ptr[(base + h0) * input_w_ + w0] += grad_val * (1.0f - fh) * (1.0f - fw);
+                    if (h0 >= 0 && h0 < input_h_ && w1 >= 0 && w1 < input_w_)
+                        grad_in_ptr[(base + h0) * input_w_ + w1] += grad_val * (1.0f - fh) * fw;
+                    if (h1 >= 0 && h1 < input_h_ && w0 >= 0 && w0 < input_w_)
+                        grad_in_ptr[(base + h1) * input_w_ + w0] += grad_val * fh * (1.0f - fw);
+                    if (h1 >= 0 && h1 < input_h_ && w1 >= 0 && w1 < input_w_)
+                        grad_in_ptr[(base + h1) * input_w_ + w1] += grad_val * fh * fw;
                 }
             }
         }

@@ -1,0 +1,62 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Variance and Standard Deviation for Float64
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { double input_data[]; };
+layout(binding = 1) buffer Output { double output_data[]; };
+layout(binding = 2) buffer Mean { double mean_data[]; };  // Pre-computed mean
+
+layout(push_constant) uniform PushConstants {
+    uint n;              // Total number of elements
+    uint reduce_size;    // Size of dimension to reduce
+    uint outer_size;     // Size of outer dimensions
+    uint op;             // 0=variance, 1=std
+    uint unbiased;       // 0=biased, 1=unbiased (divide by N-1)
+} params;
+
+shared double shared_data[256];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint gid = gl_GlobalInvocationID.x;
+    uint wid = gl_WorkGroupID.x;
+
+    // Compute squared differences from mean
+    double value = 0.0;
+    if (gid < params.n) {
+        uint mean_idx = gid / params.reduce_size;
+        double diff = input_data[gid] - mean_data[mean_idx];
+        value = diff * diff;
+    }
+    shared_data[tid] = value;
+    barrier();
+
+    // Parallel reduction for sum of squared differences
+    for (uint s = 128; s > 0; s >>= 1) {
+        if (tid < s && (gid + s) < params.n) {
+            shared_data[tid] += shared_data[tid + s];
+        }
+        barrier();
+    }
+
+    // Write result
+    if (tid == 0) {
+        double result = shared_data[0];
+
+        // Divide by N or N-1
+        uint divisor = params.reduce_size;
+        if (params.unbiased > 0 && divisor > 1) {
+            divisor -= 1;
+        }
+        result /= double(divisor);
+
+        // Take square root for std
+        if (params.op == 1) {
+            result = sqrt(result);
+        }
+
+        output_data[wid] = result;
+    }
+}

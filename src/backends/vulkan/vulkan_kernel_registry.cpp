@@ -102,22 +102,34 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     // ========================================================================
-    // In-place Operations
+    // In-place Operations (using InplaceKernelFn - no tensor copy)
     // ========================================================================
-    table.register_kernel(OpId::AddInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return get_vulkan_backend()->dispatch("add_inplace", inputs, attrs);
+    table.register_inplace_kernel(OpId::AddInplace, [](Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs) -> Tensor& {
+        std::vector<Tensor> inputs = {target};
+        inputs.insert(inputs.end(), others.begin(), others.end());
+        get_vulkan_backend()->dispatch("add_inplace", inputs, attrs);
+        return target;
     });
 
-    table.register_kernel(OpId::SubInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return get_vulkan_backend()->dispatch("sub_inplace", inputs, attrs);
+    table.register_inplace_kernel(OpId::SubInplace, [](Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs) -> Tensor& {
+        std::vector<Tensor> inputs = {target};
+        inputs.insert(inputs.end(), others.begin(), others.end());
+        get_vulkan_backend()->dispatch("sub_inplace", inputs, attrs);
+        return target;
     });
 
-    table.register_kernel(OpId::MulInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return get_vulkan_backend()->dispatch("mul_inplace", inputs, attrs);
+    table.register_inplace_kernel(OpId::MulInplace, [](Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs) -> Tensor& {
+        std::vector<Tensor> inputs = {target};
+        inputs.insert(inputs.end(), others.begin(), others.end());
+        get_vulkan_backend()->dispatch("mul_inplace", inputs, attrs);
+        return target;
     });
 
-    table.register_kernel(OpId::DivInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return get_vulkan_backend()->dispatch("div_inplace", inputs, attrs);
+    table.register_inplace_kernel(OpId::DivInplace, [](Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs) -> Tensor& {
+        std::vector<Tensor> inputs = {target};
+        inputs.insert(inputs.end(), others.begin(), others.end());
+        get_vulkan_backend()->dispatch("div_inplace", inputs, attrs);
+        return target;
     });
 
     // ========================================================================
@@ -668,26 +680,36 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     // ========================================================================
-    // In-place Activation Operations
+    // In-place Activation Operations (using InplaceKernelFn - no tensor copy)
     // ========================================================================
-    table.register_kernel(OpId::ReLUInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return get_vulkan_backend()->dispatch("relu_inplace", inputs, attrs);
+    table.register_inplace_kernel(OpId::ReLUInplace, [](Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs) -> Tensor& {
+        std::vector<Tensor> inputs = {target};
+        get_vulkan_backend()->dispatch("relu_inplace", inputs, attrs);
+        return target;
     });
 
-    table.register_kernel(OpId::SigmoidInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return get_vulkan_backend()->dispatch("sigmoid_inplace", inputs, attrs);
+    table.register_inplace_kernel(OpId::SigmoidInplace, [](Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs) -> Tensor& {
+        std::vector<Tensor> inputs = {target};
+        get_vulkan_backend()->dispatch("sigmoid_inplace", inputs, attrs);
+        return target;
     });
 
-    table.register_kernel(OpId::TanhInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return get_vulkan_backend()->dispatch("tanh_inplace", inputs, attrs);
+    table.register_inplace_kernel(OpId::TanhInplace, [](Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs) -> Tensor& {
+        std::vector<Tensor> inputs = {target};
+        get_vulkan_backend()->dispatch("tanh_inplace", inputs, attrs);
+        return target;
     });
 
-    table.register_kernel(OpId::LeakyReLUInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return get_vulkan_backend()->dispatch("leaky_relu_inplace", inputs, attrs);
+    table.register_inplace_kernel(OpId::LeakyReLUInplace, [](Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs) -> Tensor& {
+        std::vector<Tensor> inputs = {target};
+        get_vulkan_backend()->dispatch("leaky_relu_inplace", inputs, attrs);
+        return target;
     });
 
-    table.register_kernel(OpId::GeluInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return get_vulkan_backend()->dispatch("gelu_inplace", inputs, attrs);
+    table.register_inplace_kernel(OpId::GeluInplace, [](Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs) -> Tensor& {
+        std::vector<Tensor> inputs = {target};
+        get_vulkan_backend()->dispatch("gelu_inplace", inputs, attrs);
+        return target;
     });
 
     // ========================================================================

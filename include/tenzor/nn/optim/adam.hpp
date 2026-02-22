@@ -51,7 +51,9 @@ namespace optim {
  * @param beta1 First moment decay rate (default: 0.9)
  * @param beta2 Second moment decay rate (default: 0.999)
  * @param eps Term for numerical stability (default: 1e-8)
- * @param weight_decay L2 penalty (default: 0.0, use AdamW for proper weight decay)
+ * @param weight_decay L2 penalty (default: 0.0). Adam applies coupled weight decay
+ *        (L2 regularization added to gradients before moment updates). For decoupled
+ *        weight decay (applied directly to parameters), use AdamW instead.
  * @param amsgrad Use AMSGrad variant (default: false)
  *
  * @par Complexity

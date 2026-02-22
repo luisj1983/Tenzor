@@ -73,6 +73,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         -fno-math-errno
         -fno-trapping-math
         -fno-finite-math-only  # Preserves NaN/Inf handling for IEEE 754 compliance
+        -Wno-unused-parameter
     )
 
     # Check for specific SIMD support

@@ -12,11 +12,13 @@ namespace tenzor::nn {
 
 // Helper functions for operations that don't have autograd yet
 namespace {
+    // Create a scalar Variable that broadcasts with arithmetic ops
+    auto scalar_var(float value, DType dtype, Device device) -> Variable {
+        return Variable(full({1}, value, dtype, device), false);
+    }
+
     auto scalar_sub(float scalar, const Variable& var) -> Variable {
-        auto shape = var.shape();
-        std::vector<int64_t> shape_vec(shape.begin(), shape.end());
-        auto scalar_tensor = full(shape_vec, scalar, var.dtype(), var.device());
-        return Variable(scalar_tensor, false) - var;
+        return scalar_var(scalar, var.dtype(), var.device()) - var;
     }
 }
 
@@ -75,14 +77,11 @@ auto BCEWithLogitsLoss::forward(const Variable& input, const Variable& target) -
     auto neg_abs = neg(abs_input);
 
     // Element-wise max(x, 0) = (x + abs(x)) / 2
-    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
-    auto two_tensor = full(shape_vec, 2.0f, input.dtype(), input.device());
-    auto two_var = Variable(two_tensor, false);
+    auto two_var = scalar_var(2.0f, input.dtype(), input.device());
     auto max_val = (input + abs_input) / two_var;
 
     auto xz = input * target;  // x * z
-    auto ones_tensor = ones(shape_vec, input.dtype(), input.device());
-    auto ones_var = Variable(ones_tensor, false);
+    auto ones_var = scalar_var(1.0f, input.dtype(), input.device());
     auto log_term = log(ones_var + exp(neg_abs));
 
     auto loss_unreduced = max_val - xz + log_term;
@@ -219,28 +218,16 @@ auto SmoothL1Loss::forward(const Variable& input, const Variable& target) -> Var
     // loss = 0.5 * (diff^2) / beta,           if |diff| < beta
     // loss = |diff| - 0.5 * beta,             otherwise
 
-    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
-    auto beta_tensor = full(shape_vec, beta_, input.dtype(), input.device());
-    auto beta_var = Variable(beta_tensor, false);
+    auto beta_var = scalar_var(static_cast<float>(beta_), input.dtype(), input.device());
+    auto half_var = scalar_var(0.5f, input.dtype(), input.device());
 
-    auto half_tensor = full(shape_vec, 0.5, input.dtype(), input.device());
-    auto half_var = Variable(half_tensor, false);
-
-    // Compute squared term: 0.5 * (diff^2) / beta
-    auto squared_term = (half_var * diff * diff) / beta_var;
-
-    // Compute linear term: |diff| - 0.5 * beta
-    auto linear_term = abs_diff - (half_var * beta_var);
-
-    // Select based on condition: |diff| < beta
-    // mask = (abs_diff < beta) ? squared_term : linear_term
-    // Approximate using: smooth transition with clamping
-    auto beta_clamped_diff = clamp(abs_diff, 0.0f, static_cast<float>(beta_));
-    auto is_quadratic = Variable(full(shape_vec, 1.0f, input.dtype(), input.device()), false) -
-                        (abs_diff - beta_clamped_diff) / beta_var;
-
-    // Weighted sum: quadratic region * squared_term + linear region * linear_term
-    auto loss_unreduced = is_quadratic * squared_term + (Variable(full(shape_vec, 1.0f, input.dtype(), input.device()), false) - is_quadratic) * linear_term;
+    // Exact SmoothL1Loss (Huber loss) without branching:
+    //   loss = 0.5 * min(|diff|, beta)^2 / beta + max(|diff| - beta, 0)
+    // When |diff| < beta:  0.5 * |diff|^2 / beta + 0
+    // When |diff| >= beta: 0.5 * beta + |diff| - beta = |diff| - 0.5 * beta
+    auto clamped_abs = clamp(abs_diff, 0.0f, static_cast<float>(beta_));
+    auto excess = abs_diff - clamped_abs;  // max(|diff| - beta, 0)
+    auto loss_unreduced = (half_var * clamped_abs * clamped_abs) / beta_var + excess;
 
     switch (reduction_) {
         case Reduction::None:

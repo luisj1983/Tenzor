@@ -249,12 +249,53 @@ private:
     int64_t output_padding_;    ///< Output padding
     int64_t groups_;            ///< Number of groups
 
-    Variable weight_;           ///< Weight tensor
-    std::optional<Variable> bias_;  ///< Optional bias tensor
+    // Parameters accessed via parameters_ map — no member variable duplicates.
+    // Use parameters_["weight"] and parameters_.find("bias") in forward().
 
     /**
      * @brief Initialize parameters using Kaiming uniform.
      */
+    auto reset_parameters() -> void;
+};
+
+/**
+ * @brief 3D convolutional layer.
+ *
+ * Applies 3D convolution over volumetric input (video, medical imaging).
+ *
+ * Shape transformations:
+ * - Input: (N, C_in, D_in, H_in, W_in)
+ * - Output: (N, C_out, D_out, H_out, W_out)
+ * - Weight: (C_out, C_in/groups, K, K, K)
+ *
+ * @code
+ * Conv3d conv(1, 32, 3, 1, 1);
+ * Variable x(Tensor({batch, 1, 16, 64, 64}, DType::Float32, Device::cpu()), true);
+ * Variable features = conv.forward(x);  // Shape: {batch, 32, 16, 64, 64}
+ * @endcode
+ */
+class Conv3d : public Module {
+public:
+    Conv3d(int64_t in_channels,
+           int64_t out_channels,
+           int64_t kernel_size,
+           int64_t stride = 1,
+           int64_t padding = 0,
+           int64_t dilation = 1,
+           int64_t groups = 1,
+           bool bias = true);
+
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    int64_t in_channels_;
+    int64_t out_channels_;
+    int64_t kernel_size_;
+    int64_t stride_;
+    int64_t padding_;
+    int64_t dilation_;
+    int64_t groups_;
+
     auto reset_parameters() -> void;
 };
 

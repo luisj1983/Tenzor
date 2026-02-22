@@ -14,7 +14,9 @@
 #include <sstream>
 #include <iostream>
 #include <atomic>
+#include <mutex>
 #include <tuple>
+#include <unordered_map>
 
 namespace tenzor {
 
@@ -319,7 +321,12 @@ public:
         }
 
         if (use_caching_allocator_) {
-            return backend::CachingAllocator::get().allocate(bytes, device_id);
+            void* ptr = backend::CachingAllocator::get().allocate(bytes, device_id);
+            {
+                std::lock_guard<std::mutex> lock(ptr_device_mutex_);
+                ptr_device_map_[ptr] = device_id;
+            }
+            return ptr;
         }
 
         void* ptr = nullptr;
@@ -331,6 +338,10 @@ public:
             );
         }
 
+        {
+            std::lock_guard<std::mutex> lock(ptr_device_mutex_);
+            ptr_device_map_[ptr] = device_id;
+        }
         return ptr;
     }
 
@@ -340,14 +351,18 @@ public:
             return;
         }
 
-        if (use_caching_allocator_) {
-            // Note: we don't know the device_id here, but CachingAllocator tracks it
-            // For proper integration, we'd need to look up the device from the pointer
-            int device_id = 0;
-            cudaPointerAttributes attrs;
-            if (cudaPointerGetAttributes(&attrs, ptr) == cudaSuccess) {
-                device_id = attrs.device;
+        // Look up cached device_id (avoids cudaPointerGetAttributes() overhead)
+        int device_id = 0;
+        {
+            std::lock_guard<std::mutex> lock(ptr_device_mutex_);
+            auto it = ptr_device_map_.find(ptr);
+            if (it != ptr_device_map_.end()) {
+                device_id = it->second;
+                ptr_device_map_.erase(it);
             }
+        }
+
+        if (use_caching_allocator_) {
             backend::CachingAllocator::get().free(ptr, device_id);
             return;
         }
@@ -410,6 +425,12 @@ public:
     auto dispatch(const std::string& op_name,
                  std::span<const Tensor> inputs,
                  const OpAttributes& attrs) -> std::vector<Tensor> override {
+        // Stream synchronization design note:
+        // All CUDA operations are submitted to the default stream (stream 0) per device.
+        // CUDA guarantees in-order execution within a single stream, so no explicit
+        // synchronization is needed between consecutive kernel launches. Synchronization
+        // occurs at device-to-host copy boundaries (cudaMemcpy is synchronous for D2H).
+
         // Allow empty inputs for creation operations
         bool is_creation_op = (op_name == "zeros" || op_name == "ones" || op_name == "full" ||
                                op_name == "rand" || op_name == "randn" ||
@@ -1920,11 +1941,29 @@ public:
                     throw std::invalid_argument("avg_pool2d_backward operation requires exactly 1 input (grad_output)");
                 }
                 int64_t H_in = 0, W_in = 0, kernel_size = 2, stride = 2, padding = 0;
+                // Support both individual H_in/W_in attrs and comma-separated input_shape
                 if (attrs.contains("H_in")) {
                     H_in = std::stoll(attrs.at("H_in"));
                 }
                 if (attrs.contains("W_in")) {
                     W_in = std::stoll(attrs.at("W_in"));
+                }
+                if (H_in == 0 && W_in == 0 && attrs.contains("input_shape")) {
+                    // Parse "N,C,H,W" format from autograd backward pass
+                    const auto& shape_str = attrs.at("input_shape");
+                    std::vector<int64_t> dims;
+                    size_t start = 0;
+                    size_t end = shape_str.find(',');
+                    while (start < shape_str.size()) {
+                        if (end == std::string::npos) end = shape_str.size();
+                        dims.push_back(std::stoll(shape_str.substr(start, end - start)));
+                        start = end + 1;
+                        end = shape_str.find(',', start);
+                    }
+                    if (dims.size() >= 4) {
+                        H_in = dims[2];
+                        W_in = dims[3];
+                    }
                 }
                 if (attrs.contains("kernel_size")) {
                     kernel_size = std::stoll(attrs.at("kernel_size"));
@@ -1970,6 +2009,9 @@ public:
 
 private:
     bool use_caching_allocator_{false};
+    // Cache pointer→device_id mapping to avoid cudaPointerGetAttributes() in deallocate()
+    std::mutex ptr_device_mutex_;
+    std::unordered_map<void*, int> ptr_device_map_;
 };
 
 extern "C" {

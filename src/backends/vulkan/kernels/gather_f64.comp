@@ -1,0 +1,48 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Gather operation for Float64: gather elements along specified dimension
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { float64_t input_data[]; };
+layout(binding = 1) buffer Indices { int indices[]; };
+layout(binding = 2) buffer Output { float64_t output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint input_size;       // Total input size
+    uint output_size;      // Total output size
+    uint dim;              // Dimension to gather along
+    uint dim_size;         // Size of the dimension being gathered
+    uint inner_size;       // Product of dimensions after dim
+    uint outer_size;       // Product of dimensions before dim
+} params;
+
+void main() {
+    uint out_idx = gl_GlobalInvocationID.x;
+
+    if (out_idx >= params.output_size) {
+        return;
+    }
+
+    // Decompose output index
+    uint outer_idx = out_idx / (params.inner_size * params.dim_size);
+    uint remainder = out_idx % (params.inner_size * params.dim_size);
+    uint dim_idx = remainder / params.inner_size;
+    uint inner_idx = remainder % params.inner_size;
+
+    // Get the index to gather from
+    int gather_idx = indices[out_idx];
+
+    // Bounds check
+    if (gather_idx < 0 || gather_idx >= int(params.dim_size)) {
+        output_data[out_idx] = float64_t(0.0);
+        return;
+    }
+
+    // Compute input index
+    uint in_idx = outer_idx * (params.dim_size * params.inner_size) +
+                  uint(gather_idx) * params.inner_size +
+                  inner_idx;
+
+    output_data[out_idx] = input_data[in_idx];
+}

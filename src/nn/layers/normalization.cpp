@@ -1697,6 +1697,285 @@ auto GroupNorm::reset_parameters() -> void {
 }
 
 // ============================================================================
+// InstanceNorm2d Implementation
+// ============================================================================
+
+// InstanceNorm autograd function
+class InstanceNormBackwardFn : public Function {
+public:
+    InstanceNormBackwardFn(bool affine, double eps, int64_t num_features,
+                           std::vector<Tensor> tensors_to_save)
+        : affine_(affine), eps_(eps), num_features_(num_features) {
+        saved_tensors_ = std::move(tensors_to_save);
+    }
+
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+        throw std::runtime_error("InstanceNormBackwardFn::forward should not be called");
+    }
+
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        auto& grad_output_orig = grad_outputs[0];
+        auto saved = saved_tensors();
+        auto& input_orig = saved[0];      // [N, C, *]
+        auto& mean_orig = saved[1];       // [N, C]
+        auto& rstd_orig = saved[2];       // [N, C]
+        auto& weight_orig = saved[3];     // [C]
+
+        auto original_device = grad_output_orig.device();
+        auto original_dtype = grad_output_orig.dtype();
+
+        // GPU fast path
+        if (original_device.type != Device::Type::CPU) {
+            auto go = grad_output_orig.contiguous();
+            auto inp = input_orig.contiguous();
+            auto wt = weight_orig.contiguous();
+            auto mn = mean_orig.contiguous();
+            auto rs = rstd_orig.contiguous();
+
+            // InstanceNormBackward: inputs [grad_output, input, weight, mean, rstd]
+            std::vector<Tensor> inputs_vec = {go, inp, wt, mn, rs};
+            auto results = dispatch<OpId::InstanceNormBackward>(inputs_vec);
+            return results;
+        }
+
+        // CPU path: dispatch to kernel
+        auto go = grad_output_orig.to(Device::cpu()).contiguous();
+        auto inp = input_orig.to(Device::cpu()).contiguous();
+        auto mn = mean_orig.to(Device::cpu()).contiguous();
+        auto rs = rstd_orig.to(Device::cpu()).contiguous();
+        auto wt = weight_orig.to(Device::cpu()).contiguous();
+
+        // InstanceNormBackward: inputs [grad_output, input, weight, mean, rstd]
+        std::vector<Tensor> inputs_vec = {go, inp, wt, mn, rs};
+        auto results = dispatch<OpId::InstanceNormBackward>(inputs_vec);
+
+        return {results[0].to(original_dtype).to(original_device).contiguous(),
+                results[1].to(original_dtype).to(original_device).contiguous(),
+                results[2].to(original_dtype).to(original_device).contiguous()};
+    }
+
+private:
+    bool affine_;
+    double eps_;
+    int64_t num_features_;
+};
+
+InstanceNorm2d::InstanceNorm2d(int64_t num_features, double eps, bool affine)
+    : num_features_(num_features), eps_(eps), affine_(affine) {
+
+    if (affine) {
+        weight_ = Variable(ones({num_features_}), true);
+        bias_ = Variable(zeros({num_features_}), true);
+        register_parameter("weight", weight_);
+        register_parameter("bias", bias_);
+    } else {
+        weight_ = Variable(ones({num_features_}), false);
+        bias_ = Variable(zeros({num_features_}), false);
+    }
+
+    reset_parameters();
+}
+
+auto InstanceNorm2d::forward_impl(const Variable& input) -> Variable {
+    auto shape = input.shape();
+    if (shape.size() != 4) {
+        throw std::runtime_error("InstanceNorm2d expects 4D input (N, C, H, W), got " +
+                               std::to_string(shape.size()) + "D");
+    }
+
+    int64_t C = shape[1];
+    if (C != num_features_) {
+        throw std::runtime_error("Expected " + std::to_string(num_features_) +
+                               " channels, got " + std::to_string(C));
+    }
+
+    auto original_device = input.tensor().device();
+    auto original_dtype = input.tensor().dtype();
+
+    // Get weight and bias tensors
+    Tensor weight_tensor = affine_
+        ? parameters_["weight"]->tensor().to(original_dtype).to(original_device)
+        : ones({C}, original_dtype, original_device);
+    Tensor bias_tensor = affine_
+        ? parameters_["bias"]->tensor().to(original_dtype).to(original_device)
+        : zeros({C}, original_dtype, original_device);
+
+    // Dispatch to backend kernel
+    OpAttributes attrs;
+    attrs["eps"] = std::to_string(static_cast<float>(eps_));
+    std::vector<Tensor> inputs_vec = {input.tensor(), weight_tensor, bias_tensor};
+    auto results = dispatch<OpId::InstanceNorm>(inputs_vec, attrs);
+
+    Tensor output = results[0];
+    Tensor saved_mean = results[1];   // [N, C]
+    Tensor saved_rstd = results[2];   // [N, C]
+
+    if (input.requires_grad() || (affine_ && parameters_["weight"]->requires_grad())) {
+        auto result = Variable(output, true);
+
+        std::vector<Tensor> tensors_to_save = {
+            input.tensor(), saved_mean, saved_rstd, weight_tensor
+        };
+
+        auto grad_fn = std::make_shared<InstanceNormBackwardFn>(
+            affine_, eps_, num_features_, std::move(tensors_to_save));
+
+        result.set_grad_fn(grad_fn);
+
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        if (auto input_grad_fn = input.grad_fn()) {
+            next_funcs.push_back(input_grad_fn);
+        }
+        if (affine_) {
+            auto weight_it = parameters_.find("weight");
+            auto bias_it = parameters_.find("bias");
+            if (weight_it != parameters_.end() && weight_it->second->requires_grad()) {
+                if (auto weight_grad_fn = weight_it->second->grad_fn()) {
+                    next_funcs.push_back(weight_grad_fn);
+                }
+            }
+            if (bias_it != parameters_.end() && bias_it->second->requires_grad()) {
+                if (auto bias_grad_fn = bias_it->second->grad_fn()) {
+                    next_funcs.push_back(bias_grad_fn);
+                }
+            }
+        }
+        grad_fn->set_next_functions(next_funcs);
+
+        std::vector<Variable> input_vars;
+        if (input.requires_grad()) {
+            input_vars.push_back(input);
+        }
+        if (affine_) {
+            if (auto it = parameters_.find("weight"); it != parameters_.end() && it->second->requires_grad()) {
+                input_vars.push_back(*it->second);
+            }
+        }
+        grad_fn->set_input_variables(input_vars);
+
+        return result;
+    }
+
+    return Variable(output, false);
+}
+
+auto InstanceNorm2d::reset_parameters() -> void {
+    // Weight initialized to 1, bias to 0 (already done in constructor)
+}
+
+// ============================================================================
+// InstanceNorm1d Implementation
+// ============================================================================
+
+InstanceNorm1d::InstanceNorm1d(int64_t num_features, double eps, bool affine)
+    : num_features_(num_features), eps_(eps), affine_(affine) {
+
+    if (affine) {
+        weight_ = Variable(ones({num_features_}), true);
+        bias_ = Variable(zeros({num_features_}), true);
+        register_parameter("weight", weight_);
+        register_parameter("bias", bias_);
+    } else {
+        weight_ = Variable(ones({num_features_}), false);
+        bias_ = Variable(zeros({num_features_}), false);
+    }
+
+    reset_parameters();
+}
+
+auto InstanceNorm1d::forward_impl(const Variable& input) -> Variable {
+    auto shape = input.shape();
+    if (shape.size() != 3) {
+        throw std::runtime_error("InstanceNorm1d expects 3D input (N, C, L), got " +
+                               std::to_string(shape.size()) + "D");
+    }
+
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t L = shape[2];
+
+    if (C != num_features_) {
+        throw std::runtime_error("Expected " + std::to_string(num_features_) +
+                               " channels, got " + std::to_string(C));
+    }
+
+    auto original_device = input.tensor().device();
+    auto original_dtype = input.tensor().dtype();
+
+    // Reshape (N, C, L) -> (N, C, L, 1) to reuse the 4D kernel
+    Tensor input_4d = input.tensor().reshape({N, C, L, 1});
+
+    Tensor weight_tensor = affine_
+        ? parameters_["weight"]->tensor().to(original_dtype).to(original_device)
+        : ones({C}, original_dtype, original_device);
+    Tensor bias_tensor = affine_
+        ? parameters_["bias"]->tensor().to(original_dtype).to(original_device)
+        : zeros({C}, original_dtype, original_device);
+
+    OpAttributes attrs;
+    attrs["eps"] = std::to_string(static_cast<float>(eps_));
+    std::vector<Tensor> inputs_vec = {input_4d, weight_tensor, bias_tensor};
+    auto results = dispatch<OpId::InstanceNorm>(inputs_vec, attrs);
+
+    // Reshape output back to (N, C, L)
+    Tensor output = results[0].reshape({N, C, L});
+    Tensor saved_mean = results[1];
+    Tensor saved_rstd = results[2];
+
+    if (input.requires_grad() || (affine_ && parameters_["weight"]->requires_grad())) {
+        auto result = Variable(output, true);
+
+        std::vector<Tensor> tensors_to_save = {
+            input_4d, saved_mean, saved_rstd, weight_tensor
+        };
+
+        auto grad_fn = std::make_shared<InstanceNormBackwardFn>(
+            affine_, eps_, num_features_, std::move(tensors_to_save));
+
+        result.set_grad_fn(grad_fn);
+
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        if (auto input_grad_fn = input.grad_fn()) {
+            next_funcs.push_back(input_grad_fn);
+        }
+        if (affine_) {
+            auto weight_it = parameters_.find("weight");
+            auto bias_it = parameters_.find("bias");
+            if (weight_it != parameters_.end() && weight_it->second->requires_grad()) {
+                if (auto weight_grad_fn = weight_it->second->grad_fn()) {
+                    next_funcs.push_back(weight_grad_fn);
+                }
+            }
+            if (bias_it != parameters_.end() && bias_it->second->requires_grad()) {
+                if (auto bias_grad_fn = bias_it->second->grad_fn()) {
+                    next_funcs.push_back(bias_grad_fn);
+                }
+            }
+        }
+        grad_fn->set_next_functions(next_funcs);
+
+        std::vector<Variable> input_vars;
+        if (input.requires_grad()) {
+            input_vars.push_back(input);
+        }
+        if (affine_) {
+            if (auto it = parameters_.find("weight"); it != parameters_.end() && it->second->requires_grad()) {
+                input_vars.push_back(*it->second);
+            }
+        }
+        grad_fn->set_input_variables(input_vars);
+
+        return result;
+    }
+
+    return Variable(output, false);
+}
+
+auto InstanceNorm1d::reset_parameters() -> void {
+    // Weight initialized to 1, bias to 0 (already done in constructor)
+}
+
+// ============================================================================
 // RMSNorm Implementation
 // ============================================================================
 

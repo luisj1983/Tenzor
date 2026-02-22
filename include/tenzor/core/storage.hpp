@@ -10,7 +10,6 @@
 
 #include <memory>
 #include <cstddef>
-#include <atomic>
 #include "device.hpp"
 
 namespace tenzor {
@@ -59,14 +58,6 @@ public:
      */
     virtual auto device() const -> Device = 0;
 
-    /**
-     * @brief Get current reference count.
-     *
-     * @return Number of references to this storage
-     *
-     * @note Reference count is managed atomically for thread-safety.
-     */
-    virtual auto ref_count() const -> int64_t = 0;
 };
 
 // Forward declaration for backend
@@ -138,14 +129,12 @@ public:
     auto data() const -> const void* override { return device_ptr_; }
     auto size_bytes() const -> size_t override { return size_; }
     auto device() const -> Device override { return device_; }
-    auto ref_count() const -> int64_t override { return ref_count_.load(); }
 
 private:
     void* device_ptr_{nullptr};                   ///< Device memory pointer
     size_t size_{0};                              ///< Size in bytes
     Device device_;                               ///< Device specification
     Backend* backend_{nullptr};                   ///< Backend managing memory
-    mutable std::atomic<int64_t> ref_count_{1};   ///< Reference counter (atomic)
 };
 
 } // namespace tenzor

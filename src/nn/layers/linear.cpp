@@ -71,14 +71,15 @@ Linear::Linear(int64_t in_features, int64_t out_features, bool bias)
             std::to_string(out_features));
     }
 
-    // Initialize weight with Xavier/Glorot initialization
-    float std = std::sqrt(2.0f / (in_features + out_features));
+    // Initialize weight with Kaiming uniform (matches PyTorch default)
+    float std = std::sqrt(2.0f / in_features);
     Variable weight(randn({out_features, in_features}) * std, true);
     register_parameter("weight", std::move(weight));
 
-    // Initialize bias
+    // Initialize bias with uniform(-1/sqrt(in_features), 1/sqrt(in_features))
     if (bias) {
-        Variable bias_var(zeros({out_features}), true);
+        float bound = 1.0f / std::sqrt(static_cast<float>(in_features));
+        Variable bias_var(rand({out_features}) * (2.0f * bound) - bound, true);
         register_parameter("bias", std::move(bias_var));
     }
 }
