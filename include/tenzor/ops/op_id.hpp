@@ -319,6 +319,24 @@ enum class OpId : uint16_t {
     Cast = 316,
 
     // =========================================================================
+    // Extended Math Operations (320-339)
+    // =========================================================================
+    Log2 = 320,
+    Log10,
+    Log1p,
+    Exp2,
+    Expm1,
+    Erf,
+    Erfc,
+    IsNan,
+    IsInf,
+    IsFinite,
+    Atan2,       // binary: atan2(y, x)
+    Fmod,        // binary: fmod(a, b)
+    Remainder,   // binary: remainder(a, b)
+    Lerp,        // ternary: lerp(start, end, weight)
+
+    // =========================================================================
     // Sentinel (MUST BE LAST)
     // =========================================================================
     OP_COUNT

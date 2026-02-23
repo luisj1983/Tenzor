@@ -4976,5 +4976,271 @@ auto div_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
     return a;
 }
 
+// =========================================================================
+// Extended Math Kernels
+// =========================================================================
+
+namespace {
+
+// Helper: apply a unary float function element-wise with multi-dtype support
+template<typename F32Fn, typename F64Fn>
+auto unary_math_kernel(const Tensor& input, F32Fn f32_fn, F64Fn f64_fn,
+                       const char* op_name) -> Tensor {
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    Tensor result(shape_vec, input.dtype(), input.device());
+    size_t n = static_cast<size_t>(input.numel());
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_data = input.data<float>();
+        float* out_data = result.data<float>();
+        for (size_t i = 0; i < n; ++i) out_data[i] = f32_fn(in_data[i]);
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_data = input.data<double>();
+        double* out_data = result.data<double>();
+        for (size_t i = 0; i < n; ++i) out_data[i] = f64_fn(in_data[i]);
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = result.data<Float16>();
+        for (size_t i = 0; i < n; ++i)
+            out_data[i] = Float16(f32_fn(static_cast<float>(in_data[i])));
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = result.data<BFloat16>();
+        for (size_t i = 0; i < n; ++i)
+            out_data[i] = BFloat16(f32_fn(static_cast<float>(in_data[i])));
+    } else {
+        throw std::runtime_error(std::string(op_name) + ": unsupported dtype");
+    }
+    return result;
+}
+
+// Helper: apply a unary function returning Bool tensor
+template<typename F32Fn, typename F64Fn>
+auto unary_bool_kernel(const Tensor& input, F32Fn f32_fn, F64Fn f64_fn,
+                       const char* op_name) -> Tensor {
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    Tensor result(shape_vec, DType::Bool, input.device());
+    size_t n = static_cast<size_t>(input.numel());
+    bool* out_data = result.data<bool>();
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_data = input.data<float>();
+        for (size_t i = 0; i < n; ++i) out_data[i] = f32_fn(in_data[i]);
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_data = input.data<double>();
+        for (size_t i = 0; i < n; ++i) out_data[i] = f64_fn(in_data[i]);
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        for (size_t i = 0; i < n; ++i) out_data[i] = f32_fn(static_cast<float>(in_data[i]));
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        for (size_t i = 0; i < n; ++i) out_data[i] = f32_fn(static_cast<float>(in_data[i]));
+    } else if (input.dtype() == DType::Int32 || input.dtype() == DType::Int64) {
+        // Integers are always finite, never NaN/Inf
+        bool val_isnan = false;
+        bool val_isinf = false;
+        bool val_isfinite = true;
+        // Determine which function this is by testing a known value
+        bool is_nan_fn = f32_fn(std::numeric_limits<float>::quiet_NaN());
+        bool is_inf_fn = f32_fn(std::numeric_limits<float>::infinity());
+        bool fill_val = is_nan_fn ? val_isnan : (is_inf_fn ? val_isinf : val_isfinite);
+        for (size_t i = 0; i < n; ++i) out_data[i] = fill_val;
+    } else {
+        throw std::runtime_error(std::string(op_name) + ": unsupported dtype");
+    }
+    return result;
+}
+
+// Helper: binary element-wise op with broadcast support
+template<typename F32Fn, typename F64Fn>
+auto binary_math_kernel(const Tensor& a, const Tensor& b, F32Fn f32_fn, F64Fn f64_fn,
+                        const char* op_name) -> Tensor {
+    detail::validate_elementwise(a, b);
+    auto shape_a = a.shape();
+    auto shape_b = b.shape();
+    std::vector<int64_t> shape_a_vec(shape_a.begin(), shape_a.end());
+    std::vector<int64_t> shape_b_vec(shape_b.begin(), shape_b.end());
+    std::vector<int64_t> output_shape = detail::compute_broadcast_shape(shape_a_vec, shape_b_vec);
+    Tensor result(output_shape, a.dtype(), a.device());
+
+    if (detail::have_same_shape(a, b)) {
+        // Fast path: no broadcasting needed
+        size_t n = static_cast<size_t>(a.numel());
+        if (a.dtype() == DType::Float32) {
+            const float* ad = a.data<float>();
+            const float* bd = b.data<float>();
+            float* od = result.data<float>();
+            for (size_t i = 0; i < n; ++i) od[i] = f32_fn(ad[i], bd[i]);
+        } else if (a.dtype() == DType::Float64) {
+            const double* ad = a.data<double>();
+            const double* bd = b.data<double>();
+            double* od = result.data<double>();
+            for (size_t i = 0; i < n; ++i) od[i] = f64_fn(ad[i], bd[i]);
+        } else {
+            throw std::runtime_error(std::string(op_name) + ": unsupported dtype (requires float)");
+        }
+    } else {
+        // Broadcast path using stride-based indexing
+        auto a_strides = detail::compute_broadcast_strides(shape_a, output_shape);
+        auto b_strides = detail::compute_broadcast_strides(shape_b, output_shape);
+        int64_t ndim = static_cast<int64_t>(output_shape.size());
+        int64_t n = result.numel();
+
+        if (a.dtype() == DType::Float32) {
+            const float* ad = a.data<float>();
+            const float* bd = b.data<float>();
+            float* od = result.data<float>();
+            for (int64_t i = 0; i < n; ++i) {
+                int64_t a_idx = 0, b_idx = 0, idx = i;
+                for (int64_t d = ndim - 1; d >= 0; --d) {
+                    int64_t coord = idx % output_shape[d];
+                    idx /= output_shape[d];
+                    a_idx += coord * a_strides[d];
+                    b_idx += coord * b_strides[d];
+                }
+                od[i] = f32_fn(ad[a_idx], bd[b_idx]);
+            }
+        } else if (a.dtype() == DType::Float64) {
+            const double* ad = a.data<double>();
+            const double* bd = b.data<double>();
+            double* od = result.data<double>();
+            for (int64_t i = 0; i < n; ++i) {
+                int64_t a_idx = 0, b_idx = 0, idx = i;
+                for (int64_t d = ndim - 1; d >= 0; --d) {
+                    int64_t coord = idx % output_shape[d];
+                    idx /= output_shape[d];
+                    a_idx += coord * a_strides[d];
+                    b_idx += coord * b_strides[d];
+                }
+                od[i] = f64_fn(ad[a_idx], bd[b_idx]);
+            }
+        } else {
+            throw std::runtime_error(std::string(op_name) + ": unsupported dtype (requires float)");
+        }
+    }
+    return result;
+}
+
+} // anonymous namespace
+
+auto log2_kernel(const Tensor& input) -> Tensor {
+    return unary_math_kernel(input,
+        [](float x) { return std::log2(x); },
+        [](double x) { return std::log2(x); }, "log2");
+}
+
+auto log10_kernel(const Tensor& input) -> Tensor {
+    return unary_math_kernel(input,
+        [](float x) { return std::log10(x); },
+        [](double x) { return std::log10(x); }, "log10");
+}
+
+auto log1p_kernel(const Tensor& input) -> Tensor {
+    return unary_math_kernel(input,
+        [](float x) { return std::log1p(x); },
+        [](double x) { return std::log1p(x); }, "log1p");
+}
+
+auto exp2_kernel(const Tensor& input) -> Tensor {
+    return unary_math_kernel(input,
+        [](float x) { return std::exp2(x); },
+        [](double x) { return std::exp2(x); }, "exp2");
+}
+
+auto expm1_kernel(const Tensor& input) -> Tensor {
+    return unary_math_kernel(input,
+        [](float x) { return std::expm1(x); },
+        [](double x) { return std::expm1(x); }, "expm1");
+}
+
+auto erf_kernel(const Tensor& input) -> Tensor {
+    return unary_math_kernel(input,
+        [](float x) { return std::erf(x); },
+        [](double x) { return std::erf(x); }, "erf");
+}
+
+auto erfc_kernel(const Tensor& input) -> Tensor {
+    return unary_math_kernel(input,
+        [](float x) { return std::erfc(x); },
+        [](double x) { return std::erfc(x); }, "erfc");
+}
+
+auto isnan_kernel(const Tensor& input) -> Tensor {
+    return unary_bool_kernel(input,
+        [](float x) { return std::isnan(x); },
+        [](double x) { return std::isnan(x); }, "isnan");
+}
+
+auto isinf_kernel(const Tensor& input) -> Tensor {
+    return unary_bool_kernel(input,
+        [](float x) { return std::isinf(x); },
+        [](double x) { return std::isinf(x); }, "isinf");
+}
+
+auto isfinite_kernel(const Tensor& input) -> Tensor {
+    return unary_bool_kernel(input,
+        [](float x) { return std::isfinite(x); },
+        [](double x) { return std::isfinite(x); }, "isfinite");
+}
+
+auto atan2_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    return binary_math_kernel(a, b,
+        [](float y, float x) { return std::atan2(y, x); },
+        [](double y, double x) { return std::atan2(y, x); }, "atan2");
+}
+
+auto fmod_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    return binary_math_kernel(a, b,
+        [](float x, float y) { return std::fmod(x, y); },
+        [](double x, double y) { return std::fmod(x, y); }, "fmod");
+}
+
+auto remainder_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    return binary_math_kernel(a, b,
+        [](float x, float y) { return std::remainder(x, y); },
+        [](double x, double y) { return std::remainder(x, y); }, "remainder");
+}
+
+auto lerp_kernel(std::span<const Tensor> inputs) -> Tensor {
+    if (inputs.size() != 3) {
+        throw std::runtime_error("lerp requires 3 inputs (start, end, weight)");
+    }
+    const auto& start = inputs[0];
+    const auto& end = inputs[1];
+    const auto& weight = inputs[2];
+
+    auto shape_vec = std::vector<int64_t>(start.shape().begin(), start.shape().end());
+    Tensor result(shape_vec, start.dtype(), start.device());
+    size_t n = static_cast<size_t>(result.numel());
+
+    if (start.dtype() == DType::Float32) {
+        const float* s = start.data<float>();
+        const float* e = end.data<float>();
+        float* o = result.data<float>();
+        // Scalar weight (numel==1) or element-wise
+        if (weight.numel() == 1) {
+            float w = weight.data<float>()[0];
+            for (size_t i = 0; i < n; ++i) o[i] = s[i] + w * (e[i] - s[i]);
+        } else {
+            const float* w = weight.data<float>();
+            for (size_t i = 0; i < n; ++i) o[i] = s[i] + w[i] * (e[i] - s[i]);
+        }
+    } else if (start.dtype() == DType::Float64) {
+        const double* s = start.data<double>();
+        const double* e = end.data<double>();
+        double* o = result.data<double>();
+        if (weight.numel() == 1) {
+            double w = weight.data<double>()[0];
+            for (size_t i = 0; i < n; ++i) o[i] = s[i] + w * (e[i] - s[i]);
+        } else {
+            const double* w = weight.data<double>();
+            for (size_t i = 0; i < n; ++i) o[i] = s[i] + w[i] * (e[i] - s[i]);
+        }
+    } else {
+        throw std::runtime_error("lerp: unsupported dtype");
+    }
+    return result;
+}
+
 } // namespace cpu
 } // namespace tenzor

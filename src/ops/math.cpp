@@ -438,4 +438,99 @@ auto div_(Tensor& self, const Tensor& other) -> Tensor& {
     return self;
 }
 
+// =========================================================================
+// Extended Math Operations
+// =========================================================================
+
+auto log2(const Tensor& input) -> Tensor {
+    std::vector<Tensor> inputs = {input};
+    return dispatch<OpId::Log2>(inputs)[0];
+}
+
+auto log10(const Tensor& input) -> Tensor {
+    std::vector<Tensor> inputs = {input};
+    return dispatch<OpId::Log10>(inputs)[0];
+}
+
+auto log1p(const Tensor& input) -> Tensor {
+    std::vector<Tensor> inputs = {input};
+    return dispatch<OpId::Log1p>(inputs)[0];
+}
+
+auto exp2(const Tensor& input) -> Tensor {
+    std::vector<Tensor> inputs = {input};
+    return dispatch<OpId::Exp2>(inputs)[0];
+}
+
+auto expm1(const Tensor& input) -> Tensor {
+    std::vector<Tensor> inputs = {input};
+    return dispatch<OpId::Expm1>(inputs)[0];
+}
+
+auto erf(const Tensor& input) -> Tensor {
+    std::vector<Tensor> inputs = {input};
+    return dispatch<OpId::Erf>(inputs)[0];
+}
+
+auto erfc(const Tensor& input) -> Tensor {
+    std::vector<Tensor> inputs = {input};
+    return dispatch<OpId::Erfc>(inputs)[0];
+}
+
+auto isnan(const Tensor& input) -> Tensor {
+    std::vector<Tensor> inputs = {input};
+    return dispatch<OpId::IsNan>(inputs)[0];
+}
+
+auto isinf(const Tensor& input) -> Tensor {
+    std::vector<Tensor> inputs = {input};
+    return dispatch<OpId::IsInf>(inputs)[0];
+}
+
+auto isfinite(const Tensor& input) -> Tensor {
+    std::vector<Tensor> inputs = {input};
+    return dispatch<OpId::IsFinite>(inputs)[0];
+}
+
+auto atan2(const Tensor& y, const Tensor& x) -> Tensor {
+    auto [yp, xp] = promote_inputs(y, x);
+    validate_broadcast_shapes("atan2", yp.shape(), xp.shape());
+    Tensor y_c = yp.is_contiguous() ? yp : yp.contiguous();
+    Tensor x_c = xp.is_contiguous() ? xp : xp.contiguous();
+    std::vector<Tensor> inputs = {y_c, x_c};
+    return dispatch(OpId::Atan2, inputs)[0];
+}
+
+auto fmod(const Tensor& a, const Tensor& b) -> Tensor {
+    auto [ap, bp] = promote_inputs(a, b);
+    validate_broadcast_shapes("fmod", ap.shape(), bp.shape());
+    Tensor a_c = ap.is_contiguous() ? ap : ap.contiguous();
+    Tensor b_c = bp.is_contiguous() ? bp : bp.contiguous();
+    std::vector<Tensor> inputs = {a_c, b_c};
+    return dispatch(OpId::Fmod, inputs)[0];
+}
+
+auto remainder(const Tensor& a, const Tensor& b) -> Tensor {
+    auto [ap, bp] = promote_inputs(a, b);
+    validate_broadcast_shapes("remainder", ap.shape(), bp.shape());
+    Tensor a_c = ap.is_contiguous() ? ap : ap.contiguous();
+    Tensor b_c = bp.is_contiguous() ? bp : bp.contiguous();
+    std::vector<Tensor> inputs = {a_c, b_c};
+    return dispatch(OpId::Remainder, inputs)[0];
+}
+
+auto lerp(const Tensor& start, const Tensor& end, const Tensor& weight) -> Tensor {
+    auto [sp, ep] = promote_inputs(start, end);
+    Tensor wp = (weight.dtype() != sp.dtype()) ? weight.to(sp.dtype()) : weight;
+    std::vector<Tensor> inputs = {sp, ep, wp};
+    return dispatch(OpId::Lerp, inputs)[0];
+}
+
+auto lerp(const Tensor& start, const Tensor& end, double weight) -> Tensor {
+    auto [sp, ep] = promote_inputs(start, end);
+    Tensor w = full({1}, weight, sp.dtype(), sp.device());
+    std::vector<Tensor> inputs = {sp, ep, w};
+    return dispatch(OpId::Lerp, inputs)[0];
+}
+
 } // namespace tenzor

@@ -54,6 +54,22 @@ namespace cpu {
     auto cosh_kernel(const Tensor& input) -> Tensor;
     auto tanh_kernel(const Tensor& input) -> Tensor;
 
+    // Extended math
+    auto log2_kernel(const Tensor& input) -> Tensor;
+    auto log10_kernel(const Tensor& input) -> Tensor;
+    auto log1p_kernel(const Tensor& input) -> Tensor;
+    auto exp2_kernel(const Tensor& input) -> Tensor;
+    auto expm1_kernel(const Tensor& input) -> Tensor;
+    auto erf_kernel(const Tensor& input) -> Tensor;
+    auto erfc_kernel(const Tensor& input) -> Tensor;
+    auto isnan_kernel(const Tensor& input) -> Tensor;
+    auto isinf_kernel(const Tensor& input) -> Tensor;
+    auto isfinite_kernel(const Tensor& input) -> Tensor;
+    auto atan2_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto fmod_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto remainder_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto lerp_kernel(std::span<const Tensor> inputs) -> Tensor;
+
     // Reductions
     auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
@@ -497,6 +513,27 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Sinh, cpu::sinh_kernel);
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Cosh, cpu::cosh_kernel);
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Tanh, cpu::tanh_kernel);
+
+    // =========================================================================
+    // Extended Math Operations
+    // =========================================================================
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Log2, cpu::log2_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Log10, cpu::log10_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Log1p, cpu::log1p_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Exp2, cpu::exp2_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Expm1, cpu::expm1_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Erf, cpu::erf_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Erfc, cpu::erfc_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, IsNan, cpu::isnan_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, IsInf, cpu::isinf_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, IsFinite, cpu::isfinite_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Atan2, cpu::atan2_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Fmod, cpu::fmod_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Remainder, cpu::remainder_kernel);
+
+    table.register_kernel(OpId::Lerp, [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+        return {cpu::lerp_kernel(inputs)};
+    });
 
     // =========================================================================
     // Comparison Operations

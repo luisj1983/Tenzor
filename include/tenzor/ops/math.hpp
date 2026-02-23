@@ -280,6 +280,46 @@ auto sub_(Tensor& self, const Tensor& other) -> Tensor&;
 auto div_(Tensor& self, const Tensor& other) -> Tensor&;
 
 /// @}
+
+// =========================================================================
+// Extended Math Operations
+// =========================================================================
+
+/// @name Logarithmic Functions
+/// @{
+auto log2(const Tensor& input) -> Tensor;
+auto log10(const Tensor& input) -> Tensor;
+auto log1p(const Tensor& input) -> Tensor;
+/// @}
+
+/// @name Exponential Functions
+/// @{
+auto exp2(const Tensor& input) -> Tensor;
+auto expm1(const Tensor& input) -> Tensor;
+/// @}
+
+/// @name Special Functions
+/// @{
+auto erf(const Tensor& input) -> Tensor;
+auto erfc(const Tensor& input) -> Tensor;
+/// @}
+
+/// @name Classification Functions (return Bool tensors)
+/// @{
+auto isnan(const Tensor& input) -> Tensor;
+auto isinf(const Tensor& input) -> Tensor;
+auto isfinite(const Tensor& input) -> Tensor;
+/// @}
+
+/// @name Binary Math Functions
+/// @{
+auto atan2(const Tensor& y, const Tensor& x) -> Tensor;
+auto fmod(const Tensor& a, const Tensor& b) -> Tensor;
+auto remainder(const Tensor& a, const Tensor& b) -> Tensor;
+auto lerp(const Tensor& start, const Tensor& end, const Tensor& weight) -> Tensor;
+auto lerp(const Tensor& start, const Tensor& end, double weight) -> Tensor;
+/// @}
+
 /** @} */ // end of tensor_math group
 
 } // namespace tenzor
