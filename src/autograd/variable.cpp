@@ -59,25 +59,40 @@ auto Variable::has_grad() const -> bool {
 }
 
 auto Variable::set_grad(Tensor gradient) -> void {
+    if (!impl_) {
+        throw std::runtime_error("Cannot set grad of uninitialized Variable");
+    }
     impl_->grad_ = std::move(gradient);
 }
 
 auto Variable::backward(std::optional<Tensor> gradient, bool retain_graph, bool create_graph) -> void {
+    if (!impl_) {
+        throw std::runtime_error("Cannot call backward on uninitialized Variable");
+    }
     // create_graph implies retain_graph (we need the graph to differentiate through it)
     backward_engine().execute(*this, gradient, retain_graph || create_graph, create_graph);
 }
 
 auto Variable::register_hook(std::function<Tensor(const Tensor&)> hook) -> size_t {
+    if (!impl_) {
+        throw std::runtime_error("Cannot register hook on uninitialized Variable");
+    }
     size_t id = impl_->next_hook_id_++;
     impl_->hooks_[id] = std::move(hook);
     return id;
 }
 
 auto Variable::unregister_hook(size_t hook_id) -> bool {
+    if (!impl_) {
+        throw std::runtime_error("Cannot unregister hook on uninitialized Variable");
+    }
     return impl_->hooks_.erase(hook_id) > 0;
 }
 
 auto Variable::retain_grad() -> void {
+    if (!impl_) {
+        throw std::runtime_error("Cannot retain grad of uninitialized Variable");
+    }
     impl_->retain_grad_ = true;
 }
 
@@ -94,6 +109,9 @@ auto Variable::zero_grad() -> void {
 }
 
 auto Variable::detach() -> Variable {
+    if (!impl_) {
+        throw std::runtime_error("Cannot detach uninitialized Variable");
+    }
     return Variable(impl_->data_.detach(), false);
 }
 
@@ -102,6 +120,9 @@ auto Variable::requires_grad() const -> bool {
 }
 
 auto Variable::set_requires_grad(bool requires_grad) -> void {
+    if (!impl_) {
+        throw std::runtime_error("Cannot set requires_grad on uninitialized Variable");
+    }
     impl_->requires_grad_ = requires_grad;
 }
 
@@ -110,6 +131,9 @@ auto Variable::is_leaf() const -> bool {
 }
 
 auto Variable::set_grad_fn(std::shared_ptr<Function> fn) -> void {
+    if (!impl_) {
+        throw std::runtime_error("Cannot set grad_fn on uninitialized Variable");
+    }
     impl_->grad_fn_ = std::move(fn);
 }
 
@@ -176,6 +200,12 @@ CreateGraphGuard::~CreateGraphGuard() {
 
 // Arithmetic operators
 auto Variable::operator+(const Variable& other) const -> Variable {
+    if (!impl_) {
+        throw std::runtime_error("Cannot add with uninitialized Variable (lhs)");
+    }
+    if (!other.impl_) {
+        throw std::runtime_error("Cannot add with uninitialized Variable (rhs)");
+    }
     auto grad_fn = std::make_shared<AddBackward>();
 
     // Set up backward graph - MUST maintain index correspondence with input_grads!
@@ -205,6 +235,12 @@ auto Variable::operator+(const Variable& other) const -> Variable {
 }
 
 auto Variable::operator-(const Variable& other) const -> Variable {
+    if (!impl_) {
+        throw std::runtime_error("Cannot subtract with uninitialized Variable (lhs)");
+    }
+    if (!other.impl_) {
+        throw std::runtime_error("Cannot subtract with uninitialized Variable (rhs)");
+    }
     auto grad_fn = std::make_shared<SubBackward>();
 
     // Set up backward graph - MUST maintain index correspondence with input_grads!
@@ -234,6 +270,12 @@ auto Variable::operator-(const Variable& other) const -> Variable {
 }
 
 auto Variable::operator*(const Variable& other) const -> Variable {
+    if (!impl_) {
+        throw std::runtime_error("Cannot multiply with uninitialized Variable (lhs)");
+    }
+    if (!other.impl_) {
+        throw std::runtime_error("Cannot multiply with uninitialized Variable (rhs)");
+    }
     auto grad_fn = std::make_shared<MulBackward>();
 
     // Set up backward graph - MUST maintain index correspondence with input_grads!
@@ -270,6 +312,12 @@ auto Variable::operator*(const Variable& other) const -> Variable {
 }
 
 auto Variable::operator/(const Variable& other) const -> Variable {
+    if (!impl_) {
+        throw std::runtime_error("Cannot divide with uninitialized Variable (lhs)");
+    }
+    if (!other.impl_) {
+        throw std::runtime_error("Cannot divide with uninitialized Variable (rhs)");
+    }
     auto grad_fn = std::make_shared<DivBackward>();
 
     // Set up backward graph - MUST maintain index correspondence with input_grads!
@@ -306,6 +354,9 @@ auto Variable::operator/(const Variable& other) const -> Variable {
 
 // Scalar operations
 auto Variable::operator+(float scalar) const -> Variable {
+    if (!impl_) {
+        throw std::runtime_error("Cannot add scalar to uninitialized Variable");
+    }
     // Create scalar tensor with same dtype and device
     Device original_device = impl_->data_.device();
 
@@ -329,6 +380,9 @@ auto Variable::operator+(float scalar) const -> Variable {
 }
 
 auto Variable::operator+(double scalar) const -> Variable {
+    if (!impl_) {
+        throw std::runtime_error("Cannot add scalar to uninitialized Variable");
+    }
     // Create scalar tensor with same dtype and device
     Device original_device = impl_->data_.device();
 
@@ -352,6 +406,9 @@ auto Variable::operator+(double scalar) const -> Variable {
 }
 
 auto Variable::operator*(float scalar) const -> Variable {
+    if (!impl_) {
+        throw std::runtime_error("Cannot multiply scalar with uninitialized Variable");
+    }
     // Create scalar tensor with same dtype and device
     Device original_device = impl_->data_.device();
 
@@ -375,6 +432,9 @@ auto Variable::operator*(float scalar) const -> Variable {
 }
 
 auto Variable::operator*(double scalar) const -> Variable {
+    if (!impl_) {
+        throw std::runtime_error("Cannot multiply scalar with uninitialized Variable");
+    }
     // Create scalar tensor with same dtype and device
     Device original_device = impl_->data_.device();
 

@@ -670,6 +670,8 @@ auto Tensor::fill_(float value) -> Tensor& {
                 case DType::Float16: *reinterpret_cast<Float16*>(base + offset) = Float16(value); break;
                 case DType::BFloat16: *reinterpret_cast<BFloat16*>(base + offset) = BFloat16(value); break;
                 case DType::Bool: *reinterpret_cast<bool*>(base + offset) = (value != 0.0f); break;
+                case DType::Complex64: *reinterpret_cast<std::complex<float>*>(base + offset) = std::complex<float>(value, 0.0f); break;
+                case DType::Complex128: *reinterpret_cast<std::complex<double>*>(base + offset) = std::complex<double>(static_cast<double>(value), 0.0); break;
                 default: throw std::runtime_error("fill_ not supported for this dtype");
             }
             // Increment indices (row-major order)
@@ -791,6 +793,22 @@ auto Tensor::fill_(float value) -> Tensor& {
             bool bool_value = (value != 0.0f);
             for (int64_t i = 0; i < n; ++i) {
                 ptr[i] = bool_value;
+            }
+            break;
+        }
+        case DType::Complex64: {
+            auto* ptr = data<std::complex<float>>();
+            std::complex<float> c_value(value, 0.0f);
+            for (int64_t i = 0; i < n; ++i) {
+                ptr[i] = c_value;
+            }
+            break;
+        }
+        case DType::Complex128: {
+            auto* ptr = data<std::complex<double>>();
+            std::complex<double> c_value(static_cast<double>(value), 0.0);
+            for (int64_t i = 0; i < n; ++i) {
+                ptr[i] = c_value;
             }
             break;
         }

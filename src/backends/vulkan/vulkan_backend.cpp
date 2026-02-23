@@ -203,6 +203,15 @@ VulkanBackend::~VulkanBackend() {
         }
     }
 
+    // Cleanup debug messenger before instance
+    if (debug_messenger_ != VK_NULL_HANDLE && instance_ != VK_NULL_HANDLE) {
+        auto vkDestroyDebugUtilsMessengerEXT = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
+            vkGetInstanceProcAddr(instance_, "vkDestroyDebugUtilsMessengerEXT"));
+        if (vkDestroyDebugUtilsMessengerEXT) {
+            vkDestroyDebugUtilsMessengerEXT(instance_, debug_messenger_, nullptr);
+        }
+    }
+
     // Cleanup instance
     if (instance_ != VK_NULL_HANDLE) {
         vkDestroyInstance(instance_, nullptr);
@@ -279,8 +288,7 @@ void VulkanBackend::createInstance() {
                 std::cerr << "[Vulkan " << level << "] " << data->pMessage << "\n";
                 return VK_FALSE;
             };
-            VkDebugUtilsMessengerEXT messenger{};
-            vkCreateDebugUtilsMessengerEXT(instance_, &debugInfo, nullptr, &messenger);
+            vkCreateDebugUtilsMessengerEXT(instance_, &debugInfo, nullptr, &debug_messenger_);
         }
     }
 }

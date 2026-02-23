@@ -327,6 +327,7 @@ private:
 
     // Instance and devices
     VkInstance instance_ = VK_NULL_HANDLE;
+    VkDebugUtilsMessengerEXT debug_messenger_ = VK_NULL_HANDLE;
     std::vector<DeviceContext> devices_;
     std::vector<StagingBuffer> stagingBuffers_;
     std::vector<PipelineCache> pipelineCaches_;
