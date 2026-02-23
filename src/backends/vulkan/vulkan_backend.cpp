@@ -1661,6 +1661,285 @@ vulkan::ComputePipeline* VulkanBackend::getPipeline(const std::string& shader_na
         push_range.offset = 0;
         push_range.size = 20;  // 5 uint32_t values
         pushConstants.push_back(push_range);
+    } else if (shader_name == "ones_f64") {
+        // ones_f64: 4 bytes (n_elements)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 4;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "swish_backward" || shader_name == "swish_backward_f64") {
+        // swish_backward: 4 bytes (n_elements)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 4;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "cast_int64_to_int32") {
+        // cast_int64_to_int32: 4 bytes (n_elements)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 4;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "nonzero_count") {
+        // nonzero_count: 8 bytes (n_elements, dtype)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 8;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "one_hot") {
+        // one_hot: 8 bytes (n_elements, num_classes)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 8;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "max_pool2d_backward_indices" ||
+               shader_name == "max_pool2d_backward_indices_f16" ||
+               shader_name == "max_pool2d_backward_indices_f64") {
+        // max_pool2d_backward_indices: 8 bytes (n_elements, channels)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 8;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "clamp" || shader_name == "clamp_f16") {
+        // clamp/clamp_f16: 12 bytes (n, min_val, max_val)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 12;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "cross_entropy") {
+        // cross_entropy: 12 bytes (batch_size, num_classes, ignore_index)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 12;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "embedding_backward" ||
+               shader_name == "embedding_backward_f16" ||
+               shader_name == "embedding_backward_f64") {
+        // embedding_backward: 12 bytes (num_indices, embedding_dim, num_embeddings)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 12;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "indexing") {
+        // indexing: 12 bytes
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 12;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "masked_select_gather_f16" ||
+               shader_name == "masked_select_gather_f64") {
+        // masked_select_gather f16/f64: 12 bytes (n_elements, mask_is_float, output_size)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 12;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "math_i32") {
+        // math_i32: 12 bytes (n, op, param)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 12;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "matmul_bt" || shader_name == "matmul_f64_bt") {
+        // matmul_bt: 12 bytes (M, N, K)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 12;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "nonzero_gather") {
+        // nonzero_gather: 12 bytes
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 12;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "strided_copy_u8") {
+        // strided_copy_u8: 12 bytes
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 12;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "transpose") {
+        // transpose: 12 bytes (rows, cols, n_elements)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 12;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "boolean_reduction") {
+        // boolean_reduction: 16 bytes
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 16;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "box_iou") {
+        // box_iou: 16 bytes (num_boxes1, num_boxes2, total_pairs, mode)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 16;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "conv2d_backward_bias" || shader_name == "conv2d_backward_bias_f64") {
+        // conv2d_backward_bias: 16 bytes (batch, out_channels, spatial_size, n_elements)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 16;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "embedding" || shader_name == "embedding_f16" || shader_name == "embedding_f64") {
+        // embedding: 16 bytes (num_indices, embedding_dim, num_embeddings, padding_idx)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 16;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "fused_adagrad_step") {
+        // fused_adagrad_step: 16 bytes
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 16;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "layer_norm_backward" ||
+               shader_name == "layer_norm_backward_f16" ||
+               shader_name == "layer_norm_backward_f64") {
+        // layer_norm_backward: 16 bytes (batch_size, normalized_shape, epsilon, has_affine)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 16;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "prod_reduction" || shader_name == "prod_reduction_i32") {
+        // prod_reduction: 16 bytes
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 16;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "rms_norm" || shader_name == "rms_norm_f16" || shader_name == "rms_norm_f64" ||
+               shader_name == "rms_norm_backward" || shader_name == "rms_norm_backward_f16" ||
+               shader_name == "rms_norm_backward_f64") {
+        // rms_norm (all variants): 16 bytes
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 16;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "bitonic_sort_f64" || shader_name == "bitonic_sort_i32") {
+        // bitonic_sort_f64/i32: 20 bytes (n, padded_n, stage, substage, descending)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 20;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "gather" || shader_name == "gather_f16" || shader_name == "gather_f64") {
+        // gather: 24 bytes (n, dim, outer_size, dim_size, inner_size, num_indices)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 24;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "batchnorm" || shader_name == "batchnorm_backward") {
+        // batchnorm/batchnorm_backward: 24 bytes
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 24;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "group_norm") {
+        // group_norm: 28 bytes
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 28;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "fused_adadelta_step" || shader_name == "fused_rmsprop_step") {
+        // fused_adadelta_step/fused_rmsprop_step: 32 bytes
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 32;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "group_norm_backward" ||
+               shader_name == "group_norm_backward_f16" ||
+               shader_name == "group_norm_backward_f64") {
+        // group_norm_backward: 32 bytes
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 32;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "scatter" || shader_name == "scatter_f16" || shader_name == "scatter_f64") {
+        // scatter: 36 bytes
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 36;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "im2col" || shader_name == "col2im") {
+        // im2col/col2im: 44 bytes (11 uint32_t values)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 44;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "pooling_forward_with_indices") {
+        // pooling_forward_with_indices: 48 bytes (12 uint32_t values)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 48;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "conv2d" ||
+               shader_name == "conv2d_backward_input" || shader_name == "conv2d_backward_input_f64" ||
+               shader_name == "conv2d_backward_weight" || shader_name == "conv2d_backward_weight_f64") {
+        // conv2d/conv2d_backward_input/weight: 52 bytes (13 uint32_t values)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 52;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "pooling" || shader_name == "pooling_backward") {
+        // pooling/pooling_backward: 52 bytes (13 uint32_t values)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 52;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "cat" || shader_name == "cat_f16" || shader_name == "cat_f64") {
+        // cat: 60 bytes (15 uint32_t values)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 60;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "max_pool2d_backward") {
+        // max_pool2d_backward: 60 bytes (15 uint32_t values)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 60;
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "math_broadcast_bool") {
+        // math_broadcast_bool: 120 bytes (same layout as other math_broadcast variants)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 120;
+        pushConstants.push_back(push_range);
     }
 
     // Create pipeline (using persistent pipeline cache for faster creation)

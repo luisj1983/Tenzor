@@ -3,14 +3,13 @@
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/ops/creation.hpp"
-#include <atomic>
 #include <iostream>
 #include <vector>
 
 namespace tenzor {
 
-// Global gradient state
-static std::atomic<bool> grad_enabled{true};
+// Thread-local gradient state — each thread has independent grad tracking
+static thread_local bool grad_enabled{true};
 
 // Thread-local create_graph state for higher-order gradients
 static thread_local bool creating_graph{false};
@@ -135,11 +134,11 @@ NoGradGuard::~NoGradGuard() {
 
 // Global functions
 auto is_grad_enabled() -> bool {
-    return grad_enabled.load();
+    return grad_enabled;
 }
 
 auto set_grad_enabled(bool enabled) -> void {
-    grad_enabled.store(enabled);
+    grad_enabled = enabled;
 }
 
 // Higher-order gradient graph creation state

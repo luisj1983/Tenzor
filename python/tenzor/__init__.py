@@ -81,9 +81,8 @@ __all__ = [
     "dtype",
 
     # Autograd
-    "backward",
-    "requires_grad",
     "is_grad_enabled",
+    "set_grad_enabled",
 
     # Tensor creation
     "zeros",
@@ -135,6 +134,5 @@ __all__ = [
     "cuda_is_available",
     "no_grad",
     "enable_grad",
-    "set_grad_enabled",
     "initialize",
 ]

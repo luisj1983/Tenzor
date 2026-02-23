@@ -136,12 +136,16 @@ auto Tensor::data() -> T* {
                 std::string(dtype_name(impl_->dtype)) + ")");
         }
     }
-    // Bounds check: ensure offset + numel fits within storage
+    // Bounds check: compute max reachable element using strides (handles non-contiguous)
     {
         size_t storage_elements = impl_->storage->size_bytes() / tenzor::dtype_size(impl_->dtype);
-        size_t required = static_cast<size_t>(impl_->offset) + static_cast<size_t>(numel());
-        if (required > storage_elements) {
-            throw std::out_of_range("Tensor data access: offset + numel exceeds storage bounds");
+        size_t max_offset = static_cast<size_t>(impl_->offset);
+        for (int64_t d = 0; d < ndim(); ++d) {
+            if (impl_->shape[d] > 0)
+                max_offset += static_cast<size_t>(impl_->shape[d] - 1) * static_cast<size_t>(std::abs(impl_->strides[d]));
+        }
+        if (max_offset >= storage_elements) {
+            throw std::out_of_range("Tensor data access: max reachable offset exceeds storage bounds");
         }
     }
     // For byte-level access types, scale offset by dtype size so pointer arithmetic
@@ -171,12 +175,16 @@ auto Tensor::data() const -> const T* {
                 std::string(dtype_name(impl_->dtype)) + ")");
         }
     }
-    // Bounds check: ensure offset + numel fits within storage
+    // Bounds check: compute max reachable element using strides (handles non-contiguous)
     {
         size_t storage_elements = impl_->storage->size_bytes() / tenzor::dtype_size(impl_->dtype);
-        size_t required = static_cast<size_t>(impl_->offset) + static_cast<size_t>(numel());
-        if (required > storage_elements) {
-            throw std::out_of_range("Tensor data access: offset + numel exceeds storage bounds");
+        size_t max_offset = static_cast<size_t>(impl_->offset);
+        for (int64_t d = 0; d < ndim(); ++d) {
+            if (impl_->shape[d] > 0)
+                max_offset += static_cast<size_t>(impl_->shape[d] - 1) * static_cast<size_t>(std::abs(impl_->strides[d]));
+        }
+        if (max_offset >= storage_elements) {
+            throw std::out_of_range("Tensor data access: max reachable offset exceeds storage bounds");
         }
     }
     // For byte-level access types, scale offset by dtype size so pointer arithmetic
@@ -624,17 +632,45 @@ auto Tensor::fill_(float value) -> Tensor& {
         return *this;
     }
 
-    // Non-contiguous tensors: make contiguous copy, fill it, copy data back
+    // Non-contiguous tensors: iterate using strides to fill each element in-place
     if (!is_contiguous()) {
-        Tensor contig = contiguous();
-        contig.fill_(value);
-        // Copy filled data back into our storage at correct offset
-        const size_t size_bytes = numel() * dtype_size();
-        if (device().type == Device::Type::CPU) {
-            std::memcpy(data_ptr(), contig.data_ptr(), size_bytes);
-        } else {
-            auto* backend = backend_registry().get_backend(device().type);
-            backend->copy(data_ptr(), contig.data_ptr(), size_bytes, CopyKind::DeviceToDevice);
+        if (device().type != Device::Type::CPU) {
+            // TODO: Non-CPU non-contiguous fill should use a device kernel.
+            // For now, this is a known limitation — callers should make tensors
+            // contiguous before calling fill_() on non-CPU devices.
+            throw std::runtime_error(
+                "fill_() on non-contiguous non-CPU tensors is not supported. "
+                "Call .contiguous() first or use a contiguous tensor.");
+        }
+        auto ndims = this->ndim();
+        auto shp = this->shape();
+        auto str = this->strides();
+        auto elem_size = tenzor::dtype_size(dtype());
+        auto* base = static_cast<uint8_t*>(data_ptr());
+        std::vector<int64_t> indices(ndims, 0);
+        for (int64_t i = 0; i < numel(); ++i) {
+            int64_t offset = 0;
+            for (int64_t d = 0; d < ndims; ++d)
+                offset += indices[d] * str[d] * elem_size;
+            // Fill single element at base + offset
+            switch (dtype()) {
+                case DType::Float32: *reinterpret_cast<float*>(base + offset) = value; break;
+                case DType::Float64: *reinterpret_cast<double*>(base + offset) = static_cast<double>(value); break;
+                case DType::Int32: *reinterpret_cast<int32_t*>(base + offset) = static_cast<int32_t>(value); break;
+                case DType::Int64: *reinterpret_cast<int64_t*>(base + offset) = static_cast<int64_t>(value); break;
+                case DType::Int16: *reinterpret_cast<int16_t*>(base + offset) = static_cast<int16_t>(value); break;
+                case DType::Int8: *reinterpret_cast<int8_t*>(base + offset) = static_cast<int8_t>(value); break;
+                case DType::UInt8: *reinterpret_cast<uint8_t*>(base + offset) = static_cast<uint8_t>(value); break;
+                case DType::Float16: *reinterpret_cast<Float16*>(base + offset) = Float16(value); break;
+                case DType::BFloat16: *reinterpret_cast<BFloat16*>(base + offset) = BFloat16(value); break;
+                case DType::Bool: *reinterpret_cast<bool*>(base + offset) = (value != 0.0f); break;
+                default: throw std::runtime_error("fill_ not supported for this dtype");
+            }
+            // Increment indices (row-major order)
+            for (int64_t d = ndims - 1; d >= 0; --d) {
+                if (++indices[d] < shp[d]) break;
+                indices[d] = 0;
+            }
         }
         return *this;
     }
@@ -891,6 +927,7 @@ auto Tensor::transpose(int64_t dim0, int64_t dim1) const -> Tensor {
         result.impl_ = std::make_shared<TensorImpl>(*impl_);
         std::swap(result.impl_->shape[0], result.impl_->shape[1]);
         std::swap(result.impl_->strides[0], result.impl_->strides[1]);
+        result.impl_->is_contiguous_cache_ = std::nullopt;
         return result;
     }
 
@@ -899,6 +936,7 @@ auto Tensor::transpose(int64_t dim0, int64_t dim1) const -> Tensor {
     result.impl_ = std::make_shared<TensorImpl>(*impl_);
     std::swap(result.impl_->shape[dim0], result.impl_->shape[dim1]);
     std::swap(result.impl_->strides[dim0], result.impl_->strides[dim1]);
+    result.impl_->is_contiguous_cache_ = std::nullopt;
 
     return result;
 }
@@ -944,6 +982,7 @@ auto Tensor::permute(std::vector<int64_t> dims) const -> Tensor {
 
     result.impl_->shape = std::move(new_shape);
     result.impl_->strides = std::move(new_strides);
+    result.impl_->is_contiguous_cache_ = std::nullopt;
 
     return result;
 }
@@ -974,6 +1013,7 @@ auto Tensor::squeeze(std::optional<int64_t> dim) const -> Tensor {
         result.impl_ = std::make_shared<TensorImpl>(*impl_);
         result.impl_->shape.erase(result.impl_->shape.begin() + d);
         result.impl_->strides.erase(result.impl_->strides.begin() + d);
+        result.impl_->is_contiguous_cache_ = std::nullopt;
 
         return result;
     } else {
@@ -998,6 +1038,7 @@ auto Tensor::squeeze(std::optional<int64_t> dim) const -> Tensor {
         result.impl_ = std::make_shared<TensorImpl>(*impl_);
         result.impl_->shape = std::move(new_shape);
         result.impl_->strides = std::move(new_strides);
+        result.impl_->is_contiguous_cache_ = std::nullopt;
 
         return result;
     }
@@ -1027,6 +1068,7 @@ auto Tensor::unsqueeze(int64_t dim) const -> Tensor {
     // Compute stride for new dimension (should be product of all following dims)
     int64_t new_stride = (dim < ndims) ? impl_->strides[dim] : 1;
     result.impl_->strides.insert(result.impl_->strides.begin() + dim, new_stride);
+    result.impl_->is_contiguous_cache_ = std::nullopt;
 
     return result;
 }
@@ -1200,6 +1242,8 @@ auto Tensor::slice(int64_t dim, int64_t start, int64_t end, int64_t step) const 
     if (max_offset >= storage_elements) {
         throw std::out_of_range("Slice offset exceeds storage bounds");
     }
+
+    result.impl_->is_contiguous_cache_ = std::nullopt;
 
     return result;
 }

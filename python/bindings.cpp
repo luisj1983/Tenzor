@@ -1180,6 +1180,62 @@ PYBIND11_MODULE(tenzor_core, m) {
          py::arg("dtype") = tenzor::DType::Float32,
          py::arg("device") = tenzor::Device::cpu());
 
+    // Missing creation ops
+    m.def("rand", [](std::vector<int64_t> shape, tenzor::DType dtype, tenzor::Device device) {
+         return tenzor::rand(std::move(shape), dtype, device);
+         }, "Create tensor with uniform random values in [0, 1)",
+         py::arg("shape"),
+         py::arg("dtype") = tenzor::DType::Float32,
+         py::arg("device") = tenzor::Device::cpu());
+
+    m.def("linspace", [](float start, float end, int64_t steps, tenzor::DType dtype, tenzor::Device device) {
+         return tenzor::linspace(start, end, steps, dtype, device);
+         }, "Create 1D tensor with linearly spaced values",
+         py::arg("start"), py::arg("end"), py::arg("steps"),
+         py::arg("dtype") = tenzor::DType::Float32,
+         py::arg("device") = tenzor::Device::cpu());
+
+    m.def("full", [](std::vector<int64_t> shape, float value, tenzor::DType dtype, tenzor::Device device) {
+         return tenzor::full(std::move(shape), value, dtype, device);
+         }, "Create tensor filled with a scalar value",
+         py::arg("shape"), py::arg("value"),
+         py::arg("dtype") = tenzor::DType::Float32,
+         py::arg("device") = tenzor::Device::cpu());
+
+    m.def("empty", [](std::vector<int64_t> shape, tenzor::DType dtype, tenzor::Device device) {
+         return tenzor::empty(std::move(shape), dtype, device);
+         }, "Create uninitialized tensor",
+         py::arg("shape"),
+         py::arg("dtype") = tenzor::DType::Float32,
+         py::arg("device") = tenzor::Device::cpu());
+
+    // Missing math ops (free functions)
+    m.def("add", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
+         return tenzor::add(a, b);
+         }, "Element-wise addition", py::arg("a"), py::arg("b"));
+    m.def("sub", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
+         return tenzor::sub(a, b);
+         }, "Element-wise subtraction", py::arg("a"), py::arg("b"));
+    m.def("mul", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
+         return tenzor::mul(a, b);
+         }, "Element-wise multiplication", py::arg("a"), py::arg("b"));
+    m.def("div", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
+         return tenzor::div(a, b);
+         }, "Element-wise division", py::arg("a"), py::arg("b"));
+    m.def("clamp", [](const tenzor::Tensor& input, float min_val, float max_val) {
+         return tenzor::clamp(input, min_val, max_val);
+         }, "Clamp values to [min, max]",
+         py::arg("input"), py::arg("min"), py::arg("max"));
+
+    // Missing transform ops
+    m.def("reshape", [](const tenzor::Tensor& input, std::vector<int64_t> shape) {
+         return tenzor::reshape(input, std::move(shape));
+         }, "Reshape tensor", py::arg("input"), py::arg("shape"));
+    m.def("chunk", [](const tenzor::Tensor& input, int64_t chunks, int64_t dim) {
+         return tenzor::chunk(input, chunks, dim);
+         }, "Split tensor into chunks",
+         py::arg("input"), py::arg("chunks"), py::arg("dim") = 0);
+
     m.def("matmul", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
          return tenzor::matmul(a, b);
          }, "Matrix multiplication",
