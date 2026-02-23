@@ -496,7 +496,7 @@ Conv1d::Conv1d(int64_t in_channels, int64_t out_channels, int64_t kernel_size,
     if (bias) {
         std::vector<int64_t> bias_shape = {out_channels};
         float bound = 1.0f / std::sqrt(static_cast<float>(fan_in));
-        auto bias_tensor = (randn(bias_shape) * 2.0f * bound) - bound;
+        auto bias_tensor = (rand(bias_shape) * 2.0f * bound) - bound;
         auto bias_var = Variable(bias_tensor, true);
         register_parameter("bias", bias_var);
     }
@@ -766,7 +766,7 @@ ConvTranspose2d::ConvTranspose2d(int64_t in_channels, int64_t out_channels, int6
     if (bias) {
         std::vector<int64_t> bias_shape = {out_channels};
         float bound = 1.0f / std::sqrt(static_cast<float>(fan_in));
-        auto bias_tensor = (randn(bias_shape) * 2.0f * bound) - bound;
+        auto bias_tensor = (rand(bias_shape) * 2.0f * bound) - bound;
         register_parameter("bias", Variable(bias_tensor, true));
     }
 }
@@ -897,7 +897,7 @@ auto ConvTranspose2d::reset_parameters() -> void {
     if (bias_it != parameters_.end()) {
         std::vector<int64_t> bias_shape = {out_channels_};
         float bound = 1.0f / std::sqrt(static_cast<float>(fan_in));
-        auto new_bias_tensor = (randn(bias_shape) * 2.0f * bound) - bound;
+        auto new_bias_tensor = (rand(bias_shape) * 2.0f * bound) - bound;
         bias_it->second = std::make_shared<Variable>(new_bias_tensor, true);
     }
 }

@@ -54,8 +54,8 @@ private:
 
 // Element-wise Dropout
 Dropout::Dropout(double p) : p_(p) {
-    if (p < 0.0 || p >= 1.0) {
-        throw std::invalid_argument("Dropout probability must be in [0, 1)");
+    if (p < 0.0 || p > 1.0) {
+        throw std::invalid_argument("Dropout probability must be in [0, 1]");
     }
 }
 
@@ -133,8 +133,8 @@ auto Dropout::forward_impl(const Variable& input) -> Variable {
 
 // Channel-wise Dropout (Dropout2d)
 Dropout2d::Dropout2d(double p) : p_(p) {
-    if (p < 0.0 || p >= 1.0) {
-        throw std::invalid_argument("Dropout2d probability must be in [0, 1)");
+    if (p < 0.0 || p > 1.0) {
+        throw std::invalid_argument("Dropout2d probability must be in [0, 1]");
     }
 }
 
@@ -280,8 +280,8 @@ private:
 
 // Alpha Dropout (for SELU networks)
 AlphaDropout::AlphaDropout(double p) : p_(p) {
-    if (p < 0.0 || p >= 1.0) {
-        throw std::invalid_argument("AlphaDropout probability must be in [0, 1)");
+    if (p < 0.0 || p > 1.0) {
+        throw std::invalid_argument("AlphaDropout probability must be in [0, 1]");
     }
 }
 

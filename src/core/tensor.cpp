@@ -337,7 +337,7 @@ auto Tensor::to(Device device) const -> Tensor {
                           (cont.impl_->offset * tenzor::dtype_size(cont.impl_->dtype));
 
     backend->copy(result.impl_->storage->data(),
-                  const_cast<void*>(src_ptr),
+                  src_ptr,
                   size_bytes,
                   copy_kind);
 
