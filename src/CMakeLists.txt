@@ -21,6 +21,7 @@ set(TENZOR_CORE_SOURCES
     ops/op_id.cpp
     ops/creation.cpp
     ops/math.cpp
+    ops/type_promotion.cpp
     ops/indexing.cpp
     ops/reduction.cpp
     ops/transform.cpp
