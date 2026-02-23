@@ -1405,23 +1405,28 @@ PYBIND11_MODULE(tenzor_core, m) {
           "Set the random seed for reproducibility",
           py::arg("seed"));
 
-    // Missing math ops (free functions)
+    // Missing math ops (free functions) - GIL released for compute-heavy ops
     m.def("add", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
          return tenzor::add(a, b);
-         }, "Element-wise addition", py::arg("a"), py::arg("b"));
+         }, "Element-wise addition", py::arg("a"), py::arg("b"),
+         py::call_guard<py::gil_scoped_release>());
     m.def("sub", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
          return tenzor::sub(a, b);
-         }, "Element-wise subtraction", py::arg("a"), py::arg("b"));
+         }, "Element-wise subtraction", py::arg("a"), py::arg("b"),
+         py::call_guard<py::gil_scoped_release>());
     m.def("mul", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
          return tenzor::mul(a, b);
-         }, "Element-wise multiplication", py::arg("a"), py::arg("b"));
+         }, "Element-wise multiplication", py::arg("a"), py::arg("b"),
+         py::call_guard<py::gil_scoped_release>());
     m.def("div", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
          return tenzor::div(a, b);
-         }, "Element-wise division", py::arg("a"), py::arg("b"));
+         }, "Element-wise division", py::arg("a"), py::arg("b"),
+         py::call_guard<py::gil_scoped_release>());
     m.def("clamp", [](const tenzor::Tensor& input, float min_val, float max_val) {
          return tenzor::clamp(input, min_val, max_val);
          }, "Clamp values to [min, max]",
-         py::arg("input"), py::arg("min"), py::arg("max"));
+         py::arg("input"), py::arg("min"), py::arg("max"),
+         py::call_guard<py::gil_scoped_release>());
 
     // Missing transform ops
     m.def("reshape", [](const tenzor::Tensor& input, std::vector<int64_t> shape) {
@@ -1445,24 +1450,25 @@ PYBIND11_MODULE(tenzor_core, m) {
          py::call_guard<py::gil_scoped_release>());
 
     // Math operations - using lambda wrappers for overloaded functions
+    // GIL released for compute-heavy operations
     m.def("exp", [](const tenzor::Tensor& t) { return tenzor::exp(t); },
-         "Element-wise exponential");
+         "Element-wise exponential", py::call_guard<py::gil_scoped_release>());
     m.def("log", [](const tenzor::Tensor& t) { return tenzor::log(t); },
-         "Element-wise natural logarithm");
+         "Element-wise natural logarithm", py::call_guard<py::gil_scoped_release>());
     m.def("sqrt", [](const tenzor::Tensor& t) { return tenzor::sqrt(t); },
-         "Element-wise square root");
+         "Element-wise square root", py::call_guard<py::gil_scoped_release>());
     m.def("abs", [](const tenzor::Tensor& t) { return tenzor::abs(t); },
-         "Element-wise absolute value");
+         "Element-wise absolute value", py::call_guard<py::gil_scoped_release>());
     m.def("pow", [](const tenzor::Tensor& input, double exponent) {
          return tenzor::pow(input, exponent);
          }, "Element-wise power",
-         py::arg("input"), py::arg("exponent"));
+         py::arg("input"), py::arg("exponent"), py::call_guard<py::gil_scoped_release>());
     m.def("sin", [](const tenzor::Tensor& t) { return tenzor::sin(t); },
-         "Element-wise sine");
+         "Element-wise sine", py::call_guard<py::gil_scoped_release>());
     m.def("cos", [](const tenzor::Tensor& t) { return tenzor::cos(t); },
-         "Element-wise cosine");
+         "Element-wise cosine", py::call_guard<py::gil_scoped_release>());
     m.def("tanh", [](const tenzor::Tensor& t) { return tenzor::tanh(t); },
-         "Element-wise hyperbolic tangent");
+         "Element-wise hyperbolic tangent", py::call_guard<py::gil_scoped_release>());
     // Extended math operations
     m.def("log2", [](const tenzor::Tensor& t) { return tenzor::log2(t); },
          "Element-wise base-2 logarithm");
@@ -1585,13 +1591,15 @@ PYBIND11_MODULE(tenzor_core, m) {
          }, "Max reduction",
          py::arg("input"),
          py::arg("dim") = py::none(),
-         py::arg("keepdim") = false);
+         py::arg("keepdim") = false,
+         py::call_guard<py::gil_scoped_release>());
     m.def("min", [](const tenzor::Tensor& input, std::optional<int64_t> dim, bool keepdim) {
          return tenzor::min(input, dim, keepdim);
          }, "Min reduction",
          py::arg("input"),
          py::arg("dim") = py::none(),
-         py::arg("keepdim") = false);
+         py::arg("keepdim") = false,
+         py::call_guard<py::gil_scoped_release>());
 
     // Transform operations
     m.def("transpose", static_cast<tenzor::Tensor(*)(const tenzor::Tensor&, int64_t, int64_t)>(&tenzor::transpose),
