@@ -1156,6 +1156,74 @@ void batched_matmul_cublas_bf16(
     }
 }
 
+// Float16 cuBLAS matmul using cublasGemmEx with CUDA_R_16F
+void matmul_cublas_f16(
+    const __half* A, const __half* B, __half* C,
+    int64_t M, int64_t N, int64_t K) {
+
+    cublasHandle_t handle = CuBLASHandlePool::get();
+
+    // cuBLAS uses column-major order, we use row-major
+    // To compute C = A @ B in row-major, we compute C^T = B^T @ A^T
+    // Which means: cublasGemm(..., B, A, C)
+
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+
+    // Use cublasGemmEx with FP16 input/output and FP32 compute for precision
+    cublasStatus_t status = cublasGemmEx(
+        handle,
+        CUBLAS_OP_N,        // B is not transposed
+        CUBLAS_OP_N,        // A is not transposed
+        N,                  // Rows of B^T (cols of B)
+        M,                  // Cols of A^T (rows of A)
+        K,                  // Cols of B^T = Rows of A^T
+        &alpha,
+        B, CUDA_R_16F, N,   // B matrix with leading dimension N
+        A, CUDA_R_16F, K,   // A matrix with leading dimension K
+        &beta,
+        C, CUDA_R_16F, N,   // C matrix with leading dimension N
+        CUBLAS_COMPUTE_32F, // Compute in FP32 for numerical stability
+        CUBLAS_GEMM_DEFAULT
+    );
+
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        throw std::runtime_error("cuBLAS GemmEx (FP16) failed with status: " + std::to_string(status));
+    }
+}
+
+// Batched Float16 cuBLAS matmul
+void batched_matmul_cublas_f16(
+    const __half* A, const __half* B, __half* C,
+    int64_t batch_size, int64_t M, int64_t N, int64_t K,
+    int64_t stride_a, int64_t stride_b, int64_t stride_c) {
+
+    cublasHandle_t handle = CuBLASHandlePool::get();
+
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+
+    // Use cublasGemmStridedBatchedEx with FP16 input/output and FP32 compute
+    cublasStatus_t status = cublasGemmStridedBatchedEx(
+        handle,
+        CUBLAS_OP_N,        // B not transposed (for row-major trick)
+        CUBLAS_OP_N,        // A not transposed
+        N, M, K,            // Dimensions (swapped for row-major)
+        &alpha,
+        B, CUDA_R_16F, N, stride_b,   // B matrix
+        A, CUDA_R_16F, K, stride_a,   // A matrix
+        &beta,
+        C, CUDA_R_16F, N, stride_c,   // C matrix
+        batch_size,
+        CUBLAS_COMPUTE_32F,           // Compute in FP32 for numerical stability
+        CUBLAS_GEMM_DEFAULT
+    );
+
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        throw std::runtime_error("cuBLAS batched GemmEx (FP16) failed with status: " + std::to_string(status));
+    }
+}
+
 #endif // TENZOR_HAS_CUBLAS
 
 // ============================================================================
@@ -1232,13 +1300,22 @@ void matmul_i32(
 }
 
 /**
- * FP16 matrix multiplication with Tensor Core acceleration
- * Automatically selects between Tensor Core and fallback kernel based on dimensions
+ * FP16 matrix multiplication with cuBLAS and Tensor Core acceleration
+ * Uses cuBLAS with FP32 accumulation for large matrices, falls back to
+ * WMMA Tensor Core or tiled kernels for smaller/unaligned dimensions
  */
 void matmul_f16(
     const __half* A, const __half* B, __half* C,
     int64_t M, int64_t N, int64_t K,
     cudaStream_t stream = 0) {
+
+#ifdef TENZOR_HAS_CUBLAS
+    // Use cuBLAS for large matrices (FP16 benefits from Tensor Core acceleration)
+    if (M >= CUBLAS_THRESHOLD || N >= CUBLAS_THRESHOLD || K >= CUBLAS_THRESHOLD) {
+        matmul_cublas_f16(A, B, C, M, N, K);
+        return;
+    }
+#endif
 
     // Check if dimensions are multiples of 16 (Tensor Core requirement)
     const bool use_tensor_cores = (M % WMMA_M == 0) && (N % WMMA_N == 0) && (K % WMMA_K == 0);
@@ -1361,7 +1438,9 @@ void batched_matmul_f64(
 }
 
 /**
- * Batched FP16 matrix multiplication with Tensor Core acceleration
+ * Batched FP16 matrix multiplication with cuBLAS and Tensor Core acceleration
+ * Uses cuBLAS with FP32 accumulation for large matrices, falls back to
+ * WMMA Tensor Core or tiled kernels for smaller/unaligned dimensions
  */
 void batched_matmul_f16(
     const __half* A, const __half* B, __half* C,
@@ -1371,6 +1450,15 @@ void batched_matmul_f16(
     int64_t stride_a = M * K;
     int64_t stride_b = K * N;
     int64_t stride_c = M * N;
+
+#ifdef TENZOR_HAS_CUBLAS
+    // Use cuBLAS for large matrices (FP16 benefits from Tensor Core acceleration)
+    if (M >= CUBLAS_THRESHOLD || N >= CUBLAS_THRESHOLD || K >= CUBLAS_THRESHOLD) {
+        batched_matmul_cublas_f16(A, B, C, batch_size, M, N, K,
+                                   stride_a, stride_b, stride_c);
+        return;
+    }
+#endif
 
     // Check if dimensions are multiples of 16 (Tensor Core requirement)
     const bool use_tensor_cores = (M % WMMA_M == 0) && (N % WMMA_N == 0) && (K % WMMA_K == 0);

@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <fstream>
 #include <iostream>
+#include <unordered_map>
 
 namespace tenzor {
 namespace vulkan {
@@ -59,6 +60,239 @@ inline std::vector<uint32_t> loadShader(const std::string& filename) {
     file.close();
 
     return buffer;
+}
+
+/**
+ * @brief Reflect push constant size from compiled SPIR-V binary
+ *
+ * Parses SPIR-V instructions to find the push constant block and computes
+ * its total size from member offset decorations and type definitions.
+ * Returns 0 if the shader has no push constants.
+ *
+ * The size is rounded up to 4-byte alignment per Vulkan requirements.
+ *
+ * @param spirv The compiled SPIR-V binary (vector of uint32_t words)
+ * @return Total push constant size in bytes, or 0 if none
+ */
+inline uint32_t reflectPushConstantSize(const std::vector<uint32_t>& spirv) {
+    if (spirv.size() < 5 || spirv[0] != 0x07230203) {
+        return 0;  // Invalid SPIR-V or too small
+    }
+
+    // SPIR-V opcode constants
+    constexpr uint32_t SpvOpTypeFloat       = 22;
+    constexpr uint32_t SpvOpTypeInt         = 21;
+    constexpr uint32_t SpvOpTypeVector      = 23;
+    constexpr uint32_t SpvOpTypeMatrix      = 24;
+    constexpr uint32_t SpvOpTypeArray       = 28;
+    constexpr uint32_t SpvOpTypeStruct      = 30;
+    constexpr uint32_t SpvOpTypePointer     = 32;
+    constexpr uint32_t SpvOpConstant        = 43;
+    constexpr uint32_t SpvOpVariable        = 59;
+    constexpr uint32_t SpvOpMemberDecorate  = 72;
+    constexpr uint32_t SpvDecorationOffset  = 35;
+    constexpr uint32_t SpvStorageClassPushConstant = 9;
+
+    // Type size info: maps SPIR-V result ID to its size in bytes
+    std::unordered_map<uint32_t, uint32_t> type_sizes;
+    // Constant values: maps SPIR-V result ID to its uint32_t value
+    std::unordered_map<uint32_t, uint32_t> constants;
+    // Struct member type IDs: maps struct ID to vector of member type IDs
+    std::unordered_map<uint32_t, std::vector<uint32_t>> struct_members;
+    // Pointer types: maps pointer result ID to {storage_class, pointee_type_id}
+    std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> pointer_types;
+    // Member offset decorations: maps {struct_id, member_index} to offset
+    std::unordered_map<uint64_t, uint32_t> member_offsets;
+    // The struct type ID used for push constants (0 if not found)
+    uint32_t push_constant_struct_id = 0;
+
+    // Single pass through SPIR-V instructions (skip 5-word header)
+    size_t i = 5;
+    while (i < spirv.size()) {
+        uint32_t word = spirv[i];
+        uint32_t word_count = word >> 16;
+        uint32_t opcode = word & 0xFFFF;
+
+        if (word_count == 0 || i + word_count > spirv.size()) {
+            break;  // Malformed instruction
+        }
+
+        switch (opcode) {
+            case SpvOpTypeFloat: {
+                // OpTypeFloat result_id bit_width
+                if (word_count >= 3) {
+                    uint32_t id = spirv[i + 1];
+                    uint32_t bit_width = spirv[i + 2];
+                    type_sizes[id] = bit_width / 8;
+                }
+                break;
+            }
+            case SpvOpTypeInt: {
+                // OpTypeInt result_id bit_width signedness
+                if (word_count >= 3) {
+                    uint32_t id = spirv[i + 1];
+                    uint32_t bit_width = spirv[i + 2];
+                    type_sizes[id] = bit_width / 8;
+                }
+                break;
+            }
+            case SpvOpTypeVector: {
+                // OpTypeVector result_id component_type count
+                if (word_count >= 4) {
+                    uint32_t id = spirv[i + 1];
+                    uint32_t component_type = spirv[i + 2];
+                    uint32_t count = spirv[i + 3];
+                    auto it = type_sizes.find(component_type);
+                    if (it != type_sizes.end()) {
+                        type_sizes[id] = it->second * count;
+                    }
+                }
+                break;
+            }
+            case SpvOpTypeMatrix: {
+                // OpTypeMatrix result_id column_type column_count
+                if (word_count >= 4) {
+                    uint32_t id = spirv[i + 1];
+                    uint32_t column_type = spirv[i + 2];
+                    uint32_t column_count = spirv[i + 3];
+                    auto it = type_sizes.find(column_type);
+                    if (it != type_sizes.end()) {
+                        type_sizes[id] = it->second * column_count;
+                    }
+                }
+                break;
+            }
+            case SpvOpConstant: {
+                // OpConstant result_type result_id value...
+                if (word_count >= 4) {
+                    uint32_t id = spirv[i + 2];
+                    uint32_t value = spirv[i + 3];
+                    constants[id] = value;
+                }
+                break;
+            }
+            case SpvOpTypeArray: {
+                // OpTypeArray result_id element_type length_id
+                if (word_count >= 4) {
+                    uint32_t id = spirv[i + 1];
+                    uint32_t element_type = spirv[i + 2];
+                    uint32_t length_id = spirv[i + 3];
+                    auto elem_it = type_sizes.find(element_type);
+                    auto len_it = constants.find(length_id);
+                    if (elem_it != type_sizes.end() && len_it != constants.end()) {
+                        type_sizes[id] = elem_it->second * len_it->second;
+                    }
+                }
+                break;
+            }
+            case SpvOpTypeStruct: {
+                // OpTypeStruct result_id member_type_0 member_type_1 ...
+                if (word_count >= 2) {
+                    uint32_t id = spirv[i + 1];
+                    std::vector<uint32_t> members;
+                    for (uint32_t m = 2; m < word_count; ++m) {
+                        members.push_back(spirv[i + m]);
+                    }
+                    struct_members[id] = std::move(members);
+                }
+                break;
+            }
+            case SpvOpTypePointer: {
+                // OpTypePointer result_id storage_class type
+                if (word_count >= 4) {
+                    uint32_t id = spirv[i + 1];
+                    uint32_t storage_class = spirv[i + 2];
+                    uint32_t type = spirv[i + 3];
+                    pointer_types[id] = {storage_class, type};
+                }
+                break;
+            }
+            case SpvOpVariable: {
+                // OpVariable result_type result_id storage_class [initializer]
+                if (word_count >= 4) {
+                    uint32_t result_type = spirv[i + 1];
+                    uint32_t storage_class = spirv[i + 3];
+                    if (storage_class == SpvStorageClassPushConstant) {
+                        // Found push constant variable - resolve its struct type
+                        auto ptr_it = pointer_types.find(result_type);
+                        if (ptr_it != pointer_types.end()) {
+                            push_constant_struct_id = ptr_it->second.second;
+                        }
+                    }
+                }
+                break;
+            }
+            case SpvOpMemberDecorate: {
+                // OpMemberDecorate struct_type member decoration [value]
+                if (word_count >= 5) {
+                    uint32_t struct_type = spirv[i + 1];
+                    uint32_t member = spirv[i + 2];
+                    uint32_t decoration = spirv[i + 3];
+                    if (decoration == SpvDecorationOffset) {
+                        uint32_t offset = spirv[i + 4];
+                        uint64_t key = (static_cast<uint64_t>(struct_type) << 32) | member;
+                        member_offsets[key] = offset;
+                    }
+                }
+                break;
+            }
+            default:
+                break;
+        }
+
+        i += word_count;
+    }
+
+    // No push constant variable found
+    if (push_constant_struct_id == 0) {
+        return 0;
+    }
+
+    // Find the struct members
+    auto struct_it = struct_members.find(push_constant_struct_id);
+    if (struct_it == struct_members.end()) {
+        return 0;
+    }
+
+    const auto& members = struct_it->second;
+    uint32_t max_extent = 0;
+
+    for (uint32_t m = 0; m < members.size(); ++m) {
+        uint64_t key = (static_cast<uint64_t>(push_constant_struct_id) << 32) | m;
+        auto off_it = member_offsets.find(key);
+        if (off_it == member_offsets.end()) {
+            continue;  // No offset decoration for this member
+        }
+
+        uint32_t offset = off_it->second;
+        uint32_t member_size = 0;
+
+        auto size_it = type_sizes.find(members[m]);
+        if (size_it != type_sizes.end()) {
+            member_size = size_it->second;
+        } else {
+            // Check if it's a nested struct
+            auto nested_struct_it = struct_members.find(members[m]);
+            if (nested_struct_it != struct_members.end()) {
+                // Compute nested struct size recursively (find max extent)
+                uint32_t nested_max = 0;
+                for (uint32_t nm = 0; nm < nested_struct_it->second.size(); ++nm) {
+                    uint64_t nkey = (static_cast<uint64_t>(members[m]) << 32) | nm;
+                    auto noff_it = member_offsets.find(nkey);
+                    auto nsize_it = type_sizes.find(nested_struct_it->second[nm]);
+                    if (noff_it != member_offsets.end() && nsize_it != type_sizes.end()) {
+                        nested_max = std::max(nested_max, noff_it->second + nsize_it->second);
+                    }
+                }
+                member_size = nested_max;
+            }
+        }
+
+        max_extent = std::max(max_extent, offset + member_size);
+    }
+
+    // Round up to 4-byte alignment (Vulkan push constant requirement)
+    return (max_extent + 3) & ~3u;
 }
 
 /**

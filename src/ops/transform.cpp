@@ -203,14 +203,11 @@ auto stack(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
         throw std::runtime_error("Dimension out of range for stack");
     }
 
-    // Stack is equivalent to: unsqueeze each tensor at dim, then concatenate
-    std::vector<Tensor> unsqueezed;
-    unsqueezed.reserve(tensors.size());
-    for (const auto& t : tensors) {
-        unsqueezed.push_back(t.unsqueeze(dim));
-    }
-
-    return cat(std::span<const Tensor>(unsqueezed), dim);
+    // Dispatch to registered stack kernel for single-pass implementation
+    OpAttributes attrs;
+    attrs["dim"] = std::to_string(dim);
+    std::vector<Tensor> tensor_vec(tensors.begin(), tensors.end());
+    return dispatch(OpId::Stack, std::span<const Tensor>(tensor_vec), attrs)[0];
 }
 
 auto split(const Tensor& input, int64_t split_size, int64_t dim) -> std::vector<Tensor> {
