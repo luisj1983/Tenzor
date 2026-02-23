@@ -29,6 +29,17 @@ public:
 
         return {grad_input};
     }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        // ReLU backward: grad_input = grad_output * (input > 0)
+        // The mask is non-differentiable, compute at Tensor level
+        const auto& input = saved_tensors()[0];
+        std::vector<Tensor> mask_inputs = {ones(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                                                 input.dtype(), input.device()), input};
+        auto mask = dispatch(OpId::ReLUBackward, mask_inputs)[0];
+        Variable mask_var(mask, false);
+        return {grad_outputs[0] * mask_var};
+    }
 };
 
 // Backward function for Sigmoid

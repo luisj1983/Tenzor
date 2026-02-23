@@ -987,6 +987,15 @@ auto MaxBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     }
 }
 
+auto MaxBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // Max backward: gradient flows only to max element(s), masked by position.
+    // The mask is a step function (non-differentiable), so compute at Tensor level.
+    // For higher-order gradients, the second derivative of max is zero everywhere
+    // except at tie points, which have measure zero.
+    auto result = backward({grad_outputs[0].tensor()});
+    return {Variable(result[0], grad_outputs[0].requires_grad())};
+}
+
 // ReshapeBackward implementation
 auto ReshapeBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     throw std::runtime_error("ReshapeBackward::forward should not be called");
@@ -1046,8 +1055,7 @@ auto RollBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 }
 
 auto RollBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = roll(grad_outputs[0].tensor(), -shifts_, dim_);
-    return {Variable(result, grad_outputs[0].requires_grad())};
+    return {roll(grad_outputs[0], -shifts_, dim_)};
 }
 
 // SqueezeBackward implementation
@@ -1164,8 +1172,8 @@ auto CatBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     grad_inputs.reserve(split_sizes_.size());
     int64_t offset = 0;
     for (int64_t split_size : split_sizes_) {
-        auto grad_slice = slice(grad_output.tensor(), dim_, offset, offset + split_size);
-        grad_inputs.emplace_back(grad_slice, grad_output.requires_grad());
+        // Use Variable-level slice to preserve computation graph for higher-order gradients
+        grad_inputs.push_back(slice(grad_output, dim_, offset, offset + split_size));
         offset += split_size;
     }
     return grad_inputs;
@@ -1315,6 +1323,14 @@ auto UpsampleBilinearBackward::backward(std::vector<Tensor> grad_outputs) -> std
     }
 
     return {grad_input};
+}
+
+auto UpsampleBilinearBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // Upsample backward is a linear operation (weighted accumulation), so its
+    // second derivative is constant. Compute at Tensor level since the bilinear
+    // weights don't depend on the input values.
+    auto result = backward({grad_outputs[0].tensor()});
+    return {Variable(result[0], grad_outputs[0].requires_grad())};
 }
 
 } // namespace tenzor

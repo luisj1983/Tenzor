@@ -569,6 +569,7 @@ public:
     MaxBackward(std::optional<int64_t> dim, bool keepdim) : dim_(dim), keepdim_(keepdim) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 private:
     std::optional<int64_t> dim_;
     bool keepdim_;
@@ -792,6 +793,7 @@ public:
         : input_h_(input_h), input_w_(input_w), output_h_(output_h), output_w_(output_w) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 private:
     int64_t input_h_;   ///< Input height
     int64_t input_w_;   ///< Input width
