@@ -37,6 +37,15 @@ function(tenzor_discover_tests target)
         PROPERTIES ${PROPS})
 endfunction()
 
+# Helper macro: create a test executable, link GTest, and register with CTest.
+# Usage: tenzor_add_test(NAME test_foo SOURCE unit/test_foo.cpp [LIBS extra_lib])
+macro(tenzor_add_test)
+    cmake_parse_arguments(ARG "" "NAME;SOURCE" "LIBS" ${ARGN})
+    add_executable(${ARG_NAME} ${ARG_SOURCE})
+    target_link_libraries(${ARG_NAME} PRIVATE tenzor_core GTest::gtest_main ${ARG_LIBS})
+    tenzor_discover_tests(${ARG_NAME} DISCOVERY_TIMEOUT 30)
+endmacro()
+
 # Unit tests
 add_executable(tenzor_unit_tests
     unit/test_tensor.cpp

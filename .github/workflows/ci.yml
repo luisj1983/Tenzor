@@ -1,0 +1,205 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CMAKE_BUILD_TYPE: Release
+  CMAKE_GENERATOR: Ninja
+
+jobs:
+  # Tier 1: Fast smoke tests (~5 min)
+  build-and-smoke:
+    name: Build & Smoke Tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build \
+            libgtest-dev \
+            libomp-dev \
+            python3-dev \
+            python3-pybind11 \
+            pybind11-dev \
+            libmkl-dev \
+            libtbb-dev
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} \
+            -DTENZOR_BUILD_CUDA=OFF \
+            -DTENZOR_BUILD_ROCM=OFF \
+            -DTENZOR_BUILD_ONEAPI=OFF \
+            -DTENZOR_BUILD_VULKAN=OFF \
+            -DTENZOR_BUILD_METAL=OFF \
+            -DTENZOR_BUILD_WEBGPU=OFF \
+            -DTENZOR_BUILD_PYTHON=ON \
+            -DTENZOR_BUILD_TESTS=ON \
+            -DTENZOR_BUILD_BENCHMARKS=OFF \
+            -DTENZOR_BUILD_EXAMPLES=OFF \
+            -DTENZOR_BUILD_MODEL_HUB=OFF
+
+      - name: Build core library
+        run: ninja -C build tenzor_core
+
+      - name: Build CPU backend
+        run: ninja -C build tenzor_core_backend_cpu
+
+      - name: Build Python module
+        run: ninja -C build tenzor_core_python
+
+      - name: Build tests
+        run: ninja -C build
+
+      - name: Python import test
+        run: |
+          cd build
+          python3 -c "
+          import sys; sys.path.insert(0, 'python')
+          import tenzor as tz
+          tz.initialize()
+          t = tz.zeros([2, 3])
+          assert t.shape == [2, 3], f'Expected [2,3], got {t.shape}'
+          print('Python import OK')
+          "
+
+      - name: Core unit tests
+        run: |
+          cd build
+          ctest --output-on-failure -j$(nproc) \
+            -R "TensorBasicTest|TensorCreationTest|TensorMathTest|EmptyTensorTest|NumericalPrecisionTest|ViewSliceTest" \
+            --timeout 120
+
+      - name: Autograd tests
+        run: |
+          cd build
+          ctest --output-on-failure -j$(nproc) \
+            -R "AllBackends/AutogradTest" \
+            -E "cuda|vulkan|oneapi" \
+            --timeout 120
+
+      - name: Broadcasting tests
+        run: |
+          cd build
+          ctest --output-on-failure -j$(nproc) \
+            -R "AllBackends/BroadcastingTest" \
+            -E "cuda|vulkan|oneapi" \
+            --timeout 120
+
+  # Tier 2: Full CPU tests (every PR, ~30 min)
+  full-cpu-tests:
+    name: Full CPU Test Suite
+    runs-on: ubuntu-24.04
+    needs: build-and-smoke
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build \
+            libgtest-dev \
+            libomp-dev \
+            python3-dev \
+            python3-pybind11 \
+            pybind11-dev \
+            libmkl-dev \
+            libtbb-dev
+
+      - name: Configure and build
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} \
+            -DTENZOR_BUILD_CUDA=OFF \
+            -DTENZOR_BUILD_ROCM=OFF \
+            -DTENZOR_BUILD_ONEAPI=OFF \
+            -DTENZOR_BUILD_VULKAN=OFF \
+            -DTENZOR_BUILD_METAL=OFF \
+            -DTENZOR_BUILD_WEBGPU=OFF \
+            -DTENZOR_BUILD_PYTHON=ON \
+            -DTENZOR_BUILD_TESTS=ON \
+            -DTENZOR_BUILD_MODEL_HUB=OFF
+          ninja -C build
+
+      - name: Run all CPU tests
+        run: |
+          cd build
+          ctest --output-on-failure -j$(nproc) \
+            -E "cuda|vulkan|oneapi|rocm" \
+            --timeout 300
+        timeout-minutes: 45
+
+  # Tier 3: Nightly comprehensive tests
+  nightly:
+    name: Nightly Comprehensive
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build \
+            libgtest-dev \
+            libomp-dev \
+            python3-dev \
+            python3-pybind11 \
+            pybind11-dev \
+            libmkl-dev \
+            libtbb-dev
+
+      - name: Configure and build
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} \
+            -DTENZOR_BUILD_CUDA=OFF \
+            -DTENZOR_BUILD_ROCM=OFF \
+            -DTENZOR_BUILD_ONEAPI=OFF \
+            -DTENZOR_BUILD_VULKAN=OFF \
+            -DTENZOR_BUILD_METAL=OFF \
+            -DTENZOR_BUILD_WEBGPU=OFF \
+            -DTENZOR_BUILD_PYTHON=ON \
+            -DTENZOR_BUILD_TESTS=ON \
+            -DTENZOR_BUILD_MODEL_HUB=OFF \
+            -DTENZOR_ENABLE_COVERAGE=ON
+          ninja -C build
+
+      - name: Run full test suite
+        run: |
+          cd build
+          ctest --output-on-failure -j$(nproc) \
+            -E "cuda|vulkan|oneapi|rocm" \
+            --timeout 600
+        timeout-minutes: 120
+
+      - name: Generate coverage report
+        if: success() || failure()
+        run: |
+          sudo apt-get install -y lcov
+          cd build
+          lcov --capture --directory . --output-file coverage.info --ignore-errors mismatch
+          lcov --remove coverage.info '/usr/*' '*/tests/*' '*/build/*' --output-file coverage.info
+          lcov --list coverage.info
+
+      - name: Upload coverage
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: build/coverage.info

@@ -106,7 +106,6 @@ set(TENZOR_CORE_SOURCES
     quantization/quantize_api.cpp
     parallel/threadpool.cpp
     data/dataloader.cpp
-    models/hub.cpp
     models/resnet.cpp
     models/bert.cpp
     models/roberta.cpp
@@ -132,13 +131,6 @@ set(TENZOR_CORE_SOURCES
     utils/config.cpp
     utils/benchmark.cpp
     utils/tensorboard.cpp
-    backends/cpu/simd.cpp
-    backends/cpu/kernels/math_simd.cpp
-    backends/cpu/kernels/math_simd_avx512.cpp
-    backends/cpu/kernels/activations_simd.cpp
-    backends/cpu/kernels/activations_simd_avx512.cpp
-    backends/cpu/kernels/quantization/quantized_linear.cpp
-    backends/cpu/kernels/quantization/quantized_conv2d.cpp
     onnx/exporter.cpp
     onnx/importer.cpp
     jit/tracer.cpp
@@ -174,18 +166,27 @@ target_include_directories(tenzor_core PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 
-# Find required dependencies for ModelHub
-find_package(CURL REQUIRED)
-find_package(OpenSSL REQUIRED)
-
 # Link dependencies
 target_link_libraries(tenzor_core PUBLIC
     Threads::Threads
     ${CMAKE_DL_LIBS}
-    CURL::libcurl
-    OpenSSL::SSL
-    OpenSSL::Crypto
 )
+
+# Optional ModelHub dependencies (CURL + OpenSSL)
+if(TENZOR_BUILD_MODEL_HUB)
+    find_package(CURL REQUIRED)
+    find_package(OpenSSL REQUIRED)
+    target_sources(tenzor_core PRIVATE models/hub.cpp)
+    target_link_libraries(tenzor_core PUBLIC
+        CURL::libcurl
+        OpenSSL::SSL
+        OpenSSL::Crypto
+    )
+    target_compile_definitions(tenzor_core PRIVATE TENZOR_HAS_MODEL_HUB)
+    message(STATUS "Model Hub: Enabled (CURL + OpenSSL)")
+else()
+    message(STATUS "Model Hub: Disabled")
+endif()
 
 if(OpenMP_CXX_FOUND)
     target_link_libraries(tenzor_core PUBLIC OpenMP::OpenMP_CXX)

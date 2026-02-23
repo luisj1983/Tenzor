@@ -41,6 +41,8 @@ set(CPU_BACKEND_SOURCES
     kernels/vision.cpp
     kernels/advanced.cpp
     kernels/flash_attention.cpp
+    kernels/quantization/quantized_linear.cpp
+    kernels/quantization/quantized_conv2d.cpp
 )
 
 # Create CPU backend shared library
