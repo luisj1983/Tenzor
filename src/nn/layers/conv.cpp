@@ -6,6 +6,7 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/backend/dispatch.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -671,10 +672,6 @@ public:
         int64_t kernel_h = weight_shape[2];
         int64_t kernel_w = weight_shape[3];
 
-        // Use backend dispatcher
-        std::vector<Tensor> tensors_for_dispatch = {grad_output};
-        auto* backend = Dispatcher::get_backend(tensors_for_dispatch);
-
         // grad_input: Use regular conv2d forward with grad_output as input
         // The backward of ConvTranspose2d w.r.t. input is a regular Conv2d:
         //   grad_input = Conv2d(grad_output, weight, stride=stride, padding=padding)
@@ -688,7 +685,7 @@ public:
         };
 
         std::vector<Tensor> conv_inputs = {grad_output, weight};
-        auto conv_result = backend->dispatch("conv2d_forward", conv_inputs, conv_attrs);
+        auto conv_result = dispatch(OpId::Conv2dForward, std::span<const Tensor>(conv_inputs), conv_attrs);
         Tensor grad_input = conv_result[0];
 
         // Handle potential shape mismatch due to output_padding in the forward pass.
@@ -721,7 +718,7 @@ public:
 
         // Swap roles: input as grad_output, grad_output as input for weight gradient
         std::vector<Tensor> weight_grad_inputs = {input, grad_output};
-        auto weight_grad_result = backend->dispatch("conv2d_backward_weight", weight_grad_inputs, weight_grad_attrs);
+        auto weight_grad_result = dispatch(OpId::Conv2dBackwardWeight, std::span<const Tensor>(weight_grad_inputs), weight_grad_attrs);
         Tensor grad_weight = weight_grad_result[0];
 
         if (has_bias) {
