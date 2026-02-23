@@ -445,7 +445,6 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
         copy_kernel_impl<T><<<num_blocks_copy, BLOCK_SIZE, 0, stream>>>( \
             input.data<T>(), output.data<T>(), total_input); \
         CUDA_CHECK(cudaGetLastError()); \
-        CUDA_CHECK(cudaStreamSynchronize(stream)); \
         if (idx_is_int32) \
             scatter_values_kernel_impl<T, int32_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>( \
                 index.data<int32_t>(), src.data<T>(), output.data<T>(), \
@@ -468,7 +467,6 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                 reinterpret_cast<const __half*>(input.data_ptr()),
                 reinterpret_cast<__half*>(output.data_ptr()), total_input);
             CUDA_CHECK(cudaGetLastError());
-            CUDA_CHECK(cudaStreamSynchronize(stream));
             if (idx_is_int32)
                 scatter_values_kernel_impl<__half, int32_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>(
                     index.data<int32_t>(),
