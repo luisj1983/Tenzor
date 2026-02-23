@@ -10,10 +10,12 @@
 #include "tenzor/backend/kernel_registry.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/ops/transform.hpp"
 #include <cstdlib>
 #include <charconv>
 #include <climits>
 #include <cstdint>
+#include <sstream>
 #include <tuple>
 
 namespace tenzor {
@@ -1517,6 +1519,40 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         DType dtype = static_cast<DType>(dtype_int);
         Device device = Device::cpu();
         return std::vector<Tensor>{cpu::eye_kernel(n, m, dtype, device)};
+    });
+
+    // =========================================================================
+    // Tensor Manipulation Operations (triu, tril, diag, trace, flip)
+    // These call the public API which already has CPU implementations inline
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Triu, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t diagonal = parse_attr<int64_t>(attrs, "diagonal", 0);
+        return triu(inputs[0], diagonal);
+    });
+
+    table.register_single_output_kernel(OpId::Tril, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t diagonal = parse_attr<int64_t>(attrs, "diagonal", 0);
+        return tril(inputs[0], diagonal);
+    });
+
+    table.register_single_output_kernel(OpId::Diag, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t diagonal = parse_attr<int64_t>(attrs, "diagonal", 0);
+        return diag(inputs[0], diagonal);
+    });
+
+    table.register_single_output_kernel(OpId::Trace, [](std::span<const Tensor>, const OpAttributes&) -> Tensor {
+        throw std::runtime_error("trace: CPU dispatch not needed (handled inline)");
+    });
+
+    table.register_single_output_kernel(OpId::Flip, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto dims_str = attrs.count("dims") ? attrs.at("dims") : "0";
+        std::vector<int64_t> dims;
+        std::istringstream iss(dims_str);
+        std::string token;
+        while (std::getline(iss, token, ',')) {
+            dims.push_back(std::stoll(token));
+        }
+        return flip(inputs[0], dims);
     });
 }
 

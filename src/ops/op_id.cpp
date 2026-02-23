@@ -268,6 +268,29 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     // Type Conversion
     names[static_cast<size_t>(OpId::Cast)] = "cast";
 
+    // Extended Math
+    names[static_cast<size_t>(OpId::Log2)] = "log2";
+    names[static_cast<size_t>(OpId::Log10)] = "log10";
+    names[static_cast<size_t>(OpId::Log1p)] = "log1p";
+    names[static_cast<size_t>(OpId::Exp2)] = "exp2";
+    names[static_cast<size_t>(OpId::Expm1)] = "expm1";
+    names[static_cast<size_t>(OpId::Erf)] = "erf";
+    names[static_cast<size_t>(OpId::Erfc)] = "erfc";
+    names[static_cast<size_t>(OpId::IsNan)] = "isnan";
+    names[static_cast<size_t>(OpId::IsInf)] = "isinf";
+    names[static_cast<size_t>(OpId::IsFinite)] = "isfinite";
+    names[static_cast<size_t>(OpId::Atan2)] = "atan2";
+    names[static_cast<size_t>(OpId::Fmod)] = "fmod";
+    names[static_cast<size_t>(OpId::Remainder)] = "remainder";
+    names[static_cast<size_t>(OpId::Lerp)] = "lerp";
+
+    // Tensor Manipulation
+    names[static_cast<size_t>(OpId::Triu)] = "triu";
+    names[static_cast<size_t>(OpId::Tril)] = "tril";
+    names[static_cast<size_t>(OpId::Diag)] = "diag";
+    names[static_cast<size_t>(OpId::Trace)] = "trace";
+    names[static_cast<size_t>(OpId::Flip)] = "flip";
+
     return names;
 }();
 
@@ -282,7 +305,7 @@ constexpr size_t count_named_ops() {
 
 // Count of actual OpId enum values (excluding gap slots).
 // Update this when adding new OpIds to catch missing name entries at compile time.
-inline constexpr size_t EXPECTED_NAMED_OPS = 203;
+inline constexpr size_t EXPECTED_NAMED_OPS = 222;
 
 // If this fires, a new OpId was added without a corresponding name in op_names above
 static_assert(count_named_ops() == EXPECTED_NAMED_OPS,

@@ -92,6 +92,56 @@ auto contiguous(const Tensor& input) -> Tensor;
  */
 auto roll(const Tensor& input, int64_t shifts, int64_t dim) -> Tensor;
 
+/// @name Triangular and Diagonal Operations
+/// @{
+
+/**
+ * @brief Extract upper triangular part of a matrix.
+ * @param input Input tensor (at least 2D)
+ * @param diagonal Offset from main diagonal (0 = main, positive = above, negative = below)
+ * @return Tensor with elements below the diagonal zeroed out
+ */
+auto triu(const Tensor& input, int64_t diagonal = 0) -> Tensor;
+
+/**
+ * @brief Extract lower triangular part of a matrix.
+ * @param input Input tensor (at least 2D)
+ * @param diagonal Offset from main diagonal (0 = main, positive = above, negative = below)
+ * @return Tensor with elements above the diagonal zeroed out
+ */
+auto tril(const Tensor& input, int64_t diagonal = 0) -> Tensor;
+
+/**
+ * @brief Extract diagonal or construct diagonal matrix.
+ *
+ * If input is 1D, returns a 2D square matrix with input on the diagonal.
+ * If input is 2D, returns a 1D tensor of diagonal elements.
+ * @param input Input tensor (1D or 2D)
+ * @param diagonal Offset from main diagonal
+ */
+auto diag(const Tensor& input, int64_t diagonal = 0) -> Tensor;
+
+/**
+ * @brief Sum of diagonal elements (trace of matrix).
+ * @param input Input tensor (at least 2D)
+ * @return Scalar tensor with trace value
+ */
+auto trace(const Tensor& input) -> Tensor;
+
+/// @}
+/// @name Reversal Operations
+/// @{
+
+/**
+ * @brief Reverse tensor along specified dimensions.
+ * @param input Input tensor
+ * @param dims Dimensions to flip
+ * @return Tensor with reversed elements along specified dims
+ */
+auto flip(const Tensor& input, std::vector<int64_t> dims) -> Tensor;
+
+/// @}
+
 /** @} */ // end of tensor_transform group
 
 } // namespace tenzor
@@ -108,5 +158,10 @@ using tenzor::squeeze;
 using tenzor::flatten;
 using tenzor::stack;
 using tenzor::roll;
+using tenzor::triu;
+using tenzor::tril;
+using tenzor::diag;
+using tenzor::trace;
+using tenzor::flip;
 } // namespace ops
 } // namespace tenzor

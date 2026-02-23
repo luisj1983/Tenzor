@@ -337,6 +337,15 @@ enum class OpId : uint16_t {
     Lerp,        // ternary: lerp(start, end, weight)
 
     // =========================================================================
+    // Tensor Manipulation Operations (340-349)
+    // =========================================================================
+    Triu = 340,      // Upper triangular
+    Tril,            // Lower triangular
+    Diag,            // Extract/construct diagonal
+    Trace,           // Sum of diagonal elements
+    Flip,            // Reverse along dimension
+
+    // =========================================================================
     // Sentinel (MUST BE LAST)
     // =========================================================================
     OP_COUNT

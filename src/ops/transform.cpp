@@ -1,5 +1,6 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/reduction.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include <sstream>
@@ -694,6 +695,176 @@ auto roll(const Tensor& input, int64_t shifts, int64_t dim) -> Tensor {
     Tensor part2 = input.slice(dim, dim_size - shifts, dim_size);
 
     return cat({part2, part1}, dim);
+}
+
+// =========================================================================
+// Triangular, Diagonal, and Flip Operations
+// =========================================================================
+
+namespace {
+// Helper: apply a per-element operation on the last two dims of a tensor
+template<typename Func>
+auto triangular_op(const Tensor& input, int64_t diagonal, Func&& should_keep) -> Tensor {
+    if (input.ndim() < 2) {
+        throw std::runtime_error("triu/tril requires at least 2D tensor");
+    }
+
+    auto cont = input.is_contiguous() ? input : input.contiguous();
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    auto result = zeros(shape_vec, input.dtype(), input.device());
+
+    auto shape = cont.shape();
+    int64_t rows = shape[input.ndim() - 2];
+    int64_t cols = shape[input.ndim() - 1];
+    int64_t batch_size = cont.numel() / (rows * cols);
+    auto elem_size = dtype_size(input.dtype());
+
+    const auto* src = static_cast<const uint8_t*>(cont.data_ptr());
+    auto* dst = static_cast<uint8_t*>(result.data_ptr());
+
+    for (int64_t b = 0; b < batch_size; ++b) {
+        for (int64_t i = 0; i < rows; ++i) {
+            for (int64_t j = 0; j < cols; ++j) {
+                if (should_keep(i, j, diagonal)) {
+                    int64_t idx = (b * rows * cols + i * cols + j) * elem_size;
+                    std::memcpy(dst + idx, src + idx, elem_size);
+                }
+            }
+        }
+    }
+    return result;
+}
+} // anonymous namespace
+
+auto triu(const Tensor& input, int64_t diagonal) -> Tensor {
+    if (input.device().type != Device::Type::CPU) {
+        OpAttributes attrs;
+        attrs["diagonal"] = std::to_string(diagonal);
+        return dispatch(OpId::Triu, std::span<const Tensor>(&input, 1), attrs)[0];
+    }
+    return triangular_op(input, diagonal, [](int64_t i, int64_t j, int64_t d) {
+        return j >= i + d;  // Keep upper triangle
+    });
+}
+
+auto tril(const Tensor& input, int64_t diagonal) -> Tensor {
+    if (input.device().type != Device::Type::CPU) {
+        OpAttributes attrs;
+        attrs["diagonal"] = std::to_string(diagonal);
+        return dispatch(OpId::Tril, std::span<const Tensor>(&input, 1), attrs)[0];
+    }
+    return triangular_op(input, diagonal, [](int64_t i, int64_t j, int64_t d) {
+        return j <= i + d;  // Keep lower triangle
+    });
+}
+
+auto diag(const Tensor& input, int64_t diagonal) -> Tensor {
+    if (input.ndim() == 1) {
+        // 1D -> 2D: construct diagonal matrix
+        int64_t n = input.shape()[0];
+        int64_t abs_diag = std::abs(diagonal);
+        int64_t size = n + abs_diag;
+        auto result = zeros({size, size}, input.dtype(), input.device());
+
+        if (input.device().type != Device::Type::CPU) {
+            OpAttributes attrs;
+            attrs["diagonal"] = std::to_string(diagonal);
+            return dispatch(OpId::Diag, std::span<const Tensor>(&input, 1), attrs)[0];
+        }
+
+        auto cont = input.is_contiguous() ? input : input.contiguous();
+        auto elem_size = dtype_size(input.dtype());
+        const auto* src = static_cast<const uint8_t*>(cont.data_ptr());
+        auto* dst = static_cast<uint8_t*>(result.data_ptr());
+
+        for (int64_t i = 0; i < n; ++i) {
+            int64_t row = diagonal >= 0 ? i : i - diagonal;
+            int64_t col = diagonal >= 0 ? i + diagonal : i;
+            int64_t dst_idx = (row * size + col) * elem_size;
+            int64_t src_idx = i * elem_size;
+            std::memcpy(dst + dst_idx, src + src_idx, elem_size);
+        }
+        return result;
+    } else if (input.ndim() == 2) {
+        // 2D -> 1D: extract diagonal
+        if (input.device().type != Device::Type::CPU) {
+            OpAttributes attrs;
+            attrs["diagonal"] = std::to_string(diagonal);
+            return dispatch(OpId::Diag, std::span<const Tensor>(&input, 1), attrs)[0];
+        }
+
+        auto cont = input.is_contiguous() ? input : input.contiguous();
+        int64_t rows = input.shape()[0];
+        int64_t cols = input.shape()[1];
+        int64_t start_row = diagonal >= 0 ? 0 : -diagonal;
+        int64_t start_col = diagonal >= 0 ? diagonal : 0;
+        int64_t diag_len = std::min(rows - start_row, cols - start_col);
+        if (diag_len <= 0) {
+            return empty({0}, input.dtype(), input.device());
+        }
+
+        auto result = empty({diag_len}, input.dtype(), input.device());
+        auto elem_size = dtype_size(input.dtype());
+        const auto* src = static_cast<const uint8_t*>(cont.data_ptr());
+        auto* dst = static_cast<uint8_t*>(result.data_ptr());
+
+        for (int64_t i = 0; i < diag_len; ++i) {
+            int64_t src_idx = ((start_row + i) * cols + (start_col + i)) * elem_size;
+            int64_t dst_idx = i * elem_size;
+            std::memcpy(dst + dst_idx, src + src_idx, elem_size);
+        }
+        return result;
+    } else {
+        throw std::runtime_error("diag: input must be 1D or 2D, got " +
+                                 std::to_string(input.ndim()) + "D");
+    }
+}
+
+auto trace(const Tensor& input) -> Tensor {
+    if (input.ndim() < 2) {
+        throw std::runtime_error("trace requires at least 2D tensor");
+    }
+
+    if (input.device().type != Device::Type::CPU) {
+        return dispatch(OpId::Trace, std::span<const Tensor>(&input, 1), {})[0];
+    }
+
+    // Extract main diagonal and sum
+    auto diagonal = diag(input, 0);
+    return tenzor::sum(diagonal, std::nullopt, false);
+}
+
+auto flip(const Tensor& input, std::vector<int64_t> dims) -> Tensor {
+    auto ndim = input.ndim();
+    // Normalize negative dims
+    for (auto& d : dims) {
+        if (d < 0) d += ndim;
+        if (d < 0 || d >= ndim) {
+            throw std::runtime_error("flip: dimension " + std::to_string(d) + " out of range for " +
+                                     std::to_string(ndim) + "D tensor");
+        }
+    }
+
+    if (input.device().type != Device::Type::CPU) {
+        OpAttributes attrs;
+        attrs["dims"] = shape_to_string(dims);
+        return dispatch(OpId::Flip, std::span<const Tensor>(&input, 1), attrs)[0];
+    }
+
+    // Flip by reversing slices along each dimension
+    auto result = input;
+    for (auto dim : dims) {
+        int64_t dim_size = result.shape()[dim];
+        if (dim_size <= 1) continue;
+
+        std::vector<Tensor> slices;
+        slices.reserve(dim_size);
+        for (int64_t i = dim_size - 1; i >= 0; --i) {
+            slices.push_back(result.slice(dim, i, i + 1));
+        }
+        result = cat(slices, dim);
+    }
+    return result;
 }
 
 } // namespace tenzor

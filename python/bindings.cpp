@@ -1612,6 +1612,28 @@ PYBIND11_MODULE(tenzor_core, m) {
          py::arg("end_dim") = -1);
     m.def("contiguous", &tenzor::contiguous, "Make tensor contiguous");
 
+    // Triangular and diagonal operations
+    m.def("triu", [](const tenzor::Tensor& input, int64_t diagonal) {
+         return tenzor::triu(input, diagonal);
+         }, "Extract upper triangular part",
+         py::arg("input"), py::arg("diagonal") = 0);
+    m.def("tril", [](const tenzor::Tensor& input, int64_t diagonal) {
+         return tenzor::tril(input, diagonal);
+         }, "Extract lower triangular part",
+         py::arg("input"), py::arg("diagonal") = 0);
+    m.def("diag", [](const tenzor::Tensor& input, int64_t diagonal) {
+         return tenzor::diag(input, diagonal);
+         }, "Extract diagonal or construct diagonal matrix",
+         py::arg("input"), py::arg("diagonal") = 0);
+    m.def("trace", [](const tenzor::Tensor& input) {
+         return tenzor::trace(input);
+         }, "Sum of diagonal elements",
+         py::arg("input"));
+    m.def("flip", [](const tenzor::Tensor& input, std::vector<int64_t> dims) {
+         return tenzor::flip(input, std::move(dims));
+         }, "Reverse tensor along dimensions",
+         py::arg("input"), py::arg("dims"));
+
     // Concatenation and stacking operations
     m.def("cat", [](const std::vector<tenzor::Tensor>& tensors, int64_t dim) {
          return tenzor::cat(tensors, dim);
