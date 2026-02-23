@@ -177,6 +177,13 @@ __all__ = [
     "cat",
     "stack",
     "split",
+
+    # Tensor manipulation
+    "triu",
+    "tril",
+    "diag",
+    "trace",
+    "flip",
     "chunk",
 
     # Neural network

@@ -2892,6 +2892,33 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def(py::init<>())
         .def("__repr__", [](const tenzor::nn::ReLU6&) { return "ReLU6()"; });
 
+    py::class_<tenzor::nn::PReLU, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::PReLU>>(nn, "PReLU")
+        .def(py::init<int64_t, double>(),
+             py::arg("num_parameters") = 1, py::arg("init") = 0.25)
+        .def("__repr__", [](const tenzor::nn::PReLU& self) {
+            return "PReLU()";
+        });
+
+    py::class_<tenzor::nn::Hardswish, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::Hardswish>>(nn, "Hardswish")
+        .def(py::init<>())
+        .def("__repr__", [](const tenzor::nn::Hardswish&) { return "Hardswish()"; });
+
+    py::class_<tenzor::nn::Hardsigmoid, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::Hardsigmoid>>(nn, "Hardsigmoid")
+        .def(py::init<>())
+        .def("__repr__", [](const tenzor::nn::Hardsigmoid&) { return "Hardsigmoid()"; });
+
+    // Functional activations
+    nn.def("hardswish", [](const tenzor::Variable& input) {
+        return tenzor::nn::hardswish(input);
+    }, "Functional Hardswish activation", py::arg("input"));
+
+    nn.def("hardsigmoid", [](const tenzor::Variable& input) {
+        return tenzor::nn::hardsigmoid(input);
+    }, "Functional Hardsigmoid activation", py::arg("input"));
+
     // RNN layers
     py::class_<tenzor::nn::RNNCell, tenzor::nn::Module, std::shared_ptr<tenzor::nn::RNNCell>>(nn, "RNNCell")
         .def(py::init<int64_t, int64_t, const std::string&, bool>(),
