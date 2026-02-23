@@ -79,6 +79,8 @@ __all__ = [
     "Device",
     "DeviceType",
     "dtype",
+    "tensor",
+    "manual_seed",
 
     # Autograd
     "is_grad_enabled",
@@ -96,25 +98,75 @@ __all__ = [
     "full",
     "empty",
 
-    # Operations
+    # Arithmetic operations
     "matmul",
     "bmm",
     "add",
     "sub",
     "mul",
     "div",
+
+    # Reduction operations
     "sum",
     "mean",
     "max",
     "min",
     "argmax",
     "argmin",
+
+    # Math operations
     "sqrt",
     "exp",
     "log",
     "abs",
     "pow",
+    "neg",
+    "sign",
+    "sigmoid",
+    "reciprocal",
+    "sin",
+    "cos",
+    "tan",
+    "asin",
+    "acos",
+    "atan",
+    "sinh",
+    "cosh",
+    "tanh",
+    "log2",
+    "log10",
+    "log1p",
+    "exp2",
+    "expm1",
+    "erf",
+    "erfc",
+    "atan2",
+    "fmod",
+    "remainder",
+    "lerp",
+    "floor",
+    "ceil",
+    "round",
+
+    # Clamping
     "clamp",
+    "clamp_min",
+    "clamp_max",
+    "minimum",
+    "maximum",
+
+    # Classification
+    "isnan",
+    "isinf",
+    "isfinite",
+
+    # Comparison
+    "eq",
+    "ne",
+    "lt",
+    "le",
+    "gt",
+    "ge",
 
     # Shape operations
     "reshape",

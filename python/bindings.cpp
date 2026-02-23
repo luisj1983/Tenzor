@@ -1324,6 +1324,87 @@ PYBIND11_MODULE(tenzor_core, m) {
          py::arg("dtype") = tenzor::DType::Float32,
          py::arg("device") = tenzor::Device::cpu());
 
+    // tensor() - create tensor from Python data (lists, nested lists, scalars)
+    m.def("tensor", [](py::object data, std::optional<tenzor::DType> dtype, tenzor::Device device) -> tenzor::Tensor {
+        // Helper: recursively determine shape and flatten data
+        std::function<void(py::handle, std::vector<int64_t>&, int)> get_shape;
+        get_shape = [&](py::handle obj, std::vector<int64_t>& shape, int depth) {
+            if (py::isinstance<py::list>(obj) || py::isinstance<py::tuple>(obj)) {
+                auto seq = py::cast<py::sequence>(obj);
+                if (static_cast<int>(shape.size()) <= depth)
+                    shape.push_back(static_cast<int64_t>(py::len(seq)));
+                if (py::len(seq) > 0)
+                    get_shape(seq[0], shape, depth + 1);
+            }
+        };
+
+        std::vector<int64_t> shape;
+        get_shape(data, shape, 0);
+
+        // Flatten all values
+        std::vector<double> values;
+        std::function<void(py::handle)> flatten;
+        flatten = [&](py::handle obj) {
+            if (py::isinstance<py::list>(obj) || py::isinstance<py::tuple>(obj)) {
+                for (auto item : py::cast<py::sequence>(obj))
+                    flatten(item);
+            } else {
+                values.push_back(py::cast<double>(obj));
+            }
+        };
+
+        if (py::isinstance<py::list>(data) || py::isinstance<py::tuple>(data)) {
+            flatten(data);
+        } else {
+            // Scalar
+            values.push_back(py::cast<double>(data));
+        }
+
+        auto actual_dtype = dtype.value_or(tenzor::DType::Float32);
+
+        if (shape.empty()) {
+            // Scalar tensor
+            auto t = tenzor::full({}, values[0], actual_dtype, device);
+            return t;
+        }
+
+        // Create tensor and fill
+        auto t = tenzor::empty(shape, actual_dtype, device);
+        if (actual_dtype == tenzor::DType::Float64) {
+            auto* ptr = t.data<double>();
+            for (size_t i = 0; i < values.size(); ++i)
+                ptr[i] = values[i];
+        } else if (actual_dtype == tenzor::DType::Float32) {
+            auto* ptr = t.data<float>();
+            for (size_t i = 0; i < values.size(); ++i)
+                ptr[i] = static_cast<float>(values[i]);
+        } else if (actual_dtype == tenzor::DType::Int64) {
+            auto* ptr = t.data<int64_t>();
+            for (size_t i = 0; i < values.size(); ++i)
+                ptr[i] = static_cast<int64_t>(values[i]);
+        } else if (actual_dtype == tenzor::DType::Int32) {
+            auto* ptr = t.data<int32_t>();
+            for (size_t i = 0; i < values.size(); ++i)
+                ptr[i] = static_cast<int32_t>(values[i]);
+        } else {
+            // Fallback: fill as float, then cast
+            auto ft = tenzor::empty(shape, tenzor::DType::Float32, device);
+            auto* ptr = ft.data<float>();
+            for (size_t i = 0; i < values.size(); ++i)
+                ptr[i] = static_cast<float>(values[i]);
+            t = ft.to(actual_dtype);
+        }
+        return t;
+    }, "Create a tensor from Python data (lists, nested lists, or scalar)",
+    py::arg("data"),
+    py::arg("dtype") = py::none(),
+    py::arg("device") = tenzor::Device::cpu());
+
+    // manual_seed
+    m.def("manual_seed", &tenzor::manual_seed,
+          "Set the random seed for reproducibility",
+          py::arg("seed"));
+
     // Missing math ops (free functions)
     m.def("add", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
          return tenzor::add(a, b);
@@ -1382,6 +1463,95 @@ PYBIND11_MODULE(tenzor_core, m) {
          "Element-wise cosine");
     m.def("tanh", [](const tenzor::Tensor& t) { return tenzor::tanh(t); },
          "Element-wise hyperbolic tangent");
+    // Extended math operations
+    m.def("log2", [](const tenzor::Tensor& t) { return tenzor::log2(t); },
+         "Element-wise base-2 logarithm");
+    m.def("log10", [](const tenzor::Tensor& t) { return tenzor::log10(t); },
+         "Element-wise base-10 logarithm");
+    m.def("log1p", [](const tenzor::Tensor& t) { return tenzor::log1p(t); },
+         "Element-wise log(1 + x)");
+    m.def("exp2", [](const tenzor::Tensor& t) { return tenzor::exp2(t); },
+         "Element-wise 2^x");
+    m.def("expm1", [](const tenzor::Tensor& t) { return tenzor::expm1(t); },
+         "Element-wise exp(x) - 1");
+    m.def("erf", [](const tenzor::Tensor& t) { return tenzor::erf(t); },
+         "Element-wise error function");
+    m.def("erfc", [](const tenzor::Tensor& t) { return tenzor::erfc(t); },
+         "Element-wise complementary error function");
+    m.def("isnan", [](const tenzor::Tensor& t) { return tenzor::isnan(t); },
+         "Element-wise NaN test");
+    m.def("isinf", [](const tenzor::Tensor& t) { return tenzor::isinf(t); },
+         "Element-wise infinity test");
+    m.def("isfinite", [](const tenzor::Tensor& t) { return tenzor::isfinite(t); },
+         "Element-wise finiteness test");
+    m.def("atan2", [](const tenzor::Tensor& y, const tenzor::Tensor& x) { return tenzor::atan2(y, x); },
+         "Element-wise atan2", py::arg("y"), py::arg("x"));
+    m.def("fmod", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::fmod(a, b); },
+         "Element-wise float modulo", py::arg("a"), py::arg("b"));
+    m.def("remainder", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::remainder(a, b); },
+         "Element-wise remainder", py::arg("a"), py::arg("b"));
+    m.def("lerp", [](const tenzor::Tensor& start, const tenzor::Tensor& end, double weight) {
+         return tenzor::lerp(start, end, weight);
+         }, "Linear interpolation",
+         py::arg("start"), py::arg("end"), py::arg("weight"));
+    // More trig/hyperbolic
+    m.def("tan", [](const tenzor::Tensor& t) { return tenzor::tan(t); },
+         "Element-wise tangent");
+    m.def("asin", [](const tenzor::Tensor& t) { return tenzor::asin(t); },
+         "Element-wise arcsine");
+    m.def("acos", [](const tenzor::Tensor& t) { return tenzor::acos(t); },
+         "Element-wise arccosine");
+    m.def("atan", [](const tenzor::Tensor& t) { return tenzor::atan(t); },
+         "Element-wise arctangent");
+    m.def("sinh", [](const tenzor::Tensor& t) { return tenzor::sinh(t); },
+         "Element-wise hyperbolic sine");
+    m.def("cosh", [](const tenzor::Tensor& t) { return tenzor::cosh(t); },
+         "Element-wise hyperbolic cosine");
+    // Element-wise ops
+    m.def("neg", [](const tenzor::Tensor& t) { return tenzor::neg(t); },
+         "Element-wise negation");
+    m.def("sign", [](const tenzor::Tensor& t) { return tenzor::sign(t); },
+         "Element-wise sign function");
+    m.def("sigmoid", [](const tenzor::Tensor& t) { return tenzor::sigmoid(t); },
+         "Element-wise sigmoid");
+    m.def("reciprocal", [](const tenzor::Tensor& t) { return tenzor::reciprocal(t); },
+         "Element-wise reciprocal");
+    m.def("floor", [](const tenzor::Tensor& t) { return tenzor::floor(t); },
+         "Element-wise floor");
+    m.def("ceil", [](const tenzor::Tensor& t) { return tenzor::ceil(t); },
+         "Element-wise ceil");
+    m.def("round", [](const tenzor::Tensor& t) { return tenzor::round(t); },
+         "Element-wise round");
+    m.def("clamp_min", [](const tenzor::Tensor& t, float min_val) { return tenzor::clamp_min(t, min_val); },
+         "Clamp values to minimum", py::arg("input"), py::arg("min"));
+    m.def("clamp_max", [](const tenzor::Tensor& t, float max_val) { return tenzor::clamp_max(t, max_val); },
+         "Clamp values to maximum", py::arg("input"), py::arg("max"));
+    m.def("minimum", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::minimum(a, b); },
+         "Element-wise minimum", py::arg("a"), py::arg("b"));
+    m.def("maximum", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::maximum(a, b); },
+         "Element-wise maximum", py::arg("a"), py::arg("b"));
+    // Comparison ops
+    m.def("eq", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::eq(a, b); },
+         "Element-wise equality", py::arg("a"), py::arg("b"));
+    m.def("ne", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::ne(a, b); },
+         "Element-wise inequality", py::arg("a"), py::arg("b"));
+    m.def("lt", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::lt(a, b); },
+         "Element-wise less than", py::arg("a"), py::arg("b"));
+    m.def("le", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::le(a, b); },
+         "Element-wise less or equal", py::arg("a"), py::arg("b"));
+    m.def("gt", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::gt(a, b); },
+         "Element-wise greater than", py::arg("a"), py::arg("b"));
+    m.def("ge", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::ge(a, b); },
+         "Element-wise greater or equal", py::arg("a"), py::arg("b"));
+    // Additional reduction ops
+    m.def("argmax", [](const tenzor::Tensor& input, std::optional<int64_t> dim, bool keepdim) {
+         return tenzor::argmax(input, dim, keepdim);
+         }, "ArgMax reduction",
+         py::arg("input"), py::arg("dim") = py::none(), py::arg("keepdim") = false);
+    m.def("argmin", [](const tenzor::Tensor& input, std::optional<int64_t> dim, bool keepdim) {
+         return tenzor::argmin(input, dim, keepdim);
+         }, "ArgMin reduction",
+         py::arg("input"), py::arg("dim") = py::none(), py::arg("keepdim") = false);
 
     // Reduction operations - using lambda wrappers for overloaded functions
     m.def("sum", [](const tenzor::Tensor& input, std::optional<int64_t> dim, bool keepdim) {
@@ -1613,7 +1783,124 @@ PYBIND11_MODULE(tenzor_core, m) {
         }, py::is_operator())
         .def("__neg__", [](const tenzor::Variable& a) {
             return a * -1.0f;
-        }, py::is_operator());
+        }, py::is_operator())
+        // Matrix multiplication
+        .def("__matmul__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
+            return a.matmul(b);
+        }, py::is_operator())
+        .def("__rmatmul__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
+            return b.matmul(a);
+        }, py::is_operator())
+        // Power (uses tensor-level pow, wraps back in Variable)
+        .def("__pow__", [](const tenzor::Variable& a, float exp) {
+            auto result = tenzor::pow(a.tensor(), exp);
+            return tenzor::Variable(result, a.requires_grad());
+        }, py::is_operator())
+        // Comparison operators (return Tensors, not Variables — no grad needed)
+        .def("__eq__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
+            return tenzor::eq(a.tensor(), b.tensor());
+        }, py::is_operator())
+        .def("__ne__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
+            return tenzor::ne(a.tensor(), b.tensor());
+        }, py::is_operator())
+        .def("__lt__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
+            return tenzor::lt(a.tensor(), b.tensor());
+        }, py::is_operator())
+        .def("__le__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
+            return tenzor::le(a.tensor(), b.tensor());
+        }, py::is_operator())
+        .def("__gt__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
+            return tenzor::gt(a.tensor(), b.tensor());
+        }, py::is_operator())
+        .def("__ge__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
+            return tenzor::ge(a.tensor(), b.tensor());
+        }, py::is_operator())
+        // In-place operators
+        .def("__iadd__", [](tenzor::Variable& a, const tenzor::Variable& b) -> tenzor::Variable& {
+            tenzor::add_(a.tensor(), b.tensor());
+            return a;
+        }, py::is_operator())
+        .def("__isub__", [](tenzor::Variable& a, const tenzor::Variable& b) -> tenzor::Variable& {
+            tenzor::sub_(a.tensor(), b.tensor());
+            return a;
+        }, py::is_operator())
+        .def("__imul__", [](tenzor::Variable& a, const tenzor::Variable& b) -> tenzor::Variable& {
+            tenzor::mul_(a.tensor(), b.tensor());
+            return a;
+        }, py::is_operator())
+        .def("__itruediv__", [](tenzor::Variable& a, const tenzor::Variable& b) -> tenzor::Variable& {
+            tenzor::div_(a.tensor(), b.tensor());
+            return a;
+        }, py::is_operator())
+        // Scalar in-place
+        .def("__iadd__", [](tenzor::Variable& a, float b) -> tenzor::Variable& {
+            auto scalar_t = tenzor::full({1}, static_cast<double>(b), a.dtype(), a.device());
+            tenzor::add_(a.tensor(), scalar_t);
+            return a;
+        }, py::is_operator())
+        .def("__isub__", [](tenzor::Variable& a, float b) -> tenzor::Variable& {
+            auto scalar_t = tenzor::full({1}, static_cast<double>(b), a.dtype(), a.device());
+            tenzor::sub_(a.tensor(), scalar_t);
+            return a;
+        }, py::is_operator())
+        .def("__imul__", [](tenzor::Variable& a, float b) -> tenzor::Variable& {
+            auto scalar_t = tenzor::full({1}, static_cast<double>(b), a.dtype(), a.device());
+            tenzor::mul_(a.tensor(), scalar_t);
+            return a;
+        }, py::is_operator())
+        .def("__itruediv__", [](tenzor::Variable& a, float b) -> tenzor::Variable& {
+            auto scalar_t = tenzor::full({1}, static_cast<double>(b), a.dtype(), a.device());
+            tenzor::div_(a.tensor(), scalar_t);
+            return a;
+        }, py::is_operator())
+        // Numeric protocol
+        .def("__float__", [](const tenzor::Variable& v) {
+            return v.tensor().item<double>();
+        })
+        .def("__int__", [](const tenzor::Variable& v) {
+            return v.tensor().item<int64_t>();
+        })
+        .def("__repr__", [](const tenzor::Variable& v) {
+            const auto& t = v.tensor();
+            std::ostringstream oss;
+            oss << "Variable(";
+            auto shape = t.shape();
+            auto n = t.numel();
+            if (n == 0) {
+                oss << "[]";
+            } else if (n == 1) {
+                oss << t.item<float>();
+            } else if (n <= 10) {
+                oss << "[";
+                auto flat = t.contiguous();
+                for (int64_t i = 0; i < n; ++i) {
+                    if (i > 0) oss << ", ";
+                    oss << flat.data<float>()[i];
+                }
+                oss << "]";
+            } else {
+                oss << "[";
+                auto flat = t.contiguous().reshape({-1});
+                for (int64_t i = 0; i < 3; ++i) {
+                    if (i > 0) oss << ", ";
+                    oss << flat.data<float>()[i];
+                }
+                oss << ", ..., ";
+                for (int64_t i = n - 3; i < n; ++i) {
+                    if (i > n - 3) oss << ", ";
+                    oss << flat.data<float>()[i];
+                }
+                oss << "]";
+            }
+            oss << ", shape=[";
+            for (size_t i = 0; i < shape.size(); ++i) {
+                if (i > 0) oss << ", ";
+                oss << shape[i];
+            }
+            oss << "], requires_grad=" << (v.requires_grad() ? "True" : "False") << ")";
+            return oss.str();
+        })
+        .def("dim", [](const tenzor::Variable& v) { return v.tensor().ndim(); });
 
     // Gradient control functions
     m.def("is_grad_enabled", &tenzor::is_grad_enabled,
@@ -1638,7 +1925,14 @@ PYBIND11_MODULE(tenzor_core, m) {
     };
 
     py::class_<PyNoGradContext>(m, "no_grad",
-        "Context manager for disabling gradient computation")
+        "Context manager and decorator for disabling gradient computation.\n\n"
+        "Usage as context manager:\n"
+        "    with tz.no_grad():\n"
+        "        y = model(x)\n\n"
+        "Usage as decorator:\n"
+        "    @tz.no_grad()\n"
+        "    def inference(x):\n"
+        "        return model(x)")
         .def(py::init<>())
         .def("__enter__", [](PyNoGradContext& self) -> PyNoGradContext& {
             self.enter();
@@ -1647,7 +1941,21 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("__exit__", [](PyNoGradContext& self, py::object, py::object, py::object) {
             self.exit();
             return false;
-        });
+        })
+        .def("__call__", [](PyNoGradContext&, py::function func) -> py::object {
+            // When used as @no_grad() decorator, wrap the function
+            // so that grad is disabled during its execution
+            auto wrapper = py::cpp_function([func](py::args args, py::kwargs kwargs) -> py::object {
+                tenzor::NoGradGuard guard;
+                return func(*args, **kwargs);
+            });
+            // Preserve original function metadata
+            try {
+                py::module_ functools = py::module_::import("functools");
+                functools.attr("update_wrapper")(wrapper, func);
+            } catch (...) {}
+            return wrapper;
+        }, py::arg("func"));
 
     // Python-friendly context manager for enable_grad
     struct PyEnableGradContext {
@@ -1664,7 +1972,7 @@ PYBIND11_MODULE(tenzor_core, m) {
     };
 
     py::class_<PyEnableGradContext>(m, "enable_grad",
-        "Context manager for enabling gradient computation")
+        "Context manager and decorator for enabling gradient computation")
         .def(py::init<>())
         .def("__enter__", [](PyEnableGradContext& self) -> PyEnableGradContext& {
             self.enter();
@@ -1673,7 +1981,26 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("__exit__", [](PyEnableGradContext& self, py::object, py::object, py::object) {
             self.exit();
             return false;
-        });
+        })
+        .def("__call__", [](PyEnableGradContext&, py::function func) -> py::object {
+            auto wrapper = py::cpp_function([func](py::args args, py::kwargs kwargs) -> py::object {
+                bool prev = tenzor::is_grad_enabled();
+                tenzor::set_grad_enabled(true);
+                try {
+                    py::object result = func(*args, **kwargs);
+                    tenzor::set_grad_enabled(prev);
+                    return result;
+                } catch (...) {
+                    tenzor::set_grad_enabled(prev);
+                    throw;
+                }
+            });
+            try {
+                py::module_ functools = py::module_::import("functools");
+                functools.attr("update_wrapper")(wrapper, func);
+            } catch (...) {}
+            return wrapper;
+        }, py::arg("func"));
 
     // set_grad_enabled as context manager too
     struct PySetGradEnabledContext {
