@@ -347,6 +347,41 @@ class Sequential(_CppSequential):
         return '\n'.join(lines) if len(self) > 0 else "Sequential()"
 
 
+class Parameter:
+    """
+    A kind of Variable that is automatically registered as a parameter when
+    assigned as a Module attribute.
+
+    Parameters are Variables that require gradients by default.
+    This is a thin wrapper that creates a Variable with requires_grad=True.
+
+    Example::
+
+        import tenzor as tz
+
+        class MyModule(tz.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = tz.nn.Parameter(tz.randn([10, 5]))
+                self.bias = tz.nn.Parameter(tz.zeros([5]))
+
+            def forward_impl(self, x):
+                return x @ self.weight + self.bias
+    """
+
+    def __new__(cls, data=None, requires_grad=True):
+        if data is None:
+            return _core.Variable()
+        if isinstance(data, _core.Tensor):
+            return _core.Variable(data, requires_grad)
+        if isinstance(data, _core.Variable):
+            if requires_grad:
+                data.requires_grad_(True)
+            return data
+        raise TypeError(f"Parameter data must be a Tensor, got {type(data)}")
+
+
 # Override the nn module's Module and Sequential with our wrappers
 _core.nn.Module = Module
 _core.nn.Sequential = Sequential
+_core.nn.Parameter = Parameter
