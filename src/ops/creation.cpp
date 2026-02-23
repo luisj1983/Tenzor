@@ -1,5 +1,6 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/backend/dispatch.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/loader.hpp"
 #include <random>
 #include <cstring>
@@ -7,7 +8,6 @@
 #include <cmath>
 #include <algorithm>
 #include <sstream>
-#include <iostream>  // DEBUG
 #include <chrono>
 
 namespace tenzor {
@@ -70,18 +70,19 @@ static auto dtype_to_string(DType dtype) -> std::string {
 }
 
 auto zeros(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
-    // Use backend directly for non-CPU devices
+    // Use OpId dispatch for non-CPU devices
     if (device.type != Device::Type::CPU) {
-        auto backend = backend_registry().get_backend(device.type);
-        if (!backend) {
-            throw std::runtime_error("Backend not available for device type");
-        }
-
         OpAttributes attrs;
         attrs["shape"] = shape_to_string(shape);
         attrs["dtype"] = dtype_to_string(dtype);
         attrs["device_id"] = std::to_string(device.index);
 
+        if (is_op_supported(OpId::Zeros, device.type)) {
+            return dispatch_to_device(OpId::Zeros, device.type, {}, attrs)[0];
+        }
+        // Fallback for backends without OpId registration (e.g., OneAPI)
+        auto backend = backend_registry().get_backend(device.type);
+        if (!backend) throw std::runtime_error("Backend not available for device type");
         return backend->dispatch("zeros", {}, attrs)[0];
     }
 
@@ -90,29 +91,18 @@ auto zeros(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
 }
 
 auto ones(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
-    // Use backend directly for non-CPU devices
+    // Use OpId dispatch for non-CPU devices
     if (device.type != Device::Type::CPU) {
-        auto backend = backend_registry().get_backend(device.type);
-        if (!backend) {
-            throw std::runtime_error("Backend not available for device type");
-        }
-        // Validate device index
-        if (device.index < 0 || device.index >= backend->device_count()) {
-            throw std::runtime_error("Invalid device index " + std::to_string(device.index) +
-                " for backend with " + std::to_string(backend->device_count()) + " device(s)");
-        }
-
         OpAttributes attrs;
         attrs["shape"] = shape_to_string(shape);
         attrs["dtype"] = dtype_to_string(dtype);
         attrs["device_id"] = std::to_string(device.index);
 
-        // DEBUG
-        //if (shape.size() == 1 && shape[0] <= 10) {
-        //    std::cerr << "[ONES_DISPATCH] Calling backend->dispatch(\"ones\") with shape=\""
-        //              << attrs["shape"] << "\" dtype=\"" << attrs["dtype"] << "\"" << std::endl;
-        //}
-
+        if (is_op_supported(OpId::Ones, device.type)) {
+            return dispatch_to_device(OpId::Ones, device.type, {}, attrs)[0];
+        }
+        auto backend = backend_registry().get_backend(device.type);
+        if (!backend) throw std::runtime_error("Backend not available for device type");
         return backend->dispatch("ones", {}, attrs)[0];
     }
 
@@ -183,23 +173,21 @@ auto ones(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
 }
 
 auto full(std::vector<int64_t> shape, float value, DType dtype, Device device) -> Tensor {
-    // Use backend directly for non-CPU devices
+    // Use OpId dispatch for non-CPU devices
     if (device.type != Device::Type::CPU) {
-        auto backend = backend_registry().get_backend(device.type);
-        if (!backend) {
-            throw std::runtime_error("Backend not available for device type");
-        }
-
         OpAttributes attrs;
         attrs["shape"] = shape_to_string(shape);
-        // FIX: Use scientific notation with full precision to avoid loss of small values
-        // std::to_string() uses fixed precision and loses values like 1e-7
         std::ostringstream oss;
         oss << std::scientific << std::setprecision(std::numeric_limits<float>::max_digits10) << value;
         attrs["value"] = oss.str();
         attrs["dtype"] = dtype_to_string(dtype);
         attrs["device_id"] = std::to_string(device.index);
 
+        if (is_op_supported(OpId::Full, device.type)) {
+            return dispatch_to_device(OpId::Full, device.type, {}, attrs)[0];
+        }
+        auto backend = backend_registry().get_backend(device.type);
+        if (!backend) throw std::runtime_error("Backend not available for device type");
         return backend->dispatch("full", {}, attrs)[0];
     }
 
@@ -264,22 +252,21 @@ auto full(std::vector<int64_t> shape, float value, DType dtype, Device device) -
 }
 
 auto full(std::vector<int64_t> shape, double value, DType dtype, Device device) -> Tensor {
-    // Use backend directly for non-CPU devices
+    // Use OpId dispatch for non-CPU devices
     if (device.type != Device::Type::CPU) {
-        auto backend = backend_registry().get_backend(device.type);
-        if (!backend) {
-            throw std::runtime_error("Backend not available for device type");
-        }
-
         OpAttributes attrs;
         attrs["shape"] = shape_to_string(shape);
-        // Use scientific notation with full precision for double values
         std::ostringstream oss;
         oss << std::scientific << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
         attrs["value"] = oss.str();
         attrs["dtype"] = dtype_to_string(dtype);
         attrs["device_id"] = std::to_string(device.index);
 
+        if (is_op_supported(OpId::Full, device.type)) {
+            return dispatch_to_device(OpId::Full, device.type, {}, attrs)[0];
+        }
+        auto backend = backend_registry().get_backend(device.type);
+        if (!backend) throw std::runtime_error("Backend not available for device type");
         return backend->dispatch("full", {}, attrs)[0];
     }
 
@@ -349,18 +336,18 @@ auto empty(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
 }
 
 auto rand(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
-    // Use backend directly for non-CPU devices
+    // Use OpId dispatch for non-CPU devices
     if (device.type != Device::Type::CPU) {
-        auto backend = backend_registry().get_backend(device.type);
-        if (!backend) {
-            throw std::runtime_error("Backend not available for device type");
-        }
-
         OpAttributes attrs;
         attrs["shape"] = shape_to_string(shape);
         attrs["dtype"] = dtype_to_string(dtype);
         attrs["device_id"] = std::to_string(device.index);
 
+        if (is_op_supported(OpId::Rand, device.type)) {
+            return dispatch_to_device(OpId::Rand, device.type, {}, attrs)[0];
+        }
+        auto backend = backend_registry().get_backend(device.type);
+        if (!backend) throw std::runtime_error("Backend not available for device type");
         return backend->dispatch("rand", {}, attrs)[0];
     }
 
@@ -415,18 +402,18 @@ auto rand(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
 }
 
 auto randn(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
-    // Use backend directly for non-CPU devices
+    // Use OpId dispatch for non-CPU devices
     if (device.type != Device::Type::CPU) {
-        auto backend = backend_registry().get_backend(device.type);
-        if (!backend) {
-            throw std::runtime_error("Backend not available for device type");
-        }
-
         OpAttributes attrs;
         attrs["shape"] = shape_to_string(shape);
         attrs["dtype"] = dtype_to_string(dtype);
         attrs["device_id"] = std::to_string(device.index);
 
+        if (is_op_supported(OpId::Randn, device.type)) {
+            return dispatch_to_device(OpId::Randn, device.type, {}, attrs)[0];
+        }
+        auto backend = backend_registry().get_backend(device.type);
+        if (!backend) throw std::runtime_error("Backend not available for device type");
         return backend->dispatch("randn", {}, attrs)[0];
     }
 
@@ -485,12 +472,10 @@ auto randint(int64_t low, int64_t high, std::vector<int64_t> shape, DType dtype,
         throw std::invalid_argument("randint: low must be less than high");
     }
 
-    // Use backend directly for non-CPU devices
+    // Use string dispatch for non-CPU devices (no OpId::Randint registered)
     if (device.type != Device::Type::CPU) {
         auto backend = backend_registry().get_backend(device.type);
-        if (!backend) {
-            throw std::runtime_error("Backend not available for device type");
-        }
+        if (!backend) throw std::runtime_error("Backend not available for device type");
 
         OpAttributes attrs;
         attrs["shape"] = shape_to_string(shape);
@@ -564,13 +549,8 @@ auto arange(float start, float end, float step, DType dtype, Device device) -> T
         throw std::invalid_argument("Invalid start, end, step combination");
     }
 
-    // Use backend directly for non-CPU devices
+    // Use OpId dispatch for non-CPU devices
     if (device.type != Device::Type::CPU) {
-        auto backend = backend_registry().get_backend(device.type);
-        if (!backend) {
-            throw std::runtime_error("Backend not available for device type");
-        }
-
         OpAttributes attrs;
         attrs["start"] = std::to_string(start);
         attrs["end"] = std::to_string(end);
@@ -578,6 +558,11 @@ auto arange(float start, float end, float step, DType dtype, Device device) -> T
         attrs["dtype"] = dtype_to_string(dtype);
         attrs["device_id"] = std::to_string(device.index);
 
+        if (is_op_supported(OpId::Arange, device.type)) {
+            return dispatch_to_device(OpId::Arange, device.type, {}, attrs)[0];
+        }
+        auto backend = backend_registry().get_backend(device.type);
+        if (!backend) throw std::runtime_error("Backend not available for device type");
         return backend->dispatch("arange", {}, attrs)[0];
     }
 
@@ -661,13 +646,8 @@ auto linspace(float start, float end, int64_t steps, DType dtype, Device device)
         throw std::invalid_argument("steps must be positive");
     }
 
-    // Use backend directly for non-CPU devices
+    // Use OpId dispatch for non-CPU devices
     if (device.type != Device::Type::CPU) {
-        auto backend = backend_registry().get_backend(device.type);
-        if (!backend) {
-            throw std::runtime_error("Backend not available for device type");
-        }
-
         OpAttributes attrs;
         attrs["start"] = std::to_string(start);
         attrs["end"] = std::to_string(end);
@@ -675,6 +655,11 @@ auto linspace(float start, float end, int64_t steps, DType dtype, Device device)
         attrs["dtype"] = dtype_to_string(dtype);
         attrs["device_id"] = std::to_string(device.index);
 
+        if (is_op_supported(OpId::Linspace, device.type)) {
+            return dispatch_to_device(OpId::Linspace, device.type, {}, attrs)[0];
+        }
+        auto backend = backend_registry().get_backend(device.type);
+        if (!backend) throw std::runtime_error("Backend not available for device type");
         return backend->dispatch("linspace", {}, attrs)[0];
     }
 
@@ -750,19 +735,19 @@ auto linspace(float start, float end, int64_t steps, DType dtype, Device device)
 auto eye(int64_t n, std::optional<int64_t> m, DType dtype, Device device) -> Tensor {
     int64_t cols = m.value_or(n);
 
-    // Use backend directly for non-CPU devices
+    // Use OpId dispatch for non-CPU devices
     if (device.type != Device::Type::CPU) {
-        auto backend = backend_registry().get_backend(device.type);
-        if (!backend) {
-            throw std::runtime_error("Backend not available for device type");
-        }
-
         OpAttributes attrs;
         attrs["n"] = std::to_string(n);
         attrs["m"] = std::to_string(cols);
         attrs["dtype"] = dtype_to_string(dtype);
         attrs["device_id"] = std::to_string(device.index);
 
+        if (is_op_supported(OpId::Eye, device.type)) {
+            return dispatch_to_device(OpId::Eye, device.type, {}, attrs)[0];
+        }
+        auto backend = backend_registry().get_backend(device.type);
+        if (!backend) throw std::runtime_error("Backend not available for device type");
         return backend->dispatch("eye", {}, attrs)[0];
     }
 

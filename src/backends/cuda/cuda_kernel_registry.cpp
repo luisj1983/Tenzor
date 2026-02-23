@@ -200,6 +200,8 @@ namespace cuda {
     auto unfold_cuda(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation) -> Tensor;
     auto fold_cuda(const Tensor& input, const std::vector<int64_t>& output_size, int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation) -> Tensor;
     auto box_iou_cuda(const Tensor& boxes1, const Tensor& boxes2, int iou_type) -> Tensor;
+    auto gather_relative_position_bias(const Tensor& table, const Tensor& indices,
+                                       int64_t num_positions, int64_t num_heads) -> Tensor;
 
     // Advanced operations (topk, sort, cumsum, cumprod, unique)
     auto topk_kernel(const Tensor& input, int64_t k, int64_t dim, bool largest, bool sorted, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
@@ -437,6 +439,7 @@ namespace cuda {
     Tensor floor_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor ceil_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor round_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor trunc_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
 
     // Trigonometric operations
     Tensor sin_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
@@ -603,6 +606,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::Floor, cuda::floor_dispatch);
     table.register_single_output_kernel(OpId::Ceil, cuda::ceil_dispatch);
     table.register_single_output_kernel(OpId::Round, cuda::round_dispatch);
+    table.register_single_output_kernel(OpId::Trunc, cuda::trunc_dispatch);
     table.register_kernel(OpId::Pow, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         float exponent = parse_attr<float>(attrs, "exponent", 2.0f);
         return std::vector<Tensor>{cuda::pow_kernel(inputs[0], exponent, get_cuda_stream(attrs))};
@@ -1866,6 +1870,16 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         int iou_type = static_cast<int>(parse_attr<int64_t>(attrs, "iou_type", 0));
         return cuda::box_iou_cuda(inputs[0], inputs[1], iou_type);
     });
+
+    table.register_kernel(OpId::GatherRelativePositionBias,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t num_positions = 0, num_heads = 0;
+            if (attrs.contains("num_positions"))
+                num_positions = std::stoll(attrs.at("num_positions"));
+            if (attrs.contains("num_heads"))
+                num_heads = std::stoll(attrs.at("num_heads"));
+            return {cuda::gather_relative_position_bias(inputs[0], inputs[1], num_positions, num_heads)};
+        });
 
     // =========================================================================
     // Advanced Operations (topk, sort, cumsum, cumprod, unique)

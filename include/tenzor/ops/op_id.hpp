@@ -73,6 +73,7 @@ enum class OpId : uint16_t {
     Floor,
     Ceil,
     Round,
+    Trunc,
 
     // =========================================================================
     // Trigonometric Operations (50-64)
@@ -215,6 +216,7 @@ enum class OpId : uint16_t {
     ROIAlignForward,
     ROIAlignBackward,
     BoxIoU,
+    GatherRelativePositionBias,
 
     // =========================================================================
     // Fused Operations (210-229)

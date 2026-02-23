@@ -4477,6 +4477,19 @@ Tensor round_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs)
     return round_kernel(inputs[0], stream);
 }
 
+Tensor trunc_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return trunc_kernel(inputs[0], stream);
+}
+
 // Trigonometric dispatch wrappers
 Tensor sin_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
     cudaStream_t stream = nullptr;

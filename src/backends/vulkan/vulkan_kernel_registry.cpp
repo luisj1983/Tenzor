@@ -206,6 +206,10 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return get_vulkan_backend()->dispatch("round", inputs, attrs);
     });
 
+    table.register_kernel(OpId::Trunc, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("trunc", inputs, attrs);
+    });
+
     table.register_kernel(OpId::Clamp, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return get_vulkan_backend()->dispatch("clamp", inputs, attrs);
     });
@@ -613,7 +617,9 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return get_vulkan_backend()->dispatch("roi_align_backward", inputs, attrs);
     });
 
-    // Note: GatherRelativePositionBias not in OpId enum - registered via string dispatch only
+    table.register_kernel(OpId::GatherRelativePositionBias, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("gather_relative_position_bias", inputs, attrs);
+    });
 
     // ========================================================================
     // Normalization Backward Operations

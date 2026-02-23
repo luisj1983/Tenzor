@@ -381,6 +381,8 @@ namespace rocm {
     auto embedding_kernel(const Tensor& weight, const Tensor& indices, hipStream_t stream) -> Tensor;
     auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
                                    int64_t num_embeddings, hipStream_t stream) -> Tensor;
+    auto gather_relative_position_bias_kernel(const Tensor& table, const Tensor& indices,
+                                              int64_t num_positions, int64_t num_heads, hipStream_t stream) -> Tensor;
     auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
                        hipStream_t stream) -> Tensor;
     auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& weight,
@@ -1318,6 +1320,14 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t num_embeddings = parse_int64(attrs, "num_embeddings", 0);
         return std::vector<Tensor>{rocm::embedding_backward_kernel(inputs[0], inputs[1], num_embeddings, get_hip_stream(attrs))};
     });
+
+    table.register_kernel(OpId::GatherRelativePositionBias,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t num_positions = parse_int64(attrs, "num_positions", 0);
+            int64_t num_heads = parse_int64(attrs, "num_heads", 0);
+            hipStream_t stream = get_hip_stream(attrs);
+            return {rocm::gather_relative_position_bias_kernel(inputs[0], inputs[1], num_positions, num_heads, stream)};
+        });
 
     // ========================================================================
     // Linear Operations
