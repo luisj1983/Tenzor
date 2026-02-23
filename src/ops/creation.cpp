@@ -875,4 +875,66 @@ auto randperm(int64_t n, Device device) -> Tensor {
     return tensor;
 }
 
+auto meshgrid(const std::vector<Tensor>& tensors, const std::string& indexing) -> std::vector<Tensor> {
+    if (tensors.empty()) return {};
+    if (indexing != "ij" && indexing != "xy")
+        throw std::invalid_argument("meshgrid: indexing must be 'ij' or 'xy'");
+
+    size_t ndim = tensors.size();
+    for (size_t i = 0; i < ndim; ++i) {
+        if (tensors[i].ndim() != 1)
+            throw std::invalid_argument("meshgrid: all input tensors must be 1-D");
+    }
+
+    // Build output shape
+    std::vector<int64_t> out_shape;
+    for (size_t i = 0; i < ndim; ++i) {
+        out_shape.push_back(tensors[i].numel());
+    }
+
+    // For "xy" indexing with >= 2 tensors, swap first two dimensions
+    if (indexing == "xy" && ndim >= 2) {
+        std::swap(out_shape[0], out_shape[1]);
+    }
+
+    // Total elements per grid
+    int64_t total = 1;
+    for (auto s : out_shape) total *= s;
+
+    std::vector<Tensor> result;
+    for (size_t ti = 0; ti < ndim; ++ti) {
+        // Determine which output dimension this tensor varies along
+        size_t dim_idx = ti;
+        if (indexing == "xy" && ndim >= 2) {
+            if (ti == 0) dim_idx = 1;
+            else if (ti == 1) dim_idx = 0;
+        }
+
+        auto grid = empty(out_shape, tensors[ti].dtype(), tensors[ti].device());
+        auto src = tensors[ti].contiguous();
+        size_t elem_size = dtype_size(src.dtype());
+
+        // Compute strides for index calculation
+        std::vector<int64_t> strides(ndim);
+        int64_t stride = 1;
+        for (int64_t d = static_cast<int64_t>(ndim) - 1; d >= 0; --d) {
+            strides[d] = stride;
+            stride *= out_shape[d];
+        }
+
+        auto* dst = static_cast<uint8_t*>(grid.data_ptr());
+        auto* src_ptr = static_cast<const uint8_t*>(src.data_ptr());
+
+        for (int64_t flat = 0; flat < total; ++flat) {
+            // Extract index along dim_idx from flat index
+            int64_t idx = (flat / strides[dim_idx]) % out_shape[dim_idx];
+            std::memcpy(dst + flat * elem_size, src_ptr + idx * elem_size, elem_size);
+        }
+
+        result.push_back(grid);
+    }
+
+    return result;
+}
+
 } // namespace tenzor

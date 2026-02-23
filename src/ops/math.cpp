@@ -5,6 +5,7 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/type_promotion.hpp"
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <stdexcept>
@@ -551,6 +552,63 @@ auto logical_not(const Tensor& input) -> Tensor {
 auto logical_xor(const Tensor& a, const Tensor& b) -> Tensor {
     std::vector<Tensor> inputs = {a, b};
     return dispatch(OpId::LogicalXor, inputs)[0];
+}
+
+auto cross(const Tensor& input, const Tensor& other, int64_t dim) -> Tensor {
+    if (input.device().type != Device::Type::CPU)
+        throw std::runtime_error("cross: only CPU tensors supported");
+
+    auto shape_a = input.shape();
+    auto shape_b = other.shape();
+    int64_t ndim = shape_a.size();
+
+    // Resolve negative dim
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim)
+        throw std::invalid_argument("cross: dim out of range");
+
+    if (shape_a[dim] != 3 || shape_b[dim] != 3)
+        throw std::invalid_argument("cross: dimension " + std::to_string(dim) +
+            " must have size 3, got " + std::to_string(shape_a[dim]) +
+            " and " + std::to_string(shape_b[dim]));
+
+    if (!std::equal(shape_a.begin(), shape_a.end(), shape_b.begin(), shape_b.end()))
+        throw std::invalid_argument("cross: input tensors must have same shape");
+
+    // Use indexing: c[...,0,...] = a[...,1,...]*b[...,2,...] - a[...,2,...]*b[...,1,...]
+    auto a_cont = input.contiguous();
+    auto b_cont = other.contiguous();
+    auto result = empty(std::vector<int64_t>(shape_a.begin(), shape_a.end()),
+                        input.dtype(), input.device());
+
+    // Compute total iterations (product of all dims except dim)
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < dim; ++d) outer *= shape_a[d];
+    for (int64_t d = dim + 1; d < ndim; ++d) inner *= shape_a[d];
+    int64_t dim_stride = inner; // stride along the cross dimension
+
+    auto cross_typed = [&](auto* a_ptr, auto* b_ptr, auto* c_ptr) {
+        for (int64_t o = 0; o < outer; ++o) {
+            for (int64_t i = 0; i < inner; ++i) {
+                int64_t base = o * 3 * inner + i;
+                auto a0 = a_ptr[base], a1 = a_ptr[base + dim_stride], a2 = a_ptr[base + 2*dim_stride];
+                auto b0 = b_ptr[base], b1 = b_ptr[base + dim_stride], b2 = b_ptr[base + 2*dim_stride];
+                c_ptr[base]                  = a1*b2 - a2*b1;
+                c_ptr[base + dim_stride]     = a2*b0 - a0*b2;
+                c_ptr[base + 2*dim_stride]   = a0*b1 - a1*b0;
+            }
+        }
+    };
+
+    if (input.dtype() == DType::Float32) {
+        cross_typed(a_cont.data<float>(), b_cont.data<float>(), result.data<float>());
+    } else if (input.dtype() == DType::Float64) {
+        cross_typed(a_cont.data<double>(), b_cont.data<double>(), result.data<double>());
+    } else {
+        throw std::runtime_error("cross: only Float32 and Float64 supported");
+    }
+
+    return result;
 }
 
 } // namespace tenzor

@@ -328,6 +328,11 @@ auto logical_not(const Tensor& input) -> Tensor;
 auto logical_xor(const Tensor& a, const Tensor& b) -> Tensor;
 /// @}
 
+/// @name Vector Operations
+/// @{
+auto cross(const Tensor& input, const Tensor& other, int64_t dim = -1) -> Tensor;
+/// @}
+
 /** @} */ // end of tensor_math group
 
 } // namespace tenzor

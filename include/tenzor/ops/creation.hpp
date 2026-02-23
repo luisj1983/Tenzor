@@ -322,6 +322,15 @@ void manual_seed(unsigned int seed);
  */
 uint64_t get_global_seed();
 
+/**
+ * @brief Generate coordinate grids from 1-D coordinate tensors.
+ *
+ * @param tensors List of 1-D tensors
+ * @param indexing "ij" for matrix indexing (default), "xy" for Cartesian
+ * @return Vector of N-D coordinate tensors
+ */
+auto meshgrid(const std::vector<Tensor>& tensors, const std::string& indexing = "ij") -> std::vector<Tensor>;
+
 /** @} */ // end of tensor_creation group
 
 } // namespace tenzor

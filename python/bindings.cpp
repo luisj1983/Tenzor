@@ -1604,6 +1604,14 @@ PYBIND11_MODULE(tenzor_core, m) {
     m.def("logical_xor", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
          return tenzor::logical_xor(a, b);
          }, "Element-wise logical XOR", py::arg("a"), py::arg("b"));
+    m.def("meshgrid", [](const std::vector<tenzor::Tensor>& tensors, const std::string& indexing) {
+         return tenzor::meshgrid(tensors, indexing);
+         }, "Generate coordinate grids from 1-D tensors",
+         py::arg("tensors"), py::arg("indexing") = "ij");
+    m.def("cross", [](const tenzor::Tensor& a, const tenzor::Tensor& b, int64_t dim) {
+         return tenzor::cross(a, b, dim);
+         }, "Cross product of two tensors along dimension",
+         py::arg("input"), py::arg("other"), py::arg("dim") = -1);
     // More trig/hyperbolic
     m.def("tan", [](const tenzor::Tensor& t) { return tenzor::tan(t); },
          "Element-wise tangent");
