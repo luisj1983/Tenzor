@@ -184,6 +184,7 @@ if(TENZOR_BUILD_PYTHON)
         # Copy Python package files
         file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/__init__.py
                   ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/nn.py
+                  ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/functional.py
              DESTINATION ${CMAKE_BINARY_DIR}/python/tenzor)
     else()
         message(WARNING "pybind11 or Python not found, Python bindings will not be built")

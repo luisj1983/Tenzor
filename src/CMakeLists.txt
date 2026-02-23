@@ -18,6 +18,7 @@ set(TENZOR_CORE_SOURCES
     backend/simd_dispatch.cpp
     backend/runtime_simd.cpp
     backend/dispatch_table.cpp
+    backend/cuda_graph_stub.cpp
     ops/op_id.cpp
     ops/creation.cpp
     ops/math.cpp

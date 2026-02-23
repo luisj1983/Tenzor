@@ -742,6 +742,9 @@ PYBIND11_MODULE(tenzor_core, m) {
              return result;
              }, "Tensor strides")
         .def("__repr__", [](const tenzor::Tensor& t) {
+            if (!t.is_valid()) {
+                return std::string("tensor(<uninitialized>)");
+            }
             std::ostringstream ss;
             // For small tensors, print actual values like PyTorch
             tenzor::Tensor cpu_t = (t.device().type != tenzor::Device::Type::CPU) ? t.cpu() : t;
@@ -1891,6 +1894,9 @@ PYBIND11_MODULE(tenzor_core, m) {
             return v.tensor().item<int64_t>();
         })
         .def("__repr__", [](const tenzor::Variable& v) {
+            if (!v.is_initialized()) {
+                return std::string("Variable(<uninitialized>)");
+            }
             const auto& t = v.tensor();
             std::ostringstream oss;
             oss << "Variable(";

@@ -154,9 +154,9 @@ namespace cpu {
 
     // Fused operation kernels
     auto fused_linear_relu_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias) -> Tensor;
-    auto fused_conv2d_relu_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding) -> Tensor;
+    auto fused_conv2d_relu_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
     auto fused_batchnorm_relu_kernel(const Tensor& input, const Tensor& running_mean, const Tensor& running_var, const Tensor& weight, const Tensor& bias, float eps) -> Tensor;
-    auto fused_softmax_cross_entropy_kernel(const Tensor& logits, const Tensor& targets, const std::string& reduction) -> Tensor;
+    auto fused_softmax_cross_entropy_kernel(const Tensor& logits, const Tensor& targets, bool compute_grad) -> std::vector<Tensor>;
     auto fused_add_relu_kernel(const Tensor& a, const Tensor& b) -> Tensor;
     auto fused_gelu_kernel(const Tensor& input) -> Tensor;
     auto fused_layer_norm_kernel(const Tensor& input, const std::vector<int64_t>& normalized_shape, const Tensor& weight, const Tensor& bias, float eps) -> Tensor;
@@ -1263,13 +1263,21 @@ public:
             const Tensor* bias = (inputs.size() >= 3) ? &inputs[2] : nullptr;
             int64_t stride = 1;
             int64_t padding = 0;
+            int64_t dilation = 1;
+            int64_t groups = 1;
             if (attrs.contains("stride")) {
                 stride = std::stoll(attrs.at("stride"));
             }
             if (attrs.contains("padding")) {
                 padding = std::stoll(attrs.at("padding"));
             }
-            return {cpu::fused_conv2d_relu_kernel(inputs[0], inputs[1], bias, stride, padding)};
+            if (attrs.contains("dilation")) {
+                dilation = std::stoll(attrs.at("dilation"));
+            }
+            if (attrs.contains("groups")) {
+                groups = std::stoll(attrs.at("groups"));
+            }
+            return {cpu::fused_conv2d_relu_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups)};
         }
         else if (op_name == "fused_batchnorm_relu") {
             if (inputs.size() != 5) {
@@ -1285,11 +1293,11 @@ public:
             if (inputs.size() != 2) {
                 throw std::invalid_argument("fused_softmax_cross_entropy operation requires exactly 2 inputs");
             }
-            std::string reduction = "mean";
-            if (attrs.contains("reduction")) {
-                reduction = attrs.at("reduction");
+            bool compute_grad = false;
+            if (attrs.contains("compute_grad")) {
+                compute_grad = (attrs.at("compute_grad") == "1" || attrs.at("compute_grad") == "true");
             }
-            return {cpu::fused_softmax_cross_entropy_kernel(inputs[0], inputs[1], reduction)};
+            return cpu::fused_softmax_cross_entropy_kernel(inputs[0], inputs[1], compute_grad);
         }
         else if (op_name == "fused_add_relu") {
             if (inputs.size() != 2) {

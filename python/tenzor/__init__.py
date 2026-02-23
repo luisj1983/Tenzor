@@ -70,6 +70,14 @@ _sys.modules['tenzor.nn'] = _nn_module
 # Make nn point to the wrapper module which has the enhanced Module class
 nn = _nn_module
 
+# Load nn.functional submodule
+_func_path = _os.path.join(_os.path.dirname(__file__), 'functional.py')
+_func_spec = _importlib_util.spec_from_file_location('tenzor.nn.functional', _func_path)
+_func_module = _importlib_util.module_from_spec(_func_spec)
+_func_spec.loader.exec_module(_func_module)
+_sys.modules['tenzor.nn.functional'] = _func_module
+_nn_module.functional = _func_module
+
 __version__ = "1.0.0"
 
 __all__ = [
