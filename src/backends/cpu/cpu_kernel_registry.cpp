@@ -75,6 +75,8 @@ namespace cpu {
     auto logical_or_kernel(const Tensor& a, const Tensor& b) -> Tensor;
     auto logical_not_kernel(const Tensor& input) -> Tensor;
     auto logical_xor_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto minimum_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto maximum_kernel(const Tensor& a, const Tensor& b) -> Tensor;
 
     // Reductions
     auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
@@ -548,6 +550,8 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, LogicalOr, cpu::logical_or_kernel);
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, LogicalNot, cpu::logical_not_kernel);
     TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, LogicalXor, cpu::logical_xor_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Minimum, cpu::minimum_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Maximum, cpu::maximum_kernel);
 
     // =========================================================================
     // Comparison Operations

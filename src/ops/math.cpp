@@ -240,19 +240,19 @@ auto sigmoid(const Tensor& input) -> Tensor {
 }
 
 auto minimum(const Tensor& a, const Tensor& b) -> Tensor {
-    // minimum(a, b) = where(a <= b, a, b)
-    Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
-    Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
-    auto mask = le(a_contiguous, b_contiguous);
-    return where(mask, a_contiguous, b_contiguous);
+    auto [ap, bp] = promote_inputs(a, b);
+    Tensor a_cont = ap.is_contiguous() ? ap : ap.contiguous();
+    Tensor b_cont = bp.is_contiguous() ? bp : bp.contiguous();
+    std::vector<Tensor> inputs = {a_cont, b_cont};
+    return dispatch<OpId::Minimum>(inputs)[0];
 }
 
 auto maximum(const Tensor& a, const Tensor& b) -> Tensor {
-    // maximum(a, b) = where(a >= b, a, b)
-    Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
-    Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
-    auto mask = ge(a_contiguous, b_contiguous);
-    return where(mask, a_contiguous, b_contiguous);
+    auto [ap, bp] = promote_inputs(a, b);
+    Tensor a_cont = ap.is_contiguous() ? ap : ap.contiguous();
+    Tensor b_cont = bp.is_contiguous() ? bp : bp.contiguous();
+    std::vector<Tensor> inputs = {a_cont, b_cont};
+    return dispatch<OpId::Maximum>(inputs)[0];
 }
 
 auto floor(const Tensor& input) -> Tensor {

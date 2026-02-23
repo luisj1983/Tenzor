@@ -5304,5 +5304,93 @@ auto logical_xor_kernel(const Tensor& a, const Tensor& b) -> Tensor {
     return result;
 }
 
+template<typename T>
+static void minimum_typed(const T* a_data, const T* b_data, T* c_data,
+                          const Tensor& a, const Tensor& b,
+                          std::vector<int64_t>& shape_a_vec,
+                          std::vector<int64_t>& shape_b_vec,
+                          std::vector<int64_t>& output_shape) {
+    if (detail::have_same_shape(a, b)) {
+        size_t n = static_cast<size_t>(a.numel());
+        for (size_t i = 0; i < n; ++i)
+            c_data[i] = (a_data[i] < b_data[i]) ? a_data[i] : b_data[i];
+    } else {
+        detail::broadcast_op<T, T>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+            [](T x, T y) -> T { return (x < y) ? x : y; });
+    }
+}
+
+auto minimum_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    detail::validate_elementwise(a, b);
+
+    auto shape_a = a.shape();
+    auto shape_b = b.shape();
+    std::vector<int64_t> shape_a_vec(shape_a.begin(), shape_a.end());
+    std::vector<int64_t> shape_b_vec(shape_b.begin(), shape_b.end());
+    std::vector<int64_t> output_shape = detail::compute_broadcast_shape(shape_a_vec, shape_b_vec);
+    Tensor result(output_shape, a.dtype(), a.device());
+
+    if (a.dtype() == DType::Float32) {
+        minimum_typed(a.data<float>(), b.data<float>(), result.data<float>(),
+                      a, b, shape_a_vec, shape_b_vec, output_shape);
+    } else if (a.dtype() == DType::Float64) {
+        minimum_typed(a.data<double>(), b.data<double>(), result.data<double>(),
+                      a, b, shape_a_vec, shape_b_vec, output_shape);
+    } else if (a.dtype() == DType::Int32) {
+        minimum_typed(a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(),
+                      a, b, shape_a_vec, shape_b_vec, output_shape);
+    } else if (a.dtype() == DType::Int64) {
+        minimum_typed(a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(),
+                      a, b, shape_a_vec, shape_b_vec, output_shape);
+    } else {
+        throw std::runtime_error("Unsupported dtype for minimum operation");
+    }
+    return result;
+}
+
+template<typename T>
+static void maximum_typed(const T* a_data, const T* b_data, T* c_data,
+                          const Tensor& a, const Tensor& b,
+                          std::vector<int64_t>& shape_a_vec,
+                          std::vector<int64_t>& shape_b_vec,
+                          std::vector<int64_t>& output_shape) {
+    if (detail::have_same_shape(a, b)) {
+        size_t n = static_cast<size_t>(a.numel());
+        for (size_t i = 0; i < n; ++i)
+            c_data[i] = (a_data[i] > b_data[i]) ? a_data[i] : b_data[i];
+    } else {
+        detail::broadcast_op<T, T>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+            [](T x, T y) -> T { return (x > y) ? x : y; });
+    }
+}
+
+auto maximum_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    detail::validate_elementwise(a, b);
+
+    auto shape_a = a.shape();
+    auto shape_b = b.shape();
+    std::vector<int64_t> shape_a_vec(shape_a.begin(), shape_a.end());
+    std::vector<int64_t> shape_b_vec(shape_b.begin(), shape_b.end());
+    std::vector<int64_t> output_shape = detail::compute_broadcast_shape(shape_a_vec, shape_b_vec);
+    Tensor result(output_shape, a.dtype(), a.device());
+
+    if (a.dtype() == DType::Float32) {
+        maximum_typed(a.data<float>(), b.data<float>(), result.data<float>(),
+                      a, b, shape_a_vec, shape_b_vec, output_shape);
+    } else if (a.dtype() == DType::Float64) {
+        maximum_typed(a.data<double>(), b.data<double>(), result.data<double>(),
+                      a, b, shape_a_vec, shape_b_vec, output_shape);
+    } else if (a.dtype() == DType::Int32) {
+        maximum_typed(a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(),
+                      a, b, shape_a_vec, shape_b_vec, output_shape);
+    } else if (a.dtype() == DType::Int64) {
+        maximum_typed(a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(),
+                      a, b, shape_a_vec, shape_b_vec, output_shape);
+    } else {
+        throw std::runtime_error("Unsupported dtype for maximum operation");
+    }
+    return result;
+}
+
 } // namespace cpu
 } // namespace tenzor
