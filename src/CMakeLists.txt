@@ -131,6 +131,8 @@ set(TENZOR_CORE_SOURCES
     utils/config.cpp
     utils/benchmark.cpp
     utils/tensorboard.cpp
+    backends/cpu/kernels/quantization/quantized_linear.cpp
+    backends/cpu/kernels/quantization/quantized_conv2d.cpp
     onnx/exporter.cpp
     onnx/importer.cpp
     jit/tracer.cpp

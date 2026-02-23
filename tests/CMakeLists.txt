@@ -70,6 +70,7 @@ add_executable(tenzor_unit_tests
 
 target_link_libraries(tenzor_unit_tests PRIVATE
     tenzor_core
+    tenzor_backend_cpu
     GTest::gtest_main
 )
 
@@ -80,6 +81,7 @@ add_executable(tenzor_simd_benchmark
 
 target_link_libraries(tenzor_simd_benchmark PRIVATE
     tenzor_core
+    tenzor_backend_cpu
     GTest::gtest_main
 )
 
@@ -1327,7 +1329,10 @@ endif()
 # )
 
 # Register tests with CTest
-tenzor_discover_tests(tenzor_unit_tests DISCOVERY_TIMEOUT 30)
+# tenzor_unit_tests crashes during --gtest_list_tests (static destruction in linked
+# backends), so use add_test instead of gtest_discover_tests
+add_test(NAME tenzor_unit_tests COMMAND tenzor_unit_tests)
+set_tests_properties(tenzor_unit_tests PROPERTIES TIMEOUT 120)
 tenzor_discover_tests(tenzor_integration_tests DISCOVERY_TIMEOUT 30)
 tenzor_discover_tests(test_cuda_scalar_debug DISCOVERY_TIMEOUT 30)
 tenzor_discover_tests(test_dropout DISCOVERY_TIMEOUT 30)
@@ -1572,10 +1577,13 @@ add_executable(test_simd_ops
 
 target_link_libraries(test_simd_ops PRIVATE
     tenzor_core
+    tenzor_backend_cpu
     GTest::gtest_main
 )
 
-tenzor_discover_tests(test_simd_ops DISCOVERY_TIMEOUT 30)
+# test_simd_ops crashes during --gtest_list_tests (static destruction), use add_test
+add_test(NAME test_simd_ops COMMAND test_simd_ops)
+set_tests_properties(test_simd_ops PROPERTIES TIMEOUT 120)
 
 # Comparison operators tests
 add_executable(test_comparison_operators
@@ -1607,6 +1615,7 @@ add_executable(benchmark_suite
 
 target_link_libraries(benchmark_suite PRIVATE
     tenzor_core
+    tenzor_backend_cpu
 )
 
 # Cross-backend benchmark suite
@@ -2411,10 +2420,13 @@ add_executable(test_simd
 
 target_link_libraries(test_simd PRIVATE
     tenzor_core
+    tenzor_backend_cpu
     GTest::gtest_main
 )
 
-tenzor_discover_tests(test_simd DISCOVERY_TIMEOUT 30)
+# test_simd crashes during --gtest_list_tests (static destruction), use add_test
+add_test(NAME test_simd COMMAND test_simd)
+set_tests_properties(test_simd PROPERTIES TIMEOUT 120)
 
 # Extended gradcheck tests (multi-backend)
 add_executable(test_gradcheck_extended
