@@ -224,5 +224,69 @@ private:
     int64_t padding_;
 };
 
+/**
+ * @brief 1D max pooling layer.
+ *
+ * Shape: Input (N, C, L_in) -> Output (N, C, L_out)
+ * L_out = floor((L_in + 2*padding - kernel_size) / stride + 1)
+ */
+class MaxPool1d : public Module {
+public:
+    MaxPool1d(int64_t kernel_size, int64_t stride = -1, int64_t padding = 0);
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    int64_t kernel_size_;
+    int64_t stride_;
+    int64_t padding_;
+};
+
+/**
+ * @brief 1D average pooling layer.
+ *
+ * Shape: Input (N, C, L_in) -> Output (N, C, L_out)
+ */
+class AvgPool1d : public Module {
+public:
+    AvgPool1d(int64_t kernel_size, int64_t stride = -1, int64_t padding = 0);
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    int64_t kernel_size_;
+    int64_t stride_;
+    int64_t padding_;
+};
+
+/**
+ * @brief 1D adaptive average pooling layer.
+ *
+ * Shape: Input (N, C, L_in) -> Output (N, C, output_size)
+ */
+class AdaptiveAvgPool1d : public Module {
+public:
+    explicit AdaptiveAvgPool1d(int64_t output_size);
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    int64_t output_size_;
+};
+
+/**
+ * @brief 2D adaptive max pooling layer.
+ *
+ * Shape: Input (N, C, H_in, W_in) -> Output (N, C, output_h, output_w)
+ */
+class AdaptiveMaxPool2d : public Module {
+public:
+    AdaptiveMaxPool2d(int64_t output_h, int64_t output_w);
+    explicit AdaptiveMaxPool2d(int64_t output_size)
+        : AdaptiveMaxPool2d(output_size, output_size) {}
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    int64_t output_h_;
+    int64_t output_w_;
+};
+
 } // namespace nn
 } // namespace tenzor

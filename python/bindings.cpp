@@ -2800,6 +2800,31 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def(py::init<int64_t>(),
              py::arg("output_size"));
 
+    py::class_<tenzor::nn::MaxPool1d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::MaxPool1d>>(nn, "MaxPool1d")
+        .def(py::init<int64_t, int64_t, int64_t>(),
+             py::arg("kernel_size"),
+             py::arg("stride") = -1,
+             py::arg("padding") = 0);
+
+    py::class_<tenzor::nn::AvgPool1d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::AvgPool1d>>(nn, "AvgPool1d")
+        .def(py::init<int64_t, int64_t, int64_t>(),
+             py::arg("kernel_size"),
+             py::arg("stride") = -1,
+             py::arg("padding") = 0);
+
+    py::class_<tenzor::nn::AdaptiveAvgPool1d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::AdaptiveAvgPool1d>>(nn, "AdaptiveAvgPool1d")
+        .def(py::init<int64_t>(), py::arg("output_size"));
+
+    py::class_<tenzor::nn::AdaptiveMaxPool2d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::AdaptiveMaxPool2d>>(nn, "AdaptiveMaxPool2d")
+        .def(py::init<int64_t, int64_t>(),
+             py::arg("output_h"), py::arg("output_w"))
+        .def(py::init<int64_t>(),
+             py::arg("output_size"));
+
     // Utility layers
     py::class_<tenzor::nn::Flatten, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::Flatten>>(nn, "Flatten")

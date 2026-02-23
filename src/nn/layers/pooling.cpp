@@ -1332,4 +1332,304 @@ auto AvgPool3d::forward_impl(const Variable& input) -> Variable {
     return Variable(output, input.requires_grad());
 }
 
+// ============================================================================
+// MaxPool1d implementation
+// ============================================================================
+
+MaxPool1d::MaxPool1d(int64_t kernel_size, int64_t stride, int64_t padding)
+    : kernel_size_(kernel_size), stride_(stride < 0 ? kernel_size : stride),
+      padding_(padding) {
+    if (kernel_size <= 0) throw std::runtime_error("MaxPool1d: kernel_size must be positive");
+    if (padding < 0) throw std::runtime_error("MaxPool1d: padding must be non-negative");
+}
+
+auto MaxPool1d::forward_impl(const Variable& input) -> Variable {
+    auto input_shape = input.shape();
+    if (input_shape.size() != 3) {
+        throw std::invalid_argument("MaxPool1d expects 3D input [batch, channels, length]");
+    }
+
+    int64_t N = input_shape[0];
+    int64_t C = input_shape[1];
+    int64_t L_in = input_shape[2];
+    int64_t L_out = calculate_pool_output_size(L_in, kernel_size_, stride_, padding_);
+
+    auto dtype = input.tensor().dtype();
+    auto output = zeros({N, C, L_out}, dtype, input.tensor().device());
+
+    if (input.tensor().device().type == Device::Type::CPU) {
+        if (dtype == DType::Float32) {
+            const float* in_data = input.tensor().data<float>();
+            float* out_data = output.data<float>();
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    for (int64_t l = 0; l < L_out; ++l) {
+                        int64_t l_start = l * stride_ - padding_;
+                        float max_val = -std::numeric_limits<float>::infinity();
+                        for (int64_t k = 0; k < kernel_size_; ++k) {
+                            int64_t li = l_start + k;
+                            if (li >= 0 && li < L_in) {
+                                float val = in_data[(n * C + c) * L_in + li];
+                                if (val > max_val) max_val = val;
+                            }
+                        }
+                        out_data[(n * C + c) * L_out + l] = max_val;
+                    }
+                }
+            }
+        } else if (dtype == DType::Float64) {
+            const double* in_data = input.tensor().data<double>();
+            double* out_data = output.data<double>();
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    for (int64_t l = 0; l < L_out; ++l) {
+                        int64_t l_start = l * stride_ - padding_;
+                        double max_val = -std::numeric_limits<double>::infinity();
+                        for (int64_t k = 0; k < kernel_size_; ++k) {
+                            int64_t li = l_start + k;
+                            if (li >= 0 && li < L_in) {
+                                double val = in_data[(n * C + c) * L_in + li];
+                                if (val > max_val) max_val = val;
+                            }
+                        }
+                        out_data[(n * C + c) * L_out + l] = max_val;
+                    }
+                }
+            }
+        } else {
+            throw std::runtime_error("MaxPool1d: unsupported dtype");
+        }
+    }
+
+    return Variable(output, input.requires_grad());
+}
+
+// ============================================================================
+// AvgPool1d implementation
+// ============================================================================
+
+AvgPool1d::AvgPool1d(int64_t kernel_size, int64_t stride, int64_t padding)
+    : kernel_size_(kernel_size), stride_(stride < 0 ? kernel_size : stride),
+      padding_(padding) {
+    if (kernel_size <= 0) throw std::runtime_error("AvgPool1d: kernel_size must be positive");
+    if (padding < 0) throw std::runtime_error("AvgPool1d: padding must be non-negative");
+}
+
+auto AvgPool1d::forward_impl(const Variable& input) -> Variable {
+    auto input_shape = input.shape();
+    if (input_shape.size() != 3) {
+        throw std::invalid_argument("AvgPool1d expects 3D input [batch, channels, length]");
+    }
+
+    int64_t N = input_shape[0];
+    int64_t C = input_shape[1];
+    int64_t L_in = input_shape[2];
+    int64_t L_out = calculate_pool_output_size(L_in, kernel_size_, stride_, padding_);
+
+    auto dtype = input.tensor().dtype();
+    auto output = zeros({N, C, L_out}, dtype, input.tensor().device());
+
+    if (input.tensor().device().type == Device::Type::CPU) {
+        if (dtype == DType::Float32) {
+            const float* in_data = input.tensor().data<float>();
+            float* out_data = output.data<float>();
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    for (int64_t l = 0; l < L_out; ++l) {
+                        int64_t l_start = l * stride_ - padding_;
+                        float sum = 0.0f;
+                        int64_t count = 0;
+                        for (int64_t k = 0; k < kernel_size_; ++k) {
+                            int64_t li = l_start + k;
+                            if (li >= 0 && li < L_in) {
+                                sum += in_data[(n * C + c) * L_in + li];
+                                ++count;
+                            }
+                        }
+                        out_data[(n * C + c) * L_out + l] = count > 0 ? sum / static_cast<float>(count) : 0.0f;
+                    }
+                }
+            }
+        } else if (dtype == DType::Float64) {
+            const double* in_data = input.tensor().data<double>();
+            double* out_data = output.data<double>();
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    for (int64_t l = 0; l < L_out; ++l) {
+                        int64_t l_start = l * stride_ - padding_;
+                        double sum = 0.0;
+                        int64_t count = 0;
+                        for (int64_t k = 0; k < kernel_size_; ++k) {
+                            int64_t li = l_start + k;
+                            if (li >= 0 && li < L_in) {
+                                sum += in_data[(n * C + c) * L_in + li];
+                                ++count;
+                            }
+                        }
+                        out_data[(n * C + c) * L_out + l] = count > 0 ? sum / static_cast<double>(count) : 0.0;
+                    }
+                }
+            }
+        } else {
+            throw std::runtime_error("AvgPool1d: unsupported dtype");
+        }
+    }
+
+    return Variable(output, input.requires_grad());
+}
+
+// ============================================================================
+// AdaptiveAvgPool1d implementation
+// ============================================================================
+
+AdaptiveAvgPool1d::AdaptiveAvgPool1d(int64_t output_size)
+    : output_size_(output_size) {
+    if (output_size <= 0) throw std::runtime_error("AdaptiveAvgPool1d: output_size must be positive");
+}
+
+auto AdaptiveAvgPool1d::forward_impl(const Variable& input) -> Variable {
+    auto input_shape = input.shape();
+    if (input_shape.size() != 3) {
+        throw std::invalid_argument("AdaptiveAvgPool1d expects 3D input [batch, channels, length]");
+    }
+
+    int64_t N = input_shape[0];
+    int64_t C = input_shape[1];
+    int64_t L_in = input_shape[2];
+    int64_t L_out = output_size_;
+
+    auto dtype = input.tensor().dtype();
+    auto output = zeros({N, C, L_out}, dtype, input.tensor().device());
+
+    if (input.tensor().device().type == Device::Type::CPU) {
+        if (dtype == DType::Float32) {
+            const float* in_data = input.tensor().data<float>();
+            float* out_data = output.data<float>();
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    for (int64_t l = 0; l < L_out; ++l) {
+                        int64_t l_start = l * L_in / L_out;
+                        int64_t l_end = (l + 1) * L_in / L_out;
+                        float sum = 0.0f;
+                        for (int64_t li = l_start; li < l_end; ++li) {
+                            sum += in_data[(n * C + c) * L_in + li];
+                        }
+                        out_data[(n * C + c) * L_out + l] = sum / static_cast<float>(l_end - l_start);
+                    }
+                }
+            }
+        } else if (dtype == DType::Float64) {
+            const double* in_data = input.tensor().data<double>();
+            double* out_data = output.data<double>();
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    for (int64_t l = 0; l < L_out; ++l) {
+                        int64_t l_start = l * L_in / L_out;
+                        int64_t l_end = (l + 1) * L_in / L_out;
+                        double sum = 0.0;
+                        for (int64_t li = l_start; li < l_end; ++li) {
+                            sum += in_data[(n * C + c) * L_in + li];
+                        }
+                        out_data[(n * C + c) * L_out + l] = sum / static_cast<double>(l_end - l_start);
+                    }
+                }
+            }
+        } else {
+            throw std::runtime_error("AdaptiveAvgPool1d: unsupported dtype");
+        }
+    }
+
+    return Variable(output, input.requires_grad());
+}
+
+// ============================================================================
+// AdaptiveMaxPool2d implementation
+// ============================================================================
+
+AdaptiveMaxPool2d::AdaptiveMaxPool2d(int64_t output_h, int64_t output_w)
+    : output_h_(output_h), output_w_(output_w) {
+    if (output_h <= 0 || output_w <= 0) {
+        throw std::runtime_error("AdaptiveMaxPool2d: output dimensions must be positive");
+    }
+}
+
+auto AdaptiveMaxPool2d::forward_impl(const Variable& input) -> Variable {
+    auto input_shape = input.shape();
+    if (input_shape.size() != 4) {
+        throw std::invalid_argument("AdaptiveMaxPool2d expects 4D input [batch, channels, height, width]");
+    }
+
+    int64_t N = input_shape[0];
+    int64_t C = input_shape[1];
+    int64_t H_in = input_shape[2];
+    int64_t W_in = input_shape[3];
+    int64_t H_out = output_h_;
+    int64_t W_out = output_w_;
+
+    auto dtype = input.tensor().dtype();
+    auto output = zeros({N, C, H_out, W_out}, dtype, input.tensor().device());
+
+    if (input.tensor().device().type == Device::Type::CPU) {
+        if (dtype == DType::Float32) {
+            const float* in_data = input.tensor().data<float>();
+            float* out_data = output.data<float>();
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    for (int64_t h = 0; h < H_out; ++h) {
+                        int64_t h_start = h * H_in / H_out;
+                        int64_t h_end = (h + 1) * H_in / H_out;
+                        for (int64_t w = 0; w < W_out; ++w) {
+                            int64_t w_start = w * W_in / W_out;
+                            int64_t w_end = (w + 1) * W_in / W_out;
+                            float max_val = -std::numeric_limits<float>::infinity();
+                            for (int64_t hi = h_start; hi < h_end; ++hi) {
+                                for (int64_t wi = w_start; wi < w_end; ++wi) {
+                                    float val = in_data[((n * C + c) * H_in + hi) * W_in + wi];
+                                    if (val > max_val) max_val = val;
+                                }
+                            }
+                            out_data[((n * C + c) * H_out + h) * W_out + w] = max_val;
+                        }
+                    }
+                }
+            }
+        } else if (dtype == DType::Float64) {
+            const double* in_data = input.tensor().data<double>();
+            double* out_data = output.data<double>();
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    for (int64_t h = 0; h < H_out; ++h) {
+                        int64_t h_start = h * H_in / H_out;
+                        int64_t h_end = (h + 1) * H_in / H_out;
+                        for (int64_t w = 0; w < W_out; ++w) {
+                            int64_t w_start = w * W_in / W_out;
+                            int64_t w_end = (w + 1) * W_in / W_out;
+                            double max_val = -std::numeric_limits<double>::infinity();
+                            for (int64_t hi = h_start; hi < h_end; ++hi) {
+                                for (int64_t wi = w_start; wi < w_end; ++wi) {
+                                    double val = in_data[((n * C + c) * H_in + hi) * W_in + wi];
+                                    if (val > max_val) max_val = val;
+                                }
+                            }
+                            out_data[((n * C + c) * H_out + h) * W_out + w] = max_val;
+                        }
+                    }
+                }
+            }
+        } else {
+            throw std::runtime_error("AdaptiveMaxPool2d: unsupported dtype");
+        }
+    }
+
+    return Variable(output, input.requires_grad());
+}
+
 } // namespace tenzor::nn
