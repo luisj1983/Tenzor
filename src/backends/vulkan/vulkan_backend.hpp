@@ -148,7 +148,8 @@ private:
     // Pipeline management
     vulkan::ComputePipeline* getPipeline(const std::string& shader_name, int32_t device_id);
 
-    // Kernel dispatch helpers - Basic operations
+public:
+    // Kernel dispatch helpers — used by vulkan_kernel_registry.cpp
     auto dispatchBinaryOp(const std::string& op_name, const Tensor& a, const Tensor& b) -> Tensor;
     auto dispatchUnaryOp(const std::string& op_name, const Tensor& input) -> Tensor;
     auto dispatchUnaryOpWithParam(const std::string& op_name, const Tensor& input, float param) -> Tensor;
