@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <vector>
 #include <span>
@@ -933,7 +934,7 @@ public:
     DType dtype;                         ///< Element data type
     Device device;                       ///< Device location
     bool requires_grad{false};           ///< Gradient computation flag
-    mutable std::optional<bool> is_contiguous_cache_;  ///< Cached contiguity result
+    mutable std::atomic<int8_t> is_contiguous_cache_{-1};  ///< Cached contiguity: -1=unset, 0=false, 1=true
 
     /**
      * @brief Construct tensor implementation.
@@ -945,6 +946,19 @@ public:
      */
     TensorImpl(std::vector<int64_t> shape, DType dtype, Device device,
                bool zero_init = true);
+
+    /// Copy constructor (needed because std::atomic is not copyable)
+    TensorImpl(const TensorImpl& other)
+        : storage(other.storage)
+        , shape(other.shape)
+        , strides(other.strides)
+        , offset(other.offset)
+        , dtype(other.dtype)
+        , device(other.device)
+        , requires_grad(other.requires_grad)
+        , is_contiguous_cache_(other.is_contiguous_cache_.load(std::memory_order_relaxed)) {}
+
+    TensorImpl& operator=(const TensorImpl&) = delete;
 
     /**
      * @brief Get total number of elements.

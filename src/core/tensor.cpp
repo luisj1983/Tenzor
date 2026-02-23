@@ -21,8 +21,8 @@ namespace tenzor {
 // TensorImpl implementation
 TensorImpl::TensorImpl(std::vector<int64_t> shape_, DType dtype_, Device device_,
                        bool zero_init)
-    : shape(std::move(shape_)), dtype(dtype_), device(device_),
-      is_contiguous_cache_(true) {
+    : shape(std::move(shape_)), dtype(dtype_), device(device_) {
+    is_contiguous_cache_.store(1, std::memory_order_relaxed);  // freshly constructed = contiguous
 
     // Compute strides
     strides = compute_strides(this->shape);
@@ -57,15 +57,17 @@ auto TensorImpl::numel() const -> int64_t {
 }
 
 auto TensorImpl::is_contiguous() const -> bool {
-    // Return cached result if available
-    if (is_contiguous_cache_.has_value()) {
-        return *is_contiguous_cache_;
+    // Return cached result if available (atomic load for thread safety)
+    auto cached = is_contiguous_cache_.load(std::memory_order_relaxed);
+    if (cached >= 0) {
+        return cached == 1;
     }
     // A tensor is contiguous if its strides match the expected row-major strides.
     // Offset does not affect contiguity — a slice can be contiguous at a non-zero offset.
     auto expected_strides = compute_strides(shape);
-    is_contiguous_cache_ = (strides == expected_strides);
-    return *is_contiguous_cache_;
+    bool result = (strides == expected_strides);
+    is_contiguous_cache_.store(result ? 1 : 0, std::memory_order_relaxed);
+    return result;
 }
 
 // Tensor implementation
@@ -952,7 +954,7 @@ auto Tensor::transpose(int64_t dim0, int64_t dim1) const -> Tensor {
         result.impl_ = std::make_shared<TensorImpl>(*impl_);
         std::swap(result.impl_->shape[0], result.impl_->shape[1]);
         std::swap(result.impl_->strides[0], result.impl_->strides[1]);
-        result.impl_->is_contiguous_cache_ = std::nullopt;
+        result.impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
         return result;
     }
 
@@ -961,7 +963,7 @@ auto Tensor::transpose(int64_t dim0, int64_t dim1) const -> Tensor {
     result.impl_ = std::make_shared<TensorImpl>(*impl_);
     std::swap(result.impl_->shape[dim0], result.impl_->shape[dim1]);
     std::swap(result.impl_->strides[dim0], result.impl_->strides[dim1]);
-    result.impl_->is_contiguous_cache_ = std::nullopt;
+    result.impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
 
     return result;
 }
@@ -1007,7 +1009,7 @@ auto Tensor::permute(std::vector<int64_t> dims) const -> Tensor {
 
     result.impl_->shape = std::move(new_shape);
     result.impl_->strides = std::move(new_strides);
-    result.impl_->is_contiguous_cache_ = std::nullopt;
+    result.impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
 
     return result;
 }
@@ -1038,7 +1040,7 @@ auto Tensor::squeeze(std::optional<int64_t> dim) const -> Tensor {
         result.impl_ = std::make_shared<TensorImpl>(*impl_);
         result.impl_->shape.erase(result.impl_->shape.begin() + d);
         result.impl_->strides.erase(result.impl_->strides.begin() + d);
-        result.impl_->is_contiguous_cache_ = std::nullopt;
+        result.impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
 
         return result;
     } else {
@@ -1063,7 +1065,7 @@ auto Tensor::squeeze(std::optional<int64_t> dim) const -> Tensor {
         result.impl_ = std::make_shared<TensorImpl>(*impl_);
         result.impl_->shape = std::move(new_shape);
         result.impl_->strides = std::move(new_strides);
-        result.impl_->is_contiguous_cache_ = std::nullopt;
+        result.impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
 
         return result;
     }
@@ -1093,7 +1095,7 @@ auto Tensor::unsqueeze(int64_t dim) const -> Tensor {
     // Compute stride for new dimension (should be product of all following dims)
     int64_t new_stride = (dim < ndims) ? impl_->strides[dim] : 1;
     result.impl_->strides.insert(result.impl_->strides.begin() + dim, new_stride);
-    result.impl_->is_contiguous_cache_ = std::nullopt;
+    result.impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
 
     return result;
 }
@@ -1268,7 +1270,7 @@ auto Tensor::slice(int64_t dim, int64_t start, int64_t end, int64_t step) const 
         throw std::out_of_range("Slice offset exceeds storage bounds");
     }
 
-    result.impl_->is_contiguous_cache_ = std::nullopt;
+    result.impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
 
     return result;
 }
