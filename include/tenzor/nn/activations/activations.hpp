@@ -530,6 +530,20 @@ public:
 };
 
 /**
+ * @brief Gated Linear Unit (GLU): splits input in half and applies gating
+ *
+ * GLU(a, b) = a * sigmoid(b) where input is split into a and b along dim.
+ * Commonly used in language models and as an alternative to ReLU.
+ */
+class GLU : public Module {
+public:
+    explicit GLU(int64_t dim = -1) : dim_(dim) {}
+    auto forward_impl(const Variable& input) -> Variable override;
+private:
+    int64_t dim_;
+};
+
+/**
  * @defgroup functional_activations Functional Activation Functions
  * @brief Stateless activation functions for flexible use
  *
@@ -582,6 +596,9 @@ auto hardswish(const Variable& input) -> Variable;
 
 /** @brief Functional Hardsigmoid: ReLU6(x + 3) / 6 */
 auto hardsigmoid(const Variable& input) -> Variable;
+
+/** @brief Functional GLU: a * sigmoid(b) where input is split along dim */
+auto glu(const Variable& input, int64_t dim = -1) -> Variable;
 
 /** @} */ // end of functional_activations group
 

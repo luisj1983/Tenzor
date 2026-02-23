@@ -32,6 +32,7 @@ swish = _nn.swish
 mish = _nn.mish
 hardswish = _nn.hardswish
 hardsigmoid = _nn.hardsigmoid
+glu = _nn.glu
 
 # Loss functions
 mse_loss = _nn.mse_loss
@@ -55,6 +56,7 @@ __all__ = [
     "mish",
     "hardswish",
     "hardsigmoid",
+    "glu",
     # Losses
     "mse_loss",
     "l1_loss",

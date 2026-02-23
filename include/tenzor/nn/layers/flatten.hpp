@@ -84,5 +84,64 @@ private:
     int64_t end_dim_;    ///< Last dimension to include in flattening
 };
 
+/**
+ * @brief Unflatten layer for reshaping a dimension into multiple dimensions.
+ *
+ * The inverse of Flatten. Expands a single dimension into a specified shape.
+ *
+ * @code
+ * Unflatten unflatten(1, {2, 3});  // Split dim 1 into [2, 3]
+ * // Input shape: {batch, 6} -> Output shape: {batch, 2, 3}
+ * @endcode
+ */
+class Unflatten : public Module {
+public:
+    explicit Unflatten(int64_t dim, std::vector<int64_t> sizes);
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    int64_t dim_;
+    std::vector<int64_t> sizes_;
+};
+
+/**
+ * @brief PixelShuffle layer for sub-pixel convolution upscaling.
+ *
+ * Rearranges elements in a tensor of shape (*, C*r^2, H, W) to (*, C, H*r, W*r)
+ * where r is the upscale_factor. Used in super-resolution networks.
+ *
+ * @code
+ * PixelShuffle ps(2);  // upscale_factor=2
+ * // Input shape: {1, 8, 4, 4} -> Output shape: {1, 2, 8, 8}
+ * @endcode
+ */
+class PixelShuffle : public Module {
+public:
+    explicit PixelShuffle(int64_t upscale_factor);
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    int64_t upscale_factor_;
+};
+
+/**
+ * @brief PixelUnshuffle layer — the inverse of PixelShuffle.
+ *
+ * Rearranges elements in a tensor of shape (*, C, H*r, W*r) to (*, C*r^2, H, W).
+ *
+ * @code
+ * PixelUnshuffle pus(2);  // downscale_factor=2
+ * // Input shape: {1, 2, 8, 8} -> Output shape: {1, 8, 4, 4}
+ * @endcode
+ */
+class PixelUnshuffle : public Module {
+public:
+    explicit PixelUnshuffle(int64_t downscale_factor);
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    int64_t downscale_factor_;
+};
+
 } // namespace nn
 } // namespace tenzor

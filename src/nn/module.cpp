@@ -591,6 +591,137 @@ auto Sequential::load_state_dict(const std::unordered_map<std::string, Tensor>& 
 }
 
 // ============================================================================
+// ParameterList implementation
+// ============================================================================
+
+auto ParameterList::append(Variable param) -> ParameterList& {
+    std::string name = std::to_string(params_.size());
+    auto param_ptr = std::make_shared<Variable>(std::move(param));
+    params_.push_back(param_ptr);
+    register_parameter(name, *param_ptr);
+    return *this;
+}
+
+auto ParameterList::at(size_t idx) const -> std::shared_ptr<Variable> {
+    if (idx >= params_.size()) {
+        throw std::out_of_range("ParameterList index out of range: " +
+                                std::to_string(idx) + " >= " + std::to_string(params_.size()));
+    }
+    return params_[idx];
+}
+
+auto ParameterList::forward_impl(const Variable& /*input*/) -> Variable {
+    throw std::runtime_error("ParameterList does not implement forward(). "
+                             "Use it to store parameters and access them by index.");
+}
+
+auto ParameterList::parameters() -> std::vector<std::shared_ptr<Variable>> {
+    return params_;
+}
+
+auto ParameterList::named_parameters() -> std::vector<std::pair<std::string, std::shared_ptr<Variable>>> {
+    std::vector<std::pair<std::string, std::shared_ptr<Variable>>> result;
+    for (size_t i = 0; i < params_.size(); ++i) {
+        result.emplace_back(std::to_string(i), params_[i]);
+    }
+    return result;
+}
+
+auto ParameterList::state_dict() const -> std::unordered_map<std::string, Tensor> {
+    std::unordered_map<std::string, Tensor> state;
+    for (size_t i = 0; i < params_.size(); ++i) {
+        state[std::to_string(i)] = params_[i]->tensor();
+    }
+    return state;
+}
+
+auto ParameterList::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
+    for (size_t i = 0; i < params_.size(); ++i) {
+        auto key = std::to_string(i);
+        auto it = state.find(key);
+        if (it != state.end()) {
+            params_[i]->tensor() = it->second.clone();
+        }
+    }
+}
+
+// ============================================================================
+// ParameterDict implementation
+// ============================================================================
+
+auto ParameterDict::insert(const std::string& key, Variable param) -> ParameterDict& {
+    auto param_ptr = std::make_shared<Variable>(std::move(param));
+    if (params_.count(key)) {
+        params_[key] = param_ptr;
+    } else {
+        order_.push_back(key);
+        params_[key] = param_ptr;
+    }
+    register_parameter(key, *param_ptr);
+    return *this;
+}
+
+auto ParameterDict::at(const std::string& key) const -> std::shared_ptr<Variable> {
+    auto it = params_.find(key);
+    if (it == params_.end()) {
+        throw std::out_of_range("ParameterDict key not found: " + key);
+    }
+    return it->second;
+}
+
+auto ParameterDict::contains(const std::string& key) const -> bool {
+    return params_.count(key) > 0;
+}
+
+auto ParameterDict::erase(const std::string& key) -> void {
+    auto it = params_.find(key);
+    if (it == params_.end()) {
+        throw std::out_of_range("ParameterDict key not found: " + key);
+    }
+    params_.erase(it);
+    order_.erase(std::remove(order_.begin(), order_.end(), key), order_.end());
+    parameters_.erase(key);
+}
+
+auto ParameterDict::forward_impl(const Variable& /*input*/) -> Variable {
+    throw std::runtime_error("ParameterDict does not implement forward(). "
+                             "Use it to store parameters and access them by key.");
+}
+
+auto ParameterDict::parameters() -> std::vector<std::shared_ptr<Variable>> {
+    std::vector<std::shared_ptr<Variable>> result;
+    for (const auto& key : order_) {
+        result.push_back(params_.at(key));
+    }
+    return result;
+}
+
+auto ParameterDict::named_parameters() -> std::vector<std::pair<std::string, std::shared_ptr<Variable>>> {
+    std::vector<std::pair<std::string, std::shared_ptr<Variable>>> result;
+    for (const auto& key : order_) {
+        result.emplace_back(key, params_.at(key));
+    }
+    return result;
+}
+
+auto ParameterDict::state_dict() const -> std::unordered_map<std::string, Tensor> {
+    std::unordered_map<std::string, Tensor> state;
+    for (const auto& key : order_) {
+        state[key] = params_.at(key)->tensor();
+    }
+    return state;
+}
+
+auto ParameterDict::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
+    for (const auto& key : order_) {
+        auto it = state.find(key);
+        if (it != state.end()) {
+            params_.at(key)->tensor() = it->second.clone();
+        }
+    }
+}
+
+// ============================================================================
 // Hook System Implementation (Phase 2 Offload Support)
 // ============================================================================
 

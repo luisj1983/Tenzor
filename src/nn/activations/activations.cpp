@@ -707,4 +707,28 @@ auto hardsigmoid(const Variable& input) -> Variable {
     return clamped / 6.0f;
 }
 
+// GLU module
+auto GLU::forward_impl(const Variable& input) -> Variable {
+    return glu(input, dim_);
+}
+
+// Functional GLU
+auto glu(const Variable& input, int64_t dim) -> Variable {
+    auto shape = input.shape();
+    auto ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::invalid_argument("GLU: dim " + std::to_string(dim) + " out of range for " + std::to_string(ndim) + "D input");
+    }
+    if (shape[dim] % 2 != 0) {
+        throw std::invalid_argument("GLU: input size along dim " + std::to_string(dim) + " must be even, got " + std::to_string(shape[dim]));
+    }
+    int64_t half = shape[dim] / 2;
+    // Split input into two halves along dim
+    auto a = Variable(input.tensor().slice(dim, 0, half), input.requires_grad());
+    auto b = Variable(input.tensor().slice(dim, half, shape[dim]), input.requires_grad());
+    // GLU(a, b) = a * sigmoid(b)
+    return a * sigmoid(b);
+}
+
 } // namespace tenzor::nn

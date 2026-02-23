@@ -850,5 +850,77 @@ private:
     std::vector<std::shared_ptr<Module>> modules_;  ///< Ordered list of modules
 };
 
+/**
+ * @brief Ordered list container for parameters (like PyTorch's nn.ParameterList).
+ *
+ * ParameterList holds parameters in an ordered list and properly registers them.
+ * Does NOT implement forward.
+ *
+ * @code
+ * auto params = std::make_shared<ParameterList>();
+ * params->append(Variable(Tensor({3, 3}, DType::Float32, Device::cpu()), true));
+ * params->append(Variable(Tensor({3}, DType::Float32, Device::cpu()), true));
+ * auto p = params->at(0);  // First parameter
+ * @endcode
+ */
+class ParameterList : public Module {
+public:
+    ParameterList() = default;
+
+    auto append(Variable param) -> ParameterList&;
+    auto at(size_t idx) const -> std::shared_ptr<Variable>;
+    auto size() const -> size_t { return params_.size(); }
+
+    auto begin() { return params_.begin(); }
+    auto end() { return params_.end(); }
+    auto begin() const { return params_.begin(); }
+    auto end() const { return params_.end(); }
+
+    auto forward_impl(const Variable& input) -> Variable override;
+    auto parameters() -> std::vector<std::shared_ptr<Variable>> override;
+    auto named_parameters() -> std::vector<std::pair<std::string, std::shared_ptr<Variable>>> override;
+    auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
+    auto load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void override;
+
+private:
+    std::vector<std::shared_ptr<Variable>> params_;
+};
+
+/**
+ * @brief Dictionary container for parameters (like PyTorch's nn.ParameterDict).
+ *
+ * ParameterDict holds parameters in a dictionary keyed by string and properly
+ * registers them. Maintains insertion order for iteration.
+ * Does NOT implement forward.
+ *
+ * @code
+ * auto params = std::make_shared<ParameterDict>();
+ * params->insert("weight", Variable(Tensor({3, 3}, DType::Float32, Device::cpu()), true));
+ * params->insert("bias", Variable(Tensor({3}, DType::Float32, Device::cpu()), true));
+ * auto w = params->at("weight");
+ * @endcode
+ */
+class ParameterDict : public Module {
+public:
+    ParameterDict() = default;
+
+    auto insert(const std::string& key, Variable param) -> ParameterDict&;
+    auto at(const std::string& key) const -> std::shared_ptr<Variable>;
+    auto contains(const std::string& key) const -> bool;
+    auto erase(const std::string& key) -> void;
+    auto size() const -> size_t { return order_.size(); }
+    auto keys() const -> std::vector<std::string> { return order_; }
+
+    auto forward_impl(const Variable& input) -> Variable override;
+    auto parameters() -> std::vector<std::shared_ptr<Variable>> override;
+    auto named_parameters() -> std::vector<std::pair<std::string, std::shared_ptr<Variable>>> override;
+    auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
+    auto load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void override;
+
+private:
+    std::unordered_map<std::string, std::shared_ptr<Variable>> params_;
+    std::vector<std::string> order_;
+};
+
 } // namespace nn
 } // namespace tenzor

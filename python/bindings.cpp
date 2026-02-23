@@ -2983,6 +2983,61 @@ PYBIND11_MODULE(tenzor_core, m) {
         return tenzor::nn::hardsigmoid(input);
     }, "Functional Hardsigmoid activation", py::arg("input"));
 
+    // GLU
+    py::class_<tenzor::nn::GLU, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::GLU>>(nn, "GLU")
+        .def(py::init<int64_t>(), py::arg("dim") = -1)
+        .def("__repr__", [](const tenzor::nn::GLU&) { return "GLU()"; });
+
+    nn.def("glu", [](const tenzor::Variable& input, int64_t dim) {
+        return tenzor::nn::glu(input, dim);
+    }, "Functional GLU activation", py::arg("input"), py::arg("dim") = -1);
+
+    // Unflatten
+    py::class_<tenzor::nn::Unflatten, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::Unflatten>>(nn, "Unflatten")
+        .def(py::init<int64_t, std::vector<int64_t>>(),
+             py::arg("dim"), py::arg("unflattened_size"))
+        .def("__repr__", [](const tenzor::nn::Unflatten&) { return "Unflatten()"; });
+
+    // PixelShuffle / PixelUnshuffle
+    py::class_<tenzor::nn::PixelShuffle, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::PixelShuffle>>(nn, "PixelShuffle")
+        .def(py::init<int64_t>(), py::arg("upscale_factor"))
+        .def("__repr__", [](const tenzor::nn::PixelShuffle&) { return "PixelShuffle()"; });
+
+    py::class_<tenzor::nn::PixelUnshuffle, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::PixelUnshuffle>>(nn, "PixelUnshuffle")
+        .def(py::init<int64_t>(), py::arg("downscale_factor"))
+        .def("__repr__", [](const tenzor::nn::PixelUnshuffle&) { return "PixelUnshuffle()"; });
+
+    // ParameterList / ParameterDict
+    py::class_<tenzor::nn::ParameterList, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::ParameterList>>(nn, "ParameterList")
+        .def(py::init<>())
+        .def("append", &tenzor::nn::ParameterList::append, py::arg("param"))
+        .def("__getitem__", [](const tenzor::nn::ParameterList& self, size_t idx) {
+            return *self.at(idx);
+        })
+        .def("__len__", &tenzor::nn::ParameterList::size)
+        .def("__repr__", [](const tenzor::nn::ParameterList& self) {
+            return "ParameterList(size=" + std::to_string(self.size()) + ")";
+        });
+
+    py::class_<tenzor::nn::ParameterDict, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::ParameterDict>>(nn, "ParameterDict")
+        .def(py::init<>())
+        .def("insert", &tenzor::nn::ParameterDict::insert, py::arg("key"), py::arg("param"))
+        .def("__getitem__", [](const tenzor::nn::ParameterDict& self, const std::string& key) {
+            return *self.at(key);
+        })
+        .def("__contains__", &tenzor::nn::ParameterDict::contains)
+        .def("__len__", &tenzor::nn::ParameterDict::size)
+        .def("keys", &tenzor::nn::ParameterDict::keys)
+        .def("__repr__", [](const tenzor::nn::ParameterDict& self) {
+            return "ParameterDict(size=" + std::to_string(self.size()) + ")";
+        });
+
     // RNN layers
     py::class_<tenzor::nn::RNNCell, tenzor::nn::Module, std::shared_ptr<tenzor::nn::RNNCell>>(nn, "RNNCell")
         .def(py::init<int64_t, int64_t, const std::string&, bool>(),
