@@ -169,6 +169,12 @@ __all__ = [
     "isinf",
     "isfinite",
 
+    # Logical operations
+    "logical_and",
+    "logical_or",
+    "logical_not",
+    "logical_xor",
+
     # Comparison
     "eq",
     "ne",
@@ -180,9 +186,11 @@ __all__ = [
     # Shape operations
     "reshape",
     "transpose",
+    "permute",
     "flatten",
     "squeeze",
     "unsqueeze",
+    "contiguous",
     "cat",
     "stack",
     "split",
@@ -194,9 +202,29 @@ __all__ = [
     "trace",
     "flip",
     "chunk",
+    "sort",
+    "topk",
+    "unique",
+
+    # Indexing operations
+    "gather",
+    "scatter",
+    "index_select",
+    "masked_select",
+    "masked_fill",
+    "where",
+    "meshgrid",
+    "cross",
+
+    # Cumulative operations
+    "cumsum",
+    "cumprod",
 
     # Neural network
     "nn",
+    "optim",
+    "autograd",
+    "linalg",
 
     # Serialization
     "save",
