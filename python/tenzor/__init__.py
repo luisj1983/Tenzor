@@ -105,6 +105,7 @@ __all__ = [
     "linspace",
     "full",
     "empty",
+    "randperm",
 
     # Arithmetic operations
     "matmul",

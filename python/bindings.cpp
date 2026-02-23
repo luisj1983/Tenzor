@@ -1383,6 +1383,9 @@ PYBIND11_MODULE(tenzor_core, m) {
          py::arg("dtype") = tenzor::DType::Float32,
          py::arg("device") = tenzor::Device::cpu());
 
+    m.def("randperm", &tenzor::randperm, "Create random permutation of integers [0, n)",
+          py::arg("n"), py::arg("device") = tenzor::Device::cpu());
+
     // tensor() - create tensor from Python data (lists, nested lists, scalars)
     m.def("tensor", [](py::object data, std::optional<tenzor::DType> dtype, tenzor::Device device) -> tenzor::Tensor {
         // Helper: recursively determine shape and flatten data
@@ -2290,6 +2293,74 @@ PYBIND11_MODULE(tenzor_core, m) {
         }
         return static_cast<py::object>(result_tuple);
     }, "Apply a custom autograd Function class");
+
+    // autograd.grad() - functional gradient computation
+    autograd_mod.def("grad", [](
+        py::object outputs_obj,
+        py::object inputs_obj,
+        py::object grad_outputs_obj,
+        bool retain_graph,
+        bool create_graph
+    ) -> py::tuple {
+        // Normalize outputs to a list
+        std::vector<tenzor::Variable> outputs;
+        if (py::isinstance<tenzor::Variable>(outputs_obj)) {
+            outputs.push_back(outputs_obj.cast<tenzor::Variable>());
+        } else {
+            for (auto o : outputs_obj.cast<py::sequence>()) {
+                outputs.push_back(o.cast<tenzor::Variable>());
+            }
+        }
+
+        // Normalize inputs to a list
+        std::vector<tenzor::Variable> inputs;
+        if (py::isinstance<tenzor::Variable>(inputs_obj)) {
+            inputs.push_back(inputs_obj.cast<tenzor::Variable>());
+        } else {
+            for (auto i : inputs_obj.cast<py::sequence>()) {
+                inputs.push_back(i.cast<tenzor::Variable>());
+            }
+        }
+
+        // Zero gradients on inputs first
+        for (auto& inp : inputs) {
+            inp.zero_grad();
+            inp.retain_grad();
+        }
+
+        // Run backward for each output
+        for (size_t i = 0; i < outputs.size(); ++i) {
+            std::optional<tenzor::Tensor> grad_out;
+            if (!grad_outputs_obj.is_none()) {
+                auto grad_outputs = grad_outputs_obj.cast<py::sequence>();
+                if (i < static_cast<size_t>(py::len(grad_outputs))) {
+                    auto g = grad_outputs[i];
+                    if (!g.is_none()) {
+                        grad_out = g.cast<tenzor::Tensor>();
+                    }
+                }
+            }
+            bool retain = retain_graph || create_graph || (i < outputs.size() - 1);
+            outputs[i].backward(grad_out, retain, create_graph);
+        }
+
+        // Collect gradients
+        py::tuple result(inputs.size());
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            if (inputs[i].has_grad()) {
+                result[i] = py::cast(inputs[i].grad());
+            } else {
+                result[i] = py::none();
+            }
+        }
+        return result;
+    },
+    "Compute gradients of outputs w.r.t. inputs",
+    py::arg("outputs"),
+    py::arg("inputs"),
+    py::arg("grad_outputs") = py::none(),
+    py::arg("retain_graph") = false,
+    py::arg("create_graph") = false);
 
     // Neural network
     auto nn = m.def_submodule("nn", "Neural network components");
