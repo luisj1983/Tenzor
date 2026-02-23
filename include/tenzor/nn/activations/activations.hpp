@@ -477,6 +477,59 @@ public:
 };
 
 /**
+ * @brief PReLU: Parametric ReLU with learnable negative slope.
+ *
+ * Applies the function:
+ * \f[ \text{PReLU}(x) = \max(0, x) + a \cdot \min(0, x) \f]
+ *
+ * where \f$a\f$ is a learnable parameter. Can be a single value (shared
+ * across all channels) or per-channel.
+ *
+ * @par Example
+ * @code
+ * auto prelu = PReLU(64);  // Per-channel for 64 channels
+ * auto output = prelu.forward(input);
+ * @endcode
+ */
+class PReLU : public Module {
+public:
+    explicit PReLU(int64_t num_parameters = 1, double init = 0.25);
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    int64_t num_parameters_;
+};
+
+/**
+ * @brief Hardswish activation function.
+ *
+ * Applies the function:
+ * \f[ \text{Hardswish}(x) = x \cdot \frac{\text{ReLU6}(x + 3)}{6} \f]
+ *
+ * A computationally efficient approximation to Swish, commonly used in
+ * MobileNetV3 and other mobile architectures.
+ */
+class Hardswish : public Module {
+public:
+    Hardswish() = default;
+    auto forward_impl(const Variable& input) -> Variable override;
+};
+
+/**
+ * @brief Hardsigmoid activation function.
+ *
+ * Applies the function:
+ * \f[ \text{Hardsigmoid}(x) = \frac{\text{ReLU6}(x + 3)}{6} \f]
+ *
+ * A computationally efficient approximation to sigmoid.
+ */
+class Hardsigmoid : public Module {
+public:
+    Hardsigmoid() = default;
+    auto forward_impl(const Variable& input) -> Variable override;
+};
+
+/**
  * @defgroup functional_activations Functional Activation Functions
  * @brief Stateless activation functions for flexible use
  *
@@ -523,6 +576,12 @@ auto swish(const Variable& input) -> Variable;
 
 /** @brief Functional Mish: x * tanh(softplus(x)) */
 auto mish(const Variable& input) -> Variable;
+
+/** @brief Functional Hardswish: x * ReLU6(x + 3) / 6 */
+auto hardswish(const Variable& input) -> Variable;
+
+/** @brief Functional Hardsigmoid: ReLU6(x + 3) / 6 */
+auto hardsigmoid(const Variable& input) -> Variable;
 
 /** @} */ // end of functional_activations group
 

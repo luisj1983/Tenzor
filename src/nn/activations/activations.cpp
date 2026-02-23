@@ -651,4 +651,60 @@ auto gelu_(Tensor& input) -> Tensor& {
     return input;
 }
 
+// PReLU implementation
+PReLU::PReLU(int64_t num_parameters, double init)
+    : num_parameters_(num_parameters) {
+    auto weight_tensor = tenzor::full({num_parameters}, init, DType::Float32, Device::cpu());
+    Variable weight_var(weight_tensor, true);
+    register_parameter("weight", std::move(weight_var));
+}
+
+auto PReLU::forward_impl(const Variable& input) -> Variable {
+    // PReLU(x) = max(0, x) + weight * min(0, x)
+    // = relu(x) + weight * (x - relu(x))  [avoiding min for autograd]
+    auto& weight = *parameters_["weight"];
+    auto relu_x = relu(input);
+    auto neg_part = input - relu_x;  // min(0, x)
+
+    // weight has shape [num_parameters], broadcasts with input
+    return relu_x + weight * neg_part;
+}
+
+auto Hardswish::forward_impl(const Variable& input) -> Variable {
+    // Hardswish(x) = x * clamp(x + 3, 0, 6) / 6
+    // Using tensor-level clamp since Variable doesn't have one
+    auto x_plus_3 = input + 3.0f;
+    auto clamped = Variable(
+        tenzor::clamp(x_plus_3.tensor(), 0.0f, 6.0f),
+        input.requires_grad());
+    return input * clamped / 6.0f;
+}
+
+auto Hardsigmoid::forward_impl(const Variable& input) -> Variable {
+    // Hardsigmoid(x) = clamp(x + 3, 0, 6) / 6
+    auto x_plus_3 = input + 3.0f;
+    auto clamped = Variable(
+        tenzor::clamp(x_plus_3.tensor(), 0.0f, 6.0f),
+        input.requires_grad());
+    return clamped / 6.0f;
+}
+
+// Functional Hardswish
+auto hardswish(const Variable& input) -> Variable {
+    auto x_plus_3 = input + 3.0f;
+    auto clamped = Variable(
+        tenzor::clamp(x_plus_3.tensor(), 0.0f, 6.0f),
+        input.requires_grad());
+    return input * clamped / 6.0f;
+}
+
+// Functional Hardsigmoid
+auto hardsigmoid(const Variable& input) -> Variable {
+    auto x_plus_3 = input + 3.0f;
+    auto clamped = Variable(
+        tenzor::clamp(x_plus_3.tensor(), 0.0f, 6.0f),
+        input.requires_grad());
+    return clamped / 6.0f;
+}
+
 } // namespace tenzor::nn
