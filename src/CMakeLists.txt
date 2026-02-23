@@ -31,6 +31,7 @@ set(TENZOR_CORE_SOURCES
     ops/vision.cpp
     ops/detection.cpp
     ops/async_ops.cpp
+    ops/linalg.cpp
     autograd/variable.cpp
     autograd/graph.cpp
     autograd/function.cpp
@@ -199,6 +200,15 @@ endif()
 target_compile_definitions(tenzor_core PRIVATE
     TENZOR_VERSION="${PROJECT_VERSION}"
 )
+
+# Add MKL for linear algebra (linalg.cpp uses LAPACKE)
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
+include(${CMAKE_SOURCE_DIR}/cmake/FindMKL.cmake OPTIONAL RESULT_VARIABLE _MKL_MODULE_FOUND)
+if(_MKL_MODULE_FOUND AND MKL_FOUND)
+    target_link_libraries(tenzor_core PRIVATE ${MKL_LIBRARIES})
+    target_include_directories(tenzor_core PRIVATE ${MKL_INCLUDE_DIRS})
+    target_compile_definitions(tenzor_core PRIVATE TENZOR_USE_MKL MKL_ILP64)
+endif()
 
 # Add CUDA definition and includes if CUDA backend is enabled
 if(TENZOR_BUILD_CUDA)

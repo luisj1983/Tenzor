@@ -9,6 +9,7 @@
 #include <tenzor/ops/advanced.hpp>
 #include <tenzor/ops/reduction.hpp>
 #include <tenzor/ops/math.hpp>
+#include <tenzor/ops/linalg.hpp>
 #include <tenzor/ops/transform.hpp>
 #include <tenzor/backend/loader.hpp>
 #include <tenzor/backend/backend.hpp>
@@ -5006,6 +5007,22 @@ PYBIND11_MODULE(tenzor_core, m) {
     m.def("create_bfloat16_trainer", &tenzor::nn::create_bfloat16_trainer,
           py::arg("model"), py::arg("optimizer"), py::arg("loss_fn"),
           "Create BFloat16 mixed precision trainer");
+
+    // =========================================================================
+    // Linear Algebra (linalg) submodule
+    // =========================================================================
+    auto linalg_mod = m.def_submodule("linalg", "Linear algebra operations");
+
+    linalg_mod.def("det", &tenzor::linalg::det, "Compute matrix determinant",
+                   py::arg("A"));
+    linalg_mod.def("inv", &tenzor::linalg::inv, "Compute matrix inverse",
+                   py::arg("A"));
+    linalg_mod.def("solve", &tenzor::linalg::solve, "Solve linear system AX = B",
+                   py::arg("A"), py::arg("B"));
+    linalg_mod.def("cholesky", &tenzor::linalg::cholesky, "Cholesky decomposition",
+                   py::arg("A"), py::arg("upper") = false);
+    linalg_mod.def("norm", &tenzor::linalg::norm, "Matrix norm",
+                   py::arg("A"), py::arg("ord") = "fro");
 
     // =========================================================================
     // JIT Module - Tracing, Compilation, and Graph Optimization
