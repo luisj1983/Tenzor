@@ -12,18 +12,17 @@
 
 namespace tenzor {
 
-// Global random number generator for reproducible randomness
-static std::random_device rd;
-static std::mt19937 global_rng(rd());
-static bool manual_seed_set = false;
-static uint64_t manual_seed_value = 0;
+// Thread-local RNG — each thread has independent random state
+static thread_local std::mt19937 global_rng(std::random_device{}());
+static thread_local bool manual_seed_set = false;
+static thread_local uint64_t manual_seed_value = 0;
 
-// Function to access the global RNG
+// Function to access the thread-local RNG
 static std::mt19937& get_rng() {
     return global_rng;
 }
 
-// Public function to set the random seed
+// Public function to set the random seed (affects calling thread)
 void manual_seed(unsigned int seed) {
     global_rng.seed(seed);
     manual_seed_set = true;

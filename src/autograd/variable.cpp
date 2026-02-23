@@ -268,8 +268,10 @@ auto Variable::operator/(const Variable& other) const -> Variable {
     // Store Variables by value - their impl_ shared_ptr keeps data alive
     grad_fn->set_input_variables({*this, other});
 
-    // Save tensors for backward - clone to preserve values
+    // Save tensors AND input shapes for backward - clone to preserve values
     grad_fn->saved_tensors_ = {impl_->data_.clone(), other.impl_->data_.clone()};
+    grad_fn->input_shape_a_ = std::vector<int64_t>(impl_->data_.shape().begin(), impl_->data_.shape().end());
+    grad_fn->input_shape_b_ = std::vector<int64_t>(other.impl_->data_.shape().begin(), other.impl_->data_.shape().end());
 
     // When create_graph is active, also save Variables to preserve graph connections
     if (is_creating_graph()) {

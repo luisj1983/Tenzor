@@ -8,24 +8,10 @@
 #include "tenzor/core/dtype.hpp"
 #include <stdexcept>
 #include <vector>
+#include "../cuda_error.hpp"
 
 namespace tenzor {
 namespace cuda {
-
-// ============================================================================
-// CUDA Helper Functions
-// ============================================================================
-
-// Error checking macro
-#define CUDA_CHECK(call) \
-    do { \
-        cudaError_t err = call; \
-        if (err != cudaSuccess) { \
-            fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
-                    cudaGetErrorString(err)); \
-            exit(EXIT_FAILURE); \
-        } \
-    } while(0)
 
 // Grid-stride loop helper
 #define CUDA_GRID_STRIDE_LOOP(i, n) \

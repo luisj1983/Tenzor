@@ -116,7 +116,7 @@ auto add(const Tensor& a, double scalar) -> Tensor {
     if (!a.impl()) {
         throw std::runtime_error("Cannot add to uninitialized tensor");
     }
-    auto scalar_tensor = full({1}, static_cast<float>(scalar), a.dtype(), a.device());
+    auto scalar_tensor = full({1}, scalar, a.dtype(), a.device());
     std::vector<Tensor> inputs = {a.is_contiguous() ? a : a.contiguous(), scalar_tensor};
     return dispatch<OpId::Add>(inputs)[0];
 }
@@ -125,7 +125,7 @@ auto sub(const Tensor& a, double scalar) -> Tensor {
     if (!a.impl()) {
         throw std::runtime_error("Cannot subtract from uninitialized tensor");
     }
-    auto scalar_tensor = full({1}, static_cast<float>(scalar), a.dtype(), a.device());
+    auto scalar_tensor = full({1}, scalar, a.dtype(), a.device());
     std::vector<Tensor> inputs = {a.is_contiguous() ? a : a.contiguous(), scalar_tensor};
     return dispatch<OpId::Sub>(inputs)[0];
 }
@@ -134,7 +134,7 @@ auto mul(const Tensor& a, double scalar) -> Tensor {
     if (!a.impl()) {
         throw std::runtime_error("Cannot multiply uninitialized tensor");
     }
-    auto scalar_tensor = full({1}, static_cast<float>(scalar), a.dtype(), a.device());
+    auto scalar_tensor = full({1}, scalar, a.dtype(), a.device());
     std::vector<Tensor> inputs = {a.is_contiguous() ? a : a.contiguous(), scalar_tensor};
     return dispatch<OpId::Mul>(inputs)[0];
 }
@@ -143,7 +143,7 @@ auto div(const Tensor& a, double scalar) -> Tensor {
     if (!a.impl()) {
         throw std::runtime_error("Cannot divide uninitialized tensor");
     }
-    auto scalar_tensor = full({1}, static_cast<float>(scalar), a.dtype(), a.device());
+    auto scalar_tensor = full({1}, scalar, a.dtype(), a.device());
     std::vector<Tensor> inputs = {a.is_contiguous() ? a : a.contiguous(), scalar_tensor};
     return dispatch<OpId::Div>(inputs)[0];
 }

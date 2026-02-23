@@ -310,6 +310,10 @@ auto MulBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
 // DivBackward implementation
 auto DivBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     saved_tensors_ = {inputs[0].tensor(), inputs[1].tensor()};
+    // Save input shapes for broadcasting-aware backward pass
+    input_shape_a_ = std::vector<int64_t>(inputs[0].shape().begin(), inputs[0].shape().end());
+    input_shape_b_ = std::vector<int64_t>(inputs[1].shape().begin(), inputs[1].shape().end());
+
     auto result = div(inputs[0].tensor(), inputs[1].tensor());
     return {Variable(result, true)};
 }
@@ -319,9 +323,12 @@ auto DivBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     const auto& a = saved_tensors_[0];
     const auto& b = saved_tensors_[1];
 
-    auto grad_a = div(grad_outputs[0], b);
+    auto grad_a_unreduced = div(grad_outputs[0], b);
     // grad_b = -a / (b^2) * grad_output = -(a * grad_output) / (b * b)
-    auto grad_b = neg(div(mul(a, grad_outputs[0]), mul(b, b)));
+    auto grad_b_unreduced = neg(div(mul(a, grad_outputs[0]), mul(b, b)));
+
+    auto grad_a = reduce_grad_for_broadcasting(grad_a_unreduced, input_shape_a_);
+    auto grad_b = reduce_grad_for_broadcasting(grad_b_unreduced, input_shape_b_);
     return {grad_a, grad_b};
 }
 
@@ -337,9 +344,12 @@ auto DivBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     }
 
     // Use Variable operations for higher-order gradient tracking
-    auto grad_a = grad_outputs[0] / saved_b;
+    auto grad_a_unreduced = grad_outputs[0] / saved_b;
     // grad_b = -(a * grad_output) / (b * b)
-    auto grad_b = tenzor::neg((saved_a * grad_outputs[0]) / (saved_b * saved_b));
+    auto grad_b_unreduced = tenzor::neg((saved_a * grad_outputs[0]) / (saved_b * saved_b));
+
+    auto grad_a = reduce_grad_var_for_broadcasting(grad_a_unreduced, input_shape_a_);
+    auto grad_b = reduce_grad_var_for_broadcasting(grad_b_unreduced, input_shape_b_);
     return {grad_a, grad_b};
 }
 
@@ -990,8 +1000,7 @@ auto ReshapeBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<
 }
 
 auto ReshapeBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = reshape(grad_outputs[0].tensor(), input_shape_).contiguous();
-    return {Variable(result, grad_outputs[0].requires_grad())};
+    return {reshape(grad_outputs[0], input_shape_)};
 }
 
 // PermuteBackward implementation
@@ -1007,8 +1016,7 @@ auto PermuteBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<
 }
 
 auto PermuteBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = permute(grad_outputs[0].tensor(), inv_dims_).contiguous();
-    return {Variable(result, grad_outputs[0].requires_grad())};
+    return {permute(grad_outputs[0], inv_dims_)};
 }
 
 // TransposeBackward implementation
@@ -1023,8 +1031,7 @@ auto TransposeBackward::backward(std::vector<Tensor> grad_outputs) -> std::vecto
 }
 
 auto TransposeBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = transpose(grad_outputs[0].tensor(), dim0_, dim1_).contiguous();
-    return {Variable(result, grad_outputs[0].requires_grad())};
+    return {transpose(grad_outputs[0], dim0_, dim1_)};
 }
 
 // RollBackward implementation
@@ -1055,8 +1062,12 @@ auto SqueezeBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<
 }
 
 auto SqueezeBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = unsqueeze(grad_outputs[0].tensor(), dim_);
-    return {Variable(result, grad_outputs[0].requires_grad())};
+    // Use Variable-level reshape to unsqueeze back to original shape
+    // This preserves the computation graph for higher-order gradients
+    auto grad = grad_outputs[0];
+    auto target_shape = std::vector<int64_t>(grad.shape().begin(), grad.shape().end());
+    target_shape.insert(target_shape.begin() + dim_, 1);
+    return {reshape(grad, target_shape)};
 }
 
 // BmmBackward implementation

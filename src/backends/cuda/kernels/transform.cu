@@ -24,16 +24,8 @@ public:
     }
 };
 
-// CUDA Helper macros
-#define CUDA_CHECK(call) \
-    do { \
-        cudaError_t err = call; \
-        if (err != cudaSuccess) { \
-            fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
-                    cudaGetErrorString(err)); \
-            exit(EXIT_FAILURE); \
-        } \
-    } while(0)
+// Use centralized CUDA error handling
+#include "../cuda_error.hpp"
 
 #define CUDA_KERNEL_LOOP(i, n) \
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < (n); i += blockDim.x * gridDim.x)

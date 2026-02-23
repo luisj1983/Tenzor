@@ -307,6 +307,9 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+
+    std::vector<int64_t> input_shape_a_;
+    std::vector<int64_t> input_shape_b_;
 };
 
 /**
