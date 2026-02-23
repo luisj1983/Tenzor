@@ -746,58 +746,105 @@ PYBIND11_MODULE(tenzor_core, m) {
                 return std::string("tensor(<uninitialized>)");
             }
             std::ostringstream ss;
-            // For small tensors, print actual values like PyTorch
+            ss << std::setprecision(4);
             tenzor::Tensor cpu_t = (t.device().type != tenzor::Device::Type::CPU) ? t.cpu() : t;
             tenzor::Tensor cont = cpu_t.is_contiguous() ? cpu_t : cpu_t.contiguous();
             int64_t numel = cont.numel();
+            auto shape = cont.shape();
+            int64_t ndim = cont.ndim();
 
-            auto print_values = [&](auto* data, int64_t n) {
-                ss << "tensor([";
-                if (n <= 10) {
-                    for (int64_t i = 0; i < n; ++i) {
-                        if (i > 0) ss << ", ";
-                        ss << data[i];
+            // Format a single element value
+            auto fmt_elem = [&](std::ostringstream& os, int64_t flat_idx) {
+                if (cont.dtype() == tenzor::DType::Float32) {
+                    os << cont.data<float>()[flat_idx];
+                } else if (cont.dtype() == tenzor::DType::Float64) {
+                    os << cont.data<double>()[flat_idx];
+                } else if (cont.dtype() == tenzor::DType::Int32) {
+                    os << cont.data<int32_t>()[flat_idx];
+                } else if (cont.dtype() == tenzor::DType::Int64) {
+                    os << cont.data<int64_t>()[flat_idx];
+                } else if (cont.dtype() == tenzor::DType::Bool) {
+                    os << (cont.data<bool>()[flat_idx] ? "True" : "False");
+                } else {
+                    os << "?";
+                }
+            };
+
+            // Recursive printer for nested tensor structure
+            // max_elems_per_dim: show at most this many elements per dimension (3 at start + 3 at end for large)
+            constexpr int64_t EDGE_ITEMS = 3;
+            constexpr int64_t SUMMARIZE_THRESHOLD = 1000;
+            bool summarize = numel > SUMMARIZE_THRESHOLD;
+
+            // Compute strides for flat index calculation in contiguous layout
+            std::vector<int64_t> dim_strides(ndim, 1);
+            for (int64_t d = ndim - 2; d >= 0; --d) {
+                dim_strides[d] = dim_strides[d + 1] * shape[d + 1];
+            }
+
+            std::function<void(int64_t /*dim*/, int64_t /*offset*/, int /*indent*/)> print_dim;
+            print_dim = [&](int64_t dim, int64_t offset, int indent) {
+                int64_t size = shape[dim];
+                ss << "[";
+                if (dim == ndim - 1) {
+                    // Innermost dimension: print values
+                    if (!summarize || size <= 2 * EDGE_ITEMS) {
+                        for (int64_t i = 0; i < size; ++i) {
+                            if (i > 0) ss << ", ";
+                            fmt_elem(ss, offset + i);
+                        }
+                    } else {
+                        for (int64_t i = 0; i < EDGE_ITEMS; ++i) {
+                            if (i > 0) ss << ", ";
+                            fmt_elem(ss, offset + i);
+                        }
+                        ss << ", ..., ";
+                        for (int64_t i = size - EDGE_ITEMS; i < size; ++i) {
+                            if (i > size - EDGE_ITEMS) ss << ", ";
+                            fmt_elem(ss, offset + i);
+                        }
                     }
                 } else {
-                    for (int64_t i = 0; i < 3; ++i) {
-                        if (i > 0) ss << ", ";
-                        ss << data[i];
-                    }
-                    ss << ", ..., ";
-                    for (int64_t i = n - 3; i < n; ++i) {
-                        if (i > n - 3) ss << ", ";
-                        ss << data[i];
+                    // Non-innermost: recurse with nested brackets
+                    std::string pad(indent + 1, ' ');
+                    bool elide = summarize && size > 2 * EDGE_ITEMS;
+                    int64_t stride = dim_strides[dim];
+                    auto print_sub = [&](int64_t i) {
+                        if (i > 0) {
+                            ss << ",";
+                            // Add newlines between rows for 2D+
+                            int newlines = ndim - dim - 1;
+                            for (int nl = 0; nl < newlines; ++nl) ss << "\n";
+                            ss << pad;
+                        }
+                        print_dim(dim + 1, offset + i * stride, indent + 1);
+                    };
+                    if (!elide) {
+                        for (int64_t i = 0; i < size; ++i) print_sub(i);
+                    } else {
+                        for (int64_t i = 0; i < EDGE_ITEMS; ++i) print_sub(i);
+                        ss << ",\n" << pad << "...";
+                        for (int64_t i = size - EDGE_ITEMS; i < size; ++i) print_sub(i);
                     }
                 }
                 ss << "]";
             };
 
-            if (numel <= 1000 || true) { // Always print, elide for large
-                ss << std::setprecision(4);
-                if (cont.dtype() == tenzor::DType::Float32) {
-                    print_values(cont.data<float>(), numel);
-                } else if (cont.dtype() == tenzor::DType::Float64) {
-                    print_values(cont.data<double>(), numel);
-                } else if (cont.dtype() == tenzor::DType::Int32) {
-                    print_values(cont.data<int32_t>(), numel);
-                } else if (cont.dtype() == tenzor::DType::Int64) {
-                    print_values(cont.data<int64_t>(), numel);
-                } else if (cont.dtype() == tenzor::DType::Bool) {
-                    ss << "tensor([";
-                    auto* data = cont.data<bool>();
-                    int64_t n = std::min(numel, int64_t(10));
-                    for (int64_t i = 0; i < n; ++i) {
-                        if (i > 0) ss << ", ";
-                        ss << (data[i] ? "True" : "False");
-                    }
-                    if (numel > 10) ss << ", ...";
-                    ss << "]";
-                } else {
-                    ss << "tensor([...]";
-                }
+            ss << "tensor(";
+            if (ndim == 0) {
+                // Scalar tensor
+                fmt_elem(ss, 0);
+            } else if (numel == 0) {
+                // Empty tensor
+                ss << "[]";
+            } else {
+                print_dim(0, 0, 7); // 7 = len("tensor(")
             }
 
-            ss << ", dtype=" << tenzor::dtype_name(t.dtype());
+            // dtype annotation (skip float32 like PyTorch)
+            if (t.dtype() != tenzor::DType::Float32) {
+                ss << ", dtype=" << tenzor::dtype_name(t.dtype());
+            }
             if (t.device().type != tenzor::Device::Type::CPU) {
                 ss << ", device=" << t.device().to_string();
             }
@@ -1897,44 +1944,21 @@ PYBIND11_MODULE(tenzor_core, m) {
             if (!v.is_initialized()) {
                 return std::string("Variable(<uninitialized>)");
             }
-            const auto& t = v.tensor();
-            std::ostringstream oss;
-            oss << "Variable(";
-            auto shape = t.shape();
-            auto n = t.numel();
-            if (n == 0) {
-                oss << "[]";
-            } else if (n == 1) {
-                oss << t.item<float>();
-            } else if (n <= 10) {
-                oss << "[";
-                auto flat = t.contiguous();
-                for (int64_t i = 0; i < n; ++i) {
-                    if (i > 0) oss << ", ";
-                    oss << flat.data<float>()[i];
-                }
-                oss << "]";
+            // Get the Tensor repr and replace "tensor(" prefix with "Variable("
+            // This reuses the multi-dimensional formatting from Tensor.__repr__
+            auto t_repr = py::cast(v.tensor()).attr("__repr__")().cast<std::string>();
+            // Insert requires_grad before the closing paren
+            std::string result;
+            if (t_repr.size() > 1 && t_repr.back() == ')') {
+                result = t_repr.substr(0, t_repr.size() - 1);
+                result += ", requires_grad=";
+                result += v.requires_grad() ? "True" : "False";
+                result += ")";
             } else {
-                oss << "[";
-                auto flat = t.contiguous().reshape({-1});
-                for (int64_t i = 0; i < 3; ++i) {
-                    if (i > 0) oss << ", ";
-                    oss << flat.data<float>()[i];
-                }
-                oss << ", ..., ";
-                for (int64_t i = n - 3; i < n; ++i) {
-                    if (i > n - 3) oss << ", ";
-                    oss << flat.data<float>()[i];
-                }
-                oss << "]";
+                result = "Variable(" + t_repr + ", requires_grad=" +
+                         (v.requires_grad() ? "True" : "False") + ")";
             }
-            oss << ", shape=[";
-            for (size_t i = 0; i < shape.size(); ++i) {
-                if (i > 0) oss << ", ";
-                oss << shape[i];
-            }
-            oss << "], requires_grad=" << (v.requires_grad() ? "True" : "False") << ")";
-            return oss.str();
+            return result;
         })
         .def("dim", [](const tenzor::Variable& v) { return v.tensor().ndim(); });
 
