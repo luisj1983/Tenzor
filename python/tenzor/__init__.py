@@ -197,6 +197,10 @@ __all__ = [
     # Neural network
     "nn",
 
+    # Serialization
+    "save",
+    "load",
+
     # Utilities
     "cuda_is_available",
     "no_grad",

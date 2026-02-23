@@ -48,6 +48,7 @@
 #include <tenzor/utils/benchmark.hpp>
 #include <tenzor/nn/optim/adam_atan2.hpp>
 #include <tenzor/nn/layers/hrm.hpp>
+#include <tenzor/nn/serialize.hpp>
 #include <tenzor/models/resnet.hpp>
 #include <tenzor/onnx/importer.hpp>
 #include <tenzor/autograd/ops.hpp>
@@ -1462,6 +1463,30 @@ PYBIND11_MODULE(tenzor_core, m) {
     m.def("manual_seed", &tenzor::manual_seed,
           "Set the random seed for reproducibility",
           py::arg("seed"));
+
+    // save/load top-level functions (like torch.save / torch.load)
+    m.def("save", [](py::object obj, const std::string& path) {
+         // Accept either a state_dict (dict) or a Module
+         if (py::isinstance<py::dict>(obj)) {
+             auto dict = py::cast<py::dict>(obj);
+             std::unordered_map<std::string, tenzor::Tensor> state;
+             for (auto& [key, val] : dict) {
+                 state[py::cast<std::string>(key)] = py::cast<tenzor::Tensor>(val);
+             }
+             tenzor::nn::Serializer::save(state, path);
+         } else if (py::isinstance<tenzor::nn::Module>(obj)) {
+             auto& module = py::cast<tenzor::nn::Module&>(obj);
+             module.save(path);
+         } else {
+             throw py::type_error("save() expects a state_dict (dict) or nn.Module");
+         }
+         }, "Save a state_dict or module to file",
+         py::arg("obj"), py::arg("path"));
+
+    m.def("load", [](const std::string& path) {
+         return tenzor::nn::Serializer::load(path);
+         }, "Load a state_dict from file",
+         py::arg("path"));
 
     // Missing math ops (free functions) - GIL released for compute-heavy ops
     m.def("add", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
