@@ -44,14 +44,21 @@ void* CachingAllocator::allocate(size_t size, int device, cudaStream_t stream) {
         return nullptr;
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    // Get or create device allocator (map_mutex_ protects map structure)
+    DeviceAllocator* dev_alloc;
+    {
+        std::lock_guard<std::mutex> map_lock(map_mutex_);
+        dev_alloc = &device_allocators_[device];
+    }
+
+    // Lock only this device's mutex for the actual allocation
+    std::lock_guard<std::mutex> lock(dev_alloc->mutex);
 
     // Round size to alignment
     size_t original_size = size;
     size = round_size(size);
 
-    auto& device_alloc = device_allocators_[device];
-    device_alloc.stats.num_allocations++;
+    dev_alloc->stats.num_allocations++;
 
     // Try to find a suitable block in cache
     Block* block = try_allocate_from_cache(size, device, stream);
@@ -64,7 +71,7 @@ void* CachingAllocator::allocate(size_t size, int device, cudaStream_t stream) {
         ALLOC_DEBUG("NEW alloc: ptr=" << block->ptr << " size=" << size
                     << " (requested=" << original_size << ") device=" << device);
     } else {
-        device_alloc.stats.num_cache_hits++;
+        dev_alloc->stats.num_cache_hits++;
         ALLOC_DEBUG("CACHE HIT: ptr=" << block->ptr << " block_size=" << block->size
                     << " requested=" << size << " device=" << device);
     }
@@ -73,11 +80,11 @@ void* CachingAllocator::allocate(size_t size, int device, cudaStream_t stream) {
     block->allocated = true;
 
     // Update statistics
-    device_alloc.stats.allocated_bytes += block->size;
+    dev_alloc->stats.allocated_bytes += block->size;
 
     // Only subtract from cached_bytes if we got the block from cache
-    if (from_cache && device_alloc.stats.cached_bytes >= block->size) {
-        device_alloc.stats.cached_bytes -= block->size;
+    if (from_cache && dev_alloc->stats.cached_bytes >= block->size) {
+        dev_alloc->stats.cached_bytes -= block->size;
     }
 
     return block->ptr;
@@ -88,20 +95,31 @@ void CachingAllocator::free(void* ptr, int device) {
         return;
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    // Get or create device allocator
+    DeviceAllocator* dev_alloc;
+    {
+        std::lock_guard<std::mutex> map_lock(map_mutex_);
+        dev_alloc = &device_allocators_[device];
+    }
 
-    auto& device_alloc = device_allocators_[device];
-    device_alloc.stats.num_frees++;
+    std::lock_guard<std::mutex> lock(dev_alloc->mutex);
+
+    dev_alloc->stats.num_frees++;
 
     // Find the block
-    auto it = device_alloc.all_blocks.find(ptr);
-    if (it == device_alloc.all_blocks.end()) {
+    auto it = dev_alloc->all_blocks.find(ptr);
+    if (it == dev_alloc->all_blocks.end()) {
         ALLOC_DEBUG("FREE ERROR: ptr=" << ptr << " device=" << device << " NOT FOUND in all_blocks!");
-        // Check all devices
-        for (const auto& [dev_id, dev_alloc] : device_allocators_) {
-            auto found = dev_alloc.all_blocks.find(ptr);
-            if (found != dev_alloc.all_blocks.end()) {
-                ALLOC_DEBUG("  -> Found in device " << dev_id << " instead!");
+        // Check all devices (need map lock for iteration)
+        {
+            std::lock_guard<std::mutex> map_lock(map_mutex_);
+            for (const auto& [dev_id, da] : device_allocators_) {
+                if (dev_id == device) continue;
+                std::lock_guard<std::mutex> other_lock(da.mutex);
+                auto found = da.all_blocks.find(ptr);
+                if (found != da.all_blocks.end()) {
+                    ALLOC_DEBUG("  -> Found in device " << dev_id << " instead!");
+                }
             }
         }
         throw std::runtime_error("Attempted to free pointer not allocated by CachingAllocator");
@@ -119,10 +137,10 @@ void CachingAllocator::free(void* ptr, int device) {
     block->allocated = false;
 
     // Update statistics
-    if (device_alloc.stats.allocated_bytes >= block->size) {
-        device_alloc.stats.allocated_bytes -= block->size;
+    if (dev_alloc->stats.allocated_bytes >= block->size) {
+        dev_alloc->stats.allocated_bytes -= block->size;
     }
-    device_alloc.stats.cached_bytes += block->size;
+    dev_alloc->stats.cached_bytes += block->size;
 
     // Try to merge with adjacent blocks
     if (merge_enabled_) {
@@ -130,7 +148,7 @@ void CachingAllocator::free(void* ptr, int device) {
     }
 
     // Add to free blocks set
-    device_alloc.free_blocks.insert(block);
+    dev_alloc->free_blocks.insert(block);
 
     // Enforce cache limit if set
     if (max_cached_memory_ > 0) {
@@ -139,16 +157,16 @@ void CachingAllocator::free(void* ptr, int device) {
 }
 
 void CachingAllocator::empty_cache(int device) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> map_lock(map_mutex_);
 
     if (device == -1) {
         // Empty all devices
         for (auto& pair : device_allocators_) {
-            auto& device_alloc = pair.second;
+            std::lock_guard<std::mutex> dev_lock(pair.second.mutex);
 
             // Release all free blocks
             std::vector<Block*> blocks_to_release;
-            for (Block* block : device_alloc.free_blocks) {
+            for (Block* block : pair.second.free_blocks) {
                 blocks_to_release.push_back(block);
             }
 
@@ -163,10 +181,10 @@ void CachingAllocator::empty_cache(int device) {
             return;  // Device doesn't exist, nothing to empty
         }
 
-        auto& device_alloc = it->second;
+        std::lock_guard<std::mutex> dev_lock(it->second.mutex);
 
         std::vector<Block*> blocks_to_release;
-        for (Block* block : device_alloc.free_blocks) {
+        for (Block* block : it->second.free_blocks) {
             blocks_to_release.push_back(block);
         }
 
@@ -177,11 +195,12 @@ void CachingAllocator::empty_cache(int device) {
 }
 
 size_t CachingAllocator::memory_allocated(int device) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> map_lock(map_mutex_);
 
     if (device == -1) {
         size_t total = 0;
         for (const auto& pair : device_allocators_) {
+            std::lock_guard<std::mutex> dev_lock(pair.second.mutex);
             total += pair.second.stats.allocated_bytes;
         }
         return total;
@@ -189,17 +208,19 @@ size_t CachingAllocator::memory_allocated(int device) const {
 
     auto it = device_allocators_.find(device);
     if (it != device_allocators_.end()) {
+        std::lock_guard<std::mutex> dev_lock(it->second.mutex);
         return it->second.stats.allocated_bytes;
     }
     return 0;
 }
 
 size_t CachingAllocator::memory_reserved(int device) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> map_lock(map_mutex_);
 
     if (device == -1) {
         size_t total = 0;
         for (const auto& pair : device_allocators_) {
+            std::lock_guard<std::mutex> dev_lock(pair.second.mutex);
             total += pair.second.stats.reserved_bytes;
         }
         return total;
@@ -207,17 +228,19 @@ size_t CachingAllocator::memory_reserved(int device) const {
 
     auto it = device_allocators_.find(device);
     if (it != device_allocators_.end()) {
+        std::lock_guard<std::mutex> dev_lock(it->second.mutex);
         return it->second.stats.reserved_bytes;
     }
     return 0;
 }
 
 size_t CachingAllocator::memory_cached(int device) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> map_lock(map_mutex_);
 
     if (device == -1) {
         size_t total = 0;
         for (const auto& pair : device_allocators_) {
+            std::lock_guard<std::mutex> dev_lock(pair.second.mutex);
             total += pair.second.stats.cached_bytes;
         }
         return total;
@@ -225,17 +248,19 @@ size_t CachingAllocator::memory_cached(int device) const {
 
     auto it = device_allocators_.find(device);
     if (it != device_allocators_.end()) {
+        std::lock_guard<std::mutex> dev_lock(it->second.mutex);
         return it->second.stats.cached_bytes;
     }
     return 0;
 }
 
 MemoryStats CachingAllocator::get_stats(int device) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> map_lock(map_mutex_);
 
     if (device == -1) {
         MemoryStats total;
         for (const auto& pair : device_allocators_) {
+            std::lock_guard<std::mutex> dev_lock(pair.second.mutex);
             const auto& stats = pair.second.stats;
             total.allocated_bytes += stats.allocated_bytes;
             total.reserved_bytes += stats.reserved_bytes;
@@ -251,15 +276,17 @@ MemoryStats CachingAllocator::get_stats(int device) const {
 
     auto it = device_allocators_.find(device);
     if (it != device_allocators_.end()) {
+        std::lock_guard<std::mutex> dev_lock(it->second.mutex);
         return it->second.stats;
     }
     return MemoryStats();
 }
 
 void CachingAllocator::reset_stats() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> map_lock(map_mutex_);
 
     for (auto& pair : device_allocators_) {
+        std::lock_guard<std::mutex> dev_lock(pair.second.mutex);
         auto& stats = pair.second.stats;
         stats.num_allocations = 0;
         stats.num_frees = 0;
@@ -273,24 +300,26 @@ void CachingAllocator::set_alignment(size_t alignment) {
     if (alignment == 0 || (alignment & (alignment - 1)) != 0) {
         throw std::invalid_argument("Alignment must be a power of 2");
     }
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> map_lock(map_mutex_);
     alignment_ = alignment;
 }
 
 void CachingAllocator::set_max_cached_memory(size_t max_bytes) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> map_lock(map_mutex_);
     max_cached_memory_ = max_bytes;
 }
 
 void CachingAllocator::set_merge_enabled(bool enable) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> map_lock(map_mutex_);
     merge_enabled_ = enable;
 }
 
 void CachingAllocator::set_min_split_size(size_t min_size) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> map_lock(map_mutex_);
     min_split_size_ = min_size;
 }
+
+// NOTE: All functions below are called with the per-device mutex already held
 
 Block* CachingAllocator::try_allocate_from_cache(size_t size, int device, cudaStream_t stream) {
     auto& device_alloc = device_allocators_[device];

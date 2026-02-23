@@ -244,6 +244,9 @@ private:
 
     // Per-device data structures
     struct DeviceAllocator {
+        // Per-device mutex for concurrent multi-GPU allocation
+        mutable std::mutex mutex;
+
         // Free blocks ordered by size (for best-fit)
         std::set<Block*, BlockComparator> free_blocks;
 
@@ -256,8 +259,8 @@ private:
         DeviceAllocator() = default;
     };
 
-    // Mutex for thread safety
-    mutable std::mutex mutex_;
+    // Mutex for protecting device_allocators_ map structure
+    mutable std::mutex map_mutex_;
 
     // Per-device allocators
     std::unordered_map<int, DeviceAllocator> device_allocators_;
