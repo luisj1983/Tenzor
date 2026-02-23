@@ -584,6 +584,49 @@ PYBIND11_MODULE(tenzor_core, m) {
              }, py::is_operator(), "Element-wise power")
         .def("__neg__", [](const tenzor::Tensor& a) -> tenzor::Tensor { return tenzor::neg(a); },
              py::is_operator(), "Unary negation")
+        // Matrix multiplication
+        .def("__matmul__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
+             return tenzor::matmul(a, b);
+             }, py::is_operator(), "Matrix multiplication (@ operator)")
+        .def("__rmatmul__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
+             return tenzor::matmul(b, a);
+             }, py::is_operator())
+        // In-place operators
+        .def("__iadd__", [](tenzor::Tensor& a, const tenzor::Tensor& b) -> tenzor::Tensor& {
+             tenzor::add_(a, b); return a;
+             }, py::is_operator())
+        .def("__isub__", [](tenzor::Tensor& a, const tenzor::Tensor& b) -> tenzor::Tensor& {
+             tenzor::sub_(a, b); return a;
+             }, py::is_operator())
+        .def("__imul__", [](tenzor::Tensor& a, const tenzor::Tensor& b) -> tenzor::Tensor& {
+             tenzor::mul_(a, b); return a;
+             }, py::is_operator())
+        .def("__itruediv__", [](tenzor::Tensor& a, const tenzor::Tensor& b) -> tenzor::Tensor& {
+             tenzor::div_(a, b); return a;
+             }, py::is_operator())
+        // Numeric protocol
+        .def("__float__", [](const tenzor::Tensor& t) -> double {
+             if (t.numel() != 1) throw py::value_error("only one element tensors can be converted to Python scalars");
+             return t.item<double>();
+             })
+        .def("__int__", [](const tenzor::Tensor& t) -> int64_t {
+             if (t.numel() != 1) throw py::value_error("only one element tensors can be converted to Python scalars");
+             return t.item<int64_t>();
+             })
+        .def("__index__", [](const tenzor::Tensor& t) -> int64_t {
+             if (t.numel() != 1) throw py::value_error("only one element tensors can be converted to Python scalars");
+             return t.item<int64_t>();
+             })
+        // Iteration: yields t[0], t[1], ..., t[n-1]
+        .def("__iter__", [](const tenzor::Tensor& t) {
+             if (t.ndim() == 0) throw py::type_error("iteration over a 0-d tensor");
+             int64_t n = t.shape()[0];
+             py::list items;
+             for (int64_t i = 0; i < n; ++i) {
+                 items.append(py::cast(t[i]));
+             }
+             return py::iter(items);
+             })
         // Comparison operators
         .def("__eq__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::eq(a, b); },
              py::is_operator())
@@ -615,15 +658,8 @@ PYBIND11_MODULE(tenzor_core, m) {
              }
              })
         .def("__str__", [](const tenzor::Tensor& t) {
-             std::ostringstream ss;
-             ss << "Tensor(shape=[";
-             for (size_t i = 0; i < t.shape().size(); ++i) {
-                 if (i > 0) ss << ", ";
-                 ss << t.shape()[i];
-             }
-             ss << "], dtype=" << tenzor::dtype_name(t.dtype())
-                << ", device=" << t.device().to_string() << ")";
-             return ss.str();
+             // Delegate to __repr__
+             return py::str(py::cast(t).attr("__repr__")());
              })
         // Math methods
         .def("exp", [](const tenzor::Tensor& t) { return tenzor::exp(t); },
@@ -682,15 +718,87 @@ PYBIND11_MODULE(tenzor_core, m) {
         // DType conversion
         .def("to", py::overload_cast<tenzor::DType>(&tenzor::Tensor::to, py::const_),
              py::arg("dtype"), "Convert to different dtype")
+        // PyTorch-style dtype casting methods
+        .def("float", [](const tenzor::Tensor& t) { return t.to(tenzor::DType::Float32); }, "Cast to float32")
+        .def("double", [](const tenzor::Tensor& t) { return t.to(tenzor::DType::Float64); }, "Cast to float64")
+        .def("half", [](const tenzor::Tensor& t) { return t.to(tenzor::DType::Float16); }, "Cast to float16")
+        .def("long", [](const tenzor::Tensor& t) { return t.to(tenzor::DType::Int64); }, "Cast to int64")
+        .def("int", [](const tenzor::Tensor& t) { return t.to(tenzor::DType::Int32); }, "Cast to int32")
+        // Properties
+        .def("dim", &tenzor::Tensor::ndim, "Number of dimensions")
+        .def("size", [](const tenzor::Tensor& t) -> py::tuple {
+             py::tuple result(t.ndim());
+             for (int64_t i = 0; i < t.ndim(); ++i) result[i] = t.shape()[i];
+             return result;
+             }, "Return shape as tuple")
+        .def("size", [](const tenzor::Tensor& t, int64_t dim) -> int64_t {
+             if (dim < 0) dim += t.ndim();
+             return t.shape()[dim];
+             }, py::arg("dim"), "Return size of dimension")
+        .def_property_readonly("strides", [](const tenzor::Tensor& t) -> py::tuple {
+             py::tuple result(t.ndim());
+             auto strides = t.strides();
+             for (int64_t i = 0; i < t.ndim(); ++i) result[i] = strides[i];
+             return result;
+             }, "Tensor strides")
         .def("__repr__", [](const tenzor::Tensor& t) {
             std::ostringstream ss;
-            ss << "Tensor(shape=[";
-            for (size_t i = 0; i < t.shape().size(); ++i) {
-                if (i > 0) ss << ", ";
-                ss << t.shape()[i];
+            // For small tensors, print actual values like PyTorch
+            tenzor::Tensor cpu_t = (t.device().type != tenzor::Device::Type::CPU) ? t.cpu() : t;
+            tenzor::Tensor cont = cpu_t.is_contiguous() ? cpu_t : cpu_t.contiguous();
+            int64_t numel = cont.numel();
+
+            auto print_values = [&](auto* data, int64_t n) {
+                ss << "tensor([";
+                if (n <= 10) {
+                    for (int64_t i = 0; i < n; ++i) {
+                        if (i > 0) ss << ", ";
+                        ss << data[i];
+                    }
+                } else {
+                    for (int64_t i = 0; i < 3; ++i) {
+                        if (i > 0) ss << ", ";
+                        ss << data[i];
+                    }
+                    ss << ", ..., ";
+                    for (int64_t i = n - 3; i < n; ++i) {
+                        if (i > n - 3) ss << ", ";
+                        ss << data[i];
+                    }
+                }
+                ss << "]";
+            };
+
+            if (numel <= 1000 || true) { // Always print, elide for large
+                ss << std::setprecision(4);
+                if (cont.dtype() == tenzor::DType::Float32) {
+                    print_values(cont.data<float>(), numel);
+                } else if (cont.dtype() == tenzor::DType::Float64) {
+                    print_values(cont.data<double>(), numel);
+                } else if (cont.dtype() == tenzor::DType::Int32) {
+                    print_values(cont.data<int32_t>(), numel);
+                } else if (cont.dtype() == tenzor::DType::Int64) {
+                    print_values(cont.data<int64_t>(), numel);
+                } else if (cont.dtype() == tenzor::DType::Bool) {
+                    ss << "tensor([";
+                    auto* data = cont.data<bool>();
+                    int64_t n = std::min(numel, int64_t(10));
+                    for (int64_t i = 0; i < n; ++i) {
+                        if (i > 0) ss << ", ";
+                        ss << (data[i] ? "True" : "False");
+                    }
+                    if (numel > 10) ss << ", ...";
+                    ss << "]";
+                } else {
+                    ss << "tensor([...]";
+                }
             }
-            ss << "], dtype=" << tenzor::dtype_name(t.dtype())
-               << ", device=" << t.device().to_string() << ")";
+
+            ss << ", dtype=" << tenzor::dtype_name(t.dtype());
+            if (t.device().type != tenzor::Device::Type::CPU) {
+                ss << ", device=" << t.device().to_string();
+            }
+            ss << ")";
             return ss.str();
         })
         // Python-style indexing
