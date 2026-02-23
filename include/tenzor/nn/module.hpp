@@ -454,6 +454,15 @@ public:
     virtual auto load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void;
 
     /**
+     * @brief Load state dictionary with optional strict mode.
+     *
+     * @param state Map of parameter names to tensors
+     * @param strict If true (default), throws on missing/unexpected keys.
+     *               If false, silently ignores mismatches.
+     */
+    auto load_state_dict(const std::unordered_map<std::string, Tensor>& state, bool strict) -> void;
+
+    /**
      * @brief Save module to file.
      *
      * @param path File path for saved model

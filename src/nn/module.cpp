@@ -224,6 +224,10 @@ auto Module::state_dict() const -> std::unordered_map<std::string, Tensor> {
 }
 
 auto Module::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
+    load_state_dict(state, true);
+}
+
+auto Module::load_state_dict(const std::unordered_map<std::string, Tensor>& state, bool strict) -> void {
     // Track which state keys are consumed to detect unexpected keys
     std::unordered_set<std::string> consumed_keys;
 
@@ -281,6 +285,19 @@ auto Module::load_state_dict(const std::unordered_map<std::string, Tensor>& stat
         module->load_state_dict(sub_state);
     }
 
+    // Collect missing keys (expected but not in state)
+    std::vector<std::string> missing_keys;
+    for (const auto& [name, _] : parameters_) {
+        if (state.find(name) == state.end()) {
+            missing_keys.push_back(name);
+        }
+    }
+    for (const auto& [name, _] : buffers_) {
+        if (state.find(name) == state.end()) {
+            missing_keys.push_back(name);
+        }
+    }
+
     // Collect unexpected keys
     std::vector<std::string> unexpected_keys;
     for (const auto& [key, _] : state) {
@@ -289,12 +306,22 @@ auto Module::load_state_dict(const std::unordered_map<std::string, Tensor>& stat
         }
     }
 
-    // Report unexpected keys (missing keys are allowed for partial loading)
-    if (!unexpected_keys.empty()) {
-        std::string msg = "Error(s) in loading state_dict:\n  Unexpected key(s): ";
-        for (size_t i = 0; i < unexpected_keys.size(); ++i) {
-            if (i > 0) msg += ", ";
-            msg += "\"" + unexpected_keys[i] + "\"";
+    // Report both missing and unexpected keys in strict mode
+    if (strict && (!missing_keys.empty() || !unexpected_keys.empty())) {
+        std::string msg = "Error(s) in loading state_dict:";
+        if (!missing_keys.empty()) {
+            msg += "\n  Missing key(s): ";
+            for (size_t i = 0; i < missing_keys.size(); ++i) {
+                if (i > 0) msg += ", ";
+                msg += "\"" + missing_keys[i] + "\"";
+            }
+        }
+        if (!unexpected_keys.empty()) {
+            msg += "\n  Unexpected key(s): ";
+            for (size_t i = 0; i < unexpected_keys.size(); ++i) {
+                if (i > 0) msg += ", ";
+                msg += "\"" + unexpected_keys[i] + "\"";
+            }
         }
         throw std::runtime_error(msg);
     }

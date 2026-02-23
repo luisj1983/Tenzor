@@ -1374,6 +1374,14 @@ PYBIND11_MODULE(tenzor_core, m) {
          py::arg("dtype") = tenzor::DType::Float32,
          py::arg("device") = tenzor::Device::cpu());
 
+    m.def("eye", [](int64_t n, std::optional<int64_t> m, tenzor::DType dtype, tenzor::Device device) {
+         return tenzor::eye(n, m, dtype, device);
+         }, "Create identity matrix",
+         py::arg("n"),
+         py::arg("m") = py::none(),
+         py::arg("dtype") = tenzor::DType::Float32,
+         py::arg("device") = tenzor::Device::cpu());
+
     // tensor() - create tensor from Python data (lists, nested lists, scalars)
     m.def("tensor", [](py::object data, std::optional<tenzor::DType> dtype, tenzor::Device device) -> tenzor::Tensor {
         // Helper: recursively determine shape and flatten data
@@ -2394,9 +2402,10 @@ PYBIND11_MODULE(tenzor_core, m) {
         // ====================================================================
         .def("state_dict", &tenzor::nn::Module::state_dict,
              "Get module state as dictionary (parameters + buffers)")
-        .def("load_state_dict", &tenzor::nn::Module::load_state_dict,
-             py::arg("state"),
-             "Load module state from dictionary")
+        .def("load_state_dict", py::overload_cast<const std::unordered_map<std::string, tenzor::Tensor>&, bool>(
+             &tenzor::nn::Module::load_state_dict),
+             py::arg("state"), py::arg("strict") = true,
+             "Load module state from dictionary. If strict=True (default), throws on missing/unexpected keys.")
         .def("save", &tenzor::nn::Module::save,
              py::arg("path"),
              "Save module to file")
