@@ -71,6 +71,10 @@ namespace cpu {
     auto fmod_kernel(const Tensor& a, const Tensor& b) -> Tensor;
     auto remainder_kernel(const Tensor& a, const Tensor& b) -> Tensor;
     auto lerp_kernel(std::span<const Tensor> inputs) -> Tensor;
+    auto logical_and_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto logical_or_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto logical_not_kernel(const Tensor& input) -> Tensor;
+    auto logical_xor_kernel(const Tensor& a, const Tensor& b) -> Tensor;
 
     // Reductions
     auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
@@ -536,6 +540,14 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::Lerp, [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
         return {cpu::lerp_kernel(inputs)};
     });
+
+    // =========================================================================
+    // Logical Operations
+    // =========================================================================
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, LogicalAnd, cpu::logical_and_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, LogicalOr, cpu::logical_or_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, LogicalNot, cpu::logical_not_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, LogicalXor, cpu::logical_xor_kernel);
 
     // =========================================================================
     // Comparison Operations

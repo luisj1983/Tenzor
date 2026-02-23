@@ -59,5 +59,52 @@ auto cholesky(const Tensor& A, bool upper = false) -> Tensor;
  */
 auto norm(const Tensor& A, const std::string& ord = "fro") -> Tensor;
 
+/**
+ * @brief Compute sign and log of absolute determinant.
+ *
+ * More numerically stable than computing det directly for large matrices.
+ *
+ * @param A Input square matrix (..., N, N)
+ * @return Tuple of (sign, logabsdet) tensors
+ */
+auto slogdet(const Tensor& A) -> std::tuple<Tensor, Tensor>;
+
+/**
+ * @brief Compute Singular Value Decomposition.
+ *
+ * Factorizes A = U @ diag(S) @ V^T.
+ *
+ * @param A Input matrix (..., M, N)
+ * @param full_matrices If true, compute full U (M,M) and Vh (N,N). If false, compute reduced (M,K) and (K,N) where K=min(M,N).
+ * @return Tuple of (U, S, Vh) tensors
+ */
+auto svd(const Tensor& A, bool full_matrices = true) -> std::tuple<Tensor, Tensor, Tensor>;
+
+/**
+ * @brief Compute QR decomposition.
+ *
+ * Factorizes A = Q @ R where Q is orthogonal and R is upper-triangular.
+ *
+ * @param A Input matrix (..., M, N)
+ * @return Tuple of (Q, R) tensors
+ */
+auto qr(const Tensor& A) -> std::tuple<Tensor, Tensor>;
+
+/**
+ * @brief Compute eigenvalues and eigenvectors of a symmetric/Hermitian matrix.
+ *
+ * @param A Symmetric matrix (..., N, N)
+ * @return Tuple of (eigenvalues, eigenvectors) where eigenvalues shape is (..., N)
+ */
+auto eigh(const Tensor& A) -> std::tuple<Tensor, Tensor>;
+
+/**
+ * @brief Compute eigenvalues of a symmetric/Hermitian matrix.
+ *
+ * @param A Symmetric matrix (..., N, N)
+ * @return Eigenvalues tensor (..., N)
+ */
+auto eigvalsh(const Tensor& A) -> Tensor;
+
 } // namespace linalg
 } // namespace tenzor

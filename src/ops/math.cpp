@@ -533,4 +533,24 @@ auto lerp(const Tensor& start, const Tensor& end, double weight) -> Tensor {
     return dispatch(OpId::Lerp, inputs)[0];
 }
 
+auto logical_and(const Tensor& a, const Tensor& b) -> Tensor {
+    std::vector<Tensor> inputs = {a, b};
+    return dispatch(OpId::LogicalAnd, inputs)[0];
+}
+
+auto logical_or(const Tensor& a, const Tensor& b) -> Tensor {
+    std::vector<Tensor> inputs = {a, b};
+    return dispatch(OpId::LogicalOr, inputs)[0];
+}
+
+auto logical_not(const Tensor& input) -> Tensor {
+    std::vector<Tensor> inputs = {input};
+    return dispatch(OpId::LogicalNot, inputs)[0];
+}
+
+auto logical_xor(const Tensor& a, const Tensor& b) -> Tensor {
+    std::vector<Tensor> inputs = {a, b};
+    return dispatch(OpId::LogicalXor, inputs)[0];
+}
+
 } // namespace tenzor

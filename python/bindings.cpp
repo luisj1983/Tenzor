@@ -609,11 +609,17 @@ PYBIND11_MODULE(tenzor_core, m) {
         // Numeric protocol
         .def("__float__", [](const tenzor::Tensor& t) -> double {
              if (t.numel() != 1) throw py::value_error("only one element tensors can be converted to Python scalars");
-             return t.item<double>();
+             if (t.dtype() == tenzor::DType::Float64) return t.item<double>();
+             if (t.dtype() == tenzor::DType::Int32) return static_cast<double>(t.item<int32_t>());
+             if (t.dtype() == tenzor::DType::Int64) return static_cast<double>(t.item<int64_t>());
+             return static_cast<double>(t.item<float>());
              })
         .def("__int__", [](const tenzor::Tensor& t) -> int64_t {
              if (t.numel() != 1) throw py::value_error("only one element tensors can be converted to Python scalars");
-             return t.item<int64_t>();
+             if (t.dtype() == tenzor::DType::Int64) return t.item<int64_t>();
+             if (t.dtype() == tenzor::DType::Int32) return static_cast<int64_t>(t.item<int32_t>());
+             if (t.dtype() == tenzor::DType::Float64) return static_cast<int64_t>(t.item<double>());
+             return static_cast<int64_t>(t.item<float>());
              })
         .def("__index__", [](const tenzor::Tensor& t) -> int64_t {
              if (t.numel() != 1) throw py::value_error("only one element tensors can be converted to Python scalars");
@@ -1587,6 +1593,17 @@ PYBIND11_MODULE(tenzor_core, m) {
          return tenzor::lerp(start, end, weight);
          }, "Linear interpolation",
          py::arg("start"), py::arg("end"), py::arg("weight"));
+    m.def("logical_and", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
+         return tenzor::logical_and(a, b);
+         }, "Element-wise logical AND", py::arg("a"), py::arg("b"));
+    m.def("logical_or", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
+         return tenzor::logical_or(a, b);
+         }, "Element-wise logical OR", py::arg("a"), py::arg("b"));
+    m.def("logical_not", [](const tenzor::Tensor& t) { return tenzor::logical_not(t); },
+         "Element-wise logical NOT");
+    m.def("logical_xor", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
+         return tenzor::logical_xor(a, b);
+         }, "Element-wise logical XOR", py::arg("a"), py::arg("b"));
     // More trig/hyperbolic
     m.def("tan", [](const tenzor::Tensor& t) { return tenzor::tan(t); },
          "Element-wise tangent");
@@ -1972,10 +1989,18 @@ PYBIND11_MODULE(tenzor_core, m) {
         }, py::is_operator())
         // Numeric protocol
         .def("__float__", [](const tenzor::Variable& v) {
-            return v.tensor().item<double>();
+            auto t = v.tensor();
+            if (t.dtype() == tenzor::DType::Float64)
+                return t.item<double>();
+            return static_cast<double>(t.item<float>());
         })
         .def("__int__", [](const tenzor::Variable& v) {
-            return v.tensor().item<int64_t>();
+            auto t = v.tensor();
+            if (t.dtype() == tenzor::DType::Int64)
+                return t.item<int64_t>();
+            if (t.dtype() == tenzor::DType::Int32)
+                return static_cast<int64_t>(t.item<int32_t>());
+            return static_cast<int64_t>(t.item<float>());
         })
         .def("__repr__", [](const tenzor::Variable& v) {
             if (!v.is_initialized()) {
@@ -1997,7 +2022,27 @@ PYBIND11_MODULE(tenzor_core, m) {
             }
             return result;
         })
-        .def("dim", [](const tenzor::Variable& v) { return v.tensor().ndim(); });
+        .def("dim", [](const tenzor::Variable& v) { return v.tensor().ndim(); })
+        .def("__index__", [](const tenzor::Variable& v) {
+            return v.tensor().item<int64_t>();
+        })
+        .def("__iter__", [](const tenzor::Variable& v) {
+            auto t = v.tensor();
+            if (t.ndim() == 0) throw py::type_error("iteration over a 0-d Variable");
+            int64_t n = t.shape()[0];
+            py::list result;
+            for (int64_t i = 0; i < n; ++i) {
+                result.append(tenzor::Variable(t[i].contiguous().clone(), v.requires_grad()));
+            }
+            return py::iter(result);
+        })
+        .def_property_readonly("strides", [](const tenzor::Variable& v) {
+            auto s = v.tensor().strides();
+            py::tuple result(s.size());
+            for (size_t i = 0; i < s.size(); ++i)
+                result[i] = s[i];
+            return result;
+        });
 
     // Gradient control functions
     m.def("is_grad_enabled", &tenzor::is_grad_enabled,
@@ -5023,6 +5068,24 @@ PYBIND11_MODULE(tenzor_core, m) {
                    py::arg("A"), py::arg("upper") = false);
     linalg_mod.def("norm", &tenzor::linalg::norm, "Matrix norm",
                    py::arg("A"), py::arg("ord") = "fro");
+    linalg_mod.def("slogdet", [](const tenzor::Tensor& A) {
+        auto [sign, logabsdet] = tenzor::linalg::slogdet(A);
+        return py::make_tuple(sign, logabsdet);
+    }, "Sign and log of absolute determinant", py::arg("A"));
+    linalg_mod.def("svd", [](const tenzor::Tensor& A, bool full_matrices) {
+        auto [U, S, Vh] = tenzor::linalg::svd(A, full_matrices);
+        return py::make_tuple(U, S, Vh);
+    }, "Singular Value Decomposition", py::arg("A"), py::arg("full_matrices") = true);
+    linalg_mod.def("qr", [](const tenzor::Tensor& A) {
+        auto [Q, R] = tenzor::linalg::qr(A);
+        return py::make_tuple(Q, R);
+    }, "QR decomposition", py::arg("A"));
+    linalg_mod.def("eigh", [](const tenzor::Tensor& A) {
+        auto [eigenvalues, eigenvectors] = tenzor::linalg::eigh(A);
+        return py::make_tuple(eigenvalues, eigenvectors);
+    }, "Eigendecomposition of symmetric matrix", py::arg("A"));
+    linalg_mod.def("eigvalsh", &tenzor::linalg::eigvalsh,
+                   "Eigenvalues of symmetric matrix", py::arg("A"));
 
     // =========================================================================
     // JIT Module - Tracing, Compilation, and Graph Optimization

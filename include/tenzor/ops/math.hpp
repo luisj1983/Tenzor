@@ -320,6 +320,14 @@ auto lerp(const Tensor& start, const Tensor& end, const Tensor& weight) -> Tenso
 auto lerp(const Tensor& start, const Tensor& end, double weight) -> Tensor;
 /// @}
 
+/// @name Logical Operations (return Bool tensors)
+/// @{
+auto logical_and(const Tensor& a, const Tensor& b) -> Tensor;
+auto logical_or(const Tensor& a, const Tensor& b) -> Tensor;
+auto logical_not(const Tensor& input) -> Tensor;
+auto logical_xor(const Tensor& a, const Tensor& b) -> Tensor;
+/// @}
+
 /** @} */ // end of tensor_math group
 
 } // namespace tenzor

@@ -5242,5 +5242,67 @@ auto lerp_kernel(std::span<const Tensor> inputs) -> Tensor {
     return result;
 }
 
+// Helper: convert any dtype element to bool (non-zero = true)
+namespace {
+auto to_bool_value(const Tensor& t, size_t idx) -> bool {
+    switch (t.dtype()) {
+        case DType::Bool: return t.data<bool>()[idx];
+        case DType::Float32: return t.data<float>()[idx] != 0.0f;
+        case DType::Float64: return t.data<double>()[idx] != 0.0;
+        case DType::Int32: return t.data<int32_t>()[idx] != 0;
+        case DType::Int64: return t.data<int64_t>()[idx] != 0;
+        case DType::Int8: return t.data<int8_t>()[idx] != 0;
+        case DType::UInt8: return t.data<uint8_t>()[idx] != 0;
+        case DType::Float16: return static_cast<float>(t.data<Float16>()[idx]) != 0.0f;
+        case DType::BFloat16: return static_cast<float>(t.data<BFloat16>()[idx]) != 0.0f;
+        default: return t.data<float>()[idx] != 0.0f;
+    }
+}
+} // anonymous namespace
+
+auto logical_and_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    auto shape_vec = std::vector<int64_t>(a.shape().begin(), a.shape().end());
+    Tensor result(shape_vec, DType::Bool, a.device());
+    size_t n = static_cast<size_t>(a.numel());
+    bool* out = result.data<bool>();
+    for (size_t i = 0; i < n; ++i) {
+        out[i] = to_bool_value(a, i) && to_bool_value(b, i);
+    }
+    return result;
+}
+
+auto logical_or_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    auto shape_vec = std::vector<int64_t>(a.shape().begin(), a.shape().end());
+    Tensor result(shape_vec, DType::Bool, a.device());
+    size_t n = static_cast<size_t>(a.numel());
+    bool* out = result.data<bool>();
+    for (size_t i = 0; i < n; ++i) {
+        out[i] = to_bool_value(a, i) || to_bool_value(b, i);
+    }
+    return result;
+}
+
+auto logical_not_kernel(const Tensor& input) -> Tensor {
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    Tensor result(shape_vec, DType::Bool, input.device());
+    size_t n = static_cast<size_t>(input.numel());
+    bool* out = result.data<bool>();
+    for (size_t i = 0; i < n; ++i) {
+        out[i] = !to_bool_value(input, i);
+    }
+    return result;
+}
+
+auto logical_xor_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    auto shape_vec = std::vector<int64_t>(a.shape().begin(), a.shape().end());
+    Tensor result(shape_vec, DType::Bool, a.device());
+    size_t n = static_cast<size_t>(a.numel());
+    bool* out = result.data<bool>();
+    for (size_t i = 0; i < n; ++i) {
+        out[i] = to_bool_value(a, i) != to_bool_value(b, i);
+    }
+    return result;
+}
+
 } // namespace cpu
 } // namespace tenzor
