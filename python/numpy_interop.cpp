@@ -166,16 +166,16 @@ auto tensor_to_numpy(const Tensor& tensor) -> py::array {
     // Get NumPy format string
     std::string format = dtype_to_numpy_format(dtype);
 
-    // Handle CUDA tensors - must copy to CPU first
-    if (device.type == Device::Type::CUDA) {
-        // Copy to CPU
-        Tensor cpu_tensor = tensor.cpu();
+    // Handle non-CPU tensors - must copy to CPU first
+    if (device.type != Device::Type::CPU) {
+        // Copy to CPU (works for CUDA, Vulkan, ROCm, OneAPI)
+        Tensor cpu_tensor = tensor.to(Device::cpu());
 
         // Create NumPy array with copied data
-        py::array result(py::dtype(format), np_shape, np_strides);
+        py::array result(py::dtype(format), np_shape);
 
-        // Copy data
-        void* src = const_cast<void*>(cpu_tensor.impl()->storage->data());
+        // Copy data using data_ptr() which accounts for storage offset
+        void* src = cpu_tensor.data_ptr();
         void* dst = result.mutable_data();
         size_t total_bytes = cpu_tensor.numel() * element_size;
         std::memcpy(dst, src, total_bytes);

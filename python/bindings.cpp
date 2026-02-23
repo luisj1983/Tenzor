@@ -1816,15 +1816,21 @@ PYBIND11_MODULE(tenzor_core, m) {
         // Parameter/buffer/module registration (exposed from protected via lambda)
         // ====================================================================
         .def("register_parameter", [](tenzor::nn::Module& self, const std::string& name, tenzor::Variable param) {
-            static_cast<PyModule&>(self).py_register_parameter(name, std::move(param));
+            auto* pymod = dynamic_cast<PyModule*>(&self);
+            if (!pymod) throw std::runtime_error("register_parameter requires a Python-subclassed Module");
+            pymod->py_register_parameter(name, std::move(param));
         }, py::arg("name"), py::arg("param"),
              "Register a trainable parameter")
         .def("register_buffer", [](tenzor::nn::Module& self, const std::string& name, tenzor::Variable buffer) {
-            static_cast<PyModule&>(self).py_register_buffer(name, std::move(buffer));
+            auto* pymod = dynamic_cast<PyModule*>(&self);
+            if (!pymod) throw std::runtime_error("register_buffer requires a Python-subclassed Module");
+            pymod->py_register_buffer(name, std::move(buffer));
         }, py::arg("name"), py::arg("buffer"),
              "Register a non-trainable buffer (e.g., running stats)")
         .def("register_module", [](tenzor::nn::Module& self, const std::string& name, std::shared_ptr<tenzor::nn::Module> module) {
-            static_cast<PyModule&>(self).py_register_module(name, std::move(module));
+            auto* pymod = dynamic_cast<PyModule*>(&self);
+            if (!pymod) throw std::runtime_error("register_module requires a Python-subclassed Module");
+            pymod->py_register_module(name, std::move(module));
         }, py::arg("name"), py::arg("module"),
              "Register a child module")
 

@@ -1,7 +1,7 @@
 #include "tenzor/nn/module.hpp"
 #include "tenzor/nn/serialize.hpp"
-#include <iostream>
 #include <algorithm>
+#include <unordered_set>
 
 namespace tenzor::nn {
 
@@ -224,10 +224,14 @@ auto Module::state_dict() const -> std::unordered_map<std::string, Tensor> {
 }
 
 auto Module::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
+    // Track which state keys are consumed to detect unexpected keys
+    std::unordered_set<std::string> consumed_keys;
+
     // Load own parameters
     for (auto& [name, param] : parameters_) {
         auto it = state.find(name);
         if (it != state.end()) {
+            consumed_keys.insert(name);
             // Verify shapes match
             const auto& loaded_tensor = it->second;
             if (param->tensor().shape().size() != loaded_tensor.shape().size() ||
@@ -247,6 +251,7 @@ auto Module::load_state_dict(const std::unordered_map<std::string, Tensor>& stat
     for (auto& [name, buffer] : buffers_) {
         auto it = state.find(name);
         if (it != state.end()) {
+            consumed_keys.insert(name);
             const auto& loaded_tensor = it->second;
             if (buffer->tensor().shape().size() != loaded_tensor.shape().size() ||
                 !std::equal(buffer->tensor().shape().begin(), buffer->tensor().shape().end(),
@@ -268,11 +273,30 @@ auto Module::load_state_dict(const std::unordered_map<std::string, Tensor>& stat
         for (const auto& [key, tensor] : state) {
             if (key.rfind(prefix, 0) == 0) {
                 // Key starts with prefix
+                consumed_keys.insert(key);
                 std::string sub_key = key.substr(prefix.length());
                 sub_state[sub_key] = tensor;
             }
         }
         module->load_state_dict(sub_state);
+    }
+
+    // Collect unexpected keys
+    std::vector<std::string> unexpected_keys;
+    for (const auto& [key, _] : state) {
+        if (consumed_keys.find(key) == consumed_keys.end()) {
+            unexpected_keys.push_back(key);
+        }
+    }
+
+    // Report unexpected keys (missing keys are allowed for partial loading)
+    if (!unexpected_keys.empty()) {
+        std::string msg = "Error(s) in loading state_dict:\n  Unexpected key(s): ";
+        for (size_t i = 0; i < unexpected_keys.size(); ++i) {
+            if (i > 0) msg += ", ";
+            msg += "\"" + unexpected_keys[i] + "\"";
+        }
+        throw std::runtime_error(msg);
     }
 }
 

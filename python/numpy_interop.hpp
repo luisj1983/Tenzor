@@ -34,11 +34,11 @@ auto get_numpy_itemsize(const py::array& arr) -> size_t;
 
 /**
  * Convert Tensor to NumPy array
- * Zero-copy when tensor is on CPU and contiguous
- * Copies when tensor is on CUDA or non-contiguous
+ * Zero-copy when tensor is on CPU (supports strided views)
+ * Always copies when tensor is on non-CPU devices (CUDA, Vulkan, ROCm, OneAPI)
  *
  * @param tensor The input tensor
- * @return NumPy array (may share memory with tensor)
+ * @return NumPy array (may share memory with CPU tensor)
  */
 auto tensor_to_numpy(const Tensor& tensor) -> py::array;
 
