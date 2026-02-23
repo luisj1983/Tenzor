@@ -41,10 +41,16 @@ auto Variable::tensor() -> Tensor& {
 }
 
 auto Variable::grad() const -> const std::optional<Tensor>& {
+    if (!impl_) {
+        throw std::runtime_error("Cannot access grad of uninitialized Variable");
+    }
     return impl_->grad_;
 }
 
 auto Variable::grad() -> std::optional<Tensor>& {
+    if (!impl_) {
+        throw std::runtime_error("Cannot access grad of uninitialized Variable");
+    }
     return impl_->grad_;
 }
 
@@ -112,14 +118,23 @@ auto Variable::grad_fn() const -> std::shared_ptr<Function> {
 }
 
 auto Variable::shape() const -> std::span<const int64_t> {
+    if (!impl_) {
+        throw std::runtime_error("Cannot access shape of uninitialized Variable");
+    }
     return impl_->data_.shape();
 }
 
 auto Variable::dtype() const -> DType {
+    if (!impl_) {
+        throw std::runtime_error("Cannot access dtype of uninitialized Variable");
+    }
     return impl_->data_.dtype();
 }
 
 auto Variable::device() const -> const Device& {
+    if (!impl_) {
+        throw std::runtime_error("Cannot access device of uninitialized Variable");
+    }
     return impl_->data_.device();
 }
 

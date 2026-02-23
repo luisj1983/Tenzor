@@ -95,12 +95,31 @@ void fill_tensor(Tensor& tensor, Generator gen) {
         for (int64_t i = 0; i < numel; ++i) {
             data[i] = gen();
         }
-    } else {
-        // For other dtypes, work through Float32 and convert
-        float* data = work_tensor.data<float>();
+    } else if (work_tensor.dtype() == DType::Float16 || work_tensor.dtype() == DType::BFloat16) {
+        // For half-precision types, fill via a Float32 temporary and convert
+        Tensor temp({work_tensor.shape().begin(), work_tensor.shape().end()},
+                    DType::Float32, Device::cpu());
+        float* temp_data = temp.data<float>();
         for (int64_t i = 0; i < numel; ++i) {
-            data[i] = static_cast<float>(gen());
+            temp_data[i] = static_cast<float>(gen());
         }
+        // Convert and copy back
+        Tensor converted = temp.to(work_tensor.dtype());
+        std::memcpy(work_tensor.data_ptr(), converted.data_ptr(),
+                    numel * dtype_size(work_tensor.dtype()));
+    } else if (work_tensor.dtype() == DType::Int32) {
+        int32_t* data = work_tensor.data<int32_t>();
+        for (int64_t i = 0; i < numel; ++i) {
+            data[i] = static_cast<int32_t>(gen());
+        }
+    } else if (work_tensor.dtype() == DType::Int64) {
+        int64_t* data = work_tensor.data<int64_t>();
+        for (int64_t i = 0; i < numel; ++i) {
+            data[i] = static_cast<int64_t>(gen());
+        }
+    } else {
+        throw std::runtime_error("fill_tensor: unsupported dtype " +
+            std::string(dtype_name(work_tensor.dtype())));
     }
 
     if (needs_device_transfer) {

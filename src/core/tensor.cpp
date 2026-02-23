@@ -257,6 +257,7 @@ auto Tensor::item() const -> T {
 // Explicit instantiations for all scalar types
 template auto Tensor::item<float>() const -> float;
 template auto Tensor::item<Float16>() const -> Float16;
+template auto Tensor::item<BFloat16>() const -> BFloat16;
 template auto Tensor::item<double>() const -> double;
 template auto Tensor::item<int32_t>() const -> int32_t;
 template auto Tensor::item<int64_t>() const -> int64_t;
@@ -661,6 +662,9 @@ auto Tensor::fill_(float value) -> Tensor& {
                 case DType::Int16: *reinterpret_cast<int16_t*>(base + offset) = static_cast<int16_t>(value); break;
                 case DType::Int8: *reinterpret_cast<int8_t*>(base + offset) = static_cast<int8_t>(value); break;
                 case DType::UInt8: *reinterpret_cast<uint8_t*>(base + offset) = static_cast<uint8_t>(value); break;
+                case DType::UInt16: *reinterpret_cast<uint16_t*>(base + offset) = static_cast<uint16_t>(value); break;
+                case DType::UInt32: *reinterpret_cast<uint32_t*>(base + offset) = static_cast<uint32_t>(value); break;
+                case DType::UInt64: *reinterpret_cast<uint64_t*>(base + offset) = static_cast<uint64_t>(value); break;
                 case DType::Float16: *reinterpret_cast<Float16*>(base + offset) = Float16(value); break;
                 case DType::BFloat16: *reinterpret_cast<BFloat16*>(base + offset) = BFloat16(value); break;
                 case DType::Bool: *reinterpret_cast<bool*>(base + offset) = (value != 0.0f); break;
@@ -726,6 +730,27 @@ auto Tensor::fill_(float value) -> Tensor& {
             uint8_t* ptr = data<uint8_t>();
             for (int64_t i = 0; i < n; ++i) {
                 ptr[i] = static_cast<uint8_t>(value);
+            }
+            break;
+        }
+        case DType::UInt16: {
+            uint16_t* ptr = data<uint16_t>();
+            for (int64_t i = 0; i < n; ++i) {
+                ptr[i] = static_cast<uint16_t>(value);
+            }
+            break;
+        }
+        case DType::UInt32: {
+            uint32_t* ptr = data<uint32_t>();
+            for (int64_t i = 0; i < n; ++i) {
+                ptr[i] = static_cast<uint32_t>(value);
+            }
+            break;
+        }
+        case DType::UInt64: {
+            uint64_t* ptr = data<uint64_t>();
+            for (int64_t i = 0; i < n; ++i) {
+                ptr[i] = static_cast<uint64_t>(value);
             }
             break;
         }

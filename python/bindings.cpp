@@ -605,7 +605,14 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("__bool__", [](const tenzor::Tensor& t) -> bool {
              if (t.numel() != 1) throw py::value_error(
                  "The truth value of a Tensor with more than one element is ambiguous");
-             return t.item<float>() != 0.0f;
+             switch (t.dtype()) {
+                 case tenzor::DType::Float32: return t.item<float>() != 0.0f;
+                 case tenzor::DType::Float64: return t.item<double>() != 0.0;
+                 case tenzor::DType::Int32: return t.item<int32_t>() != 0;
+                 case tenzor::DType::Int64: return t.item<int64_t>() != 0;
+                 case tenzor::DType::Bool: return t.item<bool>();
+                 default: return t.item<float>() != 0.0f;
+             }
              })
         .def("__str__", [](const tenzor::Tensor& t) {
              std::ostringstream ss;
@@ -843,7 +850,7 @@ PYBIND11_MODULE(tenzor_core, m) {
                             scalar_value = static_cast<float>(*src_cpu.data<int64_t>());
                             break;
                         default:
-                            scalar_value = 0.0f;
+                            throw py::type_error("Unsupported dtype for scalar broadcast in __setitem__");
                     }
                     dst.fill_(scalar_value);
                     return;

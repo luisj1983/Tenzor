@@ -369,7 +369,7 @@ auto acos(const Tensor& input) -> Tensor {
 
 // Comparison operations
 auto eq(const Tensor& a, const Tensor& b) -> Tensor {
-    // Ensure tensors are contiguous before element-wise comparison
+    validate_broadcast_shapes("eq", a.shape(), b.shape());
     Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
     Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
     std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
@@ -377,7 +377,7 @@ auto eq(const Tensor& a, const Tensor& b) -> Tensor {
 }
 
 auto ne(const Tensor& a, const Tensor& b) -> Tensor {
-    // Ensure tensors are contiguous before element-wise comparison
+    validate_broadcast_shapes("ne", a.shape(), b.shape());
     Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
     Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
     std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
@@ -385,7 +385,7 @@ auto ne(const Tensor& a, const Tensor& b) -> Tensor {
 }
 
 auto lt(const Tensor& a, const Tensor& b) -> Tensor {
-    // Ensure tensors are contiguous before element-wise comparison
+    validate_broadcast_shapes("lt", a.shape(), b.shape());
     Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
     Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
     std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
@@ -393,7 +393,7 @@ auto lt(const Tensor& a, const Tensor& b) -> Tensor {
 }
 
 auto le(const Tensor& a, const Tensor& b) -> Tensor {
-    // Ensure tensors are contiguous before element-wise comparison
+    validate_broadcast_shapes("le", a.shape(), b.shape());
     Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
     Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
     std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
@@ -401,7 +401,7 @@ auto le(const Tensor& a, const Tensor& b) -> Tensor {
 }
 
 auto gt(const Tensor& a, const Tensor& b) -> Tensor {
-    // Ensure tensors are contiguous before element-wise comparison
+    validate_broadcast_shapes("gt", a.shape(), b.shape());
     Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
     Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
     std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
@@ -409,7 +409,7 @@ auto gt(const Tensor& a, const Tensor& b) -> Tensor {
 }
 
 auto ge(const Tensor& a, const Tensor& b) -> Tensor {
-    // Ensure tensors are contiguous before element-wise comparison
+    validate_broadcast_shapes("ge", a.shape(), b.shape());
     Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
     Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
     std::vector<Tensor> inputs = {a_contiguous, b_contiguous};

@@ -105,19 +105,8 @@ auto numerical_gradient(
             double* data_plus = x_plus_cpu.data<double>();
             double* data_minus = x_minus_cpu.data<double>();
 
-            // DEBUG: Print values before perturbation
-            if (i == 0) {
-                std::cout << "DEBUG [element " << i << "]: Before perturbation = " << data_plus[i] << std::endl;
-            }
-
             data_plus[i] += eps;
             data_minus[i] -= eps;
-
-            // DEBUG: Print perturbed values
-            if (i == 0) {
-                std::cout << "DEBUG [element " << i << "]: After perturbation, x_plus[0] = " << data_plus[i]
-                          << ", x_minus[0] = " << data_minus[i] << std::endl;
-            }
 
         } else {
             throw std::runtime_error("gradcheck only supports Float32 and Float64 dtypes");
@@ -133,23 +122,9 @@ auto numerical_gradient(
             x_minus = Variable(x_minus_cpu, false);
         }
 
-        // DEBUG: Verify values in Variable
-        if (input.dtype() == DType::Float64 && i == 0) {
-            auto verify_cpu = x_plus.tensor().to(Device::cpu());
-            const double* verify_data = verify_cpu.data<double>();
-            std::cout << "DEBUG [element " << i << "]: x_plus Variable tensor[0] = " << verify_data[i] << std::endl;
-        }
-
         // Compute function outputs
         Variable f_plus = func(x_plus);
         Variable f_minus = func(x_minus);
-
-        // DEBUG: Check output dtype
-        if (input.dtype() == DType::Float64 && i == 0) {
-            std::cout << "DEBUG [element " << i << "]: f_plus dtype = "
-                      << (f_plus.dtype() == DType::Float64 ? "Float64" :
-                          (f_plus.dtype() == DType::Float32 ? "Float32" : "Other")) << std::endl;
-        }
 
         // Extract scalar values (function should return scalar or we sum it)
         double val_plus, val_minus;
@@ -157,12 +132,6 @@ auto numerical_gradient(
         if (f_plus.tensor().numel() == 1) {
             val_plus = extract_scalar(f_plus.tensor());
             val_minus = extract_scalar(f_minus.tensor());
-
-            // DEBUG: Print function output values
-            if (input.dtype() == DType::Float64 && i == 0) {
-                std::cout << "DEBUG [element " << i << "]: f_plus = " << val_plus
-                          << ", f_minus = " << val_minus << std::endl;
-            }
         } else {
             // If output is not scalar, sum it to get scalar
             // This allows checking functions with multiple outputs
@@ -200,24 +169,10 @@ auto numerical_gradient(
 
             val_plus = total_plus;
             val_minus = total_minus;
-
-            // DEBUG: Print summed values for vector outputs
-            if (input.dtype() == DType::Float64 && i == 0) {
-                std::cout << std::setprecision(20)  << "DEBUG [element " << i << ", vector sum]: f_plus_sum = " << val_plus
-                          << ", f_minus_sum = " << val_minus << std::endl;
-                std::cout << std::setprecision(6);  // Reset precision
-            }
         }
 
         // Compute numerical gradient using central differences
         double numerical_grad_i = (val_plus - val_minus) / (2.0 * eps);
-
-        // DEBUG: Print computed numerical gradient
-        if (input.dtype() == DType::Float64 && i == 0) {
-            std::cout << "DEBUG [element " << i << "]: numerical_grad = " << numerical_grad_i
-                      << " (from val_plus=" << val_plus << ", val_minus=" << val_minus
-                      << ", eps=" << eps << ")" << std::endl;
-        }
 
         // Store in gradient tensor (using pre-created CPU tensor)
         if (num_grad.dtype() == DType::Float32) {
@@ -286,13 +241,6 @@ auto compare_gradients(
         } else {
             num_val = numerical_cpu.data<double>()[i];
             ana_val = analytical_cpu.data<double>()[i];
-        }
-
-        // DEBUG: Print first 4 elements for Float64
-        if (!is_float32 && i < 4) {
-            std::cout << std::setprecision(15) << "DEBUG compare [" << i << "]: numerical = " << num_val
-                      << ", analytical = " << ana_val
-                      << ", abs_error = " << std::abs(num_val - ana_val) << std::endl;
         }
 
         // Compute errors
@@ -380,9 +328,6 @@ auto gradcheck_detailed(
         if (atol < 1e-4) atol = 1e-4;
         if (rtol < 1e-2) rtol = 1e-2;
     }
-
-    // Save original requires_grad state
-    bool original_requires_grad = input.requires_grad();
 
     try {
         // Compute numerical gradient FIRST so we have it even if analytical fails

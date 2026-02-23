@@ -128,8 +128,21 @@ void Serializer::write_tensor(std::ofstream& file, const std::string& name, cons
         case DType::Bool:
             data_ptr = cpu_tensor.data<bool>();
             break;
+        case DType::Float16:
+            data_ptr = cpu_tensor.data<Float16>();
+            break;
+        case DType::BFloat16:
+            data_ptr = cpu_tensor.data<BFloat16>();
+            break;
+        case DType::Int8:
+            data_ptr = cpu_tensor.data<int8_t>();
+            break;
+        case DType::Int16:
+            data_ptr = cpu_tensor.data<int16_t>();
+            break;
         default:
-            throw std::runtime_error("Unsupported dtype for serialization");
+            throw std::runtime_error("Unsupported dtype for serialization: " +
+                std::string(dtype_name(cpu_tensor.dtype())));
     }
 
     file.write(static_cast<const char*>(data_ptr), num_bytes);
@@ -178,8 +191,21 @@ auto Serializer::read_tensor(std::ifstream& file) -> std::pair<std::string, Tens
         case DType::Bool:
             data_ptr = tensor.data<bool>();
             break;
+        case DType::Float16:
+            data_ptr = tensor.data<Float16>();
+            break;
+        case DType::BFloat16:
+            data_ptr = tensor.data<BFloat16>();
+            break;
+        case DType::Int8:
+            data_ptr = tensor.data<int8_t>();
+            break;
+        case DType::Int16:
+            data_ptr = tensor.data<int16_t>();
+            break;
         default:
-            throw std::runtime_error("Unsupported dtype for deserialization");
+            throw std::runtime_error("Unsupported dtype for deserialization: " +
+                std::string(dtype_name(dtype)));
     }
 
     file.read(static_cast<char*>(data_ptr), num_bytes);

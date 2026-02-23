@@ -297,9 +297,14 @@ auto repeat(const Tensor& input, std::vector<int64_t> repeats) -> Tensor {
     auto shape = input.shape();
     int64_t ndim = shape.size();
 
-    // Validate repeats size
+    // If repeats has more dims than input, unsqueeze leading dimensions
+    Tensor padded = input;
     if (repeats.size() > static_cast<size_t>(ndim)) {
-        throw std::runtime_error("Number of repeat dimensions cannot exceed input dimensions");
+        for (size_t i = 0; i < repeats.size() - static_cast<size_t>(ndim); ++i) {
+            padded = padded.unsqueeze(0);
+        }
+        shape = padded.shape();
+        ndim = shape.size();
     }
 
     // Pad repeats with 1s at the front if needed
@@ -314,19 +319,19 @@ auto repeat(const Tensor& input, std::vector<int64_t> repeats) -> Tensor {
     }
 
     // For non-CPU devices, use dispatcher
-    if (input.device().type != Device::Type::CPU) {
+    if (padded.device().type != Device::Type::CPU) {
         OpAttributes attrs;
         attrs["repeats"] = shape_to_string(repeats);
-        std::vector<Tensor> inputs = {input};
+        std::vector<Tensor> inputs = {padded};
         return dispatch(OpId::Repeat, inputs, attrs)[0];
     }
 
     // CPU implementation: repeat elements along each dimension
     // Make input contiguous for easier indexing
-    auto input_cont = input.is_contiguous() ? input : input.contiguous();
+    auto input_cont = padded.is_contiguous() ? padded : padded.contiguous();
 
     // Create output tensor
-    auto output = empty(out_shape, input.dtype(), Device::cpu());
+    auto output = empty(out_shape, padded.dtype(), Device::cpu());
 
     // Calculate total elements
     int64_t total_out = 1;

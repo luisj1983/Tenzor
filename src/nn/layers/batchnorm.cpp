@@ -858,7 +858,7 @@ auto BatchNorm1d::forward_impl(const Variable& input) -> Variable {
         requires_grad = requires_grad || cached_weight_->requires_grad();
     }
 
-    if (requires_grad) {
+    if (is_grad_enabled() && requires_grad) {
         auto result = Variable(output, true);
 
         // Compute invstd for backward

@@ -393,6 +393,7 @@ auto ModuleDict::erase(const std::string& key) -> void {
     }
     modules_.erase(it);
     order_.erase(std::remove(order_.begin(), order_.end(), key), order_.end());
+    submodules_.erase(key);
 }
 
 auto ModuleDict::values() const -> std::vector<std::shared_ptr<Module>> {
