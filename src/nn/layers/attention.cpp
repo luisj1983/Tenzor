@@ -126,7 +126,8 @@ auto MultiheadAttention::scaled_dot_product_attention(
     const Variable& key,
     const Variable& value,
     const Tensor& attn_mask,
-    double dropout_p) const -> std::pair<Variable, Variable> {
+    double dropout_p,
+    bool need_weights) const -> std::pair<Variable, Variable> {
 
     // Query: (batch, num_heads, seq_len_q, head_dim)
     // Key: (batch, num_heads, seq_len_k, head_dim)
@@ -143,7 +144,9 @@ auto MultiheadAttention::scaled_dot_product_attention(
 
     // Use fused CPU kernel for inference when conditions allow:
     // - CPU device, Float32, no mask (or is_causal handles masking), no dropout (or eval mode)
-    bool can_use_fused = query.device().type == Device::Type::CPU &&
+    // - need_weights must be false (fused path doesn't compute attention weights)
+    bool can_use_fused = !need_weights &&
+                         query.device().type == Device::Type::CPU &&
                          query.dtype() == DType::Float32 &&
                          (is_causal_ || !attn_mask.is_valid() || attn_mask.shape().size() == 0) &&  // No explicit mask needed
                          (dropout_p <= 0.0 || !is_training());  // No dropout needed
@@ -191,8 +194,10 @@ auto MultiheadAttention::scaled_dot_product_attention(
     // Requirements: cuDNN 9.0+, Ampere+ GPU, head_dim in {32, 64, 128, 256}, FP16 input
     // Note: Only enabled for FP16 inputs - FP32→FP16 conversion overhead makes BMM faster for FP32
     // Note: Only enabled in inference mode - cuDNN SDPA doesn't build autograd graph
+    // need_weights must be false (cuDNN SDPA path doesn't compute attention weights)
     bool is_fp16 = query.dtype() == DType::Float16 || query.dtype() == DType::BFloat16;
-    bool can_use_cudnn_sdpa = is_fp16 &&
+    bool can_use_cudnn_sdpa = !need_weights &&
+        is_fp16 &&
         (query.device().type == Device::Type::CUDA) &&
         (head_dim == 32 || head_dim == 64 || head_dim == 128 || head_dim == 256) &&
         !is_training();  // Only use cuDNN SDPA in inference mode
@@ -230,12 +235,14 @@ auto MultiheadAttention::scaled_dot_product_attention(
     // When is_causal_ is true, the kernel handles causal masking internally (no explicit mask needed)
     // When is_causal_ is false, we still require no external mask for the flash path
     // Dropout is handled inside the fused kernel via Philox RNG (no training guard needed)
-    bool can_use_flash_attention = query.device().type == Device::Type::CPU &&
+    // need_weights must be false (flash attention path doesn't compute attention weights)
+    bool can_use_flash_attention = !need_weights &&
+                                   query.device().type == Device::Type::CPU &&
                                    query.dtype() == DType::Float32 &&
                                    head_dim <= 256 &&
                                    (is_causal_ || !attn_mask.is_valid() || attn_mask.shape().size() == 0);
 
-    if (can_use_flash_attention) {
+    if (can_use_flash_attention && !query.requires_grad()) {
         try {
             float scale_f = 1.0f / std::sqrt(static_cast<float>(head_dim));
 
@@ -435,7 +442,7 @@ auto MultiheadAttention::forward(const Variable& query,
     }
 
     // Compute attention
-    auto [attended_values, attn_weights] = scaled_dot_product_attention(Q, K, V, combined_mask, dropout_);
+    auto [attended_values, attn_weights] = scaled_dot_product_attention(Q, K, V, combined_mask, dropout_, need_weights);
 
     // Merge heads
     Variable output = merge_heads(attended_values);

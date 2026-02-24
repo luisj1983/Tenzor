@@ -588,22 +588,26 @@ static void matmul_blocked_float16(
     constexpr int64_t TILE_N = 128;
     constexpr int64_t TILE_K = 256;
 
-    // Use heap-allocated thread-local buffers to avoid stack overflow
-    // (stack arrays of 128*256 + 256*128 + 128*128 = ~192KB per thread)
-    static thread_local std::vector<float> A_fp32_buf(TILE_M * TILE_K);
-    static thread_local std::vector<float> B_fp32_buf(TILE_K * TILE_N);
-    static thread_local std::vector<float> C_fp32_buf(TILE_M * TILE_N);
-
     // Zero-initialize output
     std::fill_n(C, M * N, Float16(0.0f));
 
-    #pragma omp parallel for collapse(2) if(M * N > 65536)
+    // Use omp parallel to allocate per-thread FP32 workspace buffers on the heap.
+    // 'static thread_local' vectors are NOT safe here because this code runs inside
+    // a dlopen'd shared library, and OpenMP worker threads may bypass the C++ TLS
+    // initialization machinery, leaving the vectors empty (data() == nullptr).
+    #pragma omp parallel if(M * N > 65536)
+    {
+    std::vector<float> A_fp32_buf(TILE_M * TILE_K);
+    std::vector<float> B_fp32_buf(TILE_K * TILE_N);
+    std::vector<float> C_fp32_buf(TILE_M * TILE_N);
+
+    #pragma omp for collapse(2)
     for (int64_t i0 = 0; i0 < M; i0 += TILE_M) {
         for (int64_t j0 = 0; j0 < N; j0 += TILE_N) {
             int64_t tile_m = std::min(TILE_M, M - i0);
             int64_t tile_n = std::min(TILE_N, N - j0);
 
-            // Thread-local buffer pointers
+            // Per-thread buffer pointers
             float* A_fp32 = A_fp32_buf.data();
             float* B_fp32 = B_fp32_buf.data();
             float* C_fp32 = C_fp32_buf.data();
@@ -695,6 +699,7 @@ static void matmul_blocked_float16(
             #endif
         }
     }
+    } // omp parallel
 }
 
 // High-performance BFloat16 matrix multiplication
@@ -4030,6 +4035,13 @@ auto gt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
                 c_data[i] = (a_data[i] > b_data[i]);
             }
 #endif
+        } else if (a.dtype() == DType::BFloat16) {
+            const BFloat16* a_data = a.data<BFloat16>();
+            const BFloat16* b_data = b.data<BFloat16>();
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = (static_cast<float>(a_data[i]) > static_cast<float>(b_data[i]));
+            }
         } else if (a.dtype() == DType::Int64) {
             const int64_t* a_data = a.data<int64_t>();
             const int64_t* b_data = b.data<int64_t>();
@@ -4057,6 +4069,11 @@ auto gt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const double* b_data = b.data<double>();
             detail::broadcast_op<double, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](double x, double y) { return x > y; });
+        } else if (a.dtype() == DType::BFloat16) {
+            const BFloat16* a_data = a.data<BFloat16>();
+            const BFloat16* b_data = b.data<BFloat16>();
+            detail::broadcast_op<BFloat16, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](BFloat16 x, BFloat16 y) { return static_cast<float>(x) > static_cast<float>(y); });
         } else if (a.dtype() == DType::Int32) {
             const int32_t* a_data = a.data<int32_t>();
             const int32_t* b_data = b.data<int32_t>();

@@ -230,7 +230,8 @@ private:
                                      const Variable& key,
                                      const Variable& value,
                                      const Tensor& attn_mask = Tensor{},
-                                     double dropout_p = 0.0) const
+                                     double dropout_p = 0.0,
+                                     bool need_weights = false) const
         -> std::pair<Variable, Variable>;
 
     /**

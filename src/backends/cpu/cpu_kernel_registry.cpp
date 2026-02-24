@@ -404,35 +404,30 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     TENZOR_REGISTER_INPLACE_KERNEL(table, DivInplace, cpu::div_inplace_kernel);
 
     // Inplace activation operations
-    table.register_kernel(OpId::ReLUInplace, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        Tensor input = inputs[0];  // Copy to allow modification
-        cpu::relu_inplace_kernel(input);
-        return std::vector<Tensor>{input};
+    table.register_inplace_kernel(OpId::ReLUInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes&) -> Tensor& {
+        cpu::relu_inplace_kernel(target);
+        return target;
     });
 
-    table.register_kernel(OpId::SigmoidInplace, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        Tensor input = inputs[0];
-        cpu::sigmoid_inplace_kernel(input);
-        return std::vector<Tensor>{input};
+    table.register_inplace_kernel(OpId::SigmoidInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes&) -> Tensor& {
+        cpu::sigmoid_inplace_kernel(target);
+        return target;
     });
 
-    table.register_kernel(OpId::TanhInplace, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        Tensor input = inputs[0];
-        cpu::tanh_inplace_kernel(input);
-        return std::vector<Tensor>{input};
+    table.register_inplace_kernel(OpId::TanhInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes&) -> Tensor& {
+        cpu::tanh_inplace_kernel(target);
+        return target;
     });
 
-    table.register_kernel(OpId::LeakyReLUInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_inplace_kernel(OpId::LeakyReLUInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
         float alpha = parse_attr<float>(attrs, "alpha", 0.01f);
-        Tensor input = inputs[0];
-        cpu::leaky_relu_inplace_kernel(input, alpha);
-        return std::vector<Tensor>{input};
+        cpu::leaky_relu_inplace_kernel(target, alpha);
+        return target;
     });
 
-    table.register_kernel(OpId::GeluInplace, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        Tensor input = inputs[0];
-        cpu::gelu_inplace_kernel(input);
-        return std::vector<Tensor>{input};
+    table.register_inplace_kernel(OpId::GeluInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes&) -> Tensor& {
+        cpu::gelu_inplace_kernel(target);
+        return target;
     });
 
     // =========================================================================

@@ -155,7 +155,7 @@ private:
      * @brief Convert attention mask to transformer format
      * Transforms [batch, seq_len] with 0/1 to [seq_len, seq_len] with -inf/0
      */
-    auto prepare_attention_mask(const Tensor& mask, int64_t seq_len) -> Tensor;
+    auto prepare_attention_mask(const Tensor& mask, int64_t seq_len, DType compute_dtype = DType::Float32) -> Tensor;
 };
 
 /**

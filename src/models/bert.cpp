@@ -152,7 +152,7 @@ BertEncoder::BertEncoder(const BertConfig& config)
     register_module("encoder", encoder_);
 }
 
-auto BertEncoder::prepare_attention_mask(const Tensor& mask, int64_t seq_len) -> Tensor {
+auto BertEncoder::prepare_attention_mask(const Tensor& mask, int64_t seq_len, DType compute_dtype) -> Tensor {
     if (!mask.is_valid() || mask.numel() == 0) {
         return Tensor{};
     }
@@ -163,11 +163,13 @@ auto BertEncoder::prepare_attention_mask(const Tensor& mask, int64_t seq_len) ->
     auto batch_size = mask.shape()[0];
     auto device = mask.device();
 
-    // Convert mask to float: 1 -> 0.0 (attend), 0 -> -1e9 (ignore)
-    auto float_mask = mask.to(DType::Float32);
+    // Convert mask to the model's compute dtype to avoid dtype mismatches during backward
+    auto float_mask = mask.to(compute_dtype);
     // (mask - 1.0) gives -1.0 for padding (was 0), 0.0 for valid (was 1)
-    // Multiply by 1e9 to get -1e9 for masked positions, 0.0 for attended
-    auto attn_mask = (float_mask - 1.0) * 1e9f;
+    // Use dtype-appropriate large value: Float16 max is ~65504, so 1e9 would overflow
+    float mask_fill = (compute_dtype == DType::Float16 || compute_dtype == DType::BFloat16)
+                      ? 1e4f : 1e9f;
+    auto attn_mask = (float_mask - 1.0) * mask_fill;
 
     // Reshape to [batch, 1, 1, seq_len] for broadcasting across heads and query positions
     attn_mask = attn_mask.reshape({batch_size, 1, 1, seq_len});
@@ -182,7 +184,8 @@ auto BertEncoder::forward(const Variable& hidden_states,
     call_forward_pre_hooks();
 
     // Prepare attention mask if provided
-    auto mask = prepare_attention_mask(attention_mask, hidden_states.tensor().shape()[1]);
+    auto mask = prepare_attention_mask(attention_mask, hidden_states.tensor().shape()[1],
+                                       hidden_states.tensor().dtype());
 
     // Pass through encoder layers
     auto output = encoder_->forward(hidden_states, mask, Tensor{});

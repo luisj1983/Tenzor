@@ -139,7 +139,8 @@ auto Tensor::data() -> T* {
         }
     }
     // Bounds check: compute max reachable element using strides (handles non-contiguous)
-    {
+    // Skip for empty tensors (any dimension is 0) — no elements to access
+    if (impl_->numel() > 0) {
         size_t storage_elements = impl_->storage->size_bytes() / tenzor::dtype_size(impl_->dtype);
         size_t max_offset = static_cast<size_t>(impl_->offset);
         for (int64_t d = 0; d < ndim(); ++d) {
@@ -178,7 +179,8 @@ auto Tensor::data() const -> const T* {
         }
     }
     // Bounds check: compute max reachable element using strides (handles non-contiguous)
-    {
+    // Skip for empty tensors (any dimension is 0) — no elements to access
+    if (impl_->numel() > 0) {
         size_t storage_elements = impl_->storage->size_bytes() / tenzor::dtype_size(impl_->dtype);
         size_t max_offset = static_cast<size_t>(impl_->offset);
         for (int64_t d = 0; d < ndim(); ++d) {

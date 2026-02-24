@@ -51,13 +51,12 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
         return;
     }
 
-    // Topological sort from root (cached for retain_graph scenarios)
-    Function* root_ptr = root.grad_fn().get();
-    if (topo_cache_.root != root_ptr || topo_cache_.sorted.empty()) {
-        topo_cache_.root = root_ptr;
-        topo_cache_.sorted = topological_sort(root.grad_fn());
-    }
-    auto& sorted = topo_cache_.sorted;
+    // Topological sort from root
+    // Use a local variable (not the instance cache) to be re-entrant safe.
+    // Nested backward calls (e.g. from gradient checkpointing) invoke
+    // execute() on the same thread-local engine; a shared cache would be
+    // overwritten, invalidating the outer call's iterators.
+    auto sorted = topological_sort(root.grad_fn());
 
     // Set the create_graph flag so backward functions know to use Variable ops
     // Use RAII guard to ensure flag is restored even on exception
@@ -75,8 +74,7 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                     func->set_next_functions({});
                 }
             }
-            topo_cache_.root = nullptr;
-            topo_cache_.sorted.clear();
+            sorted.clear();
             if (root.grad_fn() && !root.is_leaf()) {
                 root.set_grad_fn(nullptr);
             }

@@ -12,7 +12,7 @@
 #include <memory>
 #include <optional>
 #include <functional>
-#include <unordered_map>
+#include <map>
 #include "../core/tensor.hpp"
 
 namespace tenzor {
@@ -110,8 +110,8 @@ struct VariableImpl {
     /// Whether to retain gradient for non-leaf variables (atomic for thread-safe concurrent access)
     std::atomic<bool> retain_grad_{false};
 
-    /// Backward hooks keyed by ID (requires synchronization for modifications)
-    std::unordered_map<size_t, std::function<Tensor(const Tensor&)>> hooks_;
+    /// Backward hooks keyed by ID, ordered by registration order (requires synchronization for modifications)
+    std::map<size_t, std::function<Tensor(const Tensor&)>> hooks_;
 
     /// Next hook ID for register_hook
     size_t next_hook_id_{0};
