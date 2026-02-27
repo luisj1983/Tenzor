@@ -13,14 +13,17 @@ struct CatKernelFloat64 {};
 struct CatKernelFloat16 {};
 struct CatKernelInt32 {};
 struct CatKernelInt64 {};
+struct CatKernelBFloat16 {};
 struct CatKernelBool {};
 struct ClampKernelFloat32 {};
 struct ClampKernelFloat64 {};
 struct ClampKernelFloat16 {};
+struct ClampKernelBFloat16 {};
 struct ClampKernelInt32 {};
 struct SignKernelFloat32 {};
 struct SignKernelFloat64 {};
 struct SignKernelFloat16 {};
+struct SignKernelBFloat16 {};
 struct SignKernelInt32 {};
 
 // Helper function to get typed pointer from tensor
@@ -47,6 +50,19 @@ inline auto calculate_strides(const std::vector<int64_t>& shape) -> std::vector<
         stride *= shape[i];
     }
     return strides;
+}
+
+// BFloat16 conversion helpers (BFloat16 stored as uint16_t in memory)
+inline float bf16_to_f32(uint16_t bf16) {
+    uint32_t bits = static_cast<uint32_t>(bf16) << 16;
+    float result;
+    __builtin_memcpy(&result, &bits, sizeof(float));
+    return result;
+}
+inline uint16_t f32_to_bf16(float f32) {
+    uint32_t bits;
+    __builtin_memcpy(&bits, &f32, sizeof(uint32_t));
+    return static_cast<uint16_t>(bits >> 16);
 }
 
 /**
@@ -233,6 +249,32 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, sycl::queue& queue
                 }
             ).wait();
         }
+        else if (dtype == DType::BFloat16) {
+            // BFloat16 stored as uint16_t — pure copy, no conversion needed
+            const uint16_t* src_ptr = get_data_ptr<const uint16_t>(tensor);
+            uint16_t* dst_ptr = get_data_ptr<uint16_t>(output);
+
+            const int64_t src_slice_stride = elements_per_slice * tensor_size_in_dim;
+            const int64_t dst_slice_stride = elements_per_slice * out_shape[dim];
+
+            queue.parallel_for<CatKernelBFloat16>(
+                sycl::range<1>(num_slices * tensor_size_in_dim * elements_per_slice),
+                [=](sycl::id<1> idx) {
+                    const int64_t flat_idx = idx[0];
+                    const int64_t slice_idx = flat_idx / src_slice_stride;
+                    const int64_t remainder = flat_idx % src_slice_stride;
+                    const int64_t concat_idx = remainder / elements_per_slice;
+                    const int64_t elem_idx = remainder % elements_per_slice;
+
+                    const int64_t src_idx = slice_idx * src_slice_stride + concat_idx * elements_per_slice + elem_idx;
+                    const int64_t dst_idx = slice_idx * dst_slice_stride +
+                                           (offset_in_concat_dim + concat_idx) * elements_per_slice +
+                                           elem_idx;
+
+                    dst_ptr[dst_idx] = src_ptr[src_idx];
+                }
+            ).wait();
+        }
         else if (dtype == DType::Int32) {
             const int32_t* src_ptr = get_data_ptr<const int32_t>(tensor);
             int32_t* dst_ptr = get_data_ptr<int32_t>(output);
@@ -380,6 +422,15 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val, sycl::queue
             out_ptr[idx] = sycl::half(sycl::fmin(sycl::fmax(val, min_val), max_val));
         }).wait();
     }
+    else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+
+        queue.parallel_for<ClampKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            const float val = bf16_to_f32(in_ptr[idx]);
+            out_ptr[idx] = f32_to_bf16(sycl::fmin(sycl::fmax(val, min_val), max_val));
+        }).wait();
+    }
     else if (input.dtype() == DType::Int32) {
         const int32_t* in_ptr = get_data_ptr<const int32_t>(input);
         int32_t* out_ptr = get_data_ptr<int32_t>(output);
@@ -468,6 +519,25 @@ auto sign_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
                 out_ptr[idx] = sycl::half(1.0f);
             } else {
                 out_ptr[idx] = sycl::half(-1.0f);
+            }
+        }).wait();
+    }
+    else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+
+        const uint16_t bf16_zero = f32_to_bf16(0.0f);
+        const uint16_t bf16_pos_one = f32_to_bf16(1.0f);
+        const uint16_t bf16_neg_one = f32_to_bf16(-1.0f);
+
+        queue.parallel_for<SignKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            const float val = bf16_to_f32(in_ptr[idx]);
+            if (val == 0.0f) {
+                out_ptr[idx] = bf16_zero;
+            } else if (val > 0.0f) {
+                out_ptr[idx] = bf16_pos_one;
+            } else {
+                out_ptr[idx] = bf16_neg_one;
             }
         }).wait();
     }

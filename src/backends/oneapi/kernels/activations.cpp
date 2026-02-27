@@ -60,11 +60,41 @@ class LogSoftmaxKernelFloat64;
 class LogSoftmaxKernelFloat16;
 class LogSoftmaxBackwardKernelFloat64;
 class LogSoftmaxBackwardKernelFloat16;
+class ReLUKernelBFloat16;
+class ReLUBackwardKernelBFloat16;
+class SigmoidKernelBFloat16;
+class SigmoidBackwardKernelBFloat16;
+class TanhKernelBFloat16;
+class TanhBackwardKernelBFloat16;
+class GeLUKernelBFloat16;
+class GeLUBackwardKernelBFloat16;
+class SoftmaxKernelBFloat16;
+class SoftmaxBackwardKernelBFloat16;
+class LeakyReLUKernelBFloat16;
+class LeakyReLUBackwardKernelBFloat16;
+class SwishKernelBFloat16;
+class SwishBackwardKernelBFloat16;
+class LogSoftmaxKernelBFloat16;
+class LogSoftmaxBackwardKernelBFloat16;
 
 // Helper function to get typed pointer from tensor
 template<typename T>
 inline auto get_data_ptr(const Tensor& t) -> T* {
     return static_cast<T*>(const_cast<void*>(t.data_ptr()));
+}
+
+// BFloat16 <-> Float32 conversion helpers (device-compatible)
+inline float bf16_to_f32(uint16_t bf16) {
+    uint32_t bits = static_cast<uint32_t>(bf16) << 16;
+    float result;
+    __builtin_memcpy(&result, &bits, sizeof(float));
+    return result;
+}
+
+inline uint16_t f32_to_bf16(float f32) {
+    uint32_t bits;
+    __builtin_memcpy(&bits, &f32, sizeof(uint32_t));
+    return static_cast<uint16_t>(bits >> 16);
 }
 
 // ReLU activation forward
@@ -101,6 +131,15 @@ auto relu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         queue.parallel_for<ReLUKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float val = static_cast<float>(in_ptr[idx]);
             out_ptr[idx] = sycl::half(sycl::fmax(0.0f, val));
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+
+        queue.parallel_for<ReLUKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float val = bf16_to_f32(in_ptr[idx]);
+            out_ptr[idx] = f32_to_bf16(sycl::fmax(0.0f, val));
         }).wait();
     }
     else {
@@ -150,6 +189,16 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
             grad_in_ptr[idx] = in_val > 0.0f ? grad_out_ptr[idx] : sycl::half(0.0f);
         }).wait();
     }
+    else if (in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_out_cont);
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+        uint16_t* grad_in_ptr = get_data_ptr<uint16_t>(grad_input);
+
+        queue.parallel_for<ReLUBackwardKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float in_val = bf16_to_f32(in_ptr[idx]);
+            grad_in_ptr[idx] = in_val > 0.0f ? grad_out_ptr[idx] : f32_to_bf16(0.0f);
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for relu_backward");
     }
@@ -187,6 +236,15 @@ auto sigmoid_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         queue.parallel_for<SigmoidKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float val = static_cast<float>(in_ptr[idx]);
             out_ptr[idx] = sycl::half(1.0f / (1.0f + sycl::exp(-val)));
+        }).wait();
+    }
+    else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+
+        queue.parallel_for<SigmoidKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float val = bf16_to_f32(in_ptr[idx]);
+            out_ptr[idx] = f32_to_bf16(1.0f / (1.0f + sycl::exp(-val)));
         }).wait();
     }
     else {
@@ -232,6 +290,17 @@ auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& output, sy
             grad_in_ptr[idx] = sycl::half(g_out * out_val * (1.0f - out_val));
         }).wait();
     }
+    else if (output.dtype() == DType::BFloat16) {
+        const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
+        const uint16_t* out_ptr = get_data_ptr<const uint16_t>(output);
+        uint16_t* grad_in_ptr = get_data_ptr<uint16_t>(grad_input);
+
+        queue.parallel_for<SigmoidBackwardKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float g_out = bf16_to_f32(grad_out_ptr[idx]);
+            float out_val = bf16_to_f32(out_ptr[idx]);
+            grad_in_ptr[idx] = f32_to_bf16(g_out * out_val * (1.0f - out_val));
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for sigmoid_backward");
     }
@@ -269,6 +338,14 @@ auto tanh_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         queue.parallel_for<TanhKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float val = static_cast<float>(in_ptr[idx]);
             out_ptr[idx] = sycl::half(sycl::tanh(val));
+        }).wait();
+    }
+    else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+
+        queue.parallel_for<TanhKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = f32_to_bf16(sycl::tanh(bf16_to_f32(in_ptr[idx])));
         }).wait();
     }
     else {
@@ -312,6 +389,17 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& output, sycl:
             float g_out = static_cast<float>(grad_out_ptr[idx]);
             float out_val = static_cast<float>(out_ptr[idx]);
             grad_in_ptr[idx] = sycl::half(g_out * (1.0f - out_val * out_val));
+        }).wait();
+    }
+    else if (output.dtype() == DType::BFloat16) {
+        const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
+        const uint16_t* out_ptr = get_data_ptr<const uint16_t>(output);
+        uint16_t* grad_in_ptr = get_data_ptr<uint16_t>(grad_input);
+
+        queue.parallel_for<TanhBackwardKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float g_out = bf16_to_f32(grad_out_ptr[idx]);
+            float out_val = bf16_to_f32(out_ptr[idx]);
+            grad_in_ptr[idx] = f32_to_bf16(g_out * (1.0f - out_val * out_val));
         }).wait();
     }
     else {
@@ -368,6 +456,20 @@ auto gelu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             float x_cubed = x * x * x;
             float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
             out_ptr[idx] = sycl::half(0.5f * x * (1.0f + sycl::tanh(inner)));
+        }).wait();
+    }
+    else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+
+        const float sqrt_2_over_pi = 0.7978845608f;
+        const float coeff = 0.044715f;
+
+        queue.parallel_for<GeLUKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = bf16_to_f32(in_ptr[idx]);
+            float x_cubed = x * x * x;
+            float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
+            out_ptr[idx] = f32_to_bf16(0.5f * x * (1.0f + sycl::tanh(inner)));
         }).wait();
     }
     else {
@@ -451,6 +553,29 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
                              0.5f * x * sech_sq * sqrt_2_over_pi * (1.0f + 3.0f * coeff * x_sq);
 
             grad_in_ptr[idx] = sycl::half(static_cast<float>(grad_out_ptr[idx]) * derivative);
+        }).wait();
+    }
+    else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        uint16_t* grad_in_ptr = get_data_ptr<uint16_t>(grad_input);
+
+        const float sqrt_2_over_pi = 0.7978845608f;
+        const float coeff = 0.044715f;
+
+        queue.parallel_for<GeLUBackwardKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = bf16_to_f32(in_ptr[idx]);
+            float x_sq = x * x;
+            float x_cubed = x_sq * x;
+
+            float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
+            float tanh_inner = sycl::tanh(inner);
+            float sech_sq = 1.0f - tanh_inner * tanh_inner;
+
+            float derivative = 0.5f * (1.0f + tanh_inner) +
+                             0.5f * x * sech_sq * sqrt_2_over_pi * (1.0f + 3.0f * coeff * x_sq);
+
+            grad_in_ptr[idx] = f32_to_bf16(bf16_to_f32(grad_out_ptr[idx]) * derivative);
         }).wait();
     }
     else {
@@ -567,6 +692,36 @@ auto softmax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Ten
             }
         }).wait();
     }
+    else if (in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+
+        const int64_t total_work_items = outer_size * inner_size;
+        queue.parallel_for<SoftmaxKernelBFloat16>(sycl::range<1>(total_work_items), [=](sycl::id<1> idx) {
+            const int64_t work_idx = idx[0];
+            const int64_t outer_idx = work_idx / inner_size;
+            const int64_t inner_idx = work_idx % inner_size;
+            const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+
+            float max_val = -3.4028235e+38f;
+            for (int64_t d = 0; d < dim_size; ++d) {
+                float val = bf16_to_f32(in_ptr[base_offset + d * inner_size]);
+                max_val = sycl::fmax(max_val, val);
+            }
+
+            float sum = 0.0f;
+            for (int64_t d = 0; d < dim_size; ++d) {
+                float val = sycl::exp(bf16_to_f32(in_ptr[base_offset + d * inner_size]) - max_val);
+                out_ptr[base_offset + d * inner_size] = f32_to_bf16(val);
+                sum += val;
+            }
+
+            for (int64_t d = 0; d < dim_size; ++d) {
+                float normalized = bf16_to_f32(out_ptr[base_offset + d * inner_size]) / sum;
+                out_ptr[base_offset + d * inner_size] = f32_to_bf16(normalized);
+            }
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for softmax");
     }
@@ -656,6 +811,31 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
             }
         }).wait();
     }
+    else if (output.dtype() == DType::BFloat16) {
+        const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
+        const uint16_t* out_ptr = get_data_ptr<const uint16_t>(output);
+        uint16_t* grad_in_ptr = get_data_ptr<uint16_t>(grad_input);
+
+        const int64_t total_work_items = outer_size * inner_size;
+        queue.parallel_for<SoftmaxBackwardKernelBFloat16>(sycl::range<1>(total_work_items), [=](sycl::id<1> idx) {
+            const int64_t work_idx = idx[0];
+            const int64_t outer_idx = work_idx / inner_size;
+            const int64_t inner_idx = work_idx % inner_size;
+            const int64_t offset = (outer_idx * dim_size * inner_size) + inner_idx;
+
+            float dot = 0.0f;
+            for (int64_t d = 0; d < dim_size; ++d) {
+                dot += bf16_to_f32(grad_out_ptr[offset + d * inner_size]) *
+                       bf16_to_f32(out_ptr[offset + d * inner_size]);
+            }
+
+            for (int64_t d = 0; d < dim_size; ++d) {
+                float out_val = bf16_to_f32(out_ptr[offset + d * inner_size]);
+                float grad_out_val = bf16_to_f32(grad_out_ptr[offset + d * inner_size]);
+                grad_in_ptr[offset + d * inner_size] = f32_to_bf16(out_val * (grad_out_val - dot));
+            }
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for softmax_backward");
     }
@@ -696,6 +876,15 @@ auto leaky_relu_kernel(const Tensor& input, float alpha, sycl::queue& queue) -> 
         queue.parallel_for<LeakyReLUKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = static_cast<float>(in_ptr[idx]);
             out_ptr[idx] = sycl::half(x > 0.0f ? x : alpha * x);
+        }).wait();
+    }
+    else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+
+        queue.parallel_for<LeakyReLUKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = bf16_to_f32(in_ptr[idx]);
+            out_ptr[idx] = f32_to_bf16(x > 0.0f ? x : alpha * x);
         }).wait();
     }
     else {
@@ -740,6 +929,17 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
             float in_val = static_cast<float>(in_ptr[idx]);
             float grad_out_val = static_cast<float>(grad_out_ptr[idx]);
             grad_in_ptr[idx] = sycl::half(in_val > 0.0f ? grad_out_val : alpha * grad_out_val);
+        }).wait();
+    }
+    else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        uint16_t* grad_in_ptr = get_data_ptr<uint16_t>(grad_input);
+
+        queue.parallel_for<LeakyReLUBackwardKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float in_val = bf16_to_f32(in_ptr[idx]);
+            float g_out = bf16_to_f32(grad_out_ptr[idx]);
+            grad_in_ptr[idx] = f32_to_bf16(in_val > 0.0f ? g_out : alpha * g_out);
         }).wait();
     }
     else {
@@ -900,6 +1100,50 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) ->
             );
         }).wait();
     }
+    else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+
+        // Calculate dimensions
+        int64_t outer_size = 1;
+        for (int64_t i = 0; i < dim; ++i) {
+            outer_size *= shape[i];
+        }
+        int64_t dim_size = shape[dim];
+        int64_t inner_size = 1;
+        for (int64_t i = dim + 1; i < static_cast<int64_t>(shape.size()); ++i) {
+            inner_size *= shape[i];
+        }
+
+        queue.submit([&](sycl::handler& cgh) {
+            cgh.parallel_for<LogSoftmaxKernelBFloat16>(
+                sycl::range<2>(outer_size, inner_size),
+                [=](sycl::id<2> idx) {
+                    const int64_t i = idx[0];
+                    const int64_t k = idx[1];
+
+                    // Use float accumulation for numerical stability
+                    float max_val = -3.4028235e+38f;
+                    for (int64_t j = 0; j < dim_size; ++j) {
+                        const int64_t index = (i * dim_size + j) * inner_size + k;
+                        max_val = sycl::max(max_val, bf16_to_f32(in_ptr[index]));
+                    }
+
+                    float sum_exp = 0.0f;
+                    for (int64_t j = 0; j < dim_size; ++j) {
+                        const int64_t index = (i * dim_size + j) * inner_size + k;
+                        sum_exp += sycl::exp(bf16_to_f32(in_ptr[index]) - max_val);
+                    }
+                    const float log_sum_exp = sycl::log(sum_exp);
+
+                    for (int64_t j = 0; j < dim_size; ++j) {
+                        const int64_t index = (i * dim_size + j) * inner_size + k;
+                        out_ptr[index] = f32_to_bf16(bf16_to_f32(in_ptr[index]) - max_val - log_sum_exp);
+                    }
+                }
+            );
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for log_softmax");
     }
@@ -1035,6 +1279,46 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
             );
         }).wait();
     }
+    else if (output.dtype() == DType::BFloat16) {
+        const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
+        const uint16_t* out_ptr = get_data_ptr<const uint16_t>(output);
+        uint16_t* grad_in_ptr = get_data_ptr<uint16_t>(grad_input);
+
+        // Calculate dimensions
+        int64_t outer_size = 1;
+        for (int64_t i = 0; i < dim; ++i) {
+            outer_size *= shape[i];
+        }
+        int64_t dim_size = shape[dim];
+        int64_t inner_size = 1;
+        for (int64_t i = dim + 1; i < static_cast<int64_t>(shape.size()); ++i) {
+            inner_size *= shape[i];
+        }
+
+        queue.submit([&](sycl::handler& cgh) {
+            cgh.parallel_for<LogSoftmaxBackwardKernelBFloat16>(
+                sycl::range<2>(outer_size, inner_size),
+                [=](sycl::id<2> idx) {
+                    const int64_t i = idx[0];
+                    const int64_t k = idx[1];
+
+                    // Use float accumulation for precision
+                    float sum_grad = 0.0f;
+                    for (int64_t j = 0; j < dim_size; ++j) {
+                        const int64_t index = (i * dim_size + j) * inner_size + k;
+                        sum_grad += bf16_to_f32(grad_out_ptr[index]);
+                    }
+
+                    for (int64_t j = 0; j < dim_size; ++j) {
+                        const int64_t index = (i * dim_size + j) * inner_size + k;
+                        float grad_out_val = bf16_to_f32(grad_out_ptr[index]);
+                        float out_val = bf16_to_f32(out_ptr[index]);
+                        grad_in_ptr[index] = f32_to_bf16(grad_out_val - sycl::exp(out_val) * sum_grad);
+                    }
+                }
+            );
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for log_softmax_backward");
     }
@@ -1078,6 +1362,16 @@ auto swish_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             const float x = static_cast<float>(in_ptr[idx]);
             const float sigmoid = 1.0f / (1.0f + sycl::exp(-x));
             out_ptr[idx] = sycl::half(x * sigmoid);
+        }).wait();
+    }
+    else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+
+        queue.parallel_for<SwishKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = bf16_to_f32(in_ptr[idx]);
+            float sigmoid = 1.0f / (1.0f + sycl::exp(-x));
+            out_ptr[idx] = f32_to_bf16(x * sigmoid);
         }).wait();
     }
     else {
@@ -1142,6 +1436,18 @@ auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl:
             grad_in_ptr[idx] = sycl::half(g_out * swish_grad);
         }).wait();
     }
+    else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        uint16_t* grad_in_ptr = get_data_ptr<uint16_t>(grad_input);
+
+        queue.parallel_for<SwishBackwardKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = bf16_to_f32(in_ptr[idx]);
+            float sigmoid = 1.0f / (1.0f + sycl::exp(-x));
+            float derivative = sigmoid + x * sigmoid * (1.0f - sigmoid);
+            grad_in_ptr[idx] = f32_to_bf16(bf16_to_f32(grad_out_ptr[idx]) * derivative);
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for swish_backward");
     }
@@ -1169,6 +1475,11 @@ class LeakyReLUInplaceKernelFloat16 {};
 class GeLUInplaceKernelFloat32 {};
 class GeLUInplaceKernelFloat64 {};
 class GeLUInplaceKernelFloat16 {};
+class ReLUInplaceKernelBFloat16 {};
+class SigmoidInplaceKernelBFloat16 {};
+class TanhInplaceKernelBFloat16 {};
+class LeakyReLUInplaceKernelBFloat16 {};
+class GeLUInplaceKernelBFloat16 {};
 
 auto relu_inplace_kernel(Tensor& input, sycl::queue& queue) -> void {
     const int64_t numel = input.numel();
@@ -1188,6 +1499,12 @@ auto relu_inplace_kernel(Tensor& input, sycl::queue& queue) -> void {
         sycl::half* ptr = get_data_ptr<sycl::half>(input);
         queue.parallel_for<ReLUInplaceKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             if (float(ptr[idx]) < 0.0f) ptr[idx] = sycl::half(0.0f);
+        }).wait();
+    }
+    else if (input.dtype() == DType::BFloat16) {
+        uint16_t* ptr = get_data_ptr<uint16_t>(input);
+        queue.parallel_for<ReLUInplaceKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            if (bf16_to_f32(ptr[idx]) < 0.0f) ptr[idx] = f32_to_bf16(0.0f);
         }).wait();
     }
     else {
@@ -1216,6 +1533,13 @@ auto sigmoid_inplace_kernel(Tensor& input, sycl::queue& queue) -> void {
             ptr[idx] = sycl::half(1.0f / (1.0f + sycl::exp(-x)));
         }).wait();
     }
+    else if (input.dtype() == DType::BFloat16) {
+        uint16_t* ptr = get_data_ptr<uint16_t>(input);
+        queue.parallel_for<SigmoidInplaceKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = bf16_to_f32(ptr[idx]);
+            ptr[idx] = f32_to_bf16(1.0f / (1.0f + sycl::exp(-x)));
+        }).wait();
+    }
     else {
         throw std::runtime_error("sigmoid_inplace: unsupported dtype");
     }
@@ -1240,6 +1564,13 @@ auto tanh_inplace_kernel(Tensor& input, sycl::queue& queue) -> void {
         queue.parallel_for<TanhInplaceKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = static_cast<float>(ptr[idx]);
             ptr[idx] = sycl::half(sycl::tanh(x));
+        }).wait();
+    }
+    else if (input.dtype() == DType::BFloat16) {
+        uint16_t* ptr = get_data_ptr<uint16_t>(input);
+        queue.parallel_for<TanhInplaceKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = bf16_to_f32(ptr[idx]);
+            ptr[idx] = f32_to_bf16(sycl::tanh(x));
         }).wait();
     }
     else {
@@ -1267,6 +1598,13 @@ auto leaky_relu_inplace_kernel(Tensor& input, float alpha, sycl::queue& queue) -
         queue.parallel_for<LeakyReLUInplaceKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = static_cast<float>(ptr[idx]);
             if (x < 0.0f) ptr[idx] = sycl::half(x * alpha);
+        }).wait();
+    }
+    else if (input.dtype() == DType::BFloat16) {
+        uint16_t* ptr = get_data_ptr<uint16_t>(input);
+        queue.parallel_for<LeakyReLUInplaceKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = bf16_to_f32(ptr[idx]);
+            if (x < 0.0f) ptr[idx] = f32_to_bf16(x * alpha);
         }).wait();
     }
     else {
@@ -1306,6 +1644,15 @@ auto gelu_inplace_kernel(Tensor& input, sycl::queue& queue) -> void {
             float x_cubed = x * x * x;
             float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
             ptr[idx] = sycl::half(0.5f * x * (1.0f + sycl::tanh(inner)));
+        }).wait();
+    }
+    else if (input.dtype() == DType::BFloat16) {
+        uint16_t* ptr = get_data_ptr<uint16_t>(input);
+        queue.parallel_for<GeLUInplaceKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = bf16_to_f32(ptr[idx]);
+            float x_cubed = x * x * x;
+            float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
+            ptr[idx] = f32_to_bf16(0.5f * x * (1.0f + sycl::tanh(inner)));
         }).wait();
     }
     else {

@@ -7,8 +7,18 @@ namespace tenzor {
 namespace oneapi {
 
 // Kernel class declarations for SYCL
-class EmbeddingLookupKernel;
-class EmbeddingBackwardKernel;
+class EmbeddingLookupKernelFloat32;
+class EmbeddingLookupKernelFloat64;
+class EmbeddingLookupKernelFloat16;
+class EmbeddingLookupKernelBFloat16;
+class EmbeddingBackwardKernelFloat32;
+class EmbeddingBackwardKernelFloat64;
+class EmbeddingBackwardKernelFloat16;
+class EmbeddingBackwardKernelBFloat16;
+class EmbeddingBackwardZeroKernelFloat32;
+class EmbeddingBackwardZeroKernelFloat64;
+class EmbeddingBackwardZeroKernelFloat16;
+class EmbeddingBackwardZeroKernelBFloat16;
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -20,17 +30,10 @@ inline auto get_data_ptr(const Tensor& t) -> T* {
  * @brief Embedding lookup kernel for OneAPI/SYCL
  *
  * Given indices tensor and weight matrix, return corresponding embeddings.
- * Supports batch processing and multi-dimensional indices.
- *
- * @param indices Tensor of shape [batch, seq_len] or any shape containing int64 indices
- * @param weights Embedding weight matrix of shape [vocab_size, embedding_dim]
- * @param padding_idx Special index to fill with zeros (use -1 to disable)
- * @param queue SYCL queue for execution
- * @return Output embeddings of shape indices.shape() + [embedding_dim]
+ * Supports Float32, Float64, Float16, and BFloat16.
  */
 auto embedding_lookup_kernel(const Tensor& indices, const Tensor& weights,
                              int64_t padding_idx, sycl::queue& queue) -> Tensor {
-    // Get shapes
     auto indices_shape_span = indices.shape();
     auto weights_shape_span = weights.shape();
 
@@ -45,40 +48,98 @@ auto embedding_lookup_kernel(const Tensor& indices, const Tensor& weights,
     std::vector<int64_t> output_shape = indices_shape;
     output_shape.push_back(embedding_dim);
 
-    // Create output tensor
     Tensor output(output_shape, weights.dtype(), weights.device());
 
-    // Get device pointers
     const int64_t* indices_ptr = get_data_ptr<const int64_t>(indices);
-    const float* weights_ptr = get_data_ptr<const float>(weights);
-    float* output_ptr = get_data_ptr<float>(output);
 
-    // Launch kernel: one work item per (index, embedding_dim) pair
-    queue.parallel_for<EmbeddingLookupKernel>(
-        sycl::range<2>(num_indices, embedding_dim),
-        [=](sycl::id<2> idx) {
-            int64_t index_idx = idx[0];
-            int64_t emb_dim_idx = idx[1];
+    if (weights.dtype() == DType::Float32) {
+        const float* weights_ptr = get_data_ptr<const float>(weights);
+        float* output_ptr = get_data_ptr<float>(output);
 
-            // Get the vocabulary index
-            int64_t vocab_idx = indices_ptr[index_idx];
+        queue.parallel_for<EmbeddingLookupKernelFloat32>(
+            sycl::range<2>(num_indices, embedding_dim),
+            [=](sycl::id<2> idx) {
+                int64_t index_idx = idx[0];
+                int64_t emb_dim_idx = idx[1];
+                int64_t vocab_idx = indices_ptr[index_idx];
 
-            // Handle padding index
-            if (vocab_idx == padding_idx) {
-                output_ptr[index_idx * embedding_dim + emb_dim_idx] = 0.0f;
-            } else {
-                // Bounds checking
-                if (vocab_idx < 0 || vocab_idx >= vocab_size) {
-                    // Can't throw in device code, just clamp
-                    vocab_idx = 0;
+                if (vocab_idx == padding_idx) {
+                    output_ptr[index_idx * embedding_dim + emb_dim_idx] = 0.0f;
+                } else {
+                    if (vocab_idx < 0 || vocab_idx >= vocab_size) vocab_idx = 0;
+                    output_ptr[index_idx * embedding_dim + emb_dim_idx] =
+                        weights_ptr[vocab_idx * embedding_dim + emb_dim_idx];
                 }
-
-                // Perform lookup
-                output_ptr[index_idx * embedding_dim + emb_dim_idx] =
-                    weights_ptr[vocab_idx * embedding_dim + emb_dim_idx];
             }
-        }
-    ).wait();
+        ).wait();
+    }
+    else if (weights.dtype() == DType::Float64) {
+        const double* weights_ptr = get_data_ptr<const double>(weights);
+        double* output_ptr = get_data_ptr<double>(output);
+
+        queue.parallel_for<EmbeddingLookupKernelFloat64>(
+            sycl::range<2>(num_indices, embedding_dim),
+            [=](sycl::id<2> idx) {
+                int64_t index_idx = idx[0];
+                int64_t emb_dim_idx = idx[1];
+                int64_t vocab_idx = indices_ptr[index_idx];
+
+                if (vocab_idx == padding_idx) {
+                    output_ptr[index_idx * embedding_dim + emb_dim_idx] = 0.0;
+                } else {
+                    if (vocab_idx < 0 || vocab_idx >= vocab_size) vocab_idx = 0;
+                    output_ptr[index_idx * embedding_dim + emb_dim_idx] =
+                        weights_ptr[vocab_idx * embedding_dim + emb_dim_idx];
+                }
+            }
+        ).wait();
+    }
+    else if (weights.dtype() == DType::Float16) {
+        const sycl::half* weights_ptr = get_data_ptr<const sycl::half>(weights);
+        sycl::half* output_ptr = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<EmbeddingLookupKernelFloat16>(
+            sycl::range<2>(num_indices, embedding_dim),
+            [=](sycl::id<2> idx) {
+                int64_t index_idx = idx[0];
+                int64_t emb_dim_idx = idx[1];
+                int64_t vocab_idx = indices_ptr[index_idx];
+
+                if (vocab_idx == padding_idx) {
+                    output_ptr[index_idx * embedding_dim + emb_dim_idx] = sycl::half(0.0f);
+                } else {
+                    if (vocab_idx < 0 || vocab_idx >= vocab_size) vocab_idx = 0;
+                    output_ptr[index_idx * embedding_dim + emb_dim_idx] =
+                        weights_ptr[vocab_idx * embedding_dim + emb_dim_idx];
+                }
+            }
+        ).wait();
+    }
+    else if (weights.dtype() == DType::BFloat16) {
+        // BFloat16 stored as uint16_t — pure lookup, no conversion needed
+        const uint16_t* weights_ptr = get_data_ptr<const uint16_t>(weights);
+        uint16_t* output_ptr = get_data_ptr<uint16_t>(output);
+
+        queue.parallel_for<EmbeddingLookupKernelBFloat16>(
+            sycl::range<2>(num_indices, embedding_dim),
+            [=](sycl::id<2> idx) {
+                int64_t index_idx = idx[0];
+                int64_t emb_dim_idx = idx[1];
+                int64_t vocab_idx = indices_ptr[index_idx];
+
+                if (vocab_idx == padding_idx) {
+                    output_ptr[index_idx * embedding_dim + emb_dim_idx] = 0;
+                } else {
+                    if (vocab_idx < 0 || vocab_idx >= vocab_size) vocab_idx = 0;
+                    output_ptr[index_idx * embedding_dim + emb_dim_idx] =
+                        weights_ptr[vocab_idx * embedding_dim + emb_dim_idx];
+                }
+            }
+        ).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for embedding_lookup_kernel");
+    }
 
     return output;
 }
@@ -87,63 +148,158 @@ auto embedding_lookup_kernel(const Tensor& indices, const Tensor& weights,
  * @brief Embedding backward kernel for OneAPI/SYCL
  *
  * Computes gradient w.r.t. embedding weights given gradient w.r.t. output.
- *
- * @param grad_output Gradient of shape indices.shape() + [embedding_dim]
- * @param indices Original indices used in forward pass
- * @param vocab_size Number of embeddings in vocabulary
- * @param embedding_dim Dimension of each embedding
- * @param queue SYCL queue for execution
- * @return Gradient w.r.t. weights of shape [vocab_size, embedding_dim]
+ * Supports Float32, Float64, Float16, and BFloat16.
  */
 auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
                                int64_t vocab_size, int64_t embedding_dim,
                                sycl::queue& queue) -> Tensor {
-    // Create gradient tensor initialized to zeros
     Tensor grad_weight({vocab_size, embedding_dim}, grad_output.dtype(), grad_output.device());
 
-    // Initialize to zero
-    float* grad_weight_ptr = get_data_ptr<float>(grad_weight);
     int64_t total_weight_elements = vocab_size * embedding_dim;
-
-    queue.parallel_for<class ZeroInitKernel>(
-        sycl::range<1>(total_weight_elements),
-        [=](sycl::id<1> idx) {
-            grad_weight_ptr[idx] = 0.0f;
-        }
-    ).wait();
-
-    // Get pointers
-    const int64_t* indices_ptr = get_data_ptr<const int64_t>(indices);
-    const float* grad_output_ptr = get_data_ptr<const float>(grad_output);
-
     int64_t num_indices = indices.numel();
+    const int64_t* indices_ptr = get_data_ptr<const int64_t>(indices);
 
-    // Accumulate gradients
-    // Use atomic operations for race-free accumulation
-    queue.parallel_for<EmbeddingBackwardKernel>(
-        sycl::range<2>(num_indices, embedding_dim),
-        [=](sycl::id<2> idx) {
-            int64_t index_idx = idx[0];
-            int64_t emb_dim_idx = idx[1];
+    if (grad_output.dtype() == DType::Float32) {
+        float* grad_weight_ptr = get_data_ptr<float>(grad_weight);
 
-            int64_t vocab_idx = indices_ptr[index_idx];
+        queue.parallel_for<EmbeddingBackwardZeroKernelFloat32>(
+            sycl::range<1>(total_weight_elements),
+            [=](sycl::id<1> idx) { grad_weight_ptr[idx] = 0.0f; }
+        ).wait();
 
-            // Bounds check
-            if (vocab_idx >= 0 && vocab_idx < vocab_size) {
-                // Atomic add to handle multiple indices pointing to same embedding
-                float grad_val = grad_output_ptr[index_idx * embedding_dim + emb_dim_idx];
+        const float* grad_output_ptr = get_data_ptr<const float>(grad_output);
 
-                // Use atomic_ref properly with a reference
-                sycl::atomic_ref<float,
-                                sycl::memory_order::relaxed,
-                                sycl::memory_scope::device,
-                                sycl::access::address_space::global_space>
-                    atomic_grad(grad_weight_ptr[vocab_idx * embedding_dim + emb_dim_idx]);
+        queue.parallel_for<EmbeddingBackwardKernelFloat32>(
+            sycl::range<2>(num_indices, embedding_dim),
+            [=](sycl::id<2> idx) {
+                int64_t index_idx = idx[0];
+                int64_t emb_dim_idx = idx[1];
+                int64_t vocab_idx = indices_ptr[index_idx];
 
-                atomic_grad.fetch_add(grad_val);
+                if (vocab_idx >= 0 && vocab_idx < vocab_size) {
+                    float grad_val = grad_output_ptr[index_idx * embedding_dim + emb_dim_idx];
+                    sycl::atomic_ref<float, sycl::memory_order::relaxed,
+                                    sycl::memory_scope::device,
+                                    sycl::access::address_space::global_space>
+                        atomic_grad(grad_weight_ptr[vocab_idx * embedding_dim + emb_dim_idx]);
+                    atomic_grad.fetch_add(grad_val);
+                }
             }
-        }
-    ).wait();
+        ).wait();
+    }
+    else if (grad_output.dtype() == DType::Float64) {
+        double* grad_weight_ptr = get_data_ptr<double>(grad_weight);
+
+        queue.parallel_for<EmbeddingBackwardZeroKernelFloat64>(
+            sycl::range<1>(total_weight_elements),
+            [=](sycl::id<1> idx) { grad_weight_ptr[idx] = 0.0; }
+        ).wait();
+
+        const double* grad_output_ptr = get_data_ptr<const double>(grad_output);
+
+        queue.parallel_for<EmbeddingBackwardKernelFloat64>(
+            sycl::range<2>(num_indices, embedding_dim),
+            [=](sycl::id<2> idx) {
+                int64_t index_idx = idx[0];
+                int64_t emb_dim_idx = idx[1];
+                int64_t vocab_idx = indices_ptr[index_idx];
+
+                if (vocab_idx >= 0 && vocab_idx < vocab_size) {
+                    double grad_val = grad_output_ptr[index_idx * embedding_dim + emb_dim_idx];
+                    sycl::atomic_ref<double, sycl::memory_order::relaxed,
+                                    sycl::memory_scope::device,
+                                    sycl::access::address_space::global_space>
+                        atomic_grad(grad_weight_ptr[vocab_idx * embedding_dim + emb_dim_idx]);
+                    atomic_grad.fetch_add(grad_val);
+                }
+            }
+        ).wait();
+    }
+    else if (grad_output.dtype() == DType::Float16) {
+        // Float16 backward: accumulate in float, then convert
+        // We store grad_weight as Float32 temporarily for atomic adds
+        Tensor grad_weight_f32({vocab_size, embedding_dim}, DType::Float32, grad_output.device());
+        float* gw_f32_ptr = get_data_ptr<float>(grad_weight_f32);
+
+        queue.parallel_for<EmbeddingBackwardZeroKernelFloat16>(
+            sycl::range<1>(total_weight_elements),
+            [=](sycl::id<1> idx) { gw_f32_ptr[idx] = 0.0f; }
+        ).wait();
+
+        const sycl::half* grad_output_ptr = get_data_ptr<const sycl::half>(grad_output);
+
+        queue.parallel_for<EmbeddingBackwardKernelFloat16>(
+            sycl::range<2>(num_indices, embedding_dim),
+            [=](sycl::id<2> idx) {
+                int64_t index_idx = idx[0];
+                int64_t emb_dim_idx = idx[1];
+                int64_t vocab_idx = indices_ptr[index_idx];
+
+                if (vocab_idx >= 0 && vocab_idx < vocab_size) {
+                    float grad_val = static_cast<float>(grad_output_ptr[index_idx * embedding_dim + emb_dim_idx]);
+                    sycl::atomic_ref<float, sycl::memory_order::relaxed,
+                                    sycl::memory_scope::device,
+                                    sycl::access::address_space::global_space>
+                        atomic_grad(gw_f32_ptr[vocab_idx * embedding_dim + emb_dim_idx]);
+                    atomic_grad.fetch_add(grad_val);
+                }
+            }
+        ).wait();
+
+        // Convert Float32 accumulator back to Float16
+        sycl::half* gw_ptr = get_data_ptr<sycl::half>(grad_weight);
+        queue.parallel_for<class EmbeddingBackwardConvertF16>(
+            sycl::range<1>(total_weight_elements),
+            [=](sycl::id<1> idx) { gw_ptr[idx] = sycl::half(gw_f32_ptr[idx]); }
+        ).wait();
+    }
+    else if (grad_output.dtype() == DType::BFloat16) {
+        // BFloat16 backward: accumulate in float, then convert
+        Tensor grad_weight_f32({vocab_size, embedding_dim}, DType::Float32, grad_output.device());
+        float* gw_f32_ptr = get_data_ptr<float>(grad_weight_f32);
+
+        queue.parallel_for<EmbeddingBackwardZeroKernelBFloat16>(
+            sycl::range<1>(total_weight_elements),
+            [=](sycl::id<1> idx) { gw_f32_ptr[idx] = 0.0f; }
+        ).wait();
+
+        const uint16_t* grad_output_ptr = get_data_ptr<const uint16_t>(grad_output);
+
+        queue.parallel_for<EmbeddingBackwardKernelBFloat16>(
+            sycl::range<2>(num_indices, embedding_dim),
+            [=](sycl::id<2> idx) {
+                int64_t index_idx = idx[0];
+                int64_t emb_dim_idx = idx[1];
+                int64_t vocab_idx = indices_ptr[index_idx];
+
+                if (vocab_idx >= 0 && vocab_idx < vocab_size) {
+                    // BFloat16 → Float32: shift bits left by 16
+                    uint32_t bits = static_cast<uint32_t>(grad_output_ptr[index_idx * embedding_dim + emb_dim_idx]) << 16;
+                    float grad_val;
+                    __builtin_memcpy(&grad_val, &bits, sizeof(float));
+                    sycl::atomic_ref<float, sycl::memory_order::relaxed,
+                                    sycl::memory_scope::device,
+                                    sycl::access::address_space::global_space>
+                        atomic_grad(gw_f32_ptr[vocab_idx * embedding_dim + emb_dim_idx]);
+                    atomic_grad.fetch_add(grad_val);
+                }
+            }
+        ).wait();
+
+        // Convert Float32 accumulator back to BFloat16
+        uint16_t* gw_ptr = get_data_ptr<uint16_t>(grad_weight);
+        queue.parallel_for<class EmbeddingBackwardConvertBF16>(
+            sycl::range<1>(total_weight_elements),
+            [=](sycl::id<1> idx) {
+                uint32_t bits;
+                __builtin_memcpy(&bits, &gw_f32_ptr[idx], sizeof(float));
+                gw_ptr[idx] = static_cast<uint16_t>(bits >> 16);
+            }
+        ).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for embedding_backward_kernel");
+    }
 
     return grad_weight;
 }
@@ -152,13 +308,7 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
  * @brief EmbeddingBag forward kernel - aggregate embeddings
  *
  * Computes sum, mean, or max aggregation of embeddings for bags of indices.
- *
- * @param embeddings Pre-computed embeddings from embedding_lookup
- * @param offsets Starting index of each bag in the indices tensor
- * @param mode Aggregation mode: "sum", "mean", or "max"
- * @param include_last_offset Whether offsets includes final boundary
- * @param queue SYCL queue for execution
- * @return Aggregated embeddings of shape [num_bags, embedding_dim]
+ * Currently Float32 only (EmbeddingBag is rarely used with other dtypes).
  */
 auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offsets,
                                   const std::string& mode, bool include_last_offset,
@@ -169,22 +319,17 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
 
     int64_t num_bags = offsets.numel();
 
-    // Create output tensor
     Tensor output({num_bags, embedding_dim}, embeddings.dtype(), embeddings.device());
 
-    // Get pointers
     const float* embeddings_ptr = get_data_ptr<const float>(embeddings);
     const int64_t* offsets_ptr = get_data_ptr<const int64_t>(offsets);
     float* output_ptr = get_data_ptr<float>(output);
 
-    // Convert mode string to enum for device copyability
-    // 0 = sum, 1 = mean, 2 = max
     int mode_enum = 1; // default mean
     if (mode == "sum") mode_enum = 0;
     else if (mode == "mean") mode_enum = 1;
     else if (mode == "max") mode_enum = 2;
 
-    // Process each bag in parallel
     queue.parallel_for<class EmbeddingBagKernel>(
         sycl::range<2>(num_bags, embedding_dim),
         [=](sycl::id<2> idx) {
@@ -213,9 +358,9 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
             for (int64_t i = start_idx; i < end_idx; ++i) {
                 float val = embeddings_ptr[i * embedding_dim + emb_dim_idx];
 
-                if (mode_enum == 0 || mode_enum == 1) { // sum or mean
+                if (mode_enum == 0 || mode_enum == 1) {
                     result += val;
-                } else if (mode_enum == 2) { // max
+                } else if (mode_enum == 2) {
                     if (first || val > result) {
                         result = val;
                         first = false;
@@ -223,8 +368,7 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
                 }
             }
 
-            // Apply mean normalization if needed
-            if (mode_enum == 1 && bag_size > 0) { // mean
+            if (mode_enum == 1 && bag_size > 0) {
                 result /= bag_size;
             }
 
@@ -237,22 +381,10 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
 
 /**
  * @brief Renormalize embeddings that exceed max_norm
- *
- * For each unique index in indices, if the corresponding embedding's norm
- * exceeds max_norm, scale it down to have norm equal to max_norm.
- *
- * @param weights Embedding weight matrix [vocab_size, embedding_dim]
- * @param indices Indices to check and renormalize
- * @param max_norm Maximum allowed norm
- * @param norm_type Type of norm (1.0 for L1, 2.0 for L2)
- * @param queue SYCL queue for execution
  */
 auto embedding_renorm_kernel(Tensor& weights, const Tensor& indices,
                              double max_norm, double norm_type,
                              sycl::queue& queue) -> void {
-    // This is a simplified version - for efficiency, should deduplicate indices first
-    // For now, we'll process on CPU to handle the complexity
-
     auto weights_cpu = weights.to(Device::cpu());
     auto indices_cpu = indices.to(Device::cpu());
 
@@ -263,7 +395,6 @@ auto embedding_renorm_kernel(Tensor& weights, const Tensor& indices,
     const int64_t* indices_ptr = get_data_ptr<const int64_t>(indices_cpu);
     int64_t num_indices = indices.numel();
 
-    // Track which indices we've already processed
     std::vector<bool> processed(weights_shape[0], false);
 
     for (int64_t i = 0; i < num_indices; ++i) {
@@ -275,7 +406,6 @@ auto embedding_renorm_kernel(Tensor& weights, const Tensor& indices,
 
         processed[vocab_idx] = true;
 
-        // Compute norm
         double norm = 0.0;
         for (int64_t j = 0; j < embedding_dim; ++j) {
             double val = weights_ptr[vocab_idx * embedding_dim + j];
@@ -292,7 +422,6 @@ auto embedding_renorm_kernel(Tensor& weights, const Tensor& indices,
             norm = std::pow(norm, 1.0 / norm_type);
         }
 
-        // Renormalize if exceeds max_norm
         if (norm > max_norm) {
             double scale = max_norm / (norm + 1e-8);
             for (int64_t j = 0; j < embedding_dim; ++j) {
@@ -301,7 +430,6 @@ auto embedding_renorm_kernel(Tensor& weights, const Tensor& indices,
         }
     }
 
-    // Copy back to device
     float* device_weights_ptr = get_data_ptr<float>(weights);
     const float* host_weights_ptr = get_data_ptr<const float>(weights_cpu);
     queue.memcpy(device_weights_ptr, host_weights_ptr,

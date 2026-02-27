@@ -318,11 +318,20 @@ auto initialize() -> void {
                 ONEAPI_REGISTER(Dot, "dot");
                 ONEAPI_REGISTER(Pow, "pow");
 
-                // Inplace operations
-                ONEAPI_REGISTER(AddInplace, "add_inplace");
-                ONEAPI_REGISTER(SubInplace, "sub_inplace");
-                ONEAPI_REGISTER(MulInplace, "mul_inplace");
-                ONEAPI_REGISTER(DivInplace, "div_inplace");
+                // Inplace arithmetic operations — must use register_inplace_kernel
+                // (dispatch_inplace() only checks inplace_kernels[], not kernels[])
+                #define ONEAPI_REGISTER_INPLACE(op_id, op_name) \
+                    oneapi_table.register_inplace_kernel(OpId::op_id, \
+                        [](Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs) -> Tensor& { \
+                            std::vector<Tensor> inputs = {target}; \
+                            inputs.insert(inputs.end(), others.begin(), others.end()); \
+                            DispatchTableRegistry::get_backend(Device::Type::OneAPI)->dispatch(op_name, inputs, attrs); \
+                            return target; \
+                        })
+                ONEAPI_REGISTER_INPLACE(AddInplace, "add_inplace");
+                ONEAPI_REGISTER_INPLACE(SubInplace, "sub_inplace");
+                ONEAPI_REGISTER_INPLACE(MulInplace, "mul_inplace");
+                ONEAPI_REGISTER_INPLACE(DivInplace, "div_inplace");
 
                 // Unary math operations
                 ONEAPI_REGISTER(Sqrt, "sqrt");
@@ -401,6 +410,7 @@ auto initialize() -> void {
                 ONEAPI_REGISTER(Repeat, "repeat");
                 ONEAPI_REGISTER(Expand, "expand");
                 ONEAPI_REGISTER(Cat, "cat");
+                ONEAPI_REGISTER(Stack, "stack");
 
                 // Indexing operations
                 ONEAPI_REGISTER(IndexSelect, "index_select");
@@ -438,6 +448,9 @@ auto initialize() -> void {
                 ONEAPI_REGISTER(Full, "full");
                 ONEAPI_REGISTER(Rand, "rand");
                 ONEAPI_REGISTER(Randn, "randn");
+                ONEAPI_REGISTER(Arange, "arange");
+                ONEAPI_REGISTER(Linspace, "linspace");
+                ONEAPI_REGISTER(Eye, "eye");
 
                 // Embedding operations
                 ONEAPI_REGISTER(Embedding, "embedding_lookup");
@@ -457,18 +470,33 @@ auto initialize() -> void {
                 ONEAPI_REGISTER(FusedLinearReLU, "fused_linear_relu");
                 ONEAPI_REGISTER(FusedBatchNormReLU, "fused_batchnorm_relu");
                 ONEAPI_REGISTER(FusedSoftmaxCrossEntropy, "fused_softmax_cross_entropy");
+                ONEAPI_REGISTER(FusedRMSNorm, "fused_rms_norm");
+                ONEAPI_REGISTER(RMSNormBackward, "rms_norm_backward");
 
                 // Vision operations
                 ONEAPI_REGISTER(ROIAlignForward, "roi_align");
                 ONEAPI_REGISTER(ROIAlignBackward, "roi_align_backward");
                 ONEAPI_REGISTER(Interpolate, "interpolate");
+                ONEAPI_REGISTER(GatherRelativePositionBias, "gather_relative_position_bias");
 
-                // In-place activation operations
-                ONEAPI_REGISTER(ReLUInplace, "relu_inplace");
-                ONEAPI_REGISTER(SigmoidInplace, "sigmoid_inplace");
-                ONEAPI_REGISTER(TanhInplace, "tanh_inplace");
-                ONEAPI_REGISTER(LeakyReLUInplace, "leaky_relu_inplace");
-                ONEAPI_REGISTER(GeluInplace, "gelu_inplace");
+                // Normalization operations
+                ONEAPI_REGISTER(GroupNorm, "group_norm");
+                ONEAPI_REGISTER(GroupNormBackward, "group_norm_backward");
+
+                // In-place activation operations — must use register_inplace_kernel
+                #define ONEAPI_REGISTER_INPLACE_ACTIVATION(op_id, op_name) \
+                    oneapi_table.register_inplace_kernel(OpId::op_id, \
+                        [](Tensor& target, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& { \
+                            std::vector<Tensor> inputs = {target}; \
+                            DispatchTableRegistry::get_backend(Device::Type::OneAPI)->dispatch(op_name, inputs, attrs); \
+                            return target; \
+                        })
+                ONEAPI_REGISTER_INPLACE_ACTIVATION(ReLUInplace, "relu_inplace");
+                ONEAPI_REGISTER_INPLACE_ACTIVATION(SigmoidInplace, "sigmoid_inplace");
+                ONEAPI_REGISTER_INPLACE_ACTIVATION(TanhInplace, "tanh_inplace");
+                ONEAPI_REGISTER_INPLACE_ACTIVATION(LeakyReLUInplace, "leaky_relu_inplace");
+                ONEAPI_REGISTER_INPLACE_ACTIVATION(GeluInplace, "gelu_inplace");
+                #undef ONEAPI_REGISTER_INPLACE_ACTIVATION
 
                 // Indexing operations
                 ONEAPI_REGISTER(Nonzero, "nonzero");
@@ -478,6 +506,7 @@ auto initialize() -> void {
                 // Transposed convolution
                 ONEAPI_REGISTER(ConvTranspose2dForward, "conv_transpose2d_forward");
 
+                #undef ONEAPI_REGISTER_INPLACE
                 #undef ONEAPI_REGISTER
 
                 DispatchTableRegistry::mark_ready(Device::Type::OneAPI);

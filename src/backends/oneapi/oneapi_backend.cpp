@@ -88,6 +88,20 @@ namespace oneapi {
     auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, sycl::queue& queue) -> Tensor;
     auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, sycl::queue& queue) -> Tensor;
 
+    // Creation operations
+    auto arange_kernel(double start, double end, double step, DType dtype, Device device, sycl::queue& queue) -> Tensor;
+    auto linspace_kernel(double start, double end, int64_t steps, DType dtype, Device device, sycl::queue& queue) -> Tensor;
+    auto eye_kernel(int64_t n, int64_t m, DType dtype, Device device, sycl::queue& queue) -> Tensor;
+
+    // Group normalization
+    auto group_norm_kernel(const Tensor& input, int64_t num_groups,
+                           const Tensor* weight, const Tensor* bias,
+                           float eps, sycl::queue& queue) -> std::vector<Tensor>;
+    auto group_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
+                                    const Tensor& mean, const Tensor& rstd,
+                                    const Tensor& weight, int64_t num_groups,
+                                    sycl::queue& queue) -> std::vector<Tensor>;
+
     // Batch normalization
     auto batchnorm2d_mean_var(const Tensor& input, sycl::queue& queue) -> std::vector<Tensor>;
     auto batchnorm2d_update_running_stats(Tensor& running_mean, Tensor& running_var,
@@ -224,6 +238,11 @@ namespace oneapi {
                                  sycl::queue& queue) -> Tensor;
     auto fused_softmax_cross_entropy_kernel(const Tensor& logits, const Tensor& targets,
                                             const std::string& reduction, sycl::queue& queue) -> Tensor;
+    auto fused_rms_norm_kernel(const Tensor& input, const Tensor& weight, float eps,
+                                sycl::queue& queue) -> std::tuple<Tensor, Tensor>;
+    auto rms_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
+                                   const Tensor& weight, const Tensor& rrms,
+                                   sycl::queue& queue) -> std::tuple<Tensor, Tensor>;
 
     // LSTM operations
     auto lstm_cell_forward_kernel(const Tensor& gates, const Tensor& c_prev,
@@ -571,7 +590,8 @@ public:
                  const OpAttributes& attrs) -> std::vector<Tensor> override {
         // Validate inputs
         bool is_creation_op = (op_name == "zeros" || op_name == "ones" ||
-                               op_name == "full" || op_name == "rand" || op_name == "randn");
+                               op_name == "full" || op_name == "rand" || op_name == "randn" ||
+                               op_name == "arange" || op_name == "linspace" || op_name == "eye");
 
         if (inputs.empty() && !is_creation_op) {
             throw std::invalid_argument("dispatch requires at least one input tensor");
@@ -1067,12 +1087,13 @@ public:
             else if (op_name == "embedding_lookup") {
                 if (inputs.size() != 2) throw std::invalid_argument("embedding_lookup requires 2 inputs");
                 int64_t padding_idx = attrs.contains("padding_idx") ? std::stoll(attrs.at("padding_idx")) : -1;
-                return {oneapi::embedding_lookup_kernel(inputs[0], inputs[1], padding_idx, queue)};
+                // inputs[0] = weights, inputs[1] = indices (from nn::Embedding layer)
+                return {oneapi::embedding_lookup_kernel(inputs[1], inputs[0], padding_idx, queue)};
             }
             else if (op_name == "embedding_backward") {
                 if (inputs.size() != 2) throw std::invalid_argument("embedding_backward requires 2 inputs");
-                int64_t vocab_size = std::stoll(attrs.at("vocab_size"));
-                int64_t embedding_dim = std::stoll(attrs.at("embedding_dim"));
+                int64_t vocab_size = std::stoll(attrs.at("num_embeddings"));
+                int64_t embedding_dim = inputs[0].shape().back();
                 return {oneapi::embedding_backward_kernel(inputs[0], inputs[1], vocab_size, embedding_dim, queue)};
             }
             else if (op_name == "embedding_bag_forward") {
@@ -1362,6 +1383,20 @@ public:
                 std::string reduction = attrs.contains("reduction") ? attrs.at("reduction") : "mean";
                 return {oneapi::fused_softmax_cross_entropy_kernel(inputs[0], inputs[1], reduction, queue)};
             }
+            else if (op_name == "fused_rms_norm") {
+                if (inputs.size() != 2) throw std::invalid_argument("fused_rms_norm requires 2 inputs");
+                float epsilon = attrs.contains("eps") ? std::stof(attrs.at("eps")) : 1e-5f;
+                auto [output, rrms] = oneapi::fused_rms_norm_kernel(inputs[0], inputs[1], epsilon, queue);
+                return {output, rrms};
+            }
+            else if (op_name == "rms_norm_backward") {
+                if (inputs.size() != 4) throw std::invalid_argument("rms_norm_backward requires 4 inputs");
+                // Dispatch sends: {grad_output, input, rrms, weight}
+                // Kernel expects: (grad_output, input, weight, rrms)
+                auto [grad_input, grad_weight] = oneapi::rms_norm_backward_kernel(
+                    inputs[0], inputs[1], inputs[3], inputs[2], queue);
+                return {grad_input, grad_weight};
+            }
 
             // ================================================================
             // LSTM operations
@@ -1559,6 +1594,70 @@ public:
                                                         stride, padding, dilation, groups,
                                                         input_scale, input_zero_point,
                                                         weight_scale, weight_zero_point, queue)};
+            }
+
+            // ================================================================
+            // Stack operation
+            // ================================================================
+            else if (op_name == "stack") {
+                if (inputs.empty()) throw std::invalid_argument("stack requires at least one input");
+                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : 0;
+                // Stack = unsqueeze each tensor at dim, then cat
+                std::vector<Tensor> unsqueezed;
+                unsqueezed.reserve(inputs.size());
+                for (const auto& t : inputs) {
+                    unsqueezed.push_back(oneapi::unsqueeze_kernel(t, dim, queue));
+                }
+                return {oneapi::cat_kernel(std::span<const Tensor>(unsqueezed.data(), unsqueezed.size()), dim, queue)};
+            }
+
+            // ================================================================
+            // Creation operations (arange, linspace, eye)
+            // ================================================================
+            else if (op_name == "arange") {
+                double start = attrs.contains("start") ? std::stod(attrs.at("start")) : 0.0;
+                double end_val = std::stod(attrs.at("end"));
+                double step = attrs.contains("step") ? std::stod(attrs.at("step")) : 1.0;
+                DType dtype = parse_dtype(attrs);
+                int32_t device_id = attrs.contains("device_id") ? std::stoi(attrs.at("device_id")) : 0;
+                return {oneapi::arange_kernel(start, end_val, step, dtype, Device(Device::Type::OneAPI, device_id), queue)};
+            }
+            else if (op_name == "linspace") {
+                double start = std::stod(attrs.at("start"));
+                double end_val = std::stod(attrs.at("end"));
+                int64_t steps = std::stoll(attrs.at("steps"));
+                DType dtype = parse_dtype(attrs);
+                int32_t device_id = attrs.contains("device_id") ? std::stoi(attrs.at("device_id")) : 0;
+                return {oneapi::linspace_kernel(start, end_val, steps, dtype, Device(Device::Type::OneAPI, device_id), queue)};
+            }
+            else if (op_name == "eye") {
+                int64_t n = std::stoll(attrs.at("n"));
+                int64_t m = attrs.contains("m") ? std::stoll(attrs.at("m")) : n;
+                DType dtype = parse_dtype(attrs);
+                int32_t device_id = attrs.contains("device_id") ? std::stoi(attrs.at("device_id")) : 0;
+                return {oneapi::eye_kernel(n, m, dtype, Device(Device::Type::OneAPI, device_id), queue)};
+            }
+
+            // ================================================================
+            // Group normalization
+            // ================================================================
+            else if (op_name == "group_norm") {
+                if (inputs.size() < 1) throw std::invalid_argument("group_norm requires at least 1 input");
+                int64_t num_groups = attrs.contains("num_groups") ? std::stoll(attrs.at("num_groups")) : 1;
+                float eps = attrs.contains("eps") ? std::stof(attrs.at("eps")) : 1e-5f;
+                const Tensor* weight = inputs.size() > 1 ? &inputs[1] : nullptr;
+                const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+                return oneapi::group_norm_kernel(inputs[0], num_groups, weight, bias, eps, queue);
+            }
+
+            // ================================================================
+            // Group normalization backward
+            // ================================================================
+            else if (op_name == "group_norm_backward") {
+                // inputs: [grad_output, input, mean, rstd, weight]
+                if (inputs.size() < 5) throw std::invalid_argument("group_norm_backward requires 5 inputs");
+                int64_t num_groups = attrs.contains("num_groups") ? std::stoll(attrs.at("num_groups")) : 1;
+                return oneapi::group_norm_backward_kernel(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], num_groups, queue);
             }
 
             else {

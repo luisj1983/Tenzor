@@ -21,6 +21,19 @@ inline auto get_data_ptr(const Tensor& t) -> T* {
     return static_cast<T*>(const_cast<void*>(t.data_ptr()));
 }
 
+// BFloat16 conversion helpers
+inline float bf16_to_f32(uint16_t bf16) {
+    uint32_t bits = static_cast<uint32_t>(bf16) << 16;
+    float result;
+    __builtin_memcpy(&result, &bits, sizeof(float));
+    return result;
+}
+inline uint16_t f32_to_bf16(float f32) {
+    uint32_t bits;
+    __builtin_memcpy(&bits, &f32, sizeof(uint32_t));
+    return static_cast<uint16_t>(bits >> 16);
+}
+
 /**
  * @brief Generate random numbers from a standard normal distribution (Gaussian with mean=0, stddev=1)
  *
@@ -100,6 +113,24 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
                 ptr[i] = sycl::half(temp_ptr[i]);
             }).wait();
         }
+        else if (dtype == DType::BFloat16) {
+            // Generate Float32 then convert to BFloat16
+            uint16_t* ptr = get_data_ptr<uint16_t>(output);
+
+            Tensor temp_buffer({numel}, DType::Float32, device);
+            float* temp_ptr = get_data_ptr<float>(temp_buffer);
+
+            ::oneapi::mkl::rng::philox4x32x10 engine(queue, seed);
+            ::oneapi::mkl::rng::gaussian<float> distribution(0.0f, 1.0f);
+            ::oneapi::mkl::rng::generate(distribution, engine, numel, temp_ptr);
+            queue.wait();
+
+            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+                uint32_t bits;
+                __builtin_memcpy(&bits, &temp_ptr[i], sizeof(uint32_t));
+                ptr[i] = static_cast<uint16_t>(bits >> 16);
+            }).wait();
+        }
         else {
             throw std::runtime_error("Unsupported dtype for randn (oneMKL path)");
         }
@@ -151,6 +182,23 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
         sycl::half* device_ptr = get_data_ptr<sycl::half>(output);
         queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
             device_ptr[i] = sycl::half(temp_ptr[i]);
+        }).wait();
+    }
+    else if (dtype == DType::BFloat16) {
+        std::vector<float> host_data(numel);
+        for (int64_t i = 0; i < numel; ++i) {
+            host_data[i] = static_cast<float>(dist(gen));
+        }
+
+        Tensor temp_buffer({numel}, DType::Float32, device);
+        float* temp_ptr = get_data_ptr<float>(temp_buffer);
+        queue.memcpy(temp_ptr, host_data.data(), numel * sizeof(float)).wait();
+
+        uint16_t* device_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            uint32_t bits;
+            __builtin_memcpy(&bits, &temp_ptr[i], sizeof(uint32_t));
+            device_ptr[i] = static_cast<uint16_t>(bits >> 16);
         }).wait();
     }
     else {
@@ -210,6 +258,41 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
 
             queue.wait();
         }
+        else if (dtype == DType::Float16) {
+            // Generate Float32 then convert to Float16
+            sycl::half* ptr = get_data_ptr<sycl::half>(output);
+
+            Tensor temp_buffer({numel}, DType::Float32, device);
+            float* temp_ptr = get_data_ptr<float>(temp_buffer);
+
+            ::oneapi::mkl::rng::philox4x32x10 engine(queue, seed);
+            ::oneapi::mkl::rng::uniform<float> distribution(0.0f, 1.0f);
+            ::oneapi::mkl::rng::generate(distribution, engine, numel, temp_ptr);
+            queue.wait();
+
+            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+                ptr[i] = sycl::half(temp_ptr[i]);
+            }).wait();
+        }
+        else if (dtype == DType::BFloat16) {
+            // Generate Float32 then convert to BFloat16 (truncate upper 16 bits)
+            uint16_t* ptr = get_data_ptr<uint16_t>(output);
+
+            Tensor temp_buffer({numel}, DType::Float32, device);
+            float* temp_ptr = get_data_ptr<float>(temp_buffer);
+
+            ::oneapi::mkl::rng::philox4x32x10 engine(queue, seed);
+            ::oneapi::mkl::rng::uniform<float> distribution(0.0f, 1.0f);
+            ::oneapi::mkl::rng::generate(distribution, engine, numel, temp_ptr);
+            queue.wait();
+
+            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+                // BFloat16: upper 16 bits of float32
+                uint32_t bits;
+                __builtin_memcpy(&bits, &temp_ptr[i], sizeof(uint32_t));
+                ptr[i] = static_cast<uint16_t>(bits >> 16);
+            }).wait();
+        }
         else {
             throw std::runtime_error("Unsupported dtype for rand (oneMKL path)");
         }
@@ -246,10 +329,233 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
         double* device_ptr = get_data_ptr<double>(output);
         queue.memcpy(device_ptr, host_data.data(), numel * sizeof(double)).wait();
     }
+    else if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        // Generate Float32 on host, upload, convert on device
+        std::vector<float> host_data(numel);
+        for (int64_t i = 0; i < numel; ++i) {
+            host_data[i] = static_cast<float>(dist(gen));
+        }
+
+        Tensor temp_buffer({numel}, DType::Float32, device);
+        float* temp_ptr = get_data_ptr<float>(temp_buffer);
+        queue.memcpy(temp_ptr, host_data.data(), numel * sizeof(float)).wait();
+
+        if (dtype == DType::Float16) {
+            sycl::half* device_ptr = get_data_ptr<sycl::half>(output);
+            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+                device_ptr[i] = sycl::half(temp_ptr[i]);
+            }).wait();
+        } else {
+            uint16_t* device_ptr = get_data_ptr<uint16_t>(output);
+            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+                uint32_t bits;
+                __builtin_memcpy(&bits, &temp_ptr[i], sizeof(uint32_t));
+                device_ptr[i] = static_cast<uint16_t>(bits >> 16);
+            }).wait();
+        }
+    }
     else {
         throw std::runtime_error("Unsupported dtype for rand (fallback path)");
     }
 #endif
+
+    return output;
+}
+
+/**
+ * @brief Generate a 1D tensor of evenly spaced values in [start, end) with given step
+ */
+auto arange_kernel(double start, double end, double step, DType dtype, Device device, sycl::queue& queue) -> Tensor {
+    int64_t numel = static_cast<int64_t>(std::ceil((end - start) / step));
+    if (numel <= 0) numel = 0;
+
+    Tensor output({numel}, dtype, device);
+    if (numel == 0) return output;
+
+    if (dtype == DType::Float32) {
+        float* ptr = get_data_ptr<float>(output);
+        float s = static_cast<float>(start), st = static_cast<float>(step);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            ptr[i] = s + static_cast<float>(i[0]) * st;
+        }).wait();
+    }
+    else if (dtype == DType::Float64) {
+        double* ptr = get_data_ptr<double>(output);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            ptr[i] = start + static_cast<double>(i[0]) * step;
+        }).wait();
+    }
+    else if (dtype == DType::Float16) {
+        sycl::half* ptr = get_data_ptr<sycl::half>(output);
+        float s = static_cast<float>(start), st = static_cast<float>(step);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            ptr[i] = sycl::half(s + static_cast<float>(i[0]) * st);
+        }).wait();
+    }
+    else if (dtype == DType::BFloat16) {
+        uint16_t* ptr = get_data_ptr<uint16_t>(output);
+        float s = static_cast<float>(start), st = static_cast<float>(step);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            ptr[i] = f32_to_bf16(s + static_cast<float>(i[0]) * st);
+        }).wait();
+    }
+    else if (dtype == DType::Int32) {
+        int32_t* ptr = get_data_ptr<int32_t>(output);
+        int32_t s = static_cast<int32_t>(start), st = static_cast<int32_t>(step);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            ptr[i] = s + static_cast<int32_t>(i[0]) * st;
+        }).wait();
+    }
+    else if (dtype == DType::Int64) {
+        int64_t* ptr = get_data_ptr<int64_t>(output);
+        int64_t s = static_cast<int64_t>(start), st = static_cast<int64_t>(step);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            ptr[i] = s + static_cast<int64_t>(i[0]) * st;
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for arange kernel");
+    }
+
+    return output;
+}
+
+/**
+ * @brief Generate a 1D tensor of `steps` evenly spaced values in [start, end]
+ */
+auto linspace_kernel(double start, double end, int64_t steps, DType dtype, Device device, sycl::queue& queue) -> Tensor {
+    Tensor output({steps}, dtype, device);
+    if (steps == 0) return output;
+
+    if (steps == 1) {
+        // Single element: just start
+        if (dtype == DType::Float32) {
+            float val = static_cast<float>(start);
+            float* ptr = get_data_ptr<float>(output);
+            queue.memcpy(ptr, &val, sizeof(float)).wait();
+        } else if (dtype == DType::Float64) {
+            double* ptr = get_data_ptr<double>(output);
+            queue.memcpy(ptr, &start, sizeof(double)).wait();
+        } else if (dtype == DType::Float16) {
+            sycl::half val = sycl::half(static_cast<float>(start));
+            sycl::half* ptr = get_data_ptr<sycl::half>(output);
+            queue.memcpy(ptr, &val, sizeof(sycl::half)).wait();
+        } else if (dtype == DType::BFloat16) {
+            uint16_t val = f32_to_bf16(static_cast<float>(start));
+            uint16_t* ptr = get_data_ptr<uint16_t>(output);
+            queue.memcpy(ptr, &val, sizeof(uint16_t)).wait();
+        }
+        return output;
+    }
+
+    double step_size = (end - start) / static_cast<double>(steps - 1);
+
+    if (dtype == DType::Float32) {
+        float* ptr = get_data_ptr<float>(output);
+        float s = static_cast<float>(start), e = static_cast<float>(end), st = static_cast<float>(step_size);
+        int64_t n = steps;
+        queue.parallel_for(sycl::range<1>(steps), [=](sycl::id<1> i) {
+            if (static_cast<int64_t>(i[0]) == n - 1) {
+                ptr[i] = e;  // Ensure last element is exactly end
+            } else {
+                ptr[i] = s + static_cast<float>(i[0]) * st;
+            }
+        }).wait();
+    }
+    else if (dtype == DType::Float64) {
+        double* ptr = get_data_ptr<double>(output);
+        int64_t n = steps;
+        queue.parallel_for(sycl::range<1>(steps), [=](sycl::id<1> i) {
+            if (static_cast<int64_t>(i[0]) == n - 1) {
+                ptr[i] = end;
+            } else {
+                ptr[i] = start + static_cast<double>(i[0]) * step_size;
+            }
+        }).wait();
+    }
+    else if (dtype == DType::Float16) {
+        sycl::half* ptr = get_data_ptr<sycl::half>(output);
+        float s = static_cast<float>(start), e = static_cast<float>(end), st = static_cast<float>(step_size);
+        int64_t n = steps;
+        queue.parallel_for(sycl::range<1>(steps), [=](sycl::id<1> i) {
+            if (static_cast<int64_t>(i[0]) == n - 1) {
+                ptr[i] = sycl::half(e);
+            } else {
+                ptr[i] = sycl::half(s + static_cast<float>(i[0]) * st);
+            }
+        }).wait();
+    }
+    else if (dtype == DType::BFloat16) {
+        uint16_t* ptr = get_data_ptr<uint16_t>(output);
+        float s = static_cast<float>(start), e = static_cast<float>(end), st = static_cast<float>(step_size);
+        int64_t n = steps;
+        queue.parallel_for(sycl::range<1>(steps), [=](sycl::id<1> i) {
+            if (static_cast<int64_t>(i[0]) == n - 1) {
+                ptr[i] = f32_to_bf16(e);
+            } else {
+                ptr[i] = f32_to_bf16(s + static_cast<float>(i[0]) * st);
+            }
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for linspace kernel");
+    }
+
+    return output;
+}
+
+/**
+ * @brief Generate a 2D identity matrix of shape [n, m]
+ */
+auto eye_kernel(int64_t n, int64_t m, DType dtype, Device device, sycl::queue& queue) -> Tensor {
+    Tensor output({n, m}, dtype, device);
+    int64_t total = n * m;
+
+    // Zero-initialize first
+    queue.memset(const_cast<void*>(output.data_ptr()), 0, total * output.dtype_size()).wait();
+
+    int64_t diag_len = std::min(n, m);
+
+    if (dtype == DType::Float32) {
+        float* ptr = get_data_ptr<float>(output);
+        queue.parallel_for(sycl::range<1>(diag_len), [=](sycl::id<1> i) {
+            ptr[i[0] * m + i[0]] = 1.0f;
+        }).wait();
+    }
+    else if (dtype == DType::Float64) {
+        double* ptr = get_data_ptr<double>(output);
+        queue.parallel_for(sycl::range<1>(diag_len), [=](sycl::id<1> i) {
+            ptr[i[0] * m + i[0]] = 1.0;
+        }).wait();
+    }
+    else if (dtype == DType::Float16) {
+        sycl::half* ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for(sycl::range<1>(diag_len), [=](sycl::id<1> i) {
+            ptr[i[0] * m + i[0]] = sycl::half(1.0f);
+        }).wait();
+    }
+    else if (dtype == DType::BFloat16) {
+        uint16_t* ptr = get_data_ptr<uint16_t>(output);
+        uint16_t one = f32_to_bf16(1.0f);
+        queue.parallel_for(sycl::range<1>(diag_len), [=](sycl::id<1> i) {
+            ptr[i[0] * m + i[0]] = one;
+        }).wait();
+    }
+    else if (dtype == DType::Int32) {
+        int32_t* ptr = get_data_ptr<int32_t>(output);
+        queue.parallel_for(sycl::range<1>(diag_len), [=](sycl::id<1> i) {
+            ptr[i[0] * m + i[0]] = 1;
+        }).wait();
+    }
+    else if (dtype == DType::Int64) {
+        int64_t* ptr = get_data_ptr<int64_t>(output);
+        queue.parallel_for(sycl::range<1>(diag_len), [=](sycl::id<1> i) {
+            ptr[i[0] * m + i[0]] = 1;
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for eye kernel");
+    }
 
     return output;
 }

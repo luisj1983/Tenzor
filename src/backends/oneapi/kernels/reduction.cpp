@@ -19,19 +19,23 @@ namespace oneapi {
 class SumKernelFloat32;
 class SumKernelFloat64;
 class SumKernelFloat16;
+class SumKernelBFloat16;
 class SumKernelInt32;
 class SumKernelInt64;
 class SumKernelBool;
 class MeanKernelFloat32;
 class MeanKernelFloat64;
 class MeanKernelFloat16;
+class MeanKernelBFloat16;
 class MaxKernelFloat32;
 class MaxKernelFloat64;
 class MaxKernelFloat16;
+class MaxKernelBFloat16;
 class MaxKernelInt32;
 class MinKernelFloat32;
 class MinKernelFloat64;
 class MinKernelFloat16;
+class MinKernelBFloat16;
 class MinKernelInt32;
 class ArgmaxKernelFloat32;
 class ArgmaxKernelFloat64;
@@ -46,6 +50,20 @@ class ArgminKernelInt32;
 template<typename T>
 inline auto get_data_ptr(const Tensor& t) -> T* {
     return static_cast<T*>(const_cast<void*>(t.data_ptr()));
+}
+
+// BFloat16 <-> Float32 conversion helpers (device-compatible)
+inline float bf16_to_f32(uint16_t bf16) {
+    uint32_t bits = static_cast<uint32_t>(bf16) << 16;
+    float result;
+    __builtin_memcpy(&result, &bits, sizeof(float));
+    return result;
+}
+
+inline uint16_t f32_to_bf16(float f32) {
+    uint32_t bits;
+    __builtin_memcpy(&bits, &f32, sizeof(uint32_t));
+    return static_cast<uint16_t>(bits >> 16);
 }
 
 // Helper to calculate strides from shape
@@ -178,6 +196,23 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
             queue.wait();
             sycl::free(sum_buf, queue);
         }
+        else if (in_cont.dtype() == DType::BFloat16) {
+            const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+            uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+
+            // Use float accumulation for precision
+            auto sum_buf = sycl::malloc_shared<float>(1, queue);
+            sum_buf[0] = 0.0f;
+
+            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(sum_buf, sycl::plus<float>()),
+                              [=](sycl::id<1> idx, auto& sum) {
+                sum += bf16_to_f32(in_ptr[idx]);
+            }).wait();
+
+            out_ptr[0] = f32_to_bf16(sum_buf[0]);
+            queue.wait();
+            sycl::free(sum_buf, queue);
+        }
         else if (in_cont.dtype() == DType::Int32) {
             const int32_t* in_ptr = get_data_ptr<const int32_t>(in_cont);
             int32_t* out_ptr = get_data_ptr<int32_t>(output);
@@ -288,6 +323,24 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 }
 
                 out_ptr[outer_idx * inner_size + inner_idx] = sycl::half(sum);
+            }).wait();
+        }
+        else if (in_cont.dtype() == DType::BFloat16) {
+            const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+            uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+
+            queue.parallel_for<SumKernelBFloat16>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+
+                // Use float accumulation for precision
+                float sum = 0.0f;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    sum += bf16_to_f32(in_ptr[base_offset + d * inner_size]);
+                }
+
+                out_ptr[outer_idx * inner_size + inner_idx] = f32_to_bf16(sum);
             }).wait();
         }
         else if (in_cont.dtype() == DType::Int32) {
@@ -436,6 +489,23 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
             queue.wait();
             sycl::free(sum_buf, queue);
         }
+        else if (in_cont.dtype() == DType::BFloat16) {
+            const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+            uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+            const float scale = 1.0f / static_cast<float>(total_size);
+
+            auto sum_buf = sycl::malloc_shared<float>(1, queue);
+            sum_buf[0] = 0.0f;
+
+            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(sum_buf, sycl::plus<float>()),
+                              [=](sycl::id<1> idx, auto& sum) {
+                sum += bf16_to_f32(in_ptr[idx]);
+            }).wait();
+
+            out_ptr[0] = f32_to_bf16(sum_buf[0] * scale);
+            queue.wait();
+            sycl::free(sum_buf, queue);
+        }
         else {
             throw std::runtime_error("Unsupported dtype for mean reduction");
         }
@@ -497,6 +567,24 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
                 }
 
                 out_ptr[outer_idx * inner_size + inner_idx] = sycl::half(sum * scale);
+            }).wait();
+        }
+        else if (in_cont.dtype() == DType::BFloat16) {
+            const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+            uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+            const float scale = 1.0f / static_cast<float>(dim_size);
+
+            queue.parallel_for<MeanKernelBFloat16>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+
+                float sum = 0.0f;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    sum += bf16_to_f32(in_ptr[base_offset + d * inner_size]);
+                }
+
+                out_ptr[outer_idx * inner_size + inner_idx] = f32_to_bf16(sum * scale);
             }).wait();
         }
         else {
@@ -568,6 +656,18 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                     max_val = sycl::fmax(max_val, static_cast<float>(in_ptr[i]));
                 }
                 out_ptr[0] = sycl::half(max_val);
+            }).wait();
+        }
+        else if (input.dtype() == DType::BFloat16) {
+            const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+            uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+
+            queue.single_task([=]() {
+                float max_val = -std::numeric_limits<float>::infinity();
+                for (int64_t i = 0; i < total_size; ++i) {
+                    max_val = sycl::fmax(max_val, bf16_to_f32(in_ptr[i]));
+                }
+                out_ptr[0] = f32_to_bf16(max_val);
             }).wait();
         }
         else if (input.dtype() == DType::Int32) {
@@ -643,6 +743,24 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 }
 
                 out_ptr[outer_idx * inner_size + inner_idx] = sycl::half(max_val);
+            }).wait();
+        }
+        else if (input.dtype() == DType::BFloat16) {
+            const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+            uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+
+            queue.parallel_for<MaxKernelBFloat16>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+
+                float max_val = -std::numeric_limits<float>::infinity();
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    float val = bf16_to_f32(in_ptr[base_offset + d * inner_size]);
+                    max_val = sycl::fmax(max_val, val);
+                }
+
+                out_ptr[outer_idx * inner_size + inner_idx] = f32_to_bf16(max_val);
             }).wait();
         }
         else if (input.dtype() == DType::Int32) {
@@ -734,6 +852,18 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 out_ptr[0] = sycl::half(min_val);
             }).wait();
         }
+        else if (input.dtype() == DType::BFloat16) {
+            const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+            uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+
+            queue.single_task([=]() {
+                float min_val = std::numeric_limits<float>::infinity();
+                for (int64_t i = 0; i < total_size; ++i) {
+                    min_val = sycl::fmin(min_val, bf16_to_f32(in_ptr[i]));
+                }
+                out_ptr[0] = f32_to_bf16(min_val);
+            }).wait();
+        }
         else if (input.dtype() == DType::Int32) {
             const int32_t* in_ptr = get_data_ptr<const int32_t>(input);
             int32_t* out_ptr = get_data_ptr<int32_t>(output);
@@ -807,6 +937,24 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 }
 
                 out_ptr[outer_idx * inner_size + inner_idx] = sycl::half(min_val);
+            }).wait();
+        }
+        else if (input.dtype() == DType::BFloat16) {
+            const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+            uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+
+            queue.parallel_for<MinKernelBFloat16>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+
+                float min_val = std::numeric_limits<float>::infinity();
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    float val = bf16_to_f32(in_ptr[base_offset + d * inner_size]);
+                    min_val = sycl::fmin(min_val, val);
+                }
+
+                out_ptr[outer_idx * inner_size + inner_idx] = f32_to_bf16(min_val);
             }).wait();
         }
         else if (input.dtype() == DType::Int32) {

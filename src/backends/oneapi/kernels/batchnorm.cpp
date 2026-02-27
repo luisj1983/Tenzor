@@ -35,11 +35,32 @@ class BatchNorm2dVarianceKernelFloat16;
 class BatchNorm2dUpdateRunningStatsKernelFloat32;
 class BatchNorm2dUpdateRunningStatsKernelFloat64;
 class BatchNorm2dUpdateRunningStatsKernelFloat16;
+class BatchNorm2dForwardKernelBFloat16;
+class BatchNorm2dForwardAffineKernelBFloat16;
+class BatchNorm2dBackwardGammaKernelBFloat16;
+class BatchNorm2dBackwardInputKernelBFloat16;
+class BatchNorm2dMeanKernelBFloat16;
+class BatchNorm2dVarianceKernelBFloat16;
+class BatchNorm2dUpdateRunningStatsKernelBFloat16;
 
 // Helper function to get typed pointer from tensor
 template<typename T>
 inline auto get_data_ptr(const Tensor& t) -> T* {
     return static_cast<T*>(const_cast<void*>(t.data_ptr()));
+}
+
+// BFloat16 <-> Float32 conversion helpers (device-compatible)
+inline float bf16_to_f32(uint16_t bf16) {
+    uint32_t bits = static_cast<uint32_t>(bf16) << 16;
+    float result;
+    __builtin_memcpy(&result, &bits, sizeof(float));
+    return result;
+}
+
+inline uint16_t f32_to_bf16(float f32) {
+    uint32_t bits;
+    __builtin_memcpy(&bits, &f32, sizeof(uint32_t));
+    return static_cast<uint16_t>(bits >> 16);
 }
 
 #ifdef TENZOR_HAS_ONEDNN
@@ -410,6 +431,31 @@ auto batchnorm2d_forward(const Tensor& input, const Tensor& mean, const Tensor& 
             out_ptr[input_idx] = sycl::half((val - m) * std_inv);
         }).wait();
     }
+    else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        // Mean/variance may be Float32 (from mean_var) or BFloat16 (running stats)
+        const bool stats_f32 = (mean.dtype() == DType::Float32);
+        const float* mean_f32 = stats_f32 ? get_data_ptr<const float>(mean) : nullptr;
+        const float* var_f32 = stats_f32 ? get_data_ptr<const float>(variance) : nullptr;
+        const uint16_t* mean_bf16 = !stats_f32 ? get_data_ptr<const uint16_t>(mean) : nullptr;
+        const uint16_t* var_bf16 = !stats_f32 ? get_data_ptr<const uint16_t>(variance) : nullptr;
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+
+        queue.parallel_for<BatchNorm2dForwardKernelBFloat16>(sycl::range<3>(N, C, H * W), [=](sycl::id<3> idx) {
+            const int64_t n = idx[0];
+            const int64_t c = idx[1];
+            const int64_t hw = idx[2];
+
+            // Use float for intermediate calculations for numerical stability
+            const float m = stats_f32 ? mean_f32[c] : bf16_to_f32(mean_bf16[c]);
+            const float v = stats_f32 ? var_f32[c] : bf16_to_f32(var_bf16[c]);
+            const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
+
+            const int64_t input_idx = ((n * C + c) * H * W) + hw;
+            const float val = bf16_to_f32(in_ptr[input_idx]);
+            out_ptr[input_idx] = f32_to_bf16((val - m) * std_inv);
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for batchnorm2d_forward (pure SYCL)");
     }
@@ -504,6 +550,35 @@ auto batchnorm2d_forward_affine(const Tensor& input, const Tensor& mean, const T
             const int64_t input_idx = ((n * C + c) * H * W) + hw;
             const float val = static_cast<float>(in_ptr[input_idx]);
             out_ptr[input_idx] = sycl::half(g * (val - m) * std_inv + b);
+        }).wait();
+    }
+    else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        // Mean/variance may be Float32 (from mean_var) or BFloat16 (running stats)
+        const bool stats_f32 = (mean.dtype() == DType::Float32);
+        const float* mean_f32 = stats_f32 ? get_data_ptr<const float>(mean) : nullptr;
+        const float* var_f32 = stats_f32 ? get_data_ptr<const float>(variance) : nullptr;
+        const uint16_t* mean_bf16 = !stats_f32 ? get_data_ptr<const uint16_t>(mean) : nullptr;
+        const uint16_t* var_bf16 = !stats_f32 ? get_data_ptr<const uint16_t>(variance) : nullptr;
+        const uint16_t* gamma_ptr = get_data_ptr<const uint16_t>(gamma);
+        const uint16_t* beta_ptr = get_data_ptr<const uint16_t>(beta);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+
+        queue.parallel_for<BatchNorm2dForwardAffineKernelBFloat16>(sycl::range<3>(N, C, H * W), [=](sycl::id<3> idx) {
+            const int64_t n = idx[0];
+            const int64_t c = idx[1];
+            const int64_t hw = idx[2];
+
+            // Use float for intermediate calculations for numerical stability
+            const float m = stats_f32 ? mean_f32[c] : bf16_to_f32(mean_bf16[c]);
+            const float v = stats_f32 ? var_f32[c] : bf16_to_f32(var_bf16[c]);
+            const float g = bf16_to_f32(gamma_ptr[c]);
+            const float b = bf16_to_f32(beta_ptr[c]);
+            const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
+
+            const int64_t input_idx = ((n * C + c) * H * W) + hw;
+            const float val = bf16_to_f32(in_ptr[input_idx]);
+            out_ptr[input_idx] = f32_to_bf16(g * (val - m) * std_inv + b);
         }).wait();
     }
     else {
@@ -687,6 +762,66 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
                                                       x_norm * grad_gamma_val * scale));
         }).wait();
     }
+    else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        // Mean/variance may be Float32 (from mean_var) or BFloat16 (running stats)
+        const bool stats_f32 = (mean.dtype() == DType::Float32);
+        const float* mean_f32 = stats_f32 ? get_data_ptr<const float>(mean) : nullptr;
+        const float* var_f32 = stats_f32 ? get_data_ptr<const float>(variance) : nullptr;
+        const uint16_t* mean_bf16 = !stats_f32 ? get_data_ptr<const uint16_t>(mean) : nullptr;
+        const uint16_t* var_bf16 = !stats_f32 ? get_data_ptr<const uint16_t>(variance) : nullptr;
+        const uint16_t* gamma_ptr = get_data_ptr<const uint16_t>(gamma);
+        uint16_t* grad_in_ptr = get_data_ptr<uint16_t>(grad_input);
+        uint16_t* grad_gamma_ptr = get_data_ptr<uint16_t>(grad_gamma);
+        uint16_t* grad_beta_ptr = get_data_ptr<uint16_t>(grad_beta);
+
+        // Compute grad_gamma and grad_beta using float accumulation
+        queue.parallel_for<BatchNorm2dBackwardGammaKernelBFloat16>(sycl::range<1>(C), [=](sycl::id<1> c) {
+            float sum_grad_out = 0.0f;
+            float sum_grad_out_norm = 0.0f;
+            const float m = stats_f32 ? mean_f32[c] : bf16_to_f32(mean_bf16[c]);
+            const float v = stats_f32 ? var_f32[c] : bf16_to_f32(var_bf16[c]);
+            const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t hw = 0; hw < spatial; ++hw) {
+                    const int64_t idx = ((n * C + c) * spatial) + hw;
+                    float grad_out_val = bf16_to_f32(grad_out_ptr[idx]);
+                    float in_val = bf16_to_f32(in_ptr[idx]);
+                    sum_grad_out += grad_out_val;
+                    sum_grad_out_norm += grad_out_val * (in_val - m) * std_inv;
+                }
+            }
+
+            grad_gamma_ptr[c] = f32_to_bf16(sum_grad_out_norm);
+            grad_beta_ptr[c] = f32_to_bf16(sum_grad_out);
+        }).wait();
+
+        // Compute grad_input
+        const float scale = 1.0f / static_cast<float>(N * spatial);
+        queue.parallel_for<BatchNorm2dBackwardInputKernelBFloat16>(sycl::range<3>(N, C, spatial), [=](sycl::id<3> idx) {
+            const int64_t n = idx[0];
+            const int64_t c = idx[1];
+            const int64_t hw = idx[2];
+
+            const float m = stats_f32 ? mean_f32[c] : bf16_to_f32(mean_bf16[c]);
+            const float v = stats_f32 ? var_f32[c] : bf16_to_f32(var_bf16[c]);
+            const float g = bf16_to_f32(gamma_ptr[c]);
+            const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
+
+            const int64_t input_idx = ((n * C + c) * spatial) + hw;
+            const float in_val = bf16_to_f32(in_ptr[input_idx]);
+            const float x_norm = (in_val - m) * std_inv;
+            const float grad_out_val = bf16_to_f32(grad_out_ptr[input_idx]);
+            const float grad_beta_val = bf16_to_f32(grad_beta_ptr[c]);
+            const float grad_gamma_val = bf16_to_f32(grad_gamma_ptr[c]);
+
+            grad_in_ptr[input_idx] = f32_to_bf16(g * std_inv * (grad_out_val -
+                                                      grad_beta_val * scale -
+                                                      x_norm * grad_gamma_val * scale));
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for batchnorm2d_backward (pure SYCL)");
     }
@@ -745,6 +880,24 @@ auto batchnorm2d_update_running_stats(Tensor& running_mean, Tensor& running_var,
             run_var_ptr[c] = sycl::half((1.0f - momentum) * run_var + momentum * batch_var);
         }).wait();
     }
+    else if (running_mean.dtype() == DType::BFloat16) {
+        uint16_t* run_mean_ptr = get_data_ptr<uint16_t>(running_mean);
+        uint16_t* run_var_ptr = get_data_ptr<uint16_t>(running_var);
+        const uint16_t* batch_mean_ptr = get_data_ptr<const uint16_t>(batch_mean);
+        const uint16_t* batch_var_ptr = get_data_ptr<const uint16_t>(batch_var);
+
+        queue.parallel_for<BatchNorm2dUpdateRunningStatsKernelBFloat16>(sycl::range<1>(C), [=](sycl::id<1> c_id) {
+            const int64_t c = c_id[0];
+            // Use float for intermediate calculations for numerical stability
+            float run_mean = bf16_to_f32(run_mean_ptr[c]);
+            float run_var = bf16_to_f32(run_var_ptr[c]);
+            float batch_mean = bf16_to_f32(batch_mean_ptr[c]);
+            float batch_var = bf16_to_f32(batch_var_ptr[c]);
+
+            run_mean_ptr[c] = f32_to_bf16((1.0f - momentum) * run_mean + momentum * batch_mean);
+            run_var_ptr[c] = f32_to_bf16((1.0f - momentum) * run_var + momentum * batch_var);
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for batchnorm2d_update_running_stats");
     }
@@ -768,8 +921,8 @@ auto batchnorm2d_mean_var(const Tensor& input, sycl::queue& queue) -> std::vecto
         throw std::runtime_error("BatchNorm2d: Cannot compute mean/variance for empty tensor");
     }
 
-    // For Float16 inputs, store mean/variance in Float32 to avoid overflow
-    DType stats_dtype = (input.dtype() == DType::Float16) ? DType::Float32 : input.dtype();
+    // For Float16/BFloat16 inputs, store mean/variance in Float32 to avoid overflow
+    DType stats_dtype = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) ? DType::Float32 : input.dtype();
     Tensor mean({C}, stats_dtype, input.device());
     Tensor variance({C}, stats_dtype, input.device());
 
@@ -897,11 +1050,759 @@ auto batchnorm2d_mean_var(const Tensor& input, sycl::queue& queue) -> std::vecto
             var_ptr[c] = sum_sq_diff / static_cast<float>(total_elements);
         }).wait();
     }
+    else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        // Mean/variance stored as Float32 to avoid BFloat16 overflow
+        float* mean_ptr = get_data_ptr<float>(mean);
+        float* var_ptr = get_data_ptr<float>(variance);
+
+        // Compute mean for each channel using float accumulation
+        queue.parallel_for<BatchNorm2dMeanKernelBFloat16>(sycl::range<1>(C), [=](sycl::id<1> c_id) {
+            const int64_t c = c_id[0];
+            float sum = 0.0f;
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t h = 0; h < H; ++h) {
+                    for (int64_t w = 0; w < W; ++w) {
+                        const int64_t idx = ((n * C + c) * H + h) * W + w;
+                        sum += bf16_to_f32(in_ptr[idx]);
+                    }
+                }
+            }
+
+            mean_ptr[c] = sum / static_cast<float>(total_elements);
+        }).wait();
+
+        // Compute variance for each channel using float accumulation
+        queue.parallel_for<BatchNorm2dVarianceKernelBFloat16>(sycl::range<1>(C), [=](sycl::id<1> c_id) {
+            const int64_t c = c_id[0];
+            const float channel_mean = mean_ptr[c];
+            float sum_sq_diff = 0.0f;
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t h = 0; h < H; ++h) {
+                    for (int64_t w = 0; w < W; ++w) {
+                        const int64_t idx = ((n * C + c) * H + h) * W + w;
+                        const float diff = bf16_to_f32(in_ptr[idx]) - channel_mean;
+                        sum_sq_diff += diff * diff;
+                    }
+                }
+            }
+
+            var_ptr[c] = sum_sq_diff / static_cast<float>(total_elements);
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for batchnorm2d_mean_var (pure SYCL)");
     }
 
     return {mean, variance};
+}
+
+// ============================================================================
+// Group Normalization
+// ============================================================================
+
+// SYCL kernel class declarations
+class GroupNormMeanKernelFloat32;
+class GroupNormMeanKernelFloat64;
+class GroupNormMeanKernelFloat16;
+class GroupNormVarianceKernelFloat32;
+class GroupNormVarianceKernelFloat64;
+class GroupNormVarianceKernelFloat16;
+class GroupNormNormalizeKernelFloat32;
+class GroupNormNormalizeKernelFloat64;
+class GroupNormNormalizeKernelFloat16;
+class GroupNormMeanKernelBFloat16;
+class GroupNormVarianceKernelBFloat16;
+class GroupNormNormalizeKernelBFloat16;
+
+auto group_norm_kernel(const Tensor& input, int64_t num_groups,
+                       const Tensor* weight, const Tensor* bias,
+                       float eps, sycl::queue& queue) -> std::vector<Tensor> {
+    auto shape = input.shape();
+    if (shape.size() < 2) {
+        throw std::invalid_argument("group_norm requires at least 2D input");
+    }
+
+    const int64_t N = shape[0];
+    const int64_t C = shape[1];
+    int64_t spatial_size = 1;
+    for (size_t i = 2; i < shape.size(); ++i) {
+        spatial_size *= shape[i];
+    }
+
+    const int64_t channels_per_group = C / num_groups;
+    const int64_t group_size = channels_per_group * spatial_size;
+
+    // Output same shape/dtype as input; mean/inv_std are [N, num_groups] Float32
+    Tensor output(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
+    Tensor mean_out({N, num_groups}, DType::Float32, input.device());
+    Tensor inv_std_out({N, num_groups}, DType::Float32, input.device());
+
+    float* mean_ptr = get_data_ptr<float>(mean_out);
+    float* inv_std_ptr = get_data_ptr<float>(inv_std_out);
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(input);
+        float* out_ptr = get_data_ptr<float>(output);
+        const float* w_ptr = weight ? get_data_ptr<const float>(*weight) : nullptr;
+        const float* b_ptr = bias ? get_data_ptr<const float>(*bias) : nullptr;
+
+        // Pass 1: compute per-group mean
+        queue.parallel_for<GroupNormMeanKernelFloat32>(
+            sycl::range<2>(N, num_groups),
+            [=](sycl::id<2> idx) {
+                const int64_t n = idx[0];
+                const int64_t g = idx[1];
+                const int64_t c_start = g * channels_per_group;
+
+                float sum = 0.0f;
+                for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        sum += in_ptr[(n * C + c) * spatial_size + s];
+                    }
+                }
+                mean_ptr[n * num_groups + g] = sum / static_cast<float>(group_size);
+            }
+        ).wait();
+
+        // Pass 2: compute per-group variance and inv_std
+        queue.parallel_for<GroupNormVarianceKernelFloat32>(
+            sycl::range<2>(N, num_groups),
+            [=](sycl::id<2> idx) {
+                const int64_t n = idx[0];
+                const int64_t g = idx[1];
+                const int64_t c_start = g * channels_per_group;
+                const float m = mean_ptr[n * num_groups + g];
+
+                float var = 0.0f;
+                for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        float diff = in_ptr[(n * C + c) * spatial_size + s] - m;
+                        var += diff * diff;
+                    }
+                }
+                var /= static_cast<float>(group_size);
+                inv_std_ptr[n * num_groups + g] = 1.0f / sycl::sqrt(var + eps);
+            }
+        ).wait();
+
+        // Pass 3: normalize + affine
+        queue.parallel_for<GroupNormNormalizeKernelFloat32>(
+            sycl::range<3>(N, C, spatial_size),
+            [=](sycl::id<3> idx) {
+                const int64_t n = idx[0];
+                const int64_t c = idx[1];
+                const int64_t s = idx[2];
+                const int64_t g = c / channels_per_group;
+
+                const float m = mean_ptr[n * num_groups + g];
+                const float istd = inv_std_ptr[n * num_groups + g];
+                const float w = w_ptr ? w_ptr[c] : 1.0f;
+                const float b = b_ptr ? b_ptr[c] : 0.0f;
+
+                const int64_t i = (n * C + c) * spatial_size + s;
+                out_ptr[i] = (in_ptr[i] - m) * istd * w + b;
+            }
+        ).wait();
+    }
+    else if (input.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(input);
+        double* out_ptr = get_data_ptr<double>(output);
+        const double* w_ptr = weight ? get_data_ptr<const double>(*weight) : nullptr;
+        const double* b_ptr = bias ? get_data_ptr<const double>(*bias) : nullptr;
+        const double eps_d = static_cast<double>(eps);
+
+        queue.parallel_for<GroupNormMeanKernelFloat64>(
+            sycl::range<2>(N, num_groups),
+            [=](sycl::id<2> idx) {
+                const int64_t n = idx[0];
+                const int64_t g = idx[1];
+                const int64_t c_start = g * channels_per_group;
+
+                double sum = 0.0;
+                for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        sum += in_ptr[(n * C + c) * spatial_size + s];
+                    }
+                }
+                // Store mean as float (stats are always Float32)
+                mean_ptr[n * num_groups + g] = static_cast<float>(sum / static_cast<double>(group_size));
+            }
+        ).wait();
+
+        queue.parallel_for<GroupNormVarianceKernelFloat64>(
+            sycl::range<2>(N, num_groups),
+            [=](sycl::id<2> idx) {
+                const int64_t n = idx[0];
+                const int64_t g = idx[1];
+                const int64_t c_start = g * channels_per_group;
+                const double m = static_cast<double>(mean_ptr[n * num_groups + g]);
+
+                double var = 0.0;
+                for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        double diff = in_ptr[(n * C + c) * spatial_size + s] - m;
+                        var += diff * diff;
+                    }
+                }
+                var /= static_cast<double>(group_size);
+                inv_std_ptr[n * num_groups + g] = static_cast<float>(1.0 / sycl::sqrt(var + eps_d));
+            }
+        ).wait();
+
+        queue.parallel_for<GroupNormNormalizeKernelFloat64>(
+            sycl::range<3>(N, C, spatial_size),
+            [=](sycl::id<3> idx) {
+                const int64_t n = idx[0];
+                const int64_t c = idx[1];
+                const int64_t s = idx[2];
+                const int64_t g = c / channels_per_group;
+
+                const double m = static_cast<double>(mean_ptr[n * num_groups + g]);
+                const double istd = static_cast<double>(inv_std_ptr[n * num_groups + g]);
+                const double w = w_ptr ? w_ptr[c] : 1.0;
+                const double b = b_ptr ? b_ptr[c] : 0.0;
+
+                const int64_t i = (n * C + c) * spatial_size + s;
+                out_ptr[i] = (in_ptr[i] - m) * istd * w + b;
+            }
+        ).wait();
+    }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        const sycl::half* w_ptr = weight ? get_data_ptr<const sycl::half>(*weight) : nullptr;
+        const sycl::half* b_ptr = bias ? get_data_ptr<const sycl::half>(*bias) : nullptr;
+
+        // Use float accumulation for numerical stability
+        queue.parallel_for<GroupNormMeanKernelFloat16>(
+            sycl::range<2>(N, num_groups),
+            [=](sycl::id<2> idx) {
+                const int64_t n = idx[0];
+                const int64_t g = idx[1];
+                const int64_t c_start = g * channels_per_group;
+
+                float sum = 0.0f;
+                for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        sum += static_cast<float>(in_ptr[(n * C + c) * spatial_size + s]);
+                    }
+                }
+                mean_ptr[n * num_groups + g] = sum / static_cast<float>(group_size);
+            }
+        ).wait();
+
+        queue.parallel_for<GroupNormVarianceKernelFloat16>(
+            sycl::range<2>(N, num_groups),
+            [=](sycl::id<2> idx) {
+                const int64_t n = idx[0];
+                const int64_t g = idx[1];
+                const int64_t c_start = g * channels_per_group;
+                const float m = mean_ptr[n * num_groups + g];
+
+                float var = 0.0f;
+                for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        float diff = static_cast<float>(in_ptr[(n * C + c) * spatial_size + s]) - m;
+                        var += diff * diff;
+                    }
+                }
+                var /= static_cast<float>(group_size);
+                inv_std_ptr[n * num_groups + g] = 1.0f / sycl::sqrt(var + eps);
+            }
+        ).wait();
+
+        queue.parallel_for<GroupNormNormalizeKernelFloat16>(
+            sycl::range<3>(N, C, spatial_size),
+            [=](sycl::id<3> idx) {
+                const int64_t n = idx[0];
+                const int64_t c = idx[1];
+                const int64_t s = idx[2];
+                const int64_t g = c / channels_per_group;
+
+                const float m = mean_ptr[n * num_groups + g];
+                const float istd = inv_std_ptr[n * num_groups + g];
+                const float w = w_ptr ? static_cast<float>(w_ptr[c]) : 1.0f;
+                const float b = b_ptr ? static_cast<float>(b_ptr[c]) : 0.0f;
+
+                const int64_t i = (n * C + c) * spatial_size + s;
+                float val = static_cast<float>(in_ptr[i]);
+                out_ptr[i] = sycl::half((val - m) * istd * w + b);
+            }
+        ).wait();
+    }
+    else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        const uint16_t* w_ptr = weight ? get_data_ptr<const uint16_t>(*weight) : nullptr;
+        const uint16_t* b_ptr = bias ? get_data_ptr<const uint16_t>(*bias) : nullptr;
+
+        // Use float accumulation for numerical stability
+        queue.parallel_for<GroupNormMeanKernelBFloat16>(
+            sycl::range<2>(N, num_groups),
+            [=](sycl::id<2> idx) {
+                const int64_t n = idx[0];
+                const int64_t g = idx[1];
+                const int64_t c_start = g * channels_per_group;
+
+                float sum = 0.0f;
+                for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        sum += bf16_to_f32(in_ptr[(n * C + c) * spatial_size + s]);
+                    }
+                }
+                mean_ptr[n * num_groups + g] = sum / static_cast<float>(group_size);
+            }
+        ).wait();
+
+        queue.parallel_for<GroupNormVarianceKernelBFloat16>(
+            sycl::range<2>(N, num_groups),
+            [=](sycl::id<2> idx) {
+                const int64_t n = idx[0];
+                const int64_t g = idx[1];
+                const int64_t c_start = g * channels_per_group;
+                const float m = mean_ptr[n * num_groups + g];
+
+                float var = 0.0f;
+                for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        float diff = bf16_to_f32(in_ptr[(n * C + c) * spatial_size + s]) - m;
+                        var += diff * diff;
+                    }
+                }
+                var /= static_cast<float>(group_size);
+                inv_std_ptr[n * num_groups + g] = 1.0f / sycl::sqrt(var + eps);
+            }
+        ).wait();
+
+        queue.parallel_for<GroupNormNormalizeKernelBFloat16>(
+            sycl::range<3>(N, C, spatial_size),
+            [=](sycl::id<3> idx) {
+                const int64_t n = idx[0];
+                const int64_t c = idx[1];
+                const int64_t s = idx[2];
+                const int64_t g = c / channels_per_group;
+
+                const float m = mean_ptr[n * num_groups + g];
+                const float istd = inv_std_ptr[n * num_groups + g];
+                const float w = w_ptr ? bf16_to_f32(w_ptr[c]) : 1.0f;
+                const float b = b_ptr ? bf16_to_f32(b_ptr[c]) : 0.0f;
+
+                const int64_t i = (n * C + c) * spatial_size + s;
+                float val = bf16_to_f32(in_ptr[i]);
+                out_ptr[i] = f32_to_bf16((val - m) * istd * w + b);
+            }
+        ).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for group_norm_kernel");
+    }
+
+    return {output, mean_out, inv_std_out};
+}
+
+// ============================================================================
+// Group Normalization Backward
+// ============================================================================
+
+// SYCL kernel class declarations
+class GroupNormBackwardPassOneFloat32;
+class GroupNormBackwardPassOneFloat64;
+class GroupNormBackwardPassOneFloat16;
+class GroupNormBackwardPassTwoFloat32;
+class GroupNormBackwardPassTwoFloat64;
+class GroupNormBackwardPassTwoFloat16;
+class GroupNormBackwardGradWBFloat32;
+class GroupNormBackwardGradWBFloat64;
+class GroupNormBackwardGradWBFloat16;
+class GroupNormBackwardPassOneBFloat16;
+class GroupNormBackwardPassTwoBFloat16;
+class GroupNormBackwardGradWBBFloat16;
+
+auto group_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
+                                const Tensor& mean, const Tensor& rstd,
+                                const Tensor& weight, int64_t num_groups,
+                                sycl::queue& queue) -> std::vector<Tensor> {
+    auto shape = input.shape();
+    const int64_t N = shape[0];
+    const int64_t C = shape[1];
+    int64_t spatial_size = 1;
+    for (size_t i = 2; i < shape.size(); ++i) {
+        spatial_size *= shape[i];
+    }
+    const int64_t channels_per_group = C / num_groups;
+    const int64_t group_size = channels_per_group * spatial_size;
+
+    Tensor grad_input(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
+    Tensor grad_weight({C}, weight.dtype(), weight.device());
+    Tensor grad_bias({C}, weight.dtype(), weight.device());
+
+    // mean and rstd are Float32, shape [N, num_groups]
+    const float* mean_ptr = get_data_ptr<const float>(mean);
+    const float* rstd_ptr = get_data_ptr<const float>(rstd);
+
+    if (input.dtype() == DType::Float32) {
+        const float* go_ptr = get_data_ptr<const float>(grad_output);
+        const float* in_ptr = get_data_ptr<const float>(input);
+        const float* w_ptr = get_data_ptr<const float>(weight);
+        float* gi_ptr = get_data_ptr<float>(grad_input);
+        float* gw_ptr = get_data_ptr<float>(grad_weight);
+        float* gb_ptr = get_data_ptr<float>(grad_bias);
+
+        // Zero grad_weight and grad_bias
+        queue.memset(gw_ptr, 0, C * sizeof(float)).wait();
+        queue.memset(gb_ptr, 0, C * sizeof(float)).wait();
+
+        // Temp buffer for per-(n,g) ds and db
+        Tensor ds_buf({N, num_groups}, DType::Float32, input.device());
+        Tensor db_buf({N, num_groups}, DType::Float32, input.device());
+        float* ds_ptr = get_data_ptr<float>(ds_buf);
+        float* db_ptr = get_data_ptr<float>(db_buf);
+
+        // Pass 1: compute ds, db per (n, g)
+        queue.parallel_for<GroupNormBackwardPassOneFloat32>(
+            sycl::range<2>(N, num_groups),
+            [=](sycl::id<2> idx) {
+                const int64_t n = idx[0];
+                const int64_t g = idx[1];
+                const int64_t c_start = g * channels_per_group;
+                const float m = mean_ptr[n * num_groups + g];
+                const float r = rstd_ptr[n * num_groups + g];
+
+                float ds_val = 0.0f;
+                float db_val = 0.0f;
+                for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        const int64_t i = (n * C + c) * spatial_size + s;
+                        float dy = go_ptr[i];
+                        float x_hat = (in_ptr[i] - m) * r;
+                        float dy_w = dy * w_ptr[c];
+                        ds_val += dy_w * x_hat;
+                        db_val += dy_w;
+                    }
+                }
+                ds_ptr[n * num_groups + g] = ds_val;
+                db_ptr[n * num_groups + g] = db_val;
+            }
+        ).wait();
+
+        // Pass 2: compute grad_input and accumulate grad_weight/grad_bias
+        queue.parallel_for<GroupNormBackwardPassTwoFloat32>(
+            sycl::range<2>(N, num_groups),
+            [=](sycl::id<2> idx) {
+                const int64_t n = idx[0];
+                const int64_t g = idx[1];
+                const int64_t c_start = g * channels_per_group;
+                const float m = mean_ptr[n * num_groups + g];
+                const float r = rstd_ptr[n * num_groups + g];
+                const float ds_val = ds_ptr[n * num_groups + g];
+                const float db_val = db_ptr[n * num_groups + g];
+                const float inv_gs = 1.0f / static_cast<float>(group_size);
+
+                for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        const int64_t i = (n * C + c) * spatial_size + s;
+                        float dy = go_ptr[i];
+                        float x_hat = (in_ptr[i] - m) * r;
+                        gi_ptr[i] = r * (dy * w_ptr[c] - inv_gs * (db_val + x_hat * ds_val));
+                    }
+                }
+            }
+        ).wait();
+
+        // Pass 3: accumulate grad_weight/grad_bias across batch
+        queue.parallel_for<GroupNormBackwardGradWBFloat32>(
+            sycl::range<1>(C),
+            [=](sycl::id<1> c_id) {
+                const int64_t c = c_id[0];
+                const int64_t g = c / channels_per_group;
+
+                float gw_val = 0.0f;
+                float gb_val = 0.0f;
+                for (int64_t n = 0; n < N; ++n) {
+                    const float m = mean_ptr[n * num_groups + g];
+                    const float r = rstd_ptr[n * num_groups + g];
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        const int64_t i = (n * C + c) * spatial_size + s;
+                        float x_hat = (in_ptr[i] - m) * r;
+                        gw_val += go_ptr[i] * x_hat;
+                        gb_val += go_ptr[i];
+                    }
+                }
+                gw_ptr[c] = gw_val;
+                gb_ptr[c] = gb_val;
+            }
+        ).wait();
+    }
+    else if (input.dtype() == DType::Float64) {
+        const double* go_ptr = get_data_ptr<const double>(grad_output);
+        const double* in_ptr = get_data_ptr<const double>(input);
+        const double* w_ptr = get_data_ptr<const double>(weight);
+        double* gi_ptr = get_data_ptr<double>(grad_input);
+        double* gw_ptr = get_data_ptr<double>(grad_weight);
+        double* gb_ptr = get_data_ptr<double>(grad_bias);
+
+        queue.memset(gw_ptr, 0, C * sizeof(double)).wait();
+        queue.memset(gb_ptr, 0, C * sizeof(double)).wait();
+
+        Tensor ds_buf({N, num_groups}, DType::Float32, input.device());
+        Tensor db_buf({N, num_groups}, DType::Float32, input.device());
+        float* ds_ptr = get_data_ptr<float>(ds_buf);
+        float* db_ptr = get_data_ptr<float>(db_buf);
+
+        queue.parallel_for<GroupNormBackwardPassOneFloat64>(
+            sycl::range<2>(N, num_groups),
+            [=](sycl::id<2> idx) {
+                const int64_t n = idx[0];
+                const int64_t g = idx[1];
+                const int64_t c_start = g * channels_per_group;
+                const double m = static_cast<double>(mean_ptr[n * num_groups + g]);
+                const double r = static_cast<double>(rstd_ptr[n * num_groups + g]);
+
+                double ds_val = 0.0;
+                double db_val = 0.0;
+                for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        const int64_t i = (n * C + c) * spatial_size + s;
+                        double dy = go_ptr[i];
+                        double x_hat = (in_ptr[i] - m) * r;
+                        double dy_w = dy * w_ptr[c];
+                        ds_val += dy_w * x_hat;
+                        db_val += dy_w;
+                    }
+                }
+                ds_ptr[n * num_groups + g] = static_cast<float>(ds_val);
+                db_ptr[n * num_groups + g] = static_cast<float>(db_val);
+            }
+        ).wait();
+
+        queue.parallel_for<GroupNormBackwardPassTwoFloat64>(
+            sycl::range<2>(N, num_groups),
+            [=](sycl::id<2> idx) {
+                const int64_t n = idx[0];
+                const int64_t g = idx[1];
+                const int64_t c_start = g * channels_per_group;
+                const double m = static_cast<double>(mean_ptr[n * num_groups + g]);
+                const double r = static_cast<double>(rstd_ptr[n * num_groups + g]);
+                const double ds_val = static_cast<double>(ds_ptr[n * num_groups + g]);
+                const double db_val = static_cast<double>(db_ptr[n * num_groups + g]);
+                const double inv_gs = 1.0 / static_cast<double>(group_size);
+
+                for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        const int64_t i = (n * C + c) * spatial_size + s;
+                        double dy = go_ptr[i];
+                        double x_hat = (in_ptr[i] - m) * r;
+                        gi_ptr[i] = r * (dy * w_ptr[c] - inv_gs * (db_val + x_hat * ds_val));
+                    }
+                }
+            }
+        ).wait();
+
+        queue.parallel_for<GroupNormBackwardGradWBFloat64>(
+            sycl::range<1>(C),
+            [=](sycl::id<1> c_id) {
+                const int64_t c = c_id[0];
+                const int64_t g = c / channels_per_group;
+
+                double gw_val = 0.0;
+                double gb_val = 0.0;
+                for (int64_t n = 0; n < N; ++n) {
+                    const double m = static_cast<double>(mean_ptr[n * num_groups + g]);
+                    const double r = static_cast<double>(rstd_ptr[n * num_groups + g]);
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        const int64_t i = (n * C + c) * spatial_size + s;
+                        double x_hat = (in_ptr[i] - m) * r;
+                        gw_val += go_ptr[i] * x_hat;
+                        gb_val += go_ptr[i];
+                    }
+                }
+                gw_ptr[c] = gw_val;
+                gb_ptr[c] = gb_val;
+            }
+        ).wait();
+    }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* go_ptr = get_data_ptr<const sycl::half>(grad_output);
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        const sycl::half* w_ptr = get_data_ptr<const sycl::half>(weight);
+        sycl::half* gi_ptr = get_data_ptr<sycl::half>(grad_input);
+        sycl::half* gw_ptr = get_data_ptr<sycl::half>(grad_weight);
+        sycl::half* gb_ptr = get_data_ptr<sycl::half>(grad_bias);
+
+        // Use float intermediates
+        Tensor ds_buf({N, num_groups}, DType::Float32, input.device());
+        Tensor db_buf({N, num_groups}, DType::Float32, input.device());
+        float* ds_ptr = get_data_ptr<float>(ds_buf);
+        float* db_ptr = get_data_ptr<float>(db_buf);
+
+        queue.parallel_for<GroupNormBackwardPassOneFloat16>(
+            sycl::range<2>(N, num_groups),
+            [=](sycl::id<2> idx) {
+                const int64_t n = idx[0];
+                const int64_t g = idx[1];
+                const int64_t c_start = g * channels_per_group;
+                const float m = mean_ptr[n * num_groups + g];
+                const float r = rstd_ptr[n * num_groups + g];
+
+                float ds_val = 0.0f;
+                float db_val = 0.0f;
+                for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        const int64_t i = (n * C + c) * spatial_size + s;
+                        float dy = static_cast<float>(go_ptr[i]);
+                        float x_hat = (static_cast<float>(in_ptr[i]) - m) * r;
+                        float dy_w = dy * static_cast<float>(w_ptr[c]);
+                        ds_val += dy_w * x_hat;
+                        db_val += dy_w;
+                    }
+                }
+                ds_ptr[n * num_groups + g] = ds_val;
+                db_ptr[n * num_groups + g] = db_val;
+            }
+        ).wait();
+
+        queue.parallel_for<GroupNormBackwardPassTwoFloat16>(
+            sycl::range<2>(N, num_groups),
+            [=](sycl::id<2> idx) {
+                const int64_t n = idx[0];
+                const int64_t g = idx[1];
+                const int64_t c_start = g * channels_per_group;
+                const float m = mean_ptr[n * num_groups + g];
+                const float r = rstd_ptr[n * num_groups + g];
+                const float ds_val = ds_ptr[n * num_groups + g];
+                const float db_val = db_ptr[n * num_groups + g];
+                const float inv_gs = 1.0f / static_cast<float>(group_size);
+
+                for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        const int64_t i = (n * C + c) * spatial_size + s;
+                        float dy = static_cast<float>(go_ptr[i]);
+                        float x_hat = (static_cast<float>(in_ptr[i]) - m) * r;
+                        float w = static_cast<float>(w_ptr[c]);
+                        gi_ptr[i] = sycl::half(r * (dy * w - inv_gs * (db_val + x_hat * ds_val)));
+                    }
+                }
+            }
+        ).wait();
+
+        queue.parallel_for<GroupNormBackwardGradWBFloat16>(
+            sycl::range<1>(C),
+            [=](sycl::id<1> c_id) {
+                const int64_t c = c_id[0];
+                const int64_t g = c / channels_per_group;
+
+                float gw_val = 0.0f;
+                float gb_val = 0.0f;
+                for (int64_t n = 0; n < N; ++n) {
+                    const float m = mean_ptr[n * num_groups + g];
+                    const float r = rstd_ptr[n * num_groups + g];
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        const int64_t i = (n * C + c) * spatial_size + s;
+                        float x_hat = (static_cast<float>(in_ptr[i]) - m) * r;
+                        gw_val += static_cast<float>(go_ptr[i]) * x_hat;
+                        gb_val += static_cast<float>(go_ptr[i]);
+                    }
+                }
+                gw_ptr[c] = sycl::half(gw_val);
+                gb_ptr[c] = sycl::half(gb_val);
+            }
+        ).wait();
+    }
+    else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* go_ptr = get_data_ptr<const uint16_t>(grad_output);
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        const uint16_t* w_ptr = get_data_ptr<const uint16_t>(weight);
+        uint16_t* gi_ptr = get_data_ptr<uint16_t>(grad_input);
+        uint16_t* gw_ptr = get_data_ptr<uint16_t>(grad_weight);
+        uint16_t* gb_ptr = get_data_ptr<uint16_t>(grad_bias);
+
+        // Use float intermediates
+        Tensor ds_buf({N, num_groups}, DType::Float32, input.device());
+        Tensor db_buf({N, num_groups}, DType::Float32, input.device());
+        float* ds_ptr = get_data_ptr<float>(ds_buf);
+        float* db_ptr = get_data_ptr<float>(db_buf);
+
+        queue.parallel_for<GroupNormBackwardPassOneBFloat16>(
+            sycl::range<2>(N, num_groups),
+            [=](sycl::id<2> idx) {
+                const int64_t n = idx[0];
+                const int64_t g = idx[1];
+                const int64_t c_start = g * channels_per_group;
+                const float m = mean_ptr[n * num_groups + g];
+                const float r = rstd_ptr[n * num_groups + g];
+
+                float ds_val = 0.0f;
+                float db_val = 0.0f;
+                for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        const int64_t i = (n * C + c) * spatial_size + s;
+                        float dy = bf16_to_f32(go_ptr[i]);
+                        float x_hat = (bf16_to_f32(in_ptr[i]) - m) * r;
+                        float dy_w = dy * bf16_to_f32(w_ptr[c]);
+                        ds_val += dy_w * x_hat;
+                        db_val += dy_w;
+                    }
+                }
+                ds_ptr[n * num_groups + g] = ds_val;
+                db_ptr[n * num_groups + g] = db_val;
+            }
+        ).wait();
+
+        queue.parallel_for<GroupNormBackwardPassTwoBFloat16>(
+            sycl::range<2>(N, num_groups),
+            [=](sycl::id<2> idx) {
+                const int64_t n = idx[0];
+                const int64_t g = idx[1];
+                const int64_t c_start = g * channels_per_group;
+                const float m = mean_ptr[n * num_groups + g];
+                const float r = rstd_ptr[n * num_groups + g];
+                const float ds_val = ds_ptr[n * num_groups + g];
+                const float db_val = db_ptr[n * num_groups + g];
+                const float inv_gs = 1.0f / static_cast<float>(group_size);
+
+                for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        const int64_t i = (n * C + c) * spatial_size + s;
+                        float dy = bf16_to_f32(go_ptr[i]);
+                        float x_hat = (bf16_to_f32(in_ptr[i]) - m) * r;
+                        float w = bf16_to_f32(w_ptr[c]);
+                        gi_ptr[i] = f32_to_bf16(r * (dy * w - inv_gs * (db_val + x_hat * ds_val)));
+                    }
+                }
+            }
+        ).wait();
+
+        queue.parallel_for<GroupNormBackwardGradWBBFloat16>(
+            sycl::range<1>(C),
+            [=](sycl::id<1> c_id) {
+                const int64_t c = c_id[0];
+                const int64_t g = c / channels_per_group;
+
+                float gw_val = 0.0f;
+                float gb_val = 0.0f;
+                for (int64_t n = 0; n < N; ++n) {
+                    const float m = mean_ptr[n * num_groups + g];
+                    const float r = rstd_ptr[n * num_groups + g];
+                    for (int64_t s = 0; s < spatial_size; ++s) {
+                        const int64_t i = (n * C + c) * spatial_size + s;
+                        float x_hat = (bf16_to_f32(in_ptr[i]) - m) * r;
+                        gw_val += bf16_to_f32(go_ptr[i]) * x_hat;
+                        gb_val += bf16_to_f32(go_ptr[i]);
+                    }
+                }
+                gw_ptr[c] = f32_to_bf16(gw_val);
+                gb_ptr[c] = f32_to_bf16(gb_val);
+            }
+        ).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for group_norm_backward_kernel");
+    }
+
+    return {grad_input, grad_weight, grad_bias};
 }
 
 } // namespace oneapi

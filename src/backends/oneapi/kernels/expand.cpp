@@ -11,6 +11,7 @@ namespace oneapi {
 struct ExpandKernelFloat32 {};
 struct ExpandKernelFloat64 {};
 struct ExpandKernelFloat16 {};
+struct ExpandKernelBFloat16 {};
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -227,6 +228,38 @@ auto expand_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& 
         }
 
         queue.parallel_for<ExpandKernelFloat16>(sycl::range<1>(output_size), [=](sycl::id<1> idx) {
+            int64_t output_idx = idx[0];
+            int64_t input_idx = 0;
+            int64_t remaining = output_idx;
+
+            for (int64_t dim = ndim - 1; dim >= 0; --dim) {
+                int64_t output_coord = remaining % output_shape_arr[dim];
+                remaining /= output_shape_arr[dim];
+
+                int64_t input_coord = (input_shape_arr[dim] == 1) ? 0 : output_coord;
+                input_idx += input_coord * input_strides_arr[dim];
+            }
+
+            output_ptr[output_idx] = input_ptr[input_idx];
+        }).wait();
+    }
+    else if (input.dtype() == DType::BFloat16) {
+        // BFloat16 stored as uint16_t — pure copy/broadcast, no conversion needed
+        const uint16_t* input_ptr = get_data_ptr<const uint16_t>(input);
+        uint16_t* output_ptr = get_data_ptr<uint16_t>(output);
+
+        // Copy shape and stride info to arrays for kernel capture
+        int64_t input_shape_arr[16];
+        int64_t output_shape_arr[16];
+        int64_t input_strides_arr[16];
+
+        for (int64_t i = 0; i < ndim; ++i) {
+            input_shape_arr[i] = input_shape[i];
+            output_shape_arr[i] = target_shape[i];
+            input_strides_arr[i] = input_strides[i];
+        }
+
+        queue.parallel_for<ExpandKernelBFloat16>(sycl::range<1>(output_size), [=](sycl::id<1> idx) {
             int64_t output_idx = idx[0];
             int64_t input_idx = 0;
             int64_t remaining = output_idx;

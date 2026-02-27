@@ -52,6 +52,12 @@ struct GeKernelInt32 {};
 struct GeKernelInt64 {};
 struct GeKernelFloat16 {};
 struct GeKernelBool {};
+struct EqKernelBFloat16 {};
+struct NeKernelBFloat16 {};
+struct LtKernelBFloat16 {};
+struct LeKernelBFloat16 {};
+struct GtKernelBFloat16 {};
+struct GeKernelBFloat16 {};
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -62,6 +68,20 @@ inline auto get_data_ptr(const Tensor& t) -> T* {
 // Helper to check if shapes match
 inline auto shapes_match(std::span<const int64_t> a, std::span<const int64_t> b) -> bool {
     return std::equal(a.begin(), a.end(), b.begin(), b.end());
+}
+
+// BFloat16 <-> Float32 conversion helpers (device-compatible)
+inline float bf16_to_f32(uint16_t bf16) {
+    uint32_t bits = static_cast<uint32_t>(bf16) << 16;
+    float result;
+    __builtin_memcpy(&result, &bits, sizeof(float));
+    return result;
+}
+
+inline uint16_t f32_to_bf16(float f32) {
+    uint32_t bits;
+    __builtin_memcpy(&bits, &f32, sizeof(uint32_t));
+    return static_cast<uint16_t>(bits >> 16);
 }
 
 // ============================================================================
@@ -138,6 +158,15 @@ auto eq_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
 
         queue.parallel_for<EqKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = (a_ptr[idx] == b_ptr[idx]);
+        }).wait();
+    }
+    else if (a.dtype() == DType::BFloat16) {
+        const uint16_t* a_ptr = get_data_ptr<const uint16_t>(a);
+        const uint16_t* b_ptr = get_data_ptr<const uint16_t>(b);
+        bool* out_ptr = get_data_ptr<bool>(output);
+
+        queue.parallel_for<EqKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = (bf16_to_f32(a_ptr[idx]) == bf16_to_f32(b_ptr[idx]));
         }).wait();
     }
     else if (a.dtype() == DType::Bool) {
@@ -227,6 +256,15 @@ auto ne_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
             out_ptr[idx] = (a_ptr[idx] != b_ptr[idx]);
         }).wait();
     }
+    else if (a.dtype() == DType::BFloat16) {
+        const uint16_t* a_ptr = get_data_ptr<const uint16_t>(a);
+        const uint16_t* b_ptr = get_data_ptr<const uint16_t>(b);
+        bool* out_ptr = get_data_ptr<bool>(output);
+
+        queue.parallel_for<NeKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = (bf16_to_f32(a_ptr[idx]) != bf16_to_f32(b_ptr[idx]));
+        }).wait();
+    }
     else if (a.dtype() == DType::Bool) {
         const bool* a_ptr = get_data_ptr<const bool>(a);
         const bool* b_ptr = get_data_ptr<const bool>(b);
@@ -312,6 +350,15 @@ auto lt_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
 
         queue.parallel_for<LtKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = (a_ptr[idx] < b_ptr[idx]);
+        }).wait();
+    }
+    else if (a.dtype() == DType::BFloat16) {
+        const uint16_t* a_ptr = get_data_ptr<const uint16_t>(a);
+        const uint16_t* b_ptr = get_data_ptr<const uint16_t>(b);
+        bool* out_ptr = get_data_ptr<bool>(output);
+
+        queue.parallel_for<LtKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = (bf16_to_f32(a_ptr[idx]) < bf16_to_f32(b_ptr[idx]));
         }).wait();
     }
     else if (a.dtype() == DType::Bool) {
@@ -402,6 +449,15 @@ auto le_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
             out_ptr[idx] = (a_ptr[idx] <= b_ptr[idx]);
         }).wait();
     }
+    else if (a.dtype() == DType::BFloat16) {
+        const uint16_t* a_ptr = get_data_ptr<const uint16_t>(a);
+        const uint16_t* b_ptr = get_data_ptr<const uint16_t>(b);
+        bool* out_ptr = get_data_ptr<bool>(output);
+
+        queue.parallel_for<LeKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = (bf16_to_f32(a_ptr[idx]) <= bf16_to_f32(b_ptr[idx]));
+        }).wait();
+    }
     else if (a.dtype() == DType::Bool) {
         const bool* a_ptr = get_data_ptr<const bool>(a);
         const bool* b_ptr = get_data_ptr<const bool>(b);
@@ -490,6 +546,15 @@ auto gt_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
             out_ptr[idx] = (a_ptr[idx] > b_ptr[idx]);
         }).wait();
     }
+    else if (a.dtype() == DType::BFloat16) {
+        const uint16_t* a_ptr = get_data_ptr<const uint16_t>(a);
+        const uint16_t* b_ptr = get_data_ptr<const uint16_t>(b);
+        bool* out_ptr = get_data_ptr<bool>(output);
+
+        queue.parallel_for<GtKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = (bf16_to_f32(a_ptr[idx]) > bf16_to_f32(b_ptr[idx]));
+        }).wait();
+    }
     else if (a.dtype() == DType::Bool) {
         const bool* a_ptr = get_data_ptr<const bool>(a);
         const bool* b_ptr = get_data_ptr<const bool>(b);
@@ -576,6 +641,15 @@ auto ge_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
 
         queue.parallel_for<GeKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = (a_ptr[idx] >= b_ptr[idx]);
+        }).wait();
+    }
+    else if (a.dtype() == DType::BFloat16) {
+        const uint16_t* a_ptr = get_data_ptr<const uint16_t>(a);
+        const uint16_t* b_ptr = get_data_ptr<const uint16_t>(b);
+        bool* out_ptr = get_data_ptr<bool>(output);
+
+        queue.parallel_for<GeKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = (bf16_to_f32(a_ptr[idx]) >= bf16_to_f32(b_ptr[idx]));
         }).wait();
     }
     else if (a.dtype() == DType::Bool) {

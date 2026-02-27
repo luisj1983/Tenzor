@@ -11,11 +11,27 @@ struct GRUCellForwardFloat32 {};
 struct GRUCellForwardFloat64 {};
 struct GRUCellBackwardFloat32 {};
 struct GRUCellBackwardFloat64 {};
+struct GRUCellForwardBFloat16 {};
+struct GRUCellBackwardBFloat16 {};
 
 // Helper function to get typed pointer from tensor
 template<typename T>
 inline auto get_data_ptr(const Tensor& t) -> T* {
     return static_cast<T*>(const_cast<void*>(t.data_ptr()));
+}
+
+// BFloat16 <-> Float32 conversion helpers (device-compatible)
+inline float bf16_to_f32(uint16_t bf16) {
+    uint32_t bits = static_cast<uint32_t>(bf16) << 16;
+    float result;
+    __builtin_memcpy(&result, &bits, sizeof(float));
+    return result;
+}
+
+inline uint16_t f32_to_bf16(float f32) {
+    uint32_t bits;
+    __builtin_memcpy(&bits, &f32, sizeof(uint32_t));
+    return static_cast<uint16_t>(bits >> 16);
 }
 
 // ============================================================================
@@ -117,8 +133,37 @@ auto gru_cell_forward_kernel(
             }
         ).wait();
     }
+    else if (reset_gates.dtype() == DType::BFloat16) {
+        const uint16_t* reset_ptr = get_data_ptr<const uint16_t>(reset_gates);
+        const uint16_t* update_ptr = get_data_ptr<const uint16_t>(update_gates);
+        const uint16_t* new_input_ptr = get_data_ptr<const uint16_t>(new_gates_input);
+        const uint16_t* new_hidden_ptr = get_data_ptr<const uint16_t>(new_gates_hidden);
+        const uint16_t* h_prev_ptr = get_data_ptr<const uint16_t>(h_prev);
+        uint16_t* h_out_ptr = get_data_ptr<uint16_t>(h_out);
+
+        queue.parallel_for<GRUCellForwardBFloat16>(
+            sycl::range<1>(total_elements),
+            [=](sycl::id<1> idx) {
+                float r_gate = bf16_to_f32(reset_ptr[idx]);
+                float z_gate = bf16_to_f32(update_ptr[idx]);
+                float n_input = bf16_to_f32(new_input_ptr[idx]);
+                float n_hidden = bf16_to_f32(new_hidden_ptr[idx]);
+                float h_prev_val = bf16_to_f32(h_prev_ptr[idx]);
+
+                float r_t = 1.0f / (1.0f + sycl::exp(-r_gate));
+                float z_t = 1.0f / (1.0f + sycl::exp(-z_gate));
+
+                float n_combined = n_input + r_t * n_hidden;
+                float n_t = sycl::tanh(n_combined);
+
+                float h_t = (1.0f - z_t) * n_t + z_t * h_prev_val;
+
+                h_out_ptr[idx] = f32_to_bf16(h_t);
+            }
+        ).wait();
+    }
     else {
-        throw std::runtime_error("gru_cell_forward: only Float32 and Float64 supported");
+        throw std::runtime_error("gru_cell_forward: only Float32, Float64, and BFloat16 supported");
     }
 
     return h_out;
@@ -286,8 +331,60 @@ auto gru_cell_backward_kernel(
             }
         ).wait();
     }
+    else if (grad_h.dtype() == DType::BFloat16) {
+        const uint16_t* grad_h_ptr = get_data_ptr<const uint16_t>(grad_h);
+        const uint16_t* reset_ptr = get_data_ptr<const uint16_t>(reset_gates);
+        const uint16_t* update_ptr = get_data_ptr<const uint16_t>(update_gates);
+        const uint16_t* new_input_ptr = get_data_ptr<const uint16_t>(new_gates_input);
+        const uint16_t* new_hidden_ptr = get_data_ptr<const uint16_t>(new_gates_hidden);
+        const uint16_t* h_prev_ptr = get_data_ptr<const uint16_t>(h_prev);
+
+        uint16_t* grad_reset_ptr = get_data_ptr<uint16_t>(outputs.grad_reset);
+        uint16_t* grad_update_ptr = get_data_ptr<uint16_t>(outputs.grad_update);
+        uint16_t* grad_new_input_ptr = get_data_ptr<uint16_t>(outputs.grad_new_input);
+        uint16_t* grad_new_hidden_ptr = get_data_ptr<uint16_t>(outputs.grad_new_hidden);
+        uint16_t* grad_h_prev_ptr = get_data_ptr<uint16_t>(outputs.grad_h_prev);
+
+        queue.parallel_for<GRUCellBackwardBFloat16>(
+            sycl::range<1>(total_elements),
+            [=](sycl::id<1> idx) {
+                float r_gate = bf16_to_f32(reset_ptr[idx]);
+                float z_gate = bf16_to_f32(update_ptr[idx]);
+                float n_input = bf16_to_f32(new_input_ptr[idx]);
+                float n_hidden = bf16_to_f32(new_hidden_ptr[idx]);
+                float h_prev_val = bf16_to_f32(h_prev_ptr[idx]);
+
+                float r_t = 1.0f / (1.0f + sycl::exp(-r_gate));
+                float z_t = 1.0f / (1.0f + sycl::exp(-z_gate));
+
+                float n_combined = n_input + r_t * n_hidden;
+                float n_t = sycl::tanh(n_combined);
+
+                float dh = bf16_to_f32(grad_h_ptr[idx]);
+
+                float dn_t = dh * (1.0f - z_t);
+                float dz_t = dh * (h_prev_val - n_t);
+                float dh_prev = dh * z_t;
+
+                float dn_combined = dn_t * (1.0f - n_t * n_t);
+
+                float dn_input = dn_combined;
+                float dr_t = dn_combined * n_hidden;
+                float dn_hidden = dn_combined * r_t;
+
+                float dr_gate = dr_t * r_t * (1.0f - r_t);
+                float dz_gate = dz_t * z_t * (1.0f - z_t);
+
+                grad_reset_ptr[idx] = f32_to_bf16(dr_gate);
+                grad_update_ptr[idx] = f32_to_bf16(dz_gate);
+                grad_new_input_ptr[idx] = f32_to_bf16(dn_input);
+                grad_new_hidden_ptr[idx] = f32_to_bf16(dn_hidden);
+                grad_h_prev_ptr[idx] = f32_to_bf16(dh_prev);
+            }
+        ).wait();
+    }
     else {
-        throw std::runtime_error("gru_cell_backward: only Float32 and Float64 supported");
+        throw std::runtime_error("gru_cell_backward: only Float32, Float64, and BFloat16 supported");
     }
 
     return outputs;

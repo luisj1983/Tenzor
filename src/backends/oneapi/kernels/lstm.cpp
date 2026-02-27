@@ -12,11 +12,27 @@ struct LSTMCellForwardFloat32 {};
 struct LSTMCellForwardFloat64 {};
 struct LSTMCellBackwardFloat32 {};
 struct LSTMCellBackwardFloat64 {};
+struct LSTMCellForwardBFloat16 {};
+struct LSTMCellBackwardBFloat16 {};
 
 // Helper function to get typed pointer from tensor
 template<typename T>
 inline auto get_data_ptr(const Tensor& t) -> T* {
     return static_cast<T*>(const_cast<void*>(t.data_ptr()));
+}
+
+// BFloat16 <-> Float32 conversion helpers (device-compatible)
+inline float bf16_to_f32(uint16_t bf16) {
+    uint32_t bits = static_cast<uint32_t>(bf16) << 16;
+    float result;
+    __builtin_memcpy(&result, &bits, sizeof(float));
+    return result;
+}
+
+inline uint16_t f32_to_bf16(float f32) {
+    uint32_t bits;
+    __builtin_memcpy(&bits, &f32, sizeof(uint32_t));
+    return static_cast<uint16_t>(bits >> 16);
 }
 
 // ============================================================================
@@ -142,8 +158,45 @@ auto lstm_cell_forward_kernel(
             }
         ).wait();
     }
+    else if (gates.dtype() == DType::BFloat16) {
+        const uint16_t* gates_ptr = get_data_ptr<const uint16_t>(gates);
+        const uint16_t* c_prev_ptr = get_data_ptr<const uint16_t>(c_prev);
+        uint16_t* h_out_ptr = get_data_ptr<uint16_t>(h_out);
+        uint16_t* c_out_ptr = get_data_ptr<uint16_t>(c_out);
+
+        queue.parallel_for<LSTMCellForwardBFloat16>(
+            sycl::range<1>(total_elements),
+            [=](sycl::id<1> idx) {
+                int64_t batch_idx = idx / hidden_size;
+                int64_t hidden_idx = idx % hidden_size;
+
+                int64_t gate_offset = batch_idx * (4 * hidden_size) + hidden_idx;
+                int64_t i_offset = gate_offset;
+                int64_t f_offset = gate_offset + hidden_size;
+                int64_t g_offset = gate_offset + 2 * hidden_size;
+                int64_t o_offset = gate_offset + 3 * hidden_size;
+
+                float i_gate = bf16_to_f32(gates_ptr[i_offset]);
+                float f_gate = bf16_to_f32(gates_ptr[f_offset]);
+                float g_gate = bf16_to_f32(gates_ptr[g_offset]);
+                float o_gate = bf16_to_f32(gates_ptr[o_offset]);
+
+                float i_t = 1.0f / (1.0f + sycl::exp(-i_gate));
+                float f_t = 1.0f / (1.0f + sycl::exp(-f_gate));
+                float o_t = 1.0f / (1.0f + sycl::exp(-o_gate));
+                float g_t = sycl::tanh(g_gate);
+
+                float c_prev_val = bf16_to_f32(c_prev_ptr[idx]);
+                float c_t = f_t * c_prev_val + i_t * g_t;
+                float h_t = o_t * sycl::tanh(c_t);
+
+                c_out_ptr[idx] = f32_to_bf16(c_t);
+                h_out_ptr[idx] = f32_to_bf16(h_t);
+            }
+        ).wait();
+    }
     else {
-        throw std::runtime_error("lstm_cell_forward: only Float32 and Float64 supported");
+        throw std::runtime_error("lstm_cell_forward: only Float32, Float64, and BFloat16 supported");
     }
 
     return {h_out, c_out};
@@ -311,8 +364,67 @@ auto lstm_cell_backward_kernel(
             }
         ).wait();
     }
+    else if (gates.dtype() == DType::BFloat16) {
+        const uint16_t* grad_h_ptr = get_data_ptr<const uint16_t>(grad_h);
+        const uint16_t* grad_c_ptr = get_data_ptr<const uint16_t>(grad_c);
+        const uint16_t* gates_ptr = get_data_ptr<const uint16_t>(gates);
+        const uint16_t* c_prev_ptr = get_data_ptr<const uint16_t>(c_prev);
+        const uint16_t* c_out_ptr = get_data_ptr<const uint16_t>(c_out);
+        uint16_t* grad_gates_ptr = get_data_ptr<uint16_t>(grad_gates);
+        uint16_t* grad_c_prev_ptr = get_data_ptr<uint16_t>(grad_c_prev);
+
+        queue.parallel_for<LSTMCellBackwardBFloat16>(
+            sycl::range<1>(total_elements),
+            [=](sycl::id<1> idx) {
+                int64_t batch_idx = idx / hidden_size;
+                int64_t hidden_idx = idx % hidden_size;
+
+                int64_t gate_offset = batch_idx * (4 * hidden_size) + hidden_idx;
+                int64_t i_offset = gate_offset;
+                int64_t f_offset = gate_offset + hidden_size;
+                int64_t g_offset = gate_offset + 2 * hidden_size;
+                int64_t o_offset = gate_offset + 3 * hidden_size;
+
+                float i_gate = bf16_to_f32(gates_ptr[i_offset]);
+                float f_gate = bf16_to_f32(gates_ptr[f_offset]);
+                float g_gate = bf16_to_f32(gates_ptr[g_offset]);
+                float o_gate = bf16_to_f32(gates_ptr[o_offset]);
+
+                float i_t = 1.0f / (1.0f + sycl::exp(-i_gate));
+                float f_t = 1.0f / (1.0f + sycl::exp(-f_gate));
+                float g_t = sycl::tanh(g_gate);
+                float o_t = 1.0f / (1.0f + sycl::exp(-o_gate));
+
+                float c_prev_val = bf16_to_f32(c_prev_ptr[idx]);
+                float c_t = bf16_to_f32(c_out_ptr[idx]);
+                float tanh_c_t = sycl::tanh(c_t);
+
+                float dh = bf16_to_f32(grad_h_ptr[idx]);
+                float dc = bf16_to_f32(grad_c_ptr[idx]);
+
+                dc += dh * o_t * (1.0f - tanh_c_t * tanh_c_t);
+                float do_t = dh * tanh_c_t;
+
+                float df_t = dc * c_prev_val;
+                float di_t = dc * g_t;
+                float dg_t = dc * i_t;
+                float dc_prev = dc * f_t;
+
+                float di_gate = di_t * i_t * (1.0f - i_t);
+                float df_gate = df_t * f_t * (1.0f - f_t);
+                float do_gate = do_t * o_t * (1.0f - o_t);
+                float dg_gate = dg_t * (1.0f - g_t * g_t);
+
+                grad_gates_ptr[i_offset] = f32_to_bf16(di_gate);
+                grad_gates_ptr[f_offset] = f32_to_bf16(df_gate);
+                grad_gates_ptr[g_offset] = f32_to_bf16(dg_gate);
+                grad_gates_ptr[o_offset] = f32_to_bf16(do_gate);
+                grad_c_prev_ptr[idx] = f32_to_bf16(dc_prev);
+            }
+        ).wait();
+    }
     else {
-        throw std::runtime_error("lstm_cell_backward: only Float32 and Float64 supported");
+        throw std::runtime_error("lstm_cell_backward: only Float32, Float64, and BFloat16 supported");
     }
 
     return {grad_gates, grad_c_prev};

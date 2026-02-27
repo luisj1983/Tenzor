@@ -10,12 +10,33 @@ namespace oneapi {
 // SYCL Kernel name classes
 class TransposeKernelFloat32;
 class TransposeKernelFloat64;
+class TransposeKernelFloat16;
+class TransposeKernelBFloat16;
 class TransposeKernelUInt8;
 class TransposeKernelBool;
 class PermuteKernelFloat32;
 class PermuteKernelFloat64;
+class PermuteKernelFloat16;
+class PermuteKernelBFloat16;
 class PermuteKernelUInt8;
 class PermuteKernelBool;
+class OnesKernelBFloat16;
+class FullKernelBFloat16;
+class FillKernelFloat16;
+class FillKernelBFloat16;
+
+// BFloat16 conversion helpers (BFloat16 stored as uint16_t)
+inline float bf16_to_f32(uint16_t bf16) {
+    uint32_t bits = static_cast<uint32_t>(bf16) << 16;
+    float result;
+    __builtin_memcpy(&result, &bits, sizeof(float));
+    return result;
+}
+inline uint16_t f32_to_bf16(float f32) {
+    uint32_t bits;
+    __builtin_memcpy(&bits, &f32, sizeof(uint32_t));
+    return static_cast<uint16_t>(bits >> 16);
+}
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -146,6 +167,53 @@ auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1, sycl::que
         double* out_ptr = get_data_ptr<double>(output);
 
         queue.parallel_for<TransposeKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            int64_t remaining = idx;
+            int64_t in_idx = 0;
+            int64_t out_idx = 0;
+
+            for (size_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / iter_strides_arr[d];
+                remaining %= iter_strides_arr[d];
+
+                in_idx += coord * in_actual_strides_arr[d];
+
+                size_t out_d = (d == static_cast<size_t>(dim0)) ? dim1 :
+                              (d == static_cast<size_t>(dim1)) ? dim0 : d;
+                out_idx += coord * out_strides_arr[out_d];
+            }
+
+            out_ptr[out_idx] = in_ptr[in_idx];
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<TransposeKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            int64_t remaining = idx;
+            int64_t in_idx = 0;
+            int64_t out_idx = 0;
+
+            for (size_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / iter_strides_arr[d];
+                remaining %= iter_strides_arr[d];
+
+                in_idx += coord * in_actual_strides_arr[d];
+
+                size_t out_d = (d == static_cast<size_t>(dim0)) ? dim1 :
+                              (d == static_cast<size_t>(dim1)) ? dim0 : d;
+                out_idx += coord * out_strides_arr[out_d];
+            }
+
+            out_ptr[out_idx] = in_ptr[in_idx];
+        }).wait();
+    }
+    else if (input.dtype() == DType::BFloat16) {
+        // BFloat16 stored as uint16_t — pure copy, no conversion needed
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+
+        queue.parallel_for<TransposeKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             int64_t remaining = idx;
             int64_t in_idx = 0;
             int64_t out_idx = 0;
@@ -301,6 +369,57 @@ auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims, sycl:
         double* out_ptr = get_data_ptr<double>(output);
 
         queue.parallel_for<PermuteKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+            int64_t coords[8];
+            int64_t temp = flat_idx;
+            for (size_t d = 0; d < ndim; ++d) {
+                coords[d] = temp / iter_strides_arr[d];
+                temp %= iter_strides_arr[d];
+            }
+
+            int64_t in_idx = 0;
+            for (size_t d = 0; d < ndim; ++d) {
+                in_idx += coords[d] * in_actual_strides_arr[d];
+            }
+
+            int64_t out_idx = 0;
+            for (size_t d = 0; d < ndim; ++d) {
+                out_idx += coords[perm_dims_arr[d]] * out_strides_arr[d];
+            }
+
+            out_ptr[out_idx] = in_ptr[in_idx];
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<PermuteKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+            int64_t coords[8];
+            int64_t temp = flat_idx;
+            for (size_t d = 0; d < ndim; ++d) {
+                coords[d] = temp / iter_strides_arr[d];
+                temp %= iter_strides_arr[d];
+            }
+
+            int64_t in_idx = 0;
+            for (size_t d = 0; d < ndim; ++d) {
+                in_idx += coords[d] * in_actual_strides_arr[d];
+            }
+
+            int64_t out_idx = 0;
+            for (size_t d = 0; d < ndim; ++d) {
+                out_idx += coords[perm_dims_arr[d]] * out_strides_arr[d];
+            }
+
+            out_ptr[out_idx] = in_ptr[in_idx];
+        }).wait();
+    }
+    else if (input.dtype() == DType::BFloat16) {
+        // BFloat16 stored as uint16_t — pure copy, no conversion needed
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+
+        queue.parallel_for<PermuteKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
             int64_t coords[8];
             int64_t temp = flat_idx;
             for (size_t d = 0; d < ndim; ++d) {
@@ -586,6 +705,42 @@ auto contiguous_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             out_ptr[flat_idx] = in_ptr[in_idx];
         }).wait();
     }
+    else if (input.dtype() == DType::BFloat16 || input.dtype() == DType::Int16 || input.dtype() == DType::UInt16) {
+        // All 2-byte types: use uint16_t for raw copy
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+            int64_t remaining = flat_idx;
+            int64_t in_idx = 0;
+
+            for (size_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / out_strides_arr[d];
+                remaining %= out_strides_arr[d];
+                in_idx += coord * in_strides_arr[d];
+            }
+
+            out_ptr[flat_idx] = in_ptr[in_idx];
+        }).wait();
+    }
+    else if (input.dtype() == DType::UInt8 || input.dtype() == DType::Int8 || input.dtype() == DType::Bool) {
+        // All 1-byte types: use uint8_t for raw copy
+        const uint8_t* in_ptr = get_data_ptr<const uint8_t>(input);
+        uint8_t* out_ptr = get_data_ptr<uint8_t>(output);
+
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+            int64_t remaining = flat_idx;
+            int64_t in_idx = 0;
+
+            for (size_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / out_strides_arr[d];
+                remaining %= out_strides_arr[d];
+                in_idx += coord * in_strides_arr[d];
+            }
+
+            out_ptr[flat_idx] = in_ptr[in_idx];
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for contiguous kernel");
     }
@@ -640,6 +795,14 @@ auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
         sycl::half* device_ptr = get_data_ptr<sycl::half>(output);
         queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
             device_ptr[i] = sycl::half(1.0f);
+        }).wait();
+    }
+    else if (dtype == DType::BFloat16) {
+        // BFloat16: convert 1.0f to bf16 representation, fill via kernel
+        const uint16_t one_bf16 = f32_to_bf16(1.0f);
+        uint16_t* device_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for<OnesKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            device_ptr[i] = one_bf16;
         }).wait();
     }
     else if (dtype == DType::Int32) {
@@ -717,6 +880,13 @@ auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, De
         sycl::half* device_ptr = get_data_ptr<sycl::half>(output);
         queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
             device_ptr[i] = value_h;
+        }).wait();
+    }
+    else if (dtype == DType::BFloat16) {
+        const uint16_t value_bf16 = f32_to_bf16(value);
+        uint16_t* device_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for<FullKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            device_ptr[i] = value_bf16;
         }).wait();
     }
     else if (dtype == DType::Int32) {
@@ -797,6 +967,20 @@ auto fill_kernel(const Tensor& tensor, float value, sycl::queue& queue) -> Tenso
         std::vector<double> host_data(numel, value_d);
         double* device_ptr = get_data_ptr<double>(output);
         queue.memcpy(device_ptr, host_data.data(), numel * sizeof(double)).wait();
+    }
+    else if (tensor.dtype() == DType::Float16) {
+        const sycl::half value_h(value);
+        sycl::half* device_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<FillKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            device_ptr[i] = value_h;
+        }).wait();
+    }
+    else if (tensor.dtype() == DType::BFloat16) {
+        const uint16_t value_bf16 = f32_to_bf16(value);
+        uint16_t* device_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for<FillKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            device_ptr[i] = value_bf16;
+        }).wait();
     }
     else if (tensor.dtype() == DType::Int32) {
         const int32_t value_i = static_cast<int32_t>(value);
