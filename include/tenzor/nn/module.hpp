@@ -520,7 +520,7 @@ protected:
     std::unordered_map<size_t, ForwardPostHookMulti> forward_post_hooks_multi_;   ///< Multi-input forward post-hooks
     std::unordered_map<size_t, BackwardPreHook> backward_pre_hooks_;              ///< Backward pre-hooks
     std::unordered_map<size_t, BackwardPostHook> backward_post_hooks_;            ///< Backward post-hooks
-    size_t next_hook_id_{0};                                                      ///< Next hook ID for tracking
+    std::atomic<size_t> next_hook_id_{0};                                           ///< Next hook ID for tracking
     bool has_forward_hooks_{false};                                               ///< True if this module has forward hooks
     bool has_backward_hooks_{false};                                              ///< True if this module has backward hooks
 

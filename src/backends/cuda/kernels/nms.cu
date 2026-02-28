@@ -6,6 +6,7 @@
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include "tenzor/backend/caching_allocator.hpp"
+#include "../cuda_stream_pool.hpp"
 #include <cub/cub.cuh>
 #include <algorithm>
 #include <vector>
@@ -96,21 +97,32 @@ __global__ void nms_kernel(const float* boxes, const int64_t* sorted_indices,
             }
         }
 
-        // Combine masks from all threads using atomic OR
-        // Use shared memory to reduce atomic operations
-        __shared__ uint64_t shared_mask;
-        if (threadIdx.x == 0) {
-            shared_mask = 0;
+        // Combine masks from all threads using warp-level shuffle reduction.
+        // Each warp reduces its threads' masks via __shfl_down_sync, then
+        // warp leaders write to shared memory for cross-warp OR.
+        __shared__ unsigned long long warp_results[8]; // max 256 threads = 8 warps
+        const int warp_id = threadIdx.x / 32;
+        const int lane_id = threadIdx.x % 32;
+        const int num_warps = (blockDim.x + 31) / 32;
+
+        // Intra-warp OR reduction via shuffle
+        unsigned long long my_mask = static_cast<unsigned long long>(mask);
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            my_mask |= __shfl_down_sync(0xFFFFFFFF, my_mask, offset);
         }
+
+        if (lane_id == 0) warp_results[warp_id] = my_mask;
         __syncthreads();
 
-        atomicOr((unsigned long long*)&shared_mask, (unsigned long long)mask);
-        __syncthreads();
-
-        // Write final mask
+        // Thread 0 combines all warp results and writes final mask
         if (threadIdx.x == 0) {
-            suppression_mask[ref_idx * num_chunks + chunk] = shared_mask;
+            unsigned long long combined = 0;
+            for (int w = 0; w < num_warps; ++w) {
+                combined |= warp_results[w];
+            }
+            suppression_mask[ref_idx * num_chunks + chunk] = combined;
         }
+        __syncthreads();
     }
 }
 
@@ -183,9 +195,11 @@ extern "C" void nms_cuda(const float* boxes, const float* scores,
         return;
     }
 
-    // Create a dedicated stream so NMS doesn't serialize with other GPU work
-    cudaStream_t stream;
-    CUDA_CHECK(cudaStreamCreate(&stream));
+    // Acquire a stream from the pool instead of creating/destroying per call
+    int device_id = 0;
+    cudaGetDevice(&device_id);
+    auto stream_guard = tenzor::cuda::CUDAStreamPool::instance().acquire_guard(device_id);
+    cudaStream_t stream = stream_guard.get();
 
     // Sort indices by score on GPU using CUB RadixSort
     // Allocate device memory for sort input/output
@@ -248,7 +262,7 @@ extern "C" void nms_cuda(const float* boxes, const float* scores,
     CUDA_CHECK(cudaMemcpyAsync(num_keep, d_num_keep, sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
-    CUDA_CHECK(cudaStreamDestroy(stream));
+    // Stream automatically returned to pool by StreamGuard destructor
     // Memory automatically freed by CachedMemoryGuard destructors
 }
 

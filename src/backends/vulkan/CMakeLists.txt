@@ -341,8 +341,13 @@ endif()
 if(GLSLC)
     add_library(tenzor_backend_vulkan SHARED
         vulkan_backend.cpp
+        vulkan_memory.cpp
+        vulkan_commands.cpp
+        vulkan_dispatch.cpp
+        vulkan_ops.cpp
         vulkan_kernel_registry.cpp
         vulkan_backend.hpp
+        vulkan_helpers.hpp
         vulkan_utils.hpp
         ${CMAKE_SOURCE_DIR}/src/backend/vulkan_caching_allocator.cpp
         ${EMBEDDED_SHADERS_IMPL}
@@ -350,8 +355,13 @@ if(GLSLC)
 else()
     add_library(tenzor_backend_vulkan SHARED
         vulkan_backend.cpp
+        vulkan_memory.cpp
+        vulkan_commands.cpp
+        vulkan_dispatch.cpp
+        vulkan_ops.cpp
         vulkan_kernel_registry.cpp
         vulkan_backend.hpp
+        vulkan_helpers.hpp
         vulkan_utils.hpp
         ${CMAKE_SOURCE_DIR}/src/backend/vulkan_caching_allocator.cpp
     )

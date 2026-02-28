@@ -2,7 +2,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
 // Backward activation functions for Float64 autograd
-// Operations: 0=relu, 1=sigmoid, 2=tanh, 3=leaky_relu, 4=gelu
+// Operations: 0=relu, 1=sigmoid, 2=tanh, 3=leaky_relu, 4=gelu, 5=elu, 6=selu, 7=mish, 8=softplus
 
 layout(local_size_x = 256) in;
 
@@ -17,6 +17,8 @@ layout(push_constant) uniform PushConstants {
 } params;
 
 const double PI = 3.141592653589793;
+const double SELU_ALPHA = 1.6732632423543772848170429916717;
+const double SELU_SCALE = 1.0507009873554804934193349852946;
 
 // Double-precision exp using range reduction
 double exp_d(double x) {
@@ -59,6 +61,22 @@ double tanh_d(double x) {
     }
     double e2x = exp_d(2.0 * x);
     return (e2x - 1.0) / (e2x + 1.0);
+}
+
+// Double-precision log approximation
+double log_d(double x) {
+    if (x != x) return x;  // NaN propagation
+    if (x <= 0.0) return -1.0 / 0.0;  // -inf for x <= 0
+    if (x == 1.0) return 0.0;
+    if (x >= 1.0e-30 && x <= 1.0e30) {
+        return double(log(float(x)));
+    }
+    double ln2 = 0.6931471805599453;
+    double result = 0.0;
+    double v = x;
+    while (v > 2.0) { v *= 0.5; result += ln2; }
+    while (v < 0.5) { v *= 2.0; result -= ln2; }
+    return result + double(log(float(v)));
 }
 
 void main() {
@@ -108,6 +126,50 @@ void main() {
                              0.5 * x * sech_sq * sqrt_2_over_pi * (1.0 + 3.0 * coeff * x_sq);
 
             grad_input[idx] = g_out * derivative;
+            break;
+        }
+
+        case 5: // elu_backward: grad_output * (x > 0 ? 1 : alpha * exp(x))
+            // val is the input
+            if (val > 0.0) {
+                grad_input[idx] = g_out;
+            } else {
+                grad_input[idx] = g_out * params.alpha * exp_d(val);
+            }
+            break;
+
+        case 6: // selu_backward: grad_output * (x > 0 ? scale : scale * alpha * exp(x))
+            // val is the input
+            if (val > 0.0) {
+                grad_input[idx] = g_out * SELU_SCALE;
+            } else {
+                grad_input[idx] = g_out * SELU_SCALE * SELU_ALPHA * exp_d(val);
+            }
+            break;
+
+        case 7: { // mish_backward: Complex formula
+            // val is the input
+            double x = val;
+            double sp = x > 20.0 ? x : (x < -20.0 ? exp_d(x) : log_d(1.0 + exp_d(x)));
+            double tanh_sp = tanh_d(sp);
+            double sigmoid_x = 1.0 / (1.0 + exp_d(-x));
+            double derivative = tanh_sp + x * sigmoid_x * (1.0 - tanh_sp * tanh_sp);
+            grad_input[idx] = g_out * derivative;
+            break;
+        }
+
+        case 8: { // softplus_backward: grad_output * sigmoid(beta * x)
+            // val is the input, params.alpha is beta
+            double bx = params.alpha * val;
+            double grad;
+            if (bx > 20.0) {
+                grad = 1.0;
+            } else if (bx < -20.0) {
+                grad = exp_d(bx);
+            } else {
+                grad = 1.0 / (1.0 + exp_d(-bx));
+            }
+            grad_input[idx] = g_out * grad;
             break;
         }
 

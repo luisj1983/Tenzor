@@ -77,13 +77,7 @@ auto zeros(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
         attrs["dtype"] = dtype_to_string(dtype);
         attrs["device_id"] = std::to_string(device.index);
 
-        if (is_op_supported(OpId::Zeros, device.type)) {
-            return dispatch_to_device(OpId::Zeros, device.type, {}, attrs)[0];
-        }
-        // Fallback for backends without OpId registration (e.g., OneAPI)
-        auto backend = backend_registry().get_backend(device.type);
-        if (!backend) throw std::runtime_error("Backend not available for device type");
-        return backend->dispatch("zeros", {}, attrs)[0];
+        return dispatch_to_device(OpId::Zeros, device.type, {}, attrs)[0];
     }
 
     // CPU path: use zero-initialized constructor directly
@@ -98,12 +92,7 @@ auto ones(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
         attrs["dtype"] = dtype_to_string(dtype);
         attrs["device_id"] = std::to_string(device.index);
 
-        if (is_op_supported(OpId::Ones, device.type)) {
-            return dispatch_to_device(OpId::Ones, device.type, {}, attrs)[0];
-        }
-        auto backend = backend_registry().get_backend(device.type);
-        if (!backend) throw std::runtime_error("Backend not available for device type");
-        return backend->dispatch("ones", {}, attrs)[0];
+        return dispatch_to_device(OpId::Ones, device.type, {}, attrs)[0];
     }
 
     // CPU path: validate device index (only index 0 is valid for CPU)
@@ -183,12 +172,7 @@ auto full(std::vector<int64_t> shape, float value, DType dtype, Device device) -
         attrs["dtype"] = dtype_to_string(dtype);
         attrs["device_id"] = std::to_string(device.index);
 
-        if (is_op_supported(OpId::Full, device.type)) {
-            return dispatch_to_device(OpId::Full, device.type, {}, attrs)[0];
-        }
-        auto backend = backend_registry().get_backend(device.type);
-        if (!backend) throw std::runtime_error("Backend not available for device type");
-        return backend->dispatch("full", {}, attrs)[0];
+        return dispatch_to_device(OpId::Full, device.type, {}, attrs)[0];
     }
 
     // CPU path: use uninitialized allocation (avoid wasteful zeroing before fill)
@@ -262,12 +246,7 @@ auto full(std::vector<int64_t> shape, double value, DType dtype, Device device) 
         attrs["dtype"] = dtype_to_string(dtype);
         attrs["device_id"] = std::to_string(device.index);
 
-        if (is_op_supported(OpId::Full, device.type)) {
-            return dispatch_to_device(OpId::Full, device.type, {}, attrs)[0];
-        }
-        auto backend = backend_registry().get_backend(device.type);
-        if (!backend) throw std::runtime_error("Backend not available for device type");
-        return backend->dispatch("full", {}, attrs)[0];
+        return dispatch_to_device(OpId::Full, device.type, {}, attrs)[0];
     }
 
     // CPU path: use uninitialized allocation (avoid wasteful zeroing before fill)
@@ -343,12 +322,7 @@ auto rand(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
         attrs["dtype"] = dtype_to_string(dtype);
         attrs["device_id"] = std::to_string(device.index);
 
-        if (is_op_supported(OpId::Rand, device.type)) {
-            return dispatch_to_device(OpId::Rand, device.type, {}, attrs)[0];
-        }
-        auto backend = backend_registry().get_backend(device.type);
-        if (!backend) throw std::runtime_error("Backend not available for device type");
-        return backend->dispatch("rand", {}, attrs)[0];
+        return dispatch_to_device(OpId::Rand, device.type, {}, attrs)[0];
     }
 
     // CPU path: use uninitialized allocation (avoid wasteful zeroing before fill)
@@ -409,12 +383,7 @@ auto randn(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
         attrs["dtype"] = dtype_to_string(dtype);
         attrs["device_id"] = std::to_string(device.index);
 
-        if (is_op_supported(OpId::Randn, device.type)) {
-            return dispatch_to_device(OpId::Randn, device.type, {}, attrs)[0];
-        }
-        auto backend = backend_registry().get_backend(device.type);
-        if (!backend) throw std::runtime_error("Backend not available for device type");
-        return backend->dispatch("randn", {}, attrs)[0];
+        return dispatch_to_device(OpId::Randn, device.type, {}, attrs)[0];
     }
 
     // CPU path: use uninitialized allocation (avoid wasteful zeroing before fill)
@@ -472,23 +441,8 @@ auto randint(int64_t low, int64_t high, std::vector<int64_t> shape, DType dtype,
         throw std::invalid_argument("randint: low must be less than high");
     }
 
-    // Use string dispatch for non-CPU devices (no OpId::Randint registered)
-    if (device.type != Device::Type::CPU) {
-        auto backend = backend_registry().get_backend(device.type);
-        if (!backend) throw std::runtime_error("Backend not available for device type");
-
-        OpAttributes attrs;
-        attrs["shape"] = shape_to_string(shape);
-        attrs["dtype"] = dtype_to_string(dtype);
-        attrs["device_id"] = std::to_string(device.index);
-        attrs["low"] = std::to_string(low);
-        attrs["high"] = std::to_string(high);
-
-        return backend->dispatch("randint", {}, attrs)[0];
-    }
-
-    // CPU path: use uninitialized allocation
-    auto tensor = Tensor::empty_uninitialized(std::move(shape), dtype, device);
+    // Generate on CPU, transfer to target device if needed
+    auto tensor = Tensor::empty_uninitialized(std::move(shape), dtype, Device::cpu());
     if (!tensor.impl() || !tensor.impl()->storage) return tensor;
 
     size_t numel = tensor.numel();
@@ -538,7 +492,7 @@ auto randint(int64_t low, int64_t high, std::vector<int64_t> shape, DType dtype,
         default:
             throw std::runtime_error("Unsupported dtype for randint() - only integer types are supported");
     }
-    return tensor;
+    return device.type != Device::Type::CPU ? tensor.to(device) : tensor;
 }
 
 auto arange(float start, float end, float step, DType dtype, Device device) -> Tensor {
@@ -558,12 +512,7 @@ auto arange(float start, float end, float step, DType dtype, Device device) -> T
         attrs["dtype"] = dtype_to_string(dtype);
         attrs["device_id"] = std::to_string(device.index);
 
-        if (is_op_supported(OpId::Arange, device.type)) {
-            return dispatch_to_device(OpId::Arange, device.type, {}, attrs)[0];
-        }
-        auto backend = backend_registry().get_backend(device.type);
-        if (!backend) throw std::runtime_error("Backend not available for device type");
-        return backend->dispatch("arange", {}, attrs)[0];
+        return dispatch_to_device(OpId::Arange, device.type, {}, attrs)[0];
     }
 
     // Calculate number of elements
@@ -655,12 +604,7 @@ auto linspace(float start, float end, int64_t steps, DType dtype, Device device)
         attrs["dtype"] = dtype_to_string(dtype);
         attrs["device_id"] = std::to_string(device.index);
 
-        if (is_op_supported(OpId::Linspace, device.type)) {
-            return dispatch_to_device(OpId::Linspace, device.type, {}, attrs)[0];
-        }
-        auto backend = backend_registry().get_backend(device.type);
-        if (!backend) throw std::runtime_error("Backend not available for device type");
-        return backend->dispatch("linspace", {}, attrs)[0];
+        return dispatch_to_device(OpId::Linspace, device.type, {}, attrs)[0];
     }
 
     // Use uninitialized allocation (avoid wasteful zeroing before fill)
@@ -743,12 +687,7 @@ auto eye(int64_t n, std::optional<int64_t> m, DType dtype, Device device) -> Ten
         attrs["dtype"] = dtype_to_string(dtype);
         attrs["device_id"] = std::to_string(device.index);
 
-        if (is_op_supported(OpId::Eye, device.type)) {
-            return dispatch_to_device(OpId::Eye, device.type, {}, attrs)[0];
-        }
-        auto backend = backend_registry().get_backend(device.type);
-        if (!backend) throw std::runtime_error("Backend not available for device type");
-        return backend->dispatch("eye", {}, attrs)[0];
+        return dispatch_to_device(OpId::Eye, device.type, {}, attrs)[0];
     }
 
     // Start with zeros (now safe since we're on CPU)

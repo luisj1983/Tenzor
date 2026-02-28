@@ -253,6 +253,7 @@ enum class OpId : uint16_t {
     Arange,
     Linspace,
     Eye,
+    Randint,
 
     // =========================================================================
     // RNN Operations (250-259)
@@ -314,6 +315,10 @@ enum class OpId : uint16_t {
     MaxPool3dBackward,
     AvgPool3dForward,
     AvgPool3dBackward,
+    AdaptiveMaxPool3d,       // 309
+    AdaptiveMaxPool3dBackward,
+    AdaptiveAvgPool3d,
+    AdaptiveAvgPool3dBackward,
 
     // =========================================================================
     // Type Conversion Operations (316-319)
@@ -359,6 +364,18 @@ enum class OpId : uint16_t {
     // =========================================================================
     Minimum = 360,
     Maximum,
+
+    // =========================================================================
+    // 1D Pooling Operations (370-379)
+    // =========================================================================
+    MaxPool1dForward = 370,
+    MaxPool1dBackward,
+    AvgPool1dForward,
+    AvgPool1dBackward,
+    AdaptiveMaxPool1d,
+    AdaptiveMaxPool1dBackward,
+    AdaptiveAvgPool1d,
+    AdaptiveAvgPool1dBackward,
 
     // =========================================================================
     // Sentinel (MUST BE LAST)

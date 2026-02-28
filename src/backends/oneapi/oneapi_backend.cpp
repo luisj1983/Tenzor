@@ -1,3 +1,4 @@
+#include "oneapi_internal.hpp"
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/backend/oneapi_caching_allocator.hpp"
@@ -320,6 +321,26 @@ namespace oneapi {
                                  sycl::queue& queue) -> Tensor;
 } // namespace oneapi
 
+// ============================================================================
+// oneapi_internal: Queue provider for the kernel registry
+// ============================================================================
+namespace {
+    static void* g_backend_ptr = nullptr;
+    static oneapi_internal::QueueGetter g_queue_getter = nullptr;
+}
+
+namespace oneapi_internal {
+    void set_backend_queue_provider(void* backend) {
+        g_backend_ptr = backend;
+    }
+    void set_queue_getter(QueueGetter fn) {
+        g_queue_getter = fn;
+    }
+    sycl::queue& get_queue(int32_t device_id) {
+        return g_queue_getter(g_backend_ptr, device_id);
+    }
+} // namespace oneapi_internal
+
 /**
  * @brief OneAPI/SYCL backend implementation for Intel GPUs and CPUs.
  *
@@ -374,6 +395,12 @@ public:
         } catch (const sycl::exception& e) {
             // No SYCL devices available
         }
+
+        // Wire up queue provider for the kernel registry
+        oneapi_internal::set_backend_queue_provider(this);
+        oneapi_internal::set_queue_getter([](void* backend, int32_t device_id) -> sycl::queue& {
+            return static_cast<OneAPIBackend*>(backend)->get_queue(device_id);
+        });
     }
 
     ~OneAPIBackend() override {

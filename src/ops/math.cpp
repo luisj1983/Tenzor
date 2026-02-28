@@ -241,6 +241,7 @@ auto sigmoid(const Tensor& input) -> Tensor {
 
 auto minimum(const Tensor& a, const Tensor& b) -> Tensor {
     auto [ap, bp] = promote_inputs(a, b);
+    validate_broadcast_shapes("minimum", ap.shape(), bp.shape());
     Tensor a_cont = ap.is_contiguous() ? ap : ap.contiguous();
     Tensor b_cont = bp.is_contiguous() ? bp : bp.contiguous();
     std::vector<Tensor> inputs = {a_cont, b_cont};
@@ -249,6 +250,7 @@ auto minimum(const Tensor& a, const Tensor& b) -> Tensor {
 
 auto maximum(const Tensor& a, const Tensor& b) -> Tensor {
     auto [ap, bp] = promote_inputs(a, b);
+    validate_broadcast_shapes("maximum", ap.shape(), bp.shape());
     Tensor a_cont = ap.is_contiguous() ? ap : ap.contiguous();
     Tensor b_cont = bp.is_contiguous() ? bp : bp.contiguous();
     std::vector<Tensor> inputs = {a_cont, b_cont};
@@ -391,6 +393,7 @@ static void check_inplace_autograd(const Tensor& self) {
 // In-place operations — convert other to self's dtype (in-place can't change self's type)
 auto add_(Tensor& self, const Tensor& other) -> Tensor& {
     check_inplace_autograd(self);
+    validate_broadcast_shapes("add_", self.shape(), other.shape());
     if (!self.is_contiguous()) {
         throw std::runtime_error("In-place add requires contiguous tensor");
     }
@@ -403,6 +406,7 @@ auto add_(Tensor& self, const Tensor& other) -> Tensor& {
 
 auto mul_(Tensor& self, const Tensor& other) -> Tensor& {
     check_inplace_autograd(self);
+    validate_broadcast_shapes("mul_", self.shape(), other.shape());
     if (!self.is_contiguous()) {
         throw std::runtime_error("In-place mul requires contiguous tensor");
     }
@@ -415,6 +419,7 @@ auto mul_(Tensor& self, const Tensor& other) -> Tensor& {
 
 auto sub_(Tensor& self, const Tensor& other) -> Tensor& {
     check_inplace_autograd(self);
+    validate_broadcast_shapes("sub_", self.shape(), other.shape());
     if (!self.is_contiguous()) {
         throw std::runtime_error("In-place sub requires contiguous tensor");
     }
@@ -427,6 +432,7 @@ auto sub_(Tensor& self, const Tensor& other) -> Tensor& {
 
 auto div_(Tensor& self, const Tensor& other) -> Tensor& {
     check_inplace_autograd(self);
+    validate_broadcast_shapes("div_", self.shape(), other.shape());
     if (!self.is_contiguous()) {
         throw std::runtime_error("In-place div requires contiguous tensor");
     }

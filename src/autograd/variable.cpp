@@ -1,4 +1,5 @@
 #include "tenzor/autograd/variable.hpp"
+#include "tenzor/autograd/anomaly_mode.hpp"
 #include "tenzor/autograd/engine.hpp"
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/autograd/ops.hpp"
@@ -13,6 +14,9 @@ static thread_local bool grad_enabled{true};
 
 // Thread-local create_graph state for higher-order gradients
 static thread_local bool creating_graph{false};
+
+// Thread-local anomaly detection state
+static thread_local bool anomaly_detection_enabled{false};
 
 Variable::Variable(Tensor data, bool requires_grad)
     : impl_(std::make_shared<VariableImpl>(std::move(data), requires_grad)) {
@@ -77,7 +81,7 @@ auto Variable::register_hook(std::function<Tensor(const Tensor&)> hook) -> size_
     if (!impl_) {
         throw std::runtime_error("Cannot register hook on uninitialized Variable");
     }
-    size_t id = impl_->next_hook_id_++;
+    size_t id = impl_->next_hook_id_.fetch_add(1, std::memory_order_relaxed);
     impl_->hooks_[id] = std::move(hook);
     return id;
 }
@@ -196,6 +200,23 @@ CreateGraphGuard::CreateGraphGuard() : prev_state_(is_creating_graph()) {
 
 CreateGraphGuard::~CreateGraphGuard() {
     set_creating_graph(prev_state_);
+}
+
+// Anomaly detection state
+auto is_anomaly_detection_enabled() -> bool {
+    return anomaly_detection_enabled;
+}
+
+auto set_anomaly_detection(bool enabled) -> void {
+    anomaly_detection_enabled = enabled;
+}
+
+AnomalyMode::AnomalyMode(bool enabled) : prev_state_(is_anomaly_detection_enabled()) {
+    set_anomaly_detection(enabled);
+}
+
+AnomalyMode::~AnomalyMode() {
+    set_anomaly_detection(prev_state_);
 }
 
 // Arithmetic operators
@@ -352,109 +373,34 @@ auto Variable::operator/(const Variable& other) const -> Variable {
     return output;
 }
 
+// Helper: create scalar tensor directly on target device via full() dispatch.
+// Avoids the old 2-step CPU alloc + .to(device) pattern for GPU tensors.
+static auto make_scalar_var(double value, DType dtype, Device device) -> Variable {
+    Tensor t = (dtype == DType::Float64)
+        ? full({}, value, dtype, device)
+        : full({}, static_cast<float>(value), dtype, device);
+    return Variable(t, false);
+}
+
 // Scalar operations
 auto Variable::operator+(float scalar) const -> Variable {
-    if (!impl_) {
-        throw std::runtime_error("Cannot add scalar to uninitialized Variable");
-    }
-    // Create scalar tensor with same dtype and device
-    Device original_device = impl_->data_.device();
-
-    // Always create scalar tensors on CPU first to avoid CUDA pointer dereference
-    Tensor scalar_tensor(std::vector<int64_t>{}, impl_->data_.dtype(), Device::cpu());
-    if (impl_->data_.dtype() == DType::Float64) {
-        scalar_tensor.data<double>()[0] = static_cast<double>(scalar);
-    } else if (impl_->data_.dtype() == DType::Float16) {
-        scalar_tensor.data<Float16>()[0] = Float16(scalar);
-    } else {
-        scalar_tensor.data<float>()[0] = scalar;
-    }
-
-    // Transfer to original device if needed
-    if (original_device != Device::cpu()) {
-        scalar_tensor = scalar_tensor.to(original_device);
-    }
-
-    Variable scalar_var(scalar_tensor, false);
-    return *this + scalar_var;
+    if (!impl_) throw std::runtime_error("Cannot add scalar to uninitialized Variable");
+    return *this + make_scalar_var(scalar, impl_->data_.dtype(), impl_->data_.device());
 }
 
 auto Variable::operator+(double scalar) const -> Variable {
-    if (!impl_) {
-        throw std::runtime_error("Cannot add scalar to uninitialized Variable");
-    }
-    // Create scalar tensor with same dtype and device
-    Device original_device = impl_->data_.device();
-
-    // Always create scalar tensors on CPU first to avoid CUDA pointer dereference
-    Tensor scalar_tensor(std::vector<int64_t>{}, impl_->data_.dtype(), Device::cpu());
-    if (impl_->data_.dtype() == DType::Float64) {
-        scalar_tensor.data<double>()[0] = scalar;
-    } else if (impl_->data_.dtype() == DType::Float16) {
-        scalar_tensor.data<Float16>()[0] = Float16(static_cast<float>(scalar));
-    } else {
-        scalar_tensor.data<float>()[0] = static_cast<float>(scalar);
-    }
-
-    // Transfer to original device if needed
-    if (original_device != Device::cpu()) {
-        scalar_tensor = scalar_tensor.to(original_device);
-    }
-
-    Variable scalar_var(scalar_tensor, false);
-    return *this + scalar_var;
+    if (!impl_) throw std::runtime_error("Cannot add scalar to uninitialized Variable");
+    return *this + make_scalar_var(scalar, impl_->data_.dtype(), impl_->data_.device());
 }
 
 auto Variable::operator*(float scalar) const -> Variable {
-    if (!impl_) {
-        throw std::runtime_error("Cannot multiply scalar with uninitialized Variable");
-    }
-    // Create scalar tensor with same dtype and device
-    Device original_device = impl_->data_.device();
-
-    // Always create scalar tensors on CPU first to avoid CUDA pointer dereference
-    Tensor scalar_tensor(std::vector<int64_t>{}, impl_->data_.dtype(), Device::cpu());
-    if (impl_->data_.dtype() == DType::Float64) {
-        scalar_tensor.data<double>()[0] = static_cast<double>(scalar);
-    } else if (impl_->data_.dtype() == DType::Float16) {
-        scalar_tensor.data<Float16>()[0] = Float16(scalar);
-    } else {
-        scalar_tensor.data<float>()[0] = scalar;
-    }
-
-    // Transfer to original device if needed
-    if (original_device != Device::cpu()) {
-        scalar_tensor = scalar_tensor.to(original_device);
-    }
-
-    Variable scalar_var(scalar_tensor, false);
-    return *this * scalar_var;
+    if (!impl_) throw std::runtime_error("Cannot multiply scalar with uninitialized Variable");
+    return *this * make_scalar_var(scalar, impl_->data_.dtype(), impl_->data_.device());
 }
 
 auto Variable::operator*(double scalar) const -> Variable {
-    if (!impl_) {
-        throw std::runtime_error("Cannot multiply scalar with uninitialized Variable");
-    }
-    // Create scalar tensor with same dtype and device
-    Device original_device = impl_->data_.device();
-
-    // Always create scalar tensors on CPU first to avoid CUDA pointer dereference
-    Tensor scalar_tensor(std::vector<int64_t>{}, impl_->data_.dtype(), Device::cpu());
-    if (impl_->data_.dtype() == DType::Float64) {
-        scalar_tensor.data<double>()[0] = scalar;
-    } else if (impl_->data_.dtype() == DType::Float16) {
-        scalar_tensor.data<Float16>()[0] = Float16(static_cast<float>(scalar));
-    } else {
-        scalar_tensor.data<float>()[0] = static_cast<float>(scalar);
-    }
-
-    // Transfer to original device if needed
-    if (original_device != Device::cpu()) {
-        scalar_tensor = scalar_tensor.to(original_device);
-    }
-
-    Variable scalar_var(scalar_tensor, false);
-    return *this * scalar_var;
+    if (!impl_) throw std::runtime_error("Cannot multiply scalar with uninitialized Variable");
+    return *this * make_scalar_var(scalar, impl_->data_.dtype(), impl_->data_.device());
 }
 
 // Scalar subtraction operators
@@ -463,25 +409,7 @@ auto Variable::operator-(float scalar) const -> Variable {
 }
 
 auto Variable::operator-(double scalar) const -> Variable {
-    Device original_device = device();
-
-    // Always create scalar tensors on CPU first to avoid CUDA pointer dereference
-    Tensor scalar_tensor({}, dtype(), Device::cpu());
-    if (dtype() == DType::Float64) {
-        scalar_tensor.data<double>()[0] = scalar;
-    } else if (dtype() == DType::Float16) {
-        scalar_tensor.data<Float16>()[0] = Float16(static_cast<float>(scalar));
-    } else {
-        scalar_tensor.data<float>()[0] = static_cast<float>(scalar);
-    }
-
-    // Transfer to original device if needed
-    if (original_device != Device::cpu()) {
-        scalar_tensor = scalar_tensor.to(original_device);
-    }
-
-    Variable scalar_var(scalar_tensor, false);
-    return *this - scalar_var;
+    return *this - make_scalar_var(scalar, dtype(), device());
 }
 
 // Scalar division operators
@@ -490,25 +418,7 @@ auto Variable::operator/(float scalar) const -> Variable {
 }
 
 auto Variable::operator/(double scalar) const -> Variable {
-    Device original_device = device();
-
-    // Always create scalar tensors on CPU first to avoid CUDA pointer dereference
-    Tensor scalar_tensor({}, dtype(), Device::cpu());
-    if (dtype() == DType::Float64) {
-        scalar_tensor.data<double>()[0] = scalar;
-    } else if (dtype() == DType::Float16) {
-        scalar_tensor.data<Float16>()[0] = Float16(static_cast<float>(scalar));
-    } else {
-        scalar_tensor.data<float>()[0] = static_cast<float>(scalar);
-    }
-
-    // Transfer to original device if needed
-    if (original_device != Device::cpu()) {
-        scalar_tensor = scalar_tensor.to(original_device);
-    }
-
-    Variable scalar_var(scalar_tensor, false);
-    return *this / scalar_var;
+    return *this / make_scalar_var(scalar, dtype(), device());
 }
 
 // Shape transformation methods

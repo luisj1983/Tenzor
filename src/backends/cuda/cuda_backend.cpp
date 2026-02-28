@@ -7,6 +7,7 @@
 #pragma message("WARNING: Building without cuDNN. Conv2d, pooling, softmax, batchnorm, and layernorm will use custom CUDA kernels with reduced performance.")
 #endif
 #include <cuda_runtime.h>
+#include "cuda_stream_pool.hpp"
 #include <stdexcept>
 #include <limits>
 #include <cstdlib>
@@ -416,14 +417,15 @@ public:
     }
 
     auto create_stream(int32_t device_id) -> StreamHandle override {
-        cudaStream_t stream;
-        cudaSetDevice(device_id);
-        cudaStreamCreate(&stream);
+        auto stream = cuda::CUDAStreamPool::instance().acquire(device_id);
         return static_cast<StreamHandle>(stream);
     }
 
     auto destroy_stream(StreamHandle stream) -> void override {
-        cudaStreamDestroy(static_cast<cudaStream_t>(stream));
+        // Return stream to pool instead of destroying it
+        int device_id = 0;
+        cudaGetDevice(&device_id);
+        cuda::CUDAStreamPool::instance().release(device_id, static_cast<cudaStream_t>(stream));
     }
 
     auto synchronize_stream(StreamHandle stream) -> void override {

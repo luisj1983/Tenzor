@@ -219,6 +219,7 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::Arange)] = "arange";
     names[static_cast<size_t>(OpId::Linspace)] = "linspace";
     names[static_cast<size_t>(OpId::Eye)] = "eye";
+    names[static_cast<size_t>(OpId::Randint)] = "randint";
 
     // RNN
     names[static_cast<size_t>(OpId::LSTMCellForward)] = "lstm_cell_forward";
@@ -266,6 +267,10 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::MaxPool3dBackward)] = "maxpool3d_backward";
     names[static_cast<size_t>(OpId::AvgPool3dForward)] = "avgpool3d_forward";
     names[static_cast<size_t>(OpId::AvgPool3dBackward)] = "avgpool3d_backward";
+    names[static_cast<size_t>(OpId::AdaptiveMaxPool3d)] = "adaptive_maxpool3d";
+    names[static_cast<size_t>(OpId::AdaptiveMaxPool3dBackward)] = "adaptive_maxpool3d_backward";
+    names[static_cast<size_t>(OpId::AdaptiveAvgPool3d)] = "adaptive_avgpool3d";
+    names[static_cast<size_t>(OpId::AdaptiveAvgPool3dBackward)] = "adaptive_avgpool3d_backward";
 
     // Type Conversion
     names[static_cast<size_t>(OpId::Cast)] = "cast";
@@ -300,6 +305,16 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::Minimum)] = "minimum";
     names[static_cast<size_t>(OpId::Maximum)] = "maximum";
 
+    // 1D Pooling
+    names[static_cast<size_t>(OpId::MaxPool1dForward)] = "maxpool1d_forward";
+    names[static_cast<size_t>(OpId::MaxPool1dBackward)] = "maxpool1d_backward";
+    names[static_cast<size_t>(OpId::AvgPool1dForward)] = "avgpool1d_forward";
+    names[static_cast<size_t>(OpId::AvgPool1dBackward)] = "avgpool1d_backward";
+    names[static_cast<size_t>(OpId::AdaptiveMaxPool1d)] = "adaptive_maxpool1d";
+    names[static_cast<size_t>(OpId::AdaptiveMaxPool1dBackward)] = "adaptive_maxpool1d_backward";
+    names[static_cast<size_t>(OpId::AdaptiveAvgPool1d)] = "adaptive_avgpool1d";
+    names[static_cast<size_t>(OpId::AdaptiveAvgPool1dBackward)] = "adaptive_avgpool1d_backward";
+
     return names;
 }();
 
@@ -314,7 +329,7 @@ constexpr size_t count_named_ops() {
 
 // Count of actual OpId enum values (excluding gap slots).
 // Update this when adding new OpIds to catch missing name entries at compile time.
-inline constexpr size_t EXPECTED_NAMED_OPS = 230;
+inline constexpr size_t EXPECTED_NAMED_OPS = 243;
 
 // If this fires, a new OpId was added without a corresponding name in op_names above
 static_assert(count_named_ops() == EXPECTED_NAMED_OPS,

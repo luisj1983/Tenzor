@@ -41,6 +41,22 @@ cross_entropy = _nn.cross_entropy
 nll_loss = _nn.nll_loss
 bce_loss = _nn.bce_loss
 
+# Functional operations (stateless wrappers)
+dropout = _nn.functional_dropout
+linear = _nn.functional_linear
+max_pool2d = _nn.functional_max_pool2d
+avg_pool2d = _nn.functional_avg_pool2d
+batch_norm = _nn.functional_batch_norm
+layer_norm = _nn.functional_layer_norm
+group_norm = _nn.functional_group_norm
+interpolate = _nn.functional_interpolate
+embedding = _nn.functional_embedding
+binary_cross_entropy_with_logits = _nn.functional_binary_cross_entropy_with_logits
+
+# Gradient clipping utilities
+clip_grad_norm_ = _nn.clip_grad_norm_
+clip_grad_value_ = _nn.clip_grad_value_
+
 __all__ = [
     # Activations
     "relu",
@@ -63,4 +79,18 @@ __all__ = [
     "cross_entropy",
     "nll_loss",
     "bce_loss",
+    # Functional operations
+    "dropout",
+    "linear",
+    "max_pool2d",
+    "avg_pool2d",
+    "batch_norm",
+    "layer_norm",
+    "group_norm",
+    "interpolate",
+    "embedding",
+    "binary_cross_entropy_with_logits",
+    # Gradient clipping
+    "clip_grad_norm_",
+    "clip_grad_value_",
 ]

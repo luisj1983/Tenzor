@@ -108,6 +108,7 @@ endforeach()
 # Build backend glue sources
 set(BACKEND_GLUE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/oneapi_backend.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/oneapi_kernel_registry.cpp
     ${CMAKE_SOURCE_DIR}/src/backend/oneapi_caching_allocator.cpp
 )
 

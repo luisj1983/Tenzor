@@ -1,5 +1,6 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/backend/caching_allocator.hpp"
+#include "tenzor/backend/dtype_dispatch.hpp"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
@@ -4232,19 +4233,12 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, cudaSt
         constexpr int BLOCK = 256;
         int blocks = (output_size + BLOCK - 1) / BLOCK;
 
-        if (input.dtype() == DType::Float32) {
-            norm_along_dim_kernel<float><<<blocks, BLOCK, 0, stream>>>(
-                input.data<float>(), output.data<float>(), meta,
+        TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "norm", [&]() {
+            norm_along_dim_kernel<scalar_t><<<blocks, BLOCK, 0, stream>>>(
+                input.data<scalar_t>(), output.data<scalar_t>(), meta,
                 ndim, actual_dim, output_size, dim_size, p);
             CUDA_CHECK(cudaGetLastError());
-        } else if (input.dtype() == DType::Float64) {
-            norm_along_dim_kernel<double><<<blocks, BLOCK, 0, stream>>>(
-                input.data<double>(), output.data<double>(), meta,
-                ndim, actual_dim, output_size, dim_size, p);
-            CUDA_CHECK(cudaGetLastError());
-        } else {
-            throw std::runtime_error("norm: only Float32 and Float64 are supported");
-        }
+        });
 
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {

@@ -98,6 +98,61 @@ jobs:
             -E "cuda|vulkan|oneapi" \
             --timeout 120
 
+  # Tier 1.5: Sanitizer build (ASAN + UBSAN, ~15 min)
+  sanitizer:
+    name: ASAN + UBSAN
+    runs-on: ubuntu-24.04
+    needs: build-and-smoke
+    if: github.event_name == 'pull_request'
+    env:
+      CMAKE_BUILD_TYPE: Debug
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build \
+            libgtest-dev \
+            libomp-dev \
+            libmkl-dev \
+            libtbb-dev
+
+      - name: Configure (sanitizers, no Python)
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined" \
+            -DTENZOR_BUILD_CUDA=OFF \
+            -DTENZOR_BUILD_ROCM=OFF \
+            -DTENZOR_BUILD_ONEAPI=OFF \
+            -DTENZOR_BUILD_VULKAN=OFF \
+            -DTENZOR_BUILD_METAL=OFF \
+            -DTENZOR_BUILD_WEBGPU=OFF \
+            -DTENZOR_BUILD_PYTHON=OFF \
+            -DTENZOR_BUILD_TESTS=ON \
+            -DTENZOR_BUILD_BENCHMARKS=OFF \
+            -DTENZOR_BUILD_EXAMPLES=OFF \
+            -DTENZOR_BUILD_MODEL_HUB=OFF
+
+      - name: Build
+        run: ninja -C build
+
+      - name: Run tests under sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=0,halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1,print_stacktrace=1
+        run: |
+          cd build
+          ctest --output-on-failure -j$(nproc) \
+            -E "cuda|vulkan|oneapi|rocm" \
+            --timeout 600
+        timeout-minutes: 30
+
   # Tier 2: Full CPU tests (every PR, ~30 min)
   full-cpu-tests:
     name: Full CPU Test Suite

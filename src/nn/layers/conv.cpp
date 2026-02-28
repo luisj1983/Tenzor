@@ -322,10 +322,7 @@ auto Conv2d::forward_impl(const Variable& input) -> Variable {
     Tensor output;
 
     // Use backend dispatcher (routes to CUDA/cuDNN/CPU automatically based on tensor device)
-    std::vector<Tensor> tensors_for_dispatch = {input.tensor()};
-    auto* backend = Dispatcher::get_backend(tensors_for_dispatch);
-
-    // Compute output using backend operation
+    // Compute output using OpId dispatch
     std::vector<Tensor> inputs_vec = {input.tensor(), weight_matched.tensor()};
     if (bias_ptr != nullptr) {
         inputs_vec.push_back(*bias_ptr);
@@ -337,11 +334,8 @@ auto Conv2d::forward_impl(const Variable& input) -> Variable {
         {"dilation", std::to_string(dilation_)},
         {"groups", std::to_string(groups_)}
     };
-    auto output_result = backend->dispatch(
-        "conv2d_forward",
-        std::span<const Tensor>(inputs_vec),
-        forward_attrs
-    );
+    auto output_result = dispatch_to_device(OpId::Conv2dForward, input.tensor().device().type,
+        inputs_vec, forward_attrs);
     output = output_result[0];
 
     auto result = Variable(output, input.requires_grad() || weight.requires_grad());

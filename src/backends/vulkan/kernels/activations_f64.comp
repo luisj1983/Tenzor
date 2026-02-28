@@ -1,7 +1,7 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
-// Activation functions: ReLU, Sigmoid, Tanh, GELU, LeakyReLU, Swish (Float64)
+// Activation functions: ReLU, Sigmoid, Tanh, GELU, LeakyReLU, Swish, ELU, SELU, Mish, Softplus (Float64)
 layout(local_size_x = 256) in;
 
 layout(binding = 0) buffer Input { double input_data[]; };
@@ -9,11 +9,13 @@ layout(binding = 1) buffer Output { double output_data[]; };
 
 layout(push_constant) uniform PushConstants {
     uint n;          // Number of elements
-    uint activation; // 0=ReLU, 1=Sigmoid, 2=Tanh, 3=GELU, 4=LeakyReLU, 5=Swish
-    double alpha;    // Parameter for LeakyReLU
+    uint activation; // 0=ReLU, 1=Sigmoid, 2=Tanh, 3=GELU, 4=LeakyReLU, 5=Swish, 6=ELU, 7=SELU, 8=Mish, 9=Softplus
+    double alpha;    // Parameter for LeakyReLU, ELU, Softplus beta
 } params;
 
 const double PI = 3.141592653589793;
+const double SELU_ALPHA = 1.6732632423543772848170429916717;
+const double SELU_SCALE = 1.0507009873554804934193349852946;
 
 // Double-precision exp using range reduction
 double exp_d(double x) {
@@ -62,6 +64,24 @@ double tanh_d(double x) {
     return (e2x - 1.0) / (e2x + 1.0);
 }
 
+// Double-precision log approximation
+double log_d(double x) {
+    if (x != x) return x;  // NaN propagation
+    if (x <= 0.0) return -1.0 / 0.0;  // -inf for x <= 0
+    if (x == 1.0) return 0.0;
+    // For values that fit in float range with good precision, use float log
+    if (x >= 1.0e-30 && x <= 1.0e30) {
+        return double(log(float(x)));
+    }
+    // For extreme values, use range reduction
+    double ln2 = 0.6931471805599453;
+    double result = 0.0;
+    double v = x;
+    while (v > 2.0) { v *= 0.5; result += ln2; }
+    while (v < 0.5) { v *= 2.0; result -= ln2; }
+    return result + double(log(float(v)));
+}
+
 double relu(double x) {
     return max(0.0, x);
 }
@@ -82,6 +102,32 @@ double leaky_relu(double x, double alpha) {
 
 double swish(double x) {
     return x / (1.0 + exp_d(-x));
+}
+
+double elu(double x, double alpha) {
+    return x > 0.0 ? x : alpha * (exp_d(x) - 1.0);
+}
+
+double selu(double x) {
+    return x > 0.0 ? SELU_SCALE * x : SELU_SCALE * SELU_ALPHA * (exp_d(x) - 1.0);
+}
+
+double softplus_d(double x, double beta) {
+    double bx = beta * x;
+    if (bx > 20.0) return x;
+    if (bx < -20.0) return exp_d(bx) / beta;
+    return log_d(1.0 + exp_d(bx)) / beta;
+}
+
+double softplus_d1(double x) {
+    if (x > 20.0) return x;
+    if (x < -20.0) return exp_d(x);
+    return log_d(1.0 + exp_d(x));
+}
+
+double mish(double x) {
+    double sp = softplus_d1(x);
+    return x * tanh_d(sp);
 }
 
 void main() {
@@ -112,6 +158,18 @@ void main() {
             break;
         case 5: // Swish
             result = swish(x);
+            break;
+        case 6: // ELU
+            result = elu(x, params.alpha);
+            break;
+        case 7: // SELU
+            result = selu(x);
+            break;
+        case 8: // Mish
+            result = mish(x);
+            break;
+        case 9: // Softplus
+            result = softplus_d(x, params.alpha);
             break;
         default:
             result = x;

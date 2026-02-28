@@ -385,3 +385,7 @@ class Parameter:
 _core.nn.Module = Module
 _core.nn.Sequential = Sequential
 _core.nn.Parameter = Parameter
+
+# Expose gradient clipping utilities at nn level (matching PyTorch's torch.nn.utils)
+clip_grad_norm_ = _core.nn.clip_grad_norm_
+clip_grad_value_ = _core.nn.clip_grad_value_

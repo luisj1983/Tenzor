@@ -5,6 +5,7 @@
 #include <cstdio>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/backend/dtype_dispatch.hpp"
 #include <stdexcept>
 #include "../cuda_error.hpp"
 
@@ -310,31 +311,18 @@ auto gru_cell_forward_kernel(
     int64_t total = batch_size * hidden_size;
     int num_blocks = get_num_blocks(total);
 
-    if (reset_gates.dtype() == DType::Float32) {
-        gru_cell_forward_fused<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            reset_gates.data<float>(),
-            update_gates.data<float>(),
-            new_gates_input.data<float>(),
-            new_gates_hidden.data<float>(),
-            h_prev.data<float>(),
-            h_out.data<float>(),
+    TENZOR_DISPATCH_FLOATING_TYPES(reset_gates.dtype(), "gru_cell_forward", [&]() {
+        gru_cell_forward_fused<scalar_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reset_gates.data<scalar_t>(),
+            update_gates.data<scalar_t>(),
+            new_gates_input.data<scalar_t>(),
+            new_gates_hidden.data<scalar_t>(),
+            h_prev.data<scalar_t>(),
+            h_out.data<scalar_t>(),
             batch_size,
             hidden_size);
-            CUDA_CHECK(cudaGetLastError());
-    } else if (reset_gates.dtype() == DType::Float64) {
-        gru_cell_forward_fused<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            reset_gates.data<double>(),
-            update_gates.data<double>(),
-            new_gates_input.data<double>(),
-            new_gates_hidden.data<double>(),
-            h_prev.data<double>(),
-            h_out.data<double>(),
-            batch_size,
-            hidden_size);
-            CUDA_CHECK(cudaGetLastError());
-    } else {
-        throw std::runtime_error("GRU only supports Float32 and Float64");
-    }
+        CUDA_CHECK(cudaGetLastError());
+    });
 
     CUDA_CHECK(cudaGetLastError());
 
@@ -375,41 +363,23 @@ auto gru_cell_backward_kernel(
     int64_t total = batch_size * hidden_size;
     int num_blocks = get_num_blocks(total);
 
-    if (grad_h.dtype() == DType::Float32) {
-        gru_cell_backward_fused<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            grad_h.data<float>(),
-            reset_gates.data<float>(),
-            update_gates.data<float>(),
-            new_gates_input.data<float>(),
-            new_gates_hidden.data<float>(),
-            h_prev.data<float>(),
-            outputs.grad_reset.data<float>(),
-            outputs.grad_update.data<float>(),
-            outputs.grad_new_input.data<float>(),
-            outputs.grad_new_hidden.data<float>(),
-            outputs.grad_h_prev.data<float>(),
+    TENZOR_DISPATCH_FLOATING_TYPES(grad_h.dtype(), "gru_cell_backward", [&]() {
+        gru_cell_backward_fused<scalar_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            grad_h.data<scalar_t>(),
+            reset_gates.data<scalar_t>(),
+            update_gates.data<scalar_t>(),
+            new_gates_input.data<scalar_t>(),
+            new_gates_hidden.data<scalar_t>(),
+            h_prev.data<scalar_t>(),
+            outputs.grad_reset.data<scalar_t>(),
+            outputs.grad_update.data<scalar_t>(),
+            outputs.grad_new_input.data<scalar_t>(),
+            outputs.grad_new_hidden.data<scalar_t>(),
+            outputs.grad_h_prev.data<scalar_t>(),
             batch_size,
             hidden_size);
-            CUDA_CHECK(cudaGetLastError());
-    } else if (grad_h.dtype() == DType::Float64) {
-        gru_cell_backward_fused<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            grad_h.data<double>(),
-            reset_gates.data<double>(),
-            update_gates.data<double>(),
-            new_gates_input.data<double>(),
-            new_gates_hidden.data<double>(),
-            h_prev.data<double>(),
-            outputs.grad_reset.data<double>(),
-            outputs.grad_update.data<double>(),
-            outputs.grad_new_input.data<double>(),
-            outputs.grad_new_hidden.data<double>(),
-            outputs.grad_h_prev.data<double>(),
-            batch_size,
-            hidden_size);
-            CUDA_CHECK(cudaGetLastError());
-    } else {
-        throw std::runtime_error("GRU backward only supports Float32 and Float64");
-    }
+        CUDA_CHECK(cudaGetLastError());
+    });
 
     CUDA_CHECK(cudaGetLastError());
 

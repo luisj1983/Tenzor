@@ -55,7 +55,9 @@ public:
      */
     MaxPool2d(int64_t kernel_size,
              int64_t stride = -1,  // Default: same as kernel_size
-             int64_t padding = 0);
+             int64_t padding = 0,
+             bool ceil_mode = false,
+             bool return_indices = false);
 
     /**
      * @brief Forward pass through max pooling.
@@ -65,10 +67,18 @@ public:
      */
     auto forward_impl(const Variable& input) -> Variable override;
 
+    /// Whether ceil_mode is enabled for output size calculation.
+    auto get_ceil_mode() const -> bool { return ceil_mode_; }
+
+    /// Whether return_indices is enabled.
+    auto get_return_indices() const -> bool { return return_indices_; }
+
 private:
     int64_t kernel_size_;  ///< Pooling window size
     int64_t stride_;       ///< Stride
     int64_t padding_;      ///< Padding
+    bool ceil_mode_;       ///< Use ceil instead of floor for output size
+    bool return_indices_;  ///< Store indices of max values
 };
 
 /**
@@ -195,14 +205,21 @@ class MaxPool3d : public Module {
 public:
     MaxPool3d(int64_t kernel_size,
              int64_t stride = -1,
-             int64_t padding = 0);
+             int64_t padding = 0,
+             bool ceil_mode = false,
+             bool return_indices = false);
 
     auto forward_impl(const Variable& input) -> Variable override;
+
+    auto get_ceil_mode() const -> bool { return ceil_mode_; }
+    auto get_return_indices() const -> bool { return return_indices_; }
 
 private:
     int64_t kernel_size_;
     int64_t stride_;
     int64_t padding_;
+    bool ceil_mode_;
+    bool return_indices_;
 };
 
 /**
@@ -232,13 +249,19 @@ private:
  */
 class MaxPool1d : public Module {
 public:
-    MaxPool1d(int64_t kernel_size, int64_t stride = -1, int64_t padding = 0);
+    MaxPool1d(int64_t kernel_size, int64_t stride = -1, int64_t padding = 0,
+              bool ceil_mode = false, bool return_indices = false);
     auto forward_impl(const Variable& input) -> Variable override;
+
+    auto get_ceil_mode() const -> bool { return ceil_mode_; }
+    auto get_return_indices() const -> bool { return return_indices_; }
 
 private:
     int64_t kernel_size_;
     int64_t stride_;
     int64_t padding_;
+    bool ceil_mode_;
+    bool return_indices_;
 };
 
 /**
@@ -284,6 +307,56 @@ public:
     auto forward_impl(const Variable& input) -> Variable override;
 
 private:
+    int64_t output_h_;
+    int64_t output_w_;
+};
+
+/**
+ * @brief 1D adaptive max pooling layer.
+ *
+ * Shape: Input (N, C, L_in) -> Output (N, C, output_size)
+ */
+class AdaptiveMaxPool1d : public Module {
+public:
+    explicit AdaptiveMaxPool1d(int64_t output_size);
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    int64_t output_size_;
+};
+
+/**
+ * @brief 3D adaptive max pooling layer.
+ *
+ * Shape: Input (N, C, D_in, H_in, W_in) -> Output (N, C, output_d, output_h, output_w)
+ */
+class AdaptiveMaxPool3d : public Module {
+public:
+    AdaptiveMaxPool3d(int64_t output_d, int64_t output_h, int64_t output_w);
+    explicit AdaptiveMaxPool3d(int64_t output_size)
+        : AdaptiveMaxPool3d(output_size, output_size, output_size) {}
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    int64_t output_d_;
+    int64_t output_h_;
+    int64_t output_w_;
+};
+
+/**
+ * @brief 3D adaptive average pooling layer.
+ *
+ * Shape: Input (N, C, D_in, H_in, W_in) -> Output (N, C, output_d, output_h, output_w)
+ */
+class AdaptiveAvgPool3d : public Module {
+public:
+    AdaptiveAvgPool3d(int64_t output_d, int64_t output_h, int64_t output_w);
+    explicit AdaptiveAvgPool3d(int64_t output_size)
+        : AdaptiveAvgPool3d(output_size, output_size, output_size) {}
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    int64_t output_d_;
     int64_t output_h_;
     int64_t output_w_;
 };

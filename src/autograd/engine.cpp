@@ -1,12 +1,70 @@
 #include "tenzor/autograd/engine.hpp"
+#include "tenzor/autograd/anomaly_mode.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/math.hpp"
+#include "tenzor/ops/reduction.hpp"
 #include "tenzor/utils/error.hpp"
 #include <unordered_set>
 #include <functional>
 #include <stdexcept>
+#include <typeinfo>
+
+#ifdef __GNUC__
+#include <cxxabi.h>
+#endif
 
 namespace tenzor {
+
+// Check computed gradients for NaN/Inf when anomaly detection is enabled.
+// Zero overhead when disabled (thread-local bool early-return).
+static void check_for_anomaly(const std::vector<Tensor>& grads,
+                              const Function* func) {
+    if (!is_anomaly_detection_enabled()) return;
+
+    for (size_t i = 0; i < grads.size(); ++i) {
+        const auto& grad = grads[i];
+        if (grad.numel() == 0) continue;
+
+        // Only check floating-point gradients (integer grads can't be NaN/Inf)
+        if (grad.dtype() != DType::Float32 && grad.dtype() != DType::Float64 &&
+            grad.dtype() != DType::Float16 && grad.dtype() != DType::BFloat16) {
+            continue;
+        }
+
+        auto nan_mask = isnan(grad);
+        auto inf_mask = isinf(grad);
+
+        // Sum bool masks as float to check if any anomalies exist
+        auto nan_count = sum(nan_mask.to(DType::Float32));
+        auto inf_count = sum(inf_mask.to(DType::Float32));
+
+        bool has_nan = nan_count.data<float>()[0] > 0.0f;
+        bool has_inf = inf_count.data<float>()[0] > 0.0f;
+
+        if (has_nan || has_inf) {
+            // Get demangled function name for readability
+            std::string func_name = typeid(*func).name();
+#ifdef __GNUC__
+            int status = 0;
+            char* demangled = abi::__cxa_demangle(func_name.c_str(), nullptr, nullptr, &status);
+            if (status == 0 && demangled) {
+                func_name = demangled;
+                free(demangled);
+            }
+#endif
+            std::string anomaly;
+            if (has_nan && has_inf) anomaly = "NaN and Inf";
+            else if (has_nan) anomaly = "NaN";
+            else anomaly = "Inf";
+
+            throw AutogradException(
+                "Anomaly detected: gradient output " + std::to_string(i) +
+                " contains " + anomaly + " values in backward of '" +
+                func_name + "'");
+        }
+    }
+}
 
 // Floating-point precision hierarchy for gradient accumulation.
 // Higher precedence = higher precision. This avoids using dtype_size()
@@ -145,6 +203,9 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                 // Standard backward path: raw Tensor operations
                 input_grads = function->backward(grad_outputs);
             }
+
+            // Check for NaN/Inf in computed gradients when anomaly detection is on
+            check_for_anomaly(input_grads, function.get());
 
             // Release saved tensors immediately to free GPU memory for subsequent layers.
             // This is safe because saved tensors are only needed during this backward() call.
@@ -388,6 +449,10 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
 
             function->reload_saved_tensors();
             auto input_grads = function->backward(grad_outputs);
+
+            // Check for NaN/Inf in computed gradients when anomaly detection is on
+            check_for_anomaly(input_grads, function.get());
+
             function->release_saved_tensors();
 
             // Accumulate gradients to input variables

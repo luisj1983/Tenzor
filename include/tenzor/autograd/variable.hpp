@@ -54,7 +54,7 @@ struct VariableImpl {
           requires_grad_(other.requires_grad_.load(std::memory_order_relaxed)),
           retain_grad_(other.retain_grad_.load(std::memory_order_relaxed)),
           hooks_(other.hooks_),
-          next_hook_id_(other.next_hook_id_) {}
+          next_hook_id_(other.next_hook_id_.load(std::memory_order_relaxed)) {}
 
     VariableImpl(VariableImpl&& other) noexcept
         : data_(std::move(other.data_)),
@@ -63,7 +63,7 @@ struct VariableImpl {
           requires_grad_(other.requires_grad_.load(std::memory_order_relaxed)),
           retain_grad_(other.retain_grad_.load(std::memory_order_relaxed)),
           hooks_(std::move(other.hooks_)),
-          next_hook_id_(other.next_hook_id_) {}
+          next_hook_id_(other.next_hook_id_.load(std::memory_order_relaxed)) {}
 
     VariableImpl& operator=(const VariableImpl& other) {
         if (this != &other) {
@@ -73,7 +73,7 @@ struct VariableImpl {
             requires_grad_.store(other.requires_grad_.load(std::memory_order_relaxed), std::memory_order_relaxed);
             retain_grad_.store(other.retain_grad_.load(std::memory_order_relaxed), std::memory_order_relaxed);
             hooks_ = other.hooks_;
-            next_hook_id_ = other.next_hook_id_;
+            next_hook_id_.store(other.next_hook_id_.load(std::memory_order_relaxed), std::memory_order_relaxed);
         }
         return *this;
     }
@@ -86,7 +86,7 @@ struct VariableImpl {
             requires_grad_.store(other.requires_grad_.load(std::memory_order_relaxed), std::memory_order_relaxed);
             retain_grad_.store(other.retain_grad_.load(std::memory_order_relaxed), std::memory_order_relaxed);
             hooks_ = std::move(other.hooks_);
-            next_hook_id_ = other.next_hook_id_;
+            next_hook_id_.store(other.next_hook_id_.load(std::memory_order_relaxed), std::memory_order_relaxed);
         }
         return *this;
     }
@@ -113,8 +113,8 @@ struct VariableImpl {
     /// Backward hooks keyed by ID, ordered by registration order (requires synchronization for modifications)
     std::map<size_t, std::function<Tensor(const Tensor&)>> hooks_;
 
-    /// Next hook ID for register_hook
-    size_t next_hook_id_{0};
+    /// Next hook ID for register_hook (atomic for thread-safe concurrent register_hook calls)
+    std::atomic<size_t> next_hook_id_{0};
 
     // Note: No mutex included in initial implementation (Option B from design doc).
     // Users responsible for external synchronization if accessing Variable handles

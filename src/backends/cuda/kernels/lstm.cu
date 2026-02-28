@@ -5,6 +5,7 @@
 #include <cstdio>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/backend/dtype_dispatch.hpp"
 #include <stdexcept>
 #include "../cuda_error.hpp"
 
@@ -308,27 +309,16 @@ auto lstm_cell_forward_kernel(
     int64_t total = batch_size * hidden_size;
     int num_blocks = get_num_blocks(total);
 
-    if (gates.dtype() == DType::Float32) {
-        lstm_cell_forward_fused<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            gates.data<float>(),
-            c_prev.data<float>(),
-            h_out.data<float>(),
-            c_out.data<float>(),
+    TENZOR_DISPATCH_FLOATING_TYPES(gates.dtype(), "lstm_cell_forward", [&]() {
+        lstm_cell_forward_fused<scalar_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            gates.data<scalar_t>(),
+            c_prev.data<scalar_t>(),
+            h_out.data<scalar_t>(),
+            c_out.data<scalar_t>(),
             batch_size,
             hidden_size);
-            CUDA_CHECK(cudaGetLastError());
-    } else if (gates.dtype() == DType::Float64) {
-        lstm_cell_forward_fused<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            gates.data<double>(),
-            c_prev.data<double>(),
-            h_out.data<double>(),
-            c_out.data<double>(),
-            batch_size,
-            hidden_size);
-            CUDA_CHECK(cudaGetLastError());
-    } else {
-        throw std::runtime_error("LSTM only supports Float32 and Float64");
-    }
+        CUDA_CHECK(cudaGetLastError());
+    });
 
     CUDA_CHECK(cudaGetLastError());
 
@@ -357,33 +347,19 @@ auto lstm_cell_backward_kernel(
     int64_t total = batch_size * hidden_size;
     int num_blocks = get_num_blocks(total);
 
-    if (gates.dtype() == DType::Float32) {
-        lstm_cell_backward_fused<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            grad_h.data<float>(),
-            grad_c.data<float>(),
-            gates.data<float>(),
-            c_prev.data<float>(),
-            c_out.data<float>(),
-            grad_gates.data<float>(),
-            grad_c_prev.data<float>(),
+    TENZOR_DISPATCH_FLOATING_TYPES(gates.dtype(), "lstm_cell_backward", [&]() {
+        lstm_cell_backward_fused<scalar_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            grad_h.data<scalar_t>(),
+            grad_c.data<scalar_t>(),
+            gates.data<scalar_t>(),
+            c_prev.data<scalar_t>(),
+            c_out.data<scalar_t>(),
+            grad_gates.data<scalar_t>(),
+            grad_c_prev.data<scalar_t>(),
             batch_size,
             hidden_size);
-            CUDA_CHECK(cudaGetLastError());
-    } else if (gates.dtype() == DType::Float64) {
-        lstm_cell_backward_fused<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            grad_h.data<double>(),
-            grad_c.data<double>(),
-            gates.data<double>(),
-            c_prev.data<double>(),
-            c_out.data<double>(),
-            grad_gates.data<double>(),
-            grad_c_prev.data<double>(),
-            batch_size,
-            hidden_size);
-            CUDA_CHECK(cudaGetLastError());
-    } else {
-        throw std::runtime_error("LSTM backward only supports Float32 and Float64");
-    }
+        CUDA_CHECK(cudaGetLastError());
+    });
 
     CUDA_CHECK(cudaGetLastError());
 

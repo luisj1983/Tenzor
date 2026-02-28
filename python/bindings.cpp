@@ -53,7 +53,9 @@
 #include <tenzor/models/resnet.hpp>
 #include <tenzor/onnx/importer.hpp>
 #include <tenzor/autograd/ops.hpp>
+#include <tenzor/autograd/anomaly_mode.hpp>
 #include <tenzor/backend/cpu_caching_allocator.hpp>
+#include <tenzor/nn/utils/clip_grad.hpp>
 #include <tenzor/utils/error.hpp>
 #include "numpy_interop.hpp"
 #include <thread>
@@ -2172,6 +2174,44 @@ PYBIND11_MODULE(tenzor_core, m) {
     // Keep the existing set_grad_enabled function, but also allow context manager usage
 
     // ========================================================================
+    // Anomaly detection (NaN/Inf checking in backward)
+    // ========================================================================
+    m.def("set_anomaly_detection", &tenzor::set_anomaly_detection,
+          py::arg("enabled"),
+          "Enable or disable anomaly detection (NaN/Inf checking) in backward passes");
+
+    m.def("is_anomaly_detection_enabled", &tenzor::is_anomaly_detection_enabled,
+          "Check if anomaly detection is enabled");
+
+    struct PyAnomalyModeContext {
+        std::unique_ptr<tenzor::AnomalyMode> guard_;
+        bool enabled_;
+
+        PyAnomalyModeContext(bool enabled = true) : enabled_(enabled) {}
+
+        void enter() {
+            guard_ = std::make_unique<tenzor::AnomalyMode>(enabled_);
+        }
+
+        void exit() {
+            guard_.reset();
+        }
+    };
+
+    py::class_<PyAnomalyModeContext>(m, "detect_anomaly",
+        "Context manager for anomaly detection in backward passes.\n"
+        "When enabled, checks all computed gradients for NaN/Inf values\n"
+        "and throws an error identifying the responsible autograd function.")
+        .def(py::init<bool>(), py::arg("enabled") = true)
+        .def("__enter__", [](PyAnomalyModeContext& self) -> PyAnomalyModeContext& {
+            self.enter();
+            return self;
+        })
+        .def("__exit__", [](PyAnomalyModeContext& self, py::object, py::object, py::object) {
+            self.exit();
+        });
+
+    // ========================================================================
     // Custom autograd Function base class
     // ========================================================================
     // Enables Python users to define custom differentiable operations:
@@ -2892,10 +2932,12 @@ PYBIND11_MODULE(tenzor_core, m) {
     // Pooling layers
     py::class_<tenzor::nn::MaxPool2d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::MaxPool2d>>(nn, "MaxPool2d")
-        .def(py::init<int64_t, int64_t, int64_t>(),
+        .def(py::init<int64_t, int64_t, int64_t, bool, bool>(),
              py::arg("kernel_size"),
              py::arg("stride") = -1,
-             py::arg("padding") = 0);
+             py::arg("padding") = 0,
+             py::arg("ceil_mode") = false,
+             py::arg("return_indices") = false);
 
     py::class_<tenzor::nn::AvgPool2d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::AvgPool2d>>(nn, "AvgPool2d")
@@ -2906,10 +2948,12 @@ PYBIND11_MODULE(tenzor_core, m) {
 
     py::class_<tenzor::nn::MaxPool3d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::MaxPool3d>>(nn, "MaxPool3d")
-        .def(py::init<int64_t, int64_t, int64_t>(),
+        .def(py::init<int64_t, int64_t, int64_t, bool, bool>(),
              py::arg("kernel_size"),
              py::arg("stride") = -1,
-             py::arg("padding") = 0);
+             py::arg("padding") = 0,
+             py::arg("ceil_mode") = false,
+             py::arg("return_indices") = false);
 
     py::class_<tenzor::nn::AvgPool3d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::AvgPool3d>>(nn, "AvgPool3d")
@@ -2927,10 +2971,12 @@ PYBIND11_MODULE(tenzor_core, m) {
 
     py::class_<tenzor::nn::MaxPool1d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::MaxPool1d>>(nn, "MaxPool1d")
-        .def(py::init<int64_t, int64_t, int64_t>(),
+        .def(py::init<int64_t, int64_t, int64_t, bool, bool>(),
              py::arg("kernel_size"),
              py::arg("stride") = -1,
-             py::arg("padding") = 0);
+             py::arg("padding") = 0,
+             py::arg("ceil_mode") = false,
+             py::arg("return_indices") = false);
 
     py::class_<tenzor::nn::AvgPool1d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::AvgPool1d>>(nn, "AvgPool1d")
@@ -2947,6 +2993,24 @@ PYBIND11_MODULE(tenzor_core, m) {
                std::shared_ptr<tenzor::nn::AdaptiveMaxPool2d>>(nn, "AdaptiveMaxPool2d")
         .def(py::init<int64_t, int64_t>(),
              py::arg("output_h"), py::arg("output_w"))
+        .def(py::init<int64_t>(),
+             py::arg("output_size"));
+
+    py::class_<tenzor::nn::AdaptiveMaxPool1d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::AdaptiveMaxPool1d>>(nn, "AdaptiveMaxPool1d")
+        .def(py::init<int64_t>(), py::arg("output_size"));
+
+    py::class_<tenzor::nn::AdaptiveMaxPool3d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::AdaptiveMaxPool3d>>(nn, "AdaptiveMaxPool3d")
+        .def(py::init<int64_t, int64_t, int64_t>(),
+             py::arg("output_d"), py::arg("output_h"), py::arg("output_w"))
+        .def(py::init<int64_t>(),
+             py::arg("output_size"));
+
+    py::class_<tenzor::nn::AdaptiveAvgPool3d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::AdaptiveAvgPool3d>>(nn, "AdaptiveAvgPool3d")
+        .def(py::init<int64_t, int64_t, int64_t>(),
+             py::arg("output_d"), py::arg("output_h"), py::arg("output_w"))
         .def(py::init<int64_t>(),
              py::arg("output_size"));
 
@@ -3548,6 +3612,108 @@ PYBIND11_MODULE(tenzor_core, m) {
     nn.def("bce_loss", &tenzor::nn::bce_loss, "BCE loss function",
           py::arg("input"), py::arg("target"),
           py::arg("reduction") = tenzor::nn::Reduction::Mean);
+
+    // =========================================================================
+    // Functional API — stateless operation wrappers (F.dropout, F.linear, etc.)
+    // =========================================================================
+
+    nn.def("functional_dropout", [](const tenzor::Variable& input, double p, bool training) -> tenzor::Variable {
+        if (!training || p == 0.0) return input;
+        tenzor::nn::Dropout layer(p);
+        layer.train(true);
+        return layer.forward_impl(input);
+    }, py::arg("input"), py::arg("p") = 0.5, py::arg("training") = true,
+       "Apply dropout to input tensor");
+
+    nn.def("functional_linear", [](const tenzor::Variable& input, const tenzor::Variable& weight,
+                                    const py::object& bias) -> tenzor::Variable {
+        if (bias.is_none()) {
+            // y = x @ W^T (no bias)
+            return tenzor::matmul(input, tenzor::transpose(weight, 0, 1));
+        }
+        return tenzor::linear(input, weight, bias.cast<tenzor::Variable>());
+    }, py::arg("input"), py::arg("weight"), py::arg("bias") = py::none(),
+       "Apply linear transformation: y = xW^T + b");
+
+    nn.def("functional_max_pool2d", [](const tenzor::Variable& input, int64_t kernel_size,
+                                        int64_t stride, int64_t padding) -> tenzor::Variable {
+        tenzor::nn::MaxPool2d layer(kernel_size, stride, padding);
+        return layer.forward_impl(input);
+    }, py::arg("input"), py::arg("kernel_size"), py::arg("stride") = -1, py::arg("padding") = 0,
+       "Apply 2D max pooling");
+
+    nn.def("functional_avg_pool2d", [](const tenzor::Variable& input, int64_t kernel_size,
+                                        int64_t stride, int64_t padding) -> tenzor::Variable {
+        tenzor::nn::AvgPool2d layer(kernel_size, stride, padding);
+        return layer.forward_impl(input);
+    }, py::arg("input"), py::arg("kernel_size"), py::arg("stride") = -1, py::arg("padding") = 0,
+       "Apply 2D average pooling");
+
+    nn.def("functional_batch_norm", [](const tenzor::Variable& input, int64_t num_features,
+                                        bool training, double momentum, double eps) -> tenzor::Variable {
+        tenzor::nn::BatchNorm2d layer(num_features, eps, momentum, true, true);
+        layer.train(training);
+        return layer.forward_impl(input);
+    }, py::arg("input"), py::arg("num_features"),
+       py::arg("training") = true, py::arg("momentum") = 0.1, py::arg("eps") = 1e-5,
+       "Apply batch normalization (creates fresh running stats)");
+
+    nn.def("functional_layer_norm", [](const tenzor::Variable& input,
+                                        std::vector<int64_t> normalized_shape,
+                                        double eps) -> tenzor::Variable {
+        tenzor::nn::LayerNorm layer(std::move(normalized_shape), eps, true);
+        return layer.forward_impl(input);
+    }, py::arg("input"), py::arg("normalized_shape"), py::arg("eps") = 1e-5,
+       "Apply layer normalization");
+
+    nn.def("functional_group_norm", [](const tenzor::Variable& input,
+                                        int64_t num_groups, int64_t num_channels,
+                                        double eps) -> tenzor::Variable {
+        tenzor::nn::GroupNorm layer(num_groups, num_channels, eps, true);
+        return layer.forward_impl(input);
+    }, py::arg("input"), py::arg("num_groups"), py::arg("num_channels"),
+       py::arg("eps") = 1e-5,
+       "Apply group normalization");
+
+    nn.def("functional_interpolate", [](const tenzor::Variable& input,
+                                         std::vector<int64_t> size,
+                                         const std::string& mode,
+                                         bool align_corners) -> tenzor::Variable {
+        auto result = tenzor::ops::interpolate(input.tensor(), size, mode, align_corners);
+        return tenzor::Variable(result, input.requires_grad());
+    }, py::arg("input"), py::arg("size"),
+       py::arg("mode") = "bilinear", py::arg("align_corners") = false,
+       "Interpolate/resize tensor to given size");
+
+    nn.def("functional_embedding", [](const tenzor::Variable& input,
+                                       const tenzor::Variable& weight,
+                                       int64_t padding_idx) -> tenzor::Variable {
+        // Create embedding layer with weight's dimensions
+        auto weight_shape = weight.shape();
+        tenzor::nn::Embedding layer(weight_shape[0], weight_shape[1], padding_idx);
+        // Copy weight into embedding
+        // Note: functional embedding creates a new Embedding layer each call
+        return layer.forward_impl(input);
+    }, py::arg("input"), py::arg("weight"), py::arg("padding_idx") = -1,
+       "Lookup embeddings from weight matrix");
+
+    nn.def("functional_binary_cross_entropy_with_logits",
+           [](const tenzor::Variable& input, const tenzor::Variable& target,
+              tenzor::nn::Reduction reduction) -> tenzor::Variable {
+        tenzor::nn::BCEWithLogitsLoss loss(reduction);
+        return loss.forward(input, target);
+    }, py::arg("input"), py::arg("target"),
+       py::arg("reduction") = tenzor::nn::Reduction::Mean,
+       "Binary cross entropy with logits loss");
+
+    // Gradient clipping utilities
+    nn.def("clip_grad_norm_", &tenzor::nn::utils::clip_grad_norm_,
+           py::arg("parameters"), py::arg("max_norm"), py::arg("norm_type") = 2.0,
+           "Clip gradients by global norm, returns total norm before clipping");
+
+    nn.def("clip_grad_value_", &tenzor::nn::utils::clip_grad_value_,
+           py::arg("parameters"), py::arg("clip_value"),
+           "Clip gradient values to [-clip_value, clip_value]");
 
     // Optimizers
     auto optim = m.def_submodule("optim", "Optimization algorithms");

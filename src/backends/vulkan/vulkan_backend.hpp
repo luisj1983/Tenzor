@@ -102,6 +102,9 @@ private:
         VkCommandBuffer activeCommandBuffer = VK_NULL_HANDLE;
         size_t operationsInBatch = 0;
         static constexpr size_t MAX_OPERATIONS_PER_BATCH = 64;
+
+        // Per-device mutex for independent multi-GPU operation.
+        mutable std::recursive_mutex mutex;
     };
 
     // Staging buffer for host-device transfers
@@ -353,8 +356,8 @@ public:
     // Shader paths
     std::string shaderPath_;
 
-    // Thread safety: mutex for serializing Vulkan queue submissions and device access.
-    // Vulkan requires external synchronization for host access to queues.
+    // Global mutex for cross-device operations (instance creation, shutdown, pipeline cache).
+    // Per-device operations should use DeviceContext::mutex instead for parallelism.
     mutable std::recursive_mutex dispatch_mutex_;
 };
 

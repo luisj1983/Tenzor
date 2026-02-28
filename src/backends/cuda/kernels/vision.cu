@@ -1,5 +1,6 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/backend/dtype_dispatch.hpp"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <stdexcept>
@@ -379,27 +380,16 @@ auto unfold_cuda(const Tensor& input,
     dim3 grid, block;
     compute_launch_config_1d(total_elements, grid, block);
 
-    if (input.dtype() == DType::Float32) {
-        unfold_kernel<float><<<grid, block>>>(
-            input.data<float>(),
-            output.data<float>(),
+    TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "unfold_cuda", [&]() {
+        unfold_kernel<scalar_t><<<grid, block>>>(
+            input.data<scalar_t>(),
+            output.data<scalar_t>(),
             batch, channels, height, width,
             kernel_size, stride, padding, dilation,
             out_h, out_w
         );
         CUDA_CHECK(cudaGetLastError());
-    } else if (input.dtype() == DType::Float64) {
-        unfold_kernel<double><<<grid, block>>>(
-            input.data<double>(),
-            output.data<double>(),
-            batch, channels, height, width,
-            kernel_size, stride, padding, dilation,
-            out_h, out_w
-        );
-        CUDA_CHECK(cudaGetLastError());
-    } else {
-        throw std::runtime_error("unfold_cuda: Unsupported dtype");
-    }
+    });
 
     CUDA_CHECK(cudaGetLastError());
 
@@ -431,38 +421,23 @@ auto fold_cuda(const Tensor& input,
     Tensor output(output_shape, input.dtype(), input.device());
 
     // Initialize to zero
-    if (input.dtype() == DType::Float32) {
-        CUDA_CHECK(cudaMemset(output.data<float>(), 0, output.numel() * sizeof(float)));
-    } else if (input.dtype() == DType::Float64) {
-        CUDA_CHECK(cudaMemset(output.data<double>(), 0, output.numel() * sizeof(double)));
-    }
+    CUDA_CHECK(cudaMemset(output.data_ptr(), 0, output.numel() * output.dtype_size()));
 
     // Launch kernel
     int64_t total_elements = batch * col_channels * num_blocks;
     dim3 grid, block;
     compute_launch_config_1d(total_elements, grid, block);
 
-    if (input.dtype() == DType::Float32) {
-        fold_kernel<float><<<grid, block>>>(
-            input.data<float>(),
-            output.data<float>(),
+    TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "fold_cuda", [&]() {
+        fold_kernel<scalar_t><<<grid, block>>>(
+            input.data<scalar_t>(),
+            output.data<scalar_t>(),
             batch, channels, height, width,
             kernel_size, stride, padding, dilation,
             out_h, out_w
         );
         CUDA_CHECK(cudaGetLastError());
-    } else if (input.dtype() == DType::Float64) {
-        fold_kernel<double><<<grid, block>>>(
-            input.data<double>(),
-            output.data<double>(),
-            batch, channels, height, width,
-            kernel_size, stride, padding, dilation,
-            out_h, out_w
-        );
-        CUDA_CHECK(cudaGetLastError());
-    } else {
-        throw std::runtime_error("fold_cuda: Unsupported dtype");
-    }
+    });
 
     CUDA_CHECK(cudaGetLastError());
 
