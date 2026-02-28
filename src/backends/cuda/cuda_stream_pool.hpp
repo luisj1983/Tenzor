@@ -181,7 +181,7 @@ private:
 
     struct DevicePool {
         std::vector<cudaStream_t> streams;
-        std::vector<bool> available;
+        std::vector<uint8_t> available;  // NOT vector<bool> — bit-packing is not thread-safe
     };
 
     std::vector<DevicePool> device_pools_;

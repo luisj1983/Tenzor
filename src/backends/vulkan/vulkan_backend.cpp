@@ -124,9 +124,15 @@ VulkanBackend::~VulkanBackend() {
                         std::filesystem::create_directories(dir);
                         std::string path = dir + "/vulkan_pipeline_cache_"
                                          + std::to_string(devProps.deviceID) + ".bin";
-                        std::ofstream out(path, std::ios::binary);
+                        // Atomic write: write to temp file, then rename
+                        std::string tmp_path = path + ".tmp";
+                        std::ofstream out(tmp_path, std::ios::binary);
                         if (out.good()) {
                             out.write(cache_data.data(), static_cast<std::streamsize>(cache_size));
+                            out.close();
+                            if (out.good()) {
+                                std::rename(tmp_path.c_str(), path.c_str());
+                            }
                         }
                     }
                 }
@@ -464,12 +470,21 @@ void VulkanBackend::createLogicalDevices() {
                 std::ifstream cache_file(cache_path, std::ios::binary | std::ios::ate);
                 if (cache_file.good()) {
                     auto size = cache_file.tellg();
-                    if (size > 0) {
+                    // Validate: file must be large enough for VkPipelineCacheHeaderVersionOne
+                    if (size >= static_cast<std::streampos>(sizeof(uint32_t) * 4 + VK_UUID_SIZE)) {
                         cache_data.resize(static_cast<size_t>(size));
                         cache_file.seekg(0);
                         cache_file.read(cache_data.data(), size);
-                        cacheCreateInfo.initialDataSize = cache_data.size();
-                        cacheCreateInfo.pInitialData = cache_data.data();
+                        // Validate pipeline cache header version
+                        uint32_t header_size = 0;
+                        std::memcpy(&header_size, cache_data.data(), sizeof(uint32_t));
+                        uint32_t header_version = 0;
+                        std::memcpy(&header_version, cache_data.data() + sizeof(uint32_t), sizeof(uint32_t));
+                        if (header_version == VK_PIPELINE_CACHE_HEADER_VERSION_ONE
+                            && header_size <= cache_data.size()) {
+                            cacheCreateInfo.initialDataSize = cache_data.size();
+                            cacheCreateInfo.pInitialData = cache_data.data();
+                        }
                     }
                 }
             }
@@ -657,6 +672,9 @@ auto VulkanBackend::synchronize_stream(StreamHandle stream) -> void {
 }
 vulkan::ComputePipeline* VulkanBackend::getPipeline(const std::string& shader_name,
                                                     int32_t device_id) {
+    // Lock per-device mutex to protect concurrent pipeline cache access.
+    std::lock_guard<std::recursive_mutex> lock(devices_[device_id].mutex);
+
     auto& cache = pipelineCaches_[device_id];
     auto it = cache.pipelines.find(shader_name);
 

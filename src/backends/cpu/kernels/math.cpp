@@ -872,21 +872,26 @@ static void matmul_blocked_bfloat16(
     constexpr int64_t TILE_N = 128;
     constexpr int64_t TILE_K = 256;
 
-    // Use heap-allocated thread-local buffers to avoid stack overflow
-    static thread_local std::vector<float> A_fp32_buf_bf16(TILE_M * TILE_K);
-    static thread_local std::vector<float> B_fp32_buf_bf16(TILE_K * TILE_N);
-    static thread_local std::vector<float> C_fp32_buf_bf16(TILE_M * TILE_N);
-
     // Zero-initialize output
     std::fill_n(C, M * N, BFloat16(0.0f));
 
-    #pragma omp parallel for collapse(2) if(M * N > 65536)
+    // Use omp parallel to allocate per-thread FP32 workspace buffers on the heap.
+    // 'static thread_local' vectors are NOT safe here because this code runs inside
+    // a dlopen'd shared library, and OpenMP worker threads may bypass the C++ TLS
+    // initialization machinery, leaving the vectors empty (data() == nullptr).
+    #pragma omp parallel if(M * N > 65536)
+    {
+    std::vector<float> A_fp32_buf_bf16(TILE_M * TILE_K);
+    std::vector<float> B_fp32_buf_bf16(TILE_K * TILE_N);
+    std::vector<float> C_fp32_buf_bf16(TILE_M * TILE_N);
+
+    #pragma omp for collapse(2)
     for (int64_t i0 = 0; i0 < M; i0 += TILE_M) {
         for (int64_t j0 = 0; j0 < N; j0 += TILE_N) {
             int64_t tile_m = std::min(TILE_M, M - i0);
             int64_t tile_n = std::min(TILE_N, N - j0);
 
-            // Thread-local buffer pointers
+            // Per-thread buffer pointers
             float* A_fp32 = A_fp32_buf_bf16.data();
             float* B_fp32 = B_fp32_buf_bf16.data();
             float* C_fp32 = C_fp32_buf_bf16.data();
@@ -934,6 +939,7 @@ static void matmul_blocked_bfloat16(
             }
         }
     }
+    } // end #pragma omp parallel
 }
 
 #endif // __AVX512BF16__ && __AVX512F__
@@ -1028,15 +1034,14 @@ inline void mul_scalar(const T* a, const T* b, T* c, size_t n) {
 template<typename T>
 inline void div_scalar(const T* a, const T* b, T* c, size_t n) {
     for (size_t i = 0; i < n; ++i) {
-        if (b[i] == T(0)) {
-            if constexpr (std::is_integral_v<T>) {
+        if constexpr (std::is_integral_v<T>) {
+            if (b[i] == T(0)) {
                 throw std::runtime_error("Integer division by zero");
-            } else {
-                c[i] = std::numeric_limits<T>::infinity();
             }
-        } else {
-            c[i] = a[i] / b[i];
         }
+        // IEEE 754: let hardware produce correct results for FP division
+        // 0/0 = NaN, x/0 = +/-Inf (sign matches x)
+        c[i] = a[i] / b[i];
     }
 }
 
@@ -1112,12 +1117,9 @@ inline void div_avx512_f32(const float* a, const float* b, float* c, size_t n) {
         _mm512_storeu_ps(c + i, vc);
     }
 
+    // Tail loop: IEEE 754 handles 0/0=NaN, x/0=Inf naturally
     for (size_t i = simd_end; i < n; ++i) {
-        if (b[i] == 0.0f) {
-            c[i] = std::numeric_limits<float>::infinity();
-        } else {
-            c[i] = a[i] / b[i];
-        }
+        c[i] = a[i] / b[i];
     }
 }
 
@@ -1185,12 +1187,9 @@ inline void div_avx512_f64(const double* a, const double* b, double* c, size_t n
         _mm512_storeu_pd(c + i, vc);
     }
 
+    // Tail loop: IEEE 754 handles 0/0=NaN, x/0=Inf naturally
     for (; i < n; ++i) {
-        if (b[i] == 0.0) {
-            c[i] = std::numeric_limits<double>::infinity();
-        } else {
-            c[i] = a[i] / b[i];
-        }
+        c[i] = a[i] / b[i];
     }
 }
 
@@ -1353,12 +1352,9 @@ inline void div_avx2_f32(const float* a, const float* b, float* c, size_t n) {
         _mm256_storeu_ps(c + i, vc);
     }
 
+    // Tail loop: IEEE 754 handles 0/0=NaN, x/0=Inf naturally
     for (size_t i = simd_end; i < n; ++i) {
-        if (b[i] == 0.0f) {
-            c[i] = std::numeric_limits<float>::infinity();
-        } else {
-            c[i] = a[i] / b[i];
-        }
+        c[i] = a[i] / b[i];
     }
 }
 
@@ -1425,12 +1421,9 @@ inline void div_avx2_f64(const double* a, const double* b, double* c, size_t n) 
         _mm256_storeu_pd(c + i, vc);
     }
 
+    // Tail loop: IEEE 754 handles 0/0=NaN, x/0=Inf naturally
     for (; i < n; ++i) {
-        if (b[i] == 0.0) {
-            c[i] = std::numeric_limits<double>::infinity();
-        } else {
-            c[i] = a[i] / b[i];
-        }
+        c[i] = a[i] / b[i];
     }
 }
 
@@ -2050,21 +2043,16 @@ auto div_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const float* a_data = a.data<float>();
             const float* b_data = b.data<float>();
             float* c_data = result.data<float>();
+            // IEEE 754: x/0=Inf, 0/0=NaN — no special-case needed
             detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
-                                [](float x, float y) {
-                                    if (y == 0.0f) return std::numeric_limits<float>::infinity();
-                                    return x / y;
-                                });
+                                [](float x, float y) { return x / y; });
 
         } else if (a.dtype() == DType::Float64) {
             const double* a_data = a.data<double>();
             const double* b_data = b.data<double>();
             double* c_data = result.data<double>();
             detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
-                                [](double x, double y) {
-                                    if (y == 0.0) return std::numeric_limits<double>::infinity();
-                                    return x / y;
-                                });
+                                [](double x, double y) { return x / y; });
 
         } else if (a.dtype() == DType::Int32) {
             const int32_t* a_data = a.data<int32_t>();
@@ -2092,10 +2080,7 @@ auto div_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             Float16* c_data = result.data<Float16>();
             detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](Float16 x, Float16 y) {
-                                    float x_f32 = static_cast<float>(x);
-                                    float y_f32 = static_cast<float>(y);
-                                    if (y_f32 == 0.0f) return Float16(std::numeric_limits<float>::infinity());
-                                    return Float16(x_f32 / y_f32);
+                                    return Float16(static_cast<float>(x) / static_cast<float>(y));
                                 });
 
         } else if (a.dtype() == DType::BFloat16) {
@@ -2104,10 +2089,7 @@ auto div_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             BFloat16* c_data = result.data<BFloat16>();
             detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](BFloat16 x, BFloat16 y) {
-                                    float x_f32 = static_cast<float>(x);
-                                    float y_f32 = static_cast<float>(y);
-                                    if (y_f32 == 0.0f) return BFloat16(std::numeric_limits<float>::infinity());
-                                    return BFloat16(x_f32 / y_f32);
+                                    return BFloat16(static_cast<float>(x) / static_cast<float>(y));
                                 });
 
         } else {

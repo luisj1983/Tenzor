@@ -14,6 +14,15 @@ env:
   CMAKE_BUILD_TYPE: Release
   CMAKE_GENERATOR: Ninja
 
+  # GPU TESTING NOTE:
+  # GPU backends (CUDA, ROCm, Vulkan, OneAPI, Metal) are not tested in CI
+  # because GitHub-hosted runners don't have GPU hardware.
+  # To test GPU backends locally:
+  #   cd build && ninja && ctest -R "cuda|vulkan|rocm|oneapi" --output-on-failure
+  # For self-hosted GPU runners, add a separate job with:
+  #   runs-on: [self-hosted, gpu]
+  # and enable the corresponding CMake backend flags.
+
 jobs:
   # Tier 1: Fast smoke tests (~5 min)
   build-and-smoke:

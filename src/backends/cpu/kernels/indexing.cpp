@@ -84,6 +84,11 @@ void gather_impl(const T* input_ptr, T* output_ptr,
             if (static_cast<int64_t>(d) == dim) {
                 int64_t idx_val = index_ptr[flat_idx];
                 if (idx_val < 0) idx_val += input_shape[d];
+                if (idx_val < 0 || idx_val >= input_shape[d]) {
+                    throw std::out_of_range("gather: index " + std::to_string(index_ptr[flat_idx]) +
+                        " out of range for dimension " + std::to_string(d) +
+                        " with size " + std::to_string(input_shape[d]));
+                }
                 input_idx += idx_val * input_strides[d];
             } else {
                 input_idx += coord * input_strides[d];
@@ -111,6 +116,11 @@ void scatter_impl(const T* input_ptr, T* output_ptr, const T* src_ptr,
             if (static_cast<int64_t>(d) == dim) {
                 int64_t idx_val = index_ptr[flat_idx];
                 if (idx_val < 0) idx_val += input_shape[d];
+                if (idx_val < 0 || idx_val >= input_shape[d]) {
+                    throw std::out_of_range("scatter: index " + std::to_string(index_ptr[flat_idx]) +
+                        " out of range for dimension " + std::to_string(d) +
+                        " with size " + std::to_string(input_shape[d]));
+                }
                 output_idx += idx_val * input_strides[d];
             } else {
                 output_idx += coord * input_strides[d];

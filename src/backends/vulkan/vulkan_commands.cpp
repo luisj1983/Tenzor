@@ -47,14 +47,19 @@ void VulkanBackend::initCommandBufferPool(DeviceContext& ctx) {
 VkCommandBuffer VulkanBackend::acquireCommandBuffer(int32_t device_id) {
     auto& ctx = devices_[device_id];
 
-    // If we've used all buffers in the pool, wait for pending work and reset
+    // If we've used all buffers in the pool, wait for ALL GPU work and reset
     if (ctx.nextCommandBufferIndex >= ctx.commandBufferPool.size()) {
-        ensurePendingWorkComplete(device_id);
+        // Use vkDeviceWaitIdle instead of fence-only wait to ensure ALL GPU work
+        // is complete before resetting descriptor pool. Fence-only wait may miss
+        // in-flight commands that reference descriptor sets from this pool.
+        vkDeviceWaitIdle(ctx.device);
         vkResetCommandPool(ctx.device, ctx.commandPool, 0);
         ctx.nextCommandBufferIndex = 0;
+        ctx.submittedFrames = 0;
+        ctx.currentFrame = 0;
+        ctx.hasPendingWork = false;
 
-        // Also reset descriptor pool since all command buffers are complete
-        // and no descriptor sets are in use
+        // Safe to reset descriptor pool now — all GPU work is complete
         if (ctx.descriptorPool) {
             ctx.descriptorPool->reset();
         }
@@ -150,6 +155,9 @@ void VulkanBackend::endSingleTimeCommandsAsync(VkCommandBuffer commandBuffer, in
         if (waitResult != VK_SUCCESS) {
             throw std::runtime_error("Failed to wait for frame fence: " + std::to_string(waitResult));
         }
+        // Frame completed — decrement in-flight count so submittedFrames
+        // accurately tracks the number of actually pending submissions
+        ctx.submittedFrames--;
     }
 
     // Get the fence for this submission and reset it
@@ -172,7 +180,7 @@ void VulkanBackend::endSingleTimeCommandsAsync(VkCommandBuffer commandBuffer, in
 
     // Move to next frame slot (ring buffer)
     ctx.currentFrame = (ctx.currentFrame + 1) % DeviceContext::MAX_FRAMES_IN_FLIGHT;
-    ctx.submittedFrames = std::min(ctx.submittedFrames + 1, DeviceContext::MAX_FRAMES_IN_FLIGHT);
+    ctx.submittedFrames++;
 
     // Also mark pendingFence for legacy code paths
     ctx.hasPendingWork = true;
@@ -326,7 +334,7 @@ void VulkanBackend::submitBatchIfNeeded(int32_t device_id, bool force) {
     ctx.activeCommandBuffer = VK_NULL_HANDLE;
     ctx.operationsInBatch = 0;
     ctx.currentFrame = (ctx.currentFrame + 1) % DeviceContext::MAX_FRAMES_IN_FLIGHT;
-    ctx.submittedFrames = std::min(ctx.submittedFrames + 1, DeviceContext::MAX_FRAMES_IN_FLIGHT);
+    ctx.submittedFrames++;
 }
 
 void VulkanBackend::waitForFrame(int32_t device_id, size_t frameIndex) {

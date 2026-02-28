@@ -52,44 +52,54 @@ auto im2col_cpu(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
     int64_t out_h = calculate_output_size(height, kernel_h, stride_h, padding_h, dilation);
     int64_t out_w = calculate_output_size(width, kernel_w, stride_w, padding_w, dilation);
 
-    // Convert to Float32 for im2col computation (matches PyTorch CPU conv fallback behavior)
-    Tensor input_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
-    auto col_f32 = zeros({batch, channels * kernel_h * kernel_w, out_h * out_w}, DType::Float32, input.device());
-    const float* input_data = input_f32.data<float>();
-    float* col_data = col_f32.data<float>();
+    // Only upcast Float16/BFloat16 to Float32; preserve Float32/Float64 natively
+    bool needs_upcast = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
+    DType work_dtype = needs_upcast ? DType::Float32 : input.dtype();
+    Tensor input_work = needs_upcast ? input.to(DType::Float32) : input;
+    auto col = zeros({batch, channels * kernel_h * kernel_w, out_h * out_w}, work_dtype, input.device());
 
-    for (int64_t b = 0; b < batch; ++b) {
-        for (int64_t c = 0; c < channels; ++c) {
-            for (int64_t kh = 0; kh < kernel_h; ++kh) {
-                for (int64_t kw = 0; kw < kernel_w; ++kw) {
-                    int64_t col_c = c * kernel_h * kernel_w + kh * kernel_w + kw;
+    // Use typed lambda to handle both float and double paths
+    auto do_im2col = [&](auto* input_data, auto* col_data) {
+        using T = std::remove_pointer_t<decltype(input_data)>;
+        for (int64_t b = 0; b < batch; ++b) {
+            for (int64_t c = 0; c < channels; ++c) {
+                for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                    for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                        int64_t col_c = c * kernel_h * kernel_w + kh * kernel_w + kw;
 
-                    for (int64_t oh = 0; oh < out_h; ++oh) {
-                        for (int64_t ow = 0; ow < out_w; ++ow) {
-                            int64_t ih = oh * stride_h - padding_h + kh * dilation;
-                            int64_t iw = ow * stride_w - padding_w + kw * dilation;
+                        for (int64_t oh = 0; oh < out_h; ++oh) {
+                            for (int64_t ow = 0; ow < out_w; ++ow) {
+                                int64_t ih = oh * stride_h - padding_h + kh * dilation;
+                                int64_t iw = ow * stride_w - padding_w + kw * dilation;
 
-                            int64_t col_idx = b * (channels * kernel_h * kernel_w * out_h * out_w) +
-                                            col_c * (out_h * out_w) +
-                                            oh * out_w + ow;
+                                int64_t col_idx = b * (channels * kernel_h * kernel_w * out_h * out_w) +
+                                                col_c * (out_h * out_w) +
+                                                oh * out_w + ow;
 
-                            if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
-                                int64_t input_idx = b * (channels * height * width) +
-                                                   c * (height * width) +
-                                                   ih * width + iw;
-                                col_data[col_idx] = input_data[input_idx];
-                            } else {
-                                col_data[col_idx] = 0.0f;
+                                if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
+                                    int64_t input_idx = b * (channels * height * width) +
+                                                       c * (height * width) +
+                                                       ih * width + iw;
+                                    col_data[col_idx] = input_data[input_idx];
+                                } else {
+                                    col_data[col_idx] = T(0);
+                                }
                             }
                         }
                     }
                 }
             }
         }
+    };
+
+    if (work_dtype == DType::Float64) {
+        do_im2col(input_work.data<double>(), col.data<double>());
+    } else {
+        do_im2col(input_work.data<float>(), col.data<float>());
     }
 
-    // Convert back to original dtype if needed
-    return (input.dtype() != DType::Float32) ? col_f32.to(input.dtype()) : col_f32;
+    // Convert back only if we upcasted
+    return needs_upcast ? col.to(input.dtype()) : col;
 }
 
 auto im2col_cpu(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
@@ -106,41 +116,48 @@ auto col2im_cpu(const Tensor& col, int64_t channels, int64_t height, int64_t wid
     int64_t out_h = calculate_output_size(height, kernel_h, stride_h, padding_h, dilation);
     int64_t out_w = calculate_output_size(width, kernel_w, stride_w, padding_w, dilation);
 
-    // Convert to Float32 for col2im computation (matches PyTorch CPU conv fallback behavior)
-    Tensor col_f32 = (col.dtype() != DType::Float32) ? col.to(DType::Float32) : col;
-    auto output_f32 = zeros({batch, channels, height, width}, DType::Float32, col.device());
-    const float* col_data = col_f32.data<float>();
-    float* output_data = output_f32.data<float>();
+    // Only upcast Float16/BFloat16 to Float32; preserve Float32/Float64 natively
+    bool needs_upcast = (col.dtype() == DType::Float16 || col.dtype() == DType::BFloat16);
+    DType work_dtype = needs_upcast ? DType::Float32 : col.dtype();
+    Tensor col_work = needs_upcast ? col.to(DType::Float32) : col;
+    auto output = zeros({batch, channels, height, width}, work_dtype, col.device());
 
-    for (int64_t b = 0; b < batch; ++b) {
-        for (int64_t c = 0; c < channels; ++c) {
-            for (int64_t kh = 0; kh < kernel_h; ++kh) {
-                for (int64_t kw = 0; kw < kernel_w; ++kw) {
-                    int64_t col_c = c * kernel_h * kernel_w + kh * kernel_w + kw;
+    auto do_col2im = [&](const auto* col_data, auto* output_data) {
+        for (int64_t b = 0; b < batch; ++b) {
+            for (int64_t c = 0; c < channels; ++c) {
+                for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                    for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                        int64_t col_c = c * kernel_h * kernel_w + kh * kernel_w + kw;
 
-                    for (int64_t oh = 0; oh < out_h; ++oh) {
-                        for (int64_t ow = 0; ow < out_w; ++ow) {
-                            int64_t ih = oh * stride_h - padding_h + kh * dilation;
-                            int64_t iw = ow * stride_w - padding_w + kw * dilation;
+                        for (int64_t oh = 0; oh < out_h; ++oh) {
+                            for (int64_t ow = 0; ow < out_w; ++ow) {
+                                int64_t ih = oh * stride_h - padding_h + kh * dilation;
+                                int64_t iw = ow * stride_w - padding_w + kw * dilation;
 
-                            if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
-                                int64_t col_idx = b * (channels * kernel_h * kernel_w * out_h * out_w) +
-                                                col_c * (out_h * out_w) +
-                                                oh * out_w + ow;
-                                int64_t output_idx = b * (channels * height * width) +
-                                                    c * (height * width) +
-                                                    ih * width + iw;
-                                output_data[output_idx] += col_data[col_idx];
+                                if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
+                                    int64_t col_idx = b * (channels * kernel_h * kernel_w * out_h * out_w) +
+                                                    col_c * (out_h * out_w) +
+                                                    oh * out_w + ow;
+                                    int64_t output_idx = b * (channels * height * width) +
+                                                        c * (height * width) +
+                                                        ih * width + iw;
+                                    output_data[output_idx] += col_data[col_idx];
+                                }
                             }
                         }
                     }
                 }
             }
         }
+    };
+
+    if (work_dtype == DType::Float64) {
+        do_col2im(col_work.data<double>(), output.data<double>());
+    } else {
+        do_col2im(col_work.data<float>(), output.data<float>());
     }
 
-    // Convert back to original dtype if needed
-    return (col.dtype() != DType::Float32) ? output_f32.to(col.dtype()) : output_f32;
+    return needs_upcast ? output.to(col.dtype()) : output;
 }
 
 auto col2im_cpu(const Tensor& col, int64_t channels, int64_t height, int64_t width,

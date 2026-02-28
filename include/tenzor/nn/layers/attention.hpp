@@ -124,7 +124,10 @@ public:
      * @param value Value tensor of shape (N, S, E) or (S, N, E)
      * @param key_padding_mask Binary mask (N, S) where True/1.0 indicates padding
      * @param attn_mask Attention mask (L, S) or (N*num_heads, L, S) for custom patterns
-     * @param need_weights If true, return attention weights (default: true)
+     * @param need_weights If true, return attention weights (default: true).
+     *        When false, fused/flash attention paths may be used for better
+     *        performance (these paths cannot return intermediate attention weights).
+     *        When true, the standard (non-fused) attention path is always used.
      *
      * @return Pair of (output, attention_weights)
      *         - output: (N, L, E) or (L, N, E) depending on batch_first

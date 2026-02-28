@@ -822,10 +822,16 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices) -> Tensor {
     int64_t num_indices = indices.numel();
     const int64_t* idx_data = indices.data<int64_t>();
 
+    int64_t num_embeddings = w_shape[0];
     auto do_embedding = [&](auto* w_data, auto* out_data) {
         #pragma omp parallel for if(num_indices * embedding_dim > 10000)
         for (int64_t i = 0; i < num_indices; ++i) {
             int64_t idx = idx_data[i];
+            if (idx < 0) idx += num_embeddings;
+            if (idx < 0 || idx >= num_embeddings) {
+                throw std::out_of_range("Embedding index " + std::to_string(idx_data[i]) +
+                    " out of range [0, " + std::to_string(num_embeddings) + ")");
+            }
             for (int64_t j = 0; j < embedding_dim; ++j) {
                 out_data[i * embedding_dim + j] = w_data[idx * embedding_dim + j];
             }
@@ -858,11 +864,24 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
     int64_t num_indices = indices.numel();
     const int64_t* idx_data = indices.data<int64_t>();
 
+    // Validate all indices before accumulation (bounds check)
+    for (int64_t i = 0; i < num_indices; ++i) {
+        int64_t idx = idx_data[i];
+        if (idx < 0) idx += num_embeddings;
+        if (idx < 0 || idx >= num_embeddings) {
+            throw std::out_of_range("Embedding backward: index " + std::to_string(idx_data[i]) +
+                " out of range [0, " + std::to_string(num_embeddings) + ")");
+        }
+    }
+
+    // Note: gradient accumulation is single-threaded to avoid races on duplicate indices.
+    // If parallelism is needed, use per-thread buffers or atomic operations.
     if (grad_output.dtype() == DType::Float32) {
         const float* grad_data = grad_output.data<float>();
         float* grad_w_data = grad_weight.data<float>();
         for (int64_t i = 0; i < num_indices; ++i) {
             int64_t idx = idx_data[i];
+            if (idx < 0) idx += num_embeddings;
             for (int64_t j = 0; j < embedding_dim; ++j) {
                 grad_w_data[idx * embedding_dim + j] += grad_data[i * embedding_dim + j];
             }
@@ -872,6 +891,7 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
         double* grad_w_data = grad_weight.data<double>();
         for (int64_t i = 0; i < num_indices; ++i) {
             int64_t idx = idx_data[i];
+            if (idx < 0) idx += num_embeddings;
             for (int64_t j = 0; j < embedding_dim; ++j) {
                 grad_w_data[idx * embedding_dim + j] += grad_data[i * embedding_dim + j];
             }
@@ -881,6 +901,7 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
         Float16* grad_w_data = grad_weight.data<Float16>();
         for (int64_t i = 0; i < num_indices; ++i) {
             int64_t idx = idx_data[i];
+            if (idx < 0) idx += num_embeddings;
             for (int64_t j = 0; j < embedding_dim; ++j) {
                 float val = static_cast<float>(grad_w_data[idx * embedding_dim + j]) +
                             static_cast<float>(grad_data[i * embedding_dim + j]);
@@ -892,6 +913,7 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
         BFloat16* grad_w_data = grad_weight.data<BFloat16>();
         for (int64_t i = 0; i < num_indices; ++i) {
             int64_t idx = idx_data[i];
+            if (idx < 0) idx += num_embeddings;
             for (int64_t j = 0; j < embedding_dim; ++j) {
                 float val = static_cast<float>(grad_w_data[idx * embedding_dim + j]) +
                             static_cast<float>(grad_data[i * embedding_dim + j]);

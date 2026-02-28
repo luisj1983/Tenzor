@@ -22,10 +22,12 @@ namespace nn {
 
 class EmbeddingBackward : public Function {
 public:
-    EmbeddingBackward(Tensor indices, int64_t num_embeddings, int64_t embedding_dim)
+    EmbeddingBackward(Tensor indices, int64_t num_embeddings, int64_t embedding_dim,
+                      int64_t padding_idx = -1)
         : indices_(std::move(indices)),
           num_embeddings_(num_embeddings),
-          embedding_dim_(embedding_dim) {}
+          embedding_dim_(embedding_dim),
+          padding_idx_(padding_idx) {}
 
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
         // inputs[0] = weight matrix [num_embeddings, embedding_dim]
@@ -175,6 +177,31 @@ public:
             throw std::runtime_error("EmbeddingBackward: Unsupported gradient dtype");
         }
 
+        // Zero out padding_idx row so padding embeddings receive no gradient
+        if (padding_idx_ >= 0 && padding_idx_ < num_embeddings_) {
+            if (grad_dtype == DType::Float32) {
+                auto* ptr = grad_weight.data<float>();
+                for (int64_t j = 0; j < embedding_dim_; ++j) {
+                    ptr[padding_idx_ * embedding_dim_ + j] = 0.0f;
+                }
+            } else if (grad_dtype == DType::Float64) {
+                auto* ptr = grad_weight.data<double>();
+                for (int64_t j = 0; j < embedding_dim_; ++j) {
+                    ptr[padding_idx_ * embedding_dim_ + j] = 0.0;
+                }
+            }
+            // Float16 grad_weight was converted from Float32 where padding row
+            // was already accumulated — zero it after conversion
+            else if (grad_dtype == DType::Float16) {
+                auto grad_f32 = grad_weight.to(DType::Float32);
+                auto* ptr = grad_f32.data<float>();
+                for (int64_t j = 0; j < embedding_dim_; ++j) {
+                    ptr[padding_idx_ * embedding_dim_ + j] = 0.0f;
+                }
+                grad_weight = grad_f32.to(DType::Float16);
+            }
+        }
+
         return {grad_weight};
     }
 
@@ -182,6 +209,7 @@ private:
     Tensor indices_;
     int64_t num_embeddings_;
     int64_t embedding_dim_;
+    int64_t padding_idx_;
 };
 
 // ============================================================================
@@ -283,7 +311,7 @@ auto Embedding::forward_impl(const Variable& input) -> Variable {
 
         // Set up autograd for GPU path
         Tensor indices_for_grad = input_tensor;
-        auto grad_fn = std::make_shared<EmbeddingBackward>(indices_for_grad, num_embeddings_, embedding_dim_);
+        auto grad_fn = std::make_shared<EmbeddingBackward>(indices_for_grad, num_embeddings_, embedding_dim_, padding_idx_);
 
         auto result = Variable(output, true);
 
@@ -351,7 +379,8 @@ auto Embedding::forward_impl(const Variable& input) -> Variable {
                     output_ptr[i * embedding_dim_ + j] = weight_ptr[idx * embedding_dim_ + j];
                 }
             }
-        } else if (weight_dtype == DType::Float16) {
+        } else if (weight_dtype == DType::Float16 || weight_dtype == DType::BFloat16) {
+            // Convert to Float32 for computation, convert back
             auto weight_f32 = weight_cpu.to(DType::Float32);
             auto output_f32 = zeros(output_shape, DType::Float32);
 
@@ -364,16 +393,17 @@ auto Embedding::forward_impl(const Variable& input) -> Variable {
                 }
             }
 
-            output = output_f32.to(DType::Float16);
+            output = output_f32.to(weight_dtype);
         } else {
-            throw std::runtime_error("Embedding: Unsupported weight dtype");
+            throw std::runtime_error("Embedding: Unsupported weight dtype: " +
+                                     std::to_string(static_cast<int>(weight_dtype)));
         }
 
         return Variable(output, false);
     }
 
     // Use EmbeddingBackward function to preserve gradient graph
-    auto grad_fn = std::make_shared<EmbeddingBackward>(input_cpu, num_embeddings_, embedding_dim_);
+    auto grad_fn = std::make_shared<EmbeddingBackward>(input_cpu, num_embeddings_, embedding_dim_, padding_idx_);
 
     // Perform forward pass (CPU path)
     auto outputs = grad_fn->forward({*parameters_["weight"]});

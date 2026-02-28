@@ -62,17 +62,23 @@ void writeF16(uint flat_idx, float value) {
     uint f16_bits = packHalf2x16(vec2(value, 0.0)) & 0xFFFFu;
 
     uint old_val = grad_input[word_idx];
-    uint new_val;
-    uint result;
-    do {
-        old_val = grad_input[word_idx];
+    for (uint iter = 0; iter < 1024; iter++) {
+        uint new_val;
         if (half_idx == 0) {
             new_val = (old_val & 0xFFFF0000u) | f16_bits;
         } else {
             new_val = (old_val & 0x0000FFFFu) | (f16_bits << 16);
         }
-        result = atomicCompSwap(grad_input[word_idx], old_val, new_val);
-    } while (result != old_val);
+        uint result = atomicCompSwap(grad_input[word_idx], old_val, new_val);
+        if (result == old_val) return;
+        old_val = result;
+    }
+    // Fallback: direct write after exceeding retry limit
+    if (half_idx == 0) {
+        grad_input[word_idx] = (grad_input[word_idx] & 0xFFFF0000u) | f16_bits;
+    } else {
+        grad_input[word_idx] = (grad_input[word_idx] & 0x0000FFFFu) | (f16_bits << 16);
+    }
 }
 
 shared float shared_sum_dy[256];

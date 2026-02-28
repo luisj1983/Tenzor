@@ -105,10 +105,17 @@ void* VulkanCachingAllocator::allocate(size_t size, int device,
     // Try to find a suitable block in cache
     VulkanBlock* block = try_allocate_from_cache(size, device, usage, properties);
 
+    if (!block) {
+        // No suitable cached block — try merging adjacent free blocks first
+        if (try_merge_free_blocks(device) > 0) {
+            block = try_allocate_from_cache(size, device, usage, properties);
+        }
+    }
+
     bool from_cache = (block != nullptr);
 
     if (!block) {
-        // No suitable cached block, allocate new one
+        // Still no suitable block, allocate new one
         block = allocate_new_block(size, device, usage, properties);
     } else {
         device_alloc.stats.num_cache_hits++;
@@ -451,8 +458,7 @@ VulkanBlock* VulkanCachingAllocator::allocate_new_block(size_t size, int device,
 
     // Slab allocation: round up to reduce the number of vkAllocateMemory calls.
     // Each VkDeviceMemory has ~256KB driver overhead on NVIDIA, so fewer is better.
-    // Note: No block coalescing is implemented, so partially-used slabs can't be
-    // freed during OOM retry. Use moderate slab sizes to balance overhead vs fragmentation.
+    // Adjacent free blocks are lazily merged in try_merge_free_blocks() on cache miss.
     constexpr size_t kSmallSlab  = 2 * 1024 * 1024;    // 2 MB for small allocs
     constexpr size_t kMediumSlab = 32 * 1024 * 1024;   // 32 MB
     constexpr size_t kLargeSlab  = 256 * 1024 * 1024;  // 256 MB
@@ -740,6 +746,85 @@ bool VulkanCachingAllocator::split_block(VulkanBlock* block, size_t size) {
     // Note: reserved_bytes does NOT increase because we're sub-allocating
 
     return true;
+}
+
+size_t VulkanCachingAllocator::try_merge_free_blocks(int device) {
+    auto& device_alloc = device_allocators_[device];
+    size_t merges = 0;
+
+    if (device_alloc.free_blocks.size() < 2) {
+        return 0;
+    }
+
+    // Group free blocks by their underlying VkDeviceMemory
+    std::unordered_map<VkDeviceMemory, std::vector<VulkanBlock*>> mem_groups;
+    for (auto* block : device_alloc.free_blocks) {
+        mem_groups[block->memory].push_back(block);
+    }
+
+    for (auto& [mem, blocks] : mem_groups) {
+        if (blocks.size() < 2) continue;
+
+        // Sort by memory_offset within this VkDeviceMemory
+        std::sort(blocks.begin(), blocks.end(),
+                  [](const VulkanBlock* a, const VulkanBlock* b) {
+                      return a->memory_offset < b->memory_offset;
+                  });
+
+        // Scan for adjacent pairs and merge
+        for (size_t i = 0; i + 1 < blocks.size(); ) {
+            VulkanBlock* lo = blocks[i];
+            VulkanBlock* hi = blocks[i + 1];
+
+            // Check adjacency: lo's end must exactly meet hi's start
+            if (lo->memory_offset + lo->size != hi->memory_offset) {
+                ++i;
+                continue;
+            }
+
+            // Check compatible memory type
+            if (lo->memory_type_index != hi->memory_type_index) {
+                ++i;
+                continue;
+            }
+
+            // Merge hi into lo: extend lo's size, destroy hi's VkBuffer
+            device_alloc.free_blocks.erase(lo);
+            device_alloc.free_blocks.erase(hi);
+
+            lo->size += hi->size;
+
+            // Destroy hi's VkBuffer
+            if (hi->buffer != VK_NULL_HANDLE) {
+                vkDestroyBuffer(device_alloc.device, hi->buffer, nullptr);
+            }
+
+            // Decrement ref count for the shared memory (hi no longer references it)
+            auto ref_it = device_alloc.memory_ref_counts.find(mem);
+            if (ref_it != device_alloc.memory_ref_counts.end()) {
+                ref_it->second--;
+                if (ref_it->second == 0) {
+                    device_alloc.memory_ref_counts.erase(ref_it);
+                }
+            }
+
+            // Remove hi from all_blocks
+            device_alloc.all_blocks.erase(hi->mapped_ptr);
+
+            // Re-insert merged lo back into free_blocks
+            device_alloc.free_blocks.insert(lo);
+
+            // Update blocks vector for continued scanning
+            blocks[i] = lo;
+            blocks.erase(blocks.begin() + static_cast<ptrdiff_t>(i + 1));
+
+            merges++;
+            device_alloc.stats.num_merges++;
+            // Don't increment i — check if lo can merge with next block too
+        }
+    }
+
+    return merges;
 }
 
 size_t VulkanCachingAllocator::round_size(size_t size) const {

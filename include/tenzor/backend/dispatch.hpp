@@ -31,7 +31,7 @@ namespace tenzor {
  *       fast_dispatch.hpp instead (e.g., dispatch<OpId::Add>({a, b})).
  * @note This class contains only static methods (utility class pattern).
  * @see Backend for backend interface
- * @see OperationRegistry for kernel registration
+ * @see BackendDispatchTable for OpId-based kernel registration
  */
 class Dispatcher {
 public:

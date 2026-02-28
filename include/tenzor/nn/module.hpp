@@ -64,6 +64,26 @@ class Module {
 public:
     virtual ~Module() = default;
 
+    Module() = default;
+    Module(Module&& other) noexcept
+        : training_(other.training_)
+        , parameters_(std::move(other.parameters_))
+        , buffers_(std::move(other.buffers_))
+        , submodules_(std::move(other.submodules_))
+        , forward_pre_hooks_(std::move(other.forward_pre_hooks_))
+        , forward_post_hooks_(std::move(other.forward_post_hooks_))
+        , forward_pre_hooks_multi_(std::move(other.forward_pre_hooks_multi_))
+        , forward_post_hooks_multi_(std::move(other.forward_post_hooks_multi_))
+        , backward_pre_hooks_(std::move(other.backward_pre_hooks_))
+        , backward_post_hooks_(std::move(other.backward_post_hooks_))
+        , next_hook_id_(other.next_hook_id_.load())
+        , has_forward_hooks_(other.has_forward_hooks_)
+        , has_backward_hooks_(other.has_backward_hooks_)
+    {}
+    Module& operator=(Module&&) = delete;
+    Module(const Module&) = delete;
+    Module& operator=(const Module&) = delete;
+
     /**
      * @brief Forward pass computation.
      *
@@ -542,6 +562,30 @@ protected:
     auto call_own_forward_post_hooks(const Variable& input, const Variable& output) -> void {
         for (auto& [id, hook] : forward_post_hooks_) {
             hook(this, input, output);
+        }
+    }
+
+    /**
+     * @brief Validate that input is compatible with this module's parameters.
+     *
+     * Checks that the input is on the same device as the module's first parameter.
+     * Layers can optionally call this at the start of forward_impl() for
+     * better error messages on device/dtype mismatches.
+     *
+     * @param input The input variable to validate
+     * @throws std::runtime_error if device mismatch detected
+     */
+    auto validate_input_compat(const Variable& input) const -> void {
+        if (parameters_.empty()) return;
+        const auto& first_param = parameters_.begin()->second;
+        if (!first_param) return;
+        auto param_device = first_param->tensor().device();
+        auto input_device = input.tensor().device();
+        if (param_device != input_device) {
+            throw std::runtime_error(
+                "Input tensor is on " + input_device.to_string() +
+                " but module parameters are on " + param_device.to_string() +
+                ". Use module.to(device) or input.to(device) to match devices.");
         }
     }
 };

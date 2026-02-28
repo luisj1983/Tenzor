@@ -13,6 +13,7 @@
 #include <cuda_fp16.h>
 #include <memory>
 #include <unordered_map>
+#include <list>
 #include <mutex>
 
 #include "tenzor/core/tensor.hpp"
@@ -116,7 +117,10 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = cache_.find(key);
         if (it != cache_.end()) {
-            entry = it->second;
+            // Move to front of LRU list (most recently used)
+            lru_list_.splice(lru_list_.begin(), lru_list_, it->second.lru_iter);
+            entry.graph = it->second.graph;
+            entry.workspace_size = it->second.workspace_size;
             return true;
         }
         return false;
@@ -124,26 +128,52 @@ public:
 
     void set(const SDPACacheKey& key, const SDPACacheEntry& entry) {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (cache_.size() >= kMaxCacheSize) {
-            cache_.clear();  // Simple eviction strategy
+        auto it = cache_.find(key);
+        if (it != cache_.end()) {
+            // Update existing entry and move to front
+            it->second.graph = entry.graph;
+            it->second.workspace_size = entry.workspace_size;
+            lru_list_.splice(lru_list_.begin(), lru_list_, it->second.lru_iter);
+            return;
         }
-        cache_[key] = entry;
+        // Evict LRU entry if at capacity
+        if (cache_.size() >= kMaxCacheSize) {
+            auto& lru_key = lru_list_.back();
+            cache_.erase(lru_key);
+            lru_list_.pop_back();
+        }
+        // Insert new entry at front of LRU list
+        lru_list_.push_front(key);
+        CacheValue val;
+        val.graph = entry.graph;
+        val.workspace_size = entry.workspace_size;
+        val.lru_iter = lru_list_.begin();
+        cache_[key] = std::move(val);
     }
 
 private:
     SDPAGraphCache() = default;
     static constexpr size_t kMaxCacheSize = 64;
-    std::unordered_map<SDPACacheKey, SDPACacheEntry, SDPACacheKeyHash> cache_;
+
+    struct CacheValue {
+        std::shared_ptr<fe::graph::Graph> graph;
+        int64_t workspace_size;
+        std::list<SDPACacheKey>::iterator lru_iter;
+    };
+
+    std::unordered_map<SDPACacheKey, CacheValue, SDPACacheKeyHash> cache_;
+    std::list<SDPACacheKey> lru_list_;
     std::mutex mutex_;
 };
 
-// Workspace buffer
+// Workspace buffer (thread-safe singleton)
 class SDPAWorkspace {
 public:
     static void* get(size_t required_size) {
         static SDPAWorkspace instance;
+        std::lock_guard<std::mutex> lock(instance.mutex_);
         if (required_size > instance.size_) {
-            instance.resize(required_size);
+            instance.resize_locked(required_size);
         }
         return instance.buffer_;
     }
@@ -156,14 +186,17 @@ private:
         }
     }
 
-    void resize(size_t new_size) {
+    void resize_locked(size_t new_size) {
         if (buffer_) {
+            // Ensure no kernels are still using the old buffer before freeing
+            cudaDeviceSynchronize();
             cudaFree(buffer_);
         }
         size_ = new_size + (new_size / 4);  // 25% headroom
         cudaMalloc(&buffer_, size_);
     }
 
+    std::mutex mutex_;
     void* buffer_;
     size_t size_;
 };

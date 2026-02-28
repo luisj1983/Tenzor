@@ -16,6 +16,16 @@
 #include <type_traits>
 #include <stdexcept>
 
+namespace {
+// Safe absolute value for int64_t that avoids undefined behavior for INT64_MIN.
+// std::abs(INT64_MIN) is UB because -INT64_MIN overflows signed int64_t.
+inline auto safe_abs(int64_t v) -> uint64_t {
+    if (v == std::numeric_limits<int64_t>::min())
+        return static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) + 1;
+    return static_cast<uint64_t>(v < 0 ? -v : v);
+}
+} // anonymous namespace
+
 namespace tenzor {
 
 // TensorImpl implementation
@@ -145,7 +155,7 @@ auto Tensor::data() -> T* {
         size_t max_offset = static_cast<size_t>(impl_->offset);
         for (int64_t d = 0; d < ndim(); ++d) {
             if (impl_->shape[d] > 0)
-                max_offset += static_cast<size_t>(impl_->shape[d] - 1) * static_cast<size_t>(std::abs(impl_->strides[d]));
+                max_offset += static_cast<size_t>(impl_->shape[d] - 1) * static_cast<size_t>(safe_abs(impl_->strides[d]));
         }
         if (max_offset >= storage_elements) {
             throw std::out_of_range("Tensor data access: max reachable offset exceeds storage bounds");
@@ -185,7 +195,7 @@ auto Tensor::data() const -> const T* {
         size_t max_offset = static_cast<size_t>(impl_->offset);
         for (int64_t d = 0; d < ndim(); ++d) {
             if (impl_->shape[d] > 0)
-                max_offset += static_cast<size_t>(impl_->shape[d] - 1) * static_cast<size_t>(std::abs(impl_->strides[d]));
+                max_offset += static_cast<size_t>(impl_->shape[d] - 1) * static_cast<size_t>(safe_abs(impl_->strides[d]));
         }
         if (max_offset >= storage_elements) {
             throw std::out_of_range("Tensor data access: max reachable offset exceeds storage bounds");
@@ -281,7 +291,9 @@ auto Tensor::to(Device device) const -> Tensor {
         return *this;
     }
 
-    // If already on the target device and contiguous, just return
+    // If already on the target device and contiguous, return *this (no copy).
+    // This is a standard optimization (matches PyTorch behavior). The returned
+    // tensor shares storage with the original. Use .clone() if a copy is needed.
     if (impl_->device == device && is_contiguous()) {
         return *this;
     }
@@ -640,9 +652,9 @@ auto Tensor::fill_(float value) -> Tensor& {
     // Non-contiguous tensors: iterate using strides to fill each element in-place
     if (!is_contiguous()) {
         if (device().type != Device::Type::CPU) {
-            // TODO: Non-CPU non-contiguous fill should use a device kernel.
-            // For now, this is a known limitation — callers should make tensors
-            // contiguous before calling fill_() on non-CPU devices.
+            // LIMITATION: Non-contiguous GPU fill requires a strided kernel
+            // (one dispatch per backend). Currently unsupported — callers should
+            // make tensors contiguous before calling fill_() on GPU devices.
             throw std::runtime_error(
                 "fill_() on non-contiguous non-CPU tensors is not supported. "
                 "Call .contiguous() first or use a contiguous tensor.");
@@ -1274,7 +1286,7 @@ auto Tensor::slice(int64_t dim, int64_t start, int64_t end, int64_t step) const 
             int64_t extent = result.impl_->shape[d] - 1;
             int64_t stride = result.impl_->strides[d];
             // Check multiplication overflow
-            if (stride != 0 && extent > std::numeric_limits<int64_t>::max() / std::abs(stride)) {
+            if (stride != 0 && static_cast<uint64_t>(extent) > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / safe_abs(stride)) {
                 throw std::overflow_error("Slice offset computation overflows int64_t");
             }
             int64_t delta = extent * stride;

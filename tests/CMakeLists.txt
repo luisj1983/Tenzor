@@ -176,15 +176,17 @@ target_link_libraries(test_conv1d PRIVATE
     GTest::gtest_main
 )
 
-# ConvTranspose2d tests (temporarily disabled due to compilation errors)
-# add_executable(test_convtranspose2d
-#     test_convtranspose2d.cpp
-# )
+# ConvTranspose2d tests
+add_executable(test_convtranspose2d
+    test_convtranspose2d.cpp
+)
 
-# target_link_libraries(test_convtranspose2d PRIVATE
-#     tenzor_core
-#     GTest::gtest_main
-# )
+target_link_libraries(test_convtranspose2d PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+tenzor_discover_tests(test_convtranspose2d DISCOVERY_TIMEOUT 30)
 
 # Scheduler tests
 add_executable(test_schedulers
@@ -2816,6 +2818,29 @@ if(TENZOR_BUILD_VULKAN)
     )
 
     tenzor_discover_tests(test_vulkan_caching_allocator DISCOVERY_TIMEOUT 30)
+
+    add_executable(test_vulkan_threading
+        backends/test_vulkan_threading.cpp
+    )
+    target_link_libraries(test_vulkan_threading PRIVATE
+        tenzor_core
+        GTest::gtest_main
+    )
+    tenzor_discover_tests(test_vulkan_threading DISCOVERY_TIMEOUT 60)
+
+    add_executable(test_vulkan_allocator_merge
+        backends/test_vulkan_allocator_merge.cpp
+    )
+    target_link_libraries(test_vulkan_allocator_merge PRIVATE
+        tenzor_core
+        tenzor_backend_vulkan
+        ${Vulkan_LIBRARIES}
+        GTest::gtest_main
+    )
+    target_include_directories(test_vulkan_allocator_merge PRIVATE
+        ${Vulkan_INCLUDE_DIRS}
+    )
+    tenzor_discover_tests(test_vulkan_allocator_merge DISCOVERY_TIMEOUT 30)
 endif()
 
 # ============================================================================

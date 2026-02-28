@@ -86,7 +86,7 @@ void main() {
 
     // Perform scatter with reduction
     if (params.reduction == 0) {
-        // Direct assignment (may have race conditions with overlapping indices)
+        // Mode 0: Direct assignment ("last write wins"). Racy for duplicate indices by design.
         output_data[out_idx] = floatBitsToUint(value);
     } else if (params.reduction == 1) {
         // Atomic add via CAS loop

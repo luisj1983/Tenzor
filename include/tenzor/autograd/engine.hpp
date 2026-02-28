@@ -147,18 +147,6 @@ private:
     std::unordered_map<Function*, std::vector<Tensor>> grad_accumulators_;
 
     /**
-     * @brief Cached topological sort result for retain_graph scenarios.
-     *
-     * When retain_graph=true and backward() is called multiple times
-     * on the same root, reuses the cached sort order.
-     */
-    struct TopoSortCache {
-        Function* root{nullptr};
-        std::vector<std::shared_ptr<Function>> sorted;
-    };
-    TopoSortCache topo_cache_;
-
-    /**
      * @brief Accumulate gradient for a function.
      *
      * Adds a gradient to the accumulator for the given function.

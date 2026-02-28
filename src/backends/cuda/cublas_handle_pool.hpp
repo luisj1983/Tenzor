@@ -34,8 +34,9 @@ class CuBLASHandlePool {
 public:
     static cublasHandle_t get(cudaStream_t stream = nullptr) {
         static CuBLASHandlePool instance;
-        if (stream) {
+        if (stream && stream != instance.last_stream_) {
             CUBLAS_CHECK(cublasSetStream(instance.handle_, stream));
+            instance.last_stream_ = stream;
         }
         return instance.handle_;
     }
@@ -64,6 +65,7 @@ private:
     CuBLASHandlePool& operator=(const CuBLASHandlePool&) = delete;
 
     cublasHandle_t handle_ = nullptr;
+    cudaStream_t last_stream_ = nullptr;
 };
 
 } // namespace cuda

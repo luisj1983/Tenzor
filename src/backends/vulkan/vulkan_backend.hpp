@@ -105,6 +105,34 @@ private:
 
         // Per-device mutex for independent multi-GPU operation.
         mutable std::recursive_mutex mutex;
+
+        DeviceContext() = default;
+        DeviceContext(DeviceContext&& other) noexcept
+            : physicalDevice(other.physicalDevice)
+            , device(other.device)
+            , computeQueue(other.computeQueue)
+            , queueFamilyIndex(other.queueFamilyIndex)
+            , commandPool(other.commandPool)
+            , memoryProperties(other.memoryProperties)
+            , descriptorPool(std::move(other.descriptorPool))
+            , canPreserveDenormsF32(other.canPreserveDenormsF32)
+            , hasAtomicInt64(other.hasAtomicInt64)
+            , pipelineCache(other.pipelineCache)
+            , pendingFence(other.pendingFence)
+            , hasPendingWork(other.hasPendingWork)
+            , frameFences(other.frameFences)
+            , frameCommandBuffers(other.frameCommandBuffers)
+            , currentFrame(other.currentFrame)
+            , submittedFrames(other.submittedFrames)
+            , commandBufferPool(std::move(other.commandBufferPool))
+            , nextCommandBufferIndex(other.nextCommandBufferIndex)
+            , activeCommandBuffer(other.activeCommandBuffer)
+            , operationsInBatch(other.operationsInBatch)
+            // mutex is default-constructed (not movable)
+        {}
+        DeviceContext& operator=(DeviceContext&&) = delete;
+        DeviceContext(const DeviceContext&) = delete;
+        DeviceContext& operator=(const DeviceContext&) = delete;
     };
 
     // Staging buffer for host-device transfers

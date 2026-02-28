@@ -395,10 +395,28 @@ auto MultiheadAttention::forward(const Variable& query,
     auto k_shape = k_ptr->shape();
     int64_t seq_len_k = k_shape[1];
 
-    // Project inputs - use original references, not copies
-    Variable Q = q_proj_->forward(*q_ptr);
-    Variable K = k_proj_->forward(*k_ptr);
-    Variable V = v_proj_->forward(*v_ptr);
+    // Ensure query/key/value are on the same device as projection weights
+    auto weight_device = q_proj_->own_parameters()[0]->tensor().device();
+
+    auto ensure_compat = [&](const Variable& var) -> Variable {
+        Variable result = var;
+        // Device conversion first
+        if (result.tensor().device() != weight_device) {
+            auto transferred = result.tensor().to(weight_device);
+            result = Variable(transferred, result.requires_grad());
+            result.set_grad_fn(var.grad_fn());
+        }
+        return result;
+    };
+
+    Variable q_compat = ensure_compat(*q_ptr);
+    Variable k_compat = ensure_compat(*k_ptr);
+    Variable v_compat = ensure_compat(*v_ptr);
+
+    // Project inputs
+    Variable Q = q_proj_->forward(q_compat);
+    Variable K = k_proj_->forward(k_compat);
+    Variable V = v_proj_->forward(v_compat);
 
     // Reshape for multi-head attention
     Q = transpose_for_scores(Q);  // (batch, num_heads, seq_len_q, head_dim)

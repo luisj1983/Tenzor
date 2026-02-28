@@ -16,6 +16,7 @@
 #include <fstream>
 #include <iostream>
 #include <unordered_map>
+#include <cstdio>
 
 namespace tenzor {
 namespace vulkan {
@@ -75,8 +76,18 @@ inline std::vector<uint32_t> loadShader(const std::string& filename) {
  * @return Total push constant size in bytes, or 0 if none
  */
 inline uint32_t reflectPushConstantSize(const std::vector<uint32_t>& spirv) {
-    if (spirv.size() < 5 || spirv[0] != 0x07230203) {
-        return 0;  // Invalid SPIR-V or too small
+    if (spirv.size() < 5) {
+        throw std::runtime_error("reflectPushConstantSize: SPIR-V binary too small ("
+                                 + std::to_string(spirv.size()) + " words, need >= 5)");
+    }
+    if (spirv[0] != 0x07230203) {
+        throw std::runtime_error("reflectPushConstantSize: invalid SPIR-V magic number 0x"
+                                 + ([&]{
+                                     char buf[16];
+                                     snprintf(buf, sizeof(buf), "%08X", spirv[0]);
+                                     return std::string(buf);
+                                 })()
+                                 + " (expected 0x07230203)");
     }
 
     // SPIR-V opcode constants
@@ -114,7 +125,10 @@ inline uint32_t reflectPushConstantSize(const std::vector<uint32_t>& spirv) {
         uint32_t opcode = word & 0xFFFF;
 
         if (word_count == 0 || i + word_count > spirv.size()) {
-            break;  // Malformed instruction
+            std::fprintf(stderr, "[tenzor] warning: malformed SPIR-V instruction at word %zu "
+                                 "(word_count=%u, remaining=%zu)\n",
+                         i, word_count, spirv.size() - i);
+            break;
         }
 
         switch (opcode) {

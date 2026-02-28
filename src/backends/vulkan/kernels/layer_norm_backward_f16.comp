@@ -61,12 +61,14 @@ void writeF16(uint element_idx, float val) {
     uint mask = 0xFFFFu << shift;
 
     uint old_val = grad_input[word_idx];
-    uint new_val, expected;
-    do {
-        expected = old_val;
-        new_val = (expected & ~mask) | (bits << shift);
+    for (uint iter = 0; iter < 1024; iter++) {
+        uint expected = old_val;
+        uint new_val = (expected & ~mask) | (bits << shift);
         old_val = atomicCompSwap(grad_input[word_idx], expected, new_val);
-    } while (old_val != expected);
+        if (old_val == expected) return;
+    }
+    // Fallback: direct write after exceeding retry limit
+    grad_input[word_idx] = (grad_input[word_idx] & ~mask) | (bits << shift);
 }
 
 void main() {

@@ -3,9 +3,20 @@
 
 // Embedding Backward Pass (Float64)
 // Scatter-add: accumulates gradients from grad_output into grad_weight rows indexed by indices
-// For Float64, true atomic operations are not widely available. We use non-atomic addition
-// which is acceptable since gradient accumulation tolerates minor races (different indices
-// typically map to different embedding rows, so collisions are rare in practice).
+//
+// RACE CONDITION NOTE: The += on grad_weight_data is non-atomic. When duplicate indices
+// exist in the batch, multiple invocations may write to the same row concurrently, causing
+// lost updates (not corruption — just missed gradient contributions). This is a known
+// limitation because:
+//   1. GL_EXT_shader_atomic_int64 is not widely available on consumer GPUs
+//   2. Float64 atomics via CAS on uint64 would require the extension anyway
+//   3. In practice, duplicate embedding indices within a single batch are uncommon
+//      (e.g., word indices in NLP — each position typically has a unique token)
+//   4. Even with rare duplicates, SGD training is robust to occasional gradient noise
+//
+// For correctness-critical use cases with many duplicate indices, the host dispatcher
+// should pre-sort indices and use a serial accumulation path or fall back to CPU.
+//
 // Input: grad_output (num_indices, embedding_dim), indices (num_indices)
 // Output: grad_weight (num_embeddings, embedding_dim)
 

@@ -102,29 +102,29 @@ __global__ void check_for_zeros_kernel(const T* data, int64_t n, int* has_zero) 
 template<typename T>
 inline void check_integer_divisor_for_zeros(const T* data, int64_t n, cudaStream_t stream) {
 #ifndef TENZOR_SKIP_INTEGER_DIV_CHECK
-    // Allocate pinned host memory mapped into device address space —
-    // the kernel atomicExch writes directly through PCIe/NVLink without
-    // a separate cudaMemcpy D2H transfer
-    int* h_flag = nullptr;
-    CUDA_CHECK(cudaHostAlloc(&h_flag, sizeof(int), cudaHostAllocMapped));
-    *h_flag = 0;
+    // Use persistent pinned flag buffer to avoid per-call cudaHostAlloc overhead.
+    // The buffer is allocated once per thread and reused across division operations.
+    static thread_local struct {
+        int* h_flag = nullptr;
+        int* d_flag = nullptr;
+        bool initialized = false;
+    } state;
 
-    int* d_flag = nullptr;
-    CUDA_CHECK(cudaHostGetDevicePointer(&d_flag, h_flag, 0));
+    if (!state.initialized) {
+        CUDA_CHECK(cudaHostAlloc(&state.h_flag, sizeof(int), cudaHostAllocMapped));
+        CUDA_CHECK(cudaHostGetDevicePointer(&state.d_flag, state.h_flag, 0));
+        state.initialized = true;
+    }
+    *state.h_flag = 0;
 
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
-    check_for_zeros_kernel<<<grid, block, 0, stream>>>(data, n, d_flag);
+    check_for_zeros_kernel<<<grid, block, 0, stream>>>(data, n, state.d_flag);
     CUDA_CHECK(cudaGetLastError());
 
-    // Sync still needed to ensure kernel completion before reading the flag,
-    // but we've eliminated the explicit cudaMemcpyAsync D2H round-trip
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
-    bool has_zero = (*h_flag != 0);
-    CUDA_CHECK(cudaFreeHost(h_flag));
-
-    if (has_zero) {
+    if (*state.h_flag != 0) {
         throw std::runtime_error("Integer division by zero");
     }
 #else

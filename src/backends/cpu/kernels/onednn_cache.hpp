@@ -1,0 +1,152 @@
+#pragma once
+
+/// @file onednn_cache.hpp
+/// @brief Shared thread-safe LRU cache for oneDNN primitives.
+///
+/// Provides a generic `OneDNNPrimitiveCache<Key, Value, Hash>` template that
+/// encapsulates the LRU eviction logic duplicated across math.cpp,
+/// activations.cpp, pooling.cpp, nn_kernels.cpp, conv2d.cpp, batchnorm.cpp,
+/// and rnn_onednn.hpp.
+///
+/// Usage:
+///   1. Define a CacheKey struct with `operator==`
+///   2. Define a CacheKeyHash functor (use `hash_combine` helper)
+///   3. Define a CachedPrimitive struct holding your dnnl objects
+///   4. Create a `thread_local OneDNNPrimitiveCache<Key, Value, Hash>` instance
+///
+/// Each file's existing per-op caches can be migrated to use this template
+/// one at a time. This header is designed for incremental adoption — existing
+/// caches continue to work alongside new ones using this template.
+///
+/// @note All caches are thread_local so no mutex is needed.
+/// @note Full migration of existing caches is deferred to a follow-up PR.
+
+#include <cstddef>
+#include <functional>
+#include <list>
+#include <memory>
+#include <unordered_map>
+
+#ifdef TENZOR_USE_ONEDNN
+#include <dnnl.hpp>
+#endif
+
+namespace tenzor {
+namespace cpu {
+
+// ============================================================================
+// Hash combiner utility
+// ============================================================================
+
+/// Combines a seed hash with a new value using the boost hash_combine pattern.
+/// Use this to build composite hash functions for cache keys.
+///
+/// Example:
+///   size_t h = 0;
+///   hash_combine(h, algo);
+///   hash_combine(h, n);
+///   hash_combine(h, alpha);
+///   return h;
+inline void hash_combine(size_t& seed, size_t value) {
+    seed ^= value + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+}
+
+/// Convenience overload that hashes the value before combining.
+template <typename T>
+inline void hash_combine(size_t& seed, const T& value) {
+    hash_combine(seed, std::hash<T>{}(value));
+}
+
+// ============================================================================
+// Generic LRU Primitive Cache
+// ============================================================================
+
+/// Thread-local LRU cache for oneDNN primitives.
+///
+/// @tparam Key     Cache key type. Must support `operator==`.
+/// @tparam Value   Cached primitive type (typically a struct holding dnnl objects).
+/// @tparam Hash    Hash functor for Key.
+/// @tparam MaxSize Maximum number of cached entries before LRU eviction.
+///
+/// All operations are O(1) amortized (hash map + doubly-linked list).
+/// Not thread-safe — intended for use as `static thread_local`.
+template <typename Key, typename Value, typename Hash, size_t MaxSize = 64>
+class OneDNNPrimitiveCache {
+public:
+    /// Look up a cached primitive. Returns nullptr on miss.
+    /// On hit, promotes the entry to most-recently-used.
+    std::shared_ptr<Value> get(const Key& key) {
+        auto it = map_.find(key);
+        if (it == map_.end()) {
+            return nullptr;
+        }
+        // Move to front (most recently used)
+        lru_.splice(lru_.begin(), lru_, it->second.lru_iter);
+        return it->second.value;
+    }
+
+    /// Insert or update a cached primitive.
+    /// If the cache is full, evicts the least-recently-used entry.
+    void put(const Key& key, std::shared_ptr<Value> value) {
+        auto it = map_.find(key);
+        if (it != map_.end()) {
+            // Update existing entry and promote to front
+            it->second.value = std::move(value);
+            lru_.splice(lru_.begin(), lru_, it->second.lru_iter);
+            return;
+        }
+
+        // Evict LRU if at capacity
+        if (map_.size() >= MaxSize) {
+            auto& evict_key = lru_.back();
+            map_.erase(evict_key);
+            lru_.pop_back();
+        }
+
+        // Insert new entry at front
+        lru_.push_front(key);
+        map_[key] = {std::move(value), lru_.begin()};
+    }
+
+    /// Returns current number of cached entries.
+    size_t size() const { return map_.size(); }
+
+    /// Clear all cached entries.
+    void clear() {
+        map_.clear();
+        lru_.clear();
+    }
+
+private:
+    struct Entry {
+        std::shared_ptr<Value> value;
+        typename std::list<Key>::iterator lru_iter;
+    };
+
+    std::unordered_map<Key, Entry, Hash> map_;
+    std::list<Key> lru_;
+};
+
+// ============================================================================
+// Shared oneDNN Engine and Stream accessor
+// ============================================================================
+
+#ifdef TENZOR_USE_ONEDNN
+
+/// Returns a thread-local oneDNN CPU engine.
+/// Shared across all operations to avoid creating multiple engines per thread.
+inline dnnl::engine& get_onednn_engine() {
+    static thread_local dnnl::engine engine(dnnl::engine::kind::cpu, 0);
+    return engine;
+}
+
+/// Returns a thread-local oneDNN stream bound to the shared engine.
+inline dnnl::stream& get_onednn_stream() {
+    static thread_local dnnl::stream stream(get_onednn_engine());
+    return stream;
+}
+
+#endif // TENZOR_USE_ONEDNN
+
+} // namespace cpu
+} // namespace tenzor

@@ -311,6 +311,18 @@ private:
     bool split_block(VulkanBlock* block, size_t size);
 
     /**
+     * @brief Try to merge adjacent free blocks sharing the same VkDeviceMemory.
+     *
+     * Scans the free list for blocks that are contiguous in the same
+     * VkDeviceMemory allocation and merges them into larger blocks.
+     * Called lazily on allocate cache-miss before falling back to new allocation.
+     *
+     * @param device Device index
+     * @return Number of merges performed
+     */
+    size_t try_merge_free_blocks(int device);
+
+    /**
      * @brief Round size up to alignment
      */
     size_t round_size(size_t size) const;

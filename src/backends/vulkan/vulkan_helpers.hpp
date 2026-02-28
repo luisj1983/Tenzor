@@ -39,9 +39,17 @@ inline void insertTransferToComputeBarrier(VkCommandBuffer cmdBuffer) {
     // When batching is disabled, each operation is submitted separately so no barrier needed
 }
 
-// Helper function to insert a pre-read barrier
-// Required BEFORE a compute shader that reads from a buffer that may have pending writes
-// from a previous compute operation in the same batch
+// Helper function to insert a pre-read barrier.
+// This provides a compute-to-compute read barrier for cases where a shader reads
+// from a buffer written by a PRIOR dispatch within the same command buffer.
+//
+// BARRIER STRATEGY NOTE: insertComputeBarrier() is called AFTER every dispatch and
+// already provides SHADER_WRITE -> SHADER_READ|SHADER_WRITE barriers. This means
+// insertPreReadBarrier() is largely redundant in normal operation — the post-dispatch
+// barrier from the previous operation already ensures visibility. This function exists
+// for edge cases where an operation needs to read a buffer that was written by a
+// non-immediately-preceding dispatch (e.g., multi-step algorithms where step N reads
+// output from step N-2). In practice, the linear dispatch pattern makes this rare.
 inline void insertPreReadBarrier(VkCommandBuffer cmdBuffer) {
     if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
         VkMemoryBarrier memoryBarrier{};

@@ -18,6 +18,7 @@
 #include <tenzor/nn/layers/attention.hpp>
 #include <tenzor/nn/layers/transformer.hpp>
 #include <tenzor/nn/layers/embedding.hpp>
+#include <tenzor/nn/layers/lazy_linear.hpp>
 #include <tenzor/nn/optim/rmsprop.hpp>
 #include <tenzor/nn/optim/adagrad.hpp>
 #include <tenzor/nn/optim/adadelta.hpp>
@@ -464,6 +465,12 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def_property_readonly("ndim", &tenzor::Tensor::ndim)
         .def_property_readonly("dtype", &tenzor::Tensor::dtype)
         .def_property_readonly("device", &tenzor::Tensor::device)
+        .def_property_readonly("is_cuda", [](const tenzor::Tensor& self) {
+            return self.device().type == tenzor::Device::Type::CUDA;
+        })
+        .def_property_readonly("is_cpu", [](const tenzor::Tensor& self) {
+            return self.device().type == tenzor::Device::Type::CPU;
+        })
         .def_property_readonly("numel", &tenzor::Tensor::numel)
         .def("is_contiguous",
             [](const tenzor::Tensor& t, std::optional<tenzor::MemoryFormat> fmt) {
@@ -594,6 +601,31 @@ PYBIND11_MODULE(tenzor_core, m) {
              }, py::is_operator(), "Matrix multiplication (@ operator)")
         .def("__rmatmul__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
              return tenzor::matmul(b, a);
+             }, py::is_operator())
+        // Modulo and floor division
+        .def("__mod__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
+             return tenzor::fmod(a, b);
+             }, py::is_operator(), "Element-wise modulo")
+        .def("__mod__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
+             auto b_tensor = tenzor::full(std::vector<int64_t>{}, static_cast<double>(b),
+                                          a.dtype(), a.device());
+             return tenzor::fmod(a, b_tensor);
+             }, py::is_operator())
+        .def("__rmod__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
+             auto b_tensor = tenzor::full(std::vector<int64_t>{}, static_cast<double>(b),
+                                          a.dtype(), a.device());
+             return tenzor::fmod(b_tensor, a);
+             }, py::is_operator())
+        .def("__floordiv__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
+             return tenzor::floor(a / b);
+             }, py::is_operator(), "Element-wise floor division")
+        .def("__floordiv__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
+             return tenzor::floor(a / static_cast<double>(b));
+             }, py::is_operator())
+        .def("__rfloordiv__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
+             auto b_tensor = tenzor::full(std::vector<int64_t>{}, static_cast<double>(b),
+                                          a.dtype(), a.device());
+             return tenzor::floor(b_tensor / a);
              }, py::is_operator())
         // In-place operators
         .def("__iadd__", [](tenzor::Tensor& a, const tenzor::Tensor& b) -> tenzor::Tensor& {
@@ -861,6 +893,54 @@ PYBIND11_MODULE(tenzor_core, m) {
             ss << ")";
             return ss.str();
         })
+        // Pickle support for model saving/loading
+        .def(py::pickle(
+            // __getstate__: serialize to (shape, dtype_int, device_str, bytes)
+            [](const tenzor::Tensor& t) {
+                // Move to CPU and make contiguous for serialization
+                tenzor::Tensor cpu_t = (t.device().type != tenzor::Device::Type::CPU)
+                    ? t.to(tenzor::Device::cpu()) : t;
+                if (!cpu_t.is_contiguous()) cpu_t = cpu_t.contiguous();
+
+                auto shape = cpu_t.shape();
+                std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+
+                // Serialize raw bytes
+                size_t nbytes = static_cast<size_t>(cpu_t.numel()) * tenzor::dtype_size(cpu_t.dtype());
+                py::bytes data(reinterpret_cast<const char*>(cpu_t.data_ptr()), nbytes);
+
+                return py::make_tuple(
+                    shape_vec,
+                    static_cast<int>(cpu_t.dtype()),
+                    t.device().to_string(),
+                    data
+                );
+            },
+            // __setstate__: deserialize from (shape, dtype_int, device_str, bytes)
+            [](py::tuple state) {
+                if (state.size() != 4) throw std::runtime_error("Invalid pickle state");
+
+                auto shape = state[0].cast<std::vector<int64_t>>();
+                auto dtype = static_cast<tenzor::DType>(state[1].cast<int>());
+                auto device_str = state[2].cast<std::string>();
+                auto data = state[3].cast<std::string>();
+
+                // Create tensor on CPU
+                tenzor::Tensor t(shape, dtype, tenzor::Device::cpu());
+                size_t nbytes = static_cast<size_t>(t.numel()) * tenzor::dtype_size(dtype);
+                if (data.size() != nbytes) {
+                    throw std::runtime_error("Pickle data size mismatch");
+                }
+                std::memcpy(t.data_ptr(), data.data(), nbytes);
+
+                // Move to original device if needed
+                auto target_device = tenzor::Device::from_string(device_str);
+                if (target_device.type != tenzor::Device::Type::CPU) {
+                    t = t.to(target_device);
+                }
+                return t;
+            }
+        ))
         // Python-style indexing
         .def("__getitem__", [](const tenzor::Tensor& self, py::object key) -> tenzor::Tensor {
             // Handle integer indexing
@@ -1847,8 +1927,14 @@ PYBIND11_MODULE(tenzor_core, m) {
              "Get gradient function that created this variable")
         .def_property_readonly("is_leaf", &tenzor::Variable::is_leaf,
              "Check if variable is a leaf node")
+        .def_property_readonly("is_cuda", [](const tenzor::Variable& self) {
+            return self.device().type == tenzor::Device::Type::CUDA;
+        })
+        .def_property_readonly("is_cpu", [](const tenzor::Variable& self) {
+            return self.device().type == tenzor::Device::Type::CPU;
+        })
         // Gradient control
-        .def("requires_grad", &tenzor::Variable::requires_grad,
+        .def_property_readonly("requires_grad", &tenzor::Variable::requires_grad,
              "Check if variable requires gradient")
         .def("requires_grad_", &tenzor::Variable::set_requires_grad,
              py::arg("requires_grad") = true,
@@ -1938,6 +2024,37 @@ PYBIND11_MODULE(tenzor_core, m) {
         // Power (uses tensor-level pow, wraps back in Variable)
         .def("__pow__", [](const tenzor::Variable& a, float exp) {
             auto result = tenzor::pow(a.tensor(), exp);
+            return tenzor::Variable(result, a.requires_grad());
+        }, py::is_operator())
+        // Modulo and floor division (operate on underlying tensors)
+        .def("__mod__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
+            auto result = tenzor::fmod(a.tensor(), b.tensor());
+            return tenzor::Variable(result, a.requires_grad() || b.requires_grad());
+        }, py::is_operator())
+        .def("__mod__", [](const tenzor::Variable& a, float b) {
+            auto b_tensor = tenzor::full(std::vector<int64_t>{}, static_cast<double>(b),
+                                         a.dtype(), a.device());
+            auto result = tenzor::fmod(a.tensor(), b_tensor);
+            return tenzor::Variable(result, a.requires_grad());
+        }, py::is_operator())
+        .def("__rmod__", [](const tenzor::Variable& a, float b) {
+            auto b_tensor = tenzor::full(std::vector<int64_t>{}, static_cast<double>(b),
+                                         a.dtype(), a.device());
+            auto result = tenzor::fmod(b_tensor, a.tensor());
+            return tenzor::Variable(result, a.requires_grad());
+        }, py::is_operator())
+        .def("__floordiv__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
+            auto result = tenzor::floor(a.tensor() / b.tensor());
+            return tenzor::Variable(result, a.requires_grad() || b.requires_grad());
+        }, py::is_operator())
+        .def("__floordiv__", [](const tenzor::Variable& a, float b) {
+            auto result = tenzor::floor(a.tensor() / static_cast<double>(b));
+            return tenzor::Variable(result, a.requires_grad());
+        }, py::is_operator())
+        .def("__rfloordiv__", [](const tenzor::Variable& a, float b) {
+            auto b_tensor = tenzor::full(std::vector<int64_t>{}, static_cast<double>(b),
+                                         a.dtype(), a.device());
+            auto result = tenzor::floor(b_tensor / a.tensor());
             return tenzor::Variable(result, a.requires_grad());
         }, py::is_operator())
         // Comparison operators (return Tensors, not Variables — no grad needed)
@@ -2052,7 +2169,54 @@ PYBIND11_MODULE(tenzor_core, m) {
             for (size_t i = 0; i < s.size(); ++i)
                 result[i] = s[i];
             return result;
-        });
+        })
+        // Pickle support for model saving/loading
+        .def(py::pickle(
+            // __getstate__: serialize to (shape, dtype_int, device_str, requires_grad, bytes)
+            [](const tenzor::Variable& v) {
+                tenzor::Tensor t = v.tensor();
+                tenzor::Tensor cpu_t = (t.device().type != tenzor::Device::Type::CPU)
+                    ? t.to(tenzor::Device::cpu()) : t;
+                if (!cpu_t.is_contiguous()) cpu_t = cpu_t.contiguous();
+
+                auto shape = cpu_t.shape();
+                std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+
+                size_t nbytes = static_cast<size_t>(cpu_t.numel()) * tenzor::dtype_size(cpu_t.dtype());
+                py::bytes data(reinterpret_cast<const char*>(cpu_t.data_ptr()), nbytes);
+
+                return py::make_tuple(
+                    shape_vec,
+                    static_cast<int>(cpu_t.dtype()),
+                    t.device().to_string(),
+                    v.requires_grad(),
+                    data
+                );
+            },
+            // __setstate__: deserialize from (shape, dtype_int, device_str, requires_grad, bytes)
+            [](py::tuple state) {
+                if (state.size() != 5) throw std::runtime_error("Invalid pickle state");
+
+                auto shape = state[0].cast<std::vector<int64_t>>();
+                auto dtype = static_cast<tenzor::DType>(state[1].cast<int>());
+                auto device_str = state[2].cast<std::string>();
+                bool requires_grad = state[3].cast<bool>();
+                auto data = state[4].cast<std::string>();
+
+                tenzor::Tensor t(shape, dtype, tenzor::Device::cpu());
+                size_t nbytes = static_cast<size_t>(t.numel()) * tenzor::dtype_size(dtype);
+                if (data.size() != nbytes) {
+                    throw std::runtime_error("Pickle data size mismatch");
+                }
+                std::memcpy(t.data_ptr(), data.data(), nbytes);
+
+                auto target_device = tenzor::Device::from_string(device_str);
+                if (target_device.type != tenzor::Device::Type::CPU) {
+                    t = t.to(target_device);
+                }
+                return std::make_shared<tenzor::Variable>(t, requires_grad);
+            }
+        ));
 
     // Gradient control functions
     m.def("is_grad_enabled", &tenzor::is_grad_enabled,
@@ -2744,6 +2908,33 @@ PYBIND11_MODULE(tenzor_core, m) {
             }
             bool has_bias = params.size() > 1;
             return "Linear(in_features=" + std::to_string(in_f) +
+                   ", out_features=" + std::to_string(out_f) +
+                   ", bias=" + (has_bias ? "True" : "False") + ")";
+        });
+
+    py::class_<tenzor::nn::LazyLinear, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::LazyLinear>>(nn, "LazyLinear")
+        .def(py::init<int64_t, bool>(),
+             py::arg("out_features"),
+             py::arg("bias") = true)
+        .def("is_materialized", &tenzor::nn::LazyLinear::is_materialized)
+        .def("__repr__", [](const tenzor::nn::LazyLinear& self) {
+            auto& mut_self = const_cast<tenzor::nn::LazyLinear&>(self);
+            if (!self.is_materialized()) {
+                auto params = mut_self.own_parameters();
+                return std::string("LazyLinear(in_features=<not materialized>, out_features=?, bias=?)");
+            }
+            auto params = mut_self.own_parameters();
+            int64_t in_f = 0, out_f = 0;
+            if (!params.empty()) {
+                auto shape = params[0]->tensor().shape();
+                if (shape.size() >= 2) {
+                    out_f = shape[0];
+                    in_f = shape[1];
+                }
+            }
+            bool has_bias = params.size() > 1;
+            return "LazyLinear(in_features=" + std::to_string(in_f) +
                    ", out_features=" + std::to_string(out_f) +
                    ", bias=" + (has_bias ? "True" : "False") + ")";
         });

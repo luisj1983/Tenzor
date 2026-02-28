@@ -233,6 +233,17 @@ install(TARGETS tenzor_core
 
 install(DIRECTORY include/tenzor DESTINATION include)
 
+# Install backend shared libraries (only non-imported targets that were built)
+foreach(backend cpu cuda rocm vulkan metal webgpu)
+    if(TARGET tenzor_backend_${backend})
+        get_target_property(_imported tenzor_backend_${backend} IMPORTED)
+        if(NOT _imported)
+            install(TARGETS tenzor_backend_${backend}
+                LIBRARY DESTINATION lib/tenzor/backends)
+        endif()
+    endif()
+endforeach()
+
 # Export targets
 install(EXPORT TenzorTargets
     FILE TenzorTargets.cmake
