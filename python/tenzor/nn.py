@@ -68,6 +68,11 @@ class Module(_CppModule):
 
     def __init__(self):
         super().__init__()
+        # Lazy caches for submodule/parameter/buffer lookups.
+        # Populated on first __getattr__ access, invalidated by __setattr__.
+        object.__setattr__(self, '_submodule_cache', None)
+        object.__setattr__(self, '_param_cache', None)
+        object.__setattr__(self, '_buffer_cache', None)
 
     def __setattr__(self, name: str, value) -> None:
         """
@@ -81,6 +86,11 @@ class Module(_CppModule):
         if name.startswith('_'):
             object.__setattr__(self, name, value)
             return
+
+        # Invalidate caches when non-private attributes change
+        object.__setattr__(self, '_submodule_cache', None)
+        object.__setattr__(self, '_param_cache', None)
+        object.__setattr__(self, '_buffer_cache', None)
 
         # Handle Module assignment
         if isinstance(value, _CppModule):
@@ -141,20 +151,27 @@ class Module(_CppModule):
         if name.startswith('_'):
             return object.__getattribute__(self, name)
 
-        # Check in C++ submodules (get_submodules() is non-virtual, always C++)
-        submodules = self.get_submodules()
-        if name in submodules:
-            return submodules[name]
+        # Lazily populate and reuse caches to avoid repeated C++ boundary crossings
+        submodule_cache = object.__getattribute__(self, '_submodule_cache')
+        if submodule_cache is None:
+            submodule_cache = self.get_submodules()
+            object.__setattr__(self, '_submodule_cache', submodule_cache)
+        if name in submodule_cache:
+            return submodule_cache[name]
 
-        # Check in C++ own parameters (named_parameters falls through to C++ base)
-        own_params = self._get_own_named_params()
-        if name in own_params:
-            return own_params[name]
+        param_cache = object.__getattribute__(self, '_param_cache')
+        if param_cache is None:
+            param_cache = self._get_own_named_params()
+            object.__setattr__(self, '_param_cache', param_cache)
+        if name in param_cache:
+            return param_cache[name]
 
-        # Check in C++ own buffers (named_buffers is non-virtual, always C++)
-        own_buffers = self._get_own_named_buffers()
-        if name in own_buffers:
-            return own_buffers[name]
+        buffer_cache = object.__getattribute__(self, '_buffer_cache')
+        if buffer_cache is None:
+            buffer_cache = self._get_own_named_buffers()
+            object.__setattr__(self, '_buffer_cache', buffer_cache)
+        if name in buffer_cache:
+            return buffer_cache[name]
 
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
@@ -165,6 +182,11 @@ class Module(_CppModule):
         or submodules. For regular Python attributes, delegates to object.__delattr__.
         For registered C++ state, this is a no-op (the C++ state persists).
         """
+        # Invalidate caches
+        object.__setattr__(self, '_submodule_cache', None)
+        object.__setattr__(self, '_param_cache', None)
+        object.__setattr__(self, '_buffer_cache', None)
+
         submodules = self.get_submodules()
         if name in submodules:
             return

@@ -74,6 +74,30 @@ auto RNNCell::forward(const Variable& input, const Variable& hx) -> Variable {
     }
 }
 
+auto RNNCell::forward_with_precomputed_ih(const Tensor& precomputed_ih, const Variable& hx) -> Variable {
+    int64_t batch_size = precomputed_ih.shape()[0];
+
+    // Initialize hidden state if not provided
+    Variable h = hx;
+    if (!h.is_initialized() || h.tensor().numel() == 0) {
+        h = Variable(zeros({batch_size, hidden_size_},
+                          precomputed_ih.dtype(), precomputed_ih.device()), false);
+    }
+
+    // Compute hidden-to-hidden transformation
+    auto h_out = hidden_layer_->forward(h);
+
+    // Combine: precomputed_ih + W_hh @ h
+    auto combined = Variable(precomputed_ih + h_out.tensor(), true);
+
+    // Apply activation
+    if (nonlinearity_ == "tanh") {
+        return nn::tanh(combined);
+    } else { // relu
+        return nn::relu(combined);
+    }
+}
+
 // ============================================================================
 // RNN Implementation
 // ============================================================================
@@ -184,38 +208,42 @@ auto RNN::forward(const Variable& input, const Variable& hx) -> std::pair<Variab
     std::vector<Variable> final_hidden_states;
 
     for (int64_t layer = 0; layer < num_layers_; ++layer) {
-        // Forward direction
+        int64_t layer_feat_size = (layer == 0) ? input_size_ : (hidden_size_ * num_directions);
+
+        // Forward direction — batch the input-to-hidden matmul across all timesteps
         auto& forward_cell = forward_cells_[layer];
         Variable forward_h = h_layers[layer * num_directions];
 
+        // Flatten (seq_len, batch, features) -> (seq_len * batch, features)
+        auto x_flat = layer_input.tensor().reshape({seq_len * batch_size, layer_feat_size});
+        // Batch matmul: all_ih = W_ih @ x_flat  -> (seq_len * batch, hidden_size)
+        auto all_ih = forward_cell->weight_ih()->forward(Variable(x_flat, false));
+        // Reshape back: (seq_len, batch, hidden_size)
+        auto ih_3d = all_ih.tensor().reshape({seq_len, batch_size, hidden_size_});
+
         std::vector<Variable> forward_outputs;
         for (int64_t t = 0; t < seq_len; ++t) {
-            // Extract x[t, :, :]
-            auto x_tensor = layer_input.tensor();
-            auto x_t_tensor = x_tensor.slice(0, t, t + 1);
-            auto x_t_squeezed = x_t_tensor.reshape({batch_size, layer == 0 ? input_size_ : (hidden_size_ * num_directions)});
-            Variable x_t(x_t_squeezed, layer_input.requires_grad());
-
-            forward_h = forward_cell->forward(x_t, forward_h);
+            auto ih_t = ih_3d.slice(0, t, t + 1).reshape({batch_size, hidden_size_});
+            forward_h = forward_cell->forward_with_precomputed_ih(ih_t, forward_h);
             forward_outputs.push_back(forward_h);
         }
 
         final_hidden_states.push_back(forward_h);
 
-        // Backward direction (if bidirectional)
+        // Backward direction (if bidirectional) — same batched optimization
         Variable layer_output = layer_input;
         if (bidirectional_) {
             auto& backward_cell = backward_cells_[layer];
             Variable backward_h = h_layers[layer * num_directions + 1];
 
+            // Batch the input-to-hidden matmul for backward direction
+            auto all_ih_bwd = backward_cell->weight_ih()->forward(Variable(x_flat, false));
+            auto ih_3d_bwd = all_ih_bwd.tensor().reshape({seq_len, batch_size, hidden_size_});
+
             std::vector<Variable> backward_outputs;
             for (int64_t t = seq_len - 1; t >= 0; --t) {
-                auto x_tensor = layer_input.tensor();
-                auto x_t_tensor = x_tensor.slice(0, t, t + 1);
-                auto x_t_squeezed = x_t_tensor.reshape({batch_size, layer == 0 ? input_size_ : (hidden_size_ * 2)});
-                Variable x_t(x_t_squeezed, layer_input.requires_grad());
-
-                backward_h = backward_cell->forward(x_t, backward_h);
+                auto ih_t = ih_3d_bwd.slice(0, t, t + 1).reshape({batch_size, hidden_size_});
+                backward_h = backward_cell->forward_with_precomputed_ih(ih_t, backward_h);
                 backward_outputs.push_back(backward_h);
             }
 

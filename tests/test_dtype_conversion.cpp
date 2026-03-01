@@ -138,7 +138,7 @@ TEST_F(DTypeConversionTest, ShapePreservation) {
 // Test requires_grad preservation
 TEST_F(DTypeConversionTest, RequiresGradPreservation) {
     auto t_src = tenzor::ones({2, 2}, DType::Float32, Device::cpu());
-    t_src.impl()->requires_grad = true;
+    t_src.set_requires_grad(true);
 
     auto t_dst = t_src.to(DType::Float64);
 

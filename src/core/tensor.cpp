@@ -143,6 +143,44 @@ auto Tensor::is_contiguous() const noexcept -> bool {
     return impl_->is_contiguous();
 }
 
+auto Tensor::offset() const -> int64_t {
+    if (!impl_) return 0;
+    return impl_->offset;
+}
+
+auto Tensor::storage() const -> const std::shared_ptr<Storage>& {
+    if (!impl_) throw std::runtime_error("Operation on uninitialized tensor");
+    return impl_->storage;
+}
+
+auto Tensor::set_requires_grad(bool requires_grad) -> void {
+    if (!impl_) throw std::runtime_error("Operation on uninitialized tensor");
+    impl_->requires_grad = requires_grad;
+}
+
+auto Tensor::mutable_shape() -> std::vector<int64_t>& {
+    if (!impl_) throw std::runtime_error("Operation on uninitialized tensor");
+    impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
+    return impl_->shape;
+}
+
+auto Tensor::mutable_strides() -> std::vector<int64_t>& {
+    if (!impl_) throw std::runtime_error("Operation on uninitialized tensor");
+    impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
+    return impl_->strides;
+}
+
+auto Tensor::set_offset(int64_t offset) -> void {
+    if (!impl_) throw std::runtime_error("Operation on uninitialized tensor");
+    impl_->offset = offset;
+}
+
+auto Tensor::invalidate_contiguity_cache() -> void {
+    if (impl_) {
+        impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
+    }
+}
+
 // Template instantiations for common types
 template<typename T>
 auto Tensor::data() -> T* {

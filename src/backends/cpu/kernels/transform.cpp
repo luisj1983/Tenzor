@@ -73,8 +73,8 @@ auto reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape) 
     // Create new tensor sharing storage (view)
     Tensor result;
     result.impl_ = std::make_shared<TensorImpl>(*input.impl_);
-    result.impl_->shape = new_shape;
-    result.impl_->strides = compute_strides(new_shape);
+    result.mutable_shape() = new_shape;
+    result.mutable_strides() = compute_strides(new_shape);
 
     return result;
 }
@@ -83,8 +83,10 @@ auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1) -> Tensor
     // Transpose just swaps dimensions in metadata
     Tensor result;
     result.impl_ = std::make_shared<TensorImpl>(*input.impl_);
-    std::swap(result.impl_->shape[dim0], result.impl_->shape[dim1]);
-    std::swap(result.impl_->strides[dim0], result.impl_->strides[dim1]);
+    auto& r_shape = result.mutable_shape();
+    auto& r_strides = result.mutable_strides();
+    std::swap(r_shape[dim0], r_shape[dim1]);
+    std::swap(r_strides[dim0], r_strides[dim1]);
     return result;
 }
 
@@ -98,12 +100,12 @@ auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims) -> Te
     std::vector<int64_t> new_strides(ndim);
 
     for (int64_t i = 0; i < ndim; ++i) {
-        new_shape[i] = input.impl_->shape[dims[i]];
-        new_strides[i] = input.impl_->strides[dims[i]];
+        new_shape[i] = input.shape()[dims[i]];
+        new_strides[i] = input.strides()[dims[i]];
     }
 
-    result.impl_->shape = std::move(new_shape);
-    result.impl_->strides = std::move(new_strides);
+    result.mutable_shape() = std::move(new_shape);
+    result.mutable_strides() = std::move(new_strides);
 
     return result;
 }
@@ -114,17 +116,19 @@ auto squeeze_kernel(const Tensor& input, int64_t dim) -> Tensor {
 
     if (dim >= 0) {
         // Squeeze specific dimension
-        result.impl_->shape.erase(result.impl_->shape.begin() + dim);
-        result.impl_->strides.erase(result.impl_->strides.begin() + dim);
+        auto& r_shape = result.mutable_shape();
+        auto& r_strides = result.mutable_strides();
+        r_shape.erase(r_shape.begin() + dim);
+        r_strides.erase(r_strides.begin() + dim);
     } else {
         // Squeeze all dimensions with size 1
         std::vector<int64_t> new_shape;
         std::vector<int64_t> new_strides;
 
         for (int64_t i = 0; i < input.ndim(); ++i) {
-            if (input.impl_->shape[i] != 1) {
-                new_shape.push_back(input.impl_->shape[i]);
-                new_strides.push_back(input.impl_->strides[i]);
+            if (input.shape()[i] != 1) {
+                new_shape.push_back(input.shape()[i]);
+                new_strides.push_back(input.strides()[i]);
             }
         }
 
@@ -133,8 +137,8 @@ auto squeeze_kernel(const Tensor& input, int64_t dim) -> Tensor {
             new_strides.push_back(1);
         }
 
-        result.impl_->shape = std::move(new_shape);
-        result.impl_->strides = std::move(new_strides);
+        result.mutable_shape() = std::move(new_shape);
+        result.mutable_strides() = std::move(new_strides);
     }
 
     return result;
@@ -144,11 +148,13 @@ auto unsqueeze_kernel(const Tensor& input, int64_t dim) -> Tensor {
     Tensor result;
     result.impl_ = std::make_shared<TensorImpl>(*input.impl_);
 
-    result.impl_->shape.insert(result.impl_->shape.begin() + dim, 1);
+    auto& r_shape = result.mutable_shape();
+    auto& r_strides = result.mutable_strides();
+    r_shape.insert(r_shape.begin() + dim, 1);
 
     // Compute stride for new dimension
-    int64_t new_stride = (dim < input.ndim()) ? input.impl_->strides[dim] : 1;
-    result.impl_->strides.insert(result.impl_->strides.begin() + dim, new_stride);
+    int64_t new_stride = (dim < input.ndim()) ? input.strides()[dim] : 1;
+    r_strides.insert(r_strides.begin() + dim, new_stride);
 
     return result;
 }
@@ -166,19 +172,19 @@ auto contiguous_kernel(const Tensor& input) -> Tensor {
     const int64_t total_elements = input.numel();
     const size_t element_size = dtype_size(input.dtype());
 
-    auto* src = static_cast<uint8_t*>(const_cast<void*>(input.impl_->storage->data()));
-    auto* dst = static_cast<uint8_t*>(static_cast<void*>(result.impl_->storage->data()));
+    auto* src = static_cast<uint8_t*>(const_cast<void*>(input.storage()->data()));
+    auto* dst = static_cast<uint8_t*>(static_cast<void*>(result.storage()->data()));
 
     const int64_t ndims = input.ndim();
 
     if (ndims == 0) {
-        std::memcpy(dst, src + input.impl_->offset * element_size, element_size);
+        std::memcpy(dst, src + input.offset() * element_size, element_size);
         return result;
     }
 
     auto strides = input.strides();
     auto shape = input.shape();
-    const int64_t input_offset = input.impl_->offset;
+    const int64_t input_offset = input.offset();
 
     // Find the largest contiguous block size from the innermost dimension
     // This allows us to copy multiple elements at once when inner strides are contiguous
@@ -341,8 +347,8 @@ auto cat_kernel(const std::vector<Tensor>& tensors, int64_t dim) -> Tensor {
             inner_size *= t_shape[d];
         }
 
-        const uint8_t* src = static_cast<const uint8_t*>(t_cont.impl_->storage->data());
-        uint8_t* dst = static_cast<uint8_t*>(output.impl_->storage->data());
+        const uint8_t* src = static_cast<const uint8_t*>(t_cont.storage()->data());
+        uint8_t* dst = static_cast<uint8_t*>(output.storage()->data());
 
         for (int64_t o = 0; o < outer_size; ++o) {
             int64_t src_idx = o * t_dim_size * inner_size;
@@ -411,8 +417,8 @@ auto slice_kernel(const Tensor& input, int64_t dim, int64_t start, int64_t end, 
     if (step == 1) {
         Tensor result;
         result.impl_ = std::make_shared<TensorImpl>(*input.impl_);
-        result.impl_->shape = new_shape;
-        result.impl_->offset += start * strides[dim];
+        result.mutable_shape() = new_shape;
+        result.set_offset(result.offset() + start * strides[dim]);
         return result;
     }
 
@@ -429,8 +435,8 @@ auto slice_kernel(const Tensor& input, int64_t dim, int64_t start, int64_t end, 
         inner_size *= shape[d];
     }
 
-    const uint8_t* src = static_cast<const uint8_t*>(input.impl_->storage->data());
-    uint8_t* dst = static_cast<uint8_t*>(output.impl_->storage->data());
+    const uint8_t* src = static_cast<const uint8_t*>(input.storage()->data());
+    uint8_t* dst = static_cast<uint8_t*>(output.storage()->data());
 
     int64_t dst_idx = 0;
     for (int64_t o = 0; o < outer_size; ++o) {
@@ -482,8 +488,8 @@ auto expand_kernel(const Tensor& input, const std::vector<int64_t>& target_shape
 
     Tensor result;
     result.impl_ = std::make_shared<TensorImpl>(*input.impl_);
-    result.impl_->shape = target_shape;
-    result.impl_->strides = new_strides;
+    result.mutable_shape() = target_shape;
+    result.mutable_strides() = new_strides;
     return result;
 }
 
@@ -653,8 +659,8 @@ auto to_memory_format_kernel(const Tensor& input, MemoryFormat format) -> Tensor
         const size_t elem_size = dtype_size(input.dtype());
 
         Tensor cont = input.is_contiguous() ? input : contiguous_kernel(input);
-        const auto* src = static_cast<const uint8_t*>(cont.impl_->storage->data());
-        auto* dst = static_cast<uint8_t*>(output.impl_->storage->data());
+        const auto* src = static_cast<const uint8_t*>(cont.storage()->data());
+        auto* dst = static_cast<uint8_t*>(output.storage()->data());
 
         // Reorder data from NCHW to NHWC
         #pragma omp parallel for collapse(2) if(N * C * H * W > 65536)
@@ -671,7 +677,7 @@ auto to_memory_format_kernel(const Tensor& input, MemoryFormat format) -> Tensor
             }
         }
 
-        output.impl_->strides = nhwc_strides;
+        output.mutable_strides() = nhwc_strides;
         return output;
     }
 

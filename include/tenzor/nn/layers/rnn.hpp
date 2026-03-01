@@ -77,6 +77,25 @@ public:
         return forward(input, Variable{});
     }
 
+    /**
+     * @brief Forward pass with pre-computed input gates (for batched optimization).
+     *
+     * Used by RNN to avoid redundant input->hidden computations when processing
+     * multiple timesteps. Instead of calling input_layer_->forward() per timestep,
+     * RNN pre-computes all input gates at once and passes them here.
+     *
+     * @param precomputed_ih Pre-computed input-to-hidden output of shape (batch, hidden_size)
+     * @param hx Hidden state of shape (batch, hidden_size)
+     * @return New hidden state of shape (batch, hidden_size)
+     */
+    auto forward_with_precomputed_ih(const Tensor& precomputed_ih, const Variable& hx) -> Variable;
+
+    /** @brief Get input-to-hidden weight layer for batched optimization */
+    auto weight_ih() const -> std::shared_ptr<Linear> { return input_layer_; }
+
+    /** @brief Get hidden size */
+    auto hidden_size() const -> int64_t { return hidden_size_; }
+
 private:
     int64_t input_size_;
     int64_t hidden_size_;

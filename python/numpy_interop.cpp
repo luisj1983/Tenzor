@@ -188,14 +188,14 @@ auto tensor_to_numpy(const Tensor& tensor) -> py::array {
     // NumPy natively supports strided arrays.
     {
         // Validate that max accessible offset falls within storage bounds
-        int64_t max_offset = tensor.impl()->offset;
+        int64_t max_offset = tensor.offset();
         for (size_t d = 0; d < shape.size(); ++d) {
             if (shape[d] > 0) {
                 max_offset += (shape[d] - 1) * strides[d];
             }
         }
         int64_t storage_elements = static_cast<int64_t>(
-            tensor.impl()->storage->size_bytes() / element_size);
+            tensor.storage()->size_bytes() / element_size);
 
         if (max_offset >= storage_elements) {
             // Strided view exceeds storage — fall back to contiguous copy.
@@ -206,7 +206,7 @@ auto tensor_to_numpy(const Tensor& tensor) -> py::array {
                 "falling back to contiguous copy for NumPy conversion", 1);
             Tensor contiguous = tensor.contiguous();
             py::array result(py::dtype(format), np_shape);
-            void* src = const_cast<void*>(contiguous.impl()->storage->data());
+            void* src = const_cast<void*>(contiguous.storage()->data());
             void* dst = result.mutable_data();
             std::memcpy(dst, src, contiguous.numel() * element_size);
             return apply_bfloat16_dtype(result, dtype);
@@ -214,11 +214,11 @@ auto tensor_to_numpy(const Tensor& tensor) -> py::array {
 
         // Account for storage offset
         auto* base_ptr = static_cast<char*>(
-            const_cast<void*>(tensor.impl()->storage->data()));
-        void* data_ptr = base_ptr + tensor.impl()->offset * element_size;
+            const_cast<void*>(tensor.storage()->data()));
+        void* data_ptr = base_ptr + tensor.offset() * element_size;
 
         // Create capsule that keeps the tensor's storage alive via shared_ptr refcount.
-        auto* storage_ptr = new std::shared_ptr<Storage>(tensor.impl()->storage);
+        auto* storage_ptr = new std::shared_ptr<Storage>(tensor.storage());
         py::capsule capsule(storage_ptr, [](void* ptr) {
             delete static_cast<std::shared_ptr<Storage>*>(ptr);
         });
@@ -252,7 +252,7 @@ auto numpy_to_tensor(py::array arr, Device device) -> Tensor {
 
     // Always copy data from NumPy to Tensor for memory safety
     // (NumPy and Tensor have independent lifetime management)
-    void* tensor_data = tensor.impl()->storage->data();
+    void* tensor_data = tensor.storage()->data();
 
     if (can_zero_copy_numpy_to_tensor(arr)) {
         // C-contiguous array — direct memcpy

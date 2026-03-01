@@ -9,6 +9,7 @@
 #pragma once
 
 #include <optional>
+#include <utility>
 #include "../module.hpp"
 
 namespace tenzor {
@@ -49,7 +50,7 @@ namespace nn {
 class Conv2d : public Module {
 public:
     /**
-     * @brief Construct 2D convolutional layer.
+     * @brief Construct 2D convolutional layer with square kernel.
      *
      * @param in_channels Number of input channels
      * @param out_channels Number of output channels (filters)
@@ -78,6 +79,33 @@ public:
            bool bias = true);
 
     /**
+     * @brief Construct 2D convolutional layer with non-square kernel.
+     *
+     * @param in_channels Number of input channels
+     * @param out_channels Number of output channels (filters)
+     * @param kernel_size Pair of (height, width) kernel dimensions
+     * @param stride Pair of (height, width) strides (default: {1,1})
+     * @param padding Pair of (height, width) padding (default: {0,0})
+     * @param dilation Pair of (height, width) dilation (default: {1,1})
+     * @param groups Number of blocked connections (default: 1)
+     * @param bias If true, add learnable bias (default: true)
+     *
+     * @code
+     * Conv2d conv(3, 64, {3, 5});             // 3x5 kernel
+     * Conv2d conv(3, 64, {3, 5}, {1, 2});     // Non-square stride
+     * Conv2d conv(3, 64, {3, 5}, {1, 1}, {1, 2}); // Non-square padding
+     * @endcode
+     */
+    Conv2d(int64_t in_channels,
+           int64_t out_channels,
+           std::pair<int64_t, int64_t> kernel_size,
+           std::pair<int64_t, int64_t> stride = {1, 1},
+           std::pair<int64_t, int64_t> padding = {0, 0},
+           std::pair<int64_t, int64_t> dilation = {1, 1},
+           int64_t groups = 1,
+           bool bias = true);
+
+    /**
      * @brief Forward pass through 2D convolution.
      *
      * @param input Input variable of shape (N, C_in, H, W)
@@ -90,10 +118,14 @@ public:
 private:
     int64_t in_channels_;   ///< Number of input channels
     int64_t out_channels_;  ///< Number of output channels
-    int64_t kernel_size_;   ///< Kernel size
-    int64_t stride_;        ///< Stride
-    int64_t padding_;       ///< Padding
-    int64_t dilation_;      ///< Dilation
+    int64_t kernel_h_;      ///< Kernel height
+    int64_t kernel_w_;      ///< Kernel width
+    int64_t stride_h_;      ///< Stride height
+    int64_t stride_w_;      ///< Stride width
+    int64_t padding_h_;     ///< Padding height
+    int64_t padding_w_;     ///< Padding width
+    int64_t dilation_h_;    ///< Dilation height
+    int64_t dilation_w_;    ///< Dilation width
     int64_t groups_;        ///< Number of groups
 
     /**

@@ -884,6 +884,45 @@ public:
     // Implementation access
     auto impl() const -> const std::shared_ptr<TensorImpl>& { return impl_; }
 
+    // ============================================================================
+    // Low-level Accessors (for backend kernel implementations)
+    // ============================================================================
+
+    /**
+     * @brief Get the storage offset (in elements).
+     */
+    auto offset() const -> int64_t;
+
+    /**
+     * @brief Get the underlying storage.
+     */
+    auto storage() const -> const std::shared_ptr<Storage>&;
+
+    /**
+     * @brief Set the requires_grad flag.
+     */
+    auto set_requires_grad(bool requires_grad) -> void;
+
+    /**
+     * @brief Get mutable reference to shape vector (for view-creating kernels).
+     */
+    auto mutable_shape() -> std::vector<int64_t>&;
+
+    /**
+     * @brief Get mutable reference to strides vector (for view-creating kernels).
+     */
+    auto mutable_strides() -> std::vector<int64_t>&;
+
+    /**
+     * @brief Set the storage offset (in elements).
+     */
+    auto set_offset(int64_t offset) -> void;
+
+    /**
+     * @brief Invalidate the cached contiguity flag (call after modifying strides).
+     */
+    auto invalidate_contiguity_cache() -> void;
+
 private:
     std::shared_ptr<TensorImpl> impl_;
 
@@ -927,15 +966,6 @@ private:
  */
 class TensorImpl {
 public:
-    std::shared_ptr<Storage> storage;    ///< Shared storage for tensor data
-    std::vector<int64_t> shape;          ///< Tensor dimensions
-    std::vector<int64_t> strides;        ///< Memory strides per dimension
-    int64_t offset{0};                   ///< Offset into storage
-    DType dtype;                         ///< Element data type
-    Device device;                       ///< Device location
-    bool requires_grad{false};           ///< Gradient computation flag
-    mutable std::atomic<int8_t> is_contiguous_cache_{-1};  ///< Cached contiguity: -1=unset, 0=false, 1=true
-
     /**
      * @brief Construct tensor implementation.
      *
@@ -973,6 +1003,18 @@ public:
      * @return true if elements are stored without gaps
      */
     auto is_contiguous() const -> bool;
+
+private:
+    friend class Tensor;
+
+    std::shared_ptr<Storage> storage;    ///< Shared storage for tensor data
+    std::vector<int64_t> shape;          ///< Tensor dimensions
+    std::vector<int64_t> strides;        ///< Memory strides per dimension
+    int64_t offset{0};                   ///< Offset into storage
+    DType dtype;                         ///< Element data type
+    Device device;                       ///< Device location
+    bool requires_grad{false};           ///< Gradient computation flag
+    mutable std::atomic<int8_t> is_contiguous_cache_{-1};  ///< Cached contiguity: -1=unset, 0=false, 1=true
 };
 
 } // namespace tenzor

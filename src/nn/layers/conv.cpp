@@ -175,9 +175,15 @@ auto col2im_cpu(const Tensor& col, int64_t channels, int64_t height, int64_t wid
 
 class Conv2dBackward : public Function {
 public:
-    Conv2dBackward(int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+    Conv2dBackward(int64_t stride_h, int64_t stride_w,
+                   int64_t padding_h, int64_t padding_w,
+                   int64_t dilation_h, int64_t dilation_w,
+                   int64_t groups,
                    std::vector<Tensor> tensors_to_save)
-        : stride_(stride), padding_(padding), dilation_(dilation), groups_(groups) {
+        : stride_h_(stride_h), stride_w_(stride_w),
+          padding_h_(padding_h), padding_w_(padding_w),
+          dilation_h_(dilation_h), dilation_w_(dilation_w),
+          groups_(groups) {
         saved_tensors_ = std::move(tensors_to_save);
     }
 
@@ -191,17 +197,22 @@ public:
         const Tensor& weight = saved_tensors_[1];
 
         // Use backend dispatcher for gradient computation (routes to CUDA/cuDNN automatically)
-        // Use single unified backward dispatch for better performance (one cuDNN call vs 3)
         std::vector<Tensor> tensors_for_dispatch = {grad_output};
         auto* backend = Dispatcher::get_backend(tensors_for_dispatch);
 
         bool has_bias = saved_tensors_.size() > 2;
 
-        // Prepare attributes for unified backward
+        // Prepare attributes for unified backward — include both paired and single-value keys
         OpAttributes backward_attrs = {
-            {"stride", std::to_string(stride_)},
-            {"padding", std::to_string(padding_)},
-            {"dilation", std::to_string(dilation_)},
+            {"stride", std::to_string(stride_h_)},
+            {"padding", std::to_string(padding_h_)},
+            {"dilation", std::to_string(dilation_h_)},
+            {"stride_h", std::to_string(stride_h_)},
+            {"stride_w", std::to_string(stride_w_)},
+            {"padding_h", std::to_string(padding_h_)},
+            {"padding_w", std::to_string(padding_w_)},
+            {"dilation_h", std::to_string(dilation_h_)},
+            {"dilation_w", std::to_string(dilation_w_)},
             {"groups", std::to_string(groups_)},
             {"compute_grad_input", "1"},
             {"compute_grad_weight", "1"},
@@ -223,9 +234,9 @@ public:
     }
 
 private:
-    int64_t stride_;
-    int64_t padding_;
-    int64_t dilation_;
+    int64_t stride_h_, stride_w_;
+    int64_t padding_h_, padding_w_;
+    int64_t dilation_h_, dilation_w_;
     int64_t groups_;
 };
 
@@ -236,11 +247,24 @@ private:
 Conv2d::Conv2d(int64_t in_channels, int64_t out_channels, int64_t kernel_size,
               int64_t stride, int64_t padding, int64_t dilation,
               int64_t groups, bool bias)
-    : in_channels_(in_channels), out_channels_(out_channels),
-      kernel_size_(kernel_size), stride_(stride),
-      padding_(padding), dilation_(dilation), groups_(groups <= 0 ? 1 : groups) {
+    : Conv2d(in_channels, out_channels,
+             {kernel_size, kernel_size}, {stride, stride},
+             {padding, padding}, {dilation, dilation},
+             groups, bias) {}
 
-    // Ensure groups is valid (must be >= 1)
+Conv2d::Conv2d(int64_t in_channels, int64_t out_channels,
+              std::pair<int64_t, int64_t> kernel_size,
+              std::pair<int64_t, int64_t> stride,
+              std::pair<int64_t, int64_t> padding,
+              std::pair<int64_t, int64_t> dilation,
+              int64_t groups, bool bias)
+    : in_channels_(in_channels), out_channels_(out_channels),
+      kernel_h_(kernel_size.first), kernel_w_(kernel_size.second),
+      stride_h_(stride.first), stride_w_(stride.second),
+      padding_h_(padding.first), padding_w_(padding.second),
+      dilation_h_(dilation.first), dilation_w_(dilation.second),
+      groups_(groups <= 0 ? 1 : groups) {
+
     if (groups_ <= 0) {
         groups_ = 1;
     }
@@ -251,8 +275,8 @@ Conv2d::Conv2d(int64_t in_channels, int64_t out_channels, int64_t kernel_size,
         throw std::invalid_argument("out_channels must be divisible by groups");
     }
 
-    std::vector<int64_t> weight_shape = {out_channels, in_channels / groups_, kernel_size, kernel_size};
-    int64_t fan_in = (in_channels / groups_) * kernel_size * kernel_size;
+    std::vector<int64_t> weight_shape = {out_channels, in_channels / groups_, kernel_h_, kernel_w_};
+    int64_t fan_in = (in_channels / groups_) * kernel_h_ * kernel_w_;
     float std_init = std::sqrt(2.0f / fan_in);
     auto weight_tensor = randn(weight_shape) * std_init;
     auto weight_init = Variable(weight_tensor, true);
@@ -280,8 +304,8 @@ auto Conv2d::forward_impl(const Variable& input) -> Variable {
         throw std::invalid_argument("Input channels mismatch");
     }
 
-    int64_t out_h = calculate_output_size(height, kernel_size_, stride_, padding_, dilation_);
-    int64_t out_w = calculate_output_size(width, kernel_size_, stride_, padding_, dilation_);
+    int64_t out_h = calculate_output_size(height, kernel_h_, stride_h_, padding_h_, dilation_h_);
+    int64_t out_w = calculate_output_size(width, kernel_w_, stride_w_, padding_w_, dilation_w_);
 
     if (out_h <= 0 || out_w <= 0) {
         throw std::runtime_error(
@@ -300,11 +324,9 @@ auto Conv2d::forward_impl(const Variable& input) -> Variable {
                                    (input.tensor().device().type != weight.tensor().device().type);
     if (weight_needs_conversion) {
         auto weight_converted = weight.tensor();
-        // Convert device first if needed
         if (input.tensor().device().type != weight.tensor().device().type) {
             weight_converted = weight_converted.to(original_device);
         }
-        // Convert dtype if needed
         if (input.dtype() != weight_converted.dtype()) {
             weight_converted = weight_converted.to(input.dtype());
         }
@@ -320,11 +342,9 @@ auto Conv2d::forward_impl(const Variable& input) -> Variable {
                                      (input.tensor().device().type != bias.tensor().device().type);
         if (bias_needs_conversion) {
             auto bias_converted = bias.tensor();
-            // Convert device first if needed
             if (input.tensor().device().type != bias.tensor().device().type) {
                 bias_converted = bias_converted.to(original_device);
             }
-            // Convert dtype if needed
             if (input.dtype() != bias_converted.dtype()) {
                 bias_converted = bias_converted.to(input.dtype());
             }
@@ -339,16 +359,22 @@ auto Conv2d::forward_impl(const Variable& input) -> Variable {
     Tensor output;
 
     // Use backend dispatcher (routes to CUDA/cuDNN/CPU automatically based on tensor device)
-    // Compute output using OpId dispatch
     std::vector<Tensor> inputs_vec = {input.tensor(), weight_matched.tensor()};
     if (bias_ptr != nullptr) {
         inputs_vec.push_back(*bias_ptr);
     }
 
+    // Pass both paired and single-value keys for backward compat with backends
     OpAttributes forward_attrs = {
-        {"stride", std::to_string(stride_)},
-        {"padding", std::to_string(padding_)},
-        {"dilation", std::to_string(dilation_)},
+        {"stride", std::to_string(stride_h_)},
+        {"padding", std::to_string(padding_h_)},
+        {"dilation", std::to_string(dilation_h_)},
+        {"stride_h", std::to_string(stride_h_)},
+        {"stride_w", std::to_string(stride_w_)},
+        {"padding_h", std::to_string(padding_h_)},
+        {"padding_w", std::to_string(padding_w_)},
+        {"dilation_h", std::to_string(dilation_h_)},
+        {"dilation_w", std::to_string(dilation_w_)},
         {"groups", std::to_string(groups_)}
     };
     auto output_result = dispatch_to_device(OpId::Conv2dForward, input.tensor().device().type,
@@ -366,13 +392,12 @@ auto Conv2d::forward_impl(const Variable& input) -> Variable {
         }
 
         auto backward_fn = std::make_shared<Conv2dBackward>(
-            stride_, padding_, dilation_, groups_, std::move(tensors_to_save)
+            stride_h_, stride_w_, padding_h_, padding_w_,
+            dilation_h_, dilation_w_, groups_, std::move(tensors_to_save)
         );
 
         result.set_grad_fn(backward_fn);
 
-        // MUST include all inputs to maintain 1:1 index correspondence with gradients
-        // The engine correctly skips variables that don't require grad
         std::vector<Variable> input_vars = {input, *parameters_["weight"]};
         if (bias_it != parameters_.end()) {
             input_vars.push_back(*bias_it->second);
@@ -390,10 +415,10 @@ auto Conv2d::forward_impl(const Variable& input) -> Variable {
 }
 
 auto Conv2d::reset_parameters() -> void {
-    int64_t fan_in = in_channels_ / groups_ * kernel_size_ * kernel_size_;
+    int64_t fan_in = in_channels_ / groups_ * kernel_h_ * kernel_w_;
     float std = std::sqrt(2.0f / fan_in);
 
-    std::vector<int64_t> weight_shape = {out_channels_, in_channels_ / groups_, kernel_size_, kernel_size_};
+    std::vector<int64_t> weight_shape = {out_channels_, in_channels_ / groups_, kernel_h_, kernel_w_};
     auto new_weight_tensor = randn(weight_shape) * std;
     parameters_["weight"] = std::make_shared<Variable>(new_weight_tensor, true);
 

@@ -36,11 +36,11 @@ int main() {
     std::cout << "  Numel: " << inputs.numel() << "\n";
     std::cout << "  Has impl: " << (inputs.impl() != nullptr) << "\n";
     if (inputs.impl()) {
-        std::cout << "  Has storage: " << (inputs.impl()->storage != nullptr) << "\n";
-        if (inputs.impl()->storage) {
-            std::cout << "  Storage data ptr: " << inputs.impl()->storage->data() << "\n";
+        std::cout << "  Has storage: " << (inputs.storage() != nullptr) << "\n";
+        if (inputs.storage()) {
+            std::cout << "  Storage data ptr: " << inputs.storage()->data() << "\n";
             // Check actual data in storage
-            const float* data_ptr = static_cast<const float*>(inputs.impl()->storage->data());
+            const float* data_ptr = static_cast<const float*>(inputs.storage()->data());
             std::cout << "  First 5 values in storage: ";
             for (int i = 0; i < 5; ++i) std::cout << data_ptr[i] << " ";
             std::cout << "\n";

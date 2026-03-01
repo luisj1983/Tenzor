@@ -349,7 +349,7 @@ auto to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* str
     }
 
     // Set the output tensor's strides
-    output.impl_->strides = target_strides;
+    output.mutable_strides() = target_strides;
 
     // Determine current format from input strides
     auto input_strides = input.strides();
@@ -1479,8 +1479,8 @@ auto cudnn_conv2d_forward_nhwc(
     std::vector<int64_t> output_physical_shape = {batch, out_h, out_w, out_channels};
     Tensor output_nhwc(output_physical_shape, input.dtype(), input.device());
     // Immediately set to logical NCHW shape with NHWC strides
-    output_nhwc.impl_->shape = {batch, out_channels, out_h, out_w};
-    output_nhwc.impl_->strides = {out_h * out_w * out_channels, 1, out_w * out_channels, out_channels};
+    output_nhwc.mutable_shape() = {batch, out_channels, out_h, out_w};
+    output_nhwc.mutable_strides() = {out_h * out_w * out_channels, 1, out_w * out_channels, out_channels};
 
     // Use singleton cuDNN handle
     cudnnHandle_t handle = CuDNNHandle::get();

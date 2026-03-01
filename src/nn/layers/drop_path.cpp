@@ -65,8 +65,8 @@ auto DropPath::forward_impl(const Variable& input) -> Variable {
     auto mask_cpu = zeros(mask_shape, input.tensor().dtype(), Device::cpu());
 
     size_t numel = random_tensor.numel();
-    void* random_ptr = random_tensor.impl()->storage->data();
-    void* mask_ptr = mask_cpu.impl()->storage->data();
+    void* random_ptr = random_tensor.storage()->data();
+    void* mask_ptr = mask_cpu.storage()->data();
 
     if (random_tensor.dtype() == DType::Float32) {
         float* rand_data = static_cast<float*>(random_ptr);

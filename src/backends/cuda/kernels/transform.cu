@@ -205,8 +205,8 @@ auto reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape, 
     // Create new tensor sharing storage (view)
     Tensor result;
     CUDAKernelAccess::get_impl_mutable(result) = std::make_shared<TensorImpl>(*CUDAKernelAccess::get_impl(input));
-    CUDAKernelAccess::get_impl_mutable(result)->shape = new_shape;
-    CUDAKernelAccess::get_impl_mutable(result)->strides = compute_strides(new_shape);
+    result.mutable_shape() = new_shape;
+    result.mutable_strides() = compute_strides(new_shape);
 
     return result;
 }
@@ -216,8 +216,10 @@ auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1, cudaStrea
     // Transpose just swaps dimensions in metadata
     Tensor result;
     CUDAKernelAccess::get_impl_mutable(result) = std::make_shared<TensorImpl>(*CUDAKernelAccess::get_impl(input));
-    std::swap(CUDAKernelAccess::get_impl_mutable(result)->shape[dim0], CUDAKernelAccess::get_impl_mutable(result)->shape[dim1]);
-    std::swap(CUDAKernelAccess::get_impl_mutable(result)->strides[dim0], CUDAKernelAccess::get_impl_mutable(result)->strides[dim1]);
+    auto& r_shape = result.mutable_shape();
+    auto& r_strides = result.mutable_strides();
+    std::swap(r_shape[dim0], r_shape[dim1]);
+    std::swap(r_strides[dim0], r_strides[dim1]);
     return result;
 }
 
@@ -232,12 +234,12 @@ auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims, cudaS
     std::vector<int64_t> new_strides(ndim);
 
     for (int64_t i = 0; i < ndim; ++i) {
-        new_shape[i] = CUDAKernelAccess::get_impl(input)->shape[dims[i]];
-        new_strides[i] = CUDAKernelAccess::get_impl(input)->strides[dims[i]];
+        new_shape[i] = input.shape()[dims[i]];
+        new_strides[i] = input.strides()[dims[i]];
     }
 
-    CUDAKernelAccess::get_impl_mutable(result)->shape = std::move(new_shape);
-    CUDAKernelAccess::get_impl_mutable(result)->strides = std::move(new_strides);
+    result.mutable_shape() = std::move(new_shape);
+    result.mutable_strides() = std::move(new_strides);
 
     return result;
 }
@@ -249,17 +251,19 @@ auto squeeze_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Te
 
     if (dim >= 0) {
         // Squeeze specific dimension
-        CUDAKernelAccess::get_impl_mutable(result)->shape.erase(CUDAKernelAccess::get_impl_mutable(result)->shape.begin() + dim);
-        CUDAKernelAccess::get_impl_mutable(result)->strides.erase(CUDAKernelAccess::get_impl_mutable(result)->strides.begin() + dim);
+        auto& r_shape = result.mutable_shape();
+        auto& r_strides = result.mutable_strides();
+        r_shape.erase(r_shape.begin() + dim);
+        r_strides.erase(r_strides.begin() + dim);
     } else {
         // Squeeze all dimensions with size 1
         std::vector<int64_t> new_shape;
         std::vector<int64_t> new_strides;
 
         for (int64_t i = 0; i < input.ndim(); ++i) {
-            if (CUDAKernelAccess::get_impl(input)->shape[i] != 1) {
-                new_shape.push_back(CUDAKernelAccess::get_impl(input)->shape[i]);
-                new_strides.push_back(CUDAKernelAccess::get_impl(input)->strides[i]);
+            if (input.shape()[i] != 1) {
+                new_shape.push_back(input.shape()[i]);
+                new_strides.push_back(input.strides()[i]);
             }
         }
 
@@ -268,8 +272,8 @@ auto squeeze_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Te
             new_strides.push_back(1);
         }
 
-        CUDAKernelAccess::get_impl_mutable(result)->shape = std::move(new_shape);
-        CUDAKernelAccess::get_impl_mutable(result)->strides = std::move(new_strides);
+        result.mutable_shape() = std::move(new_shape);
+        result.mutable_strides() = std::move(new_strides);
     }
 
     return result;
@@ -280,11 +284,13 @@ auto unsqueeze_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> 
     Tensor result;
     CUDAKernelAccess::get_impl_mutable(result) = std::make_shared<TensorImpl>(*CUDAKernelAccess::get_impl(input));
 
-    CUDAKernelAccess::get_impl_mutable(result)->shape.insert(CUDAKernelAccess::get_impl_mutable(result)->shape.begin() + dim, 1);
+    auto& r_shape = result.mutable_shape();
+    auto& r_strides = result.mutable_strides();
+    r_shape.insert(r_shape.begin() + dim, 1);
 
     // Compute stride for new dimension
-    int64_t new_stride = (dim < input.ndim()) ? CUDAKernelAccess::get_impl(input)->strides[dim] : 1;
-    CUDAKernelAccess::get_impl_mutable(result)->strides.insert(CUDAKernelAccess::get_impl_mutable(result)->strides.begin() + dim, new_stride);
+    int64_t new_stride = (dim < input.ndim()) ? input.strides()[dim] : 1;
+    r_strides.insert(r_strides.begin() + dim, new_stride);
 
     return result;
 }
@@ -984,7 +990,7 @@ auto to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* str
         target_strides = {C * H * W, H * W, W, 1};
     }
 
-    CUDAKernelAccess::get_impl(output)->strides = target_strides;
+    output.mutable_strides() = target_strides;
 
     const int64_t total = N * C * H * W;
     const int block_size = 256;

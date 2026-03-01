@@ -175,8 +175,8 @@ auto reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape, 
     // Create new tensor sharing storage (view)
     Tensor result;
     HIPKernelAccess::get_impl_mutable(result) = std::make_shared<TensorImpl>(*HIPKernelAccess::get_impl(input));
-    HIPKernelAccess::get_impl_mutable(result)->shape = new_shape;
-    HIPKernelAccess::get_impl_mutable(result)->strides = compute_strides(new_shape);
+    result.mutable_shape() = new_shape;
+    result.mutable_strides() = compute_strides(new_shape);
 
     return result;
 }
@@ -189,10 +189,10 @@ auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1, hipStream
     // Transpose just swaps dimensions in metadata
     Tensor result;
     HIPKernelAccess::get_impl_mutable(result) = std::make_shared<TensorImpl>(*HIPKernelAccess::get_impl(input));
-    std::swap(HIPKernelAccess::get_impl_mutable(result)->shape[dim0],
-              HIPKernelAccess::get_impl_mutable(result)->shape[dim1]);
-    std::swap(HIPKernelAccess::get_impl_mutable(result)->strides[dim0],
-              HIPKernelAccess::get_impl_mutable(result)->strides[dim1]);
+    auto& r_shape = result.mutable_shape();
+    auto& r_strides = result.mutable_strides();
+    std::swap(r_shape[dim0], r_shape[dim1]);
+    std::swap(r_strides[dim0], r_strides[dim1]);
     return result;
 }
 
@@ -210,12 +210,12 @@ auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims, hipSt
     std::vector<int64_t> new_strides(ndim);
 
     for (int64_t i = 0; i < ndim; ++i) {
-        new_shape[i] = HIPKernelAccess::get_impl(input)->shape[dims[i]];
-        new_strides[i] = HIPKernelAccess::get_impl(input)->strides[dims[i]];
+        new_shape[i] = input.shape()[dims[i]];
+        new_strides[i] = input.strides()[dims[i]];
     }
 
-    HIPKernelAccess::get_impl_mutable(result)->shape = std::move(new_shape);
-    HIPKernelAccess::get_impl_mutable(result)->strides = std::move(new_strides);
+    result.mutable_shape() = std::move(new_shape);
+    result.mutable_strides() = std::move(new_strides);
 
     return result;
 }
@@ -230,19 +230,19 @@ auto squeeze_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Ten
 
     if (dim >= 0) {
         // Squeeze specific dimension
-        HIPKernelAccess::get_impl_mutable(result)->shape.erase(
-            HIPKernelAccess::get_impl_mutable(result)->shape.begin() + dim);
-        HIPKernelAccess::get_impl_mutable(result)->strides.erase(
-            HIPKernelAccess::get_impl_mutable(result)->strides.begin() + dim);
+        auto& r_shape = result.mutable_shape();
+        auto& r_strides = result.mutable_strides();
+        r_shape.erase(r_shape.begin() + dim);
+        r_strides.erase(r_strides.begin() + dim);
     } else {
         // Squeeze all dimensions with size 1
         std::vector<int64_t> new_shape;
         std::vector<int64_t> new_strides;
 
         for (int64_t i = 0; i < input.ndim(); ++i) {
-            if (HIPKernelAccess::get_impl(input)->shape[i] != 1) {
-                new_shape.push_back(HIPKernelAccess::get_impl(input)->shape[i]);
-                new_strides.push_back(HIPKernelAccess::get_impl(input)->strides[i]);
+            if (input.shape()[i] != 1) {
+                new_shape.push_back(input.shape()[i]);
+                new_strides.push_back(input.strides()[i]);
             }
         }
 
@@ -251,8 +251,8 @@ auto squeeze_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Ten
             new_strides.push_back(1);
         }
 
-        HIPKernelAccess::get_impl_mutable(result)->shape = std::move(new_shape);
-        HIPKernelAccess::get_impl_mutable(result)->strides = std::move(new_strides);
+        result.mutable_shape() = std::move(new_shape);
+        result.mutable_strides() = std::move(new_strides);
     }
 
     return result;
@@ -266,13 +266,13 @@ auto unsqueeze_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> T
     Tensor result;
     HIPKernelAccess::get_impl_mutable(result) = std::make_shared<TensorImpl>(*HIPKernelAccess::get_impl(input));
 
-    HIPKernelAccess::get_impl_mutable(result)->shape.insert(
-        HIPKernelAccess::get_impl_mutable(result)->shape.begin() + dim, 1);
+    auto& r_shape = result.mutable_shape();
+    auto& r_strides = result.mutable_strides();
+    r_shape.insert(r_shape.begin() + dim, 1);
 
     // Compute stride for new dimension
-    int64_t new_stride = (dim < input.ndim()) ? HIPKernelAccess::get_impl(input)->strides[dim] : 1;
-    HIPKernelAccess::get_impl_mutable(result)->strides.insert(
-        HIPKernelAccess::get_impl_mutable(result)->strides.begin() + dim, new_stride);
+    int64_t new_stride = (dim < input.ndim()) ? input.strides()[dim] : 1;
+    r_strides.insert(r_strides.begin() + dim, new_stride);
 
     return result;
 }

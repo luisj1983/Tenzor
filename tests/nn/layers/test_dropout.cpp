@@ -37,7 +37,7 @@ TEST(DropoutTest, InferenceModeNoModification) {
     ASSERT_EQ(output.tensor().shape()[1], 3);
     ASSERT_EQ(output.tensor().shape()[2], 4);
 
-    auto* out_data = static_cast<float*>(output.tensor().impl()->storage->data());
+    auto* out_data = static_cast<float*>(output.tensor().storage()->data());
     for (size_t i = 0; i < output.tensor().numel(); ++i) {
         EXPECT_FLOAT_EQ(out_data[i], 1.0f);
     }
@@ -53,7 +53,7 @@ TEST(DropoutTest, TrainingModeModifiesOutput) {
     auto output = dropout.forward(input);
 
     // In training mode, some values should be zeroed
-    auto* data = static_cast<float*>(output.tensor().impl()->storage->data());
+    auto* data = static_cast<float*>(output.tensor().storage()->data());
     size_t zero_count = 0;
     size_t non_zero_count = 0;
 
@@ -84,7 +84,7 @@ TEST(DropoutTest, ProbabilityZeroNoDropout) {
     auto output = dropout.forward(input);
 
     // With p=0.0, all values should remain 1.0
-    auto* data = static_cast<float*>(output.tensor().impl()->storage->data());
+    auto* data = static_cast<float*>(output.tensor().storage()->data());
     for (size_t i = 0; i < output.tensor().numel(); ++i) {
         EXPECT_FLOAT_EQ(data[i], 1.0f);
     }
@@ -100,7 +100,7 @@ TEST(DropoutTest, ProbabilityHalf) {
     auto output = dropout.forward(input);
 
     // Count non-zero values
-    auto* data = static_cast<float*>(output.tensor().impl()->storage->data());
+    auto* data = static_cast<float*>(output.tensor().storage()->data());
     size_t non_zero_count = 0;
 
     for (size_t i = 0; i < output.tensor().numel(); ++i) {
@@ -124,7 +124,7 @@ TEST(DropoutTest, ProbabilityNinetyPercent) {
     auto output = dropout.forward(input);
 
     // Count non-zero values
-    auto* data = static_cast<float*>(output.tensor().impl()->storage->data());
+    auto* data = static_cast<float*>(output.tensor().storage()->data());
     size_t non_zero_count = 0;
 
     for (size_t i = 0; i < output.tensor().numel(); ++i) {
@@ -164,7 +164,7 @@ TEST(DropoutTest, InvertedDropoutScaling) {
     auto output = dropout.forward(input);
 
     // Check that non-zero values are scaled by 1/(1-p) = 2.0
-    auto* data = static_cast<float*>(output.tensor().impl()->storage->data());
+    auto* data = static_cast<float*>(output.tensor().storage()->data());
     double sum_non_zero = 0.0;
     size_t non_zero_count = 0;
 
@@ -191,7 +191,7 @@ TEST(DropoutTest, ScalingWithDifferentProbability) {
 
     // Non-zero values should be scaled by 1/(1-0.8) = 5.0
     // Original value 3.0 * 5.0 = 15.0
-    auto* data = static_cast<float*>(output.tensor().impl()->storage->data());
+    auto* data = static_cast<float*>(output.tensor().storage()->data());
     double sum_non_zero = 0.0;
     size_t non_zero_count = 0;
 
@@ -222,7 +222,7 @@ TEST(DropoutTest, BernoulliDistribution) {
 
     auto output = dropout.forward(input);
 
-    auto* data = static_cast<float*>(output.tensor().impl()->storage->data());
+    auto* data = static_cast<float*>(output.tensor().storage()->data());
     size_t kept_count = 0;
     size_t total = output.tensor().numel();
 
@@ -315,7 +315,7 @@ TEST(DropoutTest, BackwardPassGradientValues) {
     auto input_grad = input.grad();
     ASSERT_TRUE(input_grad.has_value());
 
-    auto* grad_data = static_cast<float*>(input_grad->impl()->storage->data());
+    auto* grad_data = static_cast<float*>(input_grad->storage()->data());
     for (size_t i = 0; i < input_grad->numel(); ++i) {
         EXPECT_FLOAT_EQ(grad_data[i], 2.0f);
     }
@@ -394,7 +394,7 @@ TEST(DropoutTest, EdgeCaseSingleElement) {
 
     auto output = dropout.forward(input);
 
-    auto* data = static_cast<float*>(output.tensor().impl()->storage->data());
+    auto* data = static_cast<float*>(output.tensor().storage()->data());
     // Should be either 0 or 2.0 (scaled)
     EXPECT_TRUE(data[0] == 0.0f || std::abs(data[0] - 2.0f) < 0.01f);
 }
@@ -414,8 +414,8 @@ TEST(DropoutTest, ReproducibilityInInferenceMode) {
     auto output2 = dropout.forward(input);
 
     // In eval mode, should be identical
-    auto* data1 = static_cast<float*>(output1.tensor().impl()->storage->data());
-    auto* data2 = static_cast<float*>(output2.tensor().impl()->storage->data());
+    auto* data1 = static_cast<float*>(output1.tensor().storage()->data());
+    auto* data2 = static_cast<float*>(output2.tensor().storage()->data());
 
     for (size_t i = 0; i < output1.tensor().numel(); ++i) {
         EXPECT_FLOAT_EQ(data1[i], data2[i]);
@@ -436,7 +436,7 @@ TEST(Dropout2dTest, InferenceMode) {
     auto output = dropout.forward(input);
 
     ASSERT_EQ(output.tensor().shape().size(), 4);
-    auto* data = static_cast<float*>(output.tensor().impl()->storage->data());
+    auto* data = static_cast<float*>(output.tensor().storage()->data());
     for (size_t i = 0; i < output.tensor().numel(); ++i) {
         EXPECT_FLOAT_EQ(data[i], 1.0f);
     }
@@ -452,7 +452,7 @@ TEST(Dropout2dTest, ChannelWiseDropout) {
     auto output = dropout.forward(input);
 
     // Verify entire channels are uniformly dropped or kept
-    auto* data = static_cast<float*>(output.tensor().impl()->storage->data());
+    auto* data = static_cast<float*>(output.tensor().storage()->data());
 
     for (size_t n = 0; n < 2; ++n) {
         for (size_t c = 0; c < 10; ++c) {
@@ -504,7 +504,7 @@ TEST(DropoutTest, PreservesExpectedValueInTraining) {
 
     auto output = dropout.forward(input);
 
-    auto* data = static_cast<float*>(output.tensor().impl()->storage->data());
+    auto* data = static_cast<float*>(output.tensor().storage()->data());
     double sum = 0.0;
     for (size_t i = 0; i < output.tensor().numel(); ++i) {
         sum += data[i];
@@ -540,8 +540,8 @@ TEST(DropoutTest, ConsecutiveForwardPasses) {
     auto output1 = dropout.forward(input);
     auto output2 = dropout.forward(input);
 
-    auto* data1 = static_cast<float*>(output1.tensor().impl()->storage->data());
-    auto* data2 = static_cast<float*>(output2.tensor().impl()->storage->data());
+    auto* data1 = static_cast<float*>(output1.tensor().storage()->data());
+    auto* data2 = static_cast<float*>(output2.tensor().storage()->data());
 
     // At least some values should differ (with high probability)
     size_t diff_count = 0;

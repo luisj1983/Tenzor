@@ -90,13 +90,21 @@ auto div(const Tensor& a, const Tensor& b) -> Tensor {
 // Scalar arithmetic overloads — avoid creating temporary scalar tensors.
 // Creates a size-{1} scalar tensor once and delegates to the tensor overload,
 // but backends can optimize this path internally.
+// Helper: format scalar with full double precision for OpAttributes
+static auto scalar_to_string(double scalar) -> std::string {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.17g", scalar);
+    return std::string(buf);
+}
+
 auto add(const Tensor& a, double scalar) -> Tensor {
     if (!a.impl()) {
         throw std::runtime_error("Cannot add to uninitialized tensor");
     }
     auto scalar_tensor = full({1}, scalar, a.dtype(), a.device());
     std::vector<Tensor> inputs = {a.is_contiguous() ? a : a.contiguous(), scalar_tensor};
-    return dispatch<OpId::Add>(inputs)[0];
+    OpAttributes attrs{{"scalar_b", scalar_to_string(scalar)}};
+    return dispatch(OpId::Add, inputs, attrs)[0];
 }
 
 auto sub(const Tensor& a, double scalar) -> Tensor {
@@ -105,7 +113,8 @@ auto sub(const Tensor& a, double scalar) -> Tensor {
     }
     auto scalar_tensor = full({1}, scalar, a.dtype(), a.device());
     std::vector<Tensor> inputs = {a.is_contiguous() ? a : a.contiguous(), scalar_tensor};
-    return dispatch<OpId::Sub>(inputs)[0];
+    OpAttributes attrs{{"scalar_b", scalar_to_string(scalar)}};
+    return dispatch(OpId::Sub, inputs, attrs)[0];
 }
 
 auto mul(const Tensor& a, double scalar) -> Tensor {
@@ -114,7 +123,8 @@ auto mul(const Tensor& a, double scalar) -> Tensor {
     }
     auto scalar_tensor = full({1}, scalar, a.dtype(), a.device());
     std::vector<Tensor> inputs = {a.is_contiguous() ? a : a.contiguous(), scalar_tensor};
-    return dispatch<OpId::Mul>(inputs)[0];
+    OpAttributes attrs{{"scalar_b", scalar_to_string(scalar)}};
+    return dispatch(OpId::Mul, inputs, attrs)[0];
 }
 
 auto div(const Tensor& a, double scalar) -> Tensor {
@@ -123,7 +133,8 @@ auto div(const Tensor& a, double scalar) -> Tensor {
     }
     auto scalar_tensor = full({1}, scalar, a.dtype(), a.device());
     std::vector<Tensor> inputs = {a.is_contiguous() ? a : a.contiguous(), scalar_tensor};
-    return dispatch<OpId::Div>(inputs)[0];
+    OpAttributes attrs{{"scalar_b", scalar_to_string(scalar)}};
+    return dispatch(OpId::Div, inputs, attrs)[0];
 }
 
 auto matmul(const Tensor& a, const Tensor& b) -> Tensor {

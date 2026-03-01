@@ -2942,6 +2942,7 @@ PYBIND11_MODULE(tenzor_core, m) {
     // Convolution layers
     py::class_<tenzor::nn::Conv2d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::Conv2d>>(nn, "Conv2d")
+        // Square kernel constructor (int args)
         .def(py::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, bool>(),
              py::arg("in_channels"),
              py::arg("out_channels"),
@@ -2951,20 +2952,36 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("dilation") = 1,
              py::arg("groups") = 1,
              py::arg("bias") = true)
+        // Non-square kernel constructor (tuple args)
+        .def(py::init<int64_t, int64_t,
+                       std::pair<int64_t, int64_t>,
+                       std::pair<int64_t, int64_t>,
+                       std::pair<int64_t, int64_t>,
+                       std::pair<int64_t, int64_t>,
+                       int64_t, bool>(),
+             py::arg("in_channels"),
+             py::arg("out_channels"),
+             py::arg("kernel_size"),
+             py::arg("stride") = std::make_pair<int64_t,int64_t>(1, 1),
+             py::arg("padding") = std::make_pair<int64_t,int64_t>(0, 0),
+             py::arg("dilation") = std::make_pair<int64_t,int64_t>(1, 1),
+             py::arg("groups") = 1,
+             py::arg("bias") = true)
         .def("__repr__", [](const tenzor::nn::Conv2d& self) {
             auto params = const_cast<tenzor::nn::Conv2d&>(self).own_parameters();
-            int64_t in_c = 0, out_c = 0, k = 0;
+            int64_t in_c = 0, out_c = 0, kh = 0, kw = 0;
             if (!params.empty()) {
                 auto shape = params[0]->tensor().shape();
                 if (shape.size() >= 4) {
                     out_c = shape[0];
                     in_c = shape[1];
-                    k = shape[2];
+                    kh = shape[2];
+                    kw = shape[3];
                 }
             }
             bool has_bias = params.size() > 1;
             return "Conv2d(" + std::to_string(in_c) + ", " + std::to_string(out_c) +
-                   ", kernel_size=(" + std::to_string(k) + ", " + std::to_string(k) + ")" +
+                   ", kernel_size=(" + std::to_string(kh) + ", " + std::to_string(kw) + ")" +
                    ", bias=" + (has_bias ? "True" : "False") + ")";
         });
 

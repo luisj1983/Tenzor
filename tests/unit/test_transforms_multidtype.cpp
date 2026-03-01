@@ -142,7 +142,7 @@ TEST_P(TransformMultiDTypeTest, View_SharesStorage) {
     auto t = ones({6}, dtype, device);
     auto viewed = t.view({2, 3});
 
-    EXPECT_EQ(t.impl()->storage, viewed.impl()->storage);
+    EXPECT_EQ(t.storage(), viewed.storage());
 }
 
 // ==============================================================================

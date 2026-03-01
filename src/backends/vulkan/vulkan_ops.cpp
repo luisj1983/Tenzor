@@ -1173,7 +1173,7 @@ auto VulkanBackend::dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor {
 
     // Get VkBuffer handles - for transposed B, we need to access the underlying storage
     VkBuffer buffer_a = getVulkanBuffer(a_contig.data_ptr());
-    void* b_data_ptr = b_is_transposed ? const_cast<void*>(b_for_compute.impl_->storage->data())
+    void* b_data_ptr = b_is_transposed ? const_cast<void*>(b_for_compute.storage()->data())
                                         : b_for_compute.data_ptr();
     VkBuffer buffer_b = getVulkanBuffer(b_data_ptr);
     VkBuffer buffer_c = getVulkanBuffer(output.data_ptr());
@@ -5571,8 +5571,8 @@ auto VulkanBackend::dispatchReshape(const Tensor& input, const std::vector<int64
     // Create new tensor that shares storage (view)
     Tensor result;
     result.impl_ = std::make_shared<TensorImpl>(*input.impl_);
-    result.impl_->shape = new_shape;
-    result.impl_->strides = tenzor::compute_strides(new_shape);
+    result.mutable_shape() = new_shape;
+    result.mutable_strides() = tenzor::compute_strides(new_shape);
 
     return result;
 }
@@ -5910,8 +5910,8 @@ auto VulkanBackend::dispatchSqueeze(const Tensor& input, int64_t dim) -> Tensor 
     // Create result tensor sharing storage (zero-copy metadata-only operation)
     Tensor result;
     result.impl_ = std::make_shared<TensorImpl>(*(input.impl_));
-    result.impl_->shape = std::move(new_shape);
-    result.impl_->strides = std::move(new_strides);
+    result.mutable_shape() = std::move(new_shape);
+    result.mutable_strides() = std::move(new_strides);
 
     return result;
 }
@@ -5952,7 +5952,7 @@ auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
     // For non-contiguous tensors, use GPU kernel to reorder the data
     const int64_t total_elements = input.numel();
     const int64_t ndims = input.ndim();
-    const int64_t base_offset = input.impl_ ? input.impl_->offset : 0;
+    const int64_t base_offset = input.is_valid() ? input.offset() : 0;
 
     // Create new contiguous tensor with same shape, dtype, device
     Tensor result(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
@@ -5978,7 +5978,7 @@ auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
     auto* pipeline = getPipeline(shader_name, device_id);
 
     // Get Vulkan buffers - use base storage pointer for input
-    const void* base_storage_ptr = input.impl_ ? input.impl_->storage->data() : input.data_ptr();
+    const void* base_storage_ptr = input.is_valid() ? input.storage()->data() : input.data_ptr();
     VkBuffer buffer_in = getVulkanBuffer(const_cast<void*>(base_storage_ptr));
     VkBuffer buffer_out = getVulkanBuffer(result.data_ptr());
 

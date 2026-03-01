@@ -24,6 +24,12 @@ namespace tenzor {
  *
  * Used for O(1) dispatch via function pointer table lookup.
  * Unifies the previous jit::OpType with all backend operations.
+ *
+ * Layout: Values are intentionally sparse with range-based allocation per
+ * category (e.g., Arithmetic 0-9, Reductions 11-29, Activations 65-99).
+ * Gaps between ranges allow adding new ops to a category without renumbering.
+ * The dispatch table is sized by OP_COUNT (~380 entries, ~3.5KB/device),
+ * so the memory overhead of gaps is negligible.
  */
 enum class OpId : uint16_t {
     // =========================================================================
@@ -385,6 +391,9 @@ enum class OpId : uint16_t {
 
 /// Compile-time constant for dispatch table sizing
 inline constexpr size_t OP_COUNT = static_cast<size_t>(OpId::OP_COUNT);
+
+/// Guard against runaway enum growth — dispatch tables are stack-allocated in some paths
+static_assert(OP_COUNT <= 1024, "OpId::OP_COUNT exceeds 1024; review sparse layout or increase limit");
 
 /**
  * @brief Convert OpId to string for error messages and debugging.

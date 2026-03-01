@@ -67,7 +67,7 @@ TEST_P(TransformTest, View_SharesStorage) {
     auto viewed = t.view({2, 3});
 
     // Both should share the same storage pointer
-    EXPECT_EQ(t.impl()->storage, viewed.impl()->storage) << "Failed on " << device.to_string();
+    EXPECT_EQ(t.storage(), viewed.storage()) << "Failed on " << device.to_string();
 }
 
 // Transpose tests

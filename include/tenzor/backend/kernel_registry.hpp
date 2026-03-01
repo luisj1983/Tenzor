@@ -97,6 +97,28 @@ inline std::string parse_attr<std::string>(const OpAttributes& attrs, const std:
 }
 
 /**
+ * @brief Parse paired attributes (e.g., stride_h/stride_w), falling back to a single value.
+ *
+ * Checks for "{key}_h" and "{key}_w" first. If both exist, returns them.
+ * Otherwise falls back to single "{key}" value (used for both H and W).
+ *
+ * @param attrs Attribute map
+ * @param key Base attribute name (e.g., "stride")
+ * @param default_val Default value if neither key is found
+ * @return Pair of (H, W) values
+ */
+inline std::pair<int64_t, int64_t> parse_pair_attr(const OpAttributes& attrs, const std::string& key, int64_t default_val = 1) {
+    auto h_it = attrs.find(key + "_h");
+    auto w_it = attrs.find(key + "_w");
+    if (h_it != attrs.end() && w_it != attrs.end()) {
+        return {parse_attr<int64_t>(attrs, key + "_h", default_val),
+                parse_attr<int64_t>(attrs, key + "_w", default_val)};
+    }
+    int64_t val = parse_attr<int64_t>(attrs, key, default_val);
+    return {val, val};
+}
+
+/**
  * @brief Parse comma-separated int64_t values.
  *
  * @param attrs Attribute map

@@ -253,17 +253,17 @@ auto from_data(const T* data, std::vector<int64_t> shape,
     auto tensor = empty(shape, dtype, device);
 
     // Copy data
-    if (tensor.impl() && tensor.impl()->storage) {
+    if (tensor.impl() && tensor.storage()) {
         size_t bytes = tensor.numel() * sizeof(T);
 
         // For CPU device, use memcpy
         if (device.type == Device::Type::CPU) {
-            std::memcpy(tensor.impl()->storage->data(), data, bytes);
+            std::memcpy(tensor.storage()->data(), data, bytes);
         } else {
             // For GPU devices, use backend's copy method
             auto* backend = tenzor::backend_registry().get_backend(device.type);
             if (backend) {
-                backend->copy(tensor.impl()->storage->data(),
+                backend->copy(tensor.storage()->data(),
                              const_cast<T*>(data),
                              bytes,
                              tenzor::CopyKind::HostToDevice);
