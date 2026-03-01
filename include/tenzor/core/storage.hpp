@@ -60,24 +60,20 @@ public:
 
 };
 
-// Forward declaration for backend
-class Backend;
-
 /**
  * @brief Device (GPU) memory storage managed by backend.
  *
  * Manages device-side memory (CUDA, ROCm, OneAPI) through backend
  * abstractions. Memory allocation and deallocation are delegated to
- * the appropriate backend implementation.
+ * the appropriate backend implementation (looked up from the registry).
  *
  * Unlike CPUStorage, this class does not directly manage memory but
  * coordinates with the backend system for proper lifecycle management.
  *
  * @code
- * Backend* backend = get_cuda_backend();
  * void* device_ptr = backend->allocate(1024);
  * auto storage = std::make_unique<DeviceStorage>(
- *     device_ptr, 1024, Device::cuda(0), backend
+ *     device_ptr, 1024, Device::cuda(0)
  * );
  * @endcode
  *
@@ -89,16 +85,14 @@ public:
     /**
      * @brief Construct device storage from existing allocation.
      *
-     * Takes ownership of pre-allocated device memory. The backend
-     * pointer must remain valid for the lifetime of this storage.
+     * Takes ownership of pre-allocated device memory. Deallocation is
+     * handled by looking up the backend from the registry at destruction time.
      *
      * @param device_ptr Pointer to device memory
      * @param size_bytes Size of allocation in bytes
      * @param device Device specification
-     * @param backend Backend managing this memory
      */
-    DeviceStorage(void* device_ptr, size_t size_bytes,
-                  Device device, Backend* backend);
+    DeviceStorage(void* device_ptr, size_t size_bytes, Device device);
 
     /**
      * @brief Destructor frees device memory via backend.
@@ -134,7 +128,6 @@ private:
     void* device_ptr_{nullptr};                   ///< Device memory pointer
     size_t size_{0};                              ///< Size in bytes
     Device device_;                               ///< Device specification
-    Backend* backend_{nullptr};                   ///< Backend managing memory
 };
 
 } // namespace tenzor

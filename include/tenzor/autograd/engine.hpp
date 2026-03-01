@@ -111,7 +111,8 @@ public:
      * @endcode
      */
     auto execute_multi(std::vector<Variable*> roots,
-                      std::vector<Tensor> gradients) -> void;
+                      std::vector<Tensor> gradients,
+                      bool retain_graph = false) -> void;
 
     /**
      * @brief Clear gradient accumulation buffers.
@@ -166,7 +167,7 @@ private:
      * @param func Function to get gradients for
      * @return Vector of accumulated gradient tensors
      */
-    auto get_accumulated_grads(Function* func) -> std::vector<Tensor>;
+    auto get_accumulated_grads(Function* func) -> const std::vector<Tensor>&;
 };
 
 /**

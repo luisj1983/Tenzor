@@ -5,10 +5,8 @@
 namespace tenzor {
 
 // DeviceStorage implementation
-DeviceStorage::DeviceStorage(void* device_ptr, size_t size_bytes,
-                            Device device, Backend* backend)
-    : device_ptr_(device_ptr), size_(size_bytes),
-      device_(device), backend_(backend) {}
+DeviceStorage::DeviceStorage(void* device_ptr, size_t size_bytes, Device device)
+    : device_ptr_(device_ptr), size_(size_bytes), device_(device) {}
 
 DeviceStorage::~DeviceStorage() {
     if (!device_ptr_) {
@@ -38,9 +36,8 @@ DeviceStorage::~DeviceStorage() {
 
 DeviceStorage::DeviceStorage(DeviceStorage&& other) noexcept
     : device_ptr_(other.device_ptr_), size_(other.size_),
-      device_(other.device_), backend_(other.backend_) {
+      device_(other.device_) {
     other.device_ptr_ = nullptr;
-    other.backend_ = nullptr;
 }
 
 DeviceStorage& DeviceStorage::operator=(DeviceStorage&& other) noexcept {
@@ -55,9 +52,7 @@ DeviceStorage& DeviceStorage::operator=(DeviceStorage&& other) noexcept {
         device_ptr_ = other.device_ptr_;
         size_ = other.size_;
         device_ = other.device_;
-        backend_ = other.backend_;
         other.device_ptr_ = nullptr;
-        other.backend_ = nullptr;
     }
     return *this;
 }

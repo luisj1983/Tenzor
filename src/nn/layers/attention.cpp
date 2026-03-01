@@ -64,6 +64,16 @@ MultiheadAttention::MultiheadAttention(int64_t embed_dim,
             "dropout probability must be in [0, 1]. Got " + std::to_string(dropout_));
     }
 
+    if (add_bias_kv) {
+        throw std::runtime_error(
+            "MultiheadAttention: add_bias_kv=true not implemented");
+    }
+
+    if (add_zero_attn) {
+        throw std::runtime_error(
+            "MultiheadAttention: add_zero_attn=true not implemented");
+    }
+
     head_dim_ = embed_dim_ / num_heads_;
 
     // Create projection layers

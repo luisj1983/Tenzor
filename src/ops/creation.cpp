@@ -495,8 +495,8 @@ auto randint(int64_t low, int64_t high, std::vector<int64_t> shape, DType dtype,
     return device.type != Device::Type::CPU ? tensor.to(device) : tensor;
 }
 
-auto arange(float start, float end, float step, DType dtype, Device device) -> Tensor {
-    if (step == 0.0f) {
+auto arange(double start, double end, double step, DType dtype, Device device) -> Tensor {
+    if (step == 0.0) {
         throw std::invalid_argument("step cannot be zero");
     }
     if ((step > 0 && start >= end) || (step < 0 && start <= end)) {
@@ -506,9 +506,13 @@ auto arange(float start, float end, float step, DType dtype, Device device) -> T
     // Use OpId dispatch for non-CPU devices
     if (device.type != Device::Type::CPU) {
         OpAttributes attrs;
-        attrs["start"] = std::to_string(start);
-        attrs["end"] = std::to_string(end);
-        attrs["step"] = std::to_string(step);
+        std::ostringstream oss_s, oss_e, oss_st;
+        oss_s << std::scientific << std::setprecision(std::numeric_limits<double>::max_digits10) << start;
+        oss_e << std::scientific << std::setprecision(std::numeric_limits<double>::max_digits10) << end;
+        oss_st << std::scientific << std::setprecision(std::numeric_limits<double>::max_digits10) << step;
+        attrs["start"] = oss_s.str();
+        attrs["end"] = oss_e.str();
+        attrs["step"] = oss_st.str();
         attrs["dtype"] = dtype_to_string(dtype);
         attrs["device_id"] = std::to_string(device.index);
 
@@ -525,62 +529,47 @@ auto arange(float start, float end, float step, DType dtype, Device device) -> T
 
     void* data = tensor.impl()->storage->data();
 
-    // Fill with range values based on dtype
+    // Fill with range values using start + i * step to avoid accumulation drift
     switch (dtype) {
         case DType::Float32: {
             float* ptr = static_cast<float*>(data);
-            float value = start;
             for (int64_t i = 0; i < numel; ++i) {
-                ptr[i] = value;
-                value += step;
+                ptr[i] = static_cast<float>(start + i * step);
             }
             break;
         }
         case DType::Float64: {
             double* ptr = static_cast<double*>(data);
-            double value = start;
             for (int64_t i = 0; i < numel; ++i) {
-                ptr[i] = value;
-                value += step;
+                ptr[i] = start + i * step;
             }
             break;
         }
         case DType::Int32: {
             int32_t* ptr = static_cast<int32_t*>(data);
-            int32_t value = static_cast<int32_t>(start);
-            int32_t step_int = static_cast<int32_t>(step);
             for (int64_t i = 0; i < numel; ++i) {
-                ptr[i] = value;
-                value += step_int;
+                ptr[i] = static_cast<int32_t>(start + i * step);
             }
             break;
         }
         case DType::Int64: {
             int64_t* ptr = static_cast<int64_t*>(data);
-            int64_t value = static_cast<int64_t>(start);
-            int64_t step_int = static_cast<int64_t>(step);
             for (int64_t i = 0; i < numel; ++i) {
-                ptr[i] = value;
-                value += step_int;
+                ptr[i] = static_cast<int64_t>(start + i * step);
             }
             break;
         }
         case DType::Float16: {
             Float16* ptr = static_cast<Float16*>(data);
-            float value = start;
             for (int64_t i = 0; i < numel; ++i) {
-                ptr[i] = Float16(value);
-                value += step;
+                ptr[i] = Float16(static_cast<float>(start + i * step));
             }
             break;
         }
         case DType::Int8: {
             int8_t* ptr = static_cast<int8_t*>(data);
-            int8_t value = static_cast<int8_t>(start);
-            int8_t step_int = static_cast<int8_t>(step);
             for (int64_t i = 0; i < numel; ++i) {
-                ptr[i] = value;
-                value += step_int;
+                ptr[i] = static_cast<int8_t>(start + i * step);
             }
             break;
         }

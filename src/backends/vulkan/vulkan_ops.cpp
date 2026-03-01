@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -1461,86 +1462,15 @@ auto VulkanBackend::dispatchDot(const Tensor& a, const Tensor& b) -> Tensor {
 }
 
 auto VulkanBackend::dispatchConv2d(const Tensor& input, const Tensor& weight,
-                                   const Tensor* bias, int64_t stride,
-                                   int64_t padding, int64_t dilation,
-                                   int64_t groups) -> Tensor {
-    // Get input/weight dimensions
-    // input: [batch, in_channels, in_height, in_width]
-    // weight: [out_channels, in_channels/groups, kernel_h, kernel_w]
-    auto input_shape = input.shape();
-    auto weight_shape = weight.shape();
-
-    int64_t batch = input_shape[0];
-    int64_t in_channels = input_shape[1];
-    int64_t in_height = input_shape[2];
-    int64_t in_width = input_shape[3];
-
-    int64_t out_channels = weight_shape[0];
-    int64_t kernel_h = weight_shape[2];
-    int64_t kernel_w = weight_shape[3];
-
-    // Calculate output dimensions
-    int64_t out_height = (in_height + 2*padding - dilation*(kernel_h-1) - 1) / stride + 1;
-    int64_t out_width = (in_width + 2*padding - dilation*(kernel_w-1) - 1) / stride + 1;
-
-    int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("conv2d", device_id);
-
-    // Create output tensor
-    std::vector<int64_t> out_shape = {batch, out_channels, out_height, out_width};
-    Tensor output(out_shape, input.dtype(), input.device());
-
-    // Create command buffer
-    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
-    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-
-    // Set push constants for conv2d parameters
-    struct PushConstants {
-        uint32_t batch;
-        uint32_t in_channels;
-        uint32_t in_height;
-        uint32_t in_width;
-        uint32_t out_channels;
-        uint32_t out_height;
-        uint32_t out_width;
-        uint32_t kernel_h;
-        uint32_t kernel_w;
-        uint32_t stride;
-        uint32_t padding;
-        uint32_t dilation;
-        uint32_t has_bias;
-    } push_constants;
-
-    push_constants.batch = static_cast<uint32_t>(batch);
-    push_constants.in_channels = static_cast<uint32_t>(in_channels);
-    push_constants.in_height = static_cast<uint32_t>(in_height);
-    push_constants.in_width = static_cast<uint32_t>(in_width);
-    push_constants.out_channels = static_cast<uint32_t>(out_channels);
-    push_constants.out_height = static_cast<uint32_t>(out_height);
-    push_constants.out_width = static_cast<uint32_t>(out_width);
-    push_constants.kernel_h = static_cast<uint32_t>(kernel_h);
-    push_constants.kernel_w = static_cast<uint32_t>(kernel_w);
-    push_constants.stride = static_cast<uint32_t>(stride);
-    push_constants.padding = static_cast<uint32_t>(padding);
-    push_constants.dilation = static_cast<uint32_t>(dilation);
-    push_constants.has_bias = bias ? 1 : 0;
-
-    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
-                      VK_SHADER_STAGE_COMPUTE_BIT,
-                      0, sizeof(PushConstants), &push_constants);
-
-    // Dispatch workgroups (16x16 threads per workgroup as defined in shader)
-    uint32_t workgroups_x = (out_width + 15) / 16;
-    uint32_t workgroups_y = (out_height + 15) / 16;
-    uint32_t workgroups_z = out_channels;
-    vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, workgroups_z);
-
-    // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
-
-    endSingleTimeCommands(cmdBuffer, device_id);
-
-    return output;
+                                   const Tensor* /*bias*/, int64_t /*stride*/,
+                                   int64_t /*padding*/, int64_t /*dilation*/,
+                                   int64_t /*groups*/) -> Tensor {
+    // DEPRECATED: This legacy method had missing descriptor set bindings (the
+    // shader never received input/output buffers).  All callers should use
+    // dispatchConv2dForward() which is routed via the kernel registry.
+    (void)input; (void)weight;
+    throw std::runtime_error(
+        "dispatchConv2d is deprecated — use dispatchConv2dForward via OpId dispatch");
 }
 
 /**
@@ -3654,8 +3584,30 @@ auto VulkanBackend::dispatchEmbeddingBackward(const Tensor& grad_output, const T
         return result_f32.to(orig_dtype);
     }
 
-    bool is_float64 = (grad_output.dtype() == DType::Float64);
-    std::string shader_name = is_float64 ? "embedding_backward_f64" : "embedding_backward";
+    // For Float64, fall back to CPU scatter-add. Vulkan has no atomic Float64 support
+    // (GL_EXT_shader_atomic_int64 is not widely available), so the GPU shader does a
+    // non-atomic +=, producing incorrect gradients when duplicate indices exist.
+    if (grad_output.dtype() == DType::Float64) {
+        auto go_cpu = grad_output.to(Device(Device::Type::CPU, 0));
+        auto idx_cpu = indices.to(Device(Device::Type::CPU, 0));
+        Tensor grad_weight_cpu = Tensor({num_embeddings, embedding_dim}, DType::Float64,
+                                         Device(Device::Type::CPU, 0));
+        auto* gw_ptr = grad_weight_cpu.data<double>();
+        std::memset(gw_ptr, 0, num_embeddings * embedding_dim * sizeof(double));
+        const auto* go_ptr = go_cpu.data<double>();
+        const auto* idx_ptr = idx_cpu.data<int32_t>();
+        for (int64_t i = 0; i < num_indices; ++i) {
+            int64_t row = static_cast<int64_t>(idx_ptr[i]);
+            if (row >= 0 && row < num_embeddings) {
+                for (int64_t d = 0; d < embedding_dim; ++d) {
+                    gw_ptr[row * embedding_dim + d] += go_ptr[i * embedding_dim + d];
+                }
+            }
+        }
+        return grad_weight_cpu.to(grad_output.device());
+    }
+
+    std::string shader_name = "embedding_backward";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     // Output: grad_weight of shape [num_embeddings, embedding_dim], initialized to zero
@@ -4373,22 +4325,70 @@ auto VulkanBackend::dispatchLogSoftmax(const Tensor& input, int64_t dim) -> Tens
 auto VulkanBackend::dispatchCrossEntropy(const Tensor& log_probs, const Tensor& targets,
                                          int64_t reduction) -> Tensor {
     int32_t device_id = log_probs.device().index;
-    auto* pipeline = getPipeline("cross_entropy", device_id);
+
+    // Select shader based on dtype
+    bool is_float64 = (log_probs.dtype() == DType::Float64);
+    std::string shader_name = is_float64 ? "cross_entropy_f64" : "cross_entropy";
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    auto log_probs_shape = log_probs.shape();
+    int64_t batch_size = log_probs_shape[0];
+    int64_t num_classes = log_probs_shape[1];
 
     std::vector<int64_t> out_shape;
     if (reduction == 0) { // none
-        auto target_shape = targets.shape();
-        out_shape = std::vector<int64_t>(target_shape.begin(), target_shape.end());
+        out_shape = {batch_size};
     } else { // mean or sum
         out_shape = {1};
     }
 
     Tensor output(out_shape, log_probs.dtype(), log_probs.device());
 
+    // Get VkBuffer handles
+    VkBuffer buffer_log_probs = getVulkanBuffer(log_probs.data_ptr());
+    VkBuffer buffer_targets = getVulkanBuffer(targets.data_ptr());
+    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
+
+    // Calculate buffer sizes
+    size_t size_log_probs = log_probs.numel() * log_probs.dtype_size();
+    size_t size_targets = targets.numel() * dtype_size(targets.dtype());
+    size_t size_output = output.numel() * output.dtype_size();
+
+    // Bind buffers (binding 0: log_probs, 1: targets, 2: output)
+    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        {0, buffer_log_probs},
+        {1, buffer_targets},
+        {2, buffer_output}
+    };
+    std::vector<size_t> sizes = {size_log_probs, size_targets, size_output};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
 
-    uint32_t workgroups = (targets.numel() + 255) / 256;
+    // Bind descriptor sets
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+
+    // Set push constants
+    struct {
+        uint32_t batch_size;
+        uint32_t num_classes;
+        uint32_t reduction;  // 0=none, 1=mean, 2=sum
+    } pushConstants;
+
+    pushConstants.batch_size = static_cast<uint32_t>(batch_size);
+    pushConstants.num_classes = static_cast<uint32_t>(num_classes);
+    pushConstants.reduction = static_cast<uint32_t>(reduction);
+
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+
+    // Dispatch one workgroup per batch element
+    uint32_t workgroups = static_cast<uint32_t>(batch_size);
+    if (workgroups == 0) workgroups = 1;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -5737,8 +5737,9 @@ auto VulkanBackend::dispatchPermute(const Tensor& input, const std::vector<int64
     // Allocate temporary device buffers for metadata
     size_t metadata_size = ndim * sizeof(int32_t);
 
-    // Create staging buffer to upload metadata
-    auto& staging = getStagingBuffer(device_id, metadata_size * 3);
+    // Acquire staging buffer from pool to upload metadata
+    size_t staging_idx = acquireStagingBuffer(device_id, metadata_size * 3);
+    auto& staging = stagingPools_[device_id].buffers[staging_idx];
 
     // Map and copy all metadata
     void* mapped = staging.buffer->map();
@@ -5786,14 +5787,15 @@ auto VulkanBackend::dispatchPermute(const Tensor& input, const std::vector<int64
 
     endSingleTimeCommands(copyCmd, device_id);
 
-    // CRITICAL: With batching enabled, force submit now to ensure staging buffer
+    // With batching enabled, force submit now to ensure staging buffer
     // content is copied to device buffers before staging buffer can be reused.
-    // The staging buffer is shared and may be overwritten by any other operation
-    // that uses getStagingBuffer() before our batch is submitted.
     if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
         submitBatchIfNeeded(device_id, true);  // Force submit the copy commands
         ensurePendingWorkComplete(device_id);   // Wait for copies to complete
     }
+
+    // Release staging buffer back to pool for reuse
+    releaseStagingBuffer(device_id, staging_idx);
 
     // Set up descriptor set with all buffers
     std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
@@ -7935,15 +7937,19 @@ auto VulkanBackend::dispatchMaxPool2dBackwardWithIndices(const Tensor& grad_outp
 // Conv2d Forward Operation (OpAttributes version)
 // ============================================================================
 
-auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& weight, const OpAttributes& attrs) -> Tensor {
+auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& weight, const Tensor* bias, const OpAttributes& attrs) -> Tensor {
     // For Float16, upcast to Float32 to avoid overflow in accumulation
     // (conv2d sums over kernel*channels elements, result can exceed F16 max 65504)
     if (input.dtype() == DType::Float16) {
         auto input_f32 = input.to(DType::Float32);
         auto weight_f32 = weight.to(DType::Float32);
-        // Pass through bias handling - attrs may reference a bias tensor
-        // that also needs conversion, handled by the F32 path
-        auto result_f32 = dispatchConv2dForward(input_f32, weight_f32, attrs);
+        std::optional<Tensor> bias_f32;
+        const Tensor* bias_f32_ptr = nullptr;
+        if (bias) {
+            bias_f32 = bias->to(DType::Float32);
+            bias_f32_ptr = &*bias_f32;
+        }
+        auto result_f32 = dispatchConv2dForward(input_f32, weight_f32, bias_f32_ptr, attrs);
         // Saturating conversion: clamp to Float16 representable range to prevent
         // Inf/NaN from overflow when converting back to Float16
         result_f32 = dispatchClamp(result_f32, -65504.0f, 65504.0f);
@@ -7965,7 +7971,7 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
     int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
     int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
     int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
-    bool has_bias = attrs.contains("bias") && attrs.at("bias") == "true";
+    bool has_bias = (bias != nullptr);
 
     int64_t batch = input_shape[0];
     int64_t in_channels = input_shape[1];
@@ -7999,34 +8005,27 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
     VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
     VkBuffer buffer_weight = getVulkanBuffer(weight.data_ptr());
     VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
+    VkBuffer buffer_bias = has_bias ? getVulkanBuffer(bias->data_ptr()) : buffer_output;
 
     // Calculate buffer sizes
     size_t buffer_size_input = input.numel() * input.dtype_size();
     size_t buffer_size_weight = weight.numel() * weight.dtype_size();
     size_t buffer_size_output = output.numel() * output.dtype_size();
+    size_t buffer_size_bias = has_bias ? (bias->numel() * bias->dtype_size()) : 4;
 
     // Setup descriptor set bindings (input, weight, bias, output)
-    // Note: bias buffer is optional but we need 4 bindings
     std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
         {0, buffer_input},
         {1, buffer_weight},
-        {2, buffer_output},  // Bias will be at binding 2 if present, otherwise dummy
-        {3, buffer_output}   // Output at binding 3
+        {2, buffer_bias},
+        {3, buffer_output}
     };
     std::vector<size_t> sizes = {
         buffer_size_input,
         buffer_size_weight,
-        size_t(4),  // Dummy size for bias if not present
+        buffer_size_bias,
         buffer_size_output
     };
-
-    // If bias is present, update binding 2
-    if (has_bias) {
-        // Bias is typically passed as an additional input tensor
-        // For now, we'll create a dummy bias buffer
-        // TODO: Extract bias from inputs if available
-        bindings[2] = {2, buffer_output};  // Use output buffer as dummy for now
-    }
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
         device_id, pipeline, bindings, sizes);

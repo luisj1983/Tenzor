@@ -1,6 +1,11 @@
 /**
  * @file vulkan_memory.cpp
  * @brief Vulkan backend memory management: allocate, deallocate, copy, staging buffers
+ *
+ * Performance optimizations:
+ * - Per-device mutexes instead of global lock (9C)
+ * - Deferred free list to avoid GPU sync on deallocate (9B)
+ * - Staging buffer pool for concurrent H2D/D2H transfers (9D)
  */
 
 #include "vulkan_helpers.hpp"
@@ -11,9 +16,61 @@
 
 namespace tenzor {
 
+// ---------------------------------------------------------------------------
+// Staging buffer pool implementation (9D)
+// ---------------------------------------------------------------------------
+
+size_t VulkanBackend::StagingBufferPool::acquire(
+        int32_t /*device_id*/, size_t size, const DeviceContext& ctx) {
+    std::lock_guard<std::mutex> lock(*mutex);
+
+    // Try to find an existing buffer that is not in use and large enough
+    for (size_t i = 0; i < buffers.size(); ++i) {
+        if (!buffers[i].in_use && buffers[i].buffer && buffers[i].size >= size) {
+            buffers[i].in_use = true;
+            return i;
+        }
+    }
+
+    // Try to find a slot that is not in use but needs resizing (or is empty)
+    for (size_t i = 0; i < buffers.size(); ++i) {
+        if (!buffers[i].in_use) {
+            buffers[i].buffer = std::make_unique<vulkan::VulkanBuffer>(
+                ctx.device, ctx.physicalDevice, size,
+                VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+            );
+            buffers[i].size = size;
+            buffers[i].in_use = true;
+            return i;
+        }
+    }
+
+    // All slots are in use -- create a new one
+    size_t idx = buffers.size();
+    auto& sb = buffers.emplace_back();
+    sb.buffer = std::make_unique<vulkan::VulkanBuffer>(
+        ctx.device, ctx.physicalDevice, size,
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+    );
+    sb.size = size;
+    sb.in_use = true;
+    return idx;
+}
+
+void VulkanBackend::StagingBufferPool::release(size_t index) {
+    std::lock_guard<std::mutex> lock(*mutex);
+    if (index < buffers.size()) {
+        buffers[index].in_use = false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Allocate / Deallocate (9B deferred frees, 9C per-device mutexes)
+// ---------------------------------------------------------------------------
+
 auto VulkanBackend::allocate(size_t bytes, int32_t device_id) -> void* {
-    // Use global mutex here because allocations_ map is shared across devices.
-    std::lock_guard<std::recursive_mutex> lock(dispatch_mutex_);
     // Allocate minimum 4 bytes for all requests. This ensures:
     // 1. Empty tensors always have valid, tracked Vulkan buffers (no null data_ptr crashes)
     // 2. Float16 tensors with odd element counts have enough space for uint32 shader access
@@ -25,8 +82,15 @@ auto VulkanBackend::allocate(size_t bytes, int32_t device_id) -> void* {
         throw std::invalid_argument("Invalid device ID");
     }
 
+    // Lock only the target device for the actual Vulkan allocation
+    std::lock_guard<std::recursive_mutex> dev_lock(devices_[device_id].mutex);
     void* ptr = allocateDeviceMemory(alloc_bytes, device_id);
-    allocations_[ptr] = {alloc_bytes, device_id};
+
+    // Lock the allocations map briefly to insert the tracking entry
+    {
+        std::lock_guard<std::mutex> alloc_lock(allocations_mutex_);
+        allocations_[ptr] = {alloc_bytes, device_id};
+    }
     return ptr;
 }
 
@@ -49,25 +113,37 @@ void* VulkanBackend::allocateDeviceMemory(size_t bytes, int32_t device_id) {
 }
 
 auto VulkanBackend::deallocate(void* ptr) -> void {
-    std::lock_guard<std::recursive_mutex> lock(dispatch_mutex_);
     if (ptr == nullptr) {
         return;
     }
 
-    auto it = allocations_.find(ptr);
-    if (it != allocations_.end()) {
-        auto [bytes, device_id] = it->second;
-        // CRITICAL: When batching is enabled, the buffer may be referenced by
-        // a command buffer that hasn't been submitted yet. We must force-submit
-        // the batch and wait for it to complete before freeing the buffer.
-        if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
-            submitBatchIfNeeded(device_id, true);  // Force submit any pending batch
+    // Look up the allocation under the allocations lock, then remove it.
+    size_t bytes = 0;
+    int32_t device_id = -1;
+    {
+        std::lock_guard<std::mutex> alloc_lock(allocations_mutex_);
+        auto it = allocations_.find(ptr);
+        if (it == allocations_.end()) {
+            return;  // Unknown pointer -- nothing to do
         }
-        // Ensure any pending async GPU work completes before freeing memory
-        ensurePendingWorkComplete(device_id);
-        freeDeviceMemory(ptr, device_id);
+        bytes = it->second.first;
+        device_id = it->second.second;
         allocations_.erase(it);
     }
+
+    // Instead of force-syncing the GPU (which drains the pipeline), defer the
+    // actual free until the next synchronize() call for this device.
+    std::lock_guard<std::recursive_mutex> dev_lock(devices_[device_id].mutex);
+
+    // If batching is enabled, force-submit the current batch so the buffer is
+    // no longer referenced by an un-submitted command buffer. This is cheap
+    // compared to a full device wait.
+    if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
+        submitBatchIfNeeded(device_id, true);
+    }
+
+    // Add to deferred free list -- actual vkFreeMemory happens at synchronize()
+    deferred_frees_[device_id].push_back({ptr, bytes, device_id});
 }
 
 void VulkanBackend::freeDeviceMemory(void* ptr, int32_t device_id) {
@@ -75,9 +151,22 @@ void VulkanBackend::freeDeviceMemory(void* ptr, int32_t device_id) {
     backend::VulkanCachingAllocator::get().free(ptr, device_id);
 }
 
+void VulkanBackend::flush_deferred_frees(int32_t device_id) {
+    // Called from synchronize() after all GPU work is guaranteed complete.
+    // The caller already holds devices_[device_id].mutex.
+    auto& frees = deferred_frees_[device_id];
+    for (auto& entry : frees) {
+        freeDeviceMemory(entry.ptr, entry.device_id);
+    }
+    frees.clear();
+}
+
+// ---------------------------------------------------------------------------
+// Copy with staging buffer pool (9D)
+// ---------------------------------------------------------------------------
+
 auto VulkanBackend::copy(void* dst, const void* src, size_t bytes,
                         CopyKind kind) -> void {
-    std::lock_guard<std::recursive_mutex> lock(dispatch_mutex_);
     if (bytes == 0) {
         return;
     }
@@ -85,9 +174,15 @@ auto VulkanBackend::copy(void* dst, const void* src, size_t bytes,
     // Determine device ID from allocations
     int32_t device_id = 0;
 
+    // Lock per-device mutex for GPU command submission
+    std::lock_guard<std::recursive_mutex> dev_lock(devices_[device_id].mutex);
+
     switch (kind) {
         case CopyKind::HostToDevice: {
-            auto& staging = getStagingBuffer(device_id, bytes);
+            size_t staging_idx = acquireStagingBuffer(device_id, bytes);
+            auto& pool = stagingPools_[device_id];
+            auto& staging = pool.buffers[staging_idx];
+
             void* mapped = staging.buffer->map();
             std::memcpy(mapped, src, bytes);
             staging.buffer->unmap();
@@ -105,14 +200,14 @@ auto VulkanBackend::copy(void* dst, const void* src, size_t bytes,
             insertTransferToComputeBarrier(cmdBuffer);
             endSingleTimeCommands(cmdBuffer, device_id);
 
-            // CRITICAL: With batching enabled, force submit now to ensure staging buffer
+            // With batching enabled, force submit now to ensure staging buffer
             // content is copied to device before staging buffer can be reused.
-            // Without this, a subsequent HostToDevice copy could overwrite staging buffer
-            // before our copy command is actually submitted.
             if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
                 submitBatchIfNeeded(device_id, true);  // Force submit
                 ensurePendingWorkComplete(device_id);   // Wait for copy to complete
             }
+
+            releaseStagingBuffer(device_id, staging_idx);
             break;
         }
         case CopyKind::DeviceToHost: {
@@ -123,7 +218,9 @@ auto VulkanBackend::copy(void* dst, const void* src, size_t bytes,
             // Ensure any pending GPU compute work is complete before copying
             ensurePendingWorkComplete(device_id);
 
-            auto& staging = getStagingBuffer(device_id, bytes);
+            size_t staging_idx = acquireStagingBuffer(device_id, bytes);
+            auto& pool = stagingPools_[device_id];
+            auto& staging = pool.buffers[staging_idx];
 
             // Copy from device to staging - MUST use immediate execution, not batching
             // because we need the data available right after this call
@@ -143,6 +240,8 @@ auto VulkanBackend::copy(void* dst, const void* src, size_t bytes,
             void* mapped = staging.buffer->map();
             std::memcpy(dst, mapped, bytes);
             staging.buffer->unmap();
+
+            releaseStagingBuffer(device_id, staging_idx);
             break;
         }
         case CopyKind::DeviceToDevice: {
@@ -167,20 +266,16 @@ auto VulkanBackend::copy(void* dst, const void* src, size_t bytes,
     }
 }
 
-VulkanBackend::StagingBuffer& VulkanBackend::getStagingBuffer(int32_t device_id, size_t size) {
-    auto& staging = stagingBuffers_[device_id];
+// ---------------------------------------------------------------------------
+// Staging buffer pool helpers
+// ---------------------------------------------------------------------------
 
-    if (!staging.buffer || staging.size < size) {
-        auto& ctx = devices_[device_id];
-        staging.buffer = std::make_unique<vulkan::VulkanBuffer>(
-            ctx.device, ctx.physicalDevice, size,
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-        );
-        staging.size = size;
-    }
+size_t VulkanBackend::acquireStagingBuffer(int32_t device_id, size_t size) {
+    return stagingPools_[device_id].acquire(device_id, size, devices_[device_id]);
+}
 
-    return staging;
+void VulkanBackend::releaseStagingBuffer(int32_t device_id, size_t index) {
+    stagingPools_[device_id].release(index);
 }
 
 } // namespace tenzor

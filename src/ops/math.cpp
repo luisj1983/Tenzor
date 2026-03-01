@@ -130,10 +130,25 @@ auto matmul(const Tensor& a, const Tensor& b) -> Tensor {
     // Auto-promote dtypes if mismatched
     auto [ap, bp] = promote_inputs(a, b);
     // Handle batched matrix multiplication (3D+ tensors)
-    if (ap.shape().size() >= 3 && bp.shape().size() >= 3) {
-        return bmm(ap, bp);
+    if (ap.shape().size() >= 3 || bp.shape().size() >= 3) {
+        // Broadcast 2D input to 3D for mixed 2D/3D case
+        auto ac = ap.is_contiguous() ? ap : ap.contiguous();
+        auto bc = bp.is_contiguous() ? bp : bp.contiguous();
+        if (ac.shape().size() == 2 && bc.shape().size() >= 3) {
+            ac = expand(ac.unsqueeze(0), {bc.shape()[0], ac.shape()[0], ac.shape()[1]});
+            auto result = bmm(ac, bc);
+            return result;
+        }
+        if (bc.shape().size() == 2 && ac.shape().size() >= 3) {
+            bc = expand(bc.unsqueeze(0), {ac.shape()[0], bc.shape()[0], bc.shape()[1]});
+            auto result = bmm(ac, bc);
+            return result;
+        }
+        return bmm(ac, bc);
     }
-    std::array<Tensor, 2> inputs = {ap, bp};
+    auto ac = ap.is_contiguous() ? ap : ap.contiguous();
+    auto bc = bp.is_contiguous() ? bp : bp.contiguous();
+    std::array<Tensor, 2> inputs = {ac, bc};
     return dispatch_single<OpId::MatMul>(inputs);
 }
 
@@ -159,13 +174,17 @@ auto bmm(const Tensor& a, const Tensor& b) -> Tensor {
             std::to_string(bp.shape()[2]) + "]");
     }
 
-    std::array<Tensor, 2> inputs = {ap, bp};
+    auto ac = ap.is_contiguous() ? ap : ap.contiguous();
+    auto bc = bp.is_contiguous() ? bp : bp.contiguous();
+    std::array<Tensor, 2> inputs = {ac, bc};
     return dispatch_single<OpId::Bmm>(inputs);
 }
 
 auto dot(const Tensor& a, const Tensor& b) -> Tensor {
     auto [ap, bp] = promote_inputs(a, b);
-    std::vector<Tensor> inputs = {ap, bp};
+    auto ac = ap.is_contiguous() ? ap : ap.contiguous();
+    auto bc = bp.is_contiguous() ? bp : bp.contiguous();
+    std::vector<Tensor> inputs = {ac, bc};
     return dispatch<OpId::Dot>(inputs)[0];
 }
 
@@ -541,12 +560,18 @@ auto lerp(const Tensor& start, const Tensor& end, double weight) -> Tensor {
 }
 
 auto logical_and(const Tensor& a, const Tensor& b) -> Tensor {
-    std::vector<Tensor> inputs = {a, b};
+    validate_broadcast_shapes("logical_and", a.shape(), b.shape());
+    auto ac = a.is_contiguous() ? a : a.contiguous();
+    auto bc = b.is_contiguous() ? b : b.contiguous();
+    std::vector<Tensor> inputs = {ac, bc};
     return dispatch(OpId::LogicalAnd, inputs)[0];
 }
 
 auto logical_or(const Tensor& a, const Tensor& b) -> Tensor {
-    std::vector<Tensor> inputs = {a, b};
+    validate_broadcast_shapes("logical_or", a.shape(), b.shape());
+    auto ac = a.is_contiguous() ? a : a.contiguous();
+    auto bc = b.is_contiguous() ? b : b.contiguous();
+    std::vector<Tensor> inputs = {ac, bc};
     return dispatch(OpId::LogicalOr, inputs)[0];
 }
 
@@ -556,7 +581,10 @@ auto logical_not(const Tensor& input) -> Tensor {
 }
 
 auto logical_xor(const Tensor& a, const Tensor& b) -> Tensor {
-    std::vector<Tensor> inputs = {a, b};
+    validate_broadcast_shapes("logical_xor", a.shape(), b.shape());
+    auto ac = a.is_contiguous() ? a : a.contiguous();
+    auto bc = b.is_contiguous() ? b : b.contiguous();
+    std::vector<Tensor> inputs = {ac, bc};
     return dispatch(OpId::LogicalXor, inputs)[0];
 }
 

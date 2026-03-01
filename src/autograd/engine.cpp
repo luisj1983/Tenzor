@@ -139,6 +139,10 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
         }
     };
 
+    // Seed root gradient into accumulator so the root function is handled
+    // uniformly — no fragile "empty accumulators = root" assumption.
+    accumulate_grad(root.grad_fn().get(), root.grad().value());
+
     try {
         // Execute backward in reverse topological order
         for (auto it = sorted.rbegin(); it != sorted.rend(); ++it) {
@@ -152,25 +156,24 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
             // Get the gradient for this function's output
             std::vector<Tensor> grad_outputs;
 
-            // The gradient comes from the accumulated gradients
-            auto accum_grads = get_accumulated_grads(function.get());
+            const auto& accum_grads = get_accumulated_grads(function.get());
             if (accum_grads.empty()) {
-                // This is the root function, use the root gradient
-                grad_outputs.push_back(root.grad().value());
-            } else {
-                // Sum all accumulated gradients with dtype promotion
-                Tensor total_grad = accum_grads[0];
-                for (size_t i = 1; i < accum_grads.size(); ++i) {
-                    if (accum_grads[i].dtype() != total_grad.dtype()) {
-                        DType target = (dtype_precedence(accum_grads[i].dtype()) >= dtype_precedence(total_grad.dtype()))
-                            ? accum_grads[i].dtype() : total_grad.dtype();
-                        total_grad = total_grad.to(target);
-                        accum_grads[i] = accum_grads[i].to(target);
-                    }
-                    total_grad = total_grad + accum_grads[i];
-                }
-                grad_outputs.push_back(total_grad);
+                continue;  // No gradient flows to this function
             }
+
+            // Sum all accumulated gradients with dtype promotion
+            Tensor total_grad = accum_grads[0];
+            for (size_t i = 1; i < accum_grads.size(); ++i) {
+                Tensor gi = accum_grads[i];
+                if (gi.dtype() != total_grad.dtype()) {
+                    DType target = (dtype_precedence(gi.dtype()) >= dtype_precedence(total_grad.dtype()))
+                        ? gi.dtype() : total_grad.dtype();
+                    total_grad = total_grad.to(target);
+                    gi = gi.to(target);
+                }
+                total_grad = total_grad + gi;
+            }
+            grad_outputs.push_back(total_grad);
 
             // Reload offloaded saved tensors back to GPU before backward
             function->reload_saved_tensors();
@@ -301,36 +304,50 @@ auto BackwardEngine::topological_sort(std::shared_ptr<Function> root)
     std::unordered_set<Function*> visited;
     std::unordered_set<Function*> recursion_stack;
 
-    // DFS-based topological sort
-    std::function<void(std::shared_ptr<Function>)> dfs;
-    dfs = [&](std::shared_ptr<Function> node) {
-        if (!node) return;
-
-        // Check for cycles
-        if (recursion_stack.count(node.get())) {
-            throw AutogradException("Cycle detected in computation graph");
-        }
-
-        // Already visited
-        if (visited.count(node.get())) {
-            return;
-        }
-
-        visited.insert(node.get());
-        recursion_stack.insert(node.get());
-
-        // Visit all dependencies (next functions)
-        for (const auto& next_func : node->next_functions()) {
-            if (next_func) {
-                dfs(next_func);
-            }
-        }
-
-        recursion_stack.erase(node.get());
-        sorted.push_back(node);
+    // Iterative DFS-based topological sort (avoids stack overflow on deep graphs)
+    struct Frame {
+        std::shared_ptr<Function> node;
+        size_t child_idx;  // which child to visit next
     };
+    std::vector<Frame> stack;
+    stack.push_back({root, 0});
+    visited.insert(root.get());
+    recursion_stack.insert(root.get());
 
-    dfs(root);
+    while (!stack.empty()) {
+        auto& frame = stack.back();
+        auto& node = frame.node;
+
+        if (!node) {
+            stack.pop_back();
+            continue;
+        }
+
+        const auto& children = node->next_functions();
+
+        if (frame.child_idx < children.size()) {
+            // Process next child
+            const auto& child = children[frame.child_idx++];
+            if (!child) continue;
+
+            if (recursion_stack.count(child.get())) {
+                throw AutogradException("Cycle detected in computation graph");
+            }
+            if (visited.count(child.get())) {
+                continue;
+            }
+
+            visited.insert(child.get());
+            recursion_stack.insert(child.get());
+            stack.push_back({child, 0});
+        } else {
+            // All children visited — post-order: add to sorted
+            recursion_stack.erase(node.get());
+            sorted.push_back(std::move(node));
+            stack.pop_back();
+        }
+    }
+
     return sorted;
 }
 
@@ -342,16 +359,18 @@ auto BackwardEngine::accumulate_grad(Function* func, Tensor grad) -> void {
     grad_accumulators_[func].push_back(std::move(grad));
 }
 
-auto BackwardEngine::get_accumulated_grads(Function* func) -> std::vector<Tensor> {
+auto BackwardEngine::get_accumulated_grads(Function* func) -> const std::vector<Tensor>& {
+    static const std::vector<Tensor> empty;
     auto it = grad_accumulators_.find(func);
     if (it == grad_accumulators_.end()) {
-        return {};
+        return empty;
     }
     return it->second;
 }
 
 auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
-                                   std::vector<Tensor> gradients) -> void {
+                                   std::vector<Tensor> gradients,
+                                   bool retain_graph) -> void {
     if (roots.empty()) {
         return;
     }
@@ -409,15 +428,17 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
     }
 
     auto cleanup_graph = [&]() {
-        for (auto& func : sorted) {
-            if (func) {
-                func->set_input_variables({});
-                func->set_next_functions({});
+        if (!retain_graph) {
+            for (auto& func : sorted) {
+                if (func) {
+                    func->set_input_variables({});
+                    func->set_next_functions({});
+                }
             }
-        }
-        for (auto* root : roots) {
-            if (root && root->grad_fn() && !root->is_leaf()) {
-                root->set_grad_fn(nullptr);
+            for (auto* root : roots) {
+                if (root && root->grad_fn() && !root->is_leaf()) {
+                    root->set_grad_fn(nullptr);
+                }
             }
         }
     };
@@ -429,7 +450,7 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
             auto& function = *it;
 
             std::vector<Tensor> grad_outputs;
-            auto accum_grads = get_accumulated_grads(function.get());
+            const auto& accum_grads = get_accumulated_grads(function.get());
             if (accum_grads.empty()) {
                 continue;  // No gradient flows to this function
             }
@@ -437,13 +458,14 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
             // Sum all accumulated gradients with dtype promotion
             Tensor total_grad = accum_grads[0];
             for (size_t i = 1; i < accum_grads.size(); ++i) {
-                if (accum_grads[i].dtype() != total_grad.dtype()) {
-                    DType target = (dtype_precedence(accum_grads[i].dtype()) >= dtype_precedence(total_grad.dtype()))
-                        ? accum_grads[i].dtype() : total_grad.dtype();
+                Tensor gi = accum_grads[i];
+                if (gi.dtype() != total_grad.dtype()) {
+                    DType target = (dtype_precedence(gi.dtype()) >= dtype_precedence(total_grad.dtype()))
+                        ? gi.dtype() : total_grad.dtype();
                     total_grad = total_grad.to(target);
-                    accum_grads[i] = accum_grads[i].to(target);
+                    gi = gi.to(target);
                 }
-                total_grad = total_grad + accum_grads[i];
+                total_grad = total_grad + gi;
             }
             grad_outputs.push_back(total_grad);
 
@@ -453,7 +475,10 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
             // Check for NaN/Inf in computed gradients when anomaly detection is on
             check_for_anomaly(input_grads, function.get());
 
-            function->release_saved_tensors();
+            // Release saved tensors to free memory — only if we're not retaining the graph
+            if (!retain_graph) {
+                function->release_saved_tensors();
+            }
 
             // Accumulate gradients to input variables
             const auto& input_vars = function->input_variables();

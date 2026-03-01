@@ -64,7 +64,7 @@ auto RNNCell::forward(const Variable& input, const Variable& hx) -> Variable {
     // Compute: h_new = activation(W_ih @ x + W_hh @ h + b)
     auto i_out = input_layer_->forward(input);
     auto h_out = hidden_layer_->forward(h);
-    auto combined = Variable(i_out.tensor() + h_out.tensor(), true);
+    auto combined = i_out + h_out;
 
     // Apply activation
     if (nonlinearity_ == "tanh") {

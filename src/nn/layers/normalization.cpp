@@ -91,40 +91,48 @@ static void fused_layer_norm_f32(
         float* out_ptr = output + b * norm_size;
 
 #if defined(__AVX512F__)
-        // AVX-512 path: 16 floats at a time
-        // 2-pass algorithm: compute sum AND sum_sq in one pass
+        // AVX-512 path: 16 floats at a time, numerically stable two-pass algorithm
+        // Pass 1: compute mean
         __m512 vsum = _mm512_setzero_ps();
-        __m512 vsum_sq = _mm512_setzero_ps();
         int64_t i = 0;
 
-        // First pass: compute sum and sum_sq simultaneously
         for (; i + 16 <= norm_size; i += 16) {
             _mm_prefetch(reinterpret_cast<const char*>(in_ptr + i + 64), _MM_HINT_T0);
             __m512 x = _mm512_loadu_ps(in_ptr + i);
             vsum = _mm512_add_ps(vsum, x);
-            vsum_sq = _mm512_fmadd_ps(x, x, vsum_sq);
         }
 
         float sum = _mm512_reduce_add_ps(vsum);
-        float sum_sq = _mm512_reduce_add_ps(vsum_sq);
-
-        // Handle remainder
         for (; i < norm_size; i++) {
             sum += in_ptr[i];
-            sum_sq += in_ptr[i] * in_ptr[i];
         }
 
         float mean = sum * inv_n;
-        // var = E[x^2] - E[x]^2
-        float var = (sum_sq * inv_n) - (mean * mean);
+
+        // Pass 2: compute variance = sum((x - mean)^2) / N
+        __m512 vmean = _mm512_set1_ps(mean);
+        __m512 vvar = _mm512_setzero_ps();
+        i = 0;
+
+        for (; i + 16 <= norm_size; i += 16) {
+            __m512 x = _mm512_loadu_ps(in_ptr + i);
+            __m512 diff = _mm512_sub_ps(x, vmean);
+            vvar = _mm512_fmadd_ps(diff, diff, vvar);
+        }
+
+        float var = _mm512_reduce_add_ps(vvar);
+        for (; i < norm_size; i++) {
+            float diff = in_ptr[i] - mean;
+            var += diff * diff;
+        }
+        var *= inv_n;
         float rstd = 1.0f / std::sqrt(var + eps);
 
         // Save for backward
         mean_out[b] = mean;
         rstd_out[b] = rstd;
 
-        // Second pass: normalize and apply affine transform
-        __m512 vmean = _mm512_set1_ps(mean);
+        // Pass 3: normalize and apply affine transform
         __m512 vrstd = _mm512_set1_ps(rstd);
         i = 0;
 
@@ -146,18 +154,15 @@ static void fused_layer_norm_f32(
         }
 
 #elif defined(__AVX2__)
-        // AVX2 path: 8 floats at a time
-        // 2-pass algorithm: compute sum AND sum_sq in one pass
+        // AVX2 path: 8 floats at a time, numerically stable two-pass algorithm
+        // Pass 1: compute mean
         __m256 vsum = _mm256_setzero_ps();
-        __m256 vsum_sq = _mm256_setzero_ps();
         int64_t i = 0;
 
-        // First pass: compute sum and sum_sq simultaneously
         for (; i + 8 <= norm_size; i += 8) {
             _mm_prefetch(reinterpret_cast<const char*>(in_ptr + i + 32), _MM_HINT_T0);
             __m256 x = _mm256_loadu_ps(in_ptr + i);
             vsum = _mm256_add_ps(vsum, x);
-            vsum_sq = _mm256_fmadd_ps(x, x, vsum_sq);
         }
 
         // Horizontal sum for AVX2
@@ -168,30 +173,42 @@ static void fused_layer_norm_f32(
         sum128 = _mm_hadd_ps(sum128, sum128);
         float sum = _mm_cvtss_f32(sum128);
 
-        __m128 sq_lo = _mm256_castps256_ps128(vsum_sq);
-        __m128 sq_hi = _mm256_extractf128_ps(vsum_sq, 1);
-        __m128 sq128 = _mm_add_ps(sq_lo, sq_hi);
-        sq128 = _mm_hadd_ps(sq128, sq128);
-        sq128 = _mm_hadd_ps(sq128, sq128);
-        float sum_sq = _mm_cvtss_f32(sq128);
-
-        // Handle remainder
         for (; i < norm_size; i++) {
             sum += in_ptr[i];
-            sum_sq += in_ptr[i] * in_ptr[i];
         }
 
         float mean = sum * inv_n;
-        // var = E[x^2] - E[x]^2
-        float var = (sum_sq * inv_n) - (mean * mean);
+
+        // Pass 2: compute variance = sum((x - mean)^2) / N
+        __m256 vmean = _mm256_set1_ps(mean);
+        __m256 vvar = _mm256_setzero_ps();
+        i = 0;
+
+        for (; i + 8 <= norm_size; i += 8) {
+            __m256 x = _mm256_loadu_ps(in_ptr + i);
+            __m256 diff = _mm256_sub_ps(x, vmean);
+            vvar = _mm256_fmadd_ps(diff, diff, vvar);
+        }
+
+        __m128 var_lo = _mm256_castps256_ps128(vvar);
+        __m128 var_hi = _mm256_extractf128_ps(vvar, 1);
+        __m128 var128 = _mm_add_ps(var_lo, var_hi);
+        var128 = _mm_hadd_ps(var128, var128);
+        var128 = _mm_hadd_ps(var128, var128);
+        float var = _mm_cvtss_f32(var128);
+
+        for (; i < norm_size; i++) {
+            float diff = in_ptr[i] - mean;
+            var += diff * diff;
+        }
+        var *= inv_n;
         float rstd = 1.0f / std::sqrt(var + eps);
 
         // Save for backward
         mean_out[b] = mean;
         rstd_out[b] = rstd;
 
-        // Second pass: normalize and apply affine transform
-        __m256 vmean = _mm256_set1_ps(mean);
+        // Pass 3: normalize and apply affine transform
         __m256 vrstd = _mm256_set1_ps(rstd);
         i = 0;
 
@@ -213,21 +230,27 @@ static void fused_layer_norm_f32(
         }
 
 #else
-        // Scalar fallback - 2-pass algorithm
+        // Scalar fallback - numerically stable two-pass algorithm
+        // Pass 1: compute mean
         float sum = 0.0f;
-        float sum_sq = 0.0f;
         for (int64_t i = 0; i < norm_size; i++) {
             sum += in_ptr[i];
-            sum_sq += in_ptr[i] * in_ptr[i];
         }
         float mean = sum * inv_n;
-        float var = (sum_sq * inv_n) - (mean * mean);
+
+        // Pass 2: compute variance = sum((x - mean)^2) / N
+        float var = 0.0f;
+        for (int64_t i = 0; i < norm_size; i++) {
+            float diff = in_ptr[i] - mean;
+            var += diff * diff;
+        }
+        var *= inv_n;
         float rstd = 1.0f / std::sqrt(var + eps);
 
         mean_out[b] = mean;
         rstd_out[b] = rstd;
 
-        // Second pass: normalize and apply affine transform
+        // Pass 3: normalize and apply affine transform
         for (int64_t i = 0; i < norm_size; i++) {
             float norm_val = (in_ptr[i] - mean) * rstd;
             out_ptr[i] = norm_val * weight[i] + bias[i];
@@ -394,14 +417,12 @@ public:
         auto& rstd_orig = saved[2];  // reciprocal std (1 / sqrt(var + eps))
         auto& weight_orig = saved[3];
 
-        // Save original device before transferring to CPU
+        // Save original device and dtype for dispatch routing
         Device original_device = input_orig.device();
-
-        // Save original dtype for conversion back
         DType original_dtype = grad_output_orig.dtype();
 
-        // Vulkan GPU fast path: dispatch to GPU backward shader
-        if (original_device.type == Device::Type::Vulkan) {
+        // GPU fast path: dispatch to backend kernel (CUDA, Vulkan, ROCm, etc.)
+        if (original_device.type != Device::Type::CPU) {
             auto go = grad_output_orig.contiguous();
             auto inp = input_orig.contiguous();
             auto mn = mean_orig.contiguous();
@@ -415,23 +436,13 @@ public:
             return results;
         }
 
-        // CPU path: transfer to CPU for pointer-based access
-        // Move to CPU and convert to Float32 for computation
-        auto grad_output = (grad_output_orig.device() == Device::cpu())
-                          ? grad_output_orig.contiguous().to(DType::Float32)
-                          : grad_output_orig.contiguous().to(Device::cpu()).to(DType::Float32);
-        auto input = (input_orig.device() == Device::cpu())
-                    ? input_orig.contiguous().to(DType::Float32)
-                    : input_orig.contiguous().to(Device::cpu()).to(DType::Float32);
-        auto mean = (mean_orig.device() == Device::cpu())
-                   ? mean_orig.contiguous().to(DType::Float32)
-                   : mean_orig.contiguous().to(Device::cpu()).to(DType::Float32);
-        auto rstd = (rstd_orig.device() == Device::cpu())
-                   ? rstd_orig.contiguous().to(DType::Float32)
-                   : rstd_orig.contiguous().to(Device::cpu()).to(DType::Float32);
-        auto weight = (weight_orig.device() == Device::cpu())
-                     ? weight_orig.contiguous().to(DType::Float32)
-                     : weight_orig.contiguous().to(Device::cpu()).to(DType::Float32);
+        // CPU path: pointer-based access
+        // Convert to Float32 for computation
+        auto grad_output = grad_output_orig.contiguous().to(DType::Float32);
+        auto input = input_orig.contiguous().to(DType::Float32);
+        auto mean = mean_orig.contiguous().to(DType::Float32);
+        auto rstd = rstd_orig.contiguous().to(DType::Float32);
+        auto weight = weight_orig.contiguous().to(DType::Float32);
 
         auto shape = input.shape();
         int64_t batch_size = 1;
@@ -521,18 +532,10 @@ public:
             }
         }
 
-        // Transfer gradients back to original device and dtype if needed
-        Tensor grad_input_final = (original_device == Device::cpu())
-                                 ? grad_input.contiguous().to(original_dtype)
-                                 : grad_input.contiguous().to(original_device).to(original_dtype);
-        Tensor grad_weight_final = (original_device == Device::cpu())
-                                  ? grad_weight.contiguous().to(original_dtype)
-                                  : grad_weight.contiguous().to(original_device).to(original_dtype);
-        Tensor grad_bias_final = (original_device == Device::cpu())
-                                ? grad_bias.contiguous().to(original_dtype)
-                                : grad_bias.contiguous().to(original_device).to(original_dtype);
-
-        return {grad_input_final, grad_weight_final, grad_bias_final};
+        // Convert gradients back to original dtype (already on CPU)
+        return {grad_input.contiguous().to(original_dtype),
+                grad_weight.contiguous().to(original_dtype),
+                grad_bias.contiguous().to(original_dtype)};
     }
 
 private:

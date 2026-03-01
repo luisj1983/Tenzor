@@ -182,8 +182,10 @@ BatchNorm2d::BatchNorm2d(int64_t num_features, double eps, double momentum,
     if (track_running_stats) {
         running_mean_ = Variable(zeros({num_features}), false);
         running_var_ = Variable(ones({num_features}), false);
+        num_batches_tracked_ = Variable(zeros({}, DType::Int64), false);
         register_buffer("running_mean", running_mean_);
         register_buffer("running_var", running_var_);
+        register_buffer("num_batches_tracked", num_batches_tracked_);
     }
 
     reset_parameters();
@@ -371,7 +373,7 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
             rv_var_ptr->tensor() = fused_results[2].to(DType::Float32);
             batch_mean = fused_results[3];  // saved_mean for backward
             batch_var = fused_results[4];   // saved_inv_var for backward
-            num_batches_tracked_++;
+            buffers_["num_batches_tracked"]->tensor().data<int64_t>()[0]++;
 
             // Return output directly (autograd handled below if needed)
             Tensor output = fused_results[0];
@@ -467,7 +469,7 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
             rm_var_ptr->tensor() = updated_stats[0].to(DType::Float32);
             rv_var_ptr->tensor() = updated_stats[1].to(DType::Float32);
 
-            num_batches_tracked_++;
+            buffers_["num_batches_tracked"]->tensor().data<int64_t>()[0]++;
         }
     } else {
         // Inference mode: use running statistics (transfer to input device if needed)
@@ -607,7 +609,7 @@ auto BatchNorm2d::reset_parameters() -> void {
         // CRITICAL: Access from buffers_ map
         buffers_["running_mean"]->tensor().zero_();
         buffers_["running_var"]->tensor().fill_(1.0f);
-        num_batches_tracked_ = 0;
+        buffers_["num_batches_tracked"]->tensor().zero_();
     }
 }
 
@@ -746,8 +748,10 @@ BatchNorm1d::BatchNorm1d(int64_t num_features, double eps, double momentum,
     if (track_running_stats) {
         running_mean_ = Variable(zeros({num_features}), false);
         running_var_ = Variable(ones({num_features}), false);
+        num_batches_tracked_ = Variable(zeros({}, DType::Int64), false);
         register_buffer("running_mean", running_mean_);
         register_buffer("running_var", running_var_);
+        register_buffer("num_batches_tracked", num_batches_tracked_);
     }
 
     reset_parameters();
@@ -809,7 +813,7 @@ auto BatchNorm1d::forward_impl(const Variable& input) -> Variable {
             rm_tensor = rm_tensor * (1.0f - momentum_) + batch_mean * momentum_;
             rv_tensor = rv_tensor * (1.0f - momentum_) + unbiased_var * momentum_;
 
-            num_batches_tracked_++;
+            buffers_["num_batches_tracked"]->tensor().data<int64_t>()[0]++;
         }
     } else {
         if (track_running_stats_) {
@@ -909,7 +913,7 @@ auto BatchNorm1d::reset_parameters() -> void {
     if (track_running_stats_) {
         buffers_["running_mean"]->tensor().zero_();
         buffers_["running_var"]->tensor().fill_(1.0f);
-        num_batches_tracked_ = 0;
+        buffers_["num_batches_tracked"]->tensor().zero_();
     }
 }
 

@@ -13,6 +13,7 @@
 // Intel oneDNN for optimized pooling operations
 #ifdef TENZOR_USE_ONEDNN
 #include <dnnl.hpp>
+#include "onednn_cache.hpp"
 #include <list>
 #include <unordered_map>
 #endif
@@ -24,8 +25,8 @@ namespace cpu {
 // oneDNN Pooling Helpers with Primitive Caching
 // ============================================================================
 #ifdef TENZOR_USE_ONEDNN
-static thread_local dnnl::engine g_pooling_engine(dnnl::engine::kind::cpu, 0);
-static thread_local dnnl::stream g_pooling_stream(g_pooling_engine);
+// Use shared lazy-init accessors from onednn_cache.hpp to avoid static
+// thread_local initialization issues in dlopen'd libraries.
 
 // Threshold for using oneDNN (elements in output)
 constexpr size_t ONEDNN_POOLING_THRESHOLD = 4096;
@@ -121,8 +122,8 @@ static bool onednn_maxpool2d_forward(
     }
 
     try {
-        auto& engine = g_pooling_engine;
-        auto& stream = g_pooling_stream;
+        auto& engine = get_onednn_engine();
+        auto& stream = get_onednn_stream();
 
         // Create cache key
         PoolingCacheKey cache_key{dnnl::algorithm::pooling_max,
@@ -188,8 +189,8 @@ static bool onednn_avgpool2d_forward(
     }
 
     try {
-        auto& engine = g_pooling_engine;
-        auto& stream = g_pooling_stream;
+        auto& engine = get_onednn_engine();
+        auto& stream = get_onednn_stream();
 
         // Create cache key
         PoolingCacheKey cache_key{dnnl::algorithm::pooling_avg_exclude_padding,

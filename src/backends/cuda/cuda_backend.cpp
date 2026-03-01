@@ -388,6 +388,12 @@ public:
 
         cudaError_t err;
         if (kind == CopyKind::HostToDevice || kind == CopyKind::DeviceToDevice) {
+            // Ensure the correct device is selected before async transfer.
+            // Without this, multi-GPU setups may use the wrong device's default stream.
+            cudaPointerAttributes dst_attrs;
+            if (cudaPointerGetAttributes(&dst_attrs, dst) == cudaSuccess && dst_attrs.device >= 0) {
+                cudaSetDevice(dst_attrs.device);
+            }
             // Use async transfer for H2D and D2D — host doesn't need to wait
             // for the copy to complete, GPU-side ordering is guaranteed by stream.
             cudaStream_t stream = nullptr;  // default stream

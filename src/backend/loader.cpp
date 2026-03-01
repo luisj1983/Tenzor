@@ -1,9 +1,12 @@
 #include "tenzor/backend/loader.hpp"
+#include "tenzor/backend/dispatch_table.hpp"
 #include <mutex>
 #include <cstdlib>
 #include <atomic>
 
-#ifndef _WIN32
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <dlfcn.h>
 #endif
 
@@ -166,7 +169,24 @@ auto BackendLoader::available_backends() const -> std::vector<std::string> {
 }
 
 auto BackendLoader::unload_backend(std::string_view name) -> bool {
-    return backends_.erase(std::string(name)) > 0;
+    auto it = backends_.find(std::string(name));
+    if (it == backends_.end()) return false;
+
+    Backend* ptr = it->second.get();
+
+    // Remove from device_to_backend_ mapping to avoid dangling pointer
+    for (auto dit = device_to_backend_.begin(); dit != device_to_backend_.end(); ) {
+        if (dit->second == ptr) {
+            // Clear the dispatch table for this device type
+            DispatchTableRegistry::clear_backend(dit->first);
+            dit = device_to_backend_.erase(dit);
+        } else {
+            ++dit;
+        }
+    }
+
+    backends_.erase(it);
+    return true;
 }
 
 auto BackendLoader::load_library(const std::filesystem::path& path) -> LibHandle {

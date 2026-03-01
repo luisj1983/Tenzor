@@ -72,8 +72,9 @@ Linear::Linear(int64_t in_features, int64_t out_features, bool bias)
     }
 
     // Initialize weight with Kaiming uniform (matches PyTorch default)
-    float std = std::sqrt(2.0f / in_features);
-    Variable weight(randn({out_features, in_features}) * std, true);
+    // PyTorch uses U(-bound, bound) where bound = sqrt(1 / fan_in) for linear layers
+    float bound = std::sqrt(1.0f / static_cast<float>(in_features));
+    Variable weight(rand({out_features, in_features}) * (2.0f * bound) - bound, true);
     register_parameter("weight", std::move(weight));
 
     // Initialize bias with uniform(-1/sqrt(in_features), 1/sqrt(in_features))

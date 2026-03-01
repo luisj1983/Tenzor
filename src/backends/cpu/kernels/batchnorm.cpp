@@ -16,6 +16,7 @@
 // Intel oneDNN for optimized batch normalization (2-3x faster)
 #ifdef TENZOR_USE_ONEDNN
 #include <dnnl.hpp>
+#include "onednn_cache.hpp"
 #include <list>
 #include <unordered_map>
 #endif
@@ -491,9 +492,8 @@ auto batchnorm2d_forward_kernel(const Tensor& input,
 // ============================================================================
 
 #ifdef TENZOR_USE_ONEDNN
-// Thread-local oneDNN engine and stream for reuse
-static thread_local dnnl::engine g_bn_engine(dnnl::engine::kind::cpu, 0);
-static thread_local dnnl::stream g_bn_stream(g_bn_engine);
+// Use shared lazy-init accessors from onednn_cache.hpp to avoid static
+// thread_local initialization issues in dlopen'd libraries.
 
 // --------------------------------------------------------------------------
 // BatchNorm Primitive Caching (eliminates ~1-5ms primitive creation overhead)
@@ -576,8 +576,8 @@ static bool batchnorm2d_forward_affine_onednn(
     int64_t W = shape[3];
 
     try {
-        auto& engine = g_bn_engine;
-        auto& stream = g_bn_stream;
+        auto& engine = get_onednn_engine();
+        auto& stream = get_onednn_stream();
 
         // Create cache key
         BatchNormCacheKey cache_key{N, C, H, W};

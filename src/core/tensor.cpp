@@ -37,8 +37,13 @@ TensorImpl::TensorImpl(std::vector<int64_t> shape_, DType dtype_, Device device_
     // Compute strides
     strides = compute_strides(this->shape);
 
-    // Allocate storage
-    size_t size_bytes = numel() * dtype_size(dtype);
+    // Allocate storage (checked multiply to prevent overflow)
+    int64_t n = numel();
+    size_t elem_sz = dtype_size(dtype);
+    if (n > 0 && static_cast<size_t>(n) > std::numeric_limits<size_t>::max() / elem_sz) {
+        throw std::overflow_error("Tensor allocation size overflow");
+    }
+    size_t size_bytes = static_cast<size_t>(n) * elem_sz;
 
     // UNIFIED PATH: All devices go through backend allocator
     auto* backend = backend_registry().get_backend(device.type);
@@ -53,7 +58,7 @@ TensorImpl::TensorImpl(std::vector<int64_t> shape_, DType dtype_, Device device_
     }
 
     // Use DeviceStorage for ALL devices (including CPU)
-    storage = std::make_shared<DeviceStorage>(ptr, size_bytes, device, backend);
+    storage = std::make_shared<DeviceStorage>(ptr, size_bytes, device);
 
     // Zero-initialize if requested (CPU only - device kernels handle their own init)
     if (zero_init && device.type == Device::Type::CPU && size_bytes > 0) {
@@ -62,8 +67,15 @@ TensorImpl::TensorImpl(std::vector<int64_t> shape_, DType dtype_, Device device_
 }
 
 auto TensorImpl::numel() const -> int64_t {
-    return std::accumulate(shape.begin(), shape.end(), int64_t{1},
-                          std::multiplies<int64_t>{});
+    int64_t result = 1;
+    for (auto dim : shape) {
+        // Check for overflow before multiplying
+        if (dim != 0 && std::abs(result) > std::numeric_limits<int64_t>::max() / std::abs(dim)) {
+            throw std::overflow_error("Tensor size overflow: shape produces more than INT64_MAX elements");
+        }
+        result *= dim;
+    }
+    return result;
 }
 
 auto TensorImpl::is_contiguous() const -> bool {
@@ -714,118 +726,29 @@ auto Tensor::fill_(float value) -> Tensor& {
         return *this;
     }
 
-    // Direct implementation for CPU tensors - fill data with the value
+    // Fast path: zero fill with memset (all IEEE/integer zero representations are 0x00)
+    if (value == 0.0f) {
+        std::memset(data_ptr(), 0, static_cast<size_t>(n) * dtype_size());
+        return *this;
+    }
+
+    // Direct implementation for CPU tensors - use std::fill_n (auto-vectorized by compiler)
     switch (impl_->dtype) {
-        case DType::Float32: {
-            float* ptr = data<float>();
-            for (int64_t i = 0; i < n; ++i) {
-                ptr[i] = value;
-            }
-            break;
-        }
-        case DType::Float64: {
-            double* ptr = data<double>();
-            for (int64_t i = 0; i < n; ++i) {
-                ptr[i] = static_cast<double>(value);
-            }
-            break;
-        }
-        case DType::Int32: {
-            int32_t* ptr = data<int32_t>();
-            for (int64_t i = 0; i < n; ++i) {
-                ptr[i] = static_cast<int32_t>(value);
-            }
-            break;
-        }
-        case DType::Int64: {
-            int64_t* ptr = data<int64_t>();
-            for (int64_t i = 0; i < n; ++i) {
-                ptr[i] = static_cast<int64_t>(value);
-            }
-            break;
-        }
-        case DType::UInt8: {
-            uint8_t* ptr = data<uint8_t>();
-            for (int64_t i = 0; i < n; ++i) {
-                ptr[i] = static_cast<uint8_t>(value);
-            }
-            break;
-        }
-        case DType::UInt16: {
-            uint16_t* ptr = data<uint16_t>();
-            for (int64_t i = 0; i < n; ++i) {
-                ptr[i] = static_cast<uint16_t>(value);
-            }
-            break;
-        }
-        case DType::UInt32: {
-            uint32_t* ptr = data<uint32_t>();
-            for (int64_t i = 0; i < n; ++i) {
-                ptr[i] = static_cast<uint32_t>(value);
-            }
-            break;
-        }
-        case DType::UInt64: {
-            uint64_t* ptr = data<uint64_t>();
-            for (int64_t i = 0; i < n; ++i) {
-                ptr[i] = static_cast<uint64_t>(value);
-            }
-            break;
-        }
-        case DType::Float16: {
-            Float16* ptr = data<Float16>();
-            Float16 f16_value(value);
-            for (int64_t i = 0; i < n; ++i) {
-                ptr[i] = f16_value;
-            }
-            break;
-        }
-        case DType::BFloat16: {
-            BFloat16* ptr = data<BFloat16>();
-            BFloat16 bf16_value(value);
-            for (int64_t i = 0; i < n; ++i) {
-                ptr[i] = bf16_value;
-            }
-            break;
-        }
-        case DType::Int8: {
-            int8_t* ptr = data<int8_t>();
-            for (int64_t i = 0; i < n; ++i) {
-                ptr[i] = static_cast<int8_t>(value);
-            }
-            break;
-        }
-        case DType::Int16: {
-            int16_t* ptr = data<int16_t>();
-            for (int64_t i = 0; i < n; ++i) {
-                ptr[i] = static_cast<int16_t>(value);
-            }
-            break;
-        }
-        case DType::Bool: {
-            bool* ptr = data<bool>();
-            bool bool_value = (value != 0.0f);
-            for (int64_t i = 0; i < n; ++i) {
-                ptr[i] = bool_value;
-            }
-            break;
-        }
-        case DType::Complex64: {
-            auto* ptr = data<std::complex<float>>();
-            std::complex<float> c_value(value, 0.0f);
-            for (int64_t i = 0; i < n; ++i) {
-                ptr[i] = c_value;
-            }
-            break;
-        }
-        case DType::Complex128: {
-            auto* ptr = data<std::complex<double>>();
-            std::complex<double> c_value(static_cast<double>(value), 0.0);
-            for (int64_t i = 0; i < n; ++i) {
-                ptr[i] = c_value;
-            }
-            break;
-        }
+        case DType::Float32: std::fill_n(data<float>(), n, value); break;
+        case DType::Float64: std::fill_n(data<double>(), n, static_cast<double>(value)); break;
+        case DType::Int32: std::fill_n(data<int32_t>(), n, static_cast<int32_t>(value)); break;
+        case DType::Int64: std::fill_n(data<int64_t>(), n, static_cast<int64_t>(value)); break;
+        case DType::UInt8: std::fill_n(data<uint8_t>(), n, static_cast<uint8_t>(value)); break;
+        case DType::UInt16: std::fill_n(data<uint16_t>(), n, static_cast<uint16_t>(value)); break;
+        case DType::UInt32: std::fill_n(data<uint32_t>(), n, static_cast<uint32_t>(value)); break;
+        case DType::UInt64: std::fill_n(data<uint64_t>(), n, static_cast<uint64_t>(value)); break;
+        case DType::Float16: std::fill_n(data<Float16>(), n, Float16(value)); break;
+        case DType::BFloat16: std::fill_n(data<BFloat16>(), n, BFloat16(value)); break;
+        case DType::Int8: std::fill_n(data<int8_t>(), n, static_cast<int8_t>(value)); break;
+        case DType::Int16: std::fill_n(data<int16_t>(), n, static_cast<int16_t>(value)); break;
+        case DType::Bool: std::fill_n(data<bool>(), n, value != 0.0f); break;
+        case DType::Complex64: std::fill_n(data<std::complex<float>>(), n, std::complex<float>(value, 0.0f)); break;
+        case DType::Complex128: std::fill_n(data<std::complex<double>>(), n, std::complex<double>(static_cast<double>(value), 0.0)); break;
         default:
             throw std::runtime_error("fill_ not supported for this dtype");
     }
@@ -843,7 +766,8 @@ auto Tensor::reshape(std::vector<int64_t> new_shape) const -> Tensor {
         throw std::runtime_error("Cannot reshape null tensor");
     }
 
-    // Handle -1 inference (one dimension can be inferred)
+    // Handle -1 inference (one dimension can be inferred).
+    // Dimension 0 is allowed for zero-element tensors.
     int64_t infer_dim = -1;
     int64_t total = 1;
     for (size_t i = 0; i < new_shape.size(); ++i) {
@@ -852,8 +776,8 @@ auto Tensor::reshape(std::vector<int64_t> new_shape) const -> Tensor {
                 throw std::runtime_error("Only one dimension can be inferred");
             }
             infer_dim = static_cast<int64_t>(i);
-        } else if (new_shape[i] <= 0) {
-            throw std::runtime_error("Invalid shape dimension");
+        } else if (new_shape[i] < 0) {
+            throw std::runtime_error("Invalid shape dimension: " + std::to_string(new_shape[i]));
         } else {
             total *= new_shape[i];
         }
@@ -916,7 +840,8 @@ auto Tensor::view(std::vector<int64_t> new_shape) const -> Tensor {
         throw std::runtime_error("View requires contiguous tensor. Use reshape() or contiguous() first.");
     }
 
-    // Handle -1 inference (one dimension can be inferred)
+    // Handle -1 inference (one dimension can be inferred).
+    // Dimension 0 is allowed for zero-element tensors.
     int64_t infer_dim = -1;
     int64_t total = 1;
     for (size_t i = 0; i < new_shape.size(); ++i) {
@@ -925,8 +850,8 @@ auto Tensor::view(std::vector<int64_t> new_shape) const -> Tensor {
                 throw std::runtime_error("Only one dimension can be inferred");
             }
             infer_dim = static_cast<int64_t>(i);
-        } else if (new_shape[i] <= 0) {
-            throw std::runtime_error("Invalid shape dimension");
+        } else if (new_shape[i] < 0) {
+            throw std::runtime_error("Invalid shape dimension: " + std::to_string(new_shape[i]));
         } else {
             total *= new_shape[i];
         }
@@ -1087,11 +1012,8 @@ auto Tensor::squeeze(std::optional<int64_t> dim) const -> Tensor {
             }
         }
 
-        // If all dimensions were 1, keep at least one
-        if (new_shape.empty()) {
-            new_shape.push_back(1);
-            new_strides.push_back(1);
-        }
+        // A 0-D (scalar) tensor is valid when all dimensions are squeezed.
+        // numel() == 1 for an empty shape (identity of multiplication).
 
         Tensor result;
         result.impl_ = std::make_shared<TensorImpl>(*impl_);
@@ -1381,16 +1303,16 @@ auto Tensor::memory_format() const noexcept -> MemoryFormat {
         return MemoryFormat::Contiguous;
     }
 
-    // Check if strides match NHWC pattern
+    // Check if strides match NHWC pattern (offset is irrelevant to contiguity)
     auto nhwc_strides = compute_channels_last_strides(impl_->shape);
-    if (impl_->strides == nhwc_strides && impl_->offset == 0) {
+    if (impl_->strides == nhwc_strides) {
         return MemoryFormat::ChannelsLast;
     }
 
     // Check for 5D ChannelsLast3d
     if (impl_->shape.size() == 5) {
         auto ndhwc_strides = compute_channels_last_3d_strides(impl_->shape);
-        if (impl_->strides == ndhwc_strides && impl_->offset == 0) {
+        if (impl_->strides == ndhwc_strides) {
             return MemoryFormat::ChannelsLast3d;
         }
     }
@@ -1403,19 +1325,20 @@ auto Tensor::is_contiguous(MemoryFormat format) const noexcept -> bool {
 
     switch (format) {
         case MemoryFormat::Contiguous: {
-            // Standard row-major contiguous check
+            // Standard row-major contiguous check.
+            // Offset is irrelevant — a slice at offset N with correct strides IS contiguous.
             auto expected = compute_strides(impl_->shape);
-            return impl_->strides == expected && impl_->offset == 0;
+            return impl_->strides == expected;
         }
         case MemoryFormat::ChannelsLast: {
             if (impl_->shape.size() != 4) return false;
             auto expected = compute_channels_last_strides(impl_->shape);
-            return impl_->strides == expected && impl_->offset == 0;
+            return impl_->strides == expected;
         }
         case MemoryFormat::ChannelsLast3d: {
             if (impl_->shape.size() != 5) return false;
             auto expected = compute_channels_last_3d_strides(impl_->shape);
-            return impl_->strides == expected && impl_->offset == 0;
+            return impl_->strides == expected;
         }
         case MemoryFormat::Preserve:
             // Preserve means "keep current format", so any contiguous layout counts

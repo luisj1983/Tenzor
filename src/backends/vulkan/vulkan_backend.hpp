@@ -138,7 +138,31 @@ private:
     // Staging buffer for host-device transfers
     struct StagingBuffer {
         std::unique_ptr<vulkan::VulkanBuffer> buffer;
-        size_t size;
+        size_t size = 0;
+        bool in_use = false;  // Whether currently acquired by a transfer
+    };
+
+    // Pool of staging buffers per device for concurrent transfers
+    struct StagingBufferPool {
+        std::vector<StagingBuffer> buffers;
+        std::unique_ptr<std::mutex> mutex = std::make_unique<std::mutex>();
+
+        StagingBufferPool() = default;
+        StagingBufferPool(StagingBufferPool&&) = default;
+        StagingBufferPool& operator=(StagingBufferPool&&) = default;
+
+        // Acquire a staging buffer of at least `size` bytes. Creates one if none available.
+        // Returns index into `buffers`.
+        size_t acquire(int32_t device_id, size_t size, const DeviceContext& ctx);
+        // Release a staging buffer back to the pool for reuse.
+        void release(size_t index);
+    };
+
+    // Deferred free entry for buffers awaiting GPU idle
+    struct DeferredFree {
+        void* ptr;
+        size_t bytes;
+        int32_t device_id;
     };
 
     // Pipeline cache for reusing compiled shaders
@@ -156,7 +180,9 @@ private:
     // Memory management
     void* allocateDeviceMemory(size_t bytes, int32_t device_id);
     void freeDeviceMemory(void* ptr, int32_t device_id);
-    StagingBuffer& getStagingBuffer(int32_t device_id, size_t size);
+    size_t acquireStagingBuffer(int32_t device_id, size_t size);
+    void releaseStagingBuffer(int32_t device_id, size_t index);
+    void flush_deferred_frees(int32_t device_id);
 
     // Command execution
     VkCommandBuffer beginSingleTimeCommands(int32_t device_id);
@@ -195,7 +221,7 @@ public:
     auto dispatchConv2d(const Tensor& input, const Tensor& weight,
                        const Tensor* bias, int64_t stride, int64_t padding,
                        int64_t dilation, int64_t groups) -> Tensor;
-    auto dispatchConv2dForward(const Tensor& input, const Tensor& weight, const OpAttributes& attrs) -> Tensor;
+    auto dispatchConv2dForward(const Tensor& input, const Tensor& weight, const Tensor* bias, const OpAttributes& attrs) -> Tensor;
     auto dispatchConvTranspose2dForward(const Tensor& input, const Tensor& weight, const Tensor* bias, const OpAttributes& attrs) -> Tensor;
 
     // Conv2d backward operations
@@ -361,10 +387,16 @@ public:
     VkInstance instance_ = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT debug_messenger_ = VK_NULL_HANDLE;
     std::vector<DeviceContext> devices_;
-    std::vector<StagingBuffer> stagingBuffers_;
+    std::vector<StagingBufferPool> stagingPools_;
     std::vector<PipelineCache> pipelineCaches_;
 
+    // Deferred free lists (per-device) for buffers awaiting GPU idle
+    std::vector<std::vector<DeferredFree>> deferred_frees_;
+    // Mutex protecting deferred_frees_ (per-device vectors are accessed under device mutex,
+    // but the outer vector itself needs protection during resize/init)
+
     // Memory tracking
+    mutable std::mutex allocations_mutex_;  // Protects allocations_ map
     std::unordered_map<void*, std::pair<size_t, int32_t>> allocations_;
 
     // Buffer tracking: maps tensor data pointer (void*) to actual VulkanBuffer
@@ -384,8 +416,8 @@ public:
     // Shader paths
     std::string shaderPath_;
 
-    // Global mutex for cross-device operations (instance creation, shutdown, pipeline cache).
-    // Per-device operations should use DeviceContext::mutex instead for parallelism.
+    // Global mutex for cross-device operations (instance creation, shutdown, pipeline cache, dispatch).
+    // Memory operations (allocate/deallocate/copy) use per-device mutexes + allocations_mutex_ instead.
     mutable std::recursive_mutex dispatch_mutex_;
 };
 

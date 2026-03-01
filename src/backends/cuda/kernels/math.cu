@@ -104,10 +104,17 @@ inline void check_integer_divisor_for_zeros(const T* data, int64_t n, cudaStream
 #ifndef TENZOR_SKIP_INTEGER_DIV_CHECK
     // Use persistent pinned flag buffer to avoid per-call cudaHostAlloc overhead.
     // The buffer is allocated once per thread and reused across division operations.
-    static thread_local struct {
+    static thread_local struct PinnedFlagState {
         int* h_flag = nullptr;
         int* d_flag = nullptr;
         bool initialized = false;
+        ~PinnedFlagState() {
+            if (h_flag) {
+                cudaFreeHost(h_flag);
+                h_flag = nullptr;
+                d_flag = nullptr;
+            }
+        }
     } state;
 
     if (!state.initialized) {
@@ -284,8 +291,11 @@ static BroadcastMeta make_broadcast_meta(
     const std::vector<int64_t>& strides_a,
     const std::vector<int64_t>& strides_b,
     const std::vector<int64_t>& output_shape) {
+    if (output_shape.size() > 8) {
+        throw std::runtime_error("CUDA broadcast: tensors with >8 dimensions not supported");
+    }
     BroadcastMeta meta{};
-    for (size_t i = 0; i < output_shape.size() && i < 8; ++i) {
+    for (size_t i = 0; i < output_shape.size(); ++i) {
         meta.strides_a[i] = strides_a[i];
         meta.strides_b[i] = strides_b[i];
         meta.output_shape[i] = output_shape[i];

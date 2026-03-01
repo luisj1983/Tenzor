@@ -823,15 +823,23 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices) -> Tensor {
     const int64_t* idx_data = indices.data<int64_t>();
 
     int64_t num_embeddings = w_shape[0];
+
+    // Pre-validate all indices sequentially — throwing inside an OMP parallel
+    // region is undefined behavior, so we validate before entering the loop.
+    for (int64_t i = 0; i < num_indices; ++i) {
+        int64_t idx = idx_data[i];
+        if (idx < 0) idx += num_embeddings;
+        if (idx < 0 || idx >= num_embeddings) {
+            throw std::out_of_range("Embedding index " + std::to_string(idx_data[i]) +
+                " out of range [0, " + std::to_string(num_embeddings) + ")");
+        }
+    }
+
     auto do_embedding = [&](auto* w_data, auto* out_data) {
         #pragma omp parallel for if(num_indices * embedding_dim > 10000)
         for (int64_t i = 0; i < num_indices; ++i) {
             int64_t idx = idx_data[i];
             if (idx < 0) idx += num_embeddings;
-            if (idx < 0 || idx >= num_embeddings) {
-                throw std::out_of_range("Embedding index " + std::to_string(idx_data[i]) +
-                    " out of range [0, " + std::to_string(num_embeddings) + ")");
-            }
             for (int64_t j = 0; j < embedding_dim; ++j) {
                 out_data[i * embedding_dim + j] = w_data[idx * embedding_dim + j];
             }

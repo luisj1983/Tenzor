@@ -15,6 +15,7 @@
 // Intel oneDNN for optimized convolutions (3-8x faster)
 #ifdef TENZOR_USE_ONEDNN
 #include <dnnl.hpp>
+#include "onednn_cache.hpp"
 #include <unordered_map>
 #include <mutex>
 #include <memory>
@@ -317,6 +318,56 @@ void gemm_cpu<float>(
     }
 }
 
+// Specialization for Float16 — accumulate in float32 to avoid catastrophic precision loss
+template<>
+void gemm_cpu<Float16>(
+    const Float16* A, const Float16* B, Float16* C,
+    int64_t M, int64_t N, int64_t K,
+    bool transpose_B
+) {
+    #pragma omp parallel for collapse(2) if(M * N > 1000)
+    for (int64_t i = 0; i < M; ++i) {
+        for (int64_t j = 0; j < N; ++j) {
+            float sum = 0.0f;
+            if (transpose_B) {
+                for (int64_t k = 0; k < K; ++k) {
+                    sum += static_cast<float>(A[i * K + k]) * static_cast<float>(B[j * K + k]);
+                }
+            } else {
+                for (int64_t k = 0; k < K; ++k) {
+                    sum += static_cast<float>(A[i * K + k]) * static_cast<float>(B[k * N + j]);
+                }
+            }
+            C[i * N + j] = Float16(sum);
+        }
+    }
+}
+
+// Specialization for BFloat16 — accumulate in float32 to avoid catastrophic precision loss
+template<>
+void gemm_cpu<BFloat16>(
+    const BFloat16* A, const BFloat16* B, BFloat16* C,
+    int64_t M, int64_t N, int64_t K,
+    bool transpose_B
+) {
+    #pragma omp parallel for collapse(2) if(M * N > 1000)
+    for (int64_t i = 0; i < M; ++i) {
+        for (int64_t j = 0; j < N; ++j) {
+            float sum = 0.0f;
+            if (transpose_B) {
+                for (int64_t k = 0; k < K; ++k) {
+                    sum += static_cast<float>(A[i * K + k]) * static_cast<float>(B[j * K + k]);
+                }
+            } else {
+                for (int64_t k = 0; k < K; ++k) {
+                    sum += static_cast<float>(A[i * K + k]) * static_cast<float>(B[k * N + j]);
+                }
+            }
+            C[i * N + j] = BFloat16(sum);
+        }
+    }
+}
+
 // Matrix multiplication for C = A^T @ B
 // A: (K, M) row-major (will be transposed)
 // B: (K, N) row-major
@@ -369,15 +420,32 @@ void gemm_transA_cpu<Float16>(
     }
 }
 
+// Specialization for BFloat16 (uses Float32 accumulation)
+template<>
+void gemm_transA_cpu<BFloat16>(
+    const BFloat16* A, const BFloat16* B, BFloat16* C,
+    int64_t M, int64_t N, int64_t K
+) {
+    #pragma omp parallel for collapse(2) if(M * N > 1000)
+    for (int64_t i = 0; i < M; ++i) {
+        for (int64_t j = 0; j < N; ++j) {
+            float sum = 0.0f;
+            for (int64_t k = 0; k < K; ++k) {
+                sum += static_cast<float>(A[k * M + i]) * static_cast<float>(B[k * N + j]);
+            }
+            C[i * N + j] = BFloat16(sum);
+        }
+    }
+}
+
 // ============================================================================
 // Conv2d Forward CPU Implementation
 // ============================================================================
 
 #ifdef TENZOR_USE_ONEDNN
 
-// Thread-local oneDNN engine and stream for reuse
-static thread_local dnnl::engine g_onednn_engine(dnnl::engine::kind::cpu, 0);
-static thread_local dnnl::stream g_onednn_stream(g_onednn_engine);
+// Use shared lazy-init accessors from onednn_cache.hpp to avoid static
+// thread_local initialization issues in dlopen'd libraries.
 
 // ============================================================================
 // oneDNN Primitive Cache for Conv2d
@@ -533,8 +601,8 @@ static bool conv2d_forward_onednn(
         int64_t width = input_shape[3];
         int64_t in_channels_per_group = weight_shape[1];
 
-        auto& engine = g_onednn_engine;
-        auto& stream = g_onednn_stream;
+        auto& engine = get_onednn_engine();
+        auto& stream = get_onednn_stream();
 
         // Create cache key
         Conv2dCacheKey cache_key{

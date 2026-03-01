@@ -32,8 +32,10 @@ namespace cuda {
 
 class CuBLASHandlePool {
 public:
+    /// Returns a per-thread cuBLAS handle, optionally bound to the given stream.
+    /// Each thread owns its own handle, so no data race on cublasSetStream.
     static cublasHandle_t get(cudaStream_t stream = nullptr) {
-        static CuBLASHandlePool instance;
+        static thread_local CuBLASHandlePool instance;
         if (stream && stream != instance.last_stream_) {
             CUBLAS_CHECK(cublasSetStream(instance.handle_, stream));
             instance.last_stream_ = stream;
@@ -42,8 +44,7 @@ public:
     }
 
     static void shutdown() {
-        // No-op: static singleton destroyed at program exit.
-        // Backend shutdown relies on proper atexit ordering.
+        // No-op: thread_local instances destroyed when each thread exits.
     }
 
 private:

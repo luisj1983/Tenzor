@@ -9,7 +9,6 @@
 #pragma once
 
 #include "../module.hpp"
-#include <atomic>
 
 namespace tenzor {
 namespace nn {
@@ -85,7 +84,7 @@ private:
     Variable bias_;                 ///< Shift parameter beta [num_features]
     Variable running_mean_;         ///< Running mean [num_features]
     Variable running_var_;          ///< Running variance [num_features]
-    std::atomic<int64_t> num_batches_tracked_{0};  ///< Count of batches processed
+    Variable num_batches_tracked_;  ///< Count of batches processed (scalar Int64 buffer)
 
     // Cached pointers to parameters_ entries (avoids ~2-3ms hash map lookup overhead)
     std::shared_ptr<Variable> cached_weight_;
@@ -152,7 +151,7 @@ private:
     Variable bias_;                 ///< Shift parameter beta
     Variable running_mean_;         ///< Running mean
     Variable running_var_;          ///< Running variance
-    std::atomic<int64_t> num_batches_tracked_{0};  ///< Count of batches processed
+    Variable num_batches_tracked_;  ///< Count of batches processed (scalar Int64 buffer)
 
     // Cached pointers to parameters_ entries (avoids ~2-3ms hash map lookup overhead)
     std::shared_ptr<Variable> cached_weight_;

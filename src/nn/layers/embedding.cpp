@@ -11,6 +11,7 @@
 #include "tenzor/ops/op_id.hpp"
 #include <stdexcept>
 #include <cmath>
+#include <cstring>
 #include <iostream>
 
 namespace tenzor {
@@ -237,6 +238,12 @@ Embedding::Embedding(int64_t num_embeddings, int64_t embedding_dim,
     if (padding_idx >= num_embeddings || padding_idx < -1) {
         throw std::invalid_argument("padding_idx must be in range [-1, num_embeddings)");
     }
+    if (scale_grad_by_freq) {
+        throw std::runtime_error("Embedding: scale_grad_by_freq not implemented");
+    }
+    if (sparse) {
+        throw std::runtime_error("Embedding: sparse not implemented");
+    }
 
     // Initialize embedding weight matrix
     initialize_weights();
@@ -249,13 +256,38 @@ auto Embedding::initialize_weights() -> void {
     // Initialize with Normal(0, 1)
     weight_ = Variable(randn({num_embeddings_, embedding_dim_}), true);
 
-    // Set padding_idx embedding to zeros if specified
+    // Set padding_idx embedding to zeros if specified (dtype-aware)
     if (padding_idx_ >= 0) {
-        auto weight_ptr = weight_.tensor().data<float>();
+        DType weight_dtype = weight_.tensor().dtype();
+        int64_t row_offset = padding_idx_ * embedding_dim_;
 
-        // Zero out the row corresponding to padding_idx
-        for (int64_t j = 0; j < embedding_dim_; ++j) {
-            weight_ptr[padding_idx_ * embedding_dim_ + j] = 0.0f;
+        if (weight_dtype == DType::Float32) {
+            auto* ptr = weight_.tensor().data<float>();
+            for (int64_t j = 0; j < embedding_dim_; ++j) {
+                ptr[row_offset + j] = 0.0f;
+            }
+        } else if (weight_dtype == DType::Float64) {
+            auto* ptr = weight_.tensor().data<double>();
+            for (int64_t j = 0; j < embedding_dim_; ++j) {
+                ptr[row_offset + j] = 0.0;
+            }
+        } else if (weight_dtype == DType::Float16) {
+            auto* ptr = weight_.tensor().data<Float16>();
+            for (int64_t j = 0; j < embedding_dim_; ++j) {
+                ptr[row_offset + j] = Float16(0.0f);
+            }
+        } else if (weight_dtype == DType::BFloat16) {
+            auto* ptr = weight_.tensor().data<BFloat16>();
+            for (int64_t j = 0; j < embedding_dim_; ++j) {
+                ptr[row_offset + j] = BFloat16(0.0f);
+            }
+        } else {
+            // Fallback: use memset for integer and other types
+            std::memset(
+                static_cast<char*>(weight_.tensor().data_ptr()) + row_offset * weight_.tensor().dtype_size(),
+                0,
+                embedding_dim_ * weight_.tensor().dtype_size()
+            );
         }
     }
 }
@@ -279,17 +311,8 @@ auto Embedding::forward_impl(const Variable& input) -> Variable {
                            ? weight_tensor : weight_tensor.to(target_device);
         Tensor indices_dev = input_tensor;
 
-        // Validate indices (requires D2H copy, but necessary for correctness)
-        {
-            Tensor indices_cpu = input_tensor.to(Device::cpu());
-            auto* idx_ptr = indices_cpu.data<int64_t>();
-            int64_t num_idx = indices_cpu.numel();
-            for (int64_t i = 0; i < num_idx; ++i) {
-                if (idx_ptr[i] < 0 || idx_ptr[i] >= num_embeddings_) {
-                    throw std::out_of_range("Index out of range: " + std::to_string(idx_ptr[i]));
-                }
-            }
-        }
+        // Skip index validation on GPU — backend kernels handle out-of-bounds
+        // (CPU path validates below in the non-device branch)
 
         // Apply max_norm if specified (requires CPU for now)
         if (max_norm_ > 0.0) {
@@ -583,9 +606,14 @@ auto EmbeddingBag::aggregate_embeddings(const Variable& embeddings, const Variab
     int64_t total_elements = emb_shape[0];
     int64_t embedding_dim = emb_shape[1];
 
-    // Save original device and transfer to CPU for pointer-based computation
+    // Save original device and dtype, then transfer to CPU Float32 for computation
     Device original_device = emb_tensor.device();
+    DType original_dtype = emb_tensor.dtype();
     Tensor emb_cpu = (original_device == Device::cpu()) ? emb_tensor : emb_tensor.to(Device::cpu());
+    // Upcast to Float32 for aggregation if needed (avoids precision loss with Float16/BFloat16)
+    if (emb_cpu.dtype() != DType::Float32) {
+        emb_cpu = emb_cpu.to(DType::Float32);
+    }
     auto emb_ptr = emb_cpu.data<float>();
 
     // If no offsets, aggregate all embeddings into single vector
@@ -622,7 +650,10 @@ auto EmbeddingBag::aggregate_embeddings(const Variable& embeddings, const Variab
             }
         }
 
-        // Transfer output back to original device if needed
+        // Convert back to original dtype and transfer to original device
+        if (original_dtype != DType::Float32) {
+            output = output.to(original_dtype);
+        }
         if (original_device != Device::cpu()) {
             output = output.to(original_device);
         }
@@ -690,7 +721,10 @@ auto EmbeddingBag::aggregate_embeddings(const Variable& embeddings, const Variab
         }
     }
 
-    // Transfer output back to original device if needed
+    // Convert back to original dtype and transfer to original device
+    if (original_dtype != DType::Float32) {
+        output = output.to(original_dtype);
+    }
     if (original_device != Device::cpu()) {
         output = output.to(original_device);
     }

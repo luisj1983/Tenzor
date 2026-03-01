@@ -391,11 +391,29 @@ public:
      */
     static void clear() noexcept {
         for (auto& table : tables_) {
+            table.ready.store(false, std::memory_order_release);
             table.kernels.fill(nullptr);
             table.single_output_kernels.fill(nullptr);
             table.inplace_kernels.fill(nullptr);
             table.backend = nullptr;
         }
+    }
+
+    /**
+     * @brief Clear a single backend's dispatch table.
+     *
+     * Used by unload_backend() to invalidate a specific device type's
+     * kernel registrations without affecting other backends.
+     *
+     * @param type Device type to clear
+     */
+    static void clear_backend(Device::Type type) noexcept {
+        auto& table = tables_[static_cast<size_t>(type)];
+        table.ready.store(false, std::memory_order_release);
+        table.kernels.fill(nullptr);
+        table.single_output_kernels.fill(nullptr);
+        table.inplace_kernels.fill(nullptr);
+        table.backend = nullptr;
     }
 
     /**

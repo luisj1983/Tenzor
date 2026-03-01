@@ -802,13 +802,22 @@ auto take_kernel(const Tensor& input, const Tensor& indices) -> Tensor {
     const auto* src = static_cast<const uint8_t*>(cont.data<uint8_t>());
     auto* dst = output.data<uint8_t>();
 
-    #pragma omp parallel for if(num_indices > 65536)
+    // Pre-validate all indices sequentially — throwing inside an OMP parallel
+    // region is undefined behavior, so we validate before entering the loop.
     for (int64_t i = 0; i < num_indices; ++i) {
         int64_t idx = idx_data[i];
         if (idx < 0) idx += input_numel;
         if (idx < 0 || idx >= input_numel) {
-            throw std::out_of_range("take: index out of range");
+            throw std::out_of_range("take: index " + std::to_string(idx_data[i]) +
+                " out of range [" + std::to_string(-input_numel) + ", " +
+                std::to_string(input_numel) + ")");
         }
+    }
+
+    #pragma omp parallel for if(num_indices > 65536)
+    for (int64_t i = 0; i < num_indices; ++i) {
+        int64_t idx = idx_data[i];
+        if (idx < 0) idx += input_numel;
         std::memcpy(dst + i * elem_size, src + idx * elem_size, elem_size);
     }
 
@@ -829,6 +838,17 @@ auto put_kernel(Tensor& input, const Tensor& indices, const Tensor& source,
     const size_t elem_size = dtype_size(result.dtype());
     auto* dst = result.data<uint8_t>();
     const auto* src_data = static_cast<const uint8_t*>(source.data<uint8_t>());
+
+    // Pre-validate all indices sequentially to avoid OOB writes.
+    for (int64_t i = 0; i < num_indices; ++i) {
+        int64_t idx = idx_data[i];
+        if (idx < 0) idx += input_numel;
+        if (idx < 0 || idx >= input_numel) {
+            throw std::out_of_range("put: index " + std::to_string(idx_data[i]) +
+                " out of range [" + std::to_string(-input_numel) + ", " +
+                std::to_string(input_numel) + ")");
+        }
+    }
 
     if (accumulate && result.dtype() == DType::Float32) {
         float* dst_f = result.data<float>();

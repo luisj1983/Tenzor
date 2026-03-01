@@ -78,17 +78,19 @@ public:
         auto grad_input = zeros({N, C, H_in, W_in}, dtype, Device::cpu());
 
         // Distribute gradients to max element positions with proper dtype handling
+        // Indices are always stored as Int64
+        const int64_t* indices_data = indices.data<int64_t>();
+
         if (dtype == DType::Float32) {
             float* grad_input_data = grad_input.data<float>();
             const float* grad_output_data = grad_output.data<float>();
-            const float* indices_data = indices.data<float>();
 
             for (int64_t n = 0; n < N; ++n) {
                 for (int64_t c = 0; c < C; ++c) {
                     for (int64_t h_out = 0; h_out < H_out; ++h_out) {
                         for (int64_t w_out = 0; w_out < W_out; ++w_out) {
                             int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                            int64_t max_idx = static_cast<int64_t>(indices_data[out_idx]);
+                            int64_t max_idx = indices_data[out_idx];
                             grad_input_data[max_idx] += grad_output_data[out_idx];
                         }
                     }
@@ -97,14 +99,13 @@ public:
         } else if (dtype == DType::Float64) {
             double* grad_input_data = grad_input.data<double>();
             const double* grad_output_data = grad_output.data<double>();
-            const double* indices_data = indices.data<double>();
 
             for (int64_t n = 0; n < N; ++n) {
                 for (int64_t c = 0; c < C; ++c) {
                     for (int64_t h_out = 0; h_out < H_out; ++h_out) {
                         for (int64_t w_out = 0; w_out < W_out; ++w_out) {
                             int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                            int64_t max_idx = static_cast<int64_t>(indices_data[out_idx]);
+                            int64_t max_idx = indices_data[out_idx];
                             grad_input_data[max_idx] += grad_output_data[out_idx];
                         }
                     }
@@ -117,14 +118,13 @@ public:
             grad_input_f32.zero_();
             float* gi_f32_data = grad_input_f32.data<float>();
             const Float16* grad_output_data = grad_output.data<Float16>();
-            const Float16* indices_data = indices.data<Float16>();
 
             for (int64_t n = 0; n < N; ++n) {
                 for (int64_t c = 0; c < C; ++c) {
                     for (int64_t h_out = 0; h_out < H_out; ++h_out) {
                         for (int64_t w_out = 0; w_out < W_out; ++w_out) {
                             int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                            int64_t max_idx = static_cast<int64_t>(static_cast<float>(indices_data[out_idx]));
+                            int64_t max_idx = indices_data[out_idx];
                             gi_f32_data[max_idx] += static_cast<float>(grad_output_data[out_idx]);
                         }
                     }
@@ -192,14 +192,14 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
         // Create output tensor and indices tensor on CPU
         auto dtype = input.tensor().dtype();
         output = zeros({N, C, H_out, W_out}, dtype, Device::cpu());
-        // Indices stored as same dtype for simplicity
-        indices = zeros({N, C, H_out, W_out}, dtype, Device::cpu());
+        // Always store indices as Int64 for precision (Float16 can't represent large indices)
+        indices = zeros({N, C, H_out, W_out}, DType::Int64, Device::cpu());
 
         // Perform max pooling with proper dtype handling
         if (dtype == DType::Float32) {
             const float* input_data = input.tensor().data<float>();
             float* output_data = output.data<float>();
-            float* indices_data = indices.data<float>();
+            int64_t* indices_data = indices.data<int64_t>();
 
             for (int64_t n = 0; n < N; ++n) {
                 for (int64_t c = 0; c < C; ++c) {
@@ -227,7 +227,7 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
 
                             int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
                             output_data[out_idx] = max_val;
-                            indices_data[out_idx] = static_cast<float>(max_idx);
+                            indices_data[out_idx] = max_idx;
                         }
                     }
                 }
@@ -235,7 +235,7 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
         } else if (dtype == DType::Float64) {
             const double* input_data = input.tensor().data<double>();
             double* output_data = output.data<double>();
-            double* indices_data = indices.data<double>();
+            int64_t* indices_data = indices.data<int64_t>();
 
             for (int64_t n = 0; n < N; ++n) {
                 for (int64_t c = 0; c < C; ++c) {
@@ -263,7 +263,7 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
 
                             int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
                             output_data[out_idx] = max_val;
-                            indices_data[out_idx] = static_cast<double>(max_idx);
+                            indices_data[out_idx] = max_idx;
                         }
                     }
                 }
@@ -271,7 +271,7 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
         } else if (dtype == DType::Float16) {
             const Float16* input_data = input.tensor().data<Float16>();
             Float16* output_data = output.data<Float16>();
-            Float16* indices_data = indices.data<Float16>();
+            int64_t* indices_data = indices.data<int64_t>();
 
             for (int64_t n = 0; n < N; ++n) {
                 for (int64_t c = 0; c < C; ++c) {
@@ -300,7 +300,7 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
 
                             int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
                             output_data[out_idx] = Float16(max_val);
-                            indices_data[out_idx] = Float16(static_cast<float>(max_idx));
+                            indices_data[out_idx] = max_idx;
                         }
                     }
                 }
@@ -308,7 +308,7 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
         } else if (dtype == DType::BFloat16) {
             const BFloat16* input_data = input.tensor().data<BFloat16>();
             BFloat16* output_data = output.data<BFloat16>();
-            BFloat16* indices_data = indices.data<BFloat16>();
+            int64_t* indices_data = indices.data<int64_t>();
 
             for (int64_t n = 0; n < N; ++n) {
                 for (int64_t c = 0; c < C; ++c) {
@@ -337,7 +337,7 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
 
                             int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
                             output_data[out_idx] = BFloat16(max_val);
-                            indices_data[out_idx] = BFloat16(static_cast<float>(max_idx));
+                            indices_data[out_idx] = max_idx;
                         }
                     }
                 }

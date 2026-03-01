@@ -835,18 +835,20 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             auto* output_data = output.data<Float16>();
 
             if (dim == REDUCE_ALL) {
-                // Full reduction - compute in Float32 for precision
+                // Full reduction - Kahan compensated summation in Float32
                 const int64_t n = input.numel();
                 float sum = 0.0f;
+                float compensation = 0.0f;
 
-                // Use OpenMP reduction - fast and efficient
-                #pragma omp parallel for reduction(+:sum) if(n > REDUCTION_OMP_THRESHOLD)
                 for (int64_t i = 0; i < n; i++) {
-                    sum += static_cast<float>(input_data[i]);
+                    float y = static_cast<float>(input_data[i]) - compensation;
+                    float t = sum + y;
+                    compensation = (t - sum) - y;
+                    sum = t;
                 }
                 output_data[0] = Float16(sum);
             } else {
-                // Dimensional reduction - compute in Float32
+                // Dimensional reduction - Kahan compensated in Float32
                 const int64_t shape_ndim = static_cast<int64_t>(input_shape.size());
                 const int64_t dim_size = input_shape[dim];
 
@@ -869,15 +871,19 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                         tmp /= input_shape[d];
                     }
 
-                    // Sum along dimension - simple accumulation in Float32
+                    // Kahan compensated sum along dimension
                     float sum = 0.0f;
+                    float compensation = 0.0f;
                     for (int64_t i = 0; i < dim_size; i++) {
                         indices[dim] = i;
                         int64_t in_idx = 0;
                         for (int64_t d = 0; d < shape_ndim; d++) {
                             in_idx += indices[d] * input_strides[d];
                         }
-                        sum += static_cast<float>(input_data[in_idx]);
+                        float y = static_cast<float>(input_data[in_idx]) - compensation;
+                        float t = sum + y;
+                        compensation = (t - sum) - y;
+                        sum = t;
                     }
                     output_data[out_idx] = Float16(sum);
                 }
@@ -1851,6 +1857,174 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                                std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                                std::vector<int64_t>(input_strides.begin(), input_strides.end()),
                                dim);
+            }
+            break;
+        }
+        case DType::Float16: {
+            auto* input_data = input.data<Float16>();
+            if (dim == REDUCE_ALL) {
+                // Convert to Float32 comparison
+                const int64_t n = input.numel();
+                if (n == 0) throw std::runtime_error("argmin: input tensor is empty");
+                int64_t min_idx = 0;
+                float min_val = static_cast<float>(input_data[0]);
+
+                #ifdef _OPENMP
+                if (n > REDUCTION_OMP_THRESHOLD) {
+                    #pragma omp parallel
+                    {
+                        int64_t local_idx = 0;
+                        float local_min = static_cast<float>(input_data[0]);
+                        #pragma omp for nowait
+                        for (int64_t i = 1; i < n; i++) {
+                            float val = static_cast<float>(input_data[i]);
+                            if (val < local_min) {
+                                local_min = val;
+                                local_idx = i;
+                            }
+                        }
+                        #pragma omp critical
+                        {
+                            if (local_min < min_val || (local_min == min_val && local_idx < min_idx)) {
+                                min_val = local_min;
+                                min_idx = local_idx;
+                            }
+                        }
+                    }
+                } else
+                #endif
+                {
+                    for (int64_t i = 1; i < n; i++) {
+                        float val = static_cast<float>(input_data[i]);
+                        if (val < min_val) {
+                            min_val = val;
+                            min_idx = i;
+                        }
+                    }
+                }
+                output_data[0] = min_idx;
+            } else {
+                // Dimensional argmin
+                const int64_t dim_size = input_shape[dim];
+                const int64_t output_size = output.numel();
+
+                #pragma omp parallel for if(output_size > 1000)
+                for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
+                    std::vector<int64_t> indices(ndim, 0);
+                    int64_t tmp = out_idx;
+                    for (int64_t d = ndim - 1; d >= 0; --d) {
+                        if (d == dim) continue;
+                        indices[d] = tmp % input_shape[d];
+                        tmp /= input_shape[d];
+                    }
+
+                    indices[dim] = 0;
+                    int64_t in_idx = 0;
+                    for (int64_t d = 0; d < ndim; d++) {
+                        in_idx += indices[d] * input_strides[d];
+                    }
+
+                    float min_val = static_cast<float>(input_data[in_idx]);
+                    int64_t min_idx = 0;
+
+                    for (int64_t i = 1; i < dim_size; i++) {
+                        indices[dim] = i;
+                        in_idx = 0;
+                        for (int64_t d = 0; d < ndim; d++) {
+                            in_idx += indices[d] * input_strides[d];
+                        }
+                        float val = static_cast<float>(input_data[in_idx]);
+                        if (val < min_val) {
+                            min_val = val;
+                            min_idx = i;
+                        }
+                    }
+                    output_data[out_idx] = min_idx;
+                }
+            }
+            break;
+        }
+        case DType::BFloat16: {
+            auto* input_data = input.data<BFloat16>();
+            if (dim == REDUCE_ALL) {
+                // Convert to Float32 comparison
+                const int64_t n = input.numel();
+                if (n == 0) throw std::runtime_error("argmin: input tensor is empty");
+                int64_t min_idx = 0;
+                float min_val = static_cast<float>(input_data[0]);
+
+                #ifdef _OPENMP
+                if (n > REDUCTION_OMP_THRESHOLD) {
+                    #pragma omp parallel
+                    {
+                        int64_t local_idx = 0;
+                        float local_min = static_cast<float>(input_data[0]);
+                        #pragma omp for nowait
+                        for (int64_t i = 1; i < n; i++) {
+                            float val = static_cast<float>(input_data[i]);
+                            if (val < local_min) {
+                                local_min = val;
+                                local_idx = i;
+                            }
+                        }
+                        #pragma omp critical
+                        {
+                            if (local_min < min_val || (local_min == min_val && local_idx < min_idx)) {
+                                min_val = local_min;
+                                min_idx = local_idx;
+                            }
+                        }
+                    }
+                } else
+                #endif
+                {
+                    for (int64_t i = 1; i < n; i++) {
+                        float val = static_cast<float>(input_data[i]);
+                        if (val < min_val) {
+                            min_val = val;
+                            min_idx = i;
+                        }
+                    }
+                }
+                output_data[0] = min_idx;
+            } else {
+                // Dimensional argmin
+                const int64_t dim_size = input_shape[dim];
+                const int64_t output_size = output.numel();
+
+                #pragma omp parallel for if(output_size > 1000)
+                for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
+                    std::vector<int64_t> indices(ndim, 0);
+                    int64_t tmp = out_idx;
+                    for (int64_t d = ndim - 1; d >= 0; --d) {
+                        if (d == dim) continue;
+                        indices[d] = tmp % input_shape[d];
+                        tmp /= input_shape[d];
+                    }
+
+                    indices[dim] = 0;
+                    int64_t in_idx = 0;
+                    for (int64_t d = 0; d < ndim; d++) {
+                        in_idx += indices[d] * input_strides[d];
+                    }
+
+                    float min_val = static_cast<float>(input_data[in_idx]);
+                    int64_t min_idx = 0;
+
+                    for (int64_t i = 1; i < dim_size; i++) {
+                        indices[dim] = i;
+                        in_idx = 0;
+                        for (int64_t d = 0; d < ndim; d++) {
+                            in_idx += indices[d] * input_strides[d];
+                        }
+                        float val = static_cast<float>(input_data[in_idx]);
+                        if (val < min_val) {
+                            min_val = val;
+                            min_idx = i;
+                        }
+                    }
+                    output_data[out_idx] = min_idx;
+                }
             }
             break;
         }

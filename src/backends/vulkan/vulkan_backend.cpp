@@ -53,6 +53,11 @@ VulkanBackend::~VulkanBackend() {
         }
     }
 
+    // Flush any deferred frees now that all GPU work is complete
+    for (size_t i = 0; i < deferred_frees_.size(); ++i) {
+        flush_deferred_frees(static_cast<int32_t>(i));
+    }
+
     // IMPORTANT: Shutdown the caching allocator BEFORE destroying the Vulkan device
     // The allocator is a singleton that may outlive this backend instance.
     // shutdown_device() releases free blocks, clears all blocks without Vulkan calls,
@@ -68,8 +73,8 @@ VulkanBackend::~VulkanBackend() {
         }
     }
 
-    // Cleanup staging buffers
-    stagingBuffers_.clear();
+    // Cleanup staging buffer pools
+    stagingPools_.clear();
 
     // Cleanup pipeline caches
     pipelineCaches_.clear();
@@ -527,9 +532,10 @@ void VulkanBackend::createLogicalDevices() {
         backend::VulkanCachingAllocator::get().initialize(
             ctx.device, ctx.physicalDevice, static_cast<int>(device_idx));
 
-        // Initialize caches
-        stagingBuffers_.push_back({});
+        // Initialize caches and per-device structures
+        stagingPools_.push_back({});
         pipelineCaches_.push_back({});
+        deferred_frees_.push_back({});
     }
 }
 auto VulkanBackend::device_count() const -> int32_t {
@@ -770,20 +776,23 @@ std::pair<VkBuffer, VkDeviceSize> VulkanBackend::getVulkanBufferAndOffset(const 
     // Search through allocations_ to find a buffer where: base_ptr <= ptr < base_ptr + size
     const auto* ptr_as_uint = reinterpret_cast<const uint8_t*>(ptr);
 
-    for (const auto& [base_ptr, alloc_info] : allocations_) {
-        const auto* base_as_uint = reinterpret_cast<const uint8_t*>(base_ptr);
-        const size_t size = alloc_info.first;
-        const int32_t device_id = alloc_info.second;
+    {
+        std::lock_guard<std::mutex> alloc_lock(allocations_mutex_);
+        for (const auto& [base_ptr, alloc_info] : allocations_) {
+            const auto* base_as_uint = reinterpret_cast<const uint8_t*>(base_ptr);
+            const size_t size = alloc_info.first;
+            const int32_t device_id = alloc_info.second;
 
-        // Check if ptr is in the range [base_ptr, base_ptr + size)
-        if (ptr_as_uint >= base_as_uint && ptr_as_uint < base_as_uint + size) {
-            // Found it! ptr is within this buffer's range
-            VkDeviceSize offset = static_cast<VkDeviceSize>(ptr_as_uint - base_as_uint);
-            try {
-                VkBuffer buffer = allocator.get_buffer(base_ptr, device_id);
-                return {buffer, offset};
-            } catch (...) {
-                // Continue searching
+            // Check if ptr is in the range [base_ptr, base_ptr + size)
+            if (ptr_as_uint >= base_as_uint && ptr_as_uint < base_as_uint + size) {
+                // Found it! ptr is within this buffer's range
+                VkDeviceSize offset = static_cast<VkDeviceSize>(ptr_as_uint - base_as_uint);
+                try {
+                    VkBuffer buffer = allocator.get_buffer(base_ptr, device_id);
+                    return {buffer, offset};
+                } catch (...) {
+                    // Continue searching
+                }
             }
         }
     }

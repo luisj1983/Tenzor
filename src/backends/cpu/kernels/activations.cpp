@@ -13,6 +13,7 @@
 // Intel oneDNN for optimized activations (5-20x faster for large tensors)
 #ifdef TENZOR_USE_ONEDNN
 #include <dnnl.hpp>
+#include "onednn_cache.hpp"
 #include <unordered_map>
 #include <list>
 #include <mutex>
@@ -41,11 +42,10 @@ namespace tenzor {
 namespace cpu {
 
 // ============================================================================
-// oneDNN Engine and Stream (thread-local for safety)
+// oneDNN Engine and Stream — use shared lazy-init accessors from onednn_cache.hpp
+// to avoid static thread_local initialization issues in dlopen'd libraries.
 // ============================================================================
 #ifdef TENZOR_USE_ONEDNN
-static thread_local dnnl::engine g_activation_engine(dnnl::engine::kind::cpu, 0);
-static thread_local dnnl::stream g_activation_stream(g_activation_engine);
 
 // --------------------------------------------------------------------------
 // Eltwise Primitive Caching (eliminates ~1-5ms primitive creation overhead)
@@ -185,8 +185,8 @@ static bool onednn_eltwise_forward(
     }
 
     try {
-        auto& engine = g_activation_engine;
-        auto& stream = g_activation_stream;
+        auto& engine = get_onednn_engine();
+        auto& stream = get_onednn_stream();
 
         // Create cache key
         EltwiseCacheKey cache_key{alg, n, alpha, beta, false, DType::Float32};
@@ -237,8 +237,8 @@ static bool onednn_eltwise_backward(
     }
 
     try {
-        auto& engine = g_activation_engine;
-        auto& stream = g_activation_stream;
+        auto& engine = get_onednn_engine();
+        auto& stream = get_onednn_stream();
 
         // Create cache key (is_backward = true)
         EltwiseCacheKey cache_key{alg, n, alpha, beta, true, DType::Float32};
@@ -295,8 +295,8 @@ static bool onednn_softmax_forward(
     }
 
     try {
-        auto& engine = g_activation_engine;
-        auto& stream = g_activation_stream;
+        auto& engine = get_onednn_engine();
+        auto& stream = get_onednn_stream();
 
         // Create cache key
         SoftmaxCacheKey cache_key{shape, axis, DType::Float32};
@@ -351,7 +351,7 @@ static bool onednn_softmax_forward(
 
 // Forward: max(0, x)
 auto relu_kernel(const Tensor& input) -> Tensor {
-    auto output = zeros_like(input);
+    auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
@@ -500,6 +500,7 @@ auto relu_kernel(const Tensor& input) -> Tensor {
         Float16* out_data = output.data<Float16>();
         size_t n = input.numel();
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
             out_data[i] = Float16(std::max(0.0f, val));
@@ -583,6 +584,7 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
         Float16* grad_in_data = grad_input.data<Float16>();
         size_t n = input.numel();
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float in_val = static_cast<float>(in_data[i]);
             float grad_out_val = static_cast<float>(grad_out_data[i]);
@@ -614,7 +616,7 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
 // Forward: 1 / (1 + exp(-x))
 // SIMD + OpenMP optimized using fast_math sigmoid approximation
 auto sigmoid_kernel(const Tensor& input) -> Tensor {
-    auto output = zeros_like(input);
+    auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
@@ -832,7 +834,7 @@ auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input) -> 
 
 // Forward: (exp(x) - exp(-x)) / (exp(x) + exp(-x)) - OpenMP + SIMD optimized
 auto tanh_kernel(const Tensor& input) -> Tensor {
-    auto output = zeros_like(input);
+    auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
@@ -995,6 +997,7 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
         Float16* grad_in_data = grad_input.data<Float16>();
         size_t n = input.numel();
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float in_val = static_cast<float>(in_data[i]);
             float grad_out_val = static_cast<float>(grad_out_data[i]);
@@ -1028,7 +1031,7 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
 // Forward: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
 // GELU (Gaussian Error Linear Unit) - using fast tanh approximation
 auto gelu_kernel(const Tensor& input) -> Tensor {
-    Tensor output = zeros_like(input);
+    Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
@@ -1114,9 +1117,10 @@ auto gelu_kernel(const Tensor& input) -> Tensor {
         Float16* out_data = output.data<Float16>();
         size_t n = input.numel();
 
-        // Convert to float, use SIMD, convert back
+        // Convert to float, compute, convert back
         constexpr float sqrt_2_over_pi = 0.7978845608f;
         constexpr float coeff = 0.044715f;
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float x3 = x * x * x;
@@ -1195,6 +1199,7 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
         constexpr float sqrt_2_over_pi = 0.7978845608f;
         constexpr float coeff = 0.044715f;
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float x2 = x * x;
@@ -1236,13 +1241,14 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
 // Forward: x * sigmoid(x)
 // Swish (also known as SiLU - Sigmoid Linear Unit)
 auto swish_kernel(const Tensor& input) -> Tensor {
-    auto output = zeros_like(input);
+    auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
         float* out_data = output.data<float>();
         size_t n = input.numel();
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = in_data[i];
             float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
@@ -1253,6 +1259,7 @@ auto swish_kernel(const Tensor& input) -> Tensor {
         double* out_data = output.data<double>();
         size_t n = input.numel();
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             double x = in_data[i];
             double sigmoid_x = 1.0 / (1.0 + std::exp(-x));
@@ -1263,6 +1270,7 @@ auto swish_kernel(const Tensor& input) -> Tensor {
         Float16* out_data = output.data<Float16>();
         size_t n = input.numel();
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
@@ -1321,6 +1329,7 @@ auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Te
         Float16* grad_in_data = grad_input.data<Float16>();
         size_t n = input.numel();
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
@@ -1353,7 +1362,7 @@ auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Te
 
 // Forward: x if x > 0 else alpha * x
 auto leaky_relu_kernel(const Tensor& input, float alpha) -> Tensor {
-    auto output = zeros_like(input);
+    auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
@@ -1417,6 +1426,7 @@ auto leaky_relu_kernel(const Tensor& input, float alpha) -> Tensor {
         Float16* out_data = output.data<Float16>();
         size_t n = input.numel();
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
             out_data[i] = Float16(val > 0.0f ? val : alpha * val);
@@ -1469,6 +1479,7 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
         Float16* grad_in_data = grad_input.data<Float16>();
         size_t n = input.numel();
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float in_val = static_cast<float>(in_data[i]);
             float grad_out_val = static_cast<float>(grad_out_data[i]);
@@ -1528,7 +1539,7 @@ static auto compute_max_along_dim(const float* data, const std::vector<int64_t>&
 
 // Forward: exp(x_i - max) / sum(exp(x_j - max))
 auto softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
-    auto output = zeros_like(input);
+    auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
 
     // Handle negative dimension
     if (dim < 0) {
@@ -1900,7 +1911,7 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
 // Forward: log(softmax(x, dim)) = x - max(x) - log(sum(exp(x - max(x))))
 // More numerically stable than computing softmax then taking log
 auto log_softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
-    auto output = zeros_like(input);
+    auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
 
     // Handle negative dimension
     if (dim < 0) {
@@ -2259,7 +2270,7 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
 
 // Forward: x if x > 0 else alpha * (exp(x) - 1)
 auto elu_kernel(const Tensor& input, float alpha) -> Tensor {
-    auto output = zeros_like(input);
+    auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
@@ -2286,6 +2297,7 @@ auto elu_kernel(const Tensor& input, float alpha) -> Tensor {
         Float16* out_data = output.data<Float16>();
         size_t n = input.numel();
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float result = (x > 0.0f) ? x : alpha * (std::exp(x) - 1.0f);
@@ -2341,6 +2353,7 @@ auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float a
         Float16* grad_in_data = grad_input.data<Float16>();
         size_t n = input.numel();
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float grad_out = static_cast<float>(grad_out_data[i]);
@@ -2377,7 +2390,7 @@ constexpr float SELU_SCALE = 1.0507009873554804934193349852946f;
 
 // Forward: scale * (x if x > 0 else alpha * (exp(x) - 1))
 auto selu_kernel(const Tensor& input) -> Tensor {
-    auto output = zeros_like(input);
+    auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
@@ -2405,6 +2418,7 @@ auto selu_kernel(const Tensor& input) -> Tensor {
         Float16* out_data = output.data<Float16>();
         size_t n = input.numel();
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float result = SELU_SCALE * ((x > 0.0f) ? x : SELU_ALPHA * (std::exp(x) - 1.0f));
@@ -2462,6 +2476,7 @@ auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
         Float16* grad_in_data = grad_input.data<Float16>();
         size_t n = input.numel();
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float grad_out = static_cast<float>(grad_out_data[i]);
@@ -2494,7 +2509,7 @@ auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
 
 // Forward: x * tanh(softplus(x)) = x * tanh(ln(1 + exp(x)))
 auto mish_kernel(const Tensor& input) -> Tensor {
-    auto output = zeros_like(input);
+    auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
@@ -2540,6 +2555,7 @@ auto mish_kernel(const Tensor& input) -> Tensor {
         Float16* out_data = output.data<Float16>();
         size_t n = input.numel();
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float softplus;
@@ -2632,6 +2648,7 @@ auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
         Float16* grad_in_data = grad_input.data<Float16>();
         size_t n = input.numel();
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float grad_out = static_cast<float>(grad_out_data[i]);
@@ -2725,6 +2742,7 @@ auto softplus_kernel(const Tensor& input, float beta, float threshold) -> Tensor
         Float16* out_data = output.data<Float16>();
         size_t n = input.numel();
 
+        #pragma omp parallel for schedule(static) if(n > 1000)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]) * beta;
             float result;
@@ -2812,6 +2830,7 @@ auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, fl
         Float16* grad_in_data = grad_input.data<Float16>();
         size_t n = input.numel();
 
+        #pragma omp parallel for schedule(static) if(n > 1000)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]) * beta;
             float sigmoid_x;
@@ -2872,6 +2891,7 @@ auto relu_inplace_kernel(Tensor& input) -> void {
     } else if (input.dtype() == DType::Float16) {
         Float16* data = input.data<Float16>();
         size_t n = input.numel();
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float val = static_cast<float>(data[i]);
             data[i] = Float16(val > 0.0f ? val : 0.0f);
@@ -2907,6 +2927,7 @@ auto sigmoid_inplace_kernel(Tensor& input) -> void {
     } else if (input.dtype() == DType::Float16) {
         Float16* data = input.data<Float16>();
         size_t n = input.numel();
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float val = static_cast<float>(data[i]);
             data[i] = Float16(1.0f / (1.0f + std::exp(-val)));
@@ -2942,6 +2963,7 @@ auto tanh_inplace_kernel(Tensor& input) -> void {
     } else if (input.dtype() == DType::Float16) {
         Float16* data = input.data<Float16>();
         size_t n = input.numel();
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float val = static_cast<float>(data[i]);
             data[i] = Float16(std::tanh(val));
@@ -2978,6 +3000,7 @@ auto leaky_relu_inplace_kernel(Tensor& input, float alpha) -> void {
     } else if (input.dtype() == DType::Float16) {
         Float16* data = input.data<Float16>();
         size_t n = input.numel();
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float val = static_cast<float>(data[i]);
             data[i] = Float16(val > 0.0f ? val : alpha * val);
@@ -3024,6 +3047,7 @@ auto gelu_inplace_kernel(Tensor& input) -> void {
     } else if (input.dtype() == DType::Float16) {
         Float16* data = input.data<Float16>();
         size_t n = input.numel();
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(data[i]);
             float x_cubed = x * x * x;

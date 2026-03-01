@@ -1151,7 +1151,8 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() < 2) {
             throw std::invalid_argument("conv2d_forward requires at least 2 inputs (input, weight)");
         }
-        return {dispatchConv2dForward(inputs[0], inputs[1], attrs)};
+        const Tensor* bias_ptr = inputs.size() >= 3 ? &inputs[2] : nullptr;
+        return {dispatchConv2dForward(inputs[0], inputs[1], bias_ptr, attrs)};
     }
 
     // ConvTranspose2d forward operation

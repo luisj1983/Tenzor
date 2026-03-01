@@ -38,6 +38,7 @@
 // Intel oneDNN for optimized matrix operations (alternative to MKL)
 #ifdef TENZOR_USE_ONEDNN
 #include <dnnl.hpp>
+#include "onednn_cache.hpp"
 #include <list>
 #include <unordered_map>
 #endif
@@ -295,8 +296,8 @@ static void matmul_microkernel_float64(
 // oneDNN MatMul helper (provides optimized GEMM with better memory handling)
 // ============================================================================
 #ifdef TENZOR_USE_ONEDNN
-static thread_local dnnl::engine g_matmul_engine(dnnl::engine::kind::cpu, 0);
-static thread_local dnnl::stream g_matmul_stream(g_matmul_engine);
+// Use shared lazy-init accessors from onednn_cache.hpp to avoid static
+// thread_local initialization issues in dlopen'd libraries.
 
 // --------------------------------------------------------------------------
 // MatMul Primitive Caching (eliminates ~1-5ms primitive creation overhead)
@@ -369,8 +370,8 @@ static bool onednn_matmul_f32(
     }
 
     try {
-        auto& engine = g_matmul_engine;
-        auto& stream = g_matmul_stream;
+        auto& engine = get_onednn_engine();
+        auto& stream = get_onednn_stream();
 
         // Create cache key
         MatMulCacheKey cache_key{M, N, K};
@@ -732,13 +733,18 @@ static void matmul_blocked_bfloat16(
     constexpr int64_t TILE_N = 128;
     constexpr int64_t TILE_K = 256;
 
-    // Thread-local FP32 accumulator for C tile
-    static thread_local std::vector<float> C_fp32_buf_bf16(TILE_M * TILE_N);
-
     // Zero-initialize output
     std::fill_n(C, M * N, BFloat16(0.0f));
 
-    #pragma omp parallel for collapse(2) if(M * N > 65536)
+    // Use omp parallel to allocate per-thread FP32 workspace buffers on the heap.
+    // 'static thread_local' vectors are NOT safe here because this code runs inside
+    // a dlopen'd shared library, and OpenMP worker threads may bypass the C++ TLS
+    // initialization machinery, leaving the vectors empty (data() == nullptr).
+    #pragma omp parallel if(M * N > 65536)
+    {
+    std::vector<float> C_fp32_buf_bf16(TILE_M * TILE_N);
+
+    #pragma omp for collapse(2)
     for (int64_t i0 = 0; i0 < M; i0 += TILE_M) {
         for (int64_t j0 = 0; j0 < N; j0 += TILE_N) {
             int64_t tile_m = std::min(TILE_M, M - i0);
@@ -853,6 +859,7 @@ static void matmul_blocked_bfloat16(
             }
         }
     }
+    } // omp parallel
 }
 
 #else // !(__AVX512BF16__ && __AVX512F__)
@@ -2014,12 +2021,12 @@ auto div_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const Float16* b_data = b.data<Float16>();
             Float16* c_data = result.data<Float16>();
 
-            // Float16 division using scalar path (convert to float32)
+            // Float16 division via float32 — IEEE 754 naturally produces NaN for 0/0
+            // and +/-Inf for x/0, so no manual zero-check needed.
             for (size_t i = 0; i < n; ++i) {
                 float a_f32 = static_cast<float>(a_data[i]);
                 float b_f32 = static_cast<float>(b_data[i]);
-                float result_f32 = (b_f32 == 0.0f) ? std::numeric_limits<float>::infinity() : a_f32 / b_f32;
-                c_data[i] = Float16(result_f32);
+                c_data[i] = Float16(a_f32 / b_f32);
             }
 
         } else if (a.dtype() == DType::BFloat16) {
@@ -2030,8 +2037,7 @@ auto div_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             for (size_t i = 0; i < n; ++i) {
                 float a_f32 = static_cast<float>(a_data[i]);
                 float b_f32 = static_cast<float>(b_data[i]);
-                float result_f32 = (b_f32 == 0.0f) ? std::numeric_limits<float>::infinity() : a_f32 / b_f32;
-                c_data[i] = BFloat16(result_f32);
+                c_data[i] = BFloat16(a_f32 / b_f32);
             }
 
         } else {
@@ -4167,8 +4173,8 @@ auto dot_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 
     int64_t n = a.shape()[0];
 
-    // Create scalar output tensor
-    Tensor output({1}, a.dtype(), a.device());
+    // Create scalar output tensor (0-D)
+    Tensor output({}, a.dtype(), a.device());
 
     switch (a.dtype()) {
         case DType::Float32: {

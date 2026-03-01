@@ -171,7 +171,7 @@ auto randint(int64_t low, int64_t high, std::vector<int64_t> shape,
  * auto t = arange(0.0f, 10.0f, 2.0f);  // [0, 2, 4, 6, 8]
  * @endcode
  */
-auto arange(float start, float end, float step = 1.0f,
+auto arange(double start, double end, double step = 1.0,
            DType dtype = DType::Float32,
            Device device = Device::cpu()) -> Tensor;
 

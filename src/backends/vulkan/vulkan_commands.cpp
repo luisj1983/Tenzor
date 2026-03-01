@@ -233,6 +233,9 @@ auto VulkanBackend::synchronize(int32_t device_id) -> void {
     ctx.activeCommandBuffer = VK_NULL_HANDLE;
     ctx.operationsInBatch = 0;
 
+    // Flush deferred frees now that all GPU work is complete
+    flush_deferred_frees(device_id);
+
     // Reset descriptor pool to reclaim descriptor sets
     // This is safe because all GPU work is complete after vkDeviceWaitIdle
     if (ctx.descriptorPool) {

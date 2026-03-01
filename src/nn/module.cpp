@@ -110,14 +110,26 @@ auto Module::to(Device device) -> void {
 }
 
 auto Module::to(DType dtype) -> void {
-    // Convert parameters to target dtype
+    // Only convert floating-point tensors (matches PyTorch behavior).
+    // Integer buffers (e.g. num_batches_tracked) are preserved.
+    auto is_floating = [](DType dt) {
+        return dt == DType::Float32 || dt == DType::Float64 ||
+               dt == DType::Float16 || dt == DType::BFloat16 ||
+               dt == DType::Complex64 || dt == DType::Complex128;
+    };
+
+    // Convert floating-point parameters to target dtype
     for (auto& [name, param] : parameters_) {
-        param->tensor() = param->tensor().to(dtype);
+        if (is_floating(param->tensor().dtype())) {
+            param->tensor() = param->tensor().to(dtype);
+        }
     }
 
-    // Convert buffers to target dtype
+    // Convert floating-point buffers to target dtype
     for (auto& [_, buffer] : buffers_) {
-        buffer->tensor() = buffer->tensor().to(dtype);
+        if (is_floating(buffer->tensor().dtype())) {
+            buffer->tensor() = buffer->tensor().to(dtype);
+        }
     }
 
     // Recursively convert submodules

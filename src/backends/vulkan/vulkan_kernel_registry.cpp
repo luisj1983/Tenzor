@@ -605,7 +605,8 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // Convolution Operations
     // ========================================================================
     table.register_kernel(OpId::Conv2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchConv2dForward(inputs[0], inputs[1], attrs)};
+        const Tensor* bias_ptr = inputs.size() >= 3 ? &inputs[2] : nullptr;
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchConv2dForward(inputs[0], inputs[1], bias_ptr, attrs)};
     });
 
     table.register_kernel(OpId::Conv2dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {

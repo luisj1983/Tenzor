@@ -81,22 +81,27 @@ struct SDPACacheKey {
     int64_t seq_len_q;
     int64_t seq_len_k;
     int64_t head_dim;
+    DType dtype;
+    float scale;
 
     bool operator==(const SDPACacheKey& other) const {
         return batch == other.batch && num_heads == other.num_heads &&
                seq_len_q == other.seq_len_q && seq_len_k == other.seq_len_k &&
-               head_dim == other.head_dim;
+               head_dim == other.head_dim && dtype == other.dtype &&
+               scale == other.scale;
     }
 };
 
 struct SDPACacheKeyHash {
     size_t operator()(const SDPACacheKey& k) const {
-        // Simple hash combining all dimensions
+        // Simple hash combining all dimensions, dtype, and scale
         size_t h = std::hash<int64_t>{}(k.batch);
         h ^= std::hash<int64_t>{}(k.num_heads) << 1;
         h ^= std::hash<int64_t>{}(k.seq_len_q) << 2;
         h ^= std::hash<int64_t>{}(k.seq_len_k) << 3;
         h ^= std::hash<int64_t>{}(k.head_dim) << 4;
+        h ^= std::hash<uint8_t>{}(static_cast<uint8_t>(k.dtype)) << 5;
+        h ^= std::hash<float>{}(k.scale) << 6;
         return h;
     }
 };
@@ -166,14 +171,15 @@ private:
     std::mutex mutex_;
 };
 
-// Workspace buffer (thread-safe singleton)
+// Per-thread workspace buffer — each thread owns its own CUDA allocation,
+// eliminating the data race where one thread frees the buffer while another
+// thread's kernel is still using it.
 class SDPAWorkspace {
 public:
     static void* get(size_t required_size) {
-        static SDPAWorkspace instance;
-        std::lock_guard<std::mutex> lock(instance.mutex_);
+        static thread_local SDPAWorkspace instance;
         if (required_size > instance.size_) {
-            instance.resize_locked(required_size);
+            instance.resize(required_size);
         }
         return instance.buffer_;
     }
@@ -186,17 +192,21 @@ private:
         }
     }
 
-    void resize_locked(size_t new_size) {
+    void resize(size_t new_size) {
         if (buffer_) {
-            // Ensure no kernels are still using the old buffer before freeing
             cudaDeviceSynchronize();
             cudaFree(buffer_);
         }
         size_ = new_size + (new_size / 4);  // 25% headroom
-        cudaMalloc(&buffer_, size_);
+        auto err = cudaMalloc(&buffer_, size_);
+        if (err != cudaSuccess) {
+            buffer_ = nullptr;
+            size_ = 0;
+            throw std::runtime_error("SDPA workspace cudaMalloc failed: " +
+                std::string(cudaGetErrorString(err)));
+        }
     }
 
-    std::mutex mutex_;
     void* buffer_;
     size_t size_;
 };
@@ -381,7 +391,7 @@ auto cudnn_sdpa_forward(
     std::vector<int64_t> q_shape_vec(q_shape.begin(), q_shape.end());
 
     // Check cache for pre-built graph
-    SDPACacheKey cache_key{batch, num_heads, seq_len_q, seq_len_k, head_dim};
+    SDPACacheKey cache_key{batch, num_heads, seq_len_q, seq_len_k, head_dim, Q.dtype(), scale};
     SDPACacheEntry cache_entry;
 
     if (!SDPAGraphCache::instance().get(cache_key, cache_entry)) {

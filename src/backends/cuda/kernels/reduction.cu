@@ -20,6 +20,20 @@ constexpr int WARP_SIZE = 32;
 constexpr int MAX_BLOCK_SIZE = 1024;
 constexpr int REDUCTION_BLOCK_SIZE = 256;
 
+// Type-safe sentinel values for max/min reductions.
+// Using -FLT_MAX for double produces wrong results since FLT_MAX << DBL_MAX.
+template<typename T> __device__ __host__ inline T sentinel_lowest();
+template<typename T> __device__ __host__ inline T sentinel_max();
+
+template<> __device__ __host__ inline float sentinel_lowest<float>() { return -FLT_MAX; }
+template<> __device__ __host__ inline float sentinel_max<float>() { return FLT_MAX; }
+template<> __device__ __host__ inline double sentinel_lowest<double>() { return -DBL_MAX; }
+template<> __device__ __host__ inline double sentinel_max<double>() { return DBL_MAX; }
+template<> __device__ __host__ inline int32_t sentinel_lowest<int32_t>() { return INT32_MIN; }
+template<> __device__ __host__ inline int32_t sentinel_max<int32_t>() { return INT32_MAX; }
+template<> __device__ __host__ inline int64_t sentinel_lowest<int64_t>() { return INT64_MIN; }
+template<> __device__ __host__ inline int64_t sentinel_max<int64_t>() { return INT64_MAX; }
+
 // Metadata struct passed by value to kernels (avoids cudaMalloc for shape/stride arrays)
 struct DimMeta {
     int64_t shape[8];
@@ -437,8 +451,8 @@ __global__ void max_reduce_kernel(const T* input, T* output, int64_t n) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t grid_size = blockDim.x * gridDim.x;
 
-    // Initialize with first element or negative infinity
-    T thread_max = (idx < n) ? input[idx] : -FLT_MAX;
+    // Initialize with first element or type-appropriate negative infinity
+    T thread_max = (idx < n) ? input[idx] : sentinel_lowest<T>();
 
     // Grid-stride loop
     for (int64_t i = idx + grid_size; i < n; i += grid_size) {
@@ -484,8 +498,8 @@ __global__ void min_reduce_kernel(const T* input, T* output, int64_t n) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t grid_size = blockDim.x * gridDim.x;
 
-    // Initialize with first element or positive infinity
-    T thread_min = (idx < n) ? input[idx] : FLT_MAX;
+    // Initialize with first element or type-appropriate positive infinity
+    T thread_min = (idx < n) ? input[idx] : sentinel_max<T>();
 
     // Grid-stride loop
     for (int64_t i = idx + grid_size; i < n; i += grid_size) {
@@ -738,11 +752,12 @@ __global__ void sum_along_dim_kernel(
 
     if (out_idx >= output_size) return;
 
-    // Compute multi-dimensional indices for output position
+    // Compute multi-dimensional indices for output position.
+    // Decompose in reverse order (innermost dim first) to match row-major layout.
     int64_t indices[8];  // Support up to 8D tensors
     int64_t tmp = out_idx;
 
-    for (int64_t d = 0; d < ndim; d++) {
+    for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) {
             indices[d] = 0;
             continue;
@@ -2015,8 +2030,8 @@ __global__ void argmax_full_kernel(const T* input, int64_t* output, int64_t n) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t grid_size = blockDim.x * gridDim.x;
 
-    // Initialize with first element or negative infinity
-    T thread_max = (idx < n) ? input[idx] : -FLT_MAX;
+    // Initialize with first element or type-appropriate negative infinity
+    T thread_max = (idx < n) ? input[idx] : sentinel_lowest<T>();
     int64_t thread_idx = (idx < n) ? idx : 0;
 
     // Grid-stride loop to find local maximum
@@ -2074,8 +2089,8 @@ __global__ void argmin_full_kernel(const T* input, int64_t* output, int64_t n) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t grid_size = blockDim.x * gridDim.x;
 
-    // Initialize with first element or positive infinity
-    T thread_min = (idx < n) ? input[idx] : FLT_MAX;
+    // Initialize with first element or type-appropriate positive infinity
+    T thread_min = (idx < n) ? input[idx] : sentinel_max<T>();
     int64_t thread_idx = (idx < n) ? idx : 0;
 
     // Grid-stride loop to find local minimum

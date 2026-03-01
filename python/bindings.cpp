@@ -3503,11 +3503,12 @@ PYBIND11_MODULE(tenzor_core, m) {
     // Attention and Transformer
     py::class_<tenzor::nn::MultiheadAttention, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::MultiheadAttention>>(nn, "MultiheadAttention")
-        .def(py::init<int64_t, int64_t, double, bool, bool, bool, int64_t, int64_t, bool>(),
+        .def(py::init<int64_t, int64_t, double, bool, bool, bool, int64_t, int64_t, bool, bool>(),
              py::arg("embed_dim"), py::arg("num_heads"), py::arg("dropout") = 0.0,
              py::arg("bias") = true, py::arg("add_bias_kv") = false,
              py::arg("add_zero_attn") = false, py::arg("kdim") = 0,
-             py::arg("vdim") = 0, py::arg("batch_first") = false)
+             py::arg("vdim") = 0, py::arg("batch_first") = false,
+             py::arg("is_causal") = false)
         .def("forward", [](tenzor::nn::MultiheadAttention& self, const tenzor::Variable& query,
                            const tenzor::Variable& key, const tenzor::Variable& value,
                            const tenzor::Tensor& key_padding_mask, const tenzor::Tensor& attn_mask,
