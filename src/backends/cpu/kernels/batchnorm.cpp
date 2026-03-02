@@ -273,8 +273,9 @@ void batchnorm_mean_var_impl(const T* input,
     }
 }
 
-// Specialized Float16 version that accumulates in Float32 to prevent overflow
-// Float16 has limited range (~65504 max), so summing many values can overflow
+// Specialized Float16 version that accumulates in Float32 with Kahan summation
+// Float16 has limited range (~65504 max), so summing many values can overflow.
+// Kahan summation compensates for floating-point rounding errors in the sum.
 template<>
 void batchnorm_mean_var_impl<Float16>(const Float16* input,
                                        Float16* mean,
@@ -298,15 +299,19 @@ void batchnorm_mean_var_impl<Float16>(const Float16* input,
     int final_threads = 1;
 #endif
 
-    // Accumulate in Float32 to prevent overflow
+    // Accumulate in Float32 with Kahan summation for numerical stability
     #pragma omp parallel for num_threads(final_threads) if(C > 1)
     for (int64_t c = 0; c < C; c++) {
-        // Compute mean with Float32 accumulation
+        // Compute mean with Kahan summation in Float32
         float sum = 0.0f;
+        float compensation = 0.0f;
         for (int64_t n = 0; n < N; n++) {
             const Float16* ch_ptr = input + (n * C + c) * spatial_size;
             for (int64_t hw = 0; hw < spatial_size; hw++) {
-                sum += static_cast<float>(ch_ptr[hw]);
+                float y = static_cast<float>(ch_ptr[hw]) - compensation;
+                float t = sum + y;
+                compensation = (t - sum) - y;
+                sum = t;
             }
         }
         float channel_mean = sum / static_cast<float>(total_elements);
@@ -322,6 +327,62 @@ void batchnorm_mean_var_impl<Float16>(const Float16* input,
             }
         }
         variance[c] = Float16(sum_sq_diff / static_cast<float>(total_elements));
+    }
+}
+
+// Specialized BFloat16 version that accumulates in Float32 with Kahan summation.
+// BFloat16 has only 8 mantissa bits — Kahan summation is essential for accurate mean.
+template<>
+void batchnorm_mean_var_impl<BFloat16>(const BFloat16* input,
+                                        BFloat16* mean,
+                                        BFloat16* variance,
+                                        int64_t N,
+                                        int64_t C,
+                                        int64_t H,
+                                        int64_t W) {
+    int64_t spatial_size = H * W;
+    int64_t total_elements = N * spatial_size;
+
+    if (total_elements == 0) {
+        throw std::runtime_error("BatchNorm2d: Cannot compute mean/variance for empty tensor (total_elements = 0)");
+    }
+
+#ifdef _OPENMP
+    int nthreads = omp_get_max_threads();
+    int effective_threads = std::min({nthreads, static_cast<int>(C), 4});
+    int final_threads = std::max(1, effective_threads);
+#else
+    int final_threads = 1;
+#endif
+
+    // Accumulate in Float32 with Kahan summation for numerical stability
+    #pragma omp parallel for num_threads(final_threads) if(C > 1)
+    for (int64_t c = 0; c < C; c++) {
+        // Compute mean with Kahan summation in Float32
+        float sum = 0.0f;
+        float compensation = 0.0f;
+        for (int64_t n = 0; n < N; n++) {
+            const BFloat16* ch_ptr = input + (n * C + c) * spatial_size;
+            for (int64_t hw = 0; hw < spatial_size; hw++) {
+                float y = static_cast<float>(ch_ptr[hw]) - compensation;
+                float t = sum + y;
+                compensation = (t - sum) - y;
+                sum = t;
+            }
+        }
+        float channel_mean = sum / static_cast<float>(total_elements);
+        mean[c] = BFloat16(channel_mean);
+
+        // Compute variance with Float32 accumulation
+        float sum_sq_diff = 0.0f;
+        for (int64_t n = 0; n < N; n++) {
+            const BFloat16* ch_ptr = input + (n * C + c) * spatial_size;
+            for (int64_t hw = 0; hw < spatial_size; hw++) {
+                float diff = static_cast<float>(ch_ptr[hw]) - channel_mean;
+                sum_sq_diff += diff * diff;
+            }
+        }
+        variance[c] = BFloat16(sum_sq_diff / static_cast<float>(total_elements));
     }
 }
 

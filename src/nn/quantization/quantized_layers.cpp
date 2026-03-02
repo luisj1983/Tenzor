@@ -121,10 +121,12 @@ auto QuantizedLinear::forward_quantized(const QuantizedTensor& input) -> Tensor 
     float* output_data = output.data<float>();
 
     // Use kernel for computation
+    // Use bias_scale_ for output scaling instead of hardcoded 1.0f
+    // bias_scale_ controls the dequantization scaling: combined_scale = input_scale * weight_scale / output_scale
     kernels::quantized_linear_kernel(
         input_data, weight_data, bias_data, output_data,
         batch_size, in_features_, out_features_,
-        input_scale, weight_scale, 1.0f,
+        input_scale, weight_scale, bias_scale_,
         input_zp, weight_zp
     );
 

@@ -1942,9 +1942,11 @@ PYBIND11_MODULE(tenzor_core, m) {
     m.def("squeeze", static_cast<tenzor::Tensor(*)(const tenzor::Tensor&, std::optional<int64_t>)>(&tenzor::squeeze),
          "Remove dimensions of size 1",
          py::arg("input"), py::arg("dim") = py::none());
-    m.def("unsqueeze", &tenzor::unsqueeze, "Add dimension of size 1",
+    m.def("unsqueeze", static_cast<tenzor::Tensor(*)(const tenzor::Tensor&, int64_t)>(&tenzor::unsqueeze),
+         "Add dimension of size 1",
          py::arg("input"), py::arg("dim"));
-    m.def("flatten", &tenzor::flatten, "Flatten tensor",
+    m.def("flatten", static_cast<tenzor::Tensor(*)(const tenzor::Tensor&, int64_t, int64_t)>(&tenzor::flatten),
+         "Flatten tensor",
          py::arg("input"),
          py::arg("start_dim") = 0,
          py::arg("end_dim") = -1);
@@ -2002,11 +2004,15 @@ PYBIND11_MODULE(tenzor_core, m) {
          "Slice tensor along dimension",
          py::arg("input"), py::arg("dim"), py::arg("start"), py::arg("end"),
          py::arg("step") = 1);
-    m.def("index_select", &tenzor::index_select, "Select indices along dimension",
+    m.def("index_select", static_cast<tenzor::Tensor(*)(const tenzor::Tensor&, int64_t, const tenzor::Tensor&)>(&tenzor::index_select),
+         "Select indices along dimension",
          py::arg("input"), py::arg("dim"), py::arg("index"));
-    m.def("gather", &tenzor::gather, "Gather elements along dimension",
+    m.def("gather", static_cast<tenzor::Tensor(*)(const tenzor::Tensor&, int64_t, const tenzor::Tensor&)>(&tenzor::gather),
+         "Gather elements along dimension",
          py::arg("input"), py::arg("dim"), py::arg("index"));
-    m.def("scatter", &tenzor::scatter, "Scatter elements along dimension",
+    m.def("scatter", [](const tenzor::Tensor& input, int64_t dim, const tenzor::Tensor& index, const tenzor::Tensor& src) {
+         return tenzor::scatter(input, dim, index, src);
+         }, "Scatter elements along dimension",
          py::arg("input"), py::arg("dim"), py::arg("index"), py::arg("src"));
     m.def("scatter_add", &tenzor::scatter_add, "Scatter-add elements along dimension",
          py::arg("input"), py::arg("dim"), py::arg("index"), py::arg("src"));
@@ -2014,7 +2020,9 @@ PYBIND11_MODULE(tenzor_core, m) {
          py::arg("input"), py::arg("mask"));
     m.def("masked_fill", &tenzor::masked_fill, "Fill elements with value where mask is true",
          py::arg("input"), py::arg("mask"), py::arg("value"));
-    m.def("where", &tenzor::where, "Conditional element selection",
+    m.def("where", [](const tenzor::Tensor& condition, const tenzor::Tensor& x, const tenzor::Tensor& y) {
+         return tenzor::where(condition, x, y);
+         }, "Conditional element selection",
          py::arg("condition"), py::arg("x"), py::arg("y"));
     m.def("take", &tenzor::take, "Take elements from flattened tensor",
          py::arg("input"), py::arg("index"));

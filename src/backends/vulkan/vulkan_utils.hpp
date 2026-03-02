@@ -602,5 +602,28 @@ private:
     VkDescriptorSetLayout descriptorSetLayout_ = VK_NULL_HANDLE;
 };
 
+/**
+ * @brief Query optimal workgroup size for a Vulkan physical device.
+ *
+ * Returns the largest power-of-2 workgroup size that fits within both
+ * maxComputeWorkGroupSize[0] and maxComputeWorkGroupInvocations, capped at 1024.
+ * Power-of-2 sizes are preferred for efficient GPU occupancy.
+ *
+ * @param physicalDevice The Vulkan physical device to query
+ * @return Optimal workgroup size (always a power of 2, at most 1024)
+ */
+inline uint32_t optimalWorkgroupSize(VkPhysicalDevice physicalDevice) {
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(physicalDevice, &props);
+    // Use the minimum of maxComputeWorkGroupSize[0] and maxComputeWorkGroupInvocations
+    uint32_t max_x = props.limits.maxComputeWorkGroupSize[0];
+    uint32_t max_inv = props.limits.maxComputeWorkGroupInvocations;
+    uint32_t optimal = std::min(max_x, max_inv);
+    // Clamp to powers of 2 for efficiency
+    uint32_t result = 1;
+    while (result * 2 <= optimal && result * 2 <= 1024) result *= 2;
+    return result;
+}
+
 } // namespace vulkan
 } // namespace tenzor

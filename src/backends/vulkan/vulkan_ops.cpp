@@ -9610,6 +9610,129 @@ auto VulkanBackend::dispatchArgSort(const Tensor& input, int64_t dim, bool desce
 
 
 // ============================================================================
+// Type Cast Operations
+// ============================================================================
+
+/**
+ * @brief Cast tensor to a different dtype using dedicated GPU shaders.
+ *
+ * Supports the following conversion paths:
+ *   Float32 <-> Float16  (via packed uint32 f16 pair shaders)
+ *   Float32 <-> Float64  (via float64_t shaders)
+ *   Float16 -> Float64   (two-step: f16->f32->f64)
+ *   Float64 -> Float16   (two-step: f64->f32->f16)
+ *
+ * For unsupported conversion paths the input is transferred to CPU, cast
+ * there, then transferred back to the Vulkan device.
+ */
+auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Tensor {
+    if (input.dtype() == target_dtype) {
+        return input;  // No-op
+    }
+
+    DType src_dtype = input.dtype();
+    int32_t device_id = input.device().index;
+    int64_t numel = input.numel();
+
+    // Determine shader name based on source/target dtype pair
+    std::string shader_name;
+    bool two_step = false;
+
+    if (src_dtype == DType::Float32 && target_dtype == DType::Float16) {
+        shader_name = "cast_f32_f16";
+    } else if (src_dtype == DType::Float16 && target_dtype == DType::Float32) {
+        shader_name = "cast_f16_f32";
+    } else if (src_dtype == DType::Float32 && target_dtype == DType::Float64) {
+        shader_name = "cast_f32_f64";
+    } else if (src_dtype == DType::Float64 && target_dtype == DType::Float32) {
+        shader_name = "cast_f64_f32";
+    } else if (src_dtype == DType::Float16 && target_dtype == DType::Float64) {
+        // Two-step: f16 -> f32 -> f64
+        two_step = true;
+    } else if (src_dtype == DType::Float64 && target_dtype == DType::Float16) {
+        // Two-step: f64 -> f32 -> f16
+        two_step = true;
+    } else {
+        // Unsupported direct GPU cast — fall back to CPU round-trip
+        Tensor cpu_input = input.to(DType::Float32);  // Ensure known type
+        Tensor cpu_copy = cpu_input.cpu();
+        Tensor casted = cpu_copy.to(target_dtype);
+        return casted.to(input.device());
+    }
+
+    // Two-step casts via Float32 intermediate
+    if (two_step) {
+        Tensor intermediate = dispatchCast(input, DType::Float32);
+        return dispatchCast(intermediate, target_dtype);
+    }
+
+    // Single-step GPU cast using compute shader
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    // Determine input/output buffer sizes
+    // For Float16 (packed): buffer size = ceil(numel / 2) * 4 bytes
+    auto buffer_size_for_dtype = [&](DType dtype) -> size_t {
+        if (dtype == DType::Float16) {
+            size_t num_pairs = (static_cast<size_t>(numel) + 1) / 2;
+            return num_pairs * 4;  // 4 bytes per packed uint32
+        }
+        return static_cast<size_t>(numel) * dtype_size(dtype);
+    };
+
+    size_t input_buf_size = buffer_size_for_dtype(src_dtype);
+    size_t output_buf_size = buffer_size_for_dtype(target_dtype);
+
+    // Allocate output tensor
+    std::vector<int64_t> out_shape(input.shape().begin(), input.shape().end());
+    Tensor output(out_shape, target_dtype, input.device());
+
+    VkBuffer buf_in = getVulkanBuffer(input.data_ptr());
+    VkBuffer buf_out = getVulkanBuffer(output.data_ptr());
+
+    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        {0, buf_in},
+        {1, buf_out}
+    };
+    std::vector<size_t> sizes = {input_buf_size, output_buf_size};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    struct PushConstants {
+        uint32_t num_elements;
+    } push_constants;
+
+    push_constants.num_elements = static_cast<uint32_t>(numel);
+
+    // For packed f16 shaders, workgroups process pairs of elements
+    uint32_t dispatch_count;
+    if ((src_dtype == DType::Float16 && target_dtype == DType::Float32) ||
+        (src_dtype == DType::Float32 && target_dtype == DType::Float16)) {
+        // Each invocation handles 2 elements (one packed pair)
+        uint32_t num_pairs = (static_cast<uint32_t>(numel) + 1) / 2;
+        dispatch_count = (num_pairs + 255) / 256;
+    } else {
+        // Each invocation handles 1 element
+        dispatch_count = (static_cast<uint32_t>(numel) + 255) / 256;
+    }
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &push_constants);
+
+    vkCmdDispatch(cmdBuffer, dispatch_count, 1, 1);
+
+    insertComputeBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+// ============================================================================
 // Typed dispatch wrappers for formerly string-dispatched operations
 // ============================================================================
 

@@ -1,6 +1,8 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/backend/caching_allocator.hpp"
+#include "cuda_launch_utils.cuh"
+#include "launch_config.cuh"
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <cuda_fp16.h>  // For __half
@@ -37,13 +39,14 @@ namespace cuda {
 // Kernel Launch Helpers
 // ============================================================================
 
+// Delegates to compute_grid_size() from cuda_launch_utils.cuh to avoid
+// duplicating the block-size logic. For per-kernel occupancy-optimized
+// launches use optimal_launch_config() or the LAUNCH_KERNEL macro instead.
 inline void compute_launch_config_1d(int64_t n, dim3& grid, dim3& block) {
-    const int block_size = 256;
+    constexpr int block_size = 256;
     block = dim3(block_size, 1, 1);
-    // Ensure at least 1 block to avoid CUDA invalid argument error
-    // Grid-stride loop will naturally handle n=0 by not executing any iterations
-    int64_t num_blocks = (n + block_size - 1) / block_size;
-    grid = dim3(num_blocks > 0 ? static_cast<unsigned int>(num_blocks) : 1, 1, 1);
+    int num_blocks = compute_grid_size(n, block_size);
+    grid = dim3(static_cast<unsigned int>(num_blocks), 1, 1);
 }
 
 inline void compute_launch_config_2d(int64_t rows, int64_t cols, dim3& grid, dim3& block) {

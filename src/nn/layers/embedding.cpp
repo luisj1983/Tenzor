@@ -322,8 +322,22 @@ auto Embedding::forward_impl(const Variable& input) -> Variable {
                            ? weight_tensor : weight_tensor.to(target_device);
         Tensor indices_dev = input_tensor;
 
-        // Skip index validation on GPU — backend kernels handle out-of-bounds
-        // (CPU path validates below in the non-device branch)
+        // Debug mode: validate indices on CPU before GPU dispatch to catch
+        // out-of-bounds errors early with clear error messages
+#ifndef NDEBUG
+        {
+            Tensor indices_cpu = input_tensor.to(Device::cpu());
+            auto idx_ptr = indices_cpu.data<int64_t>();
+            int64_t num_idx = indices_cpu.numel();
+            for (int64_t i = 0; i < num_idx; ++i) {
+                if (idx_ptr[i] < 0 || idx_ptr[i] >= num_embeddings_) {
+                    throw std::out_of_range(
+                        "Embedding index out of range: " + std::to_string(idx_ptr[i]) +
+                        " not in [0, " + std::to_string(num_embeddings_) + ")");
+                }
+            }
+        }
+#endif
 
         // Apply max_norm if specified (requires CPU for now)
         if (max_norm_ > 0.0) {

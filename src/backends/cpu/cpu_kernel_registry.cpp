@@ -1644,6 +1644,45 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         if (dims.empty()) dims = {0};
         return flip(inputs[0], dims);
     });
+
+    // =========================================================================
+    // StridedFill — fill non-contiguous tensor in-place on CPU
+    // =========================================================================
+    table.register_inplace_kernel(OpId::StridedFill, [](Tensor& self, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
+        double value = attrs.get_float(AttrKey::Value, 0.0);
+        auto ndims = self.ndim();
+        auto shp = self.shape();
+        auto str = self.strides();
+        auto elem_size = dtype_size(self.dtype());
+        auto* base = static_cast<uint8_t*>(self.data_ptr());
+        int64_t n = self.numel();
+
+        std::vector<int64_t> indices(ndims, 0);
+        for (int64_t i = 0; i < n; ++i) {
+            int64_t byte_offset = 0;
+            for (int64_t d = 0; d < ndims; ++d)
+                byte_offset += indices[d] * str[d] * static_cast<int64_t>(elem_size);
+            auto* ptr = base + byte_offset;
+            switch (self.dtype()) {
+                case DType::Float32:  *reinterpret_cast<float*>(ptr) = static_cast<float>(value); break;
+                case DType::Float64:  *reinterpret_cast<double*>(ptr) = value; break;
+                case DType::Int32:    *reinterpret_cast<int32_t*>(ptr) = static_cast<int32_t>(value); break;
+                case DType::Int64:    *reinterpret_cast<int64_t*>(ptr) = static_cast<int64_t>(value); break;
+                case DType::Int16:    *reinterpret_cast<int16_t*>(ptr) = static_cast<int16_t>(value); break;
+                case DType::Int8:     *reinterpret_cast<int8_t*>(ptr) = static_cast<int8_t>(value); break;
+                case DType::UInt8:    *reinterpret_cast<uint8_t*>(ptr) = static_cast<uint8_t>(value); break;
+                case DType::Float16:  *reinterpret_cast<Float16*>(ptr) = Float16(static_cast<float>(value)); break;
+                case DType::BFloat16: *reinterpret_cast<BFloat16*>(ptr) = BFloat16(static_cast<float>(value)); break;
+                case DType::Bool:     *reinterpret_cast<bool*>(ptr) = (value != 0.0); break;
+                default: break;
+            }
+            for (int64_t d = ndims - 1; d >= 0; --d) {
+                if (++indices[d] < shp[d]) break;
+                indices[d] = 0;
+            }
+        }
+        return self;
+    });
 }
 
 } // namespace tenzor

@@ -434,6 +434,152 @@ auto matmul(const Variable& a, const Variable& b) -> Variable;
  */
 auto linear(const Variable& x, const Variable& w, const Variable& b) -> Variable;
 
+// ============================================================================
+// Activation Functions (Variable wrappers)
+// ============================================================================
+
+/// Sigmoid activation: σ(x) = 1/(1+exp(-x)). Grad: σ(x)*(1-σ(x))
+auto sigmoid(const Variable& input) -> Variable;
+
+/// Tanh activation. Grad: 1 - tanh²(x)
+auto tanh(const Variable& input) -> Variable;
+
+/// GELU activation. Grad: 0.5*(1+erf(x/√2)) + x*φ(x)
+auto gelu(const Variable& input) -> Variable;
+
+/// ELU activation with alpha parameter. Grad: x>0 ? 1 : alpha*exp(x)
+auto elu(const Variable& input, float alpha = 1.0f) -> Variable;
+
+/// SELU activation (self-normalizing). Grad: x>0 ? λ : λ*α*exp(x)
+auto selu(const Variable& input) -> Variable;
+
+/// Mish activation: x*tanh(softplus(x))
+auto mish(const Variable& input) -> Variable;
+
+/// Leaky ReLU with negative slope. Grad: x>0 ? 1 : negative_slope
+auto leaky_relu(const Variable& input, float negative_slope = 0.01f) -> Variable;
+
+/// Softplus activation: log(1 + exp(β*x))/β. Grad: σ(β*x)
+auto softplus(const Variable& input, float beta = 1.0f) -> Variable;
+
+// ============================================================================
+// Element-wise Math Operations (Variable wrappers)
+// ============================================================================
+
+/// Square root. Grad: 1/(2*sqrt(x))
+auto sqrt(const Variable& input) -> Variable;
+
+/// Power with scalar exponent. Grad: n*x^(n-1)
+auto pow(const Variable& input, float exponent) -> Variable;
+
+/// Reciprocal: 1/x. Grad: -1/x²
+auto reciprocal(const Variable& input) -> Variable;
+
+/// Sine. Grad: cos(x)
+auto sin(const Variable& input) -> Variable;
+
+/// Cosine. Grad: -sin(x)
+auto cos(const Variable& input) -> Variable;
+
+/// Tangent. Grad: 1/cos²(x)
+auto tan(const Variable& input) -> Variable;
+
+/// Arcsine. Grad: 1/sqrt(1-x²)
+auto asin(const Variable& input) -> Variable;
+
+/// Arccosine. Grad: -1/sqrt(1-x²)
+auto acos(const Variable& input) -> Variable;
+
+/// Arctangent. Grad: 1/(1+x²)
+auto atan(const Variable& input) -> Variable;
+
+/// Hyperbolic sine. Grad: cosh(x)
+auto sinh(const Variable& input) -> Variable;
+
+/// Hyperbolic cosine. Grad: sinh(x)
+auto cosh(const Variable& input) -> Variable;
+
+// ============================================================================
+// Extended Math Operations (Variable wrappers)
+// ============================================================================
+
+/// Error function. Grad: (2/√π)*exp(-x²)
+auto erf(const Variable& input) -> Variable;
+
+/// Complementary error function. Grad: -(2/√π)*exp(-x²)
+auto erfc(const Variable& input) -> Variable;
+
+/// Log base 2. Grad: 1/(x*ln(2))
+auto log2(const Variable& input) -> Variable;
+
+/// Log base 10. Grad: 1/(x*ln(10))
+auto log10(const Variable& input) -> Variable;
+
+/// Log(1+x). Grad: 1/(1+x)
+auto log1p(const Variable& input) -> Variable;
+
+/// 2^x. Grad: 2^x * ln(2)
+auto exp2(const Variable& input) -> Variable;
+
+/// exp(x)-1. Grad: exp(x)
+auto expm1(const Variable& input) -> Variable;
+
+/// Two-argument arctangent. Grad_y: x/(x²+y²), Grad_x: -y/(x²+y²)
+auto atan2(const Variable& y, const Variable& x) -> Variable;
+
+// ============================================================================
+// Additional Reduction Operations (Variable wrappers)
+// ============================================================================
+
+/// Min reduction along dimension
+auto min(const Variable& input, std::optional<int64_t> dim = std::nullopt, bool keepdim = false) -> Variable;
+
+/// Standard deviation. Grad: (x-mean)/(N*std)
+auto std(const Variable& input, std::optional<int64_t> dim = std::nullopt, bool keepdim = false) -> Variable;
+
+/// Variance. Grad: 2*(x-mean)/N
+auto var(const Variable& input, std::optional<int64_t> dim = std::nullopt, bool keepdim = false) -> Variable;
+
+/// Product reduction. Grad: prod/x (with zero handling)
+auto prod(const Variable& input, std::optional<int64_t> dim = std::nullopt, bool keepdim = false) -> Variable;
+
+/// Log-sum-exp (numerically stable). Grad: softmax(x, dim)
+auto logsumexp(const Variable& input, int64_t dim, bool keepdim = false) -> Variable;
+
+// ============================================================================
+// Shape/Indexing Operations (Variable wrappers)
+// ============================================================================
+
+/// Insert dimension of size 1. Grad: squeeze(grad, dim)
+auto unsqueeze(const Variable& input, int64_t dim) -> Variable;
+
+/// Expand tensor to larger shape. Grad: sum along expanded dims
+auto expand(const Variable& input, const std::vector<int64_t>& shape) -> Variable;
+
+/// Flatten dimensions [start, end]. Grad: reshape to original
+auto flatten(const Variable& input, int64_t start_dim = 0, int64_t end_dim = -1) -> Variable;
+
+/// Element-wise conditional selection. Grad: grad*cond / grad*!cond
+auto where(const Variable& condition, const Variable& x, const Variable& y) -> Variable;
+
+/// Gather elements along dim. Grad: scatter_add
+auto gather(const Variable& input, int64_t dim, const Tensor& index) -> Variable;
+
+/// Scatter src into self along dim. Grad: scatter zeros / gather
+auto scatter(const Variable& input, int64_t dim, const Tensor& index, const Variable& src) -> Variable;
+
+/// Select elements along dim by index. Grad: index_add
+auto index_select(const Variable& input, int64_t dim, const Tensor& index) -> Variable;
+
+/// Narrow (alias for contiguous slice). Grad: zero-padded
+auto narrow(const Variable& input, int64_t dim, int64_t start, int64_t length) -> Variable;
+
+/// Flip along dimensions. Grad: flip(grad, dims)
+auto flip(const Variable& input, const std::vector<int64_t>& dims) -> Variable;
+
+/// Repeat tensor along dimensions. Grad: sum over repeated dims
+auto repeat(const Variable& input, const std::vector<int64_t>& repeats) -> Variable;
+
 } // namespace tenzor
 
 namespace tenzor {

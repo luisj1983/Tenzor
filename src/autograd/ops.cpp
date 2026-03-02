@@ -4,10 +4,11 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/indexing.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
-#include <array>
+#include <optional>
 
 namespace tenzor {
 
@@ -695,6 +696,491 @@ auto linear(const Variable& x, const Variable& w, const Variable& b) -> Variable
     Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);
 
+    return output;
+}
+
+// ============================================================================
+// Helper: Unary op wrapper with autograd (saves input for backward)
+// ============================================================================
+namespace {
+template<typename BackwardT, typename TensorOp>
+auto unary_autograd(const Variable& input, TensorOp&& tensor_op) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tensor_op(input.tensor()), false);
+    }
+    auto grad_fn = std::make_shared<BackwardT>();
+    grad_fn->save_for_backward({input.tensor()});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    auto result = tensor_op(input.tensor());
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// Variant that saves output instead of input (for sigmoid, tanh, sqrt, etc.)
+template<typename BackwardT, typename TensorOp>
+auto unary_autograd_save_output(const Variable& input, TensorOp&& tensor_op) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tensor_op(input.tensor()), false);
+    }
+    auto result = tensor_op(input.tensor());
+    auto grad_fn = std::make_shared<BackwardT>();
+    grad_fn->save_for_backward({result});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// Variant that saves input + a scalar parameter as a second tensor
+template<typename BackwardT, typename TensorOp>
+auto unary_autograd_with_param(const Variable& input, float param, TensorOp&& tensor_op) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tensor_op(input.tensor()), false);
+    }
+    auto grad_fn = std::make_shared<BackwardT>();
+    auto param_tensor = full({1}, param, input.tensor().dtype(), input.tensor().device());
+    grad_fn->save_for_backward({input.tensor(), param_tensor});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    auto result = tensor_op(input.tensor());
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+} // anonymous namespace
+
+// ============================================================================
+// Activation Functions (Variable wrappers)
+// ============================================================================
+
+auto sigmoid(const Variable& input) -> Variable {
+    return unary_autograd_save_output<SigmoidBackward_AG>(input,
+        [](const Tensor& t) { return tenzor::sigmoid(t); });
+}
+
+auto tanh(const Variable& input) -> Variable {
+    return unary_autograd_save_output<TanhBackward_AG>(input,
+        [](const Tensor& t) { return tenzor::tanh(t); });
+}
+
+auto gelu(const Variable& input) -> Variable {
+    return unary_autograd<GeluBackward>(input,
+        [](const Tensor& t) {
+            std::vector<Tensor> inputs = {t};
+            return dispatch(OpId::Gelu, inputs)[0];
+        });
+}
+
+auto elu(const Variable& input, float alpha) -> Variable {
+    return unary_autograd_with_param<EluBackward>(input, alpha,
+        [](const Tensor& t) {
+            std::vector<Tensor> inputs = {t};
+            return dispatch(OpId::Elu, inputs)[0];
+        });
+}
+
+auto selu(const Variable& input) -> Variable {
+    return unary_autograd<SeluBackward>(input,
+        [](const Tensor& t) {
+            std::vector<Tensor> inputs = {t};
+            return dispatch(OpId::Selu, inputs)[0];
+        });
+}
+
+auto mish(const Variable& input) -> Variable {
+    return unary_autograd<MishBackward>(input,
+        [](const Tensor& t) {
+            std::vector<Tensor> inputs = {t};
+            return dispatch(OpId::Mish, inputs)[0];
+        });
+}
+
+auto leaky_relu(const Variable& input, float negative_slope) -> Variable {
+    return unary_autograd_with_param<LeakyReluBackward>(input, negative_slope,
+        [negative_slope](const Tensor& t) {
+            std::vector<Tensor> inputs = {t};
+            OpAttributes attrs;
+            attrs.set(AttrKey::Negative_slope, static_cast<double>(negative_slope));
+            return dispatch(OpId::LeakyReLU, inputs, attrs)[0];
+        });
+}
+
+auto softplus(const Variable& input, float beta) -> Variable {
+    return unary_autograd_with_param<SoftplusBackward>(input, beta,
+        [](const Tensor& t) {
+            std::vector<Tensor> inputs = {t};
+            return dispatch(OpId::Softplus, inputs)[0];
+        });
+}
+
+// ============================================================================
+// Element-wise Math Operations (Variable wrappers)
+// ============================================================================
+
+auto sqrt(const Variable& input) -> Variable {
+    return unary_autograd_save_output<SqrtBackward>(input,
+        [](const Tensor& t) { return tenzor::sqrt(t); });
+}
+
+auto pow(const Variable& input, float exponent) -> Variable {
+    return unary_autograd_with_param<PowBackward>(input, exponent,
+        [exponent](const Tensor& t) { return tenzor::pow(t, exponent); });
+}
+
+auto reciprocal(const Variable& input) -> Variable {
+    return unary_autograd_save_output<ReciprocalBackward>(input,
+        [](const Tensor& t) { return tenzor::reciprocal(t); });
+}
+
+auto sin(const Variable& input) -> Variable {
+    return unary_autograd<SinBackward>(input,
+        [](const Tensor& t) { return tenzor::sin(t); });
+}
+
+auto cos(const Variable& input) -> Variable {
+    return unary_autograd<CosBackward>(input,
+        [](const Tensor& t) { return tenzor::cos(t); });
+}
+
+auto tan(const Variable& input) -> Variable {
+    return unary_autograd_save_output<TanBackward>(input,
+        [](const Tensor& t) { return tenzor::tan(t); });
+}
+
+auto asin(const Variable& input) -> Variable {
+    return unary_autograd<AsinBackward>(input,
+        [](const Tensor& t) { return tenzor::asin(t); });
+}
+
+auto acos(const Variable& input) -> Variable {
+    return unary_autograd<AcosBackward>(input,
+        [](const Tensor& t) { return tenzor::acos(t); });
+}
+
+auto atan(const Variable& input) -> Variable {
+    return unary_autograd<AtanBackward>(input,
+        [](const Tensor& t) { return tenzor::atan(t); });
+}
+
+auto sinh(const Variable& input) -> Variable {
+    return unary_autograd<SinhBackward>(input,
+        [](const Tensor& t) { return tenzor::sinh(t); });
+}
+
+auto cosh(const Variable& input) -> Variable {
+    return unary_autograd<CoshBackward>(input,
+        [](const Tensor& t) { return tenzor::cosh(t); });
+}
+
+// ============================================================================
+// Extended Math Operations (Variable wrappers)
+// ============================================================================
+
+auto erf(const Variable& input) -> Variable {
+    return unary_autograd<ErfBackward>(input,
+        [](const Tensor& t) { return tenzor::erf(t); });
+}
+
+auto erfc(const Variable& input) -> Variable {
+    return unary_autograd<ErfcBackward>(input,
+        [](const Tensor& t) { return tenzor::erfc(t); });
+}
+
+auto log2(const Variable& input) -> Variable {
+    return unary_autograd<Log2Backward>(input,
+        [](const Tensor& t) { return tenzor::log2(t); });
+}
+
+auto log10(const Variable& input) -> Variable {
+    return unary_autograd<Log10Backward>(input,
+        [](const Tensor& t) { return tenzor::log10(t); });
+}
+
+auto log1p(const Variable& input) -> Variable {
+    return unary_autograd<Log1pBackward>(input,
+        [](const Tensor& t) { return tenzor::log1p(t); });
+}
+
+auto exp2(const Variable& input) -> Variable {
+    return unary_autograd_save_output<Exp2Backward>(input,
+        [](const Tensor& t) { return tenzor::exp2(t); });
+}
+
+auto expm1(const Variable& input) -> Variable {
+    return unary_autograd<Expm1Backward>(input,
+        [](const Tensor& t) { return tenzor::expm1(t); });
+}
+
+auto atan2(const Variable& y, const Variable& x) -> Variable {
+    bool needs_grad = (y.requires_grad() || x.requires_grad()) && is_grad_enabled();
+    if (!needs_grad) {
+        return Variable(tenzor::atan2(y.tensor(), x.tensor()), false);
+    }
+    auto grad_fn = std::make_shared<Atan2Backward>();
+    grad_fn->save_for_backward({y.tensor(), x.tensor()});
+    grad_fn->set_next_functions({y.grad_fn(), x.grad_fn()});
+    grad_fn->set_input_variables({y, x});
+    auto result = tenzor::atan2(y.tensor(), x.tensor());
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// ============================================================================
+// Additional Reduction Operations (Variable wrappers)
+// ============================================================================
+
+auto min(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::min(input.tensor(), dim, keepdim), false);
+    }
+    auto result = tenzor::min(input.tensor(), dim, keepdim);
+    auto grad_fn = std::make_shared<MinBackward>(dim, keepdim);
+    grad_fn->save_for_backward({input.tensor(), result});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto std(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::std(input.tensor(), dim, keepdim), false);
+    }
+    auto result = tenzor::std(input.tensor(), dim, keepdim);
+    auto grad_fn = std::make_shared<StdBackward>(dim, keepdim);
+    grad_fn->save_for_backward({input.tensor(), result});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto var(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::var(input.tensor(), dim, keepdim), false);
+    }
+    auto result = tenzor::var(input.tensor(), dim, keepdim);
+    auto grad_fn = std::make_shared<VarBackward>(dim, keepdim);
+    grad_fn->save_for_backward({input.tensor()});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto prod(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::prod(input.tensor(), dim, keepdim), false);
+    }
+    auto result = tenzor::prod(input.tensor(), dim, keepdim);
+    auto grad_fn = std::make_shared<ProdBackward>(dim, keepdim);
+    grad_fn->save_for_backward({input.tensor(), result});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto logsumexp(const Variable& input, int64_t dim, bool keepdim) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::logsumexp(input.tensor(), dim, keepdim), false);
+    }
+    auto result = tenzor::logsumexp(input.tensor(), dim, keepdim);
+    auto grad_fn = std::make_shared<LogSumExpBackward>(dim, keepdim);
+    grad_fn->save_for_backward({input.tensor(), result});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// ============================================================================
+// Shape/Indexing Operations (Variable wrappers)
+// ============================================================================
+
+auto unsqueeze(const Variable& input, int64_t dim) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::unsqueeze(input.tensor(), dim), false);
+    }
+    auto result = tenzor::unsqueeze(input.tensor(), dim);
+    auto grad_fn = std::make_shared<UnsqueezeBackward>();
+    auto dim_tensor = full({1}, static_cast<float>(dim), DType::Float32, Device::cpu());
+    grad_fn->save_for_backward({dim_tensor});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto expand(const Variable& input, const std::vector<int64_t>& shape) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::expand(input.tensor(), shape), false);
+    }
+    auto result = tenzor::expand(input.tensor(), shape);
+    auto grad_fn = std::make_shared<ExpandBackward>();
+    // Save original shape as tensor for backward
+    std::vector<float> shape_data(input.tensor().shape().begin(), input.tensor().shape().end());
+    auto shape_tensor = zeros({static_cast<int64_t>(shape_data.size())}, DType::Float32, Device::cpu());
+    std::memcpy(shape_tensor.data_ptr(), shape_data.data(), shape_data.size() * sizeof(float));
+    grad_fn->save_for_backward({shape_tensor});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto flatten(const Variable& input, int64_t start_dim, int64_t end_dim) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::flatten(input.tensor(), start_dim, end_dim), false);
+    }
+    auto result = tenzor::flatten(input.tensor(), start_dim, end_dim);
+    auto grad_fn = std::make_shared<FlattenBackward>();
+    // Save original shape as tensor for backward
+    std::vector<float> shape_data(input.tensor().shape().begin(), input.tensor().shape().end());
+    auto shape_tensor = zeros({static_cast<int64_t>(shape_data.size())}, DType::Float32, Device::cpu());
+    std::memcpy(shape_tensor.data_ptr(), shape_data.data(), shape_data.size() * sizeof(float));
+    grad_fn->save_for_backward({shape_tensor});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto where(const Variable& condition, const Variable& x, const Variable& y) -> Variable {
+    bool needs_grad = (x.requires_grad() || y.requires_grad()) && is_grad_enabled();
+    if (!needs_grad) {
+        return Variable(tenzor::where(condition.tensor(), x.tensor(), y.tensor()), false);
+    }
+    auto result = tenzor::where(condition.tensor(), x.tensor(), y.tensor());
+    auto grad_fn = std::make_shared<WhereBackward>();
+    grad_fn->save_for_backward({condition.tensor()});
+    grad_fn->set_next_functions({nullptr, x.grad_fn(), y.grad_fn()});
+    grad_fn->set_input_variables({condition, x, y});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto gather(const Variable& input, int64_t dim, const Tensor& index) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::gather(input.tensor(), dim, index), false);
+    }
+    auto result = tenzor::gather(input.tensor(), dim, index);
+    auto grad_fn = std::make_shared<GatherBackward>();
+    auto dim_tensor = full({1}, static_cast<float>(dim), DType::Float32, Device::cpu());
+    // Save input shape for backward scatter_add
+    std::vector<float> shape_data(input.tensor().shape().begin(), input.tensor().shape().end());
+    auto shape_tensor = zeros({static_cast<int64_t>(shape_data.size())}, DType::Float32, Device::cpu());
+    std::memcpy(shape_tensor.data_ptr(), shape_data.data(), shape_data.size() * sizeof(float));
+    grad_fn->save_for_backward({dim_tensor, index, shape_tensor});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto scatter(const Variable& input, int64_t dim, const Tensor& index, const Variable& src) -> Variable {
+    bool needs_grad = (input.requires_grad() || src.requires_grad()) && is_grad_enabled();
+    if (!needs_grad) {
+        return Variable(tenzor::scatter(input.tensor(), dim, index, src.tensor()), false);
+    }
+    auto result = tenzor::scatter(input.tensor(), dim, index, src.tensor());
+    auto grad_fn = std::make_shared<ScatterBackward>();
+    auto dim_tensor = full({1}, static_cast<float>(dim), DType::Float32, Device::cpu());
+    grad_fn->save_for_backward({dim_tensor, index});
+    grad_fn->set_next_functions({input.grad_fn(), src.grad_fn()});
+    grad_fn->set_input_variables({input, src});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto index_select(const Variable& input, int64_t dim, const Tensor& index) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::index_select(input.tensor(), dim, index), false);
+    }
+    auto result = tenzor::index_select(input.tensor(), dim, index);
+    auto grad_fn = std::make_shared<IndexSelectBackward>();
+    auto dim_tensor = full({1}, static_cast<float>(dim), DType::Float32, Device::cpu());
+    std::vector<float> shape_data(input.tensor().shape().begin(), input.tensor().shape().end());
+    auto shape_tensor = zeros({static_cast<int64_t>(shape_data.size())}, DType::Float32, Device::cpu());
+    std::memcpy(shape_tensor.data_ptr(), shape_data.data(), shape_data.size() * sizeof(float));
+    grad_fn->save_for_backward({dim_tensor, index, shape_tensor});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto narrow(const Variable& input, int64_t dim, int64_t start, int64_t length) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(input.tensor().slice(dim, start, start + length), false);
+    }
+    auto result = input.tensor().slice(dim, start, start + length);
+    auto grad_fn = std::make_shared<NarrowBackward>();
+    auto dim_tensor = full({1}, static_cast<float>(dim), DType::Float32, Device::cpu());
+    auto start_tensor = full({1}, static_cast<float>(start), DType::Float32, Device::cpu());
+    std::vector<float> shape_data(input.tensor().shape().begin(), input.tensor().shape().end());
+    auto shape_tensor = zeros({static_cast<int64_t>(shape_data.size())}, DType::Float32, Device::cpu());
+    std::memcpy(shape_tensor.data_ptr(), shape_data.data(), shape_data.size() * sizeof(float));
+    grad_fn->save_for_backward({dim_tensor, start_tensor, shape_tensor});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto flip(const Variable& input, const std::vector<int64_t>& dims) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::flip(input.tensor(), dims), false);
+    }
+    auto result = tenzor::flip(input.tensor(), dims);
+    auto grad_fn = std::make_shared<FlipBackward>();
+    // Save dims as tensor
+    auto dims_tensor = zeros({static_cast<int64_t>(dims.size())}, DType::Float32, Device::cpu());
+    auto* ptr = dims_tensor.data<float>();
+    for (size_t i = 0; i < dims.size(); ++i) ptr[i] = static_cast<float>(dims[i]);
+    grad_fn->save_for_backward({dims_tensor});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto repeat(const Variable& input, const std::vector<int64_t>& repeats) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::repeat(input.tensor(), repeats), false);
+    }
+    auto result = tenzor::repeat(input.tensor(), repeats);
+    auto grad_fn = std::make_shared<RepeatBackward>();
+    // Save original shape and repeats
+    std::vector<float> shape_data(input.tensor().shape().begin(), input.tensor().shape().end());
+    auto shape_tensor = zeros({static_cast<int64_t>(shape_data.size())}, DType::Float32, Device::cpu());
+    std::memcpy(shape_tensor.data_ptr(), shape_data.data(), shape_data.size() * sizeof(float));
+    auto repeats_tensor = zeros({static_cast<int64_t>(repeats.size())}, DType::Float32, Device::cpu());
+    auto* rptr = repeats_tensor.data<float>();
+    for (size_t i = 0; i < repeats.size(); ++i) rptr[i] = static_cast<float>(repeats[i]);
+    grad_fn->save_for_backward({shape_tensor, repeats_tensor});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
     return output;
 }
 

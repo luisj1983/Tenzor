@@ -263,15 +263,15 @@ auto ReLU6::forward_impl(const Variable& input) -> Variable {
 LeakyReLU::LeakyReLU(double negative_slope) : negative_slope_(negative_slope) {}
 
 auto LeakyReLU::forward_impl(const Variable& input) -> Variable {
-    return leaky_relu(input, negative_slope_);
+    return nn::leaky_relu(input, negative_slope_);
 }
 
 auto Sigmoid::forward_impl(const Variable& input) -> Variable {
-    return sigmoid(input);
+    return nn::sigmoid(input);
 }
 
 auto Tanh::forward_impl(const Variable& input) -> Variable {
-    return tanh(input);
+    return nn::tanh(input);
 }
 
 Softmax::Softmax(int64_t dim) : dim_(dim) {}
@@ -402,7 +402,7 @@ auto gelu(const Variable& input, const std::string& approximate) -> Variable {
         Variable one(one_t, false);
 
         auto inner = sqrt_2_pi * (x + coef * x_cubed);
-        auto tanh_val = tanh(inner);
+        auto tanh_val = nn::tanh(inner);
         return half * x * (one + tanh_val);
     }
 
@@ -506,7 +506,7 @@ auto elu(const Variable& input, double alpha) -> Variable {
 }
 
 auto SELU::forward_impl(const Variable& input) -> Variable {
-    return selu(input);
+    return nn::selu(input);
 }
 
 auto selu(const Variable& input) -> Variable {
@@ -576,7 +576,7 @@ auto swish(const Variable& input) -> Variable {
 }
 
 auto Mish::forward_impl(const Variable& input) -> Variable {
-    return mish(input);
+    return nn::mish(input);
 }
 
 auto mish(const Variable& input) -> Variable {
@@ -740,7 +740,7 @@ auto glu(const Variable& input, int64_t dim) -> Variable {
     auto a = Variable(input.tensor().slice(dim, 0, half), input.requires_grad());
     auto b = Variable(input.tensor().slice(dim, half, shape[dim]), input.requires_grad());
     // GLU(a, b) = a * sigmoid(b)
-    return a * sigmoid(b);
+    return a * nn::sigmoid(b);
 }
 
 } // namespace tenzor::nn

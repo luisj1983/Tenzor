@@ -9,9 +9,11 @@
 #pragma once
 
 #include <memory>
+#include <vector>
 #include <unordered_map>
 #include "../../autograd/variable.hpp"
 #include "../optim/optimizer.hpp"
+#include "../utils/clip_grad.hpp"
 
 namespace tenzor {
 namespace nn {
@@ -241,6 +243,46 @@ public:
      * @param state State dictionary to load
      */
     auto load_state_dict(const std::unordered_map<std::string, float>& state) -> void;
+
+    /**
+     * @brief Clip gradients by global norm after unscaling
+     *
+     * Convenience method that unscales gradients (if not already done) and then
+     * clips them by global norm. Equivalent to calling unscale_() followed by
+     * nn::utils::clip_grad_norm_().
+     *
+     * @param optimizer Optimizer containing parameters with gradients
+     * @param max_norm Maximum allowed total norm
+     * @param norm_type Type of the p-norm (default: 2.0 for L2 norm)
+     * @return The total norm of the gradients before clipping
+     *
+     * @code
+     * scaled_loss.backward();
+     * double total_norm = scaler.clip_grad_norm_(optimizer, 1.0);
+     * scaler.step(optimizer);
+     * scaler.update();
+     * @endcode
+     */
+    auto clip_grad_norm_(optim::Optimizer& optimizer, double max_norm, double norm_type = 2.0) -> double;
+
+    /**
+     * @brief Clip gradients by value after unscaling
+     *
+     * Convenience method that unscales gradients (if not already done) and then
+     * clamps each gradient element to [-clip_value, clip_value]. Equivalent to
+     * calling unscale_() followed by nn::utils::clip_grad_value_().
+     *
+     * @param optimizer Optimizer containing parameters with gradients
+     * @param clip_value Maximum absolute value for gradient elements
+     *
+     * @code
+     * scaled_loss.backward();
+     * scaler.clip_grad_value_(optimizer, 0.5);
+     * scaler.step(optimizer);
+     * scaler.update();
+     * @endcode
+     */
+    auto clip_grad_value_(optim::Optimizer& optimizer, double clip_value) -> void;
 
 private:
     float scale_;                 ///< Current loss scale factor

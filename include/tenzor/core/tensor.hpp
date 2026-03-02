@@ -70,6 +70,14 @@ class VulkanBackend;
  * - Efficient memory management with shared storage
  * - Broadcasting and advanced indexing
  *
+ * @warning **Shallow copy semantics (matches PyTorch):** Tensor copies share
+ * underlying storage. `Tensor b = a;` does NOT copy data — both `a` and `b`
+ * point to the same memory. Mutations through one (e.g., `fill_()`) are visible
+ * through the other. Use `.clone()` for an independent deep copy.
+ * Similarly, `.to(device)` returns `*this` (no copy) when already on the target
+ * device. `.reshape()`, `.transpose()`, `.slice()` also create views sharing
+ * storage — NOT copies.
+ *
  * Tensors use shared storage with reference counting for efficient memory usage.
  *
  * @code
@@ -879,25 +887,25 @@ public:
      */
     auto set_requires_grad(bool requires_grad) -> void;
 
-    /**
-     * @brief Get mutable reference to shape vector (for view-creating kernels).
-     */
+    /// @name Internal Mutation API (backend kernels only)
+    /// @warning These methods are for backend kernel implementations creating
+    /// view tensors (reshape, transpose, slice). Do NOT use in user-facing code.
+    /// Misuse can corrupt tensor metadata and invalidate storage bounds checks.
+    /// @{
+
+    /// @brief Get mutable reference to shape vector (for view-creating kernels).
     auto mutable_shape() -> std::vector<int64_t>&;
 
-    /**
-     * @brief Get mutable reference to strides vector (for view-creating kernels).
-     */
+    /// @brief Get mutable reference to strides vector (for view-creating kernels).
     auto mutable_strides() -> std::vector<int64_t>&;
 
-    /**
-     * @brief Set the storage offset (in elements).
-     */
+    /// @brief Set the storage offset (in elements).
     auto set_offset(int64_t offset) -> void;
 
-    /**
-     * @brief Invalidate the cached contiguity flag (call after modifying strides).
-     */
+    /// @brief Invalidate the cached contiguity flag (call after modifying strides).
     auto invalidate_contiguity_cache() -> void;
+
+    /// @}
 
 private:
     std::shared_ptr<TensorImpl> impl_;

@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/nn/amp/grad_scaler.hpp"
+#include "tenzor/nn/utils/clip_grad.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/creation.hpp"
 #include <cmath>
@@ -68,9 +69,9 @@ auto GradScaler::unscale_(optim::Optimizer& optimizer) -> void {
             continue;
         }
 
-        // Unscale gradient using tensor multiplication
-        // This properly handles both CPU and CUDA tensors
-        *grad = *grad * inv_scale;
+        // Clone gradient before modifying to avoid corrupting shared gradient data
+        // (e.g., when retain_graph=true and backward is called multiple times)
+        *grad = grad->clone() * inv_scale;
     }
 
     has_unscaled_ = true;
@@ -200,6 +201,35 @@ auto GradScaler::state_dict() const -> std::unordered_map<std::string, float> {
         {"growth_interval", static_cast<float>(growth_interval_)},
         {"growth_tracker", static_cast<float>(growth_tracker_)}
     };
+}
+
+auto GradScaler::clip_grad_norm_(optim::Optimizer& optimizer, double max_norm, double norm_type) -> double {
+    // Ensure gradients are unscaled before clipping
+    if (!has_unscaled_) {
+        unscale_(optimizer);
+    }
+
+    // Collect parameters and delegate to the utility function
+    // Use a mutable copy of the parameter vector since clip_grad_norm_ takes by value
+    auto params = optimizer.parameters();
+    return nn::utils::clip_grad_norm_(
+        std::vector<std::shared_ptr<Variable>>(params.begin(), params.end()),
+        max_norm, norm_type
+    );
+}
+
+auto GradScaler::clip_grad_value_(optim::Optimizer& optimizer, double clip_value) -> void {
+    // Ensure gradients are unscaled before clipping
+    if (!has_unscaled_) {
+        unscale_(optimizer);
+    }
+
+    // Collect parameters and delegate to the utility function
+    auto params = optimizer.parameters();
+    nn::utils::clip_grad_value_(
+        std::vector<std::shared_ptr<Variable>>(params.begin(), params.end()),
+        clip_value
+    );
 }
 
 auto GradScaler::load_state_dict(const std::unordered_map<std::string, float>& state) -> void {

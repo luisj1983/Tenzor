@@ -164,6 +164,61 @@ jobs:
             --timeout 600
         timeout-minutes: 30
 
+  # Tier 1.6: ThreadSanitizer build (~15 min)
+  thread-sanitizer:
+    name: ThreadSanitizer
+    runs-on: ubuntu-24.04
+    needs: build-and-smoke
+    if: github.event_name == 'pull_request'
+    env:
+      CMAKE_BUILD_TYPE: Debug
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build \
+            libgtest-dev \
+            libomp-dev \
+            libmkl-dev \
+            libtbb-dev
+
+      - name: Configure (TSan, no Python)
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS="-fsanitize=thread -fno-sanitize-recover=all" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-sanitize-recover=all" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=thread" \
+            -DTENZOR_BUILD_CUDA=OFF \
+            -DTENZOR_BUILD_ROCM=OFF \
+            -DTENZOR_BUILD_ONEAPI=OFF \
+            -DTENZOR_BUILD_VULKAN=OFF \
+            -DTENZOR_BUILD_METAL=OFF \
+            -DTENZOR_BUILD_WEBGPU=OFF \
+            -DTENZOR_BUILD_PYTHON=OFF \
+            -DTENZOR_BUILD_TESTS=ON \
+            -DTENZOR_BUILD_BENCHMARKS=OFF \
+            -DTENZOR_BUILD_EXAMPLES=OFF \
+            -DTENZOR_BUILD_MODEL_HUB=OFF
+
+      - name: Build
+        run: ninja -C build
+
+      - name: Run thread-safety tests under TSan
+        env:
+          TSAN_OPTIONS: halt_on_error=1,second_deadlock_stack=1
+        run: |
+          cd build
+          ctest --output-on-failure -j1 \
+            -R "AutogradTest|ThreadSafety|test_hooks|test_thread" \
+            -E "cuda|vulkan|oneapi|rocm" \
+            --timeout 300
+        timeout-minutes: 20
+
   # Tier 1.75: GPU tests on self-hosted runner (when available)
   gpu-tests:
     name: GPU Backend Tests

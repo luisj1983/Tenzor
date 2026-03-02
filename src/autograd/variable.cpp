@@ -95,6 +95,12 @@ auto Variable::unregister_hook(size_t hook_id) -> bool {
     return impl_->hooks_.erase(hook_id) > 0;
 }
 
+auto Variable::clear_hooks() -> void {
+    if (!impl_) return;
+    std::unique_lock lock(impl_->hooks_mutex_);
+    impl_->hooks_.clear();
+}
+
 auto Variable::retain_grad() -> void {
     if (!impl_) {
         throw std::runtime_error("Cannot retain grad of uninitialized Variable");

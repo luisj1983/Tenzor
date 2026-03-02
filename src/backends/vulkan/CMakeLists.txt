@@ -287,6 +287,10 @@ set(SHADERS
     bitonic_sort_f64
     bitonic_sort_i32
     cast_int64_to_int32
+    cast_f32_f16
+    cast_f16_f32
+    cast_f32_f64
+    cast_f64_f32
     # Creation operations
     arange
     arange_f64

@@ -881,6 +881,17 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             attrs.get_int(AttrKey::Dim, -1), attrs.get_bool(AttrKey::Descending, false))};
     });
 
+    // ========================================================================
+    // Type Conversion (Cast)
+    // ========================================================================
+    table.register_single_output_kernel(OpId::Cast, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        if (!attrs.has(AttrKey::TargetDtype)) {
+            throw std::runtime_error("vulkan cast: missing 'target_dtype' attribute");
+        }
+        DType target_dtype = static_cast<DType>(attrs.get_int(AttrKey::TargetDtype));
+        return get_vulkan_backend()->dispatchCast(inputs[0], target_dtype);
+    });
+
     std::cout << "Vulkan dispatch table initialized with O(1) lookup" << std::endl;
 }
 

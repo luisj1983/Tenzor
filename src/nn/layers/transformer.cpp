@@ -196,7 +196,7 @@ auto TransformerEncoderLayer::apply_activation(const Variable& x) const -> Varia
     if (activation_ == "relu") {
         return relu(x);
     } else if (activation_ == "gelu") {
-        return gelu(x);
+        return nn::gelu(x);
     }
     return x;
 }
@@ -363,7 +363,7 @@ auto TransformerDecoderLayer::apply_activation(const Variable& x) const -> Varia
     if (activation_ == "relu") {
         return relu(x);
     } else if (activation_ == "gelu") {
-        return gelu(x);
+        return nn::gelu(x);
     }
     return x;
 }

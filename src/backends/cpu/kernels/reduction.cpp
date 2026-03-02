@@ -2540,39 +2540,41 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
                 break;
             }
             case DType::Float16: {
+                // Welford's single-pass algorithm for numerically stable variance
+                // Float16 has limited precision; Welford avoids catastrophic cancellation
                 auto* input_data = input.data<Float16>();
                 auto* output_data = output.data<float>();
-                float sum = 0.0f;
-                #pragma omp parallel for reduction(+:sum) if(n > REDUCTION_OMP_THRESHOLD)
-                for (int64_t i = 0; i < n; i++) sum += static_cast<float>(input_data[i]);
-                float mean = sum / static_cast<float>(n);
-                float var_sum = 0.0f;
-                #pragma omp parallel for reduction(+:var_sum) if(n > REDUCTION_OMP_THRESHOLD)
+                float mean = 0.0f;
+                float M2 = 0.0f;
                 for (int64_t i = 0; i < n; i++) {
-                    float diff = static_cast<float>(input_data[i]) - mean;
-                    var_sum += diff * diff;
+                    float x = static_cast<float>(input_data[i]);
+                    float delta = x - mean;
+                    mean += delta / static_cast<float>(i + 1);
+                    float delta2 = x - mean;
+                    M2 += delta * delta2;
                 }
                 int64_t divisor = n - correction;
                 if (divisor <= 0) divisor = 1;
-                output_data[0] = var_sum / static_cast<float>(divisor);
+                output_data[0] = M2 / static_cast<float>(divisor);
                 break;
             }
             case DType::BFloat16: {
+                // Welford's single-pass algorithm for numerically stable variance
+                // BFloat16 has only 8 mantissa bits; Welford avoids catastrophic cancellation
                 auto* input_data = input.data<BFloat16>();
                 auto* output_data = output.data<float>();
-                float sum = 0.0f;
-                #pragma omp parallel for reduction(+:sum) if(n > REDUCTION_OMP_THRESHOLD)
-                for (int64_t i = 0; i < n; i++) sum += static_cast<float>(input_data[i]);
-                float mean = sum / static_cast<float>(n);
-                float var_sum = 0.0f;
-                #pragma omp parallel for reduction(+:var_sum) if(n > REDUCTION_OMP_THRESHOLD)
+                float mean = 0.0f;
+                float M2 = 0.0f;
                 for (int64_t i = 0; i < n; i++) {
-                    float diff = static_cast<float>(input_data[i]) - mean;
-                    var_sum += diff * diff;
+                    float x = static_cast<float>(input_data[i]);
+                    float delta = x - mean;
+                    mean += delta / static_cast<float>(i + 1);
+                    float delta2 = x - mean;
+                    M2 += delta * delta2;
                 }
                 int64_t divisor = n - correction;
                 if (divisor <= 0) divisor = 1;
-                output_data[0] = var_sum / static_cast<float>(divisor);
+                output_data[0] = M2 / static_cast<float>(divisor);
                 break;
             }
             default:
@@ -2595,8 +2597,8 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
                 break;
             }
             case DType::Float16: {
-                // Compute in Float32
-                int64_t output_size = output.numel();
+                // Welford's single-pass algorithm for numerically stable variance
+                // Float16 has limited precision; single-pass avoids catastrophic cancellation
                 const int64_t dim_size = input_shape[dim];
                 const auto* input_data = input.data<Float16>();
                 auto* output_data = output.data<float>();
@@ -2619,29 +2621,26 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
                         tmp /= input_shape[d];
                     }
 
-                    float sum = 0.0f;
+                    // Welford's algorithm with Float32 accumulation
+                    float mean = 0.0f;
+                    float M2 = 0.0f;
                     for (int64_t i = 0; i < dim_size; i++) {
                         indices[dim] = i;
                         int64_t in_idx = 0;
                         for (int64_t d = 0; d < ndim; d++) in_idx += indices[d] * input_strides[d];
-                        sum += static_cast<float>(input_data[in_idx]);
+                        float x = static_cast<float>(input_data[in_idx]);
+                        float delta = x - mean;
+                        mean += delta / static_cast<float>(i + 1);
+                        float delta2 = x - mean;
+                        M2 += delta * delta2;
                     }
-                    float mean = sum / static_cast<float>(dim_size);
-
-                    float var_sum = 0.0f;
-                    for (int64_t i = 0; i < dim_size; i++) {
-                        indices[dim] = i;
-                        int64_t in_idx = 0;
-                        for (int64_t d = 0; d < ndim; d++) in_idx += indices[d] * input_strides[d];
-                        float diff = static_cast<float>(input_data[in_idx]) - mean;
-                        var_sum += diff * diff;
-                    }
-                    output_data[out_idx] = var_sum / static_cast<float>(divisor);
+                    output_data[out_idx] = M2 / static_cast<float>(divisor);
                 }
                 break;
             }
             case DType::BFloat16: {
-                int64_t output_size = output.numel();
+                // Welford's single-pass algorithm for numerically stable variance
+                // BFloat16 has only 8 mantissa bits; single-pass avoids catastrophic cancellation
                 const int64_t dim_size = input_shape[dim];
                 const auto* input_data = input.data<BFloat16>();
                 auto* output_data = output.data<float>();
@@ -2664,24 +2663,20 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
                         tmp /= input_shape[d];
                     }
 
-                    float sum = 0.0f;
+                    // Welford's algorithm with Float32 accumulation
+                    float mean = 0.0f;
+                    float M2 = 0.0f;
                     for (int64_t i = 0; i < dim_size; i++) {
                         indices[dim] = i;
                         int64_t in_idx = 0;
                         for (int64_t d = 0; d < ndim; d++) in_idx += indices[d] * input_strides[d];
-                        sum += static_cast<float>(input_data[in_idx]);
+                        float x = static_cast<float>(input_data[in_idx]);
+                        float delta = x - mean;
+                        mean += delta / static_cast<float>(i + 1);
+                        float delta2 = x - mean;
+                        M2 += delta * delta2;
                     }
-                    float mean = sum / static_cast<float>(dim_size);
-
-                    float var_sum = 0.0f;
-                    for (int64_t i = 0; i < dim_size; i++) {
-                        indices[dim] = i;
-                        int64_t in_idx = 0;
-                        for (int64_t d = 0; d < ndim; d++) in_idx += indices[d] * input_strides[d];
-                        float diff = static_cast<float>(input_data[in_idx]) - mean;
-                        var_sum += diff * diff;
-                    }
-                    output_data[out_idx] = var_sum / static_cast<float>(divisor);
+                    output_data[out_idx] = M2 / static_cast<float>(divisor);
                 }
                 break;
             }

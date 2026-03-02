@@ -6,6 +6,7 @@
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/shape.hpp"
 #include "cuda_launch_utils.cuh"
+#include "launch_config.cuh"
 #include <stdexcept>
 #include <vector>
 #include <cstring>
@@ -31,15 +32,14 @@ public:
 #define CUDA_KERNEL_LOOP(i, n) \
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < (n); i += blockDim.x * gridDim.x)
 
-// Compute optimal grid/block dimensions for 1D kernels
+// Delegates to compute_grid_size() from cuda_launch_utils.cuh to avoid
+// duplicating the block-size logic. For per-kernel occupancy-optimized
+// launches use optimal_launch_config() or the LAUNCH_KERNEL macro instead.
 inline void compute_launch_config_1d(int64_t n, dim3& grid, dim3& block) {
-    constexpr int threads_per_block = 256;
-    block = dim3(threads_per_block);
-    int64_t num_blocks = (n + threads_per_block - 1) / threads_per_block;
-    num_blocks = std::min(num_blocks, static_cast<int64_t>(2147483647));  // 2^31-1
-    // Ensure at least 1 block to avoid CUDA invalid argument error
-    // Grid-stride loop will naturally handle n=0 by not executing any iterations
-    grid = dim3(num_blocks > 0 ? static_cast<unsigned int>(num_blocks) : 1);
+    constexpr int block_size = 256;
+    block = dim3(block_size);
+    int num_blocks = compute_grid_size(n, block_size);
+    grid = dim3(static_cast<unsigned int>(num_blocks));
 }
 
 #define CUDA_GRID_STRIDE_LOOP(i, n) \

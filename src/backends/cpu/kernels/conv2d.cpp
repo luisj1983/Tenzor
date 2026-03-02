@@ -1,7 +1,9 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/backend/omp_thresholds.hpp"
 #include "gemm_optimized.hpp"
 #include "simd_fast_math.hpp"
+#include "winograd.hpp"
 #include <stdexcept>
 #include <vector>
 #include <algorithm>
@@ -159,7 +161,7 @@ void im2col_cpu(
     const int64_t col_width = channels * kernel_h * kernel_w;
 
     // Nested loop approach: eliminates 5 div/mod per element (~200 cycles saved per element)
-    #pragma omp parallel for collapse(3) if(batch * out_h * out_w > 10000)
+    #pragma omp parallel for collapse(3) if(batch * out_h * out_w > OmpThresholds::medium())
     for (int64_t b = 0; b < batch; ++b) {
         for (int64_t oh = 0; oh < out_h; ++oh) {
             for (int64_t ow = 0; ow < out_w; ++ow) {
@@ -212,7 +214,7 @@ void col2im_cpu(
 
     // Process each output element and accumulate from all contributing col positions
     // This avoids race conditions compared to the col-centric approach
-    #pragma omp parallel for collapse(4) if(output_size > 10000)
+    #pragma omp parallel for collapse(4) if(output_size > OmpThresholds::medium())
     for (int64_t b = 0; b < batch; ++b) {
         for (int64_t c = 0; c < channels; ++c) {
             for (int64_t ih = 0; ih < height; ++ih) {
@@ -268,7 +270,7 @@ void gemm_cpu(
     int64_t M, int64_t N, int64_t K,
     bool transpose_B = true
 ) {
-    #pragma omp parallel for collapse(2) if(M * N > 1000)
+    #pragma omp parallel for collapse(2) if(M * N > OmpThresholds::matmul())
     for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
             T sum = T(0.0f);
@@ -307,7 +309,7 @@ void gemm_cpu<Float16>(
     int64_t M, int64_t N, int64_t K,
     bool transpose_B
 ) {
-    #pragma omp parallel for collapse(2) if(M * N > 1000)
+    #pragma omp parallel for collapse(2) if(M * N > OmpThresholds::matmul())
     for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
             float sum = 0.0f;
@@ -332,7 +334,7 @@ void gemm_cpu<BFloat16>(
     int64_t M, int64_t N, int64_t K,
     bool transpose_B
 ) {
-    #pragma omp parallel for collapse(2) if(M * N > 1000)
+    #pragma omp parallel for collapse(2) if(M * N > OmpThresholds::matmul())
     for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
             float sum = 0.0f;
@@ -359,7 +361,7 @@ void gemm_transA_cpu(
     const T* A, const T* B, T* C,
     int64_t M, int64_t N, int64_t K
 ) {
-    #pragma omp parallel for collapse(2) if(M * N > 1000)
+    #pragma omp parallel for collapse(2) if(M * N > OmpThresholds::matmul())
     for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
             T sum = T(0.0f);
@@ -387,7 +389,7 @@ void gemm_transA_cpu<Float16>(
     const Float16* A, const Float16* B, Float16* C,
     int64_t M, int64_t N, int64_t K
 ) {
-    #pragma omp parallel for collapse(2) if(M * N > 1000)
+    #pragma omp parallel for collapse(2) if(M * N > OmpThresholds::matmul())
     for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
             float sum = 0.0f;
@@ -408,7 +410,7 @@ void gemm_transA_cpu<BFloat16>(
     const BFloat16* A, const BFloat16* B, BFloat16* C,
     int64_t M, int64_t N, int64_t K
 ) {
-    #pragma omp parallel for collapse(2) if(M * N > 1000)
+    #pragma omp parallel for collapse(2) if(M * N > OmpThresholds::matmul())
     for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
             float sum = 0.0f;
@@ -819,7 +821,7 @@ void conv2d_forward_impl(
             int64_t out_start = g * out_channels_per_group;
 
             // Process each batch
-            #pragma omp parallel for if(batch * spatial > 10000)
+            #pragma omp parallel for if(batch * spatial > OmpThresholds::medium())
             for (int64_t b = 0; b < batch; ++b) {
                 // For each spatial position
                 for (int64_t s = 0; s < spatial; ++s) {
@@ -841,7 +843,7 @@ void conv2d_forward_impl(
         // Add bias if present
         if (bias) {
             const T* bias_data = bias->data<T>();
-            #pragma omp parallel for collapse(3) if(batch * out_channels * spatial > 10000)
+            #pragma omp parallel for collapse(3) if(batch * out_channels * spatial > OmpThresholds::medium())
             for (int64_t b = 0; b < batch; ++b) {
                 for (int64_t c = 0; c < out_channels; ++c) {
                     for (int64_t s = 0; s < spatial; ++s) {
@@ -1021,7 +1023,7 @@ void conv2d_forward_impl(
         if (bias) {
             const T* bias_data = bias->data<T>();
             int64_t spatial = out_h * out_w;
-            #pragma omp parallel for collapse(3) if(batch * out_channels * spatial > 10000)
+            #pragma omp parallel for collapse(3) if(batch * out_channels * spatial > OmpThresholds::medium())
             for (int64_t b = 0; b < batch; ++b) {
                 for (int64_t c = 0; c < out_channels; ++c) {
                     for (int64_t s = 0; s < spatial; ++s) {
@@ -1094,7 +1096,7 @@ void conv2d_forward_impl(
         // GEMM output: element at (m, n) where m = b*out_h*out_w + oh*out_w + ow, n = c
         // NCHW output: element at (b, c + out_start, oh, ow)
         T* output_data = output.data<T>();
-        #pragma omp parallel for collapse(4) if(batch * out_channels_per_group * out_h * out_w > 10000)
+        #pragma omp parallel for collapse(4) if(batch * out_channels_per_group * out_h * out_w > OmpThresholds::medium())
         for (int64_t b = 0; b < batch; ++b) {
             for (int64_t c = 0; c < out_channels_per_group; ++c) {
                 for (int64_t oh = 0; oh < out_h; ++oh) {
@@ -1119,8 +1121,9 @@ void conv2d_forward_impl(
     if (bias != nullptr) {
         const T* bias_data = bias->data<T>();
         T* output_data = output.data<T>();
+        int64_t bias_numel = batch * out_channels * out_h * out_w;
 
-        #pragma omp parallel for collapse(4)
+        #pragma omp parallel for collapse(4) if(bias_numel > OmpThresholds::medium())
         for (int64_t b = 0; b < batch; ++b) {
             for (int64_t c = 0; c < out_channels; ++c) {
                 for (int64_t h = 0; h < out_h; ++h) {
@@ -1207,13 +1210,13 @@ auto conv2d_forward_kernel(
         int64_t n = output.numel();
         if (original_dtype == DType::Float16) {
             Float16* dst = output.data<Float16>();
-            #pragma omp parallel for if(n > 65536)
+            #pragma omp parallel for if(n > OmpThresholds::simple())
             for (int64_t i = 0; i < n; ++i) {
                 dst[i] = Float16(src[i]);
             }
         } else {
             BFloat16* dst = output.data<BFloat16>();
-            #pragma omp parallel for if(n > 65536)
+            #pragma omp parallel for if(n > OmpThresholds::simple())
             for (int64_t i = 0; i < n; ++i) {
                 dst[i] = BFloat16(src[i]);
             }
@@ -1352,11 +1355,11 @@ auto conv2d_backward_input_kernel(
         int64_t n = grad_input.numel();
         if (original_dtype == DType::Float16) {
             Float16* dst = grad_input.data<Float16>();
-            #pragma omp parallel for if(n > 65536)
+            #pragma omp parallel for if(n > OmpThresholds::simple())
             for (int64_t i = 0; i < n; ++i) dst[i] = Float16(src[i]);
         } else {
             BFloat16* dst = grad_input.data<BFloat16>();
-            #pragma omp parallel for if(n > 65536)
+            #pragma omp parallel for if(n > OmpThresholds::simple())
             for (int64_t i = 0; i < n; ++i) dst[i] = BFloat16(src[i]);
         }
     } else {
@@ -1489,11 +1492,11 @@ auto conv2d_backward_weight_kernel(
         int64_t n = grad_weight.numel();
         if (original_dtype == DType::Float16) {
             Float16* dst = grad_weight.data<Float16>();
-            #pragma omp parallel for if(n > 65536)
+            #pragma omp parallel for if(n > OmpThresholds::simple())
             for (int64_t i = 0; i < n; ++i) dst[i] = Float16(src[i]);
         } else {
             BFloat16* dst = grad_weight.data<BFloat16>();
-            #pragma omp parallel for if(n > 65536)
+            #pragma omp parallel for if(n > OmpThresholds::simple())
             for (int64_t i = 0; i < n; ++i) dst[i] = BFloat16(src[i]);
         }
     } else {
@@ -1525,7 +1528,7 @@ void conv2d_backward_bias_impl(
     const T* grad_out_data = grad_output.data<T>();
 
     // Sum over batch, height, width dimensions
-    #pragma omp parallel for
+    #pragma omp parallel for if(out_channels * batch * out_h * out_w > OmpThresholds::complex())
     for (int64_t c = 0; c < out_channels; ++c) {
         T sum = T(0.0f);
         for (int64_t b = 0; b < batch; ++b) {
@@ -1634,7 +1637,7 @@ void conv_transpose2d_forward_impl(
     // This is parallelizable since each output position is independent
     int64_t total_output = batch * out_channels * out_h * out_w;
 
-    #pragma omp parallel for if(total_output > 1000)
+    #pragma omp parallel for if(total_output > OmpThresholds::complex())
     for (int64_t idx = 0; idx < total_output; ++idx) {
         // Decode output position
         int64_t w = idx % out_w;
@@ -1763,7 +1766,8 @@ void depthwise_conv2d_impl(const T* in_data, const T* w_data, const T* b_data, T
                             int64_t N, int64_t C, int64_t H, int64_t W,
                             int64_t kH, int64_t kW, int64_t H_out, int64_t W_out,
                             int64_t stride, int64_t padding, int64_t dilation) {
-    #pragma omp parallel for collapse(4)
+    int64_t depthwise_numel = N * C * H_out * W_out;
+    #pragma omp parallel for collapse(4) if(depthwise_numel > OmpThresholds::medium())
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
             for (int64_t oh = 0; oh < H_out; ++oh) {

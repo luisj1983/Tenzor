@@ -39,8 +39,8 @@ static void check_for_anomaly(const std::vector<Tensor>& grads,
         auto nan_count = sum(nan_mask.to(DType::Float32));
         auto inf_count = sum(inf_mask.to(DType::Float32));
 
-        bool has_nan = nan_count.data<float>()[0] > 0.0f;
-        bool has_inf = inf_count.data<float>()[0] > 0.0f;
+        bool has_nan = nan_count.item<float>() > 0.0f;
+        bool has_inf = inf_count.item<float>() > 0.0f;
 
         if (has_nan || has_inf) {
             // Get demangled function name for readability
@@ -66,24 +66,47 @@ static void check_for_anomaly(const std::vector<Tensor>& grads,
     }
 }
 
-// Floating-point precision hierarchy for gradient accumulation.
-// Higher precedence = higher precision. This avoids using dtype_size()
-// which incorrectly equates Float16 and BFloat16 (both 2 bytes).
-static auto dtype_precedence(DType dt) -> int {
-    switch (dt) {
-        case DType::Float64:    return 6;
-        case DType::Complex128: return 6;
-        case DType::Float32:    return 5;
-        case DType::Complex64:  return 5;
-        case DType::Float16:    return 4;
-        case DType::BFloat16:   return 3;
-        case DType::Int64:      return 2;
-        case DType::Int32:      return 1;
-        case DType::Int16:      return 1;
-        case DType::Int8:       return 0;
-        case DType::UInt8:      return 0;
-        default:                return 0;
+// Promote two dtypes for gradient accumulation. Complex types always win
+// over their float counterparts (Float32 + Complex64 → Complex64), and
+// higher precision wins within the same category.
+static auto promote_dtype(DType a, DType b) -> DType {
+    if (a == b) return a;
+
+    // Check if either type is complex
+    bool a_complex = (a == DType::Complex64 || a == DType::Complex128);
+    bool b_complex = (b == DType::Complex64 || b == DType::Complex128);
+
+    if (a_complex || b_complex) {
+        // Both complex: pick higher precision
+        if (a_complex && b_complex) {
+            return (a == DType::Complex128 || b == DType::Complex128)
+                   ? DType::Complex128 : DType::Complex64;
+        }
+        // One complex, one real: promote to complex of max precision
+        DType real_dt = a_complex ? b : a;
+        DType complex_dt = a_complex ? a : b;
+        if (real_dt == DType::Float64 || complex_dt == DType::Complex128) {
+            return DType::Complex128;
+        }
+        return DType::Complex64;
     }
+
+    // Both real: use precision hierarchy
+    auto prec = [](DType dt) -> int {
+        switch (dt) {
+            case DType::Float64:  return 6;
+            case DType::Float32:  return 5;
+            case DType::Float16:  return 4;
+            case DType::BFloat16: return 3;
+            case DType::Int64:    return 2;
+            case DType::Int32:    return 1;
+            case DType::Int16:    return 1;
+            case DType::Int8:     return 0;
+            case DType::UInt8:    return 0;
+            default:              return 0;
+        }
+    };
+    return prec(a) >= prec(b) ? a : b;
 }
 
 auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
@@ -184,8 +207,7 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
             for (size_t i = 1; i < accum_grads.size(); ++i) {
                 Tensor gi = accum_grads[i];
                 if (gi.dtype() != total_grad.dtype()) {
-                    DType target = (dtype_precedence(gi.dtype()) >= dtype_precedence(total_grad.dtype()))
-                        ? gi.dtype() : total_grad.dtype();
+                    DType target = promote_dtype(gi.dtype(), total_grad.dtype());
                     total_grad = total_grad.to(target);
                     gi = gi.to(target);
                 }
@@ -263,7 +285,8 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                         got += std::to_string(grad_shape[s]);
                     }
                     throw AutogradException(
-                        "Gradient shape mismatch: expected [" + expected + "] got [" + got + "]");
+                        "In " + function->name() + ".backward(): gradient for input " +
+                        std::to_string(i) + " has shape [" + got + "], expected [" + expected + "]");
                 }
 
                 // Apply hooks (access through impl_ for handle pattern)
@@ -288,8 +311,7 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                         // Promote to higher precision rather than silently demoting
                         auto existing_grad = var.grad().value();
                         if (grad_to_apply.dtype() != existing_grad.dtype()) {
-                            DType target = (dtype_precedence(grad_to_apply.dtype()) >= dtype_precedence(existing_grad.dtype()))
-                                ? grad_to_apply.dtype() : existing_grad.dtype();
+                            DType target = promote_dtype(grad_to_apply.dtype(), existing_grad.dtype());
                             if (target != existing_grad.dtype()) {
                                 var.grad() = existing_grad.to(target);
                             }
@@ -484,8 +506,7 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
             for (size_t i = 1; i < accum_grads.size(); ++i) {
                 Tensor gi = accum_grads[i];
                 if (gi.dtype() != total_grad.dtype()) {
-                    DType target = (dtype_precedence(gi.dtype()) >= dtype_precedence(total_grad.dtype()))
-                        ? gi.dtype() : total_grad.dtype();
+                    DType target = promote_dtype(gi.dtype(), total_grad.dtype());
                     total_grad = total_grad.to(target);
                     gi = gi.to(target);
                 }
@@ -529,8 +550,7 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                     if (var.has_grad()) {
                         auto existing_grad = var.grad().value();
                         if (grad_to_apply.dtype() != existing_grad.dtype()) {
-                            DType target = (dtype_precedence(grad_to_apply.dtype()) >= dtype_precedence(existing_grad.dtype()))
-                                ? grad_to_apply.dtype() : existing_grad.dtype();
+                            DType target = promote_dtype(grad_to_apply.dtype(), existing_grad.dtype());
                             if (target != existing_grad.dtype()) {
                                 var.grad() = existing_grad.to(target);
                             }

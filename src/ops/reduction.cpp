@@ -2,6 +2,8 @@
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "tenzor/ops/math.hpp"
+#include "tenzor/ops/transform.hpp"
 
 namespace tenzor {
 
@@ -94,6 +96,20 @@ auto norm(const Tensor& input, float p, std::optional<int64_t> dim, bool keepdim
     attrs.set(AttrKey::Keepdim, keepdim);
     std::vector<Tensor> inputs = {input};
     return dispatch(OpId::Norm, inputs, attrs)[0];
+}
+
+auto logsumexp(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
+    // Numerically stable logsumexp: log(sum(exp(x))) = max(x) + log(sum(exp(x - max(x))))
+    // Subtracting the max prevents overflow in exp() for large values.
+    auto max_val = tenzor::max(input, dim, /*keepdim=*/true);  // keepdim=true for broadcasting
+    auto shifted = input - max_val;                             // subtract max for stability
+    auto exp_shifted = tenzor::exp(shifted);
+    auto sum_exp = tenzor::sum(exp_shifted, dim, keepdim);
+    auto log_sum = tenzor::log(sum_exp);
+    if (!keepdim) {
+        max_val = tenzor::squeeze(max_val, dim);
+    }
+    return max_val + log_sum;
 }
 
 } // namespace tenzor

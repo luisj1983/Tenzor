@@ -106,6 +106,27 @@ auto norm(const Tensor& input,
          std::optional<int64_t> dim = std::nullopt,
          bool keepdim = false) -> Tensor;
 
+/**
+ * @brief Numerically stable log-sum-exp reduction.
+ *
+ * Computes log(sum(exp(input), dim)) in a numerically stable way by
+ * subtracting the maximum value before exponentiation.
+ *
+ * @param input Input tensor
+ * @param dim Dimension to reduce
+ * @param keepdim Keep reduced dimension as size 1
+ * @return log(sum(exp(input), dim))
+ *
+ * @code
+ * auto t = Tensor({3, 4}, DType::Float32, Device::cpu());
+ * auto lse = logsumexp(t, 1);       // Shape: {3}
+ * auto lse_kd = logsumexp(t, 1, true); // Shape: {3, 1}
+ * @endcode
+ */
+auto logsumexp(const Tensor& input,
+              int64_t dim,
+              bool keepdim = false) -> Tensor;
+
 /** @} */ // end of tensor_reduction group
 
 } // namespace tenzor

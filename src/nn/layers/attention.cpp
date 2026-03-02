@@ -54,6 +54,14 @@ MultiheadAttention::MultiheadAttention(int64_t embed_dim,
       is_causal_(is_causal) {
 
     // Validate parameters
+    if (embed_dim_ <= 0) {
+        throw std::invalid_argument(
+            "embed_dim must be positive. Got embed_dim=" + std::to_string(embed_dim_));
+    }
+    if (num_heads_ <= 0) {
+        throw std::invalid_argument(
+            "num_heads must be positive. Got num_heads=" + std::to_string(num_heads_));
+    }
     if (embed_dim_ % num_heads_ != 0) {
         throw std::invalid_argument(
             "embed_dim must be divisible by num_heads. Got embed_dim=" +

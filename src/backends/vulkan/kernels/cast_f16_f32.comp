@@ -1,0 +1,30 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuffer {
+    uint data[];  // packed f16 pairs
+} input_buf;
+
+layout(set = 0, binding = 1) writeonly buffer OutputBuffer {
+    float data[];
+} output_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+} pc;
+
+void main() {
+    uint pair_idx = gl_GlobalInvocationID.x;
+    uint elem_idx = pair_idx * 2;
+
+    if (elem_idx >= pc.num_elements) return;
+
+    uint packed = input_buf.data[pair_idx];
+    vec2 unpacked = unpackHalf2x16(packed);
+
+    output_buf.data[elem_idx] = unpacked.x;
+    if (elem_idx + 1 < pc.num_elements) {
+        output_buf.data[elem_idx + 1] = unpacked.y;
+    }
+}

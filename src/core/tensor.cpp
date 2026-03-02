@@ -203,17 +203,26 @@ auto Tensor::data() -> T* {
                 std::string(dtype_name(impl_->dtype)) + ")");
         }
     }
-    // Bounds check: compute max reachable element using strides (handles non-contiguous)
-    // Skip for empty tensors (any dimension is 0) — no elements to access
+    // Bounds check: compute min/max reachable element using strides.
+    // Negative strides (from flip/slice with step<0) shift the reachable range
+    // downward from the base offset, so we track both endpoints.
+    // Skip for empty tensors (any dimension is 0) — no elements to access.
     if (impl_->numel() > 0) {
         size_t storage_elements = impl_->storage->size_bytes() / tenzor::dtype_size(impl_->dtype);
-        size_t max_offset = static_cast<size_t>(impl_->offset);
+        int64_t min_offset = static_cast<int64_t>(impl_->offset);
+        int64_t max_offset = static_cast<int64_t>(impl_->offset);
         for (int64_t d = 0; d < ndim(); ++d) {
-            if (impl_->shape[d] > 0)
-                max_offset += static_cast<size_t>(impl_->shape[d] - 1) * static_cast<size_t>(safe_abs(impl_->strides[d]));
+            if (impl_->shape[d] > 0) {
+                int64_t extent = (impl_->shape[d] - 1) * impl_->strides[d];
+                if (extent >= 0) {
+                    max_offset += extent;
+                } else {
+                    min_offset += extent;
+                }
+            }
         }
-        if (max_offset >= storage_elements) {
-            throw std::out_of_range("Tensor data access: max reachable offset exceeds storage bounds");
+        if (min_offset < 0 || static_cast<size_t>(max_offset) >= storage_elements) {
+            throw std::out_of_range("Tensor data access: reachable offset exceeds storage bounds");
         }
     }
     // For byte-level access types, scale offset by dtype size so pointer arithmetic
@@ -243,17 +252,26 @@ auto Tensor::data() const -> const T* {
                 std::string(dtype_name(impl_->dtype)) + ")");
         }
     }
-    // Bounds check: compute max reachable element using strides (handles non-contiguous)
-    // Skip for empty tensors (any dimension is 0) — no elements to access
+    // Bounds check: compute min/max reachable element using strides.
+    // Negative strides (from flip/slice with step<0) shift the reachable range
+    // downward from the base offset, so we track both endpoints.
+    // Skip for empty tensors (any dimension is 0) — no elements to access.
     if (impl_->numel() > 0) {
         size_t storage_elements = impl_->storage->size_bytes() / tenzor::dtype_size(impl_->dtype);
-        size_t max_offset = static_cast<size_t>(impl_->offset);
+        int64_t min_offset = static_cast<int64_t>(impl_->offset);
+        int64_t max_offset = static_cast<int64_t>(impl_->offset);
         for (int64_t d = 0; d < ndim(); ++d) {
-            if (impl_->shape[d] > 0)
-                max_offset += static_cast<size_t>(impl_->shape[d] - 1) * static_cast<size_t>(safe_abs(impl_->strides[d]));
+            if (impl_->shape[d] > 0) {
+                int64_t extent = (impl_->shape[d] - 1) * impl_->strides[d];
+                if (extent >= 0) {
+                    max_offset += extent;
+                } else {
+                    min_offset += extent;
+                }
+            }
         }
-        if (max_offset >= storage_elements) {
-            throw std::out_of_range("Tensor data access: max reachable offset exceeds storage bounds");
+        if (min_offset < 0 || static_cast<size_t>(max_offset) >= storage_elements) {
+            throw std::out_of_range("Tensor data access: reachable offset exceeds storage bounds");
         }
     }
     // For byte-level access types, scale offset by dtype size so pointer arithmetic
@@ -579,8 +597,8 @@ auto Tensor::clone() const -> Tensor {
     // (after transpose, slice with stride) have gaps that memcpy would corrupt
     Tensor src = is_contiguous() ? *this : contiguous();
 
-    // Create new tensor with same shape, dtype, and device
-    Tensor result(impl_->shape, impl_->dtype, impl_->device);
+    // Allocate uninitialized — memcpy overwrites all bytes immediately
+    Tensor result = Tensor::empty_uninitialized(impl_->shape, impl_->dtype, impl_->device);
     result.impl_->requires_grad = impl_->requires_grad;
 
     // Copy data from contiguous source
@@ -1294,9 +1312,10 @@ auto Tensor::slice(int64_t dim, int64_t start, int64_t end, int64_t step) const 
         result.impl_->strides[dim] *= step;
     }
 
-    // Validate that the slice doesn't exceed storage bounds
+    // Validate that the slice doesn't exceed storage bounds.
+    // Track both min and max reachable offsets to handle negative strides correctly.
+    int64_t min_offset = result.impl_->offset;
     int64_t max_offset = result.impl_->offset;
-    // Calculate the furthest element this slice can access (with overflow checks)
     for (int64_t d = 0; d < static_cast<int64_t>(result.impl_->shape.size()); ++d) {
         if (result.impl_->shape[d] > 0) {
             int64_t extent = result.impl_->shape[d] - 1;
@@ -1306,15 +1325,23 @@ auto Tensor::slice(int64_t dim, int64_t start, int64_t end, int64_t step) const 
                 throw std::overflow_error("Slice offset computation overflows int64_t");
             }
             int64_t delta = extent * stride;
-            // Check addition overflow
-            if (delta > 0 && max_offset > std::numeric_limits<int64_t>::max() - delta) {
-                throw std::overflow_error("Slice offset computation overflows int64_t");
+            if (delta >= 0) {
+                // Check addition overflow for positive delta
+                if (max_offset > std::numeric_limits<int64_t>::max() - delta) {
+                    throw std::overflow_error("Slice offset computation overflows int64_t");
+                }
+                max_offset += delta;
+            } else {
+                // Check subtraction underflow for negative delta
+                if (min_offset < std::numeric_limits<int64_t>::min() - delta) {
+                    throw std::overflow_error("Slice offset computation overflows int64_t");
+                }
+                min_offset += delta;
             }
-            max_offset += delta;
         }
     }
     int64_t storage_elements = static_cast<int64_t>(result.impl_->storage->size_bytes() / tenzor::dtype_size(result.impl_->dtype));
-    if (max_offset >= storage_elements) {
+    if (min_offset < 0 || max_offset >= storage_elements) {
         throw std::out_of_range("Slice offset exceeds storage bounds");
     }
 

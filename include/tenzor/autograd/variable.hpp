@@ -135,9 +135,15 @@ struct VariableImpl {
  * - Leaf/non-leaf variable distinction
  * - Gradient accumulation for leaf variables
  *
- * Thread safety: Variable is NOT thread-safe. Forward and backward passes
- * that share Variables must run on the same thread. Use separate Variable
- * instances per thread for concurrent computation.
+ * @par Thread safety
+ * All concurrent access to a Variable requires external synchronization.
+ * While shared_ptr reference counting is atomic, the Tensor data, gradient
+ * state, and computation graph are NOT. In particular:
+ * - Forward/backward passes sharing Variables must run on the same thread
+ * - Gradient accumulation is NOT atomic
+ * - Hook registration/invocation is serialized via shared_mutex
+ * - NoGradGuard is thread-local (does NOT propagate to spawned threads)
+ * For concurrent training, use separate Variable instances per thread.
  *
  * @code
  * // Create variables that require gradients
@@ -354,6 +360,13 @@ public:
      * @return true if the hook was found and removed
      */
     auto unregister_hook(size_t hook_id) -> bool;
+
+    /**
+     * @brief Remove all registered backward hooks.
+     *
+     * Useful for cleanup in test fixtures and module teardown.
+     */
+    auto clear_hooks() -> void;
 
     /**
      * @brief Enable gradient retention for non-leaf variables.

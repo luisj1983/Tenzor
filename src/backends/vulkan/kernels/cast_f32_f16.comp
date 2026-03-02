@@ -1,0 +1,30 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : enable
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuffer {
+    float data[];
+} input_buf;
+
+layout(set = 0, binding = 1) writeonly buffer OutputBuffer {
+    uint data[];  // packed f16 pairs
+} output_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint pair_idx = idx;
+    uint elem_idx = pair_idx * 2;
+
+    if (elem_idx >= pc.num_elements) return;
+
+    float v0 = input_buf.data[elem_idx];
+    float v1 = (elem_idx + 1 < pc.num_elements) ? input_buf.data[elem_idx + 1] : 0.0;
+
+    uint lo = packHalf2x16(vec2(v0, v1));
+    output_buf.data[pair_idx] = lo;
+}

@@ -354,6 +354,9 @@ public:
     auto dispatchRand(const std::vector<int64_t>& shape, DType dtype) -> Tensor;
     auto dispatchRandn(const std::vector<int64_t>& shape, DType dtype) -> Tensor;
 
+    // Type cast operations
+    auto dispatchCast(const Tensor& input, DType target_dtype) -> Tensor;
+
     // Repeat and masked operations
     auto dispatchRepeat(const Tensor& input, const std::vector<int64_t>& repeats) -> Tensor;
     auto dispatchMaskedSelect(const Tensor& input, const Tensor& mask) -> Tensor;
