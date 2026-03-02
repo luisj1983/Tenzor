@@ -407,6 +407,88 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index, const
     return output;
 }
 
+// Scatter-add: accumulate source elements into output at indexed positions
+auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src) -> Tensor {
+    if (index.dtype() != DType::Int64) {
+        throw std::invalid_argument("scatter_add: index tensor must have dtype Int64");
+    }
+
+    auto input_c = input.contiguous();
+    auto index_c = index.contiguous();
+    auto src_c = src.contiguous();
+
+    auto input_shape_span = input_c.shape();
+    auto index_shape_span = index_c.shape();
+    auto src_shape_span = src_c.shape();
+
+    std::vector<int64_t> input_shape(input_shape_span.begin(), input_shape_span.end());
+    std::vector<int64_t> index_shape(index_shape_span.begin(), index_shape_span.end());
+    std::vector<int64_t> src_shape(src_shape_span.begin(), src_shape_span.end());
+
+    if (dim < 0) dim += input_shape.size();
+    if (dim < 0 || dim >= static_cast<int64_t>(input_shape.size())) {
+        throw std::invalid_argument("scatter_add: invalid dimension");
+    }
+    if (index_shape != src_shape) {
+        throw std::invalid_argument("scatter_add: index and src must have the same shape");
+    }
+    if (input_shape.size() != index_shape.size()) {
+        throw std::invalid_argument("scatter_add: input and index must have same number of dimensions");
+    }
+
+    Tensor output(input_shape, input_c.dtype(), input_c.device());
+
+    auto input_strides = calculate_strides(input_shape);
+    auto index_strides = calculate_strides(index_shape);
+    const int64_t numel = index_c.numel();
+    const size_t ndims = index_shape.size();
+    const int64_t* index_ptr = index_c.data<int64_t>();
+
+    auto scatter_add_impl = [&]<typename T>() {
+        const T* in_ptr = input_c.data<T>();
+        T* out_ptr = output.data<T>();
+        const T* src_ptr = src_c.data<T>();
+
+        // Copy input to output first
+        std::memcpy(out_ptr, in_ptr, input_c.numel() * sizeof(T));
+
+        // Add source elements at indexed positions
+        for (int64_t flat_idx = 0; flat_idx < numel; ++flat_idx) {
+            int64_t temp = flat_idx;
+            int64_t output_idx = 0;
+            for (size_t d = 0; d < ndims; ++d) {
+                int64_t coord = temp / index_strides[d];
+                temp %= index_strides[d];
+                if (static_cast<int64_t>(d) == dim) {
+                    int64_t idx_val = index_ptr[flat_idx];
+                    if (idx_val < 0) idx_val += input_shape[d];
+                    if (idx_val < 0 || idx_val >= input_shape[d]) {
+                        throw std::out_of_range("scatter_add: index " + std::to_string(index_ptr[flat_idx]) +
+                            " out of range for dimension " + std::to_string(d) +
+                            " with size " + std::to_string(input_shape[d]));
+                    }
+                    output_idx += idx_val * input_strides[d];
+                } else {
+                    output_idx += coord * input_strides[d];
+                }
+            }
+            out_ptr[output_idx] += src_ptr[flat_idx];
+        }
+    };
+
+    if (input_c.dtype() == DType::Float32) { scatter_add_impl.template operator()<float>(); }
+    else if (input_c.dtype() == DType::Float64) { scatter_add_impl.template operator()<double>(); }
+    else if (input_c.dtype() == DType::Int32) { scatter_add_impl.template operator()<int32_t>(); }
+    else if (input_c.dtype() == DType::Int64) { scatter_add_impl.template operator()<int64_t>(); }
+    else if (input_c.dtype() == DType::Int8) { scatter_add_impl.template operator()<int8_t>(); }
+    else if (input_c.dtype() == DType::UInt8) { scatter_add_impl.template operator()<uint8_t>(); }
+    else {
+        throw std::runtime_error("scatter_add: unsupported dtype");
+    }
+
+    return output;
+}
+
 // Masked select operation - select elements where mask is true
 auto masked_select_kernel(const Tensor& input, const Tensor& mask) -> Tensor {
     auto input_shape = input.shape();

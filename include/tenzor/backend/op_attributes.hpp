@@ -209,6 +209,10 @@ enum class AttrKey : uint16_t {
     // Embedding
     IncludeLastOffset, // EmbeddingBag flag
 
+    // Linear algebra
+    FullMatrices,      // SVD: compute full U/Vt
+    Upper,             // Cholesky: return upper triangular
+
     // Sentinel
     _Count
 };

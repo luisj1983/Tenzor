@@ -317,9 +317,10 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
     }
 
     // =========================================================================
-    // FAST PATH: Use fused CPU backend kernel for inference
-    // Conditions: CPU, Float32, not training
-    // Uses oneDNN fused LSTM primitives for optimal performance
+    // FAST PATH: Use fused backend kernel for inference
+    // CPU: Uses oneDNN fused LSTM primitives for optimal performance
+    // CUDA: cuDNN LSTM forward/backward available in cudnn_ops.cu (enable #if 0 → #if 1)
+    //        Requires reserve_space from forward to be passed to backward for correct gradients
     // =========================================================================
     bool can_use_fused = input.device().type == Device::Type::CPU &&
                          input.dtype() == DType::Float32 &&

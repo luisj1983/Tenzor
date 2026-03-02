@@ -153,6 +153,9 @@ public:
     auto destroy_stream(StreamHandle stream) -> void override;
     auto synchronize_stream(StreamHandle stream) -> void override;
 
+    // Memory fill
+    auto memset(void* ptr, int value, size_t bytes, int32_t device_id) -> void override;
+
     // Kernel dispatch
     auto dispatch(const std::string& op_name,
                  std::span<const Tensor> inputs,

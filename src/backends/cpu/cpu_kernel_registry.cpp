@@ -152,6 +152,7 @@ namespace cpu {
     auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index) -> Tensor;
     auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index) -> Tensor;
     auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src) -> Tensor;
+    auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src) -> Tensor;
     auto masked_select_kernel(const Tensor& input, const Tensor& mask) -> Tensor;
     auto masked_fill_kernel(const Tensor& input, const Tensor& mask, float value) -> Tensor;
     auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y) -> Tensor;
@@ -697,6 +698,11 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::Scatter, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         return cpu::scatter_kernel(inputs[0], dim, inputs[1], inputs[2]);
+    });
+
+    table.register_single_output_kernel(OpId::ScatterAdd, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        return cpu::scatter_add_kernel(inputs[0], dim, inputs[1], inputs[2]);
     });
 
     TENZOR_REGISTER_BINARY_KERNEL(table, MaskedSelect, cpu::masked_select_kernel);

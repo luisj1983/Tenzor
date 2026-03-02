@@ -47,6 +47,12 @@ auto scatter(const Tensor& input,
             const Tensor& index,
             const Tensor& src) -> Tensor;
 
+/** @brief Scatter-add: accumulate source elements into input at index positions. */
+auto scatter_add(const Tensor& input,
+                int64_t dim,
+                const Tensor& index,
+                const Tensor& src) -> Tensor;
+
 /** @brief Select elements where mask is true. */
 auto masked_select(const Tensor& input, const Tensor& mask) -> Tensor;
 

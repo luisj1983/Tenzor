@@ -2,6 +2,9 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include <mkl.h>
 #include <mkl_lapacke.h>
 #include <stdexcept>
@@ -15,15 +18,38 @@ namespace tenzor::linalg {
 
 namespace {
 
+/// Try GPU dispatch for a single-output linalg op. Returns true and sets result on success.
+bool try_gpu_dispatch(OpId op, std::span<const Tensor> inputs,
+                      const OpAttributes& attrs, Tensor& result) {
+    if (inputs[0].device().type == Device::Type::CPU) return false;
+    try {
+        result = dispatch_single(op, inputs, attrs);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+/// Try GPU dispatch for a multi-output linalg op. Returns true and sets results on success.
+bool try_gpu_dispatch_multi(OpId op, std::span<const Tensor> inputs,
+                            const OpAttributes& attrs, std::vector<Tensor>& results) {
+    if (inputs[0].device().type == Device::Type::CPU) return false;
+    try {
+        results = dispatch(op, inputs, attrs);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 // Ensure tensor is contiguous Float32 or Float64 on CPU, return a working copy
 auto prepare_matrix(const Tensor& A) -> Tensor {
-    if (A.device().type != Device::Type::CPU) {
-        throw std::runtime_error("linalg: only CPU tensors supported");
-    }
     if (A.dtype() != DType::Float32 && A.dtype() != DType::Float64) {
         throw std::runtime_error("linalg: only Float32 and Float64 supported");
     }
-    return A.contiguous().clone();
+    // If not on CPU, move to CPU for LAPACK fallback
+    auto cpu_tensor = (A.device().type != Device::Type::CPU) ? A.to(Device::cpu()) : A;
+    return cpu_tensor.contiguous().clone();
 }
 
 auto check_square(const Tensor& A) -> std::pair<int64_t, int64_t> {
@@ -54,6 +80,13 @@ auto batch_size(const Tensor& A) -> int64_t {
 } // anonymous namespace
 
 auto det(const Tensor& A) -> Tensor {
+    // Try GPU dispatch first
+    {
+        Tensor result;
+        std::array<Tensor, 1> inputs = {A};
+        if (try_gpu_dispatch(OpId::LinalgDet, inputs, {}, result)) return result;
+    }
+
     auto work = prepare_matrix(A);
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);
@@ -114,6 +147,13 @@ auto det(const Tensor& A) -> Tensor {
 }
 
 auto inv(const Tensor& A) -> Tensor {
+    // Try GPU dispatch first
+    {
+        Tensor result;
+        std::array<Tensor, 1> inputs = {A};
+        if (try_gpu_dispatch(OpId::LinalgInv, inputs, {}, result)) return result;
+    }
+
     auto work = prepare_matrix(A);
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);
@@ -152,6 +192,13 @@ auto inv(const Tensor& A) -> Tensor {
 }
 
 auto solve(const Tensor& A, const Tensor& B) -> Tensor {
+    // Try GPU dispatch first
+    {
+        Tensor result;
+        std::array<Tensor, 2> inputs = {A, B};
+        if (try_gpu_dispatch(OpId::LinalgSolve, inputs, {}, result)) return result;
+    }
+
     auto work_a = prepare_matrix(A);
     auto work_b = prepare_matrix(B);
     auto [n, ndim_a] = check_square(work_a);
@@ -199,6 +246,15 @@ auto solve(const Tensor& A, const Tensor& B) -> Tensor {
 }
 
 auto cholesky(const Tensor& A, bool upper) -> Tensor {
+    // Try GPU dispatch first
+    {
+        Tensor result;
+        std::array<Tensor, 1> inputs = {A};
+        OpAttributes attrs;
+        attrs.set(AttrKey::Upper, upper);
+        if (try_gpu_dispatch(OpId::LinalgCholesky, inputs, attrs, result)) return result;
+    }
+
     auto work = prepare_matrix(A);
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);
@@ -348,6 +404,17 @@ auto slogdet(const Tensor& A) -> std::tuple<Tensor, Tensor> {
 }
 
 auto svd(const Tensor& A, bool full_matrices) -> std::tuple<Tensor, Tensor, Tensor> {
+    // Try GPU dispatch first
+    {
+        std::vector<Tensor> results;
+        std::array<Tensor, 1> inputs = {A};
+        OpAttributes attrs;
+        attrs.set(AttrKey::FullMatrices, full_matrices);
+        if (try_gpu_dispatch_multi(OpId::LinalgSVD, inputs, attrs, results)) {
+            return {results[0], results[1], results[2]};
+        }
+    }
+
     auto work = prepare_matrix(A);
     auto shape = A.shape();
     auto a_ndim = static_cast<int64_t>(shape.size());
@@ -441,6 +508,15 @@ auto svd(const Tensor& A, bool full_matrices) -> std::tuple<Tensor, Tensor, Tens
 }
 
 auto qr(const Tensor& A) -> std::tuple<Tensor, Tensor> {
+    // Try GPU dispatch first
+    {
+        std::vector<Tensor> results;
+        std::array<Tensor, 1> inputs = {A};
+        if (try_gpu_dispatch_multi(OpId::LinalgQR, inputs, {}, results)) {
+            return {results[0], results[1]};
+        }
+    }
+
     auto work = prepare_matrix(A);
     auto shape = A.shape();
     auto a_ndim = static_cast<int64_t>(shape.size());
@@ -539,6 +615,15 @@ auto qr(const Tensor& A) -> std::tuple<Tensor, Tensor> {
 }
 
 auto eigh(const Tensor& A) -> std::tuple<Tensor, Tensor> {
+    // Try GPU dispatch first
+    {
+        std::vector<Tensor> results;
+        std::array<Tensor, 1> inputs = {A};
+        if (try_gpu_dispatch_multi(OpId::LinalgEigh, inputs, {}, results)) {
+            return {results[0], results[1]};
+        }
+    }
+
     auto work = prepare_matrix(A);
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);
@@ -585,6 +670,15 @@ auto eigh(const Tensor& A) -> std::tuple<Tensor, Tensor> {
 }
 
 auto eigvalsh(const Tensor& A) -> Tensor {
+    // Try GPU dispatch via eigh (compute eigenvalues + eigenvectors, return only eigenvalues)
+    {
+        std::vector<Tensor> results;
+        std::array<Tensor, 1> inputs = {A};
+        if (try_gpu_dispatch_multi(OpId::LinalgEigh, inputs, {}, results)) {
+            return results[0];  // eigenvalues
+        }
+    }
+
     auto work = prepare_matrix(A);
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);

@@ -1855,7 +1855,8 @@ auto VulkanBackend::dispatchIm2Col(const Tensor& input, const OpAttributes& attr
     Tensor output(out_shape, input.dtype(), input.device());
 
     int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("im2col", device_id);
+    std::string im2col_shader = (input.dtype() == DType::Float16) ? "im2col_f16" : "im2col";
+    auto* pipeline = getPipeline(im2col_shader, device_id);
 
     // Total elements to process
     int64_t total_elements = batch * channels * kernel_size * kernel_size * num_blocks;
@@ -4254,7 +4255,9 @@ auto VulkanBackend::dispatchLogSoftmax(const Tensor& input, int64_t dim) -> Tens
     }
 
     // Select shader based on dtype
-    std::string shader_name = (input.dtype() == DType::Float64) ? "log_softmax_f64" : "log_softmax";
+    std::string shader_name = "log_softmax";
+    if (input.dtype() == DType::Float64) shader_name = "log_softmax_f64";
+    else if (input.dtype() == DType::Float16) shader_name = "log_softmax_f16";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     // Handle negative dimension
@@ -4605,7 +4608,9 @@ auto VulkanBackend::dispatchArgmin(const Tensor& input, int64_t dim, bool keepdi
 auto VulkanBackend::dispatchVariance(const Tensor& input, int64_t dim, bool unbiased, bool keepdim) -> Tensor {
     int32_t device_id = input.device().index;
     bool is_float64 = (input.dtype() == DType::Float64);
-    std::string shader_name = is_float64 ? "variance_std_f64" : "variance_std";
+    std::string shader_name = "variance_std";
+    if (is_float64) shader_name = "variance_std_f64";
+    else if (input.dtype() == DType::Float16) shader_name = "variance_std_f16";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<int64_t> out_shape;
@@ -7305,8 +7310,9 @@ auto VulkanBackend::dispatchLogSoftmaxBackward(const Tensor& grad_output,
     int32_t device_id = grad_output.device().index;
 
     // Select correct pipeline based on dtype
-    bool is_float64 = (grad_output.dtype() == DType::Float64);
-    std::string shader_name = is_float64 ? "log_softmax_backward_f64" : "log_softmax_backward";
+    std::string shader_name = "log_softmax_backward";
+    if (grad_output.dtype() == DType::Float64) shader_name = "log_softmax_backward_f64";
+    else if (grad_output.dtype() == DType::Float16) shader_name = "log_softmax_backward_f16";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     auto shape = output.shape();

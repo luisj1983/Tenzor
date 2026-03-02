@@ -192,6 +192,11 @@ auto ROCmBackend::synchronize_stream(StreamHandle stream) -> void {
     check_hip_error(hipStreamSynchronize(static_cast<hipStream_t>(stream)), "hipStreamSynchronize");
 }
 
+auto ROCmBackend::memset(void* ptr, int value, size_t bytes, int32_t device_id) -> void {
+    check_hip_error(hipSetDevice(device_id), "hipSetDevice in memset");
+    check_hip_error(hipMemset(ptr, value, bytes), "hipMemset");
+}
+
 auto ROCmBackend::dispatch(const std::string& op_name,
                            std::span<const Tensor> inputs,
                            const OpAttributes& attrs) -> std::vector<Tensor> {

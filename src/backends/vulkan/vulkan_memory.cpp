@@ -267,6 +267,37 @@ auto VulkanBackend::copy(void* dst, const void* src, size_t bytes,
 }
 
 // ---------------------------------------------------------------------------
+// memset via vkCmdFillBuffer
+// ---------------------------------------------------------------------------
+
+auto VulkanBackend::memset(void* ptr, int value, size_t bytes, int32_t device_id) -> void {
+    if (bytes == 0) return;
+
+    std::lock_guard<std::recursive_mutex> dev_lock(devices_[device_id].mutex);
+
+    auto [buffer, offset] = getVulkanBufferAndOffset(ptr);
+
+    // vkCmdFillBuffer fills with a 32-bit value, size must be multiple of 4
+    // Extend the fill pattern across all 4 bytes
+    uint32_t fill_value = 0;
+    if (value != 0) {
+        uint8_t byte_val = static_cast<uint8_t>(value);
+        fill_value = (static_cast<uint32_t>(byte_val) << 24) |
+                     (static_cast<uint32_t>(byte_val) << 16) |
+                     (static_cast<uint32_t>(byte_val) << 8)  |
+                     static_cast<uint32_t>(byte_val);
+    }
+
+    // Round size up to 4-byte alignment for vkCmdFillBuffer
+    size_t aligned_bytes = (bytes + 3) & ~size_t(3);
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdFillBuffer(cmdBuffer, buffer, offset, aligned_bytes, fill_value);
+    insertTransferToComputeBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+}
+
+// ---------------------------------------------------------------------------
 // Staging buffer pool helpers
 // ---------------------------------------------------------------------------
 

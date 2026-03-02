@@ -209,6 +209,7 @@ __all__ = [
     # Indexing operations
     "gather",
     "scatter",
+    "scatter_add",
     "index_select",
     "masked_select",
     "masked_fill",

@@ -34,6 +34,13 @@ auto scatter(const Tensor& input, int64_t dim, const Tensor& index, const Tensor
     return dispatch(OpId::Scatter, inputs, attrs)[0];
 }
 
+auto scatter_add(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src) -> Tensor {
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    std::vector<Tensor> inputs = {input, index, src};
+    return dispatch(OpId::ScatterAdd, inputs, attrs)[0];
+}
+
 auto masked_select(const Tensor& input, const Tensor& mask) -> Tensor {
     std::vector<Tensor> inputs = {input, mask};
     return dispatch(OpId::MaskedSelect, inputs)[0];

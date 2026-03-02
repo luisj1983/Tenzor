@@ -13,6 +13,7 @@
 #undef Bool
 #endif
 
+#include <cassert>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -733,6 +734,8 @@ vulkan::ComputePipeline* VulkanBackend::getPipeline(const std::string& shader_na
     // Determine push constant size via SPIR-V reflection
     std::vector<VkPushConstantRange> pushConstants;
     uint32_t pushConstantSize = vulkan::reflectPushConstantSize(shaderCode);
+    assert(pushConstantSize % 4 == 0 && "Push constant size must be 4-byte aligned");
+    assert(pushConstantSize <= 256 && "Push constant size exceeds typical Vulkan limits");
     if (pushConstantSize > 0) {
         VkPushConstantRange push_range{};
         push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;

@@ -319,49 +319,13 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index,
 // ============================================================================
 // scatter kernel
 // ============================================================================
+// Scatter uses two separate kernel launches (copy + scatter_values) instead of
+// a single combined kernel. A combined kernel with __syncthreads() between
+// grid-stride loops only synchronizes within a block, not across blocks —
+// causing undefined behavior for tensors larger than a single block.
+// Two separate launches provide a full device-wide synchronization barrier.
 
-template<typename T, typename IndexT>
-__global__ void scatter_kernel_impl(
-    const T* input,
-    const IndexT* indices,
-    const T* src,
-    T* output,
-    int64_t outer_size,
-    int64_t dim_size,
-    int64_t inner_size,
-    int64_t index_dim_size,
-    int64_t total_input,
-    int64_t total_scatter) {
-
-    // First, copy input to output (if not in-place)
-    CUDA_GRID_STRIDE_LOOP(idx, total_input) {
-        output[idx] = input[idx];
-    }
-
-    __syncthreads();
-
-    // Then scatter src values
-    CUDA_GRID_STRIDE_LOOP(idx, total_scatter) {
-        int64_t inner_idx = idx % inner_size;
-        int64_t temp = idx / inner_size;
-        int64_t index_pos = temp % index_dim_size;
-        int64_t outer_idx = temp / index_dim_size;
-
-        // Get the index value at this position
-        int64_t index_offset = outer_idx * index_dim_size * inner_size +
-                               index_pos * inner_size + inner_idx;
-        int64_t scatter_idx = static_cast<int64_t>(indices[index_offset]);
-
-        // Compute output offset
-        int64_t output_offset = outer_idx * dim_size * inner_size +
-                                scatter_idx * inner_size +
-                                inner_idx;
-
-        output[output_offset] = src[idx];
-    }
-}
-
-// Separate kernel for copy phase
+// Kernel 1: Copy input to output
 template<typename T>
 __global__ void copy_kernel_impl(const T* input, T* output, int64_t n) {
     CUDA_GRID_STRIDE_LOOP(idx, n) {
@@ -369,7 +333,7 @@ __global__ void copy_kernel_impl(const T* input, T* output, int64_t n) {
     }
 }
 
-// Separate kernel for scatter phase
+// Kernel 2: Scatter src values into output at indexed positions
 template<typename T, typename IndexT>
 __global__ void scatter_values_kernel_impl(
     const IndexT* indices,
@@ -508,6 +472,120 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
     #undef LAUNCH_SCATTER
 
     CUDA_CHECK(cudaGetLastError());
+    return output;
+}
+
+// ============================================================================
+// scatter_add kernel — uses atomicAdd for overlapping indices
+// ============================================================================
+
+template<typename T, typename IndexT>
+__global__ void scatter_add_kernel_impl(
+    const IndexT* indices,
+    const T* src,
+    T* output,
+    int64_t outer_size,
+    int64_t dim_size,
+    int64_t inner_size,
+    int64_t index_dim_size,
+    int64_t total_scatter) {
+
+    CUDA_GRID_STRIDE_LOOP(idx, total_scatter) {
+        int64_t inner_idx = idx % inner_size;
+        int64_t temp = idx / inner_size;
+        int64_t index_pos = temp % index_dim_size;
+        int64_t outer_idx = temp / index_dim_size;
+
+        int64_t index_offset = outer_idx * index_dim_size * inner_size +
+                               index_pos * inner_size + inner_idx;
+        int64_t scatter_idx = static_cast<int64_t>(indices[index_offset]);
+
+        int64_t output_offset = outer_idx * dim_size * inner_size +
+                                scatter_idx * inner_size +
+                                inner_idx;
+
+        // atomicAdd is natively supported for float, double, int, unsigned int.
+        // For integer types, cast to int/unsigned long long for atomicAdd/CAS.
+        if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
+            atomicAdd(&output[output_offset], src[idx]);
+        } else if constexpr (std::is_same_v<T, int32_t>) {
+            atomicAdd(reinterpret_cast<int*>(&output[output_offset]),
+                      static_cast<int>(src[idx]));
+        } else if constexpr (std::is_same_v<T, int64_t>) {
+            // CAS loop for int64_t atomicAdd
+            unsigned long long* addr = reinterpret_cast<unsigned long long*>(&output[output_offset]);
+            unsigned long long old_val = *addr;
+            unsigned long long assumed;
+            do {
+                assumed = old_val;
+                unsigned long long desired = static_cast<unsigned long long>(
+                    static_cast<int64_t>(assumed) + src[idx]);
+                old_val = atomicCAS(addr, assumed, desired);
+            } while (assumed != old_val);
+        } else {
+            atomicAdd(&output[output_offset], src[idx]);
+        }
+    }
+}
+
+auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
+                        const Tensor& src, cudaStream_t stream) -> Tensor {
+    int64_t ndim = input.ndim();
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::invalid_argument("scatter_add: dimension out of range");
+    }
+
+    std::vector<int64_t> output_shape(input.shape().begin(), input.shape().end());
+    Tensor output(output_shape, input.dtype(), input.device());
+
+    int64_t total_input = input.numel();
+    int64_t total_scatter = index.numel();
+
+    if (total_input == 0) return output;
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= input.shape()[i];
+    int64_t dim_size = input.shape()[dim];
+    int64_t index_dim_size = index.shape()[dim];
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= input.shape()[i];
+
+    bool idx_is_int32 = (index.dtype() == DType::Int32);
+
+    // Step 1: Copy input to output
+    int num_blocks_copy = get_num_blocks(total_input);
+    copy_kernel_impl<float><<<num_blocks_copy, BLOCK_SIZE, 0, stream>>>(
+        reinterpret_cast<const float*>(input.data_ptr()),
+        reinterpret_cast<float*>(output.data_ptr()),
+        (total_input * dtype_size(input.dtype()) + 3) / 4);
+    CUDA_CHECK(cudaGetLastError());
+
+    // Step 2: Scatter-add with atomicAdd
+    if (total_scatter == 0) return output;
+    int num_blocks_scatter = get_num_blocks(total_scatter);
+
+    #define LAUNCH_SCATTER_ADD(T) \
+        if (idx_is_int32) \
+            scatter_add_kernel_impl<T, int32_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>( \
+                index.data<int32_t>(), src.data<T>(), output.data<T>(), \
+                outer_size, dim_size, inner_size, index_dim_size, total_scatter); \
+        else \
+            scatter_add_kernel_impl<T, int64_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>( \
+                index.data<int64_t>(), src.data<T>(), output.data<T>(), \
+                outer_size, dim_size, inner_size, index_dim_size, total_scatter); \
+        CUDA_CHECK(cudaGetLastError())
+
+    switch (input.dtype()) {
+        case DType::Float32: LAUNCH_SCATTER_ADD(float); break;
+        case DType::Float64: LAUNCH_SCATTER_ADD(double); break;
+        case DType::Int32:   LAUNCH_SCATTER_ADD(int32_t); break;
+        case DType::Int64:   LAUNCH_SCATTER_ADD(int64_t); break;
+        default: throw std::runtime_error("scatter_add: unsupported dtype (atomicAdd requires float/double/int)");
+    }
+
+    #undef LAUNCH_SCATTER_ADD
+
     return output;
 }
 

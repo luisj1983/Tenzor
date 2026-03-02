@@ -2219,15 +2219,14 @@ auto cudnn_lstm_backward(
     const Tensor& hy,
     const Tensor& cy,
     const Tensor& weights,
+    void* reserve_space,
+    size_t reserve_size,
     int64_t hidden_size,
     int64_t num_layers,
     bool bidirectional,
     float dropout,
     cudaStream_t stream
 ) -> std::tuple<Tensor, Tensor, Tensor, Tensor> {
-    // Similar structure to forward but using cudnnRNNBackwardData and cudnnRNNBackwardWeights
-    // Implementation follows the same pattern with appropriate descriptor setup
-
     auto input_shape = input.shape();
     int64_t seq_len = input_shape[0];
     int64_t batch = input_shape[1];
@@ -2235,15 +2234,108 @@ auto cudnn_lstm_backward(
 
     int num_directions = bidirectional ? 2 : 1;
 
-    // Create gradient tensors
+    cudnnDataType_t cudnn_dtype = CUDNN_DATA_FLOAT;
+    if (input.dtype() == DType::Float64) cudnn_dtype = CUDNN_DATA_DOUBLE;
+    else if (input.dtype() == DType::Float16) cudnn_dtype = CUDNN_DATA_HALF;
+
+    auto handle = cuda::CuDNNHandlePool::instance().acquire(stream);
+
+    // Set up dropout descriptor
+    DropoutDescriptor dropout_desc;
+    size_t dropout_state_size = 0;
+    cudnnDropoutGetStatesSize(handle.get(), &dropout_state_size);
+    void* dropout_states = nullptr;
+    if (dropout > 0.0f && dropout_state_size > 0) {
+        cudaMalloc(&dropout_states, dropout_state_size);
+        dropout_desc.set(handle.get(), dropout, dropout_states, dropout_state_size, 0);
+    } else {
+        dropout_desc.set(handle.get(), 0.0f, nullptr, 0, 0);
+    }
+
+    // Create RNN descriptor (must match forward exactly)
+    RNNDescriptor rnn_desc;
+    cudnnDirectionMode_t direction = bidirectional ? CUDNN_BIDIRECTIONAL : CUDNN_UNIDIRECTIONAL;
+    rnn_desc.set_lstm(handle.get(), hidden_size, num_layers, dropout_desc.get(),
+                      CUDNN_LINEAR_INPUT, direction, cudnn_dtype);
+
+    // Create tensor descriptors matching forward
+    std::vector<TensorDescriptor> x_descs(seq_len), y_descs(seq_len);
+    std::vector<TensorDescriptor> dx_descs(seq_len), dy_descs(seq_len);
+    std::vector<cudnnTensorDescriptor_t> x_desc_array(seq_len), y_desc_array(seq_len);
+    std::vector<cudnnTensorDescriptor_t> dx_desc_array(seq_len), dy_desc_array(seq_len);
+
+    for (int64_t i = 0; i < seq_len; ++i) {
+        x_descs[i].set(cudnn_dtype, batch, input_size, 1, 1);
+        y_descs[i].set(cudnn_dtype, batch, hidden_size * num_directions, 1, 1);
+        dx_descs[i].set(cudnn_dtype, batch, input_size, 1, 1);
+        dy_descs[i].set(cudnn_dtype, batch, hidden_size * num_directions, 1, 1);
+        x_desc_array[i] = x_descs[i].get();
+        y_desc_array[i] = y_descs[i].get();
+        dx_desc_array[i] = dx_descs[i].get();
+        dy_desc_array[i] = dy_descs[i].get();
+    }
+
+    TensorDescriptor hx_desc, cx_desc, dhx_desc, dcx_desc, dhy_desc, dcy_desc;
+    hx_desc.set(cudnn_dtype, num_layers * num_directions, batch, hidden_size, 1);
+    cx_desc.set(cudnn_dtype, num_layers * num_directions, batch, hidden_size, 1);
+    dhx_desc.set(cudnn_dtype, num_layers * num_directions, batch, hidden_size, 1);
+    dcx_desc.set(cudnn_dtype, num_layers * num_directions, batch, hidden_size, 1);
+    dhy_desc.set(cudnn_dtype, num_layers * num_directions, batch, hidden_size, 1);
+    dcy_desc.set(cudnn_dtype, num_layers * num_directions, batch, hidden_size, 1);
+
+    // Get workspace size
+    size_t workspace_size = 0;
+    CUDNN_CHECK(cudnnGetRNNWorkspaceSize(handle.get(), rnn_desc.get(), seq_len,
+                                          x_desc_array.data(), &workspace_size));
+
+    // Allocate gradient tensors
     Tensor grad_input({seq_len, batch, input_size}, input.dtype(), input.device());
     Tensor grad_hx({num_layers * num_directions, batch, hidden_size}, input.dtype(), input.device());
     Tensor grad_cx({num_layers * num_directions, batch, hidden_size}, input.dtype(), input.device());
     Tensor grad_weights = Tensor::zeros_like(weights);
 
-    // Note: Full backward implementation would follow similar pattern to forward
-    // with cudnnRNNBackwardData and cudnnRNNBackwardWeights calls
-    // For brevity, returning initialized tensors
+    void* workspace = nullptr;
+    if (workspace_size > 0) cudaMalloc(&workspace, workspace_size);
+
+    // FilterDescriptor for weights
+    FilterDescriptor w_desc, dw_desc;
+    size_t weights_size = 0;
+    CUDNN_CHECK(cudnnGetRNNParamsSize(handle.get(), rnn_desc.get(), x_desc_array[0],
+                                       &weights_size, cudnn_dtype));
+    w_desc.set(cudnn_dtype, weights_size);
+    dw_desc.set(cudnn_dtype, weights_size);
+
+    // Backward data: compute grad_input, grad_hx, grad_cx
+    CUDNN_CHECK(cudnnRNNBackwardData(
+        handle.get(), rnn_desc.get(), seq_len,
+        y_desc_array.data(), output.data_ptr(),
+        dy_desc_array.data(), grad_output.data_ptr(),
+        dhy_desc.get(), grad_hy.data_ptr(),
+        dcy_desc.get(), grad_cy.data_ptr(),
+        w_desc.get(), weights.data_ptr(),
+        hx_desc.get(), hx.data_ptr(),
+        cx_desc.get(), cx.data_ptr(),
+        dx_desc_array.data(), grad_input.data_ptr(),
+        dhx_desc.get(), grad_hx.data_ptr(),
+        dcx_desc.get(), grad_cx.data_ptr(),
+        workspace, workspace_size,
+        reserve_space, reserve_size
+    ));
+
+    // Backward weights: compute grad_weights
+    CUDNN_CHECK(cudnnRNNBackwardWeights(
+        handle.get(), rnn_desc.get(), seq_len,
+        x_desc_array.data(), input.data_ptr(),
+        hx_desc.get(), hx.data_ptr(),
+        y_desc_array.data(), output.data_ptr(),
+        workspace, workspace_size,
+        dw_desc.get(), grad_weights.data_ptr(),
+        reserve_space, reserve_size
+    ));
+
+    // Cleanup
+    if (workspace) cudaFree(workspace);
+    if (dropout_states) cudaFree(dropout_states);
 
     return std::make_tuple(grad_input, grad_hx, grad_cx, grad_weights);
 }

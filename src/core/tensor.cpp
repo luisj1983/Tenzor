@@ -61,9 +61,13 @@ TensorImpl::TensorImpl(std::vector<int64_t> shape_, DType dtype_, Device device_
     // Use DeviceStorage for ALL devices (including CPU)
     storage = std::make_shared<DeviceStorage>(ptr, size_bytes, device);
 
-    // Zero-initialize if requested (CPU only - device kernels handle their own init)
-    if (zero_init && device.type == Device::Type::CPU && size_bytes > 0) {
-        std::memset(ptr, 0, size_bytes);
+    // Zero-initialize if requested
+    if (zero_init && size_bytes > 0) {
+        if (device.type == Device::Type::CPU) {
+            std::memset(ptr, 0, size_bytes);
+        } else {
+            backend->memset(ptr, 0, size_bytes, device.index);
+        }
     }
 }
 

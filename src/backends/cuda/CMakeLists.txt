@@ -38,6 +38,7 @@ set(CUDA_BACKEND_SOURCES
     kernels/pooling.cu
     kernels/rnn_sequence.cu
     kernels/advanced.cu
+    kernels/linalg.cu
     cublas_ops.cu
     cudnn_ops.cu
     cudnn_batchnorm.cu
@@ -81,6 +82,13 @@ if(TARGET CUDA::cublas)
     target_link_libraries(tenzor_backend_cuda PRIVATE CUDA::cublas)
     target_compile_definitions(tenzor_backend_cuda PRIVATE TENZOR_HAS_CUBLAS)
     message(STATUS "CUDA Backend: cuBLAS support enabled")
+endif()
+
+# Link cuSOLVER if available
+if(TARGET CUDA::cusolver)
+    target_link_libraries(tenzor_backend_cuda PRIVATE CUDA::cusolver)
+    target_compile_definitions(tenzor_backend_cuda PRIVATE TENZOR_HAS_CUSOLVER)
+    message(STATUS "CUDA Backend: cuSOLVER support enabled")
 endif()
 
 # Link cuDNN if available

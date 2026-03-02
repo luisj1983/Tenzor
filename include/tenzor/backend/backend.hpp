@@ -229,6 +229,25 @@ public:
     virtual auto synchronize_stream(StreamHandle stream) -> void = 0;
 
     /**
+     * @brief Fill device memory with a byte value.
+     *
+     * Sets all bytes in the specified memory region to the given value.
+     * Primarily used for zero-initialization of GPU tensors.
+     *
+     * @param ptr Pointer to device memory (from allocate())
+     * @param value Byte value to fill with (typically 0)
+     * @param bytes Number of bytes to fill
+     * @param device_id Device index where memory resides
+     * @throws std::runtime_error if operation is not supported by the backend
+     *
+     * @note Default implementation throws. GPU backends must override.
+     */
+    virtual auto memset(void* ptr, int value, size_t bytes, int32_t device_id) -> void {
+        (void)ptr; (void)value; (void)bytes; (void)device_id;
+        throw std::runtime_error(std::string(name()) + " backend does not support memset");
+    }
+
+    /**
      * @brief Dispatch operation kernel.
      *
      * Main entry point for executing operations on this backend.

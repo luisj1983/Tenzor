@@ -160,24 +160,34 @@ public:
     }
 
     /**
-     * @brief Store pointers to original leaf input Variables
+     * @brief Store copies of original leaf input Variables
      *
      * For leaf Variables, we need to accumulate gradients directly to the
      * original Variables passed to checkpoint(), not to copies.
+     * Stores Variable copies (which share the underlying VariableImpl via
+     * shared_ptr) instead of raw Variable* to prevent dangling pointers
+     * if the caller's scope exits before backward.
      *
      * @param originals Pointers to original input Variables
      */
     auto store_original_inputs(const std::vector<Variable*>& originals) -> void {
-        original_input_variables_ = originals;
+        original_input_copies_.clear();
+        original_input_copies_.reserve(originals.size());
+        for (const auto* var : originals) {
+            original_input_copies_.push_back(*var);
+        }
     }
 
     /**
-     * @brief Get stored pointers to original leaf inputs
+     * @brief Get stored original leaf inputs
      *
-     * @return Vector of pointers to original input Variables
+     * Returns references to the stored Variable copies, which share
+     * the same VariableImpl as the originals.
+     *
+     * @return Vector of Variables sharing impls with the originals
      */
-    auto get_original_inputs() const -> const std::vector<Variable*>& {
-        return original_input_variables_;
+    auto get_original_inputs() const -> const std::vector<Variable>& {
+        return original_input_copies_;
     }
 
 private:
@@ -194,8 +204,10 @@ private:
     // so input_variables_ pointers remain valid
     std::vector<std::unique_ptr<Variable>> input_variable_copies_;
 
-    // Pointers to original leaf input Variables for gradient accumulation
-    std::vector<Variable*> original_input_variables_;
+    // Copies of original leaf input Variables for gradient accumulation.
+    // Variable copies share the underlying VariableImpl via shared_ptr,
+    // preventing dangling pointers if the caller's Variables go out of scope.
+    std::vector<Variable> original_input_copies_;
 
     // Recomputed input Variables - must stay alive during backward pass
     // to prevent dangling pointers in the recomputed graph

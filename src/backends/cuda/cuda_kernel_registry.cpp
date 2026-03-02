@@ -153,6 +153,7 @@ namespace cuda {
     auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index, cudaStream_t stream) -> Tensor;
     auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index, cudaStream_t stream) -> Tensor;
     auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src, cudaStream_t stream) -> Tensor;
+    auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src, cudaStream_t stream) -> Tensor;
     auto masked_select_kernel(const Tensor& input, const Tensor& mask, cudaStream_t stream) -> Tensor;
     auto masked_fill_kernel(const Tensor& input, const Tensor& mask, double value, cudaStream_t stream) -> Tensor;
     auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y, cudaStream_t stream) -> Tensor;
@@ -166,7 +167,19 @@ namespace cuda {
     auto embedding_kernel(const Tensor& weight, const Tensor& indices, cudaStream_t stream) -> Tensor;
     auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices, int64_t num_embeddings, cudaStream_t stream) -> Tensor;
 
+    // Linear algebra operations (cuSOLVER)
+#ifdef TENZOR_HAS_CUSOLVER
+    auto linalg_det_kernel(const Tensor& A, cudaStream_t stream) -> Tensor;
+    auto linalg_inv_kernel(const Tensor& A, cudaStream_t stream) -> Tensor;
+    auto linalg_solve_kernel(const Tensor& A, const Tensor& B, cudaStream_t stream) -> Tensor;
+    auto linalg_svd_kernel(const Tensor& A, bool full_matrices, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
+    auto linalg_qr_kernel(const Tensor& A, cudaStream_t stream) -> std::tuple<Tensor, Tensor>;
+    auto linalg_eigh_kernel(const Tensor& A, cudaStream_t stream) -> std::tuple<Tensor, Tensor>;
+    auto linalg_cholesky_kernel(const Tensor& A, bool upper, cudaStream_t stream) -> Tensor;
+#endif
+
     // Fused operations
+    auto fused_conv2d_bn_relu_cuda(const Tensor& input, const Tensor& weight, const Tensor* bias, const Tensor& bn_mean, const Tensor& bn_var, const Tensor& bn_gamma, const Tensor& bn_beta, int64_t stride, int64_t padding, float eps) -> Tensor;
     auto fused_linear_relu_cuda(const Tensor& input, const Tensor& weight, const Tensor* bias) -> Tensor;
     auto fused_batchnorm_relu_cuda(const Tensor& input, const Tensor& running_mean, const Tensor& running_var, const Tensor& weight, const Tensor& bias, float eps) -> Tensor;
     auto fused_add_relu_cuda(const Tensor& a, const Tensor& b) -> Tensor;
@@ -805,6 +818,10 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         return cuda::scatter_kernel(inputs[0], dim, inputs[1], inputs[2], get_cuda_stream(attrs));
     });
+    table.register_single_output_kernel(OpId::ScatterAdd, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        return cuda::scatter_add_kernel(inputs[0], dim, inputs[1], inputs[2], get_cuda_stream(attrs));
+    });
     table.register_single_output_kernel(OpId::MaskedSelect, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         return cuda::masked_select_kernel(inputs[0], inputs[1], get_cuda_stream(attrs));
     });
@@ -1151,6 +1168,18 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // =========================================================================
     // Fused Operations (optimized combined kernels)
     // =========================================================================
+    table.register_single_output_kernel(OpId::FusedConv2dBnReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // inputs: [input, weight, conv_bias, bn_gamma, bn_beta, bn_running_mean, bn_running_var]
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+        const Tensor* bias = inputs.size() > 2 && inputs[2].numel() > 0 ? &inputs[2] : nullptr;
+        // CPU registration: [input, weight, conv_bias, bn_gamma, bn_beta, bn_running_mean, bn_running_var]
+        // CUDA func expects: (input, weight, bias, bn_mean, bn_var, bn_gamma, bn_beta, ...)
+        return cuda::fused_conv2d_bn_relu_cuda(inputs[0], inputs[1], bias,
+            inputs[5], inputs[6], inputs[3], inputs[4], stride, padding, eps);
+    });
+
     table.register_single_output_kernel(OpId::FusedLinearReLU, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
         // inputs: [input, weight] or [input, weight, bias]
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
@@ -1921,6 +1950,38 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // Type Conversion Operations
     // =========================================================================
     table.register_single_output_kernel(OpId::Cast, cuda::cast_dispatch);
+
+    // =========================================================================
+    // Linear Algebra Operations (cuSOLVER)
+    // =========================================================================
+#ifdef TENZOR_HAS_CUSOLVER
+    table.register_single_output_kernel(OpId::LinalgDet, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return cuda::linalg_det_kernel(inputs[0], get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::LinalgInv, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return cuda::linalg_inv_kernel(inputs[0], get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::LinalgSolve, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return cuda::linalg_solve_kernel(inputs[0], inputs[1], get_cuda_stream(attrs));
+    });
+    table.register_kernel(OpId::LinalgSVD, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        bool full_matrices = attrs.get_bool(AttrKey::FullMatrices, true);
+        auto [U, S, Vt] = cuda::linalg_svd_kernel(inputs[0], full_matrices, get_cuda_stream(attrs));
+        return {U, S, Vt};
+    });
+    table.register_kernel(OpId::LinalgQR, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto [Q, R] = cuda::linalg_qr_kernel(inputs[0], get_cuda_stream(attrs));
+        return {Q, R};
+    });
+    table.register_kernel(OpId::LinalgEigh, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto [W, V] = cuda::linalg_eigh_kernel(inputs[0], get_cuda_stream(attrs));
+        return {W, V};
+    });
+    table.register_single_output_kernel(OpId::LinalgCholesky, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        bool upper = attrs.get_bool(AttrKey::Upper, false);
+        return cuda::linalg_cholesky_kernel(inputs[0], upper, get_cuda_stream(attrs));
+    });
+#endif // TENZOR_HAS_CUSOLVER
 }
 
 } // namespace tenzor

@@ -166,6 +166,7 @@ namespace cpu {
     auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index) -> Tensor;
     auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index) -> Tensor;
     auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src) -> Tensor;
+    auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src) -> Tensor;
     auto masked_select_kernel(const Tensor& input, const Tensor& mask) -> Tensor;
     auto masked_fill_kernel(const Tensor& input, const Tensor& mask, float value) -> Tensor;
     auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y) -> Tensor;

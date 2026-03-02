@@ -13,15 +13,16 @@
 
 namespace tenzor {
 
-// Global activation offload flag
-static std::atomic<bool> g_activation_offload_enabled{false};
+// Per-thread activation offload flag (thread-local instead of global atomic
+// so one thread enabling offload doesn't affect other threads' backward passes)
+static thread_local bool g_activation_offload_enabled = false;
 
 void set_activation_offload(bool enabled) {
-    g_activation_offload_enabled.store(enabled, std::memory_order_release);
+    g_activation_offload_enabled = enabled;
 }
 
 bool activation_offload_enabled() {
-    return g_activation_offload_enabled.load(std::memory_order_acquire);
+    return g_activation_offload_enabled;
 }
 
 auto Function::set_next_functions(std::vector<std::shared_ptr<Function>> funcs) -> void {

@@ -3,6 +3,7 @@
 #include "tenzor/nn/serialize.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/core/device.hpp"
+#include "tenzor/backend/loader.hpp"
 #include <cstring>
 #include <stdexcept>
 
@@ -71,9 +72,11 @@ auto Optimizer::zero_grad() -> void {
             if (grad.device().type == Device::Type::CPU) {
                 std::memset(grad.data_ptr(), 0, grad.numel() * dtype_size(grad.dtype()));
             } else {
-                // GPU path: create new zero tensor
-                // TODO: Add in-place zero via cudaMemsetAsync for better performance
-                param->grad() = zeros_like(grad);
+                // GPU path: in-place zero via backend memset (avoids allocation)
+                auto* backend = backend_registry().get_backend(grad.device().type);
+                backend->memset(grad.data_ptr(), 0,
+                                grad.numel() * dtype_size(grad.dtype()),
+                                grad.device().index);
             }
         }
     }

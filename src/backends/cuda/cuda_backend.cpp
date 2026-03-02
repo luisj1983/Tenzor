@@ -459,6 +459,14 @@ public:
         cudaStreamSynchronize(static_cast<cudaStream_t>(stream));
     }
 
+    auto memset(void* ptr, int value, size_t bytes, int32_t device_id) -> void override {
+        cudaSetDevice(device_id);
+        cudaError_t err = cudaMemset(ptr, value, bytes);
+        if (err != cudaSuccess) {
+            throw std::runtime_error(std::string("cudaMemset failed: ") + cudaGetErrorString(err));
+        }
+    }
+
     auto dispatch(const std::string& op_name,
                  std::span<const Tensor> inputs,
                  const OpAttributes& attrs) -> std::vector<Tensor> override {

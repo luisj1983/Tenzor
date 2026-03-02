@@ -13,6 +13,8 @@
 #include <optional>
 #include <functional>
 #include <map>
+#include <mutex>
+#include <shared_mutex>
 #include "../core/tensor.hpp"
 
 namespace tenzor {
@@ -110,15 +112,14 @@ struct VariableImpl {
     /// Whether to retain gradient for non-leaf variables (atomic for thread-safe concurrent access)
     std::atomic<bool> retain_grad_{false};
 
-    /// Backward hooks keyed by ID, ordered by registration order (requires synchronization for modifications)
+    /// Backward hooks keyed by ID, ordered by registration order
     std::map<size_t, std::function<Tensor(const Tensor&)>> hooks_;
+
+    /// Mutex protecting hooks_ for concurrent register_hook + backward
+    mutable std::shared_mutex hooks_mutex_;
 
     /// Next hook ID for register_hook (atomic for thread-safe concurrent register_hook calls)
     std::atomic<size_t> next_hook_id_{0};
-
-    // Note: No mutex included in initial implementation (Option B from design doc).
-    // Users responsible for external synchronization if accessing Variable handles
-    // from multiple threads. This matches PyTorch's behavior.
 };
 
 /**

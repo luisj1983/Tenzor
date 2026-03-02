@@ -612,6 +612,15 @@ public:
         }
     }
 
+    auto memset(void* ptr, int value, size_t bytes, int32_t device_id) -> void override {
+        validate_device_id(device_id);
+        try {
+            get_queue(device_id).memset(ptr, value, bytes).wait();
+        } catch (const sycl::exception& e) {
+            throw std::runtime_error(std::string("SYCL memset failed: ") + e.what());
+        }
+    }
+
     auto dispatch(const std::string& op_name,
                  std::span<const Tensor> inputs,
                  const OpAttributes& attrs) -> std::vector<Tensor> override {

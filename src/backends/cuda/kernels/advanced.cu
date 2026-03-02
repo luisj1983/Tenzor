@@ -34,8 +34,17 @@ struct MultOp {
 };
 
 // ============================================================================
-// TopK kernel using partial bitonic sort
+// TopK kernel using parallel block-wide selection
 // ============================================================================
+
+// Each block handles one (outer, inner) slice. All threads participate:
+// 1. Each thread scans a stripe of dim_size elements, maintaining a local
+//    thread-best candidate.
+// 2. Block-level reduction finds the global best among all threads.
+// 3. The winning thread writes the best to shared memory and marks its
+//    element as "consumed".
+// 4. Repeat k times to collect the top-k elements.
+// 5. Sort the k results with a parallel odd-even sort.
 
 template<typename T>
 __global__ void topk_slice_kernel(
@@ -43,7 +52,6 @@ __global__ void topk_slice_kernel(
     int64_t dim_size, int64_t k, int64_t inner_size, int64_t outer_stride,
     int64_t k_stride, bool largest)
 {
-    // Each block handles one (outer, inner) slice
     int64_t slice_idx = blockIdx.x;
     int64_t outer = slice_idx / inner_size;
     int64_t inner = slice_idx % inner_size;
@@ -51,65 +59,126 @@ __global__ void topk_slice_kernel(
     int64_t in_base = outer * outer_stride + inner;
     int64_t out_base = outer * k_stride + inner;
 
-    // Shared memory for top-k candidates (value, original_index)
-    // Align int64_t pointer to 8-byte boundary
+    // Shared memory layout: k values, k indices, blockDim.x candidate values,
+    // blockDim.x candidate indices, blockDim.x candidate positions
     extern __shared__ char smem[];
-    T* s_vals = reinterpret_cast<T*>(smem);
+    T* s_topk_vals = reinterpret_cast<T*>(smem);
     size_t vals_bytes = k * sizeof(T);
-    size_t aligned_offset = (vals_bytes + 7) & ~size_t(7);
-    int64_t* s_idx = reinterpret_cast<int64_t*>(smem + aligned_offset);
+    size_t aligned_vals = (vals_bytes + 7) & ~size_t(7);
+    int64_t* s_topk_idx = reinterpret_cast<int64_t*>(smem + aligned_vals);
+    size_t idx_bytes = k * sizeof(int64_t);
+    size_t aligned_idx = (idx_bytes + 7) & ~size_t(7);
 
-    // Initialize with first k elements
-    for (int64_t i = threadIdx.x; i < k; i += blockDim.x) {
-        s_vals[i] = input[in_base + i * inner_size];
-        s_idx[i] = i;
-    }
-    __syncthreads();
+    // Candidate arrays for block-wide reduction
+    char* cand_base = smem + aligned_vals + aligned_idx;
+    T* s_cand_vals = reinterpret_cast<T*>(cand_base);
+    size_t cand_vals_bytes = blockDim.x * sizeof(T);
+    size_t aligned_cand_vals = (cand_vals_bytes + 7) & ~size_t(7);
+    int64_t* s_cand_pos = reinterpret_cast<int64_t*>(cand_base + aligned_cand_vals);
 
-    // Find the current k-th value (boundary) - single thread for simplicity
-    // For large k, a more sophisticated approach would be needed
-    if (threadIdx.x == 0) {
-        // Simple insertion: scan remaining elements and insert if better than worst
-        for (int64_t i = k; i < dim_size; ++i) {
+    const int tid = threadIdx.x;
+    const int nthreads = blockDim.x;
+
+    // Each thread finds its best among its stripe elements.
+    // We'll mark consumed elements with a sentinel.
+    // To avoid modifying input, each thread tracks consumed positions locally
+    // by iterating k rounds.
+
+    // Phase 1: Load all elements into shared/register consideration
+    // For memory efficiency, we use an iterative approach:
+    // each round, every thread finds its best unconsumed element
+    for (int64_t round = 0; round < k; ++round) {
+        // Each thread scans its stripe to find the best unconsumed element
+        T best_val;
+        int64_t best_pos = -1;
+        bool has_candidate = false;
+
+        for (int64_t i = tid; i < dim_size; i += nthreads) {
             T val = input[in_base + i * inner_size];
 
-            // Find the worst element in our top-k
-            int64_t worst_pos = 0;
-            T worst_val = s_vals[0];
-            for (int64_t j = 1; j < k; ++j) {
-                if (largest ? (s_vals[j] < worst_val) : (s_vals[j] > worst_val)) {
-                    worst_val = s_vals[j];
-                    worst_pos = j;
+            // Check if this position was already selected in a previous round
+            bool consumed = false;
+            for (int64_t r = 0; r < round; ++r) {
+                if (s_topk_idx[r] == i) {
+                    consumed = true;
+                    break;
                 }
             }
+            if (consumed) continue;
 
-            // Replace if this element is better
-            if (largest ? (val > worst_val) : (val < worst_val)) {
-                s_vals[worst_pos] = val;
-                s_idx[worst_pos] = i;
+            if (!has_candidate ||
+                (largest ? (val > best_val) : (val < best_val)) ||
+                (val == best_val && i < best_pos)) {
+                best_val = val;
+                best_pos = i;
+                has_candidate = true;
             }
         }
 
-        // Sort the top-k results (insertion sort for small k)
-        for (int64_t i = 1; i < k; ++i) {
-            T key_val = s_vals[i];
-            int64_t key_idx = s_idx[i];
-            int64_t j = i - 1;
-            while (j >= 0 && (largest ? (s_vals[j] < key_val) : (s_vals[j] > key_val))) {
-                s_vals[j + 1] = s_vals[j];
-                s_idx[j + 1] = s_idx[j];
-                --j;
+        // Store each thread's candidate in shared memory
+        // Use extreme sentinel for threads without candidates
+        s_cand_vals[tid] = best_val;  // value doesn't matter if best_pos < 0
+        s_cand_pos[tid] = best_pos;
+        __syncthreads();
+
+        // Block-wide reduction to find the global best
+        for (int stride = nthreads / 2; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                bool right_wins;
+                if (s_cand_pos[tid] < 0 && s_cand_pos[tid + stride] >= 0) {
+                    right_wins = true;
+                } else if (s_cand_pos[tid] >= 0 && s_cand_pos[tid + stride] < 0) {
+                    right_wins = false;
+                } else if (s_cand_pos[tid] < 0 && s_cand_pos[tid + stride] < 0) {
+                    right_wins = false;
+                } else {
+                    right_wins = largest ?
+                        (s_cand_vals[tid + stride] > s_cand_vals[tid] ||
+                         (s_cand_vals[tid + stride] == s_cand_vals[tid] &&
+                          s_cand_pos[tid + stride] < s_cand_pos[tid])) :
+                        (s_cand_vals[tid + stride] < s_cand_vals[tid] ||
+                         (s_cand_vals[tid + stride] == s_cand_vals[tid] &&
+                          s_cand_pos[tid + stride] < s_cand_pos[tid]));
+                }
+                if (right_wins) {
+                    s_cand_vals[tid] = s_cand_vals[tid + stride];
+                    s_cand_pos[tid] = s_cand_pos[tid + stride];
+                }
             }
-            s_vals[j + 1] = key_val;
-            s_idx[j + 1] = key_idx;
+            __syncthreads();
         }
+
+        // Thread 0 writes the winner to topk arrays
+        if (tid == 0) {
+            s_topk_vals[round] = s_cand_vals[0];
+            s_topk_idx[round] = s_cand_pos[0];
+        }
+        __syncthreads();
     }
-    __syncthreads();
+
+    // Phase 2: Sort the k results using parallel odd-even transposition sort
+    for (int64_t phase = 0; phase < k; ++phase) {
+        int64_t i = 2 * tid + (phase & 1);
+        if (i + 1 < k) {
+            bool should_swap = largest ?
+                (s_topk_vals[i] < s_topk_vals[i + 1]) :
+                (s_topk_vals[i] > s_topk_vals[i + 1]);
+            if (should_swap) {
+                T tmp_v = s_topk_vals[i];
+                s_topk_vals[i] = s_topk_vals[i + 1];
+                s_topk_vals[i + 1] = tmp_v;
+                int64_t tmp_i = s_topk_idx[i];
+                s_topk_idx[i] = s_topk_idx[i + 1];
+                s_topk_idx[i + 1] = tmp_i;
+            }
+        }
+        __syncthreads();
+    }
 
     // Write results
-    for (int64_t i = threadIdx.x; i < k; i += blockDim.x) {
-        values[out_base + i * inner_size] = s_vals[i];
-        indices[out_base + i * inner_size] = s_idx[i];
+    for (int64_t i = tid; i < k; i += nthreads) {
+        values[out_base + i * inner_size] = s_topk_vals[i];
+        indices[out_base + i * inner_size] = s_topk_idx[i];
     }
 }
 
@@ -141,10 +210,17 @@ auto topk_kernel(const Tensor& input, int64_t k, int64_t dim, bool largest,
     int64_t k_stride = k * inner_size;
 
     auto launch = [&]<typename T>() {
-        size_t vals_bytes = k * sizeof(T);
-        size_t aligned_vals = (vals_bytes + 7) & ~size_t(7);
-        size_t smem_size = aligned_vals + k * sizeof(int64_t);
-        int block_size = std::min(256L, k);
+        int block_size = 256;
+        // Shared memory: topk values + topk indices + candidate values + candidate positions
+        size_t topk_vals_bytes = k * sizeof(T);
+        size_t aligned_topk_vals = (topk_vals_bytes + 7) & ~size_t(7);
+        size_t topk_idx_bytes = k * sizeof(int64_t);
+        size_t aligned_topk_idx = (topk_idx_bytes + 7) & ~size_t(7);
+        size_t cand_vals_bytes = block_size * sizeof(T);
+        size_t aligned_cand_vals = (cand_vals_bytes + 7) & ~size_t(7);
+        size_t cand_pos_bytes = block_size * sizeof(int64_t);
+        size_t smem_size = aligned_topk_vals + aligned_topk_idx +
+                           aligned_cand_vals + cand_pos_bytes;
         topk_slice_kernel<T><<<num_slices, block_size, smem_size, stream>>>(
             input_cont.data<T>(), values.data<T>(), indices.data<int64_t>(),
             dim_size, k, inner_size, outer_stride, k_stride, largest);

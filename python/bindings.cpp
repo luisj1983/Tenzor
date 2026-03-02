@@ -1998,6 +1998,8 @@ PYBIND11_MODULE(tenzor_core, m) {
          py::arg("input"), py::arg("dim"), py::arg("index"));
     m.def("scatter", &tenzor::scatter, "Scatter elements along dimension",
          py::arg("input"), py::arg("dim"), py::arg("index"), py::arg("src"));
+    m.def("scatter_add", &tenzor::scatter_add, "Scatter-add elements along dimension",
+         py::arg("input"), py::arg("dim"), py::arg("index"), py::arg("src"));
     m.def("masked_select", &tenzor::masked_select, "Select elements where mask is true",
          py::arg("input"), py::arg("mask"));
     m.def("masked_fill", &tenzor::masked_fill, "Fill elements with value where mask is true",

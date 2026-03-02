@@ -94,7 +94,7 @@ class VulkanBackend;
  * - Efficient memory management with shared storage
  * - Broadcasting and advanced indexing
  *
- * Tensors use copy-on-write semantics for efficient memory usage.
+ * Tensors use shared storage with reference counting for efficient memory usage.
  *
  * @code
  * // Create tensors

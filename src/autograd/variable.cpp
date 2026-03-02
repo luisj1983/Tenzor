@@ -82,6 +82,7 @@ auto Variable::register_hook(std::function<Tensor(const Tensor&)> hook) -> size_
         throw std::runtime_error("Cannot register hook on uninitialized Variable");
     }
     size_t id = impl_->next_hook_id_.fetch_add(1, std::memory_order_relaxed);
+    std::unique_lock lock(impl_->hooks_mutex_);
     impl_->hooks_[id] = std::move(hook);
     return id;
 }
@@ -90,6 +91,7 @@ auto Variable::unregister_hook(size_t hook_id) -> bool {
     if (!impl_) {
         throw std::runtime_error("Cannot unregister hook on uninitialized Variable");
     }
+    std::unique_lock lock(impl_->hooks_mutex_);
     return impl_->hooks_.erase(hook_id) > 0;
 }
 

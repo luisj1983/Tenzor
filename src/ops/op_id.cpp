@@ -332,6 +332,18 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::FFTN)] = "fftn";
     names[static_cast<size_t>(OpId::IFFTN)] = "ifftn";
 
+    // Indexing Operations
+    names[static_cast<size_t>(OpId::ScatterAdd)] = "scatter_add";
+
+    // Linear Algebra Operations
+    names[static_cast<size_t>(OpId::LinalgDet)] = "linalg_det";
+    names[static_cast<size_t>(OpId::LinalgInv)] = "linalg_inv";
+    names[static_cast<size_t>(OpId::LinalgSolve)] = "linalg_solve";
+    names[static_cast<size_t>(OpId::LinalgSVD)] = "linalg_svd";
+    names[static_cast<size_t>(OpId::LinalgQR)] = "linalg_qr";
+    names[static_cast<size_t>(OpId::LinalgEigh)] = "linalg_eigh";
+    names[static_cast<size_t>(OpId::LinalgCholesky)] = "linalg_cholesky";
+
     return names;
 }();
 
@@ -346,7 +358,7 @@ constexpr size_t count_named_ops() {
 
 // Count of actual OpId enum values (excluding gap slots).
 // Update this when adding new OpIds to catch missing name entries at compile time.
-inline constexpr size_t EXPECTED_NAMED_OPS = 254;
+inline constexpr size_t EXPECTED_NAMED_OPS = 262;
 
 // If this fires, a new OpId was added without a corresponding name in op_names above
 static_assert(count_named_ops() == EXPECTED_NAMED_OPS,

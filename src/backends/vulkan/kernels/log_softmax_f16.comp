@@ -1,0 +1,96 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Log Softmax with numerical stability for Float16
+// Float16 elements are packed 2 per 32-bit word
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };
+layout(binding = 1) buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint num_classes;
+    uint dim;
+} params;
+
+shared float shared_max[256];
+shared float shared_sum[256];
+
+// Read a single float16 value from packed buffer
+float readF16(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = input_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+// Write a single float16 value to packed output buffer
+void writeF16(uint element_idx, float value) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint bits = packHalf2x16(vec2(value, 0.0)) & 0xFFFFu;
+    if (word_offset == 0) {
+        uint existing = output_data[word_idx] & 0xFFFF0000u;
+        output_data[word_idx] = existing | bits;
+    } else {
+        uint existing = output_data[word_idx] & 0x0000FFFFu;
+        output_data[word_idx] = existing | (bits << 16);
+    }
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint batch_idx = gl_WorkGroupID.x;
+
+    if (batch_idx >= params.batch_size) {
+        return;
+    }
+
+    uint base_idx = batch_idx * params.num_classes;
+
+    // Step 1: Find maximum for numerical stability
+    float local_max = -1.0 / 0.0; // -infinity
+    for (uint i = tid; i < params.num_classes; i += 256) {
+        local_max = max(local_max, readF16(base_idx + i));
+    }
+    shared_max[tid] = local_max;
+    barrier();
+
+    // Parallel reduction for max
+    for (uint s = 128; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_max[tid] = max(shared_max[tid], shared_max[tid + s]);
+        }
+        barrier();
+    }
+
+    float row_max = shared_max[0];
+    barrier();
+
+    // Step 2: Compute sum(exp(x - max))
+    float local_sum = 0.0;
+    for (uint i = tid; i < params.num_classes; i += 256) {
+        local_sum += exp(readF16(base_idx + i) - row_max);
+    }
+    shared_sum[tid] = local_sum;
+    barrier();
+
+    // Parallel reduction for sum
+    for (uint s = 128; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_sum[tid] += shared_sum[tid + s];
+        }
+        barrier();
+    }
+
+    float log_sum_exp = log(shared_sum[0]);
+    barrier();
+
+    // Step 3: Compute log_softmax = x - max - log(sum(exp(x - max)))
+    for (uint i = tid; i < params.num_classes; i += 256) {
+        float result = readF16(base_idx + i) - row_max - log_sum_exp;
+        writeF16(base_idx + i, result);
+    }
+}
