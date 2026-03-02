@@ -115,6 +115,15 @@ public:
      */
     auto forward_impl(const Variable& input) -> Variable override;
 
+    // Public accessors for quantization from_float()
+    auto stride_h() const -> int64_t { return stride_h_; }
+    auto stride_w() const -> int64_t { return stride_w_; }
+    auto padding_h() const -> int64_t { return padding_h_; }
+    auto padding_w() const -> int64_t { return padding_w_; }
+    auto dilation_h() const -> int64_t { return dilation_h_; }
+    auto dilation_w() const -> int64_t { return dilation_w_; }
+    auto groups() const -> int64_t { return groups_; }
+
 private:
     int64_t in_channels_;   ///< Number of input channels
     int64_t out_channels_;  ///< Number of output channels

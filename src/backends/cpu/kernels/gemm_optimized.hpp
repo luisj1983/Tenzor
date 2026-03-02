@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <algorithm>
 #include <cstring>
+#include <memory>
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
     #include <immintrin.h>
@@ -77,17 +78,13 @@ constexpr size_t PREFETCH_DISTANCE_B = 128;
 constexpr size_t MAX_A_PACK_SIZE = std::max(MC_AVX2 * KC_AVX2, MC_AVX512 * KC_AVX512);
 constexpr size_t MAX_B_PACK_SIZE = std::max(KC_AVX2 * NC_AVX2, KC_AVX512 * NC_AVX512);
 
-// Thread-local packing buffers allocated on the heap
-// Each thread gets its own buffers to avoid contention
+// Packing buffers allocated per-thread on the heap inside parallel regions.
+// NOT thread_local: dlopen'd shared libraries don't initialize thread_local
+// storage for OMP worker threads, causing crashes.
 struct GemmPackBuffers {
     alignas(64) float A_packed[MAX_A_PACK_SIZE];
     alignas(64) float B_packed[MAX_B_PACK_SIZE];
 };
-
-inline GemmPackBuffers& get_thread_pack_buffers() {
-    thread_local auto buffers = std::make_unique<GemmPackBuffers>();
-    return *buffers;
-}
 
 // ============================================================================
 // AVX2 Micro-kernel (6x16)
@@ -446,12 +443,13 @@ inline void gemm_optimized(
     const size_t MR = MR_AVX512;
     const size_t NR = NR_AVX512;
 
-    // Use thread-local heap packing buffers to avoid stack overflow
+    // Per-thread heap packing buffers (NOT thread_local: dlopen'd libs
+    // don't initialize thread_local for OMP worker threads, causing crashes)
     #pragma omp parallel if(M * N > OMP_THRESHOLD_GEMM)
     {
-        auto& bufs = get_thread_pack_buffers();
-        float* A_packed = bufs.A_packed;
-        float* B_packed = bufs.B_packed;
+        auto bufs = std::make_unique<GemmPackBuffers>();
+        float* A_packed = bufs->A_packed;
+        float* B_packed = bufs->B_packed;
 
         #pragma omp for collapse(2) schedule(dynamic)
         for (int64_t jc = 0; jc < N; jc += NC) {
@@ -512,12 +510,13 @@ inline void gemm_optimized(
     const size_t MR = MR_AVX2;
     const size_t NR = NR_AVX2;
 
-    // Use thread-local heap packing buffers to avoid stack overflow
+    // Per-thread heap packing buffers (NOT thread_local: dlopen'd libs
+    // don't initialize thread_local for OMP worker threads, causing crashes)
     #pragma omp parallel if(M * N > OMP_THRESHOLD_GEMM)
     {
-        auto& bufs = get_thread_pack_buffers();
-        float* A_packed = bufs.A_packed;
-        float* B_packed = bufs.B_packed;
+        auto bufs = std::make_unique<GemmPackBuffers>();
+        float* A_packed = bufs->A_packed;
+        float* B_packed = bufs->B_packed;
 
         #pragma omp for collapse(2) schedule(dynamic)
         for (int64_t jc = 0; jc < N; jc += NC) {

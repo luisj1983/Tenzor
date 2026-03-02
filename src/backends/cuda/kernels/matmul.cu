@@ -969,9 +969,10 @@ __global__ void batched_matmul_tiled_bf16_kernel(
 // Use cuBLAS for large matrices with Tensor Core acceleration (TF32)
 void matmul_cublas_f32(
     const float* A, const float* B, float* C,
-    int64_t M, int64_t N, int64_t K) {
+    int64_t M, int64_t N, int64_t K,
+    cudaStream_t stream = 0) {
 
-    cublasHandle_t handle = CuBLASHandlePool::get();
+    cublasHandle_t handle = CuBLASHandlePool::get(stream);
 
     // cuBLAS uses column-major order, we use row-major
     // To compute C = A @ B in row-major, we compute C^T = B^T @ A^T
@@ -1004,9 +1005,10 @@ void matmul_cublas_f32(
 
 void matmul_cublas_f64(
     const double* A, const double* B, double* C,
-    int64_t M, int64_t N, int64_t K) {
+    int64_t M, int64_t N, int64_t K,
+    cudaStream_t stream = 0) {
 
-    cublasHandle_t handle = CuBLASHandlePool::get();
+    cublasHandle_t handle = CuBLASHandlePool::get(stream);
 
     const double alpha = 1.0;
     const double beta = 0.0;
@@ -1032,9 +1034,10 @@ void matmul_cublas_f64(
 void batched_matmul_cublas_f32(
     const float* A, const float* B, float* C,
     int64_t batch_size, int64_t M, int64_t N, int64_t K,
-    int64_t stride_a, int64_t stride_b, int64_t stride_c) {
+    int64_t stride_a, int64_t stride_b, int64_t stride_c,
+    cudaStream_t stream = 0) {
 
-    cublasHandle_t handle = CuBLASHandlePool::get();
+    cublasHandle_t handle = CuBLASHandlePool::get(stream);
 
     const float alpha = 1.0f;
     const float beta = 0.0f;
@@ -1064,9 +1067,10 @@ void batched_matmul_cublas_f32(
 void batched_matmul_cublas_f64(
     const double* A, const double* B, double* C,
     int64_t batch_size, int64_t M, int64_t N, int64_t K,
-    int64_t stride_a, int64_t stride_b, int64_t stride_c) {
+    int64_t stride_a, int64_t stride_b, int64_t stride_c,
+    cudaStream_t stream = 0) {
 
-    cublasHandle_t handle = CuBLASHandlePool::get();
+    cublasHandle_t handle = CuBLASHandlePool::get(stream);
 
     const double alpha = 1.0;
     const double beta = 0.0;
@@ -1092,9 +1096,10 @@ void batched_matmul_cublas_f64(
 // BFloat16 cuBLAS matmul using cublasGemmEx with CUDA_R_16BF
 void matmul_cublas_bf16(
     const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
-    int64_t M, int64_t N, int64_t K) {
+    int64_t M, int64_t N, int64_t K,
+    cudaStream_t stream = 0) {
 
-    cublasHandle_t handle = CuBLASHandlePool::get();
+    cublasHandle_t handle = CuBLASHandlePool::get(stream);
 
     // cuBLAS uses column-major order, we use row-major
     // To compute C = A @ B in row-major, we compute C^T = B^T @ A^T
@@ -1129,9 +1134,10 @@ void matmul_cublas_bf16(
 void batched_matmul_cublas_bf16(
     const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
     int64_t batch_size, int64_t M, int64_t N, int64_t K,
-    int64_t stride_a, int64_t stride_b, int64_t stride_c) {
+    int64_t stride_a, int64_t stride_b, int64_t stride_c,
+    cudaStream_t stream = 0) {
 
-    cublasHandle_t handle = CuBLASHandlePool::get();
+    cublasHandle_t handle = CuBLASHandlePool::get(stream);
 
     const float alpha = 1.0f;
     const float beta = 0.0f;
@@ -1160,9 +1166,10 @@ void batched_matmul_cublas_bf16(
 // Float16 cuBLAS matmul using cublasGemmEx with CUDA_R_16F
 void matmul_cublas_f16(
     const __half* A, const __half* B, __half* C,
-    int64_t M, int64_t N, int64_t K) {
+    int64_t M, int64_t N, int64_t K,
+    cudaStream_t stream = 0) {
 
-    cublasHandle_t handle = CuBLASHandlePool::get();
+    cublasHandle_t handle = CuBLASHandlePool::get(stream);
 
     // cuBLAS uses column-major order, we use row-major
     // To compute C = A @ B in row-major, we compute C^T = B^T @ A^T
@@ -1197,9 +1204,10 @@ void matmul_cublas_f16(
 void batched_matmul_cublas_f16(
     const __half* A, const __half* B, __half* C,
     int64_t batch_size, int64_t M, int64_t N, int64_t K,
-    int64_t stride_a, int64_t stride_b, int64_t stride_c) {
+    int64_t stride_a, int64_t stride_b, int64_t stride_c,
+    cudaStream_t stream = 0) {
 
-    cublasHandle_t handle = CuBLASHandlePool::get();
+    cublasHandle_t handle = CuBLASHandlePool::get(stream);
 
     const float alpha = 1.0f;
     const float beta = 0.0f;
@@ -1244,7 +1252,7 @@ void matmul_f32(
 #ifdef TENZOR_HAS_CUBLAS
     // Use cuBLAS for large matrices
     if (M >= CUBLAS_THRESHOLD || N >= CUBLAS_THRESHOLD || K >= CUBLAS_THRESHOLD) {
-        matmul_cublas_f32(A, B, C, M, N, K);
+        matmul_cublas_f32(A, B, C, M, N, K, stream);
         return;
     }
 #endif
@@ -1268,7 +1276,7 @@ void matmul_f64(
 #ifdef TENZOR_HAS_CUBLAS
     // Use cuBLAS for large matrices
     if (M >= CUBLAS_THRESHOLD || N >= CUBLAS_THRESHOLD || K >= CUBLAS_THRESHOLD) {
-        matmul_cublas_f64(A, B, C, M, N, K);
+        matmul_cublas_f64(A, B, C, M, N, K, stream);
         return;
     }
 #endif
@@ -1313,7 +1321,7 @@ void matmul_f16(
 #ifdef TENZOR_HAS_CUBLAS
     // Use cuBLAS for large matrices (FP16 benefits from Tensor Core acceleration)
     if (M >= CUBLAS_THRESHOLD || N >= CUBLAS_THRESHOLD || K >= CUBLAS_THRESHOLD) {
-        matmul_cublas_f16(A, B, C, M, N, K);
+        matmul_cublas_f16(A, B, C, M, N, K, stream);
         return;
     }
 #endif
@@ -1361,7 +1369,7 @@ void matmul_bf16(
 #ifdef TENZOR_HAS_CUBLAS
     // Use cuBLAS for large matrices (BF16 benefits from Tensor Core acceleration)
     if (M >= CUBLAS_THRESHOLD || N >= CUBLAS_THRESHOLD || K >= CUBLAS_THRESHOLD) {
-        matmul_cublas_bf16(A, B, C, M, N, K);
+        matmul_cublas_bf16(A, B, C, M, N, K, stream);
         return;
     }
 #endif
@@ -1395,7 +1403,7 @@ void batched_matmul_f32(
     // Always use cuBLAS for batched matmul - cublasSgemmStridedBatched is
     // highly optimized and amortizes kernel launch overhead across the batch
     batched_matmul_cublas_f32(A, B, C, batch_size, M, N, K,
-                               stride_a, stride_b, stride_c);
+                               stride_a, stride_b, stride_c, stream);
 #else
     // Fallback to custom batched kernel when cuBLAS is not available
     dim3 block(TILE_SIZE, TILE_SIZE);
@@ -1425,7 +1433,7 @@ void batched_matmul_f64(
     // Always use cuBLAS for batched matmul - cublasDgemmStridedBatched is
     // highly optimized and amortizes kernel launch overhead across the batch
     batched_matmul_cublas_f64(A, B, C, batch_size, M, N, K,
-                               stride_a, stride_b, stride_c);
+                               stride_a, stride_b, stride_c, stream);
 #else
     // Fallback to custom batched kernel when cuBLAS is not available
     dim3 block(TILE_SIZE, TILE_SIZE);
@@ -1460,7 +1468,7 @@ void batched_matmul_f16(
     // Use cuBLAS for large matrices (FP16 benefits from Tensor Core acceleration)
     if (M >= CUBLAS_THRESHOLD || N >= CUBLAS_THRESHOLD || K >= CUBLAS_THRESHOLD) {
         batched_matmul_cublas_f16(A, B, C, batch_size, M, N, K,
-                                   stride_a, stride_b, stride_c);
+                                   stride_a, stride_b, stride_c, stream);
         return;
     }
 #endif
@@ -1515,7 +1523,7 @@ void batched_matmul_bf16(
 #ifdef TENZOR_HAS_CUBLAS
     // Always use cuBLAS for batched matmul - BF16 benefits from Tensor Core acceleration
     batched_matmul_cublas_bf16(A, B, C, batch_size, M, N, K,
-                                stride_a, stride_b, stride_c);
+                                stride_a, stride_b, stride_c, stream);
 #else
     // Fallback to custom batched kernel when cuBLAS is not available
     dim3 block(TILE_SIZE_F16, TILE_SIZE_F16);

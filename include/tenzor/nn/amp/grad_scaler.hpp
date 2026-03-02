@@ -286,6 +286,7 @@ public:
 
 private:
     float scale_;                 ///< Current loss scale factor
+    float init_scale_;            ///< Initial loss scale factor (for reset)
     float growth_factor_;         ///< Multiplier for scale growth
     float backoff_factor_;        ///< Multiplier for scale backoff
     int growth_interval_;         ///< Steps before attempting growth

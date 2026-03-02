@@ -81,6 +81,8 @@ MultiheadAttention::MultiheadAttention(int64_t embed_dim,
         auto bv = tenzor::zeros({1, 1, embed_dim_}, DType::Float32);
         bias_k_ = Variable(bk, true);
         bias_v_ = Variable(bv, true);
+        register_parameter("bias_k", bias_k_);
+        register_parameter("bias_v", bias_v_);
     }
 
     head_dim_ = embed_dim_ / num_heads_;
@@ -325,6 +327,28 @@ auto MultiheadAttention::scaled_dot_product_attention(
     Variable scale_var(scale_tensor, false);
 
     scores = scores * scale_var;
+
+    // Apply causal mask if is_causal_ is set (masks future tokens)
+    if (is_causal_) {
+        // Create rectangular causal mask (seq_q, seq_k) — future positions get -inf
+        Tensor causal = zeros({seq_len_q, seq_len_k}, DType::Float32, Device::cpu());
+        auto* causal_data = causal.data<float>();
+        for (int64_t i = 0; i < seq_len_q; ++i) {
+            for (int64_t j = 0; j < seq_len_k; ++j) {
+                if (j > i) {
+                    causal_data[i * seq_len_k + j] = -std::numeric_limits<float>::infinity();
+                }
+            }
+        }
+        if (query.dtype() != DType::Float32) {
+            causal = causal.to(query.dtype());
+        }
+        if (query.device() != Device::cpu()) {
+            causal = causal.to(query.device());
+        }
+        Variable causal_var(causal, false);
+        scores = scores + causal_var;
+    }
 
     // Apply attention mask if provided
     if (attn_mask.is_valid() && attn_mask.shape().size() > 0) {

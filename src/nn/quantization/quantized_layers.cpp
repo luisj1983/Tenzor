@@ -336,15 +336,15 @@ auto QuantizedConv2d::from_float(const Conv2d& fp_conv, const QConfig& qconfig)
     int64_t kernel_h = weight_shape[2];
     int64_t kernel_w = weight_shape[3];
 
-    // Create quantized Conv2d with quantization parameters
+    // Create quantized Conv2d with actual parameters from source Conv2d
     auto q_conv = std::make_shared<QuantizedConv2d>(
         in_channels,
         out_channels,
-        kernel_h,  // kernel_size (assuming square)
-        1,         // stride (default)
-        0,         // padding (default)
-        1,         // dilation (default)
-        1,         // groups (default)
+        kernel_h,
+        fp_conv.stride_h(),
+        fp_conv.padding_h(),
+        fp_conv.dilation_h(),
+        fp_conv.groups(),
         weight_qparams,
         1.0f       // bias_scale (default)
     );
@@ -613,16 +613,16 @@ auto QuantizedConv2dReLU::from_float(const Conv2d& fp_conv, const QConfig& qconf
     int64_t in_channels = weight_shape[1];
     int64_t kernel_h = weight_shape[2];
 
-    // Create QuantizedConv2dReLU using inherited constructor
+    // Create QuantizedConv2dReLU with actual parameters from source Conv2d
     auto q_conv_relu = std::shared_ptr<QuantizedConv2dReLU>(
         new QuantizedConv2dReLU(
             in_channels,
             out_channels,
-            kernel_h,  // kernel_size
-            1,         // stride
-            0,         // padding
-            1,         // dilation
-            1,         // groups
+            kernel_h,
+            fp_conv.stride_h(),
+            fp_conv.padding_h(),
+            fp_conv.dilation_h(),
+            fp_conv.groups(),
             weight_qparams,
             1.0f       // bias_scale
         )

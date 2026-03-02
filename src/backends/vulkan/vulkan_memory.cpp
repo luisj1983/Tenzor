@@ -171,8 +171,18 @@ auto VulkanBackend::copy(void* dst, const void* src, size_t bytes,
         return;
     }
 
-    // Determine device ID from allocations
+    // Determine device ID from allocations map
     int32_t device_id = 0;
+    {
+        std::lock_guard<std::mutex> alloc_lock(allocations_mutex_);
+        // For HostToDevice, dst is on device; for DeviceToHost, src is on device;
+        // for DeviceToDevice, either works
+        const void* device_ptr = (kind == CopyKind::DeviceToHost) ? src : dst;
+        auto it = allocations_.find(const_cast<void*>(device_ptr));
+        if (it != allocations_.end()) {
+            device_id = it->second.second;
+        }
+    }
 
     // Lock per-device mutex for GPU command submission
     std::lock_guard<std::recursive_mutex> dev_lock(devices_[device_id].mutex);

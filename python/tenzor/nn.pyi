@@ -530,7 +530,8 @@ class TransformerEncoderLayer(Module):
         dim_feedforward: int = 2048,
         dropout: float = 0.1,
         activation: str = 'relu',
-        batch_first: bool = False
+        batch_first: bool = False,
+        norm_first: bool = False
     ) -> None: ...
 
     def forward(
@@ -550,7 +551,8 @@ class TransformerDecoderLayer(Module):
         dim_feedforward: int = 2048,
         dropout: float = 0.1,
         activation: str = 'relu',
-        batch_first: bool = False
+        batch_first: bool = False,
+        norm_first: bool = False
     ) -> None: ...
 
     def forward(

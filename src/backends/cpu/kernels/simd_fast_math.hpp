@@ -5,7 +5,7 @@
  * Provides vectorized exp, log, tanh, sigmoid using polynomial approximations
  * with full AVX2 and AVX-512 support. Achieves 10-20x speedup over std::exp/log.
  *
- * Accuracy: < 2 ULP error for exp, < 1 ULP for log in normal range
+ * Accuracy: < 2 ULP error for exp, ~10-20 ULP error for log in normal range
  */
 
 #pragma once

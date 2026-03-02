@@ -136,12 +136,16 @@ public:
      * @param dropout Dropout probability (default: 0.1)
      * @param activation Activation function: "relu" or "gelu" (default: "relu")
      * @param batch_first If true, input is (batch, seq, feature) else (seq, batch, feature)
+     * @param norm_first If true, layer norm is applied before attention/FFN (Pre-LN);
+     *                   if false, layer norm is applied after (Post-LN, the original
+     *                   "Attention Is All You Need" architecture). Default: false.
      *
      * @throws std::invalid_argument if activation is not "relu" or "gelu"
      *
      * @code
-     * TransformerEncoderLayer layer1(512, 8);                   // Default settings
+     * TransformerEncoderLayer layer1(512, 8);                   // Default post-LN
      * TransformerEncoderLayer layer2(768, 12, 3072, 0.1, "gelu"); // BERT-like
+     * TransformerEncoderLayer layer3(512, 8, 2048, 0.1, "relu", false, true); // Pre-LN
      * @endcode
      */
     TransformerEncoderLayer(int64_t d_model,
@@ -149,7 +153,8 @@ public:
                            int64_t dim_feedforward = 2048,
                            double dropout = 0.1,
                            const std::string& activation = "relu",
-                           bool batch_first = false);
+                           bool batch_first = false,
+                           bool norm_first = false);
 
     /**
      * @brief Forward pass through encoder layer.
@@ -191,6 +196,7 @@ private:
     double dropout_;
     std::string activation_;
     bool batch_first_;
+    bool norm_first_;  ///< If true, use Pre-LN (norm before sublayer); else Post-LN
 
     // Layers
     std::shared_ptr<MultiheadAttention> self_attn_;  ///< Self-attention
@@ -326,10 +332,13 @@ public:
      * @param dropout Dropout probability (default: 0.1)
      * @param activation Activation function: "relu" or "gelu" (default: "relu")
      * @param batch_first If true, input is (batch, seq, feature)
+     * @param norm_first If true, layer norm is applied before attention/FFN (Pre-LN);
+     *                   if false, layer norm is applied after (Post-LN). Default: false.
      *
      * @code
      * TransformerDecoderLayer layer1(512, 8);
      * TransformerDecoderLayer layer2(768, 12, 3072, 0.1, "gelu", true);
+     * TransformerDecoderLayer layer3(512, 8, 2048, 0.1, "relu", false, true); // Pre-LN
      * @endcode
      */
     TransformerDecoderLayer(int64_t d_model,
@@ -337,7 +346,8 @@ public:
                            int64_t dim_feedforward = 2048,
                            double dropout = 0.1,
                            const std::string& activation = "relu",
-                           bool batch_first = false);
+                           bool batch_first = false,
+                           bool norm_first = false);
 
     /**
      * @brief Forward pass through decoder layer.
@@ -378,6 +388,7 @@ private:
     double dropout_;
     std::string activation_;
     bool batch_first_;
+    bool norm_first_;  ///< If true, use Pre-LN (norm before sublayer); else Post-LN
 
     // Layers
     std::shared_ptr<MultiheadAttention> self_attn_;       ///< Masked self-attention
@@ -486,6 +497,7 @@ public:
      * @param dropout Dropout probability (default: 0.1)
      * @param activation Activation: "relu" or "gelu" (default: "relu")
      * @param batch_first Batch dimension first (default: false)
+     * @param norm_first If true, use Pre-LN ordering in all layers (default: false)
      */
     Transformer(int64_t d_model,
                int64_t nhead,
@@ -494,7 +506,8 @@ public:
                int64_t dim_feedforward = 2048,
                double dropout = 0.1,
                const std::string& activation = "relu",
-               bool batch_first = false);
+               bool batch_first = false,
+               bool norm_first = false);
 
     /**
      * @brief Forward pass through encoder and decoder.

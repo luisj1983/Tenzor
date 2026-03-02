@@ -127,6 +127,16 @@ auto logsumexp(const Tensor& input,
               int64_t dim,
               bool keepdim = false) -> Tensor;
 
+/** @brief True if any element is nonzero. Returns Bool tensor. */
+auto any(const Tensor& input,
+        std::optional<int64_t> dim = std::nullopt,
+        bool keepdim = false) -> Tensor;
+
+/** @brief True if all elements are nonzero. Returns Bool tensor. */
+auto all(const Tensor& input,
+        std::optional<int64_t> dim = std::nullopt,
+        bool keepdim = false) -> Tensor;
+
 /** @} */ // end of tensor_reduction group
 
 } // namespace tenzor

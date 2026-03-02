@@ -161,4 +161,18 @@ auto select(const Tensor& input, int64_t dim, int64_t index) -> Tensor {
     return sliced.squeeze(dim);
 }
 
+auto narrow(const Tensor& input, int64_t dim, int64_t start, int64_t length) -> Tensor {
+    int64_t ndim = input.ndim();
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("Dimension out of range for narrow");
+    }
+    if (start < 0 || length < 0 || start + length > input.shape()[dim]) {
+        throw std::out_of_range("narrow: start (" + std::to_string(start) + ") + length (" +
+                               std::to_string(length) + ") exceeds dimension size (" +
+                               std::to_string(input.shape()[dim]) + ")");
+    }
+    return input.slice(dim, start, start + length, 1);
+}
+
 } // namespace tenzor

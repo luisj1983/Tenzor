@@ -1,5 +1,6 @@
 #include "tenzor/core/tensor.hpp"
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <stdexcept>
 #include <cmath>
@@ -786,8 +787,8 @@ void sum_along_dim(const T* input_data,
     const int64_t total_work = output_size * dim_size;
     #pragma omp parallel for if(total_work > REDUCTION_OMP_THRESHOLD)
     for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
-        // Compute multi-dimensional index for output (row-major order: last dim varies fastest)
-        std::vector<int64_t> indices(ndim, 0);
+        // Fixed-size array avoids heap allocation per iteration (max 16 dims)
+        std::array<int64_t, 16> indices{};
         int64_t tmp = out_idx;
 
         for (int64_t d = ndim - 1; d >= 0; --d) {
@@ -796,15 +797,20 @@ void sum_along_dim(const T* input_data,
             tmp /= input_shape[d];
         }
 
-        // Sum along the reduction dimension - simple accumulation
+        // Sum along the reduction dimension with Kahan compensation
+        // for improved numerical precision on Float32/Float64
         T sum = 0;
+        T compensation = 0;
         for (int64_t i = 0; i < dim_size; i++) {
             indices[dim] = i;
             int64_t in_idx = 0;
             for (int64_t d = 0; d < ndim; d++) {
                 in_idx += indices[d] * input_strides[d];
             }
-            sum += input_data[in_idx];
+            T y = input_data[in_idx] - compensation;
+            T t = sum + y;
+            compensation = (t - sum) - y;
+            sum = t;
         }
         output_data[out_idx] = sum;
     }
@@ -2909,6 +2915,182 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Ten
             throw std::runtime_error("norm: unsupported dtype");
     }
 
+    return output;
+}
+
+// any() reduction - returns true if any element is nonzero
+auto any_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
+    const auto& input_shape = input.shape();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+    dim = normalize_dim(dim, ndim);
+
+    auto output_shape = compute_reduction_shape(
+        std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+        dim, keepdim
+    );
+
+    Tensor output(output_shape, DType::Bool, input.device());
+    auto* out = output.data<bool>();
+
+    if (dim == REDUCE_ALL) {
+        const int64_t n = input.numel();
+        bool found = false;
+        switch (input.dtype()) {
+            case DType::Float32: {
+                auto* d = input.data<float>();
+                #pragma omp parallel for reduction(||:found) if(n > REDUCTION_OMP_THRESHOLD)
+                for (int64_t i = 0; i < n; i++) found = found || (d[i] != 0.0f);
+                break;
+            }
+            case DType::Float64: {
+                auto* d = input.data<double>();
+                #pragma omp parallel for reduction(||:found) if(n > REDUCTION_OMP_THRESHOLD)
+                for (int64_t i = 0; i < n; i++) found = found || (d[i] != 0.0);
+                break;
+            }
+            case DType::Int32: {
+                auto* d = input.data<int32_t>();
+                #pragma omp parallel for reduction(||:found) if(n > REDUCTION_OMP_THRESHOLD)
+                for (int64_t i = 0; i < n; i++) found = found || (d[i] != 0);
+                break;
+            }
+            case DType::Int64: {
+                auto* d = input.data<int64_t>();
+                #pragma omp parallel for reduction(||:found) if(n > REDUCTION_OMP_THRESHOLD)
+                for (int64_t i = 0; i < n; i++) found = found || (d[i] != 0);
+                break;
+            }
+            case DType::Bool: {
+                auto* d = input.data<bool>();
+                for (int64_t i = 0; i < n; i++) { if (d[i]) { found = true; break; } }
+                break;
+            }
+            default:
+                throw std::runtime_error("any: unsupported dtype");
+        }
+        out[0] = found;
+    } else {
+        const int64_t dim_size = input_shape[dim];
+        int64_t output_size = output.numel();
+        const int64_t shape_ndim = ndim;
+
+        #pragma omp parallel for if(output_size > 1000)
+        for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
+            std::array<int64_t, 16> indices{};
+            int64_t tmp = out_idx;
+            for (int64_t d = shape_ndim - 1; d >= 0; --d) {
+                if (d == dim) continue;
+                indices[d] = tmp % input_shape[d];
+                tmp /= input_shape[d];
+            }
+
+            bool found = false;
+            for (int64_t i = 0; i < dim_size && !found; i++) {
+                indices[dim] = i;
+                int64_t flat = 0;
+                for (int64_t d = 0; d < shape_ndim; d++) {
+                    flat += indices[d] * input.strides()[d];
+                }
+                switch (input.dtype()) {
+                    case DType::Float32: found = input.data<float>()[flat] != 0.0f; break;
+                    case DType::Float64: found = input.data<double>()[flat] != 0.0; break;
+                    case DType::Int32: found = input.data<int32_t>()[flat] != 0; break;
+                    case DType::Int64: found = input.data<int64_t>()[flat] != 0; break;
+                    case DType::Bool: found = input.data<bool>()[flat]; break;
+                    default: break;
+                }
+            }
+            out[out_idx] = found;
+        }
+    }
+    return output;
+}
+
+// all() reduction - returns true if all elements are nonzero
+auto all_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
+    const auto& input_shape = input.shape();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+    dim = normalize_dim(dim, ndim);
+
+    auto output_shape = compute_reduction_shape(
+        std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+        dim, keepdim
+    );
+
+    Tensor output(output_shape, DType::Bool, input.device());
+    auto* out = output.data<bool>();
+
+    if (dim == REDUCE_ALL) {
+        const int64_t n = input.numel();
+        bool result = true;
+        switch (input.dtype()) {
+            case DType::Float32: {
+                auto* d = input.data<float>();
+                #pragma omp parallel for reduction(&&:result) if(n > REDUCTION_OMP_THRESHOLD)
+                for (int64_t i = 0; i < n; i++) result = result && (d[i] != 0.0f);
+                break;
+            }
+            case DType::Float64: {
+                auto* d = input.data<double>();
+                #pragma omp parallel for reduction(&&:result) if(n > REDUCTION_OMP_THRESHOLD)
+                for (int64_t i = 0; i < n; i++) result = result && (d[i] != 0.0);
+                break;
+            }
+            case DType::Int32: {
+                auto* d = input.data<int32_t>();
+                #pragma omp parallel for reduction(&&:result) if(n > REDUCTION_OMP_THRESHOLD)
+                for (int64_t i = 0; i < n; i++) result = result && (d[i] != 0);
+                break;
+            }
+            case DType::Int64: {
+                auto* d = input.data<int64_t>();
+                #pragma omp parallel for reduction(&&:result) if(n > REDUCTION_OMP_THRESHOLD)
+                for (int64_t i = 0; i < n; i++) result = result && (d[i] != 0);
+                break;
+            }
+            case DType::Bool: {
+                auto* d = input.data<bool>();
+                for (int64_t i = 0; i < n; i++) { if (!d[i]) { result = false; break; } }
+                break;
+            }
+            default:
+                throw std::runtime_error("all: unsupported dtype");
+        }
+        out[0] = result;
+    } else {
+        const int64_t dim_size = input_shape[dim];
+        int64_t output_size = output.numel();
+        const int64_t shape_ndim = ndim;
+
+        #pragma omp parallel for if(output_size > 1000)
+        for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
+            std::array<int64_t, 16> indices{};
+            int64_t tmp = out_idx;
+            for (int64_t d = shape_ndim - 1; d >= 0; --d) {
+                if (d == dim) continue;
+                indices[d] = tmp % input_shape[d];
+                tmp /= input_shape[d];
+            }
+
+            bool result = true;
+            for (int64_t i = 0; i < dim_size && result; i++) {
+                indices[dim] = i;
+                int64_t flat = 0;
+                for (int64_t d = 0; d < shape_ndim; d++) {
+                    flat += indices[d] * input.strides()[d];
+                }
+                switch (input.dtype()) {
+                    case DType::Float32: result = input.data<float>()[flat] != 0.0f; break;
+                    case DType::Float64: result = input.data<double>()[flat] != 0.0; break;
+                    case DType::Int32: result = input.data<int32_t>()[flat] != 0; break;
+                    case DType::Int64: result = input.data<int64_t>()[flat] != 0; break;
+                    case DType::Bool: result = input.data<bool>()[flat]; break;
+                    default: break;
+                }
+            }
+            out[out_idx] = result;
+        }
+    }
     return output;
 }
 

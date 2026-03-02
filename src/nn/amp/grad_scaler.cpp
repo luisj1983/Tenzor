@@ -21,6 +21,7 @@ GradScaler::GradScaler(float init_scale,
                        float backoff_factor,
                        int growth_interval)
     : scale_(init_scale)
+    , init_scale_(init_scale)
     , growth_factor_(growth_factor)
     , backoff_factor_(backoff_factor)
     , growth_interval_(growth_interval)
@@ -43,12 +44,12 @@ GradScaler::GradScaler(float init_scale,
 }
 
 auto GradScaler::scale(const Variable& loss) -> Variable {
-    // Scale the loss tensor using tensor multiplication
-    // This properly handles both CPU and CUDA tensors
-    auto scaled_tensor = loss.tensor() * scale_;
-
-    // Return as Variable with same requires_grad as input
-    return Variable(scaled_tensor, loss.requires_grad());
+    // Use Variable multiplication to preserve autograd graph
+    // Raw Tensor multiplication would sever the computation graph
+    auto scale_tensor = full({1}, static_cast<float>(scale_),
+                             loss.dtype(), loss.device());
+    Variable scale_var(scale_tensor, false);
+    return loss * scale_var;
 }
 
 auto GradScaler::unscale_(optim::Optimizer& optimizer) -> void {
@@ -78,7 +79,15 @@ auto GradScaler::unscale_(optim::Optimizer& optimizer) -> void {
 }
 
 auto GradScaler::check_inf_nan_(const optim::Optimizer& optimizer) const -> bool {
-    // Check if any gradient contains inf or nan
+    // TODO(perf): This implementation transfers every parameter's gradient to CPU
+    // individually via .cpu(), which is extremely slow for models with many parameters
+    // on GPU (e.g., hundreds of small tensors each triggering a synchronous D2H copy).
+    // This should be replaced with a fused GPU kernel that:
+    //   1. Launches a single kernel per parameter to check for inf/nan (isinf || isnan),
+    //      writing a boolean flag to a device-side scalar.
+    //   2. Uses a single cudaMemcpy to transfer the combined result back to host.
+    // PyTorch uses _amp_foreach_non_finite_check_and_unscale_ which fuses the unscale
+    // and inf/nan check into a single pass over all gradients.
     for (const auto& param : optimizer.parameters()) {
         if (!param->has_grad()) {
             continue;
@@ -185,9 +194,8 @@ auto GradScaler::found_inf_nan() const -> bool {
 }
 
 auto GradScaler::reset() -> void {
-    // Reset to initial state
-    const float init_scale = 65536.0f;  // Store initial scale
-    scale_ = init_scale;
+    // Reset to initial state using stored init_scale_
+    scale_ = init_scale_;
     growth_tracker_ = 0;
     found_inf_nan_ = false;
     has_unscaled_ = false;

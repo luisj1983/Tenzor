@@ -96,6 +96,16 @@ auto nonzero(const Tensor& input) -> Tensor;
  */
 auto select(const Tensor& input, int64_t dim, int64_t index) -> Tensor;
 
+/**
+ * @brief Narrow (slice) tensor along a dimension.
+ * @param input Input tensor
+ * @param dim Dimension to narrow
+ * @param start Start index
+ * @param length Length of the narrow
+ * @return Narrowed tensor (view sharing storage)
+ */
+auto narrow(const Tensor& input, int64_t dim, int64_t start, int64_t length) -> Tensor;
+
 /** @} */ // end of tensor_indexing group
 
 } // namespace tenzor

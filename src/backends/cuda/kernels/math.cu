@@ -67,14 +67,24 @@ __device__ __host__ inline BFloat16 from_cuda_bfloat16(const __nv_bfloat16& x) {
 // Kernel Launch Helpers
 // ============================================================================
 
-// Delegates to compute_grid_size() from cuda_launch_utils.cuh to avoid
-// duplicating the block-size logic. For per-kernel occupancy-optimized
-// launches use optimal_launch_config() or the LAUNCH_KERNEL macro instead.
+// Uses cudaOccupancyMaxPotentialBlockSize via a representative kernel
+// (fill_kernel_device<float>) to determine an architecture-optimal block
+// size instead of the previous hardcoded 256.  All 1-D grid-stride loop
+// kernels in this file have similar register usage, so using a single
+// representative kernel for the occupancy query is safe and avoids per-
+// call-site changes.
+//
+// The forward declaration of fill_kernel_device<float> lives below (~line
+// 2350); because this is an inline function used only in host code, the
+// linker resolves the symbol just fine.
+template<typename T>
+__global__ void fill_kernel_device(T* output, T value, int64_t n);
+
 inline void compute_launch_config_1d(int64_t n, dim3& grid, dim3& block) {
-    constexpr int block_size = 256;
-    block = dim3(block_size, 1, 1);
-    int num_blocks = compute_grid_size(n, block_size);
-    grid = dim3(static_cast<unsigned int>(num_blocks), 1, 1);
+    auto [num_blocks, block_size] = optimal_launch_config(
+        fill_kernel_device<float>, n);
+    block = dim3(static_cast<unsigned int>(block_size), 1, 1);
+    grid  = dim3(static_cast<unsigned int>(num_blocks), 1, 1);
 }
 
 // Grid-stride loop pattern for better scalability
@@ -82,6 +92,15 @@ inline void compute_launch_config_1d(int64_t n, dim3& grid, dim3& block) {
     for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; \
          i < (n); \
          i += blockDim.x * gridDim.x)
+
+// Convenience: compute occupancy-based grid/block from a kernel pointer
+// and element count, storing into the provided dim3 variables.
+#define OCCUPANCY_CONFIG(kernel_ptr, numel, grid_var, block_var) \
+    do { \
+        auto [_nb, _bs] = optimal_launch_config((kernel_ptr), (numel)); \
+        (grid_var)  = dim3(static_cast<unsigned int>(_nb)); \
+        (block_var) = dim3(static_cast<unsigned int>(_bs)); \
+    } while (0)
 
 // ============================================================================
 // Division by Zero Check (for integer types)
@@ -329,21 +348,44 @@ __global__ void broadcast_kernel(
     }
 }
 
-// Device-side operation functors
+// Forward declarations - defined below
+__device__ __forceinline__ __half float2half_sat(float x);
+__device__ __forceinline__ __nv_bfloat16 float2bfloat16_sat(float x);
+
+// Device-side operation functors with FP16/BF16 saturating specializations
+// FP16/BF16 ops promote to float32 and saturate back, matching the fast-path kernels
 struct AddOp {
     template<typename T>
     __device__ T operator()(T a, T b) const { return a + b; }
 };
+template<> __device__ inline __half AddOp::operator()(const __half a, const __half b) const {
+    return float2half_sat(__half2float(a) + __half2float(b));
+}
+template<> __device__ inline __nv_bfloat16 AddOp::operator()(const __nv_bfloat16 a, const __nv_bfloat16 b) const {
+    return float2bfloat16_sat(__bfloat162float(a) + __bfloat162float(b));
+}
 
 struct SubOp {
     template<typename T>
     __device__ T operator()(T a, T b) const { return a - b; }
 };
+template<> __device__ inline __half SubOp::operator()(const __half a, const __half b) const {
+    return float2half_sat(__half2float(a) - __half2float(b));
+}
+template<> __device__ inline __nv_bfloat16 SubOp::operator()(const __nv_bfloat16 a, const __nv_bfloat16 b) const {
+    return float2bfloat16_sat(__bfloat162float(a) - __bfloat162float(b));
+}
 
 struct MulOp {
     template<typename T>
     __device__ T operator()(T a, T b) const { return a * b; }
 };
+template<> __device__ inline __half MulOp::operator()(const __half a, const __half b) const {
+    return float2half_sat(__half2float(a) * __half2float(b));
+}
+template<> __device__ inline __nv_bfloat16 MulOp::operator()(const __nv_bfloat16 a, const __nv_bfloat16 b) const {
+    return float2bfloat16_sat(__bfloat162float(a) * __bfloat162float(b));
+}
 
 struct DivOp {
     template<typename T>
@@ -354,6 +396,16 @@ struct DivOp {
         return a / b;
     }
 };
+template<> __device__ inline __half DivOp::operator()(const __half a, const __half b) const {
+    float fb = __half2float(b);
+    if (fb == 0.0f) return __float2half(INFINITY);
+    return float2half_sat(__half2float(a) / fb);
+}
+template<> __device__ inline __nv_bfloat16 DivOp::operator()(const __nv_bfloat16 a, const __nv_bfloat16 b) const {
+    float fb = __bfloat162float(b);
+    if (fb == 0.0f) return __float2bfloat16(INFINITY);
+    return float2bfloat16_sat(__bfloat162float(a) / fb);
+}
 
 // Generic in-place broadcast kernel - works for all in-place binary operations
 // Reads from a (target) and b (other), writes result back to a
@@ -414,10 +466,20 @@ __global__ void div_kernel_device(const T* a, const T* b, T* c, int64_t n) {
 // Saturating Float32 → Float16 conversion: clamps to max finite Float16 value
 // instead of producing Inf. This matches CPU Float16 operator behavior where
 // per-element clamping naturally limits value growth through deep networks.
-__device__ __forceinline__ __half __float2half_sat(float x) {
+__device__ __forceinline__ __half float2half_sat(float x) {
     constexpr float kHalfMax = 65504.0f;
     x = fminf(fmaxf(x, -kHalfMax), kHalfMax);
     return __float2half(x);
+}
+
+// Saturating Float32 -> BFloat16 conversion: clamps to max finite BFloat16
+// value (~3.39e38) instead of producing Inf.  BFloat16 has the same exponent
+// range as Float32 so overflow is rare, but accumulation across deep nets or
+// large reductions can exceed the finite range.
+__device__ __forceinline__ __nv_bfloat16 float2bfloat16_sat(float x) {
+    constexpr float kBF16Max = 3.3895313892515355e+38f;  // 0x7F7F in BF16
+    x = fminf(fmaxf(x, -kBF16Max), kBF16Max);
+    return __float2bfloat16(x);
 }
 
 // ============================================================================
@@ -427,60 +489,65 @@ __device__ __forceinline__ __half __float2half_sat(float x) {
 // FP16 addition kernel (compute in Float32, saturating conversion)
 __global__ void add_kernel_f16(const __half* a, const __half* b, __half* c, int64_t n) {
     CUDA_KERNEL_LOOP(idx, n) {
-        c[idx] = __float2half_sat(__half2float(a[idx]) + __half2float(b[idx]));
+        c[idx] = float2half_sat(__half2float(a[idx]) + __half2float(b[idx]));
     }
 }
 
 // FP16 subtraction kernel (compute in Float32, saturating conversion)
 __global__ void sub_kernel_f16(const __half* a, const __half* b, __half* c, int64_t n) {
     CUDA_KERNEL_LOOP(idx, n) {
-        c[idx] = __float2half_sat(__half2float(a[idx]) - __half2float(b[idx]));
+        c[idx] = float2half_sat(__half2float(a[idx]) - __half2float(b[idx]));
     }
 }
 
 // FP16 multiplication kernel (compute in Float32, saturating conversion)
 __global__ void mul_kernel_f16(const __half* a, const __half* b, __half* c, int64_t n) {
     CUDA_KERNEL_LOOP(idx, n) {
-        c[idx] = __float2half_sat(__half2float(a[idx]) * __half2float(b[idx]));
+        c[idx] = float2half_sat(__half2float(a[idx]) * __half2float(b[idx]));
     }
 }
 
 // FP16 division kernel (compute in Float32, saturating conversion)
 __global__ void div_kernel_f16(const __half* a, const __half* b, __half* c, int64_t n) {
     CUDA_KERNEL_LOOP(idx, n) {
-        c[idx] = __float2half_sat(__half2float(a[idx]) / __half2float(b[idx]));
+        c[idx] = float2half_sat(__half2float(a[idx]) / __half2float(b[idx]));
     }
 }
 
 // ============================================================================
-// BFloat16 Binary Operations
+// BFloat16 Binary Operations (compute in Float32, saturating conversion)
 // ============================================================================
 
 // BFloat16 addition kernel
 __global__ void add_kernel_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b, __nv_bfloat16* c, int64_t n) {
     CUDA_KERNEL_LOOP(idx, n) {
-        c[idx] = __hadd(a[idx], b[idx]);
+        c[idx] = float2bfloat16_sat(__bfloat162float(a[idx]) + __bfloat162float(b[idx]));
     }
 }
 
 // BFloat16 subtraction kernel
 __global__ void sub_kernel_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b, __nv_bfloat16* c, int64_t n) {
     CUDA_KERNEL_LOOP(idx, n) {
-        c[idx] = __hsub(a[idx], b[idx]);
+        c[idx] = float2bfloat16_sat(__bfloat162float(a[idx]) - __bfloat162float(b[idx]));
     }
 }
 
 // BFloat16 multiplication kernel
 __global__ void mul_kernel_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b, __nv_bfloat16* c, int64_t n) {
     CUDA_KERNEL_LOOP(idx, n) {
-        c[idx] = __hmul(a[idx], b[idx]);
+        c[idx] = float2bfloat16_sat(__bfloat162float(a[idx]) * __bfloat162float(b[idx]));
     }
 }
 
-// BFloat16 division kernel
+// BFloat16 division kernel (with div-by-zero protection, matching FP16 pattern)
 __global__ void div_kernel_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b, __nv_bfloat16* c, int64_t n) {
     CUDA_KERNEL_LOOP(idx, n) {
-        c[idx] = __hdiv(a[idx], b[idx]);
+        float fb = __bfloat162float(b[idx]);
+        if (fb == 0.0f) {
+            c[idx] = __float2bfloat16(INFINITY);
+        } else {
+            c[idx] = float2bfloat16_sat(__bfloat162float(a[idx]) / fb);
+        }
     }
 }
 

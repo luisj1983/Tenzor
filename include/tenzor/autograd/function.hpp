@@ -221,6 +221,7 @@ public:
 
 protected:
     mutable std::vector<Tensor> saved_tensors_;                     ///< Tensors saved for backward
+    mutable std::vector<uint64_t> saved_versions_;                  ///< Tensor versions at save time (for in-place detection)
     mutable std::vector<Variable> saved_variables_;                 ///< Variables saved for backward (preserves graph for create_graph)
     mutable Device offloaded_device_{Device::cpu()};                ///< Original device when offloaded
     mutable bool tensors_offloaded_{false};                         ///< Whether saved tensors are on CPU due to offloading

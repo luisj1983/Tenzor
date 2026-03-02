@@ -150,6 +150,12 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
         return;
     }
 
+    // Save and clear grad_accumulators_ for re-entrancy safety.
+    // Nested backward calls (from checkpointing) must use independent
+    // accumulator maps to avoid corrupting the outer call's state.
+    auto saved_accumulators = std::move(grad_accumulators_);
+    grad_accumulators_.clear();
+
     // Topological sort from root
     // Use a local variable (not the instance cache) to be re-entrant safe.
     // Nested backward calls (e.g. from gradient checkpointing) invoke
@@ -337,11 +343,14 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
     } catch (...) {
         clear_gradients();
         cleanup_graph();
+        grad_accumulators_ = std::move(saved_accumulators);
         throw;
     }
 
     clear_gradients();
     cleanup_graph();
+    // Restore outer accumulators for re-entrancy safety
+    grad_accumulators_ = std::move(saved_accumulators);
 }
 
 auto BackwardEngine::topological_sort(std::shared_ptr<Function> root)
@@ -435,34 +444,50 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
         roots[i]->grad() = gradients[i];
     }
 
-    // Build combined topological sort from all roots
+    // Build combined topological sort from all roots using iterative DFS
+    // (iterative to avoid stack overflow on deep computation graphs)
     std::vector<std::shared_ptr<Function>> sorted;
     std::unordered_set<Function*> visited;
-    std::unordered_set<Function*> recursion_stack;
+    std::unordered_set<Function*> on_stack;
 
-    std::function<void(std::shared_ptr<Function>)> dfs;
-    dfs = [&](std::shared_ptr<Function> node) {
-        if (!node) return;
-        if (recursion_stack.count(node.get())) {
-            throw AutogradException("Cycle detected in computation graph");
-        }
-        if (visited.count(node.get())) {
-            return;
-        }
-        visited.insert(node.get());
-        recursion_stack.insert(node.get());
-        for (const auto& next_func : node->next_functions()) {
-            if (next_func) {
-                dfs(next_func);
-            }
-        }
-        recursion_stack.erase(node.get());
-        sorted.push_back(node);
+    struct DFSFrame {
+        std::shared_ptr<Function> node;
+        size_t child_idx;
     };
+    std::vector<DFSFrame> stack;
 
     for (auto* root : roots) {
-        if (root && root->grad_fn()) {
-            dfs(root->grad_fn());
+        if (!root || !root->grad_fn()) continue;
+        auto root_fn = root->grad_fn();
+        if (visited.count(root_fn.get())) continue;
+
+        stack.push_back({root_fn, 0});
+        visited.insert(root_fn.get());
+        on_stack.insert(root_fn.get());
+
+        while (!stack.empty()) {
+            auto& frame = stack.back();
+            const auto& children = frame.node->next_functions();
+
+            if (frame.child_idx < children.size()) {
+                auto& child = children[frame.child_idx];
+                frame.child_idx++;
+
+                if (!child) continue;
+                if (on_stack.count(child.get())) {
+                    throw AutogradException("Cycle detected in computation graph");
+                }
+                if (visited.count(child.get())) continue;
+
+                visited.insert(child.get());
+                on_stack.insert(child.get());
+                stack.push_back({child, 0});
+            } else {
+                // All children processed — post-order visit
+                on_stack.erase(frame.node.get());
+                sorted.push_back(frame.node);
+                stack.pop_back();
+            }
         }
     }
 

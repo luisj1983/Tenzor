@@ -86,6 +86,49 @@ public:
     }
 };
 
+// Backward function for LeakyReLU
+class LeakyReLUBackward : public Function {
+public:
+    LeakyReLUBackward(double negative_slope) : negative_slope_(negative_slope) {}
+
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+        throw std::runtime_error("LeakyReLUBackward::forward should not be called");
+    }
+
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        auto& grad_output = grad_outputs[0];
+        const auto& input = saved_tensors()[0];
+
+        // d(LeakyReLU)/dx = 1 if x > 0, negative_slope otherwise
+        auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+        auto zero = zeros(shape_vec, input.dtype(), input.device());
+        auto one_tensor = ones(shape_vec, input.dtype(), input.device());
+        auto slope_tensor = full(shape_vec, static_cast<float>(negative_slope_),
+                                 input.dtype(), input.device());
+
+        auto condition = gt(input, zero);
+        auto grad_leaky_relu = where(condition, one_tensor, slope_tensor);
+
+        return {grad_output * grad_leaky_relu};
+    }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        const auto& input = saved_tensors()[0];
+        auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+        auto zero = zeros(shape_vec, input.dtype(), input.device());
+        auto one_tensor = ones(shape_vec, input.dtype(), input.device());
+        auto slope_tensor = full(shape_vec, static_cast<float>(negative_slope_),
+                                 input.dtype(), input.device());
+        auto condition = gt(input, zero);
+        auto mask = where(condition, one_tensor, slope_tensor);
+        Variable mask_var(mask, false);
+        return {grad_outputs[0] * mask_var};
+    }
+
+private:
+    double negative_slope_;
+};
+
 // Backward function for GELU
 class GeLUBackward : public Function {
 public:
@@ -380,7 +423,28 @@ auto leaky_relu(const Variable& input, double negative_slope) -> Variable {
     attrs.set(AttrKey::Alpha, static_cast<double>(negative_slope));
     std::vector<Tensor> inputs = {input.tensor()};
     auto result = dispatch(OpId::LeakyReLU, inputs, attrs)[0];
-    return Variable(result, input.requires_grad());
+
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+
+    // Set up autograd
+    auto grad_fn = std::make_shared<LeakyReLUBackward>(negative_slope);
+    grad_fn->save_for_backward({input.tensor()});
+
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    if (input.grad_fn()) {
+        next_funcs.push_back(input.grad_fn());
+    }
+    grad_fn->set_next_functions(next_funcs);
+
+    std::vector<Variable> input_vars;
+    input_vars.push_back(input);
+    grad_fn->set_input_variables(input_vars);
+
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
 }
 
 auto gelu(const Variable& input, const std::string& approximate) -> Variable {
@@ -419,8 +483,8 @@ auto gelu(const Variable& input, const std::string& approximate) -> Variable {
 
     // Set up autograd
     auto grad_fn = std::make_shared<GeLUBackward>();
-    // Save BOTH input and output
-    grad_fn->save_for_backward({input.tensor(), result_tensor});
+    // Only save input — backward dispatches to GeluBackward kernel which only needs input
+    grad_fn->save_for_backward({input.tensor()});
 
     std::vector<std::shared_ptr<Function>> next_funcs;
     if (input.grad_fn()) {
@@ -663,6 +727,100 @@ auto gelu_(Tensor& input) -> Tensor& {
     return input;
 }
 
+// Backward function for Hardswish
+// Hardswish(x) = x * clamp(x + 3, 0, 6) / 6
+// d(Hardswish)/dx = 0 if x <= -3, (2x + 3) / 6 if -3 < x < 3, 1 if x >= 3
+class HardswishBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+        throw std::runtime_error("HardswishBackward::forward should not be called");
+    }
+
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        auto& grad_output = grad_outputs[0];
+        const auto& input = saved_tensors()[0];
+
+        auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+        auto zero = zeros(shape_vec, input.dtype(), input.device());
+        auto one_tensor = ones(shape_vec, input.dtype(), input.device());
+        auto neg3 = full(shape_vec, -3.0f, input.dtype(), input.device());
+        auto pos3 = full(shape_vec, 3.0f, input.dtype(), input.device());
+
+        // Middle region gradient: (2x + 3) / 6
+        auto middle_grad = (input * 2.0f + 3.0f) / 6.0f;
+
+        // Piecewise: 0 for x <= -3, (2x+3)/6 for -3 < x < 3, 1 for x >= 3
+        auto cond_low = gt(input, neg3);   // x > -3
+        auto cond_high = gt(input, pos3);  // x > 3 (actually x >= 3 but close enough)
+
+        // First select middle vs 0, then override with 1 for high region
+        auto grad_hs = where(cond_low, middle_grad, zero);
+        grad_hs = where(cond_high, one_tensor, grad_hs);
+
+        return {grad_output * grad_hs};
+    }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        const auto& input = saved_tensors()[0];
+        auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+        auto zero = zeros(shape_vec, input.dtype(), input.device());
+        auto one_tensor = ones(shape_vec, input.dtype(), input.device());
+        auto neg3 = full(shape_vec, -3.0f, input.dtype(), input.device());
+        auto pos3 = full(shape_vec, 3.0f, input.dtype(), input.device());
+        auto middle_grad = (input * 2.0f + 3.0f) / 6.0f;
+        auto cond_low = gt(input, neg3);
+        auto cond_high = gt(input, pos3);
+        auto grad_hs = where(cond_low, middle_grad, zero);
+        grad_hs = where(cond_high, one_tensor, grad_hs);
+        Variable mask_var(grad_hs, false);
+        return {grad_outputs[0] * mask_var};
+    }
+};
+
+// Backward function for Hardsigmoid
+// Hardsigmoid(x) = clamp(x + 3, 0, 6) / 6
+// d(Hardsigmoid)/dx = 0 if x <= -3, 1/6 if -3 < x < 3, 0 if x >= 3
+class HardsigmoidBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+        throw std::runtime_error("HardsigmoidBackward::forward should not be called");
+    }
+
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        auto& grad_output = grad_outputs[0];
+        const auto& input = saved_tensors()[0];
+
+        auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+        auto zero = zeros(shape_vec, input.dtype(), input.device());
+        auto sixth = full(shape_vec, 1.0f / 6.0f, input.dtype(), input.device());
+        auto neg3 = full(shape_vec, -3.0f, input.dtype(), input.device());
+        auto pos3 = full(shape_vec, 3.0f, input.dtype(), input.device());
+
+        // 1/6 when -3 < x < 3, 0 otherwise
+        auto cond_low = gt(input, neg3);
+        auto cond_high = gt(input, pos3);
+        auto grad_hs = where(cond_low, sixth, zero);
+        grad_hs = where(cond_high, zero, grad_hs);
+
+        return {grad_output * grad_hs};
+    }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        const auto& input = saved_tensors()[0];
+        auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+        auto zero = zeros(shape_vec, input.dtype(), input.device());
+        auto sixth = full(shape_vec, 1.0f / 6.0f, input.dtype(), input.device());
+        auto neg3 = full(shape_vec, -3.0f, input.dtype(), input.device());
+        auto pos3 = full(shape_vec, 3.0f, input.dtype(), input.device());
+        auto cond_low = gt(input, neg3);
+        auto cond_high = gt(input, pos3);
+        auto grad_hs = where(cond_low, sixth, zero);
+        grad_hs = where(cond_high, zero, grad_hs);
+        Variable mask_var(grad_hs, false);
+        return {grad_outputs[0] * mask_var};
+    }
+};
+
 // PReLU implementation
 PReLU::PReLU(int64_t num_parameters, double init)
     : num_parameters_(num_parameters) {
@@ -683,40 +841,70 @@ auto PReLU::forward_impl(const Variable& input) -> Variable {
 }
 
 auto Hardswish::forward_impl(const Variable& input) -> Variable {
-    // Hardswish(x) = x * clamp(x + 3, 0, 6) / 6
-    // Using tensor-level clamp since Variable doesn't have one
-    auto x_plus_3 = input + 3.0f;
-    auto clamped = Variable(
-        tenzor::clamp(x_plus_3.tensor(), 0.0f, 6.0f),
-        input.requires_grad());
-    return input * clamped / 6.0f;
+    return hardswish(input);
 }
 
 auto Hardsigmoid::forward_impl(const Variable& input) -> Variable {
-    // Hardsigmoid(x) = clamp(x + 3, 0, 6) / 6
-    auto x_plus_3 = input + 3.0f;
-    auto clamped = Variable(
-        tenzor::clamp(x_plus_3.tensor(), 0.0f, 6.0f),
-        input.requires_grad());
-    return clamped / 6.0f;
+    return hardsigmoid(input);
 }
 
 // Functional Hardswish
 auto hardswish(const Variable& input) -> Variable {
-    auto x_plus_3 = input + 3.0f;
-    auto clamped = Variable(
-        tenzor::clamp(x_plus_3.tensor(), 0.0f, 6.0f),
-        input.requires_grad());
-    return input * clamped / 6.0f;
+    // Hardswish(x) = x * clamp(x + 3, 0, 6) / 6
+    // Compute forward at tensor level for efficiency
+    auto x_plus_3_t = input.tensor() + 3.0f;
+    auto clamped_t = tenzor::clamp(x_plus_3_t, 0.0f, 6.0f);
+    auto result_tensor = input.tensor() * clamped_t / 6.0f;
+
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result_tensor, false);
+    }
+
+    auto grad_fn = std::make_shared<HardswishBackward>();
+    grad_fn->save_for_backward({input.tensor()});
+
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    if (input.grad_fn()) {
+        next_funcs.push_back(input.grad_fn());
+    }
+    grad_fn->set_next_functions(next_funcs);
+
+    std::vector<Variable> input_vars;
+    input_vars.push_back(input);
+    grad_fn->set_input_variables(input_vars);
+
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+    return output;
 }
 
 // Functional Hardsigmoid
 auto hardsigmoid(const Variable& input) -> Variable {
-    auto x_plus_3 = input + 3.0f;
-    auto clamped = Variable(
-        tenzor::clamp(x_plus_3.tensor(), 0.0f, 6.0f),
-        input.requires_grad());
-    return clamped / 6.0f;
+    // Hardsigmoid(x) = clamp(x + 3, 0, 6) / 6
+    auto x_plus_3_t = input.tensor() + 3.0f;
+    auto clamped_t = tenzor::clamp(x_plus_3_t, 0.0f, 6.0f);
+    auto result_tensor = clamped_t / 6.0f;
+
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result_tensor, false);
+    }
+
+    auto grad_fn = std::make_shared<HardsigmoidBackward>();
+    grad_fn->save_for_backward({input.tensor()});
+
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    if (input.grad_fn()) {
+        next_funcs.push_back(input.grad_fn());
+    }
+    grad_fn->set_next_functions(next_funcs);
+
+    std::vector<Variable> input_vars;
+    input_vars.push_back(input);
+    grad_fn->set_input_variables(input_vars);
+
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+    return output;
 }
 
 // GLU module

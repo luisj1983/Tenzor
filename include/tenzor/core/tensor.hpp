@@ -232,6 +232,12 @@ public:
      */
     auto requires_grad() const noexcept -> bool;
 
+    /// Get the mutation version counter (incremented on in-place operations)
+    auto version() const noexcept -> uint64_t;
+
+    /// Increment the mutation version counter
+    auto bump_version() -> void;
+
     /**
      * @brief Check if tensor is contiguous in memory.
      *
@@ -311,10 +317,10 @@ public:
      * @brief Move tensor to specified device.
      *
      * Creates a new tensor on the target device with copied data.
-     * If tensor is already on the device, returns a copy.
+     * Returns this tensor (no copy) if already on the target device.
      *
      * @param device Target device
-     * @return New tensor on specified device
+     * @return Tensor on specified device (may be this or new tensor)
      *
      * @code
      * Tensor cpu_t({3, 4}, DType::Float32, Device::cpu());
@@ -636,7 +642,7 @@ public:
      * t.fill_(1.5f);  // All elements = 1.5
      * @endcode
      */
-    auto fill_(float value) -> Tensor&;
+    auto fill_(double value) -> Tensor&;
 
     /**
      * @brief Fill tensor with zeros.
@@ -815,6 +821,122 @@ public:
     auto to(MemoryFormat format) const -> Tensor;
 
     // ============================================================================
+    // Convenience Accessors
+    // ============================================================================
+
+    /**
+     * @brief Get the size of a specific dimension.
+     *
+     * @param dim Dimension index (supports negative indexing)
+     * @return Size of the specified dimension
+     * @throws std::out_of_range if dim is out of bounds
+     *
+     * @code
+     * Tensor t({2, 3, 4}, DType::Float32, Device::cpu());
+     * auto s = t.size(1);   // Returns 3
+     * auto s2 = t.size(-1); // Returns 4
+     * @endcode
+     */
+    auto size(int64_t dim) const -> int64_t {
+        if (dim < 0) dim += ndim();
+        return shape()[dim];
+    }
+
+    /**
+     * @brief Get the stride of a specific dimension.
+     *
+     * @param dim Dimension index (supports negative indexing)
+     * @return Stride of the specified dimension
+     * @throws std::out_of_range if dim is out of bounds
+     *
+     * @code
+     * Tensor t({2, 3, 4}, DType::Float32, Device::cpu());
+     * auto s = t.stride(1);   // Returns 4
+     * auto s2 = t.stride(-1); // Returns 1
+     * @endcode
+     */
+    auto stride(int64_t dim) const -> int64_t {
+        if (dim < 0) dim += ndim();
+        return strides()[dim];
+    }
+
+    /**
+     * @brief Get the number of dimensions (alias for ndim()).
+     *
+     * @return Number of dimensions (rank) of the tensor
+     */
+    auto dim() const -> int64_t { return ndim(); }
+
+    /**
+     * @brief Check if tensor has a floating-point data type.
+     *
+     * @return true for Float16, BFloat16, Float32, Float64
+     */
+    auto is_floating_point() const noexcept -> bool {
+        auto dt = dtype();
+        return dt == DType::Float16 || dt == DType::BFloat16 ||
+               dt == DType::Float32 || dt == DType::Float64;
+    }
+
+    /**
+     * @brief Check if tensor has a complex data type.
+     *
+     * @return true for Complex64, Complex128
+     */
+    auto is_complex() const noexcept -> bool {
+        auto dt = dtype();
+        return dt == DType::Complex64 || dt == DType::Complex128;
+    }
+
+    /**
+     * @brief Check if tensor has a signed data type.
+     *
+     * @return true for all floating-point, complex, and signed integer types
+     */
+    auto is_signed() const noexcept -> bool {
+        auto dt = dtype();
+        return dt != DType::UInt8 && dt != DType::UInt16 &&
+               dt != DType::UInt32 && dt != DType::UInt64 && dt != DType::Bool;
+    }
+
+    /**
+     * @brief Get the size of each element in bytes (alias for dtype_size()).
+     *
+     * @return Number of bytes per element
+     *
+     * @code
+     * Tensor t({3, 4}, DType::Float32, Device::cpu());
+     * size_t bytes = t.element_size();  // Returns 4
+     * @endcode
+     */
+    auto element_size() const noexcept -> size_t { return dtype_size(); }
+
+    /**
+     * @brief Narrow (slice) tensor along a dimension.
+     * @param dim Dimension to narrow
+     * @param start Start index
+     * @param length Number of elements to keep
+     * @return Narrowed tensor view
+     */
+    auto narrow(int64_t dim, int64_t start, int64_t length) const -> Tensor;
+
+    /**
+     * @brief Select a single index along a dimension, removing that dimension.
+     * @param dim Dimension to select from
+     * @param index Index to select
+     * @return Tensor with dim removed
+     */
+    auto select(int64_t dim, int64_t index) const -> Tensor;
+
+    /**
+     * @brief Split tensor into chunks along a dimension.
+     * @param chunks Number of chunks
+     * @param dim Dimension to split along (default: 0)
+     * @return Vector of tensor chunks
+     */
+    auto chunk(int64_t chunks, int64_t dim = 0) const -> std::vector<Tensor>;
+
+    // ============================================================================
     // Utility Methods (Phase 8 additions)
     // ============================================================================
 
@@ -967,7 +1089,8 @@ public:
         , dtype(other.dtype)
         , device(other.device)
         , requires_grad(other.requires_grad)
-        , is_contiguous_cache_(other.is_contiguous_cache_.load(std::memory_order_relaxed)) {}
+        , is_contiguous_cache_(other.is_contiguous_cache_.load(std::memory_order_relaxed))
+        , version_counter_(other.version_counter_.load(std::memory_order_relaxed)) {}
 
     TensorImpl& operator=(const TensorImpl&) = delete;
 
@@ -996,6 +1119,7 @@ private:
     Device device;                       ///< Device location
     bool requires_grad{false};           ///< Gradient computation flag
     mutable std::atomic<int8_t> is_contiguous_cache_{-1};  ///< Cached contiguity: -1=unset, 0=false, 1=true
+    std::atomic<uint64_t> version_counter_{0};  ///< Mutation version for autograd in-place detection
 };
 
 } // namespace tenzor

@@ -349,7 +349,14 @@ public:
             checkVk(allocResult, "Failed to allocate buffer memory");
         }
 
-        vkBindBufferMemory(device, buffer_, memory_, 0);
+        VkResult bindResult = vkBindBufferMemory(device, buffer_, memory_, 0);
+        if (bindResult != VK_SUCCESS) {
+            vkFreeMemory(device, memory_, nullptr);
+            memory_ = VK_NULL_HANDLE;
+            vkDestroyBuffer(device, buffer_, nullptr);
+            buffer_ = VK_NULL_HANDLE;
+            checkVk(bindResult, "Failed to bind buffer memory");
+        }
     }
 
     ~VulkanBuffer() {

@@ -61,6 +61,8 @@ enum class OpId : uint16_t {
     Std,
     Norm,
     ArgSort,
+    Any,     // = 22, Boolean any reduction
+    All,     // = 23, Boolean all reduction
 
     // =========================================================================
     // Element-wise Math (30-49)

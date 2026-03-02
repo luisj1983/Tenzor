@@ -842,7 +842,7 @@ auto cudnn_fused_conv2d_activation_forward(
         bias_ptr = bias->data_ptr();
     } else {
         zero_bias = Tensor({out_channels}, input.dtype(), input.device());
-        cudaMemset(zero_bias.data_ptr(), 0, out_channels * dtype_size(input.dtype()));
+        cudaMemsetAsync(zero_bias.data_ptr(), 0, out_channels * dtype_size(input.dtype()), stream);
         bias_ptr = zero_bias.data_ptr();
     }
 

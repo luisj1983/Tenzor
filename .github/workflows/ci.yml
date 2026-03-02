@@ -250,6 +250,99 @@ jobs:
           ctest -R "cuda|vulkan" -j4 \
             --output-on-failure --timeout 300
 
+  # Tier 1.8: Clang build (catches different warnings/errors than GCC)
+  clang-build:
+    name: Clang-18 Build
+    runs-on: ubuntu-24.04
+    needs: build-and-smoke
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build \
+            libgtest-dev \
+            libomp-dev \
+            libmkl-dev \
+            libtbb-dev \
+            clang-18
+
+      - name: Configure with Clang
+        env:
+          CC: clang-18
+          CXX: clang++-18
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} \
+            -DCMAKE_C_COMPILER=clang-18 \
+            -DCMAKE_CXX_COMPILER=clang++-18 \
+            -DTENZOR_BUILD_CUDA=OFF \
+            -DTENZOR_BUILD_ROCM=OFF \
+            -DTENZOR_BUILD_ONEAPI=OFF \
+            -DTENZOR_BUILD_VULKAN=OFF \
+            -DTENZOR_BUILD_METAL=OFF \
+            -DTENZOR_BUILD_WEBGPU=OFF \
+            -DTENZOR_BUILD_PYTHON=OFF \
+            -DTENZOR_BUILD_TESTS=ON \
+            -DTENZOR_BUILD_BENCHMARKS=OFF \
+            -DTENZOR_BUILD_EXAMPLES=OFF \
+            -DTENZOR_BUILD_MODEL_HUB=OFF
+
+      - name: Build
+        run: ninja -C build
+
+      - name: Run core tests
+        run: |
+          cd build
+          ctest --output-on-failure -j$(nproc) \
+            -R "TensorBasicTest|TensorCreationTest|AutogradTest" \
+            -E "cuda|vulkan|oneapi|rocm" \
+            --timeout 120
+
+  # Tier 1.9: macOS build (CPU-only smoke test)
+  macos-build:
+    name: macOS Build
+    runs-on: macos-14
+    needs: build-and-smoke
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install ninja googletest libomp
+
+      - name: Configure (CPU only)
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} \
+            -DTENZOR_BUILD_CUDA=OFF \
+            -DTENZOR_BUILD_ROCM=OFF \
+            -DTENZOR_BUILD_ONEAPI=OFF \
+            -DTENZOR_BUILD_VULKAN=OFF \
+            -DTENZOR_BUILD_METAL=OFF \
+            -DTENZOR_BUILD_WEBGPU=OFF \
+            -DTENZOR_BUILD_PYTHON=OFF \
+            -DTENZOR_BUILD_TESTS=ON \
+            -DTENZOR_BUILD_BENCHMARKS=OFF \
+            -DTENZOR_BUILD_EXAMPLES=OFF \
+            -DTENZOR_BUILD_MODEL_HUB=OFF \
+            -DTENZOR_NATIVE_ARCH=OFF
+
+      - name: Build
+        run: ninja -C build
+
+      - name: Run smoke tests
+        run: |
+          cd build
+          ctest --output-on-failure -j$(sysctl -n hw.logicalcpu) \
+            -R "TensorBasicTest|TensorCreationTest" \
+            -E "cuda|vulkan|oneapi|rocm" \
+            --timeout 120
+
   # Tier 2: Full CPU tests (every PR, ~30 min)
   full-cpu-tests:
     name: Full CPU Test Suite

@@ -162,7 +162,10 @@ void VulkanBackend::endSingleTimeCommandsAsync(VkCommandBuffer commandBuffer, in
 
     // Get the fence for this submission and reset it
     VkFence fence = ctx.frameFences[targetFrame];
-    vkResetFences(ctx.device, 1, &fence);
+    VkResult resetResult = vkResetFences(ctx.device, 1, &fence);
+    if (resetResult != VK_SUCCESS) {
+        throw std::runtime_error("Failed to reset frame fence: " + std::to_string(resetResult));
+    }
 
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -198,32 +201,22 @@ auto VulkanBackend::synchronize(int32_t device_id) -> void {
         submitBatchIfNeeded(device_id, true);  // Force submit any pending work
     }
 
-    // First ensure any fence-tracked work is complete (legacy pendingFence)
-    ensurePendingWorkComplete(device_id);
-
-    // Wait for all frame fences in the ring buffer
-    if (ctx.submittedFrames > 0) {
-        std::vector<VkFence> fencesToWait;
-        for (size_t i = 0; i < DeviceContext::MAX_FRAMES_IN_FLIGHT; ++i) {
-            if (ctx.frameFences[i] != VK_NULL_HANDLE) {
-                fencesToWait.push_back(ctx.frameFences[i]);
-            }
+    // Wait for all device operations to complete.
+    // vkDeviceWaitIdle is equivalent to waiting on all queue fences and is
+    // simpler than tracking individual frame fences for a full synchronize.
+    VkResult waitResult = vkDeviceWaitIdle(ctx.device);
+    if (waitResult != VK_SUCCESS) {
+        std::string error_msg = "vkDeviceWaitIdle failed: " + std::to_string(waitResult);
+        if (waitResult == VK_ERROR_DEVICE_LOST) {
+            error_msg += " (VK_ERROR_DEVICE_LOST - GPU crash or timeout)";
         }
-        if (!fencesToWait.empty()) {
-            constexpr uint64_t FENCE_TIMEOUT_NS = 30'000'000'000ULL;  // 30 seconds
-            VkResult result = vkWaitForFences(ctx.device, static_cast<uint32_t>(fencesToWait.size()),
-                           fencesToWait.data(), VK_TRUE, FENCE_TIMEOUT_NS);
-            if (result == VK_TIMEOUT) {
-                throw std::runtime_error("GPU sync fence wait timed out after 30 seconds. "
-                    "This often indicates memory pressure or a shader hang.");
-            }
-        }
-        ctx.submittedFrames = 0;
-        ctx.currentFrame = 0;
+        throw std::runtime_error(error_msg);
     }
 
-    // Then wait for all device operations (belt and suspenders)
-    vkDeviceWaitIdle(ctx.device);
+    // Reset fence tracking state — all work is now complete
+    ctx.submittedFrames = 0;
+    ctx.currentFrame = 0;
+    ctx.hasPendingWork = false;
 
     // Reset command pool and pool index
     vkResetCommandPool(ctx.device, ctx.commandPool, 0);
@@ -321,7 +314,10 @@ void VulkanBackend::submitBatchIfNeeded(int32_t device_id, bool force) {
     VkFence fence = ctx.frameFences[ctx.currentFrame];
 
     // Reset fence before use
-    vkResetFences(ctx.device, 1, &fence);
+    VkResult resetResult = vkResetFences(ctx.device, 1, &fence);
+    if (resetResult != VK_SUCCESS) {
+        throw std::runtime_error("Failed to reset batch fence: " + std::to_string(resetResult));
+    }
 
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;

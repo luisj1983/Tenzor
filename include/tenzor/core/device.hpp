@@ -204,7 +204,7 @@ struct Device {
 template<>
 struct std::hash<tenzor::Device> {
     auto operator()(const tenzor::Device& device) const -> size_t {
-        return std::hash<uint8_t>{}(static_cast<uint8_t>(device.type)) ^
-               (std::hash<int32_t>{}(device.index) << 1);
+        return std::hash<uint8_t>{}(static_cast<uint8_t>(device.type)) * 31 +
+               std::hash<int32_t>{}(device.index);
     }
 };

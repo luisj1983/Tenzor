@@ -45,6 +45,8 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::Std)] = "std";
     names[static_cast<size_t>(OpId::Norm)] = "norm";
     names[static_cast<size_t>(OpId::ArgSort)] = "argsort";
+    names[static_cast<size_t>(OpId::Any)] = "any";
+    names[static_cast<size_t>(OpId::All)] = "all";
 
     // Element-wise math
     names[static_cast<size_t>(OpId::Sqrt)] = "sqrt";
@@ -364,7 +366,7 @@ constexpr size_t count_named_ops() {
 
 // Count of actual OpId enum values (excluding gap slots).
 // Update this when adding new OpIds to catch missing name entries at compile time.
-inline constexpr size_t EXPECTED_NAMED_OPS = 268;
+inline constexpr size_t EXPECTED_NAMED_OPS = 270;
 
 // If this fires, a new OpId was added without a corresponding name in op_names above
 static_assert(count_named_ops() == EXPECTED_NAMED_OPS,

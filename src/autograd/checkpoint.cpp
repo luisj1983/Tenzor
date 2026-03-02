@@ -119,6 +119,11 @@ auto CheckpointFunction::backward(std::vector<Tensor> grad_outputs) -> std::vect
     stats.total_recompute_time_ms += duration.count() / 1000.0;
     recompute_count_++;
 
+    // Invalidate cached recomputation outputs after backward to avoid stale data
+    // if backward is called again (e.g., with retain_graph=true)
+    has_cached_outputs_ = false;
+    cached_recompute_outputs_.clear();
+
     return input_grads;
 }
 

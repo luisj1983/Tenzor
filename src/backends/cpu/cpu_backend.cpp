@@ -63,6 +63,8 @@ namespace cpu {
     auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction) -> Tensor;
     auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction) -> Tensor;
     auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Tensor;
+    auto any_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
+    auto all_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
 
     // Comparison operations
     auto eq_kernel(const Tensor& a, const Tensor& b) -> Tensor;

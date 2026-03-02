@@ -153,13 +153,15 @@ TransformerEncoderLayer::TransformerEncoderLayer(int64_t d_model,
                                                  int64_t dim_feedforward,
                                                  double dropout,
                                                  const std::string& activation,
-                                                 bool batch_first)
+                                                 bool batch_first,
+                                                 bool norm_first)
     : d_model_(d_model),
       nhead_(nhead),
       dim_feedforward_(dim_feedforward),
       dropout_(dropout),
       activation_(activation),
-      batch_first_(batch_first) {
+      batch_first_(batch_first),
+      norm_first_(norm_first) {
 
     // Validate activation
     if (activation_ != "relu" && activation_ != "gelu") {
@@ -208,25 +210,53 @@ auto TransformerEncoderLayer::forward(const Variable& src,
     // NOTE: This is necessary because this multi-argument forward bypasses Module::forward()
     call_forward_pre_hooks();
 
-    // Self-attention block
-    auto [attn_output, _] = self_attn_->forward(src, src, src,
-                                                 src_key_padding_mask,
-                                                 src_mask,
-                                                 false);
+    Variable output;
 
-    // Dropout + residual + norm (use unique variable names to avoid overwriting)
-    Variable residual1 = src + dropout1_->forward(attn_output);
-    Variable x_norm1 = norm1_->forward(residual1);
+    if (norm_first_) {
+        // Pre-LN: x = x + Dropout(SelfAttn(Norm1(x)))
+        //         x = x + Dropout(FFN(Norm2(x)))
+        // This ordering improves training stability for deep transformers.
 
-    // Feed-forward block
-    Variable ff1 = linear1_->forward(x_norm1);
-    Variable ff_act = apply_activation(ff1);
-    Variable ff_drop = dropout2_->forward(ff_act);
-    Variable ff_output = linear2_->forward(ff_drop);
+        // Self-attention with pre-normalization
+        Variable x_normed = norm1_->forward(src);
+        auto [attn_output, _] = self_attn_->forward(x_normed, x_normed, x_normed,
+                                                     src_key_padding_mask,
+                                                     src_mask,
+                                                     false);
+        Variable x = src + dropout1_->forward(attn_output);
 
-    // Dropout + residual + norm (use unique variable names)
-    Variable residual2 = x_norm1 + dropout3_->forward(ff_output);
-    Variable output = norm2_->forward(residual2);
+        // Feed-forward with pre-normalization
+        Variable x_normed2 = norm2_->forward(x);
+        Variable ff1 = linear1_->forward(x_normed2);
+        Variable ff_act = apply_activation(ff1);
+        Variable ff_drop = dropout2_->forward(ff_act);
+        Variable ff_output = linear2_->forward(ff_drop);
+        output = x + dropout3_->forward(ff_output);
+    } else {
+        // Post-LN (original "Attention Is All You Need"):
+        // x = Norm1(x + Dropout(SelfAttn(x)))
+        // x = Norm2(x + Dropout(FFN(x)))
+
+        // Self-attention block
+        auto [attn_output, _] = self_attn_->forward(src, src, src,
+                                                     src_key_padding_mask,
+                                                     src_mask,
+                                                     false);
+
+        // Dropout + residual + norm
+        Variable residual1 = src + dropout1_->forward(attn_output);
+        Variable x_norm1 = norm1_->forward(residual1);
+
+        // Feed-forward block
+        Variable ff1 = linear1_->forward(x_norm1);
+        Variable ff_act = apply_activation(ff1);
+        Variable ff_drop = dropout2_->forward(ff_act);
+        Variable ff_output = linear2_->forward(ff_drop);
+
+        // Dropout + residual + norm
+        Variable residual2 = x_norm1 + dropout3_->forward(ff_output);
+        output = norm2_->forward(residual2);
+    }
 
     // Call forward post-hooks (enables CPU-start offloading)
     call_forward_post_hooks();
@@ -260,7 +290,8 @@ TransformerEncoder::TransformerEncoder(
             encoder_layer->dim_feedforward_,
             encoder_layer->dropout_,
             encoder_layer->activation_,
-            encoder_layer->batch_first_
+            encoder_layer->batch_first_,
+            encoder_layer->norm_first_
         );
         layers_.push_back(layer_copy);
         register_module("layer_" + std::to_string(i), layer_copy);
@@ -312,13 +343,15 @@ TransformerDecoderLayer::TransformerDecoderLayer(int64_t d_model,
                                                  int64_t dim_feedforward,
                                                  double dropout,
                                                  const std::string& activation,
-                                                 bool batch_first)
+                                                 bool batch_first,
+                                                 bool norm_first)
     : d_model_(d_model),
       nhead_(nhead),
       dim_feedforward_(dim_feedforward),
       dropout_(dropout),
       activation_(activation),
-      batch_first_(batch_first) {
+      batch_first_(batch_first),
+      norm_first_(norm_first) {
 
     // Validate activation
     if (activation_ != "relu" && activation_ != "gelu") {
@@ -374,35 +407,79 @@ auto TransformerDecoderLayer::forward(const Variable& tgt,
                                      const Tensor& memory_mask,
                                      const Tensor& tgt_key_padding_mask,
                                      const Tensor& memory_key_padding_mask) -> Variable {
-    // Masked self-attention block
-    auto [self_attn_output, _] = self_attn_->forward(tgt, tgt, tgt,
-                                                      tgt_key_padding_mask,
-                                                      tgt_mask,
-                                                      false);
+    // Call forward pre-hooks (for offloading, profiling, etc.)
+    call_forward_pre_hooks();
 
-    // Dropout + residual + norm (use unique variable names)
-    Variable residual1 = tgt + dropout1_->forward(self_attn_output);
-    Variable x_norm1 = norm1_->forward(residual1);
+    Variable output;
 
-    // Cross-attention block (attend to encoder memory)
-    auto [cross_attn_output, __] = multihead_attn_->forward(x_norm1, memory, memory,
-                                                             memory_key_padding_mask,
-                                                             memory_mask,
-                                                             false);
+    if (norm_first_) {
+        // Pre-LN: normalize before each sub-layer, residual around the sub-layer.
+        // x = x + Dropout(SelfAttn(Norm1(x)))
+        // x = x + Dropout(CrossAttn(Norm2(x), memory))
+        // x = x + Dropout(FFN(Norm3(x)))
 
-    // Dropout + residual + norm (use unique variable names)
-    Variable residual2 = x_norm1 + dropout2_->forward(cross_attn_output);
-    Variable x_norm2 = norm2_->forward(residual2);
+        // Masked self-attention with pre-normalization
+        Variable tgt_normed = norm1_->forward(tgt);
+        auto [self_attn_output, _] = self_attn_->forward(tgt_normed, tgt_normed, tgt_normed,
+                                                          tgt_key_padding_mask,
+                                                          tgt_mask,
+                                                          false);
+        Variable x = tgt + dropout1_->forward(self_attn_output);
 
-    // Feed-forward block
-    Variable ff1 = linear1_->forward(x_norm2);
-    Variable ff_act = apply_activation(ff1);
-    Variable ff_drop = dropout3_->forward(ff_act);
-    Variable ff_output = linear2_->forward(ff_drop);
+        // Cross-attention with pre-normalization
+        Variable x_normed2 = norm2_->forward(x);
+        auto [cross_attn_output, __] = multihead_attn_->forward(x_normed2, memory, memory,
+                                                                  memory_key_padding_mask,
+                                                                  memory_mask,
+                                                                  false);
+        x = x + dropout2_->forward(cross_attn_output);
 
-    // Dropout + residual + norm (use unique variable names)
-    Variable residual3 = x_norm2 + dropout4_->forward(ff_output);
-    Variable output = norm3_->forward(residual3);
+        // Feed-forward with pre-normalization
+        Variable x_normed3 = norm3_->forward(x);
+        Variable ff1 = linear1_->forward(x_normed3);
+        Variable ff_act = apply_activation(ff1);
+        Variable ff_drop = dropout3_->forward(ff_act);
+        Variable ff_output = linear2_->forward(ff_drop);
+        output = x + dropout4_->forward(ff_output);
+    } else {
+        // Post-LN (original "Attention Is All You Need"):
+        // x = Norm1(x + Dropout(SelfAttn(x)))
+        // x = Norm2(x + Dropout(CrossAttn(x, memory)))
+        // x = Norm3(x + Dropout(FFN(x)))
+
+        // Masked self-attention block
+        auto [self_attn_output, _] = self_attn_->forward(tgt, tgt, tgt,
+                                                          tgt_key_padding_mask,
+                                                          tgt_mask,
+                                                          false);
+
+        // Dropout + residual + norm
+        Variable residual1 = tgt + dropout1_->forward(self_attn_output);
+        Variable x_norm1 = norm1_->forward(residual1);
+
+        // Cross-attention block (attend to encoder memory)
+        auto [cross_attn_output, __] = multihead_attn_->forward(x_norm1, memory, memory,
+                                                                  memory_key_padding_mask,
+                                                                  memory_mask,
+                                                                  false);
+
+        // Dropout + residual + norm
+        Variable residual2 = x_norm1 + dropout2_->forward(cross_attn_output);
+        Variable x_norm2 = norm2_->forward(residual2);
+
+        // Feed-forward block
+        Variable ff1 = linear1_->forward(x_norm2);
+        Variable ff_act = apply_activation(ff1);
+        Variable ff_drop = dropout3_->forward(ff_act);
+        Variable ff_output = linear2_->forward(ff_drop);
+
+        // Dropout + residual + norm
+        Variable residual3 = x_norm2 + dropout4_->forward(ff_output);
+        output = norm3_->forward(residual3);
+    }
+
+    // Call forward post-hooks
+    call_forward_post_hooks();
 
     return output;
 }
@@ -433,7 +510,8 @@ TransformerDecoder::TransformerDecoder(
             decoder_layer->dim_feedforward_,
             decoder_layer->dropout_,
             decoder_layer->activation_,
-            decoder_layer->batch_first_
+            decoder_layer->batch_first_,
+            decoder_layer->norm_first_
         );
         layers_.push_back(layer_copy);
         register_module("layer_" + std::to_string(i), layer_copy);
@@ -485,11 +563,12 @@ Transformer::Transformer(int64_t d_model,
                         int64_t dim_feedforward,
                         double dropout,
                         const std::string& activation,
-                        bool batch_first) {
+                        bool batch_first,
+                        bool norm_first) {
 
     // Create encoder
     auto encoder_layer = std::make_shared<TransformerEncoderLayer>(
-        d_model, nhead, dim_feedforward, dropout, activation, batch_first);
+        d_model, nhead, dim_feedforward, dropout, activation, batch_first, norm_first);
 
     auto encoder_norm = std::make_shared<LayerNorm>(std::vector<int64_t>{d_model});
 
@@ -498,7 +577,7 @@ Transformer::Transformer(int64_t d_model,
 
     // Create decoder
     auto decoder_layer = std::make_shared<TransformerDecoderLayer>(
-        d_model, nhead, dim_feedforward, dropout, activation, batch_first);
+        d_model, nhead, dim_feedforward, dropout, activation, batch_first, norm_first);
 
     auto decoder_norm = std::make_shared<LayerNorm>(std::vector<int64_t>{d_model});
 

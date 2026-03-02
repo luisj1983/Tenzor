@@ -138,11 +138,13 @@ static void batchnorm_mean_var_simd_f32(
     int64_t total_elements = N * spatial_size;
     float inv_total = 1.0f / static_cast<float>(total_elements);
 
-    // Use fewer threads to avoid OpenMP overhead
+    // Cap threads: each thread should have enough work to amortize overhead.
+    // Minimum work-per-thread threshold: at least 4 channels per thread.
+    constexpr int MIN_CHANNELS_PER_THREAD = 4;
 #ifdef _OPENMP
     int nthreads = omp_get_max_threads();
-    int effective_threads = std::min({nthreads, static_cast<int>(C), 4});
-    int final_threads = std::max(1, effective_threads);
+    int max_useful_threads = std::max(1, static_cast<int>(C / MIN_CHANNELS_PER_THREAD));
+    int final_threads = std::min(nthreads, max_useful_threads);
 #else
     int final_threads = 1;
 #endif
@@ -237,11 +239,13 @@ void batchnorm_mean_var_impl(const T* input,
         throw std::runtime_error("BatchNorm2d: Cannot compute mean/variance for empty tensor (total_elements = 0)");
     }
 
-    // Use fewer threads to avoid OpenMP overhead
+    // Cap threads: each thread should have enough work to amortize overhead.
+    // Minimum work-per-thread threshold: at least 4 channels per thread.
+    constexpr int MIN_CHANNELS_PER_THREAD = 4;
 #ifdef _OPENMP
     int nthreads = omp_get_max_threads();
-    int effective_threads = std::min({nthreads, static_cast<int>(C), 4});
-    int final_threads = std::max(1, effective_threads);
+    int max_useful_threads = std::max(1, static_cast<int>(C / MIN_CHANNELS_PER_THREAD));
+    int final_threads = std::min(nthreads, max_useful_threads);
 #else
     int final_threads = 1;
 #endif
@@ -1002,11 +1006,13 @@ void batchnorm_backward_impl(const T* grad_output,
         throw std::runtime_error("BatchNorm2d backward: Cannot compute gradients for empty tensor (total_elements = 0)");
     }
 
-    // Use fewer threads to avoid OpenMP overhead
+    // Cap threads: each thread should have enough work to amortize overhead.
+    // Minimum work-per-thread threshold: at least 4 channels per thread.
+    constexpr int MIN_CHANNELS_PER_THREAD = 4;
 #ifdef _OPENMP
     int nthreads = omp_get_max_threads();
-    int effective_threads = std::min({nthreads, static_cast<int>(C), 4});
-    int final_threads = std::max(1, effective_threads);
+    int max_useful_threads = std::max(1, static_cast<int>(C / MIN_CHANNELS_PER_THREAD));
+    int final_threads = std::min(nthreads, max_useful_threads);
 #else
     int final_threads = 1;
 #endif

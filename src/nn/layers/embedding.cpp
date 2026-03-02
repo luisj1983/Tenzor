@@ -322,9 +322,9 @@ auto Embedding::forward_impl(const Variable& input) -> Variable {
                            ? weight_tensor : weight_tensor.to(target_device);
         Tensor indices_dev = input_tensor;
 
-        // Debug mode: validate indices on CPU before GPU dispatch to catch
-        // out-of-bounds errors early with clear error messages
-#ifndef NDEBUG
+        // Validate indices on CPU before GPU dispatch to catch
+        // out-of-bounds errors early with clear error messages.
+        // Always enabled — GPU out-of-bounds reads cause silent corruption or crashes.
         {
             Tensor indices_cpu = input_tensor.to(Device::cpu());
             auto idx_ptr = indices_cpu.data<int64_t>();
@@ -337,7 +337,6 @@ auto Embedding::forward_impl(const Variable& input) -> Variable {
                 }
             }
         }
-#endif
 
         // Apply max_norm if specified (requires CPU for now)
         if (max_norm_ > 0.0) {
@@ -653,7 +652,11 @@ auto EmbeddingBag::aggregate_embeddings(const Variable& embeddings, const Variab
     int64_t total_elements = emb_shape[0];
     int64_t embedding_dim = emb_shape[1];
 
-    // Save original device and dtype, then transfer to CPU Float32 for computation
+    // Save original device and dtype, then transfer to CPU Float32 for computation.
+    // TODO(perf): For GPU tensors this transfers the entire embedding result to CPU
+    // for aggregation (sum/mean/max), then transfers back. This should be replaced
+    // with a fused GPU kernel that performs the per-bag aggregation directly on-device,
+    // avoiding two expensive D2H/H2D transfers per forward pass.
     Device original_device = emb_tensor.device();
     DType original_dtype = emb_tensor.dtype();
     Tensor emb_cpu = (original_device == Device::cpu()) ? emb_tensor : emb_tensor.to(Device::cpu());

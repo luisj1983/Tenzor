@@ -233,6 +233,11 @@ __all__ = [
     "autograd",
     "linalg",
 
+    # Submodules
+    "fft",
+    "sparse",
+    "amp",
+
     # Serialization
     "save",
     "load",
@@ -247,4 +252,7 @@ __all__ = [
     "reset_memory_stats",
     "set_anomaly_detection",
     "is_anomaly_detection_enabled",
+    "memory_format",
+    "list_backends",
+    "is_backend_available",
 ]

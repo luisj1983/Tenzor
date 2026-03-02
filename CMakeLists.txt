@@ -86,7 +86,14 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Global compiler flags
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    add_compile_options(-Wall -Wextra -pedantic -march=native)
+    add_compile_options(-Wall -Wextra -pedantic)
+
+    # Use -march=native for maximum performance on the build machine.
+    # Disable for distribution (cross-compilation or portable binaries).
+    option(TENZOR_NATIVE_ARCH "Use -march=native for host-specific optimizations" ON)
+    if(TENZOR_NATIVE_ARCH)
+        add_compile_options(-march=native)
+    endif()
 
     # Enable coverage if requested
     if(TENZOR_ENABLE_COVERAGE)

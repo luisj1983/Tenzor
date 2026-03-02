@@ -50,6 +50,13 @@ auto Function::input_variables() const -> const std::vector<Variable>& {
 }
 
 auto Function::save_for_backward(std::vector<Tensor> tensors) -> void {
+    // Record version counters for in-place modification detection
+    saved_versions_.clear();
+    saved_versions_.reserve(tensors.size());
+    for (const auto& t : tensors) {
+        saved_versions_.push_back(t.version());
+    }
+
     if (activation_offload_enabled() && !tensors.empty()) {
         // Check if any tensor is on a GPU device
         auto dev = tensors[0].device();
@@ -67,6 +74,15 @@ auto Function::save_for_backward(std::vector<Tensor> tensors) -> void {
 auto Function::saved_tensors() const -> const std::vector<Tensor>& {
     if (tensors_offloaded_) {
         reload_saved_tensors();
+    }
+    // Check that saved tensors have not been modified in-place since save
+    for (size_t i = 0; i < saved_tensors_.size() && i < saved_versions_.size(); ++i) {
+        if (saved_tensors_[i].version() != saved_versions_[i]) {
+            throw std::runtime_error(
+                "one of the variables needed for gradient computation has been modified by an "
+                "in-place operation after the forward pass. Use .clone() before in-place ops "
+                "on tensors used in autograd computation.");
+        }
     }
     return saved_tensors_;
 }

@@ -39,14 +39,21 @@ namespace cuda {
 // Kernel Launch Helpers
 // ============================================================================
 
-// Delegates to compute_grid_size() from cuda_launch_utils.cuh to avoid
-// duplicating the block-size logic. For per-kernel occupancy-optimized
-// launches use optimal_launch_config() or the LAUNCH_KERNEL macro instead.
+// Uses cudaOccupancyMaxPotentialBlockSize via a representative kernel
+// (im2col_kernel<float>) to determine an architecture-optimal block size
+// instead of the previous hardcoded 256.
+template<typename T>
+__global__ void im2col_kernel(
+    const T* input, T* output,
+    int64_t batch, int64_t channels, int64_t height, int64_t width,
+    int64_t kernel_h, int64_t kernel_w, int64_t stride, int64_t padding,
+    int64_t dilation, int64_t out_h, int64_t out_w);
+
 inline void compute_launch_config_1d(int64_t n, dim3& grid, dim3& block) {
-    constexpr int block_size = 256;
-    block = dim3(block_size, 1, 1);
-    int num_blocks = compute_grid_size(n, block_size);
-    grid = dim3(static_cast<unsigned int>(num_blocks), 1, 1);
+    auto [num_blocks, block_size] = optimal_launch_config(
+        im2col_kernel<float>, n);
+    block = dim3(static_cast<unsigned int>(block_size), 1, 1);
+    grid  = dim3(static_cast<unsigned int>(num_blocks), 1, 1);
 }
 
 inline void compute_launch_config_2d(int64_t rows, int64_t cols, dim3& grid, dim3& block) {

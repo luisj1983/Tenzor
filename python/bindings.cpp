@@ -510,6 +510,18 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("start_dim") = 0, py::arg("end_dim") = -1)
         .def("view", &tenzor::Tensor::view,
              py::arg("shape"))
+        .def("narrow", &tenzor::Tensor::narrow,
+             py::arg("dim"), py::arg("start"), py::arg("length"),
+             "Narrow (slice) tensor along a dimension",
+             py::call_guard<py::gil_scoped_release>())
+        .def("select", &tenzor::Tensor::select,
+             py::arg("dim"), py::arg("index"),
+             "Select a single index along a dimension",
+             py::call_guard<py::gil_scoped_release>())
+        .def("chunk", &tenzor::Tensor::chunk,
+             py::arg("chunks"), py::arg("dim") = 0,
+             "Split tensor into chunks along a dimension",
+             py::call_guard<py::gil_scoped_release>())
         // Memory operations
         .def("clone", &tenzor::Tensor::clone)
         .def("detach", &tenzor::Tensor::detach)
@@ -573,88 +585,114 @@ PYBIND11_MODULE(tenzor_core, m) {
                     throw std::runtime_error("Unsupported dtype for item()");
             }
         }, "Extract scalar value from single-element tensor")
-        // Arithmetic operators - Tensor-Tensor
-        .def("__add__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return a + b; })
-        .def("__sub__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return a - b; })
-        .def("__mul__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return a * b; })
+        // Arithmetic operators - Tensor-Tensor (GIL released for compute)
+        .def("__add__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return a + b; },
+             py::call_guard<py::gil_scoped_release>())
+        .def("__sub__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return a - b; },
+             py::call_guard<py::gil_scoped_release>())
+        .def("__mul__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return a * b; },
+             py::call_guard<py::gil_scoped_release>())
         .def("__truediv__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return a / b; },
-             py::is_operator(), "Element-wise division")
+             py::is_operator(), "Element-wise division",
+             py::call_guard<py::gil_scoped_release>())
         // Arithmetic operators - Tensor-Scalar (use Tensor scalar operators directly)
         .def("__add__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
              return a + static_cast<double>(b);
-             }, py::is_operator())
+             }, py::is_operator(),
+             py::call_guard<py::gil_scoped_release>())
         .def("__radd__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
              return a + static_cast<double>(b);  // addition is commutative
-             }, py::is_operator())
+             }, py::is_operator(),
+             py::call_guard<py::gil_scoped_release>())
         .def("__sub__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
              return a - static_cast<double>(b);
-             }, py::is_operator())
+             }, py::is_operator(),
+             py::call_guard<py::gil_scoped_release>())
         .def("__rsub__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
              return tenzor::neg(a - static_cast<double>(b));  // b - a = -(a - b)
-             }, py::is_operator())
+             }, py::is_operator(),
+             py::call_guard<py::gil_scoped_release>())
         .def("__mul__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
              return a * static_cast<double>(b);
-             }, py::is_operator())
+             }, py::is_operator(),
+             py::call_guard<py::gil_scoped_release>())
         .def("__rmul__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
              return a * static_cast<double>(b);  // multiplication is commutative
-             }, py::is_operator())
+             }, py::is_operator(),
+             py::call_guard<py::gil_scoped_release>())
         .def("__truediv__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
              return a / static_cast<double>(b);
-             }, py::is_operator())
+             }, py::is_operator(),
+             py::call_guard<py::gil_scoped_release>())
         .def("__rtruediv__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
              // b / a = b * reciprocal(a)
              return tenzor::reciprocal(a) * static_cast<double>(b);
-             }, py::is_operator())
+             }, py::is_operator(),
+             py::call_guard<py::gil_scoped_release>())
         .def("__pow__", [](const tenzor::Tensor& a, float exponent) -> tenzor::Tensor {
              return tenzor::pow(a, exponent);
-             }, py::is_operator(), "Element-wise power")
+             }, py::is_operator(), "Element-wise power",
+             py::call_guard<py::gil_scoped_release>())
         .def("__neg__", [](const tenzor::Tensor& a) -> tenzor::Tensor { return tenzor::neg(a); },
-             py::is_operator(), "Unary negation")
+             py::is_operator(), "Unary negation",
+             py::call_guard<py::gil_scoped_release>())
         // Matrix multiplication
         .def("__matmul__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
              return tenzor::matmul(a, b);
-             }, py::is_operator(), "Matrix multiplication (@ operator)")
+             }, py::is_operator(), "Matrix multiplication (@ operator)",
+             py::call_guard<py::gil_scoped_release>())
         .def("__rmatmul__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
              return tenzor::matmul(b, a);
-             }, py::is_operator())
+             }, py::is_operator(),
+             py::call_guard<py::gil_scoped_release>())
         // Modulo and floor division
         .def("__mod__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
              return tenzor::fmod(a, b);
-             }, py::is_operator(), "Element-wise modulo")
+             }, py::is_operator(), "Element-wise modulo",
+             py::call_guard<py::gil_scoped_release>())
         .def("__mod__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
              auto b_tensor = tenzor::full(std::vector<int64_t>{}, static_cast<double>(b),
                                           a.dtype(), a.device());
              return tenzor::fmod(a, b_tensor);
-             }, py::is_operator())
+             }, py::is_operator(),
+             py::call_guard<py::gil_scoped_release>())
         .def("__rmod__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
              auto b_tensor = tenzor::full(std::vector<int64_t>{}, static_cast<double>(b),
                                           a.dtype(), a.device());
              return tenzor::fmod(b_tensor, a);
-             }, py::is_operator())
+             }, py::is_operator(),
+             py::call_guard<py::gil_scoped_release>())
         .def("__floordiv__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
              return tenzor::floor(a / b);
-             }, py::is_operator(), "Element-wise floor division")
+             }, py::is_operator(), "Element-wise floor division",
+             py::call_guard<py::gil_scoped_release>())
         .def("__floordiv__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
              return tenzor::floor(a / static_cast<double>(b));
-             }, py::is_operator())
+             }, py::is_operator(),
+             py::call_guard<py::gil_scoped_release>())
         .def("__rfloordiv__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
              auto b_tensor = tenzor::full(std::vector<int64_t>{}, static_cast<double>(b),
                                           a.dtype(), a.device());
              return tenzor::floor(b_tensor / a);
-             }, py::is_operator())
+             }, py::is_operator(),
+             py::call_guard<py::gil_scoped_release>())
         // In-place operators
         .def("__iadd__", [](tenzor::Tensor& a, const tenzor::Tensor& b) -> tenzor::Tensor& {
              tenzor::add_(a, b); return a;
-             }, py::is_operator())
+             }, py::is_operator(),
+             py::call_guard<py::gil_scoped_release>())
         .def("__isub__", [](tenzor::Tensor& a, const tenzor::Tensor& b) -> tenzor::Tensor& {
              tenzor::sub_(a, b); return a;
-             }, py::is_operator())
+             }, py::is_operator(),
+             py::call_guard<py::gil_scoped_release>())
         .def("__imul__", [](tenzor::Tensor& a, const tenzor::Tensor& b) -> tenzor::Tensor& {
              tenzor::mul_(a, b); return a;
-             }, py::is_operator())
+             }, py::is_operator(),
+             py::call_guard<py::gil_scoped_release>())
         .def("__itruediv__", [](tenzor::Tensor& a, const tenzor::Tensor& b) -> tenzor::Tensor& {
              tenzor::div_(a, b); return a;
-             }, py::is_operator())
+             }, py::is_operator(),
+             py::call_guard<py::gil_scoped_release>())
         // Numeric protocol
         .def("__float__", [](const tenzor::Tensor& t) -> double {
              if (t.numel() != 1) throw py::value_error("only one element tensors can be converted to Python scalars");
@@ -718,24 +756,32 @@ PYBIND11_MODULE(tenzor_core, m) {
              // Delegate to __repr__
              return py::str(py::cast(t).attr("__repr__")());
              })
-        // Math methods
+        // Math methods (GIL released for compute)
         .def("exp", [](const tenzor::Tensor& t) { return tenzor::exp(t); },
-             "Element-wise exponential")
+             "Element-wise exponential",
+             py::call_guard<py::gil_scoped_release>())
         .def("log", [](const tenzor::Tensor& t) { return tenzor::log(t); },
-             "Element-wise natural logarithm")
+             "Element-wise natural logarithm",
+             py::call_guard<py::gil_scoped_release>())
         .def("sqrt", [](const tenzor::Tensor& t) { return tenzor::sqrt(t); },
-             "Element-wise square root")
+             "Element-wise square root",
+             py::call_guard<py::gil_scoped_release>())
         .def("sin", [](const tenzor::Tensor& t) { return tenzor::sin(t); },
-             "Element-wise sine")
+             "Element-wise sine",
+             py::call_guard<py::gil_scoped_release>())
         .def("cos", [](const tenzor::Tensor& t) { return tenzor::cos(t); },
-             "Element-wise cosine")
+             "Element-wise cosine",
+             py::call_guard<py::gil_scoped_release>())
         .def("tan", [](const tenzor::Tensor& t) { return tenzor::tan(t); },
-             "Element-wise tangent")
+             "Element-wise tangent",
+             py::call_guard<py::gil_scoped_release>())
         .def("abs", [](const tenzor::Tensor& t) { return tenzor::abs(t); },
-             "Element-wise absolute value")
+             "Element-wise absolute value",
+             py::call_guard<py::gil_scoped_release>())
         .def("pow", [](const tenzor::Tensor& t, float exponent) {
              return tenzor::pow(t, exponent);
-             }, py::arg("exponent"), "Element-wise power")
+             }, py::arg("exponent"), "Element-wise power",
+             py::call_guard<py::gil_scoped_release>())
         // Reduction operations (as member methods calling free functions)
         .def("sum", [](const tenzor::Tensor& t) {
              return tenzor::sum(t, std::nullopt, false);
@@ -772,6 +818,24 @@ PYBIND11_MODULE(tenzor_core, m) {
              return tenzor::min(t, std::make_optional(dim), keepdim);
              }, py::arg("dim"), py::arg("keepdim")=false,
              "Minimum along dimension",
+             py::call_guard<py::gil_scoped_release>())
+        .def("any", [](const tenzor::Tensor& t) {
+             return tenzor::any(t, std::nullopt, false);
+             }, "True if any element is nonzero",
+             py::call_guard<py::gil_scoped_release>())
+        .def("any", [](const tenzor::Tensor& t, int64_t dim, bool keepdim) {
+             return tenzor::any(t, std::make_optional(dim), keepdim);
+             }, py::arg("dim"), py::arg("keepdim")=false,
+             "Any nonzero along dimension",
+             py::call_guard<py::gil_scoped_release>())
+        .def("all", [](const tenzor::Tensor& t) {
+             return tenzor::all(t, std::nullopt, false);
+             }, "True if all elements are nonzero",
+             py::call_guard<py::gil_scoped_release>())
+        .def("all", [](const tenzor::Tensor& t, int64_t dim, bool keepdim) {
+             return tenzor::all(t, std::make_optional(dim), keepdim);
+             }, py::arg("dim"), py::arg("keepdim")=false,
+             "All nonzero along dimension",
              py::call_guard<py::gil_scoped_release>())
         // Device transfer with overloads
         .def("cuda", [](const tenzor::Tensor& t, int32_t device_id) {
@@ -1385,56 +1449,43 @@ PYBIND11_MODULE(tenzor_core, m) {
                         fmt_shape(dst_shape));
                 }
 
-                // Implement proper broadcasting copy
-                // Make source contiguous for easier access
-                auto src_cont = src.contiguous();
+                // Use expand() + contiguous copy instead of element-by-element loop
+                // expand() creates a view with broadcast strides (no data copy),
+                // then .contiguous() materializes the expanded data in one backend call.
+                auto dst_shape_vec = std::vector<int64_t>(dst_shape.begin(), dst_shape.end());
+                auto expanded = tenzor::expand(src, dst_shape_vec).contiguous();
 
-                // Element-wise copy with broadcasting
-                auto dst_shape_vec = dst.shape();
-                auto src_shape_vec = src_cont.shape();
-                std::vector<int64_t> dst_indices(dst_shape_vec.size(), 0);
-                size_t total_elements = dst.numel();
-
-                for (size_t i = 0; i < total_elements; ++i) {
-                    // Calculate multi-dimensional index for destination
-                    size_t temp = i;
-                    for (int64_t dim = static_cast<int64_t>(dst_shape_vec.size()) - 1; dim >= 0; --dim) {
-                        dst_indices[dim] = temp % dst_shape_vec[dim];
-                        temp /= dst_shape_vec[dim];
-                    }
-
-                    // Calculate corresponding source index with broadcasting
-                    std::vector<int64_t> src_indices(src_shape_vec.size());
-                    for (int64_t i = 0; i < src_ndim; ++i) {
-                        int64_t dst_dim = dst_ndim - 1 - i;
-                        int64_t src_dim = src_ndim - 1 - i;
-
-                        // Apply broadcasting rule: dimension is either 1 (broadcast) or matches dst
-                        if (src_shape_vec[src_dim] == 1) {
-                            src_indices[src_dim] = 0;  // Broadcast this dimension
-                        } else {
-                            src_indices[src_dim] = dst_indices[dst_dim];
+                // Copy expanded data into destination
+                if (dst.is_contiguous()) {
+                    size_t bytes = dst.numel() * dst.dtype_size();
+                    if (dst.device().type == tenzor::Device::Type::CPU) {
+                        std::memcpy(dst.data_ptr(), expanded.data_ptr(), bytes);
+                    } else {
+                        auto* backend = tenzor::backend_registry().get_backend(dst.device().type);
+                        if (backend) {
+                            backend->copy(dst.data_ptr(), expanded.data_ptr(), bytes,
+                                        tenzor::CopyKind::DeviceToDevice);
                         }
                     }
-
-                    // Calculate linear offset in source tensor
-                    size_t src_offset = 0;
-                    auto src_strides = src_cont.strides();
-                    for (size_t dim = 0; dim < src_indices.size(); ++dim) {
-                        src_offset += src_indices[dim] * src_strides[dim];
-                    }
-
-                    // Calculate offset in destination tensor
-                    size_t dst_offset = 0;
+                } else {
+                    // Non-contiguous destination: element-wise copy using strides
                     auto dst_strides = dst.strides();
-                    for (size_t dim = 0; dim < dst_indices.size(); ++dim) {
-                        dst_offset += dst_indices[dim] * dst_strides[dim];
+                    size_t total_elements = dst.numel();
+                    std::vector<int64_t> indices(dst_shape_vec.size(), 0);
+                    for (size_t i = 0; i < total_elements; ++i) {
+                        size_t temp = i;
+                        for (int64_t dim = static_cast<int64_t>(dst_shape_vec.size()) - 1; dim >= 0; --dim) {
+                            indices[dim] = temp % dst_shape_vec[dim];
+                            temp /= dst_shape_vec[dim];
+                        }
+                        size_t offset = 0;
+                        for (size_t dim = 0; dim < indices.size(); ++dim) {
+                            offset += indices[dim] * dst_strides[dim];
+                        }
+                        void* dst_ptr = static_cast<char*>(dst.data_ptr()) + offset * dst.dtype_size();
+                        void* src_ptr = static_cast<char*>(expanded.data_ptr()) + i * expanded.dtype_size();
+                        std::memcpy(dst_ptr, src_ptr, dst.dtype_size());
                     }
-
-                    // Copy single element based on dtype
-                    void* dst_ptr = static_cast<char*>(dst.data_ptr()) + dst_offset * dst.dtype_size();
-                    void* src_ptr = static_cast<char*>(src_cont.data_ptr()) + src_offset * src_cont.dtype_size();
-                    std::memcpy(dst_ptr, src_ptr, dst.dtype_size());
                 }
             };
 
@@ -1926,6 +1977,21 @@ PYBIND11_MODULE(tenzor_core, m) {
     m.def("min", [](const tenzor::Tensor& input, std::optional<int64_t> dim, bool keepdim) {
          return tenzor::min(input, dim, keepdim);
          }, "Min reduction",
+         py::arg("input"),
+         py::arg("dim") = py::none(),
+         py::arg("keepdim") = false,
+         py::call_guard<py::gil_scoped_release>());
+
+    m.def("any", [](const tenzor::Tensor& input, std::optional<int64_t> dim, bool keepdim) {
+         return tenzor::any(input, dim, keepdim);
+         }, "Any reduction",
+         py::arg("input"),
+         py::arg("dim") = py::none(),
+         py::arg("keepdim") = false,
+         py::call_guard<py::gil_scoped_release>());
+    m.def("all", [](const tenzor::Tensor& input, std::optional<int64_t> dim, bool keepdim) {
+         return tenzor::all(input, dim, keepdim);
+         }, "All reduction",
          py::arg("input"),
          py::arg("dim") = py::none(),
          py::arg("keepdim") = false,
@@ -3743,10 +3809,10 @@ PYBIND11_MODULE(tenzor_core, m) {
 
     py::class_<tenzor::nn::TransformerEncoderLayer, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::TransformerEncoderLayer>>(nn, "TransformerEncoderLayer")
-        .def(py::init<int64_t, int64_t, int64_t, double, const std::string&, bool>(),
+        .def(py::init<int64_t, int64_t, int64_t, double, const std::string&, bool, bool>(),
              py::arg("d_model"), py::arg("nhead"), py::arg("dim_feedforward") = 2048,
              py::arg("dropout") = 0.1, py::arg("activation") = "relu",
-             py::arg("batch_first") = false)
+             py::arg("batch_first") = false, py::arg("norm_first") = false)
         .def("forward", [](tenzor::nn::TransformerEncoderLayer& self, const tenzor::Variable& src,
                            const tenzor::Tensor& src_mask, const tenzor::Tensor& src_key_padding_mask) {
             return self.forward(src, src_mask, src_key_padding_mask);
@@ -3766,10 +3832,10 @@ PYBIND11_MODULE(tenzor_core, m) {
 
     py::class_<tenzor::nn::TransformerDecoderLayer, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::TransformerDecoderLayer>>(nn, "TransformerDecoderLayer")
-        .def(py::init<int64_t, int64_t, int64_t, double, const std::string&, bool>(),
+        .def(py::init<int64_t, int64_t, int64_t, double, const std::string&, bool, bool>(),
              py::arg("d_model"), py::arg("nhead"), py::arg("dim_feedforward") = 2048,
              py::arg("dropout") = 0.1, py::arg("activation") = "relu",
-             py::arg("batch_first") = false)
+             py::arg("batch_first") = false, py::arg("norm_first") = false)
         .def("forward", [](tenzor::nn::TransformerDecoderLayer& self, const tenzor::Variable& tgt,
                            const tenzor::Variable& memory, const tenzor::Tensor& tgt_mask,
                            const tenzor::Tensor& memory_mask, const tenzor::Tensor& tgt_key_padding_mask,
@@ -3799,11 +3865,12 @@ PYBIND11_MODULE(tenzor_core, m) {
 
     py::class_<tenzor::nn::Transformer, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::Transformer>>(nn, "Transformer")
-        .def(py::init<int64_t, int64_t, int64_t, int64_t, int64_t, double, const std::string&, bool>(),
+        .def(py::init<int64_t, int64_t, int64_t, int64_t, int64_t, double, const std::string&, bool, bool>(),
              py::arg("d_model") = 512, py::arg("nhead") = 8,
              py::arg("num_encoder_layers") = 6, py::arg("num_decoder_layers") = 6,
              py::arg("dim_feedforward") = 2048, py::arg("dropout") = 0.1,
-             py::arg("activation") = "relu", py::arg("batch_first") = false)
+             py::arg("activation") = "relu", py::arg("batch_first") = false,
+             py::arg("norm_first") = false)
         .def("forward", [](tenzor::nn::Transformer& self, const tenzor::Variable& src,
                            const tenzor::Variable& tgt, const tenzor::Tensor& src_mask,
                            const tenzor::Tensor& tgt_mask, const tenzor::Tensor& memory_mask,
@@ -5585,19 +5652,49 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("state"),
              "Load scaler state from dictionary");
 
-    // Autocast context manager
-    py::class_<tenzor::nn::amp::Autocast>(amp, "Autocast",
+    // Autocast context manager — uses a wrapper to defer activation to __enter__
+    struct PyAutocastContext {
+        bool enabled_;
+        tenzor::DType dtype_;
+        tenzor::Device::Type device_type_;
+        std::unique_ptr<tenzor::nn::amp::Autocast> guard_;
+
+        PyAutocastContext(bool enabled, tenzor::DType dtype, tenzor::Device::Type device_type)
+            : enabled_(enabled), dtype_(dtype), device_type_(device_type) {}
+
+        void enter() {
+            guard_ = std::make_unique<tenzor::nn::amp::Autocast>(enabled_, dtype_, device_type_);
+        }
+
+        void exit() {
+            guard_.reset();  // Destructor restores previous state
+        }
+    };
+
+    py::class_<PyAutocastContext>(amp, "Autocast",
         R"pbdoc(
             Automatic mixed precision context manager.
 
             Automatically casts operations to lower precision (Float16 or BFloat16)
             for performance while maintaining numerical stability.
+
+            Usage:
+                with tz.amp.Autocast():
+                    output = model(input)  # Ops auto-cast to FP16
         )pbdoc")
         .def(py::init<bool, tenzor::DType, tenzor::Device::Type>(),
              py::arg("enabled") = true,
              py::arg("dtype") = tenzor::DType::Float16,
              py::arg("device_type") = tenzor::Device::Type::CUDA,
              "Create autocast context")
+        .def("__enter__", [](PyAutocastContext& self) -> PyAutocastContext& {
+            self.enter();
+            return self;
+        })
+        .def("__exit__", [](PyAutocastContext& self, py::object, py::object, py::object) {
+            self.exit();
+            return false;
+        })
         .def_static("is_enabled", &tenzor::nn::amp::Autocast::is_enabled,
                     "Check if autocast is currently enabled")
         .def_static("get_dtype", &tenzor::nn::amp::Autocast::get_dtype,
