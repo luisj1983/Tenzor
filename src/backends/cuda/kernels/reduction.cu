@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <cub/cub.cuh>
 #include "../cuda_error.hpp"
+#include "cuda_launch_utils.cuh"
 
 namespace tenzor {
 namespace cuda {
@@ -18,6 +19,9 @@ namespace cuda {
 // Constants
 constexpr int WARP_SIZE = 32;
 constexpr int MAX_BLOCK_SIZE = 1024;
+// Reduction block size is used for static __shared__ memory in kernels.
+// 256 is a good default for occupancy on most architectures (Volta+).
+// For kernels without shared memory constraints, use optimal_launch_config().
 constexpr int REDUCTION_BLOCK_SIZE = 256;
 
 // Type-safe sentinel values for max/min reductions.

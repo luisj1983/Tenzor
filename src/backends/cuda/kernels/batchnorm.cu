@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <vector>
 #include "../cuda_error.hpp"
+#include "cuda_launch_utils.cuh"
 
 namespace tenzor {
 namespace cuda {
@@ -646,31 +647,45 @@ auto batchnorm2d_mean_var(const Tensor& input,
     }
 
     if (input.dtype() == DType::Float32) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / 32) * sizeof(float);
-        batchnorm_mean_kernel<float><<<C, BATCHNORM_BLOCK_SIZE, shared_mem_size, stream>>>(
+        // Use occupancy API for optimal block size (dynamic shared mem = warps * sizeof(T))
+        auto [grid_f32, bs_f32] = optimal_launch_config(
+            batchnorm_mean_kernel<float>, N * H * W, (256 / 32) * sizeof(float));
+        int bn_bs = std::max(32, std::min(bs_f32, 1024));
+        // Round down to multiple of warp size
+        bn_bs = (bn_bs / 32) * 32;
+        int shared_mem_size = (bn_bs / 32) * sizeof(float);
+        batchnorm_mean_kernel<float><<<C, bn_bs, shared_mem_size, stream>>>(
             input.data<float>(), mean.data<float>(), N, C, H, W);
         CUDA_CHECK(cudaGetLastError());
 
-        batchnorm_variance_kernel<float><<<C, BATCHNORM_BLOCK_SIZE, shared_mem_size, stream>>>(
+        batchnorm_variance_kernel<float><<<C, bn_bs, shared_mem_size, stream>>>(
             input.data<float>(), mean.data<float>(), variance.data<float>(), N, C, H, W);
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / 32) * sizeof(double);
-        batchnorm_mean_kernel<double><<<C, BATCHNORM_BLOCK_SIZE, shared_mem_size, stream>>>(
+        auto [grid_f64, bs_f64] = optimal_launch_config(
+            batchnorm_mean_kernel<double>, N * H * W, (256 / 32) * sizeof(double));
+        int bn_bs = std::max(32, std::min(bs_f64, 1024));
+        bn_bs = (bn_bs / 32) * 32;
+        int shared_mem_size = (bn_bs / 32) * sizeof(double);
+        batchnorm_mean_kernel<double><<<C, bn_bs, shared_mem_size, stream>>>(
             input.data<double>(), mean.data<double>(), N, C, H, W);
         CUDA_CHECK(cudaGetLastError());
 
-        batchnorm_variance_kernel<double><<<C, BATCHNORM_BLOCK_SIZE, shared_mem_size, stream>>>(
+        batchnorm_variance_kernel<double><<<C, bn_bs, shared_mem_size, stream>>>(
             input.data<double>(), mean.data<double>(), variance.data<double>(), N, C, H, W);
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / 32) * sizeof(__half);
-        batchnorm_mean_kernel<__half><<<C, BATCHNORM_BLOCK_SIZE, shared_mem_size, stream>>>(
+        auto [grid_f16, bs_f16] = optimal_launch_config(
+            batchnorm_mean_kernel<__half>, N * H * W, (256 / 32) * sizeof(__half));
+        int bn_bs = std::max(32, std::min(bs_f16, 1024));
+        bn_bs = (bn_bs / 32) * 32;
+        int shared_mem_size = (bn_bs / 32) * sizeof(__half);
+        batchnorm_mean_kernel<__half><<<C, bn_bs, shared_mem_size, stream>>>(
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(mean.data<Float16>()), N, C, H, W);
         CUDA_CHECK(cudaGetLastError());
 
-        batchnorm_variance_kernel<__half><<<C, BATCHNORM_BLOCK_SIZE, shared_mem_size, stream>>>(
+        batchnorm_variance_kernel<__half><<<C, bn_bs, shared_mem_size, stream>>>(
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<const __half*>(mean.data<Float16>()),
             reinterpret_cast<__half*>(variance.data<Float16>()), N, C, H, W);

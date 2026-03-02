@@ -120,6 +120,17 @@ public:
      */
     auto weight() const -> const Variable&;
 
+    /**
+     * @brief Create an Embedding from pretrained weight vectors.
+     *
+     * @param embeddings Pretrained weight tensor [num_embeddings, embedding_dim]
+     * @param freeze If true, the weight is not updated during training (requires_grad=false)
+     * @param padding_idx Optional index to zero-out (default: none)
+     * @return Shared pointer to new Embedding with pretrained weights
+     */
+    static auto from_pretrained(const Tensor& embeddings, bool freeze = true,
+                                int64_t padding_idx = -1) -> std::shared_ptr<Embedding>;
+
 private:
     Variable weight_;  ///< Embedding matrix [num_embeddings, embedding_dim]
     int64_t num_embeddings_;

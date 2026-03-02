@@ -47,6 +47,7 @@
 #include <tenzor/ops/async_ops.hpp>
 #include <tenzor/ops/fused_ops.hpp>
 #include <tenzor/data/transforms.hpp>
+#include <tenzor/autograd/graph_viz.hpp>
 #include <tenzor/utils/tensorboard.hpp>
 #include <tenzor/utils/benchmark.hpp>
 #include <tenzor/nn/optim/adam_atan2.hpp>
@@ -1016,15 +1017,9 @@ PYBIND11_MODULE(tenzor_core, m) {
                         entry.int_val = py::cast<int64_t>(indices[i]);
                     } else if (py::isinstance<py::slice>(indices[i])) {
                         entry.is_int = false;
-                        // Defer slice.compute to Phase B (needs current dim size)
-                        // Store raw slice info — we'll re-resolve per dimension
+                        // Extract raw start/stop/step from Python slice object.
+                        // None values get sentinel min/max — resolved against dim size in Phase B.
                         py::slice slice_obj = py::cast<py::slice>(indices[i]);
-                        // We must compute now since we need the py::slice object
-                        // Mark with sentinel — will recompute in Phase B
-                        entry.start = -999999; // sentinel
-                        // Actually, we need to store start/stop/step from the Python slice
-                        // Use py::slice::compute with a dummy large size to get raw values
-                        // Better approach: extract attr-level start/stop/step
                         auto s_start = slice_obj.attr("start");
                         auto s_stop = slice_obj.attr("stop");
                         auto s_step = slice_obj.attr("step");
@@ -1180,12 +1175,19 @@ PYBIND11_MODULE(tenzor_core, m) {
                 throw std::runtime_error("Unsupported index type for assignment");
             }
 
-            // Parse value under GIL
+            // Parse value under GIL — use int64 for integer dtypes to avoid double truncation
             tenzor::Tensor value_tensor;
             bool is_scalar_value = false;
             double scalar_value = 0.0;
+            int64_t int_scalar_value = 0;
+            bool is_integer_scalar = false;
             if (py::isinstance<tenzor::Tensor>(value)) {
                 value_tensor = py::cast<tenzor::Tensor>(value);
+            } else if (py::isinstance<py::int_>(value) && !py::isinstance<py::bool_>(value)) {
+                is_scalar_value = true;
+                is_integer_scalar = true;
+                int_scalar_value = py::cast<int64_t>(value);
+                scalar_value = static_cast<double>(int_scalar_value);
             } else if (py::isinstance<py::float_>(value) || py::isinstance<py::int_>(value)) {
                 is_scalar_value = true;
                 scalar_value = py::cast<double>(value);
@@ -1207,16 +1209,24 @@ PYBIND11_MODULE(tenzor_core, m) {
                         *t.data<double>() = scalar_value;
                         break;
                     case tenzor::DType::Int32:
-                        *t.data<int32_t>() = static_cast<int32_t>(scalar_value);
+                        *t.data<int32_t>() = is_integer_scalar
+                            ? static_cast<int32_t>(int_scalar_value)
+                            : static_cast<int32_t>(scalar_value);
                         break;
                     case tenzor::DType::Int64:
-                        *t.data<int64_t>() = static_cast<int64_t>(scalar_value);
+                        *t.data<int64_t>() = is_integer_scalar
+                            ? int_scalar_value
+                            : static_cast<int64_t>(scalar_value);
                         break;
                     case tenzor::DType::UInt8:
-                        *t.data<uint8_t>() = static_cast<uint8_t>(scalar_value);
+                        *t.data<uint8_t>() = is_integer_scalar
+                            ? static_cast<uint8_t>(int_scalar_value)
+                            : static_cast<uint8_t>(scalar_value);
                         break;
                     case tenzor::DType::Bool:
-                        *t.data<bool>() = static_cast<bool>(scalar_value);
+                        *t.data<bool>() = is_integer_scalar
+                            ? (int_scalar_value != 0)
+                            : (scalar_value != 0.0);
                         break;
                     default:
                         throw std::runtime_error("Unsupported dtype for scalar assignment");
@@ -2403,11 +2413,14 @@ PYBIND11_MODULE(tenzor_core, m) {
                 tenzor::NoGradGuard guard;
                 return func(*args, **kwargs);
             });
-            // Preserve original function metadata
+            // Preserve original function metadata (__name__, __doc__, etc.)
             try {
                 py::module_ functools = py::module_::import("functools");
                 functools.attr("update_wrapper")(wrapper, func);
-            } catch (...) {}
+            } catch (py::error_already_set&) {
+                // functools.update_wrapper failed — not critical, continue without metadata
+                PyErr_Clear();
+            }
             return wrapper;
         }, py::arg("func"));
 
@@ -2590,9 +2603,8 @@ PYBIND11_MODULE(tenzor_core, m) {
                 // Save tensors from ctx into C++ Function's saved_tensors_
                 saved_tensors_ = ctx_->saved_tensors_;
                 return outputs;
-            } catch (py::error_already_set& e) {
-                throw std::runtime_error(
-                    "Python exception in autograd Function.forward(): " + std::string(e.what()));
+            } catch (py::error_already_set&) {
+                throw;  // Preserves Python traceback
             }
         }
 
@@ -2623,9 +2635,8 @@ PYBIND11_MODULE(tenzor_core, m) {
                     }
                 }
                 return grads;
-            } catch (py::error_already_set& e) {
-                throw std::runtime_error(
-                    "Python exception in autograd Function.backward(): " + std::string(e.what()));
+            } catch (py::error_already_set&) {
+                throw;  // Preserves Python traceback
             }
         }
     };
@@ -2767,6 +2778,19 @@ PYBIND11_MODULE(tenzor_core, m) {
     py::arg("grad_outputs") = py::none(),
     py::arg("retain_graph") = false,
     py::arg("create_graph") = false);
+
+    // autograd.make_dot() - computation graph visualization (Graphviz DOT format)
+    autograd_mod.def("make_dot", [](const tenzor::Variable& root,
+                                     py::dict params_dict) -> std::string {
+        std::unordered_map<std::string, tenzor::Variable> params;
+        for (auto& [key, val] : params_dict) {
+            params[key.cast<std::string>()] = val.cast<tenzor::Variable>();
+        }
+        return tenzor::make_dot(root, params);
+    },
+    "Generate Graphviz DOT string for the computation graph",
+    py::arg("root"),
+    py::arg("params") = py::dict());
 
     // Neural network
     auto nn = m.def_submodule("nn", "Neural network components");
@@ -3797,6 +3821,10 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("sparse") = false)
         .def("forward", &tenzor::nn::Embedding::forward)
         .def("weight", py::overload_cast<>(&tenzor::nn::Embedding::weight))
+        .def_static("from_pretrained", &tenzor::nn::Embedding::from_pretrained,
+             py::arg("embeddings"), py::arg("freeze") = true,
+             py::arg("padding_idx") = -1,
+             "Create Embedding from pretrained weight tensor")
         .def("__repr__", [](const tenzor::nn::Embedding& self) {
             auto params = const_cast<tenzor::nn::Embedding&>(self).own_parameters();
             int64_t num_emb = 0, emb_dim = 0;

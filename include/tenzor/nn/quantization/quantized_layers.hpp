@@ -246,6 +246,49 @@ private:
 };
 
 /**
+ * @brief Quantized Layer Normalization layer.
+ *
+ * Applies layer normalization with per-channel scale and bias for INT8 inference.
+ * Created from a floating-point LayerNorm via from_float().
+ */
+class QuantizedLayerNorm : public Module {
+public:
+    /**
+     * @brief Construct quantized layer norm.
+     *
+     * @param normalized_shape Shape of the normalized dimensions
+     * @param weight Scale parameter (gamma)
+     * @param bias Bias parameter (beta)
+     * @param eps Epsilon for numerical stability
+     */
+    QuantizedLayerNorm(
+        std::vector<int64_t> normalized_shape,
+        Tensor weight,
+        Tensor bias,
+        double eps = 1e-5
+    );
+
+    auto forward_impl(const Variable& input) -> Variable override;
+    auto forward_quantized(const QuantizedTensor& input) -> QuantizedTensor;
+
+    /**
+     * @brief Create quantized layer norm from floating-point version.
+     *
+     * @param fp_ln Floating-point LayerNorm module
+     * @param qconfig Quantization configuration
+     * @return Quantized layer norm layer
+     */
+    static auto from_float(const Module& fp_ln, const QConfig& qconfig)
+        -> std::shared_ptr<QuantizedLayerNorm>;
+
+private:
+    std::vector<int64_t> normalized_shape_;
+    Tensor weight_;
+    Tensor bias_;
+    double eps_;
+};
+
+/**
  * @brief Fused quantized Conv2d + ReLU layer.
  *
  * Combines convolution and ReLU activation in a single quantized operation

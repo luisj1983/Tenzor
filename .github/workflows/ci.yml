@@ -164,6 +164,37 @@ jobs:
             --timeout 600
         timeout-minutes: 30
 
+  # Tier 1.75: GPU tests on self-hosted runner (when available)
+  gpu-tests:
+    name: GPU Backend Tests
+    runs-on: [self-hosted, gpu, linux]
+    needs: build-and-smoke
+    if: github.event_name == 'pull_request'
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure with GPU backends
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} \
+            -DTENZOR_BUILD_CUDA=ON \
+            -DTENZOR_BUILD_VULKAN=ON \
+            -DTENZOR_BUILD_PYTHON=OFF \
+            -DTENZOR_BUILD_TESTS=ON \
+            -DTENZOR_BUILD_BENCHMARKS=OFF \
+            -DTENZOR_BUILD_EXAMPLES=OFF \
+            -DTENZOR_BUILD_MODEL_HUB=OFF
+
+      - name: Build
+        run: ninja -C build
+
+      - name: Run GPU tests
+        run: |
+          cd build
+          ctest -R "cuda|vulkan" -j4 \
+            --output-on-failure --timeout 300
+
   # Tier 2: Full CPU tests (every PR, ~30 min)
   full-cpu-tests:
     name: Full CPU Test Suite

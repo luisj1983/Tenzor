@@ -10,6 +10,10 @@
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/utils/error.hpp"
 #include <cmath>
+#include <iostream>
+#include <string>
+#include <typeinfo>
+#include <unordered_set>
 
 namespace tenzor {
 
@@ -80,8 +84,24 @@ auto Function::saved_variables() const -> const std::vector<Variable>& {
 }
 
 auto Function::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    // Default implementation: extract Tensors, call backward(), wrap results back
-    // This provides no higher-order gradient support but ensures backward compatibility
+    // Default fallback: extract Tensors, call backward(), wrap results back.
+    // This provides no higher-order gradient support — gradient graph will be
+    // disconnected at this operation when create_graph=true.
+    static thread_local std::unordered_set<std::string> warned_ops;
+    bool any_requires_grad = false;
+    for (auto& var : grad_outputs) {
+        if (var.requires_grad()) { any_requires_grad = true; break; }
+    }
+    if (any_requires_grad) {
+        auto op_name = std::string(typeid(*this).name());
+        if (warned_ops.find(op_name) == warned_ops.end()) {
+            warned_ops.insert(op_name);
+            std::cerr << "[tenzor::autograd] Warning: " << op_name
+                      << " does not support higher-order gradients. "
+                      << "Gradient graph will be disconnected at this operation.\n";
+        }
+    }
+
     std::vector<Tensor> tensor_grads;
     tensor_grads.reserve(grad_outputs.size());
     for (auto& var : grad_outputs) {

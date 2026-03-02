@@ -485,11 +485,15 @@ __global__ void matmul_tensor_core_f16_kernel(
 
     using namespace nvcuda::wmma;
 
-    // Calculate warp position in output matrix
-    // With 1 warp per block, each block computes one 16x16 output tile
-    // All 32 threads in the warp work together on WMMA operations
-    const int warpM = blockIdx.y;
-    const int warpN = blockIdx.x;
+    // Multi-warp kernel: 4 warps per block, each handles one 16x16 tile
+    // Block covers a 2x2 grid of WMMA tiles for better occupancy
+    const int warpId = threadIdx.y;  // 0..3
+    const int localM = warpId / 2;   // 0 or 1 (row within block's 2x2 tile grid)
+    const int localN = warpId % 2;   // 0 or 1 (col within block's 2x2 tile grid)
+
+    // Global tile position for this warp
+    const int warpM = blockIdx.y * 2 + localM;
+    const int warpN = blockIdx.x * 2 + localN;
 
     // Check if this warp is within bounds
     if (warpM * WMMA_M >= M || warpN * WMMA_N >= N) {
@@ -523,65 +527,62 @@ __global__ void matmul_tensor_core_f16_kernel(
             mma_sync(acc_frag, a_frag, b_frag, acc_frag);
         } else {
             // Handle edge case where K is not a multiple of WMMA_K
-            // Load partial tiles with bounds checking
+            // Each warp uses its own shared memory slice to avoid conflicts
+            __shared__ __half As[4][WMMA_M][WMMA_K + 1];
+            __shared__ __half Bs[4][WMMA_K][WMMA_N + 1];
+
             const int64_t aRow = warpM * WMMA_M;
             const int64_t aCol = k;
             const int64_t bRow = k;
             const int64_t bCol = warpN * WMMA_N;
 
-            // Create temporary padded tiles in shared memory
-            __shared__ __half As[WMMA_M][WMMA_K + 1];
-            __shared__ __half Bs[WMMA_K][WMMA_N + 1];
-
-            // Load with bounds checking
-            for (int i = threadIdx.y; i < WMMA_M; i += blockDim.y) {
-                for (int j = threadIdx.x; j < WMMA_K; j += blockDim.x) {
+            // Load with bounds checking (each thread in warp cooperates)
+            for (int i = 0; i < WMMA_M; ++i) {
+                for (int j = threadIdx.x; j < WMMA_K; j += 32) {
                     const int64_t row = aRow + i;
                     const int64_t col = aCol + j;
-                    As[i][j] = (row < M && col < K) ? A[row * K + col] : __float2half(0.0f);
+                    As[warpId][i][j] = (row < M && col < K) ? A[row * K + col] : __float2half(0.0f);
                 }
             }
 
-            for (int i = threadIdx.y; i < WMMA_K; i += blockDim.y) {
-                for (int j = threadIdx.x; j < WMMA_N; j += blockDim.x) {
+            for (int i = 0; i < WMMA_K; ++i) {
+                for (int j = threadIdx.x; j < WMMA_N; j += 32) {
                     const int64_t row = bRow + i;
                     const int64_t col = bCol + j;
-                    Bs[i][j] = (row < K && col < N) ? B[row * N + col] : __float2half(0.0f);
+                    Bs[warpId][i][j] = (row < K && col < N) ? B[row * N + col] : __float2half(0.0f);
                 }
             }
 
-            __syncthreads();
+            __syncwarp();
 
             // Load from shared memory
-            load_matrix_sync(a_frag, &As[0][0], WMMA_K);
-            load_matrix_sync(b_frag, &Bs[0][0], WMMA_N);
+            load_matrix_sync(a_frag, &As[warpId][0][0], WMMA_K + 1);
+            load_matrix_sync(b_frag, &Bs[warpId][0][0], WMMA_N + 1);
 
             // Perform matrix multiply-accumulate
             mma_sync(acc_frag, a_frag, b_frag, acc_frag);
-
-            __syncthreads();
         }
     }
 
     // Store result to global memory
-    // Float accumulator needs to be converted to half when storing
+    // Each warp stores its own tile independently
     const int64_t cRow = warpM * WMMA_M;
     const int64_t cCol = warpN * WMMA_N;
 
     if (cRow < M && cCol < N) {
-        // Store float accumulator to shared memory first
-        __shared__ float Cs_float[WMMA_M][WMMA_N + 1];
-        store_matrix_sync(&Cs_float[0][0], acc_frag, WMMA_N, mem_row_major);
+        // Store float accumulator to per-warp shared memory, then convert to half
+        __shared__ float Cs_float[4][WMMA_M][WMMA_N + 1];
+        store_matrix_sync(&Cs_float[warpId][0][0], acc_frag, WMMA_N + 1, mem_row_major);
 
-        __syncthreads();
+        __syncwarp();
 
         // Convert float to half and store to global memory with bounds checking
-        for (int i = threadIdx.y; i < WMMA_M; i += blockDim.y) {
-            for (int j = threadIdx.x; j < WMMA_N; j += blockDim.x) {
+        for (int i = 0; i < WMMA_M; ++i) {
+            for (int j = threadIdx.x; j < WMMA_N; j += 32) {
                 const int64_t row = cRow + i;
                 const int64_t col = cCol + j;
                 if (row < M && col < N) {
-                    C[row * N + col] = __float2half(Cs_float[i][j]);
+                    C[row * N + col] = __float2half(Cs_float[warpId][i][j]);
                 }
             }
         }
@@ -1322,10 +1323,14 @@ void matmul_f16(
 
     if (use_tensor_cores) {
         // Use Tensor Cores for optimal performance
-        // 1 warp (32 threads) per block, each warp computes one 16x16 tile
-        dim3 block(32, 1);  // 1 warp per block (32 threads)
-        dim3 grid((N + WMMA_N - 1) / WMMA_N,
-                  (M + WMMA_M - 1) / WMMA_M);
+        // 4 warps (128 threads) per block for better occupancy (~100% vs ~25%)
+        // Each warp computes one 16x16 tile; block handles 2x2 = 4 tiles
+        constexpr int WARPS_PER_BLOCK = 4;
+        constexpr int BLOCK_TILES_M = 2;  // 2 tiles vertically
+        constexpr int BLOCK_TILES_N = 2;  // 2 tiles horizontally
+        dim3 block(32, WARPS_PER_BLOCK);  // 4 warps per block (128 threads)
+        dim3 grid((N + WMMA_N * BLOCK_TILES_N - 1) / (WMMA_N * BLOCK_TILES_N),
+                  (M + WMMA_M * BLOCK_TILES_M - 1) / (WMMA_M * BLOCK_TILES_M));
 
         matmul_tensor_core_f16_kernel<<<grid, block, 0, stream>>>(A, B, C, M, N, K);
         CUDA_CHECK(cudaGetLastError());

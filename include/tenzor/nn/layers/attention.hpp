@@ -203,8 +203,13 @@ private:
     int64_t vdim_;           ///< Value dimension
     double dropout_;         ///< Dropout probability
     bool batch_first_;       ///< Whether batch dimension is first
+    bool add_bias_kv_;       ///< Whether to add bias to key/value sequences
     bool add_zero_attn_;     ///< Whether to add zero attention
     bool is_causal_;         ///< Whether to apply causal masking in fused kernels
+
+    // Optional bias_k and bias_v parameters (when add_bias_kv=true)
+    Variable bias_k_;  ///< Bias for key [1, 1, embed_dim]
+    Variable bias_v_;  ///< Bias for value [1, 1, embed_dim]
 
     // Projection layers
     std::shared_ptr<Linear> q_proj_;    ///< Query projection

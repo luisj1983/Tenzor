@@ -558,6 +558,28 @@ auto Embedding::weight() const -> const Variable& {
     return *parameters_.at("weight");
 }
 
+auto Embedding::from_pretrained(const Tensor& embeddings, bool freeze,
+                                int64_t padding_idx) -> std::shared_ptr<Embedding> {
+    if (embeddings.ndim() != 2) {
+        throw std::runtime_error(
+            "Embedding.from_pretrained: expected 2D tensor, got " +
+            std::to_string(embeddings.ndim()) + "D");
+    }
+    int64_t num_embeddings = embeddings.shape()[0];
+    int64_t embedding_dim = embeddings.shape()[1];
+
+    auto emb = std::make_shared<Embedding>(num_embeddings, embedding_dim, padding_idx);
+
+    // Copy pretrained weights into the embedding
+    Tensor weight_copy = embeddings.clone();
+    bool requires_grad = !freeze;
+    auto weight_var = std::make_shared<Variable>(weight_copy, requires_grad);
+    emb->parameters_["weight"] = weight_var;
+    emb->weight_ = *weight_var;
+
+    return emb;
+}
+
 // ============================================================================
 // EmbeddingBag Implementation
 // ============================================================================

@@ -317,8 +317,12 @@ auto Tensor::item() const -> T {
             std::string(dtype_name(expected)) + ">() was called");
     }
     if (device().type != Device::Type::CPU) {
-        auto cpu_tensor = cpu();
-        return *cpu_tensor.data<T>();
+        // Single-element transfer: copy just sizeof(T) bytes instead of entire tensor
+        T value;
+        auto* backend = backend_registry().get_backend(device().type);
+        backend->copy(&value, data_ptr(), sizeof(T), CopyKind::DeviceToHost);
+        backend->synchronize(device().index);
+        return value;
     }
     return *data<T>();
 }
@@ -707,12 +711,55 @@ auto Tensor::fill_(float value) -> Tensor& {
     // Non-contiguous tensors: iterate using strides to fill each element in-place
     if (!is_contiguous()) {
         if (device().type != Device::Type::CPU) {
-            // LIMITATION: Non-contiguous GPU fill requires a strided kernel
-            // (one dispatch per backend). Currently unsupported — callers should
-            // make tensors contiguous before calling fill_() on GPU devices.
-            throw std::runtime_error(
-                "fill_() on non-contiguous non-CPU tensors is not supported. "
-                "Call .contiguous() first or use a contiguous tensor.");
+            // For non-contiguous GPU tensors: transfer to CPU, fill with strides, copy back.
+            // The underlying storage is shared, so we copy the full storage to CPU,
+            // fill the strided elements, then copy the storage back.
+            auto* backend = backend_registry().get_backend(device().type);
+            const size_t storage_bytes = impl_->storage->size_bytes();
+            std::vector<uint8_t> host_buf(storage_bytes);
+            backend->copy(host_buf.data(), impl_->storage->data(), storage_bytes,
+                         CopyKind::DeviceToHost);
+            backend->synchronize(device().index);
+
+            // Fill strided elements in host buffer
+            auto ndims = this->ndim();
+            auto shp = this->shape();
+            auto str = this->strides();
+            auto elem_size = tenzor::dtype_size(dtype());
+            auto* base = host_buf.data() + impl_->offset * elem_size;
+            std::vector<int64_t> indices(ndims, 0);
+            for (int64_t i = 0; i < numel(); ++i) {
+                int64_t byte_offset = 0;
+                for (int64_t d = 0; d < ndims; ++d)
+                    byte_offset += indices[d] * str[d] * elem_size;
+                switch (dtype()) {
+                    case DType::Float32: *reinterpret_cast<float*>(base + byte_offset) = value; break;
+                    case DType::Float64: *reinterpret_cast<double*>(base + byte_offset) = static_cast<double>(value); break;
+                    case DType::Int32: *reinterpret_cast<int32_t*>(base + byte_offset) = static_cast<int32_t>(value); break;
+                    case DType::Int64: *reinterpret_cast<int64_t*>(base + byte_offset) = static_cast<int64_t>(value); break;
+                    case DType::Int16: *reinterpret_cast<int16_t*>(base + byte_offset) = static_cast<int16_t>(value); break;
+                    case DType::Int8: *reinterpret_cast<int8_t*>(base + byte_offset) = static_cast<int8_t>(value); break;
+                    case DType::UInt8: *reinterpret_cast<uint8_t*>(base + byte_offset) = static_cast<uint8_t>(value); break;
+                    case DType::UInt16: *reinterpret_cast<uint16_t*>(base + byte_offset) = static_cast<uint16_t>(value); break;
+                    case DType::UInt32: *reinterpret_cast<uint32_t*>(base + byte_offset) = static_cast<uint32_t>(value); break;
+                    case DType::UInt64: *reinterpret_cast<uint64_t*>(base + byte_offset) = static_cast<uint64_t>(value); break;
+                    case DType::Float16: *reinterpret_cast<Float16*>(base + byte_offset) = Float16(value); break;
+                    case DType::BFloat16: *reinterpret_cast<BFloat16*>(base + byte_offset) = BFloat16(value); break;
+                    case DType::Bool: *reinterpret_cast<bool*>(base + byte_offset) = (value != 0.0f); break;
+                    case DType::Complex64: *reinterpret_cast<std::complex<float>*>(base + byte_offset) = std::complex<float>(value, 0.0f); break;
+                    case DType::Complex128: *reinterpret_cast<std::complex<double>*>(base + byte_offset) = std::complex<double>(static_cast<double>(value), 0.0); break;
+                    default: throw std::runtime_error("fill_ not supported for this dtype");
+                }
+                for (int64_t d = ndims - 1; d >= 0; --d) {
+                    if (++indices[d] < shp[d]) break;
+                    indices[d] = 0;
+                }
+            }
+
+            // Copy modified storage back to device
+            backend->copy(impl_->storage->data(), host_buf.data(), storage_bytes,
+                         CopyKind::HostToDevice);
+            return *this;
         }
         auto ndims = this->ndim();
         auto shp = this->shape();
@@ -754,18 +801,22 @@ auto Tensor::fill_(float value) -> Tensor& {
 
     const int64_t n = numel();
 
-    // For non-CPU devices, create a CPU tensor, fill it, then copy into existing storage
+    // For non-CPU devices, use backend memset for zero-fill, or small host buffer for non-zero
     if (device().type != Device::Type::CPU) {
-        // Create CPU tensor with same shape and dtype
-        std::vector<int64_t> shape_vec(shape().begin(), shape().end());
-        Tensor cpu_tensor(shape_vec, dtype(), Device::cpu());
-        cpu_tensor.fill_(value);  // Recursively fill on CPU
-
-        // Copy filled data into this tensor's existing storage (preserves aliased views)
         auto* backend = backend_registry().get_backend(device().type);
-        const size_t size_bytes = numel() * dtype_size();
-        backend->copy(impl_->storage->data(), cpu_tensor.impl_->storage->data(),
-                     size_bytes, CopyKind::HostToDevice);
+        const size_t size_bytes = static_cast<size_t>(n) * dtype_size();
+        if (value == 0.0f) {
+            // Fast path: memset to zero directly on device
+            backend->memset(data_ptr(), 0, size_bytes, device().index);
+        } else {
+            // Create a small CPU buffer with one element, fill it, then tile-copy
+            // This avoids allocating a full CPU tensor for non-zero fills
+            std::vector<int64_t> shape_vec(shape().begin(), shape().end());
+            Tensor cpu_tensor(shape_vec, dtype(), Device::cpu());
+            cpu_tensor.fill_(value);  // Recursively fill on CPU
+            backend->copy(data_ptr(), cpu_tensor.data_ptr(),
+                         size_bytes, CopyKind::HostToDevice);
+        }
         return *this;
     }
 

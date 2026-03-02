@@ -477,17 +477,31 @@ void VulkanBackend::createLogicalDevices() {
                 if (cache_file.good()) {
                     auto size = cache_file.tellg();
                     // Validate: file must be large enough for VkPipelineCacheHeaderVersionOne
-                    if (size >= static_cast<std::streampos>(sizeof(uint32_t) * 4 + VK_UUID_SIZE)) {
+                    // Header: headerSize(4) + version(4) + vendorID(4) + deviceID(4) + UUID(16) = 32 bytes
+                    constexpr size_t VK_CACHE_HEADER_SIZE = sizeof(uint32_t) * 4 + VK_UUID_SIZE;
+                    if (size >= static_cast<std::streampos>(VK_CACHE_HEADER_SIZE)) {
                         cache_data.resize(static_cast<size_t>(size));
                         cache_file.seekg(0);
                         cache_file.read(cache_data.data(), size);
-                        // Validate pipeline cache header version
+                        // Validate pipeline cache header: version, vendor ID, device ID, and UUID
                         uint32_t header_size = 0;
                         std::memcpy(&header_size, cache_data.data(), sizeof(uint32_t));
                         uint32_t header_version = 0;
                         std::memcpy(&header_version, cache_data.data() + sizeof(uint32_t), sizeof(uint32_t));
-                        if (header_version == VK_PIPELINE_CACHE_HEADER_VERSION_ONE
-                            && header_size <= cache_data.size()) {
+                        uint32_t cache_vendor_id = 0;
+                        std::memcpy(&cache_vendor_id, cache_data.data() + sizeof(uint32_t) * 2, sizeof(uint32_t));
+                        uint32_t cache_device_id = 0;
+                        std::memcpy(&cache_device_id, cache_data.data() + sizeof(uint32_t) * 3, sizeof(uint32_t));
+                        uint8_t cache_uuid[VK_UUID_SIZE];
+                        std::memcpy(cache_uuid, cache_data.data() + sizeof(uint32_t) * 4, VK_UUID_SIZE);
+
+                        bool valid = (header_version == VK_PIPELINE_CACHE_HEADER_VERSION_ONE)
+                                  && (header_size <= cache_data.size())
+                                  && (cache_vendor_id == devProps.vendorID)
+                                  && (cache_device_id == devProps.deviceID)
+                                  && (std::memcmp(cache_uuid, devProps.pipelineCacheUUID, VK_UUID_SIZE) == 0);
+
+                        if (valid) {
                             cacheCreateInfo.initialDataSize = cache_data.size();
                             cacheCreateInfo.pInitialData = cache_data.data();
                         }
@@ -511,9 +525,22 @@ void VulkanBackend::createLogicalDevices() {
                                            nullptr, &ctx.commandPool),
                        "Failed to create command pool");
 
-        // Create descriptor pool
-        // Increased from 1000 to 100000 to support long-running tests (transformers, LSTMs, etc.)
-        ctx.descriptorPool = std::make_unique<vulkan::DescriptorPool>(ctx.device, 100000);
+        // Create descriptor pool — clamp to device limits
+        {
+            VkPhysicalDeviceProperties descPoolProps;
+            vkGetPhysicalDeviceProperties(ctx.physicalDevice, &descPoolProps);
+            // We need up to 100000 sets for long-running tests (transformers, LSTMs, etc.)
+            // but must not exceed the device's maxBoundDescriptorSets limit.
+            // Note: maxBoundDescriptorSets is typically 4-32 (simultaneous bindings),
+            // but pool maxSets is about total allocatable sets — most drivers support much more.
+            // Still clamp descriptorCount to reasonable fraction of device storage buffer limits.
+            uint32_t maxSets = 100000u;
+            uint32_t maxStorageBuffers = descPoolProps.limits.maxDescriptorSetStorageBuffers;
+            if (maxStorageBuffers > 0 && maxSets * 8 > maxStorageBuffers) {
+                maxSets = maxStorageBuffers / 8;
+            }
+            ctx.descriptorPool = std::make_unique<vulkan::DescriptorPool>(ctx.device, maxSets);
+        }
 
         // Create fence for async synchronization
         VkFenceCreateInfo fenceInfo{};
@@ -829,13 +856,17 @@ VkDescriptorSet VulkanBackend::allocateAndWriteDescriptorSet(
 
     // If descriptor pool is exhausted, wait for pending work, reset, and retry
     if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL) {
-        // Wait for all GPU work to complete before resetting
+        // Wait for all submitted frame fences to complete before resetting.
+        // Uses fence-based wait instead of vkDeviceWaitIdle for better
+        // concurrency — only blocks on our own submissions.
         ensurePendingWorkComplete(device_id);
-        vkDeviceWaitIdle(ctx.device);
 
         // Reset command pool and descriptor pool
         vkResetCommandPool(ctx.device, ctx.commandPool, 0);
         ctx.nextCommandBufferIndex = 0;
+        ctx.submittedFrames = 0;
+        ctx.currentFrame = 0;
+        ctx.hasPendingWork = false;
         ctx.descriptorPool->reset();
 
         // Retry allocation

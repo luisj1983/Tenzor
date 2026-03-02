@@ -450,7 +450,7 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                 reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
                 reinterpret_cast<__nv_bfloat16*>(output.data_ptr()), total_input);
             CUDA_CHECK(cudaGetLastError());
-            CUDA_CHECK(cudaStreamSynchronize(stream));
+            // No sync needed: CUDA stream ordering guarantees sequential execution
             if (idx_is_int32)
                 scatter_values_kernel_impl<__nv_bfloat16, int32_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>(
                     index.data<int32_t>(),

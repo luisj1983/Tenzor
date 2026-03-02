@@ -342,8 +342,12 @@ public:
                                                    memRequirements.memoryTypeBits,
                                                    properties);
 
-        checkVk(vkAllocateMemory(device, &allocInfo, nullptr, &memory_),
-                "Failed to allocate buffer memory");
+        VkResult allocResult = vkAllocateMemory(device, &allocInfo, nullptr, &memory_);
+        if (allocResult != VK_SUCCESS) {
+            vkDestroyBuffer(device, buffer_, nullptr);
+            buffer_ = VK_NULL_HANDLE;
+            checkVk(allocResult, "Failed to allocate buffer memory");
+        }
 
         vkBindBufferMemory(device, buffer_, memory_, 0);
     }

@@ -42,6 +42,7 @@ set(TENZOR_CORE_SOURCES
     autograd/checkpoint.cpp
     autograd/gradcheck.cpp
     autograd/graph_optimizer.cpp
+    autograd/graph_viz.cpp
     nn/module.cpp
     nn/serialize.cpp
     nn/checkpoint.cpp
@@ -97,6 +98,7 @@ set(TENZOR_CORE_SOURCES
     nn/utils/kv_cache.cpp
     nn/utils/grad_accumulation.cpp
     nn/utils/spectral_norm.cpp
+    nn/utils/weight_norm.cpp
     nn/init.cpp
     nn/parallel/data_parallel.cpp
     # nn/parallel/distributed_data_parallel.cpp  # Disabled - use new distributed API from distributed/ instead
@@ -164,6 +166,19 @@ set_target_properties(tenzor_core PROPERTIES
     VERSION ${PROJECT_VERSION}
     SOVERSION 1
     PUBLIC_HEADER "${CMAKE_SOURCE_DIR}/include/tenzor/tenzor.hpp"
+)
+
+# Pre-compiled headers for faster compilation
+target_precompile_headers(tenzor_core PRIVATE
+    <vector>
+    <memory>
+    <string>
+    <unordered_map>
+    <cstdint>
+    <stdexcept>
+    <algorithm>
+    <functional>
+    <optional>
 )
 
 # Include directories

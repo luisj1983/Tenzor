@@ -354,7 +354,9 @@ class Sequential(_CppSequential):
             *args: Variable number of modules to add in order
         """
         super().__init__()
-        # Keep Python references alive to prevent garbage collection
+        # _py_modules keeps Python references alive to prevent garbage collection.
+        # The C++ Module base class stores raw pointers to child modules; without
+        # this list, Python could GC the modules while C++ still references them.
         self._py_modules = list(args)
         for module in args:
             self.append(module)

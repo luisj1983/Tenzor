@@ -45,38 +45,14 @@ enum class MemoryFormat {
 // Forward declarations
 class TensorImpl;
 class Tensor;
+class TensorAccessor;
 
-// Forward declarations for backend kernel functions
-namespace cpu {
-    auto clone_kernel(const tenzor::Tensor& input) -> tenzor::Tensor;
-    auto reshape_kernel(const tenzor::Tensor& input, const std::vector<int64_t>& new_shape) -> tenzor::Tensor;
-    auto transpose_kernel(const tenzor::Tensor& input, int64_t dim0, int64_t dim1) -> tenzor::Tensor;
-    auto permute_kernel(const tenzor::Tensor& input, const std::vector<int64_t>& dims) -> tenzor::Tensor;
-    auto squeeze_kernel(const tenzor::Tensor& input, int64_t dim) -> tenzor::Tensor;
-    auto unsqueeze_kernel(const tenzor::Tensor& input, int64_t dim) -> tenzor::Tensor;
-    auto contiguous_kernel(const tenzor::Tensor& input) -> tenzor::Tensor;
-    auto cat_kernel(const std::vector<tenzor::Tensor>& tensors, int64_t dim) -> tenzor::Tensor;
-    auto flatten_kernel(const tenzor::Tensor& input, int64_t start_dim, int64_t end_dim) -> tenzor::Tensor;
-    auto slice_kernel(const tenzor::Tensor& input, int64_t dim, int64_t start, int64_t end, int64_t step) -> tenzor::Tensor;
-    auto expand_kernel(const tenzor::Tensor& input, const std::vector<int64_t>& target_shape) -> tenzor::Tensor;
-    auto to_memory_format_kernel(const tenzor::Tensor& input, tenzor::MemoryFormat format) -> tenzor::Tensor;
-}
+// Forward declarations for backend kernel accessor classes
 namespace cuda {
-    class CUDAKernelAccess;  // Forward declaration for friend access
-
-    auto clone_kernel(const tenzor::Tensor& input) -> tenzor::Tensor;
-    auto reshape_kernel(const tenzor::Tensor& input, const std::vector<int64_t>& new_shape) -> tenzor::Tensor;
-    auto transpose_kernel(const tenzor::Tensor& input, int64_t dim0, int64_t dim1) -> tenzor::Tensor;
-    auto permute_kernel(const tenzor::Tensor& input, const std::vector<int64_t>& dims) -> tenzor::Tensor;
-    auto squeeze_kernel(const tenzor::Tensor& input, int64_t dim) -> tenzor::Tensor;
-    auto unsqueeze_kernel(const tenzor::Tensor& input, int64_t dim) -> tenzor::Tensor;
-    auto contiguous_kernel(const tenzor::Tensor& input) -> tenzor::Tensor;
-    auto to_memory_format_kernel(const tenzor::Tensor& input, tenzor::MemoryFormat format, void* stream) -> tenzor::Tensor;
-    auto cudnn_conv2d_forward_nhwc(const tenzor::Tensor& input, const tenzor::Tensor& weight, const tenzor::Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, void* stream) -> tenzor::Tensor;
-    auto cudnn_conv2d_backward_nhwc(const tenzor::Tensor& grad_output, const tenzor::Tensor& input, const tenzor::Tensor& weight, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias, void* stream) -> std::tuple<tenzor::Tensor, tenzor::Tensor, tenzor::Tensor>;
+    class CUDAKernelAccess;
 }
 namespace rocm {
-    class HIPKernelAccess;  // Forward declaration for friend access
+    class HIPKernelAccess;
 }
 
 // Forward declaration for Vulkan backend
@@ -927,33 +903,30 @@ private:
     std::shared_ptr<TensorImpl> impl_;
 
     friend class Variable;
-    friend class cuda::CUDAKernelAccess;  // Allow CUDA kernels to access impl_
-    friend class rocm::HIPKernelAccess;   // Allow ROCm/HIP kernels to access impl_
-    friend class VulkanBackend;           // Allow Vulkan backend to access impl_
+    friend class TensorAccessor;  // Single accessor for all backend kernel access to impl_
+    friend class VulkanBackend;   // Vulkan backend needs direct access for buffer management
+};
 
-    // Friend declarations for backend kernels that need direct access to impl_
-    friend auto cpu::clone_kernel(const Tensor& input) -> Tensor;
-    friend auto cpu::reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape) -> Tensor;
-    friend auto cpu::transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1) -> Tensor;
-    friend auto cpu::permute_kernel(const Tensor& input, const std::vector<int64_t>& dims) -> Tensor;
-    friend auto cpu::squeeze_kernel(const Tensor& input, int64_t dim) -> Tensor;
-    friend auto cpu::unsqueeze_kernel(const Tensor& input, int64_t dim) -> Tensor;
-    friend auto cpu::contiguous_kernel(const Tensor& input) -> Tensor;
-    friend auto cpu::cat_kernel(const std::vector<Tensor>& tensors, int64_t dim) -> Tensor;
-    friend auto cpu::flatten_kernel(const Tensor& input, int64_t start_dim, int64_t end_dim) -> Tensor;
-    friend auto cpu::slice_kernel(const Tensor& input, int64_t dim, int64_t start, int64_t end, int64_t step) -> Tensor;
-    friend auto cpu::expand_kernel(const Tensor& input, const std::vector<int64_t>& target_shape) -> Tensor;
-    friend auto cpu::to_memory_format_kernel(const Tensor& input, MemoryFormat format) -> Tensor;
-    friend auto cuda::clone_kernel(const Tensor& input) -> Tensor;
-    friend auto cuda::reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape) -> Tensor;
-    friend auto cuda::transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1) -> Tensor;
-    friend auto cuda::permute_kernel(const Tensor& input, const std::vector<int64_t>& dims) -> Tensor;
-    friend auto cuda::squeeze_kernel(const Tensor& input, int64_t dim) -> Tensor;
-    friend auto cuda::unsqueeze_kernel(const Tensor& input, int64_t dim) -> Tensor;
-    friend auto cuda::contiguous_kernel(const Tensor& input) -> Tensor;
-    friend auto cuda::to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* stream) -> Tensor;
-    friend auto cuda::cudnn_conv2d_forward_nhwc(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, void* stream) -> Tensor;
-    friend auto cuda::cudnn_conv2d_backward_nhwc(const Tensor& grad_output, const Tensor& input, const Tensor& weight, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias, void* stream) -> std::tuple<Tensor, Tensor, Tensor>;
+/**
+ * @brief Privileged accessor for Tensor internals.
+ *
+ * Provides controlled access to Tensor::impl_ for backend kernels that need
+ * to create view tensors (reshape, transpose, slice, etc.) by sharing storage.
+ * This consolidates friend access into a single class instead of requiring
+ * each kernel function to be individually friended.
+ *
+ * Backend accessor classes (CUDAKernelAccess, HIPKernelAccess) and CPU kernel
+ * functions should use this class to access Tensor internals.
+ */
+class TensorAccessor {
+public:
+    static auto get_impl(const Tensor& t) -> const std::shared_ptr<TensorImpl>& {
+        return t.impl_;
+    }
+
+    static auto get_impl_mutable(Tensor& t) -> std::shared_ptr<TensorImpl>& {
+        return t.impl_;
+    }
 };
 
 /**

@@ -12,6 +12,13 @@ namespace tenzor {
 std::array<BackendDispatchTable, DEVICE_TYPE_COUNT> DispatchTableRegistry::tables_{};
 
 void BackendDispatchTable::throw_unsupported(OpId op) const {
+    if (!ready.load(std::memory_order_acquire)) {
+        throw std::runtime_error(
+            std::string(device_type_to_string(device_type)) +
+            " backend not available. Ensure tenzor::initialize() has been called "
+            "and the backend library is installed."
+        );
+    }
     throw std::runtime_error(
         std::string("Operation '") + std::string(op_id_to_name(op)) +
         "' not supported on " + device_type_to_string(device_type) + " backend"

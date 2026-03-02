@@ -9,14 +9,15 @@
 namespace tenzor {
 namespace rocm {
 
-// Helper class to access Tensor private members from HIP kernels
+// Helper class to access Tensor private members from HIP kernels.
+// Routes through TensorAccessor which is a friend of Tensor.
 class HIPKernelAccess {
 public:
     static auto get_impl(const Tensor& t) -> const std::shared_ptr<TensorImpl>& {
-        return t.impl_;
+        return TensorAccessor::get_impl(t);
     }
     static auto get_impl_mutable(Tensor& t) -> std::shared_ptr<TensorImpl>& {
-        return t.impl_;
+        return TensorAccessor::get_impl_mutable(t);
     }
 };
 

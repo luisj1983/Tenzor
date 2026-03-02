@@ -6,6 +6,7 @@
 #include "simd_fast_math.hpp"
 #include "float16_simd.hpp"
 #include "bfloat16_simd.hpp"
+#include "int_simd.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <algorithm>
@@ -335,34 +336,9 @@ struct MatMulCachedPrimitive {
 
 static constexpr size_t MATMUL_CACHE_SIZE = 48;
 
-class MatMulPrimitiveCache {
-public:
-    std::shared_ptr<MatMulCachedPrimitive> get(const MatMulCacheKey& key) {
-        auto it = cache_.find(key);
-        if (it != cache_.end()) {
-            // Move to front of LRU list
-            lru_list_.remove(key);
-            lru_list_.push_front(key);
-            return it->second;
-        }
-        return nullptr;
-    }
-
-    void put(const MatMulCacheKey& key, std::shared_ptr<MatMulCachedPrimitive> value) {
-        // Evict if cache is full
-        if (cache_.size() >= MATMUL_CACHE_SIZE) {
-            auto evict_key = lru_list_.back();
-            lru_list_.pop_back();
-            cache_.erase(evict_key);
-        }
-        cache_[key] = value;
-        lru_list_.push_front(key);
-    }
-
-private:
-    std::unordered_map<MatMulCacheKey, std::shared_ptr<MatMulCachedPrimitive>, MatMulCacheKeyHash> cache_;
-    std::list<MatMulCacheKey> lru_list_;
-};
+// Use shared OneDNNPrimitiveCache template (O(1) LRU via splice, replaces O(n) list::remove)
+using MatMulPrimitiveCache = OneDNNPrimitiveCache<MatMulCacheKey, MatMulCachedPrimitive,
+                                                   MatMulCacheKeyHash, MATMUL_CACHE_SIZE>;
 
 static thread_local MatMulPrimitiveCache g_matmul_cache;
 
@@ -1502,7 +1478,7 @@ auto add_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 #ifdef TENZOR_HAS_AVX512
             detail::add_avx512_i32(a_data, b_data, c_data, n);
 #else
-            detail::add_scalar(a_data, b_data, c_data, n);
+            int_simd::add_i32(a_data, b_data, c_data, n);
 #endif
 
         } else if (a.dtype() == DType::Int64) {
@@ -1538,17 +1514,23 @@ auto add_kernel(const Tensor& a, const Tensor& b) -> Tensor {
                 c_data[i] = BFloat16(static_cast<float>(a_data[i]) + static_cast<float>(b_data[i]));
             }
 
+        } else if (a.dtype() == DType::Int16) {
+            const int16_t* a_data = a.data<int16_t>();
+            const int16_t* b_data = b.data<int16_t>();
+            int16_t* c_data = result.data<int16_t>();
+            int_simd::add_i16(a_data, b_data, c_data, n);
+
         } else if (a.dtype() == DType::Int8) {
             const int8_t* a_data = a.data<int8_t>();
             const int8_t* b_data = b.data<int8_t>();
             int8_t* c_data = result.data<int8_t>();
-            detail::add_scalar(a_data, b_data, c_data, n);
+            int_simd::add_i8(a_data, b_data, c_data, n);
 
         } else if (a.dtype() == DType::UInt8) {
             const uint8_t* a_data = a.data<uint8_t>();
             const uint8_t* b_data = b.data<uint8_t>();
             uint8_t* c_data = result.data<uint8_t>();
-            detail::add_scalar(a_data, b_data, c_data, n);
+            int_simd::add_u8(a_data, b_data, c_data, n);
 
         } else if (a.dtype() == DType::Bool) {
             // Bool add uses numeric semantics (int(a) + int(b) -> bool)
@@ -1727,7 +1709,7 @@ auto sub_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 #ifdef TENZOR_HAS_AVX512
             detail::sub_avx512_i32(a_data, b_data, c_data, n);
 #else
-            detail::sub_scalar(a_data, b_data, c_data, n);
+            int_simd::sub_i32(a_data, b_data, c_data, n);
 #endif
 
         } else if (a.dtype() == DType::Int64) {
@@ -1750,11 +1732,17 @@ auto sub_kernel(const Tensor& a, const Tensor& b) -> Tensor {
                 c_data[i] = BFloat16(static_cast<float>(a_data[i]) - static_cast<float>(b_data[i]));
             }
 
+        } else if (a.dtype() == DType::Int16) {
+            const int16_t* a_data = a.data<int16_t>();
+            const int16_t* b_data = b.data<int16_t>();
+            int16_t* c_data = result.data<int16_t>();
+            int_simd::sub_i16(a_data, b_data, c_data, n);
+
         } else if (a.dtype() == DType::Int8) {
             const int8_t* a_data = a.data<int8_t>();
             const int8_t* b_data = b.data<int8_t>();
             int8_t* c_data = result.data<int8_t>();
-            detail::sub_scalar(a_data, b_data, c_data, n);
+            int_simd::sub_i8(a_data, b_data, c_data, n);
 
         } else if (a.dtype() == DType::Bool) {
             // Bool sub uses numeric semantics (int(a) - int(b) -> bool)
@@ -2371,6 +2359,58 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         BFloat16* c_data = result.data<BFloat16>();
 
         matmul_blocked_bfloat16(a_data, b_data, c_data, M, N, K);
+
+    } else if (a_contig.dtype() == DType::Complex64 && b_contig.dtype() == DType::Complex64) {
+#ifdef TENZOR_HAS_MKL
+        MKL_Complex8 alpha = {1.0f, 0.0f};
+        MKL_Complex8 beta = {0.0f, 0.0f};
+        cblas_cgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                    static_cast<MKL_INT>(M), static_cast<MKL_INT>(N), static_cast<MKL_INT>(K),
+                    &alpha,
+                    reinterpret_cast<const void*>(a_contig.data<std::complex<float>>()),
+                    static_cast<MKL_INT>(K),
+                    reinterpret_cast<const void*>(b_contig.data<std::complex<float>>()),
+                    static_cast<MKL_INT>(N),
+                    &beta,
+                    reinterpret_cast<void*>(result.data<std::complex<float>>()),
+                    static_cast<MKL_INT>(N));
+#else
+        // Fallback: naive complex matmul
+        const auto* a_data = a_contig.data<std::complex<float>>();
+        const auto* b_data = b_contig.data<std::complex<float>>();
+        auto* c_data = result.data<std::complex<float>>();
+        std::fill_n(c_data, M * N, std::complex<float>(0.0f, 0.0f));
+        for (int64_t i = 0; i < M; ++i)
+            for (int64_t k = 0; k < K; ++k)
+                for (int64_t j = 0; j < N; ++j)
+                    c_data[i * N + j] += a_data[i * K + k] * b_data[k * N + j];
+#endif
+
+    } else if (a_contig.dtype() == DType::Complex128 && b_contig.dtype() == DType::Complex128) {
+#ifdef TENZOR_HAS_MKL
+        MKL_Complex16 alpha = {1.0, 0.0};
+        MKL_Complex16 beta = {0.0, 0.0};
+        cblas_zgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                    static_cast<MKL_INT>(M), static_cast<MKL_INT>(N), static_cast<MKL_INT>(K),
+                    &alpha,
+                    reinterpret_cast<const void*>(a_contig.data<std::complex<double>>()),
+                    static_cast<MKL_INT>(K),
+                    reinterpret_cast<const void*>(b_contig.data<std::complex<double>>()),
+                    static_cast<MKL_INT>(N),
+                    &beta,
+                    reinterpret_cast<void*>(result.data<std::complex<double>>()),
+                    static_cast<MKL_INT>(N));
+#else
+        // Fallback: naive complex matmul
+        const auto* a_data = a_contig.data<std::complex<double>>();
+        const auto* b_data = b_contig.data<std::complex<double>>();
+        auto* c_data = result.data<std::complex<double>>();
+        std::fill_n(c_data, M * N, std::complex<double>(0.0, 0.0));
+        for (int64_t i = 0; i < M; ++i)
+            for (int64_t k = 0; k < K; ++k)
+                for (int64_t j = 0; j < N; ++j)
+                    c_data[i * N + j] += a_data[i * K + k] * b_data[k * N + j];
+#endif
 
     } else {
         throw std::runtime_error(

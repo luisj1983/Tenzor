@@ -65,14 +65,14 @@ MultiheadAttention::MultiheadAttention(int64_t embed_dim,
             "dropout probability must be in [0, 1]. Got " + std::to_string(dropout_));
     }
 
-    if (add_bias_kv) {
-        throw std::runtime_error(
-            "MultiheadAttention: add_bias_kv=true not implemented");
-    }
+    add_bias_kv_ = add_bias_kv;
 
-    if (add_zero_attn) {
-        throw std::runtime_error(
-            "MultiheadAttention: add_zero_attn=true not implemented");
+    if (add_bias_kv) {
+        // Initialize bias_k and bias_v as learnable parameters [1, 1, embed_dim]
+        auto bk = tenzor::zeros({1, 1, embed_dim_}, DType::Float32);
+        auto bv = tenzor::zeros({1, 1, embed_dim_}, DType::Float32);
+        bias_k_ = Variable(bk, true);
+        bias_v_ = Variable(bv, true);
     }
 
     head_dim_ = embed_dim_ / num_heads_;
@@ -428,6 +428,25 @@ auto MultiheadAttention::forward(const Variable& query,
     Variable Q = q_proj_->forward(q_compat);
     Variable K = k_proj_->forward(k_compat);
     Variable V = v_proj_->forward(v_compat);
+
+    // add_bias_kv: concatenate bias_k/bias_v to key/value sequences
+    if (add_bias_kv_) {
+        // bias_k_ is [1, 1, embed_dim], expand to [batch_size, 1, embed_dim]
+        auto bk = Variable(tenzor::expand(bias_k_.tensor(), {batch_size, 1, embed_dim_}), false);
+        auto bv = Variable(tenzor::expand(bias_v_.tensor(), {batch_size, 1, embed_dim_}), false);
+        K = tenzor::cat({K, bk}, 1);  // [batch, seq_k+1, embed]
+        V = tenzor::cat({V, bv}, 1);  // [batch, seq_k+1, embed]
+        seq_len_k += 1;
+    }
+
+    // add_zero_attn: append zero row to key/value sequences
+    if (add_zero_attn_) {
+        auto zero_row = Variable(tenzor::zeros({batch_size, 1, embed_dim_},
+                                                K.tensor().dtype(), K.tensor().device()), false);
+        K = tenzor::cat({K, zero_row}, 1);
+        V = tenzor::cat({V, zero_row}, 1);
+        seq_len_k += 1;
+    }
 
     // Reshape for multi-head attention
     Q = transpose_for_scores(Q);  // (batch, num_heads, seq_len_q, head_dim)

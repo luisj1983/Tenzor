@@ -156,46 +156,28 @@ void im2col_cpu(
     int64_t out_h,
     int64_t out_w
 ) {
-    int64_t total_elements = batch * out_h * out_w * channels * kernel_h * kernel_w;
+    const int64_t col_width = channels * kernel_h * kernel_w;
 
-    // Limit threads to avoid OpenMP overhead for memory-bound operations
-#ifdef _OPENMP
-    int max_threads = omp_get_max_threads();
-    int effective_threads = std::min({max_threads, static_cast<int>(batch), 8});
-    int final_threads = std::max(1, effective_threads);
-#else
-    int final_threads = 1;
-#endif
-
-    #pragma omp parallel for num_threads(final_threads) if(total_elements > 10000)
-    for (int64_t idx = 0; idx < total_elements; ++idx) {
-        // Decode flat index to (b, oh, ow, c, kh, kw)
-        int64_t temp = idx;
-        int64_t kw = temp % kernel_w; temp /= kernel_w;
-        int64_t kh = temp % kernel_h; temp /= kernel_h;
-        int64_t c = temp % channels; temp /= channels;
-        int64_t ow = temp % out_w; temp /= out_w;
-        int64_t oh = temp % out_h; temp /= out_h;
-        int64_t b = temp;
-
-        // Calculate input position with padding and dilation
-        int64_t ih = oh * stride - padding + kh * dilation;
-        int64_t iw = ow * stride - padding + kw * dilation;
-
-        // Output index in col matrix
-        // Shape: (batch * out_h * out_w, channels * kernel_h * kernel_w)
-        int64_t out_row = b * out_h * out_w + oh * out_w + ow;
-        int64_t out_col = c * kernel_h * kernel_w + kh * kernel_w + kw;
-        int64_t out_idx = out_row * (channels * kernel_h * kernel_w) + out_col;
-
-        // Check bounds and apply padding
-        if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
-            int64_t input_idx = b * (channels * height * width) +
-                               c * (height * width) +
-                               ih * width + iw;
-            output[out_idx] = input[input_idx];
-        } else {
-            output[out_idx] = T(0.0f);  // Padding with zeros
+    // Nested loop approach: eliminates 5 div/mod per element (~200 cycles saved per element)
+    #pragma omp parallel for collapse(3) if(batch * out_h * out_w > 10000)
+    for (int64_t b = 0; b < batch; ++b) {
+        for (int64_t oh = 0; oh < out_h; ++oh) {
+            for (int64_t ow = 0; ow < out_w; ++ow) {
+                T* col_ptr = output + ((b * out_h + oh) * out_w + ow) * col_width;
+                for (int64_t c = 0; c < channels; ++c) {
+                    for (int64_t kh_idx = 0; kh_idx < kernel_h; ++kh_idx) {
+                        int64_t ih = oh * stride - padding + kh_idx * dilation;
+                        for (int64_t kw_idx = 0; kw_idx < kernel_w; ++kw_idx) {
+                            int64_t iw = ow * stride - padding + kw_idx * dilation;
+                            if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
+                                *col_ptr++ = input[((b * channels + c) * height + ih) * width + iw];
+                            } else {
+                                *col_ptr++ = T(0.0f);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

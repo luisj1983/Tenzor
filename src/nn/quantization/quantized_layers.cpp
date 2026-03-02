@@ -7,6 +7,8 @@
 #include "tenzor/nn/layers/linear.hpp"
 #include "tenzor/nn/layers/conv.hpp"
 #include "tenzor/ops/math.hpp"
+#include "tenzor/ops/reduction.hpp"
+#include "tenzor/ops/creation.hpp"
 #include <stdexcept>
 
 namespace tenzor {
@@ -421,6 +423,73 @@ auto QuantizedBatchNorm2d::from_float(const Module& fp_bn, const QConfig& qconfi
     );
 
     return q_bn;
+}
+
+// ============================================================================
+// QuantizedLayerNorm Implementation
+// ============================================================================
+
+QuantizedLayerNorm::QuantizedLayerNorm(
+    std::vector<int64_t> normalized_shape,
+    Tensor weight,
+    Tensor bias,
+    double eps
+) : normalized_shape_(std::move(normalized_shape)),
+    weight_(std::move(weight)),
+    bias_(std::move(bias)),
+    eps_(eps) {}
+
+auto QuantizedLayerNorm::forward_impl(const Variable& input) -> Variable {
+    // Layer norm: y = (x - mean) / sqrt(var + eps) * weight + bias
+    // For quantized inference, we compute at float precision
+    Tensor x = input.tensor();
+    auto x_shape = x.shape();
+    int64_t norm_size = 1;
+    for (auto d : normalized_shape_) norm_size *= d;
+
+    // Compute mean and variance over the last N dimensions
+    int64_t outer_size = x.numel() / norm_size;
+    Tensor x_flat = x.reshape({outer_size, norm_size});
+
+    Tensor x_mean = ::tenzor::mean(x_flat, 1, true);    // [outer, 1]
+    Tensor centered = x_flat - x_mean;
+    Tensor var = ::tenzor::mean(centered * centered, 1, true);  // [outer, 1]
+
+    // inv_std = 1 / sqrt(var + eps)
+    auto eps_t = ::tenzor::full({outer_size, 1}, static_cast<float>(eps_),
+                                 var.dtype(), var.device());
+    Tensor std_val = ::tenzor::sqrt(var + eps_t);
+    Tensor ones_t = ::tenzor::ones({outer_size, 1}, var.dtype(), var.device());
+    Tensor inv_std = ::tenzor::div(ones_t, std_val);
+    Tensor normalized = centered * inv_std;
+
+    // Reshape back and apply weight + bias
+    normalized = normalized.reshape(std::vector<int64_t>(x_shape.begin(), x_shape.end()));
+    Tensor output = normalized * weight_ + bias_;
+
+    return Variable(output, input.requires_grad());
+}
+
+auto QuantizedLayerNorm::forward_quantized(const QuantizedTensor& input) -> QuantizedTensor {
+    // Dequantize → layer norm → requantize
+    Tensor deq = input.dequantize();
+    auto result = forward_impl(Variable(deq, false));
+    return quantize_per_tensor_symmetric(result.tensor());
+}
+
+auto QuantizedLayerNorm::from_float(const Module& fp_ln, const QConfig& /*qconfig*/)
+    -> std::shared_ptr<QuantizedLayerNorm> {
+    auto state_dict = fp_ln.state_dict();
+
+    Tensor weight = state_dict.at("weight");
+    Tensor bias = state_dict.at("bias");
+
+    // Infer normalized_shape from weight shape
+    auto wshape = weight.shape();
+    std::vector<int64_t> normalized_shape(wshape.begin(), wshape.end());
+
+    return std::make_shared<QuantizedLayerNorm>(
+        normalized_shape, weight, bias, 1e-5);
 }
 
 // ============================================================================

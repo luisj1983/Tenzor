@@ -47,19 +47,19 @@ void VulkanBackend::initCommandBufferPool(DeviceContext& ctx) {
 VkCommandBuffer VulkanBackend::acquireCommandBuffer(int32_t device_id) {
     auto& ctx = devices_[device_id];
 
-    // If we've used all buffers in the pool, wait for ALL GPU work and reset
+    // If we've used all buffers in the pool, wait for pending GPU work and reset
     if (ctx.nextCommandBufferIndex >= ctx.commandBufferPool.size()) {
-        // Use vkDeviceWaitIdle instead of fence-only wait to ensure ALL GPU work
-        // is complete before resetting descriptor pool. Fence-only wait may miss
-        // in-flight commands that reference descriptor sets from this pool.
-        vkDeviceWaitIdle(ctx.device);
+        // Wait for all submitted frame fences instead of vkDeviceWaitIdle.
+        // This is more targeted — only waits for our own submissions, not
+        // all device work (which would serialize unrelated queues).
+        ensurePendingWorkComplete(device_id);
         vkResetCommandPool(ctx.device, ctx.commandPool, 0);
         ctx.nextCommandBufferIndex = 0;
         ctx.submittedFrames = 0;
         ctx.currentFrame = 0;
         ctx.hasPendingWork = false;
 
-        // Safe to reset descriptor pool now — all GPU work is complete
+        // Safe to reset descriptor pool now — all submitted work is complete
         if (ctx.descriptorPool) {
             ctx.descriptorPool->reset();
         }
