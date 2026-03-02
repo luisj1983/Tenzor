@@ -9,6 +9,7 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/backend/dispatch.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/core/shape.hpp"
 #include <algorithm>
@@ -63,10 +64,10 @@ auto topk(const Tensor& input,
     // For non-CPU tensors, dispatch to backend kernel
     if (input.device().type != Device::Type::CPU) {
         OpAttributes attrs;
-        attrs["k"] = std::to_string(k);
-        attrs["dim"] = std::to_string(dim);
-        attrs["largest"] = largest ? "1" : "0";
-        attrs["sorted"] = sorted ? "1" : "0";
+        attrs.set(AttrKey::K, k);
+        attrs.set(AttrKey::Dim, dim);
+        attrs.set(AttrKey::Largest, largest);
+        attrs.set(AttrKey::Sorted, sorted);
         std::vector<Tensor> inputs = {input};
         auto results = dispatch<OpId::TopK>(inputs, attrs);
         return {results[0], results[1]};
@@ -182,8 +183,8 @@ auto sort(const Tensor& input,
     // For non-CPU tensors, dispatch to backend kernel
     if (input.device().type != Device::Type::CPU) {
         OpAttributes attrs;
-        attrs["dim"] = std::to_string(dim);
-        attrs["descending"] = descending ? "1" : "0";
+        attrs.set(AttrKey::Dim, dim);
+        attrs.set(AttrKey::Descending, descending);
         std::vector<Tensor> inputs = {input};
         auto results = dispatch<OpId::Sort>(inputs, attrs);
         return {results[0], results[1]};
@@ -276,9 +277,9 @@ auto unique(const Tensor& input,
     // For non-CPU tensors, dispatch to backend kernel
     if (input.device().type != Device::Type::CPU) {
         OpAttributes attrs;
-        attrs["sorted"] = sorted_output ? "1" : "0";
-        attrs["return_inverse"] = return_inverse ? "1" : "0";
-        attrs["return_counts"] = return_counts ? "1" : "0";
+        attrs.set(AttrKey::Sorted, sorted_output);
+        attrs.set(AttrKey::ReturnInverse, return_inverse);
+        attrs.set(AttrKey::ReturnCounts, return_counts);
         std::vector<Tensor> inputs = {input};
         auto results = dispatch<OpId::Unique>(inputs, attrs);
         return {results[0], results[1], results[2]};
@@ -398,8 +399,8 @@ auto cumsum(const Tensor& input, int64_t dim) -> Tensor {
 
     // For non-CPU tensors, dispatch to backend kernel
     if (input.device().type != Device::Type::CPU) {
-        OpAttributes attrs;
-        attrs["dim"] = std::to_string(dim);
+        NewOpAttributes attrs;
+        attrs.set(AttrKey::Dim, dim);
         std::vector<Tensor> inputs = {input};
         return dispatch<OpId::CumSum>(inputs, attrs)[0];
     }
@@ -479,8 +480,8 @@ auto cumprod(const Tensor& input, int64_t dim) -> Tensor {
 
     // For non-CPU tensors, dispatch to backend kernel
     if (input.device().type != Device::Type::CPU) {
-        OpAttributes attrs;
-        attrs["dim"] = std::to_string(dim);
+        NewOpAttributes attrs;
+        attrs.set(AttrKey::Dim, dim);
         std::vector<Tensor> inputs = {input};
         return dispatch<OpId::CumProd>(inputs, attrs)[0];
     }

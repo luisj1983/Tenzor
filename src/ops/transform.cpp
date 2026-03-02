@@ -2,6 +2,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include <sstream>
 #include <cstring>
@@ -99,8 +100,8 @@ auto cat(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
 
     // For non-CPU devices, use dispatcher to route to backend-specific implementation
     if (tensors[0].device().type != Device::Type::CPU) {
-        OpAttributes attrs;
-        attrs["dim"] = std::to_string(dim);
+        NewOpAttributes attrs;
+        attrs.set(AttrKey::Dim, dim);
 
         // Convert span to vector for dispatch
         std::vector<Tensor> tensor_vec(tensors.begin(), tensors.end());
@@ -204,8 +205,8 @@ auto stack(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
     }
 
     // Dispatch to registered stack kernel for single-pass implementation
-    OpAttributes attrs;
-    attrs["dim"] = std::to_string(dim);
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
     std::vector<Tensor> tensor_vec(tensors.begin(), tensors.end());
     return dispatch(OpId::Stack, std::span<const Tensor>(tensor_vec), attrs)[0];
 }
@@ -248,6 +249,35 @@ auto split(const Tensor& input, int64_t split_size, int64_t dim) -> std::vector<
         result.push_back(input.slice(dim, start, end));
     }
 
+    return result;
+}
+
+auto split_with_sizes(const Tensor& input, const std::vector<int64_t>& split_sizes, int64_t dim) -> std::vector<Tensor> {
+    auto shape = input.shape();
+    int64_t ndim = shape.size();
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::invalid_argument("Dimension out of range for split_with_sizes");
+    }
+
+    // Validate split sizes sum to dimension size
+    int64_t total = 0;
+    for (auto s : split_sizes) {
+        if (s < 0) throw std::invalid_argument("split_with_sizes: sizes must be non-negative");
+        total += s;
+    }
+    if (total != shape[dim]) {
+        throw std::invalid_argument("split_with_sizes: sizes must sum to dimension size (" +
+            std::to_string(total) + " != " + std::to_string(shape[dim]) + ")");
+    }
+
+    std::vector<Tensor> result;
+    result.reserve(split_sizes.size());
+    int64_t offset = 0;
+    for (auto s : split_sizes) {
+        result.push_back(input.slice(dim, offset, offset + s));
+        offset += s;
+    }
     return result;
 }
 
@@ -318,8 +348,8 @@ auto repeat(const Tensor& input, std::vector<int64_t> repeats) -> Tensor {
 
     // For non-CPU devices, use dispatcher
     if (padded.device().type != Device::Type::CPU) {
-        OpAttributes attrs;
-        attrs["repeats"] = shape_to_string(repeats);
+        NewOpAttributes attrs;
+        attrs.set(AttrKey::Repeats, shape_to_string(repeats));
         std::vector<Tensor> inputs = {padded};
         return dispatch(OpId::Repeat, inputs, attrs)[0];
     }
@@ -424,7 +454,7 @@ auto tile(const Tensor& input, std::vector<int64_t> reps) -> Tensor {
     // For non-CPU devices, use dispatcher
     if (input.device().type != Device::Type::CPU) {
         OpAttributes attrs;
-        attrs["reps"] = shape_to_string(reps);
+        attrs.set(AttrKey::Reps, shape_to_string(reps));
         std::vector<Tensor> inputs = {input};
         return dispatch(OpId::Tile, inputs, attrs)[0];
     }
@@ -516,8 +546,8 @@ auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor {
 
     // Use dispatcher for non-CPU devices (expand takes an input tensor)
     if (input.device().type != Device::Type::CPU) {
-        OpAttributes attrs;
-        attrs["shape"] = shape_to_string(shape);
+        NewOpAttributes attrs;
+        attrs.set(AttrKey::Shape, shape_to_string(shape));
 
         std::vector<Tensor> inputs = {input};
         return dispatch(OpId::Expand, inputs, attrs)[0];
@@ -689,9 +719,9 @@ auto roll(const Tensor& input, int64_t shifts, int64_t dim) -> Tensor {
     // Try OpId dispatch for GPU backends
     try {
         std::array<Tensor, 1> inputs = {input};
-        OpAttributes attrs;
-        attrs["shift"] = std::to_string(shifts);
-        attrs["dim"] = std::to_string(dim);
+        NewOpAttributes attrs;
+        attrs.set(AttrKey::Shift, shifts);
+        attrs.set(AttrKey::Dim, dim);
         return dispatch<OpId::Roll>(inputs, attrs)[0];
     } catch (const std::runtime_error&) {
         // Fall through to slice+cat fallback (CPU or unregistered backends)
@@ -746,7 +776,7 @@ auto triangular_op(const Tensor& input, int64_t diagonal, Func&& should_keep) ->
 auto triu(const Tensor& input, int64_t diagonal) -> Tensor {
     if (input.device().type != Device::Type::CPU) {
         OpAttributes attrs;
-        attrs["diagonal"] = std::to_string(diagonal);
+        attrs.set(AttrKey::Diagonal, diagonal);
         return dispatch(OpId::Triu, std::span<const Tensor>(&input, 1), attrs)[0];
     }
     return triangular_op(input, diagonal, [](int64_t i, int64_t j, int64_t d) {
@@ -757,7 +787,7 @@ auto triu(const Tensor& input, int64_t diagonal) -> Tensor {
 auto tril(const Tensor& input, int64_t diagonal) -> Tensor {
     if (input.device().type != Device::Type::CPU) {
         OpAttributes attrs;
-        attrs["diagonal"] = std::to_string(diagonal);
+        attrs.set(AttrKey::Diagonal, diagonal);
         return dispatch(OpId::Tril, std::span<const Tensor>(&input, 1), attrs)[0];
     }
     return triangular_op(input, diagonal, [](int64_t i, int64_t j, int64_t d) {
@@ -775,7 +805,7 @@ auto diag(const Tensor& input, int64_t diagonal) -> Tensor {
 
         if (input.device().type != Device::Type::CPU) {
             OpAttributes attrs;
-            attrs["diagonal"] = std::to_string(diagonal);
+            attrs.set(AttrKey::Diagonal, diagonal);
             return dispatch(OpId::Diag, std::span<const Tensor>(&input, 1), attrs)[0];
         }
 
@@ -796,7 +826,7 @@ auto diag(const Tensor& input, int64_t diagonal) -> Tensor {
         // 2D -> 1D: extract diagonal
         if (input.device().type != Device::Type::CPU) {
             OpAttributes attrs;
-            attrs["diagonal"] = std::to_string(diagonal);
+            attrs.set(AttrKey::Diagonal, diagonal);
             return dispatch(OpId::Diag, std::span<const Tensor>(&input, 1), attrs)[0];
         }
 
@@ -854,7 +884,7 @@ auto flip(const Tensor& input, std::vector<int64_t> dims) -> Tensor {
 
     if (input.device().type != Device::Type::CPU) {
         OpAttributes attrs;
-        attrs["dims"] = shape_to_string(dims);
+        attrs.set(AttrKey::Dims, shape_to_string(dims));
         return dispatch(OpId::Flip, std::span<const Tensor>(&input, 1), attrs)[0];
     }
 

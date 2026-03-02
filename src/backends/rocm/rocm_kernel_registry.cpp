@@ -8,6 +8,7 @@
 
 #include "tenzor/backend/dispatch_table.hpp"
 #include "tenzor/backend/kernel_registry.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include <hip/hip_runtime.h>
 #include <iostream>
@@ -21,98 +22,41 @@ namespace tenzor {
 
 // Helper to extract HIP stream from attributes
 inline hipStream_t get_hip_stream(const OpAttributes& attrs) {
-    if (attrs.contains("stream")) {
+    if (attrs.has(AttrKey::Stream)) {
         return static_cast<hipStream_t>(
-            reinterpret_cast<void*>(std::stoull(attrs.at("stream")))
+            reinterpret_cast<void*>(static_cast<uintptr_t>(attrs.get_int(AttrKey::Stream)))
         );
     }
     return nullptr;  // Default stream
 }
 
-// Helper to parse int64_t from attributes
-inline int64_t parse_int64(const OpAttributes& attrs, const std::string& key, int64_t default_val = 0) {
-    if (attrs.contains(key)) {
-        return std::stoll(attrs.at(key));
-    }
+// Helper to convert dtype string to DType enum
+inline DType dtype_from_string(std::string_view s, DType default_val = DType::Float32) {
+    if (s == "float32") return DType::Float32;
+    if (s == "float64") return DType::Float64;
+    if (s == "float16") return DType::Float16;
+    if (s == "bfloat16") return DType::BFloat16;
+    if (s == "int32") return DType::Int32;
+    if (s == "int64") return DType::Int64;
+    if (s == "int8") return DType::Int8;
+    if (s == "uint8") return DType::UInt8;
+    if (s == "bool") return DType::Bool;
     return default_val;
 }
 
-// Helper to parse float from attributes
-inline float parse_float(const OpAttributes& attrs, const std::string& key, float default_val = 0.0f) {
-    if (attrs.contains(key)) {
-        return std::stof(attrs.at(key));
-    }
-    return default_val;
-}
-
-// Helper to parse bool from attributes
-inline bool parse_bool(const OpAttributes& attrs, const std::string& key, bool default_val = false) {
-    if (attrs.contains(key)) {
-        return attrs.at(key) == "1" || attrs.at(key) == "true";
-    }
-    return default_val;
-}
-
-// Helper to parse string from attributes
-inline std::string parse_string(const OpAttributes& attrs, const std::string& key, const std::string& default_val = "") {
-    if (attrs.contains(key)) {
-        return attrs.at(key);
-    }
-    return default_val;
-}
-
-// Helper to parse vector of int64_t from comma-separated string
-inline std::vector<int64_t> parse_shape(const OpAttributes& attrs, const std::string& key) {
-    std::vector<int64_t> result;
-    if (!attrs.contains(key)) return result;
-
-    std::string str = attrs.at(key);
-    size_t pos = 0;
-    while (pos < str.size()) {
-        size_t comma = str.find(',', pos);
-        if (comma == std::string::npos) comma = str.size();
-        result.push_back(std::stoll(str.substr(pos, comma - pos)));
-        pos = comma + 1;
-    }
-    return result;
-}
-
-// Helper to parse DType from string
-inline DType parse_dtype(const OpAttributes& attrs, const std::string& key, DType default_val = DType::Float32) {
-    if (!attrs.contains(key)) return default_val;
-    auto dtype_str = attrs.at(key);
-    if (dtype_str == "float32") return DType::Float32;
-    else if (dtype_str == "float64") return DType::Float64;
-    else if (dtype_str == "float16") return DType::Float16;
-    else if (dtype_str == "int32") return DType::Int32;
-    else if (dtype_str == "int64") return DType::Int64;
-    else if (dtype_str == "int8") return DType::Int8;
-    else if (dtype_str == "uint8") return DType::UInt8;
-    else if (dtype_str == "bool") return DType::Bool;
-    return default_val;
-}
-
-// Helper to parse double from attributes
-inline double parse_double(const OpAttributes& attrs, const std::string& key, double default_val = 0.0) {
-    if (attrs.contains(key)) {
-        return std::stod(attrs.at(key));
-    }
-    return default_val;
-}
-
-// Helper to parse vector of int64_t from comma-separated string (alias for parse_shape)
-inline std::vector<int64_t> parse_int64_vector(const OpAttributes& attrs, const std::string& key) {
-    return parse_shape(attrs, key);
-}
-
-// Helper to parse Device from attributes
-inline Device parse_device(const OpAttributes& attrs, const std::string& key, Device default_val = Device::rocm(0)) {
-    if (!attrs.contains(key)) return default_val;
-    auto device_str = attrs.at(key);
+// Helper to convert device string to Device
+inline Device device_from_string(std::string_view s, Device default_val = Device::rocm(0)) {
+    if (s.empty()) return default_val;
     // Parse strings like "rocm:0", "cuda:1", "cpu"
-    size_t colon_pos = device_str.find(':');
-    std::string type_str = (colon_pos != std::string::npos) ? device_str.substr(0, colon_pos) : device_str;
-    int32_t device_id = (colon_pos != std::string::npos) ? std::stoi(device_str.substr(colon_pos + 1)) : 0;
+    size_t colon_pos = s.find(':');
+    std::string_view type_str = (colon_pos != std::string_view::npos) ? s.substr(0, colon_pos) : s;
+    int32_t device_id = 0;
+    if (colon_pos != std::string_view::npos) {
+        auto id_str = s.substr(colon_pos + 1);
+        int val = 0;
+        auto [ptr, ec] = std::from_chars(id_str.data(), id_str.data() + id_str.size(), val);
+        if (ec == std::errc{}) device_id = static_cast<int32_t>(val);
+    }
 
     Device::Type type = Device::Type::CPU;
     if (type_str == "rocm" || type_str == "hip") type = Device::Type::ROCm;
@@ -466,23 +410,23 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::Pow, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float exponent = parse_float(attrs, "exponent", 2.0f);
+        float exponent = static_cast<float>(attrs.get_float(AttrKey::Exponent, 2.0));
         return std::vector<Tensor>{rocm::pow_kernel(inputs[0], exponent, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Clamp, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float min_val = parse_float(attrs, "min", -std::numeric_limits<float>::infinity());
-        float max_val = parse_float(attrs, "max", std::numeric_limits<float>::infinity());
+        float min_val = static_cast<float>(attrs.get_float(AttrKey::Min, -std::numeric_limits<float>::infinity()));
+        float max_val = static_cast<float>(attrs.get_float(AttrKey::Max, std::numeric_limits<float>::infinity()));
         return std::vector<Tensor>{rocm::clamp_kernel(inputs[0], min_val, max_val, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::ClampMin, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float min_val = parse_float(attrs, "min", -std::numeric_limits<float>::infinity());
+        float min_val = static_cast<float>(attrs.get_float(AttrKey::Min, -std::numeric_limits<float>::infinity()));
         return std::vector<Tensor>{rocm::clamp_kernel(inputs[0], min_val, std::numeric_limits<float>::infinity(), get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::ClampMax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float max_val = parse_float(attrs, "max", std::numeric_limits<float>::infinity());
+        float max_val = static_cast<float>(attrs.get_float(AttrKey::Max, std::numeric_limits<float>::infinity()));
         return std::vector<Tensor>{rocm::clamp_kernel(inputs[0], -std::numeric_limits<float>::infinity(), max_val, get_hip_stream(attrs))};
     });
 
@@ -575,65 +519,65 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // Note: Use INT64_MIN as default to signal "full reduction" (no dim specified)
     // This is distinct from dim=-1 which means "last dimension" in PyTorch convention
     table.register_kernel(OpId::Sum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", INT64_MIN);
-        bool keepdim = parse_bool(attrs, "keepdim", false);
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return std::vector<Tensor>{rocm::sum_kernel(inputs[0], dim, keepdim, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Mean, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", INT64_MIN);
-        bool keepdim = parse_bool(attrs, "keepdim", false);
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return std::vector<Tensor>{rocm::mean_kernel(inputs[0], dim, keepdim, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Max, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", INT64_MIN);
-        bool keepdim = parse_bool(attrs, "keepdim", false);
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return std::vector<Tensor>{rocm::max_kernel(inputs[0], dim, keepdim, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Min, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", INT64_MIN);
-        bool keepdim = parse_bool(attrs, "keepdim", false);
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return std::vector<Tensor>{rocm::min_kernel(inputs[0], dim, keepdim, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::ArgMax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", INT64_MIN);
-        bool keepdim = parse_bool(attrs, "keepdim", false);
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return std::vector<Tensor>{rocm::argmax_kernel(inputs[0], dim, keepdim, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::ArgMin, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", INT64_MIN);
-        bool keepdim = parse_bool(attrs, "keepdim", false);
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return std::vector<Tensor>{rocm::argmin_kernel(inputs[0], dim, keepdim, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Prod, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", INT64_MIN);
-        bool keepdim = parse_bool(attrs, "keepdim", false);
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return std::vector<Tensor>{rocm::prod_kernel(inputs[0], dim, keepdim, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Var, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", INT64_MIN);
-        bool keepdim = parse_bool(attrs, "keepdim", false);
-        bool unbiased = parse_bool(attrs, "unbiased", true);
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        bool unbiased = attrs.get_bool(AttrKey::Unbiased, true);
         return std::vector<Tensor>{rocm::var_kernel(inputs[0], dim, keepdim, unbiased, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Std, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", INT64_MIN);
-        bool keepdim = parse_bool(attrs, "keepdim", false);
-        bool unbiased = parse_bool(attrs, "unbiased", true);
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        bool unbiased = attrs.get_bool(AttrKey::Unbiased, true);
         return std::vector<Tensor>{rocm::std_kernel(inputs[0], dim, keepdim, unbiased, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Norm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float p = parse_float(attrs, "p", 2.0f);
-        int64_t dim = parse_int64(attrs, "dim", INT64_MIN);
-        bool keepdim = parse_bool(attrs, "keepdim", false);
+        float p = static_cast<float>(attrs.get_float(AttrKey::P, 2.0));
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return std::vector<Tensor>{rocm::norm_kernel(inputs[0], p, dim, keepdim, get_hip_stream(attrs))};
     });
 
@@ -669,12 +613,12 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::LeakyReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float alpha = parse_float(attrs, "alpha", 0.01f);
+        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
         return std::vector<Tensor>{rocm::leaky_relu_kernel(inputs[0], alpha, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::LeakyReLUBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float alpha = parse_float(attrs, "alpha", 0.01f);
+        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
         return std::vector<Tensor>{rocm::leaky_relu_backward_kernel(inputs[0], inputs[1], alpha, get_hip_stream(attrs))};
     });
 
@@ -687,12 +631,12 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::Elu, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float alpha = parse_float(attrs, "alpha", 1.0f);
+        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 1.0));
         return std::vector<Tensor>{rocm::elu_kernel(inputs[0], alpha, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::EluBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float alpha = parse_float(attrs, "alpha", 1.0f);
+        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 1.0));
         return std::vector<Tensor>{rocm::elu_backward_kernel(inputs[0], inputs[1], alpha, get_hip_stream(attrs))};
     });
 
@@ -721,14 +665,14 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::Softplus, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float beta = parse_float(attrs, "beta", 1.0f);
-        float threshold = parse_float(attrs, "threshold", 20.0f);
+        float beta = static_cast<float>(attrs.get_float(AttrKey::Beta, 1.0));
+        float threshold = static_cast<float>(attrs.get_float(AttrKey::Threshold, 20.0));
         return std::vector<Tensor>{rocm::softplus_kernel(inputs[0], beta, threshold, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::SoftplusBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float beta = parse_float(attrs, "beta", 1.0f);
-        float threshold = parse_float(attrs, "threshold", 20.0f);
+        float beta = static_cast<float>(attrs.get_float(AttrKey::Beta, 1.0));
+        float threshold = static_cast<float>(attrs.get_float(AttrKey::Threshold, 20.0));
         return std::vector<Tensor>{rocm::softplus_backward_kernel(inputs[0], inputs[1], beta, threshold, get_hip_stream(attrs))};
     });
 
@@ -736,22 +680,22 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // Softmax Operations
     // ========================================================================
     table.register_kernel(OpId::Softmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", -1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         return std::vector<Tensor>{rocm::softmax_kernel(inputs[0], dim, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::SoftmaxBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", -1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         return std::vector<Tensor>{rocm::softmax_backward_kernel(inputs[0], inputs[1], dim, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::LogSoftmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", -1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         return std::vector<Tensor>{rocm::log_softmax_kernel(inputs[0], dim, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::LogSoftmaxBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", -1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         return std::vector<Tensor>{rocm::log_softmax_backward_kernel(inputs[0], inputs[1], dim, get_hip_stream(attrs))};
     });
 
@@ -759,47 +703,47 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // Tensor Creation Operations
     // ========================================================================
     table.register_kernel(OpId::Zeros, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto shape = parse_shape(attrs, "shape");
-        DType dtype = parse_dtype(attrs, "dtype", DType::Float32);
-        int32_t device_id = static_cast<int32_t>(parse_int64(attrs, "device_id", 0));
+        auto shape = attrs.get_int_list(AttrKey::Shape);
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
+        int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
         Device device = Device::rocm(device_id);
         return std::vector<Tensor>{rocm::zeros_kernel(shape, dtype, device, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Ones, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto shape = parse_shape(attrs, "shape");
-        DType dtype = parse_dtype(attrs, "dtype", DType::Float32);
-        int32_t device_id = static_cast<int32_t>(parse_int64(attrs, "device_id", 0));
+        auto shape = attrs.get_int_list(AttrKey::Shape);
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
+        int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
         Device device = Device::rocm(device_id);
         return std::vector<Tensor>{rocm::ones_kernel(shape, dtype, device, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Full, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto shape = parse_shape(attrs, "shape");
-        float value = parse_float(attrs, "value", 0.0f);
-        DType dtype = parse_dtype(attrs, "dtype", DType::Float32);
-        int32_t device_id = static_cast<int32_t>(parse_int64(attrs, "device_id", 0));
+        auto shape = attrs.get_int_list(AttrKey::Shape);
+        float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
+        int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
         Device device = Device::rocm(device_id);
         return std::vector<Tensor>{rocm::full_kernel(shape, value, dtype, device, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Fill, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float value = parse_float(attrs, "value", 0.0f);
+        float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
         return std::vector<Tensor>{rocm::fill_kernel(inputs[0], value, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Rand, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto shape = parse_shape(attrs, "shape");
-        DType dtype = parse_dtype(attrs, "dtype", DType::Float32);
-        int32_t device_id = static_cast<int32_t>(parse_int64(attrs, "device_id", 0));
+        auto shape = attrs.get_int_list(AttrKey::Shape);
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
+        int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
         Device device = Device::rocm(device_id);
         return std::vector<Tensor>{rocm::rand_kernel(shape, dtype, device, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Randn, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto shape = parse_shape(attrs, "shape");
-        DType dtype = parse_dtype(attrs, "dtype", DType::Float32);
-        int32_t device_id = static_cast<int32_t>(parse_int64(attrs, "device_id", 0));
+        auto shape = attrs.get_int_list(AttrKey::Shape);
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
+        int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
         Device device = Device::rocm(device_id);
         return std::vector<Tensor>{rocm::randn_kernel(shape, dtype, device, get_hip_stream(attrs))};
     });
@@ -816,33 +760,33 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::Reshape, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto shape = parse_shape(attrs, "shape");
+        auto shape = attrs.get_int_list(AttrKey::Shape);
         return std::vector<Tensor>{rocm::reshape_kernel(inputs[0], shape, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Transpose, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim0 = parse_int64(attrs, "dim0", 0);
-        int64_t dim1 = parse_int64(attrs, "dim1", 1);
+        int64_t dim0 = attrs.get_int(AttrKey::Dim0, 0);
+        int64_t dim1 = attrs.get_int(AttrKey::Dim1, 1);
         return std::vector<Tensor>{rocm::transpose_kernel(inputs[0], dim0, dim1, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Permute, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto dims = parse_shape(attrs, "dims");
+        auto dims = attrs.get_int_list(AttrKey::Shape);
         return std::vector<Tensor>{rocm::permute_kernel(inputs[0], dims, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Squeeze, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", -1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         return std::vector<Tensor>{rocm::squeeze_kernel(inputs[0], dim, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Unsqueeze, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", 0);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         return std::vector<Tensor>{rocm::unsqueeze_kernel(inputs[0], dim, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Expand, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto shape = parse_shape(attrs, "shape");
+        auto shape = attrs.get_int_list(AttrKey::Shape);
         return std::vector<Tensor>{rocm::expand_kernel(inputs[0], shape, static_cast<void*>(get_hip_stream(attrs)))};
     });
 
@@ -859,19 +803,17 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::BatchNorm2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float epsilon = parse_float(attrs, "epsilon", 1e-5f);
-        if (attrs.contains("eps")) epsilon = parse_float(attrs, "eps", 1e-5f);
+        float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         return std::vector<Tensor>{rocm::batchnorm2d_forward(inputs[0], inputs[1], inputs[2], epsilon, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::BatchNorm2dForwardAffine, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float epsilon = parse_float(attrs, "epsilon", 1e-5f);
-        if (attrs.contains("eps")) epsilon = parse_float(attrs, "eps", 1e-5f);
+        float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         return std::vector<Tensor>{rocm::batchnorm2d_forward_affine(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], epsilon, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::BatchNorm2dUpdateRunningStats, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float momentum = parse_float(attrs, "momentum", 0.1f);
+        float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.1));
         Tensor running_mean = inputs[0];
         Tensor running_var = inputs[1];
         rocm::batchnorm2d_update_running_stats(running_mean, running_var, inputs[2], inputs[3], momentum, get_hip_stream(attrs));
@@ -879,8 +821,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::BatchNorm2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float epsilon = parse_float(attrs, "epsilon", 1e-5f);
-        if (attrs.contains("eps")) epsilon = parse_float(attrs, "eps", 1e-5f);
+        float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         auto [grad_input, grad_gamma, grad_beta] = rocm::batchnorm2d_backward(
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], epsilon, get_hip_stream(attrs));
         return std::vector<Tensor>{grad_input, grad_gamma, grad_beta};
@@ -890,31 +831,31 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // Convolution Operations
     // ========================================================================
     table.register_kernel(OpId::Conv2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t stride = parse_int64(attrs, "stride", 1);
-        int64_t padding = parse_int64(attrs, "padding", 0);
-        int64_t dilation = parse_int64(attrs, "dilation", 1);
-        int64_t groups = parse_int64(attrs, "groups", 1);
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return std::vector<Tensor>{rocm::conv2d_forward_kernel(inputs[0], inputs[1], bias,
             stride, padding, dilation, groups, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Conv2dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t stride = parse_int64(attrs, "stride", 1);
-        int64_t padding = parse_int64(attrs, "padding", 0);
-        int64_t dilation = parse_int64(attrs, "dilation", 1);
-        int64_t groups = parse_int64(attrs, "groups", 1);
-        auto input_shape = parse_shape(attrs, "input_shape");
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
         return std::vector<Tensor>{rocm::conv2d_backward_input(inputs[0], inputs[1], input_shape,
             stride, padding, dilation, groups, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Conv2dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t stride = parse_int64(attrs, "stride", 1);
-        int64_t padding = parse_int64(attrs, "padding", 0);
-        int64_t dilation = parse_int64(attrs, "dilation", 1);
-        int64_t groups = parse_int64(attrs, "groups", 1);
-        auto weight_shape = parse_shape(attrs, "weight_shape");
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
         return std::vector<Tensor>{rocm::conv2d_backward_weight(inputs[0], inputs[1], weight_shape,
             stride, padding, dilation, groups, get_hip_stream(attrs))};
     });
@@ -927,48 +868,48 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // Pooling Operations
     // ========================================================================
     table.register_kernel(OpId::MaxPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t kernel_size = parse_int64(attrs, "kernel_size", 2);
-        int64_t stride = parse_int64(attrs, "stride", kernel_size);
-        int64_t padding = parse_int64(attrs, "padding", 0);
-        int64_t dilation = parse_int64(attrs, "dilation", 1);
+        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
+        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         auto [output, indices] = rocm::maxpool2d_forward_hip(inputs[0], kernel_size, stride,
             padding, dilation, get_hip_stream(attrs));
         return std::vector<Tensor>{output, indices};
     });
 
     table.register_kernel(OpId::MaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto input_shape = parse_shape(attrs, "input_shape");
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
         return std::vector<Tensor>{rocm::maxpool2d_backward_hip(inputs[0], inputs[1],
             input_shape, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::AvgPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t kernel_size = parse_int64(attrs, "kernel_size", 2);
-        int64_t stride = parse_int64(attrs, "stride", kernel_size);
-        int64_t padding = parse_int64(attrs, "padding", 0);
+        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
+        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         return std::vector<Tensor>{rocm::avgpool2d_forward_hip(inputs[0], kernel_size, stride,
             padding, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::AvgPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t kernel_size = parse_int64(attrs, "kernel_size", 2);
-        int64_t stride = parse_int64(attrs, "stride", kernel_size);
-        int64_t padding = parse_int64(attrs, "padding", 0);
-        auto input_shape = parse_shape(attrs, "input_shape");
+        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
+        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
         return std::vector<Tensor>{rocm::avgpool2d_backward_hip(inputs[0], input_shape,
             kernel_size, stride, padding, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::AdaptiveAvgPool2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t output_h = parse_int64(attrs, "output_h", 1);
-        int64_t output_w = parse_int64(attrs, "output_w", 1);
+        int64_t output_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t output_w = attrs.get_int(AttrKey::OutputSizeW, 1);
         return std::vector<Tensor>{rocm::adaptive_avgpool2d_hip(inputs[0], output_h, output_w,
             get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::AdaptiveMaxPool2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t output_h = parse_int64(attrs, "output_h", 1);
-        int64_t output_w = parse_int64(attrs, "output_w", 1);
+        int64_t output_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t output_w = attrs.get_int(AttrKey::OutputSizeW, 1);
         auto [output, indices] = rocm::adaptive_maxpool2d_hip(inputs[0], output_h, output_w,
             get_hip_stream(attrs));
         return std::vector<Tensor>{output, indices};
@@ -983,12 +924,12 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::ConvTranspose2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t stride_h = parse_int64(attrs, "stride_h", 1);
-        int64_t stride_w = parse_int64(attrs, "stride_w", 1);
-        int64_t padding_h = parse_int64(attrs, "padding_h", 0);
-        int64_t padding_w = parse_int64(attrs, "padding_w", 0);
-        int64_t output_padding_h = parse_int64(attrs, "output_padding_h", 0);
-        int64_t output_padding_w = parse_int64(attrs, "output_padding_w", 0);
+        int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
+        int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
+        int64_t padding_h = attrs.get_int(AttrKey::PaddingH, 0);
+        int64_t padding_w = attrs.get_int(AttrKey::PaddingW, 0);
+        int64_t output_padding_h = attrs.get_int(AttrKey::OutputPaddingH, 0);
+        int64_t output_padding_w = attrs.get_int(AttrKey::OutputPaddingW, 0);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return std::vector<Tensor>{rocm::conv_transpose2d_forward_kernel(
             inputs[0], inputs[1], bias, stride_h, stride_w, padding_h, padding_w,
@@ -996,12 +937,12 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::DepthwiseConv2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t stride_h = parse_int64(attrs, "stride_h", 1);
-        int64_t stride_w = parse_int64(attrs, "stride_w", 1);
-        int64_t padding_h = parse_int64(attrs, "padding_h", 0);
-        int64_t padding_w = parse_int64(attrs, "padding_w", 0);
-        int64_t dilation_h = parse_int64(attrs, "dilation_h", 1);
-        int64_t dilation_w = parse_int64(attrs, "dilation_w", 1);
+        int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
+        int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
+        int64_t padding_h = attrs.get_int(AttrKey::PaddingH, 0);
+        int64_t padding_w = attrs.get_int(AttrKey::PaddingW, 0);
+        int64_t dilation_h = attrs.get_int(AttrKey::DilationH, 1);
+        int64_t dilation_w = attrs.get_int(AttrKey::DilationW, 1);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return std::vector<Tensor>{rocm::depthwise_conv2d_kernel(
             inputs[0], inputs[1], bias, stride_h, stride_w, padding_h, padding_w,
@@ -1012,22 +953,22 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // Indexing Operations
     // ========================================================================
     table.register_kernel(OpId::Gather, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", 0);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         return std::vector<Tensor>{rocm::gather_hip(inputs[0], dim, inputs[1], get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Scatter, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", 0);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         return std::vector<Tensor>{rocm::scatter_hip(inputs[0], dim, inputs[1], inputs[2], get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::IndexSelect, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", 0);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         return std::vector<Tensor>{rocm::index_select_hip(inputs[0], dim, inputs[1], get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::MaskedFill, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        double value = static_cast<double>(parse_float(attrs, "value", 0.0f));
+        double value = attrs.get_float(AttrKey::Value, 0.0);
         return std::vector<Tensor>{rocm::masked_fill_hip(inputs[0], inputs[1], value, get_hip_stream(attrs))};
     });
 
@@ -1040,22 +981,22 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::Slice, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", 0);
-        int64_t start = parse_int64(attrs, "start", 0);
-        int64_t end = parse_int64(attrs, "end", std::numeric_limits<int64_t>::max());
-        int64_t step = parse_int64(attrs, "step", 1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        int64_t start = attrs.get_int(AttrKey::Start, 0);
+        int64_t end = attrs.get_int(AttrKey::End, std::numeric_limits<int64_t>::max());
+        int64_t step = attrs.get_int(AttrKey::Step, 1);
         return std::vector<Tensor>{rocm::slice_hip(inputs[0], dim, start, end, step, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Cat, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", 0);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         std::vector<Tensor> tensors(inputs.begin(), inputs.end());
         return std::vector<Tensor>{rocm::cat_hip(tensors, dim, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Roll, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t shift = parse_int64(attrs, "shift", 0);
-        int64_t dim = parse_int64(attrs, "dim", 0);
+        int64_t shift = attrs.get_int(AttrKey::Shift, 0);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         return std::vector<Tensor>{rocm::roll_kernel(inputs[0], shift, dim, get_hip_stream(attrs))};
     });
 
@@ -1064,7 +1005,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::Put, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        bool accumulate = parse_bool(attrs, "accumulate", false);
+        bool accumulate = attrs.get_bool(AttrKey::Accumulate, false);
         Tensor input = inputs[0];
         return std::vector<Tensor>{rocm::put_hip(input, inputs[1], inputs[2], accumulate, get_hip_stream(attrs))};
     });
@@ -1149,41 +1090,41 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // Additional Transform Operations
     // ========================================================================
     table.register_kernel(OpId::Chunk, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t chunks = parse_int64(attrs, "chunks", 1);
-        int64_t dim = parse_int64(attrs, "dim", 0);
+        int64_t chunks = attrs.get_int(AttrKey::Chunks, 1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         return rocm::chunk_kernel(inputs[0], chunks, dim, get_hip_stream(attrs));
     });
 
     table.register_kernel(OpId::Flatten, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t start_dim = parse_int64(attrs, "start_dim", 0);
-        int64_t end_dim = parse_int64(attrs, "end_dim", -1);
+        int64_t start_dim = attrs.get_int(AttrKey::StartDim, 0);
+        int64_t end_dim = attrs.get_int(AttrKey::EndDim, -1);
         return std::vector<Tensor>{rocm::flatten_kernel(inputs[0], start_dim, end_dim, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Repeat, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto repeats = parse_int64_vector(attrs, "repeats");
+        auto repeats = attrs.get_int_list(AttrKey::Repeats);
         return std::vector<Tensor>{rocm::repeat_kernel(inputs[0], repeats, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Tile, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto reps = parse_int64_vector(attrs, "reps");
+        auto reps = attrs.get_int_list(AttrKey::Repeats);
         return std::vector<Tensor>{rocm::tile_kernel(inputs[0], reps, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Stack, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", 0);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         std::vector<Tensor> tensors(inputs.begin(), inputs.end());
         return rocm::stack_kernel(tensors, dim, get_hip_stream(attrs));
     });
 
     table.register_kernel(OpId::Split, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t split_size = parse_int64(attrs, "split_size", 1);
-        int64_t dim = parse_int64(attrs, "dim", 0);
+        int64_t split_size = attrs.get_int(AttrKey::SplitSize, 1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         return rocm::split_kernel(inputs[0], split_size, dim, get_hip_stream(attrs));
     });
 
     table.register_kernel(OpId::Expand, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto new_shape = parse_int64_vector(attrs, "shape");
+        auto new_shape = attrs.get_int_list(AttrKey::Shape);
         return std::vector<Tensor>{rocm::expand_kernel(inputs[0], new_shape, get_hip_stream(attrs))};
     });
 
@@ -1191,29 +1132,29 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // Creation Operations
     // ========================================================================
     table.register_kernel(OpId::Arange, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        double start = parse_double(attrs, "start", 0.0);
-        double end = parse_double(attrs, "end", 1.0);
-        double step = parse_double(attrs, "step", 1.0);
-        DType dtype = parse_dtype(attrs, "dtype", DType::Float32);
-        Device device = parse_device(attrs, "device", Device::rocm(0));
+        double start = attrs.get_float(AttrKey::Start, 0.0);
+        double end = attrs.get_float(AttrKey::End, 1.0);
+        double step = attrs.get_float(AttrKey::Step, 1.0);
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
+        Device device = device_from_string(attrs.get_string(AttrKey::Device, ""), Device::rocm(0));
         return std::vector<Tensor>{rocm::arange_kernel(start, end, step, dtype, device, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Linspace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        double start = parse_double(attrs, "start", 0.0);
-        double end = parse_double(attrs, "end", 1.0);
-        int64_t steps = parse_int64(attrs, "steps", 100);
-        DType dtype = parse_dtype(attrs, "dtype", DType::Float32);
-        Device device = parse_device(attrs, "device", Device::rocm(0));
+        double start = attrs.get_float(AttrKey::Start, 0.0);
+        double end = attrs.get_float(AttrKey::End, 1.0);
+        int64_t steps = attrs.get_int(AttrKey::Steps, 100);
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
+        Device device = device_from_string(attrs.get_string(AttrKey::Device, ""), Device::rocm(0));
         return std::vector<Tensor>{rocm::linspace_kernel(start, end, steps, dtype, device, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Eye, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t n = parse_int64(attrs, "n", 1);
-        int64_t m = parse_int64(attrs, "m", -1);
-        int64_t k = parse_int64(attrs, "k", 0);
-        DType dtype = parse_dtype(attrs, "dtype", DType::Float32);
-        Device device = parse_device(attrs, "device", Device::rocm(0));
+        int64_t n = attrs.get_int(AttrKey::N, 1);
+        int64_t m = attrs.get_int(AttrKey::M, -1);
+        int64_t k = attrs.get_int(AttrKey::K, 0);
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
+        Device device = device_from_string(attrs.get_string(AttrKey::Device, ""), Device::rocm(0));
         return std::vector<Tensor>{rocm::eye_kernel(n, m, k, dtype, device, get_hip_stream(attrs))};
     });
 
@@ -1221,8 +1162,8 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // Normalization Operations
     // ========================================================================
     table.register_kernel(OpId::LayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto normalized_shape = parse_int64_vector(attrs, "normalized_shape");
-        float eps = parse_float(attrs, "eps", 1e-5f);
+        auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         const Tensor* weight = inputs.size() > 1 ? &inputs[1] : nullptr;
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return std::vector<Tensor>{rocm::layer_norm_kernel(inputs[0], normalized_shape, weight, bias, eps, get_hip_stream(attrs))};
@@ -1237,15 +1178,15 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::GroupNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t num_groups = parse_int64(attrs, "num_groups", 1);
-        float eps = parse_float(attrs, "eps", 1e-5f);
+        int64_t num_groups = attrs.get_int(AttrKey::Groups, 1);
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         const Tensor* weight = inputs.size() > 1 ? &inputs[1] : nullptr;
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return std::vector<Tensor>{rocm::group_norm_kernel(inputs[0], num_groups, weight, bias, eps, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::GroupNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t num_groups = parse_int64(attrs, "num_groups", 1);
+        int64_t num_groups = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* weight = inputs.size() > 4 ? &inputs[4] : nullptr;
         auto [grad_input, grad_weight, grad_bias] = rocm::group_norm_backward_kernel(
             inputs[0], inputs[1], inputs[2], inputs[3], num_groups, weight, get_hip_stream(attrs));
@@ -1253,7 +1194,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::InstanceNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float eps = parse_float(attrs, "eps", 1e-5f);
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         const Tensor* weight = inputs.size() > 1 ? &inputs[1] : nullptr;
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return std::vector<Tensor>{rocm::instance_norm_kernel(inputs[0], weight, bias, eps, get_hip_stream(attrs))};
@@ -1277,14 +1218,14 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::FusedBatchNormReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: input, running_mean, running_var, weight, bias
-        float eps = parse_float(attrs, "eps", 1e-5f);
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         return std::vector<Tensor>{rocm::fused_batchnorm_relu_hip(inputs[0], inputs[1], inputs[2],
                                                                   inputs[3], inputs[4], eps)};
     });
 
     table.register_kernel(OpId::FusedSoftmaxCrossEntropy, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: logits, targets
-        std::string reduction = parse_string(attrs, "reduction", "mean");
+        std::string reduction = std::string(attrs.get_string(AttrKey::Reduction, "mean"));
         return std::vector<Tensor>{rocm::fused_softmax_cross_entropy_hip(inputs[0], inputs[1], reduction)};
     });
 
@@ -1300,8 +1241,8 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::FusedLayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: input, weight, bias
-        auto normalized_shape = parse_int64_vector(attrs, "normalized_shape");
-        float eps = parse_float(attrs, "eps", 1e-5f);
+        auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         return std::vector<Tensor>{rocm::fused_layer_norm_hip(inputs[0], normalized_shape,
                                                               inputs[1], inputs[2], eps)};
     });
@@ -1309,7 +1250,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::FusedConv2dReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // This is implemented as conv output -> batchnorm -> relu
         // inputs: conv_output, running_mean, running_var, weight, bias
-        float eps = parse_float(attrs, "eps", 1e-5f);
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         return std::vector<Tensor>{rocm::fused_conv_batchnorm_relu_hip(inputs[0], inputs[1], inputs[2],
                                                                         inputs[3], inputs[4], eps)};
     });
@@ -1324,14 +1265,14 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::EmbeddingBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: grad_output, indices
-        int64_t num_embeddings = parse_int64(attrs, "num_embeddings", 0);
+        int64_t num_embeddings = attrs.get_int(AttrKey::NumEmbeddings, 0);
         return std::vector<Tensor>{rocm::embedding_backward_kernel(inputs[0], inputs[1], num_embeddings, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::GatherRelativePositionBias,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t num_positions = parse_int64(attrs, "num_positions", 0);
-            int64_t num_heads = parse_int64(attrs, "num_heads", 0);
+            int64_t num_positions = attrs.get_int(AttrKey::NumPositions, 0);
+            int64_t num_heads = attrs.get_int(AttrKey::NumHeads, 0);
             hipStream_t stream = get_hip_stream(attrs);
             return {rocm::gather_relative_position_bias_kernel(inputs[0], inputs[1], num_positions, num_heads, stream)};
         });
@@ -1355,15 +1296,15 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // ========================================================================
     table.register_kernel(OpId::Dropout, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: input
-        float p = parse_float(attrs, "p", 0.5f);
-        bool training = parse_bool(attrs, "training", true);
+        float p = static_cast<float>(attrs.get_float(AttrKey::P, 0.5));
+        bool training = attrs.get_bool(AttrKey::Training, true);
         auto [output, mask] = rocm::dropout_kernel(inputs[0], p, training, get_hip_stream(attrs));
         return std::vector<Tensor>{output, mask};
     });
 
     table.register_kernel(OpId::DropoutBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: grad_output, mask
-        float p = parse_float(attrs, "p", 0.5f);
+        float p = static_cast<float>(attrs.get_float(AttrKey::P, 0.5));
         return std::vector<Tensor>{rocm::dropout_backward_kernel(inputs[0], inputs[1], p, get_hip_stream(attrs))};
     });
 
@@ -1372,28 +1313,28 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // ========================================================================
     table.register_kernel(OpId::Unfold, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: input
-        int64_t kernel_size = parse_int64(attrs, "kernel_size", 3);
-        int64_t stride = parse_int64(attrs, "stride", 1);
-        int64_t padding = parse_int64(attrs, "padding", 0);
-        int64_t dilation = parse_int64(attrs, "dilation", 1);
+        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 3);
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         return std::vector<Tensor>{rocm::unfold_kernel(inputs[0], kernel_size, stride, padding, dilation, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Fold, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: input
-        auto output_size = parse_int64_vector(attrs, "output_size");
-        int64_t kernel_size = parse_int64(attrs, "kernel_size", 3);
-        int64_t stride = parse_int64(attrs, "stride", 1);
-        int64_t padding = parse_int64(attrs, "padding", 0);
-        int64_t dilation = parse_int64(attrs, "dilation", 1);
+        auto output_size = attrs.get_int_list(AttrKey::OutputSize);
+        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 3);
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         return std::vector<Tensor>{rocm::fold_kernel(inputs[0], output_size, kernel_size, stride, padding, dilation, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Interpolate, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: input
-        auto size = parse_int64_vector(attrs, "size");
-        std::string mode = parse_string(attrs, "mode", "nearest");
-        bool align_corners = parse_bool(attrs, "align_corners", false);
+        auto size = attrs.get_int_list(AttrKey::OutputSize);
+        std::string mode = std::string(attrs.get_string(AttrKey::Mode, "nearest"));
+        bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
         return std::vector<Tensor>{rocm::interpolate_kernel(inputs[0], size, mode, align_corners, get_hip_stream(attrs))};
     });
 

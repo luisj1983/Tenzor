@@ -26,6 +26,7 @@
 #include "../ops/op_id.hpp"
 #include "../nn/amp/autocast.hpp"
 #include "dispatch_table.hpp"
+#include "op_attributes.hpp"
 
 namespace tenzor {
 

@@ -242,6 +242,9 @@ public:
         // Enabled by default. Disable with TENZOR_DISABLE_CACHING_ALLOCATOR=1 if issues arise.
         const char* disable_caching = std::getenv("TENZOR_DISABLE_CACHING_ALLOCATOR");
         use_caching_allocator_ = (disable_caching == nullptr || std::string(disable_caching) != "1");
+
+        // Enable peer access between GPU pairs for fast D2D transfers
+        init_peer_access();
     }
 
     auto name() const -> std::string_view override {
@@ -391,8 +394,26 @@ public:
             // Ensure the correct device is selected before async transfer.
             // Without this, multi-GPU setups may use the wrong device's default stream.
             cudaPointerAttributes dst_attrs;
+            cudaPointerAttributes src_attrs;
+            int dst_device = -1, src_device = -1;
             if (cudaPointerGetAttributes(&dst_attrs, dst) == cudaSuccess && dst_attrs.device >= 0) {
-                cudaSetDevice(dst_attrs.device);
+                dst_device = dst_attrs.device;
+                cudaSetDevice(dst_device);
+            }
+            if (kind == CopyKind::DeviceToDevice) {
+                if (cudaPointerGetAttributes(&src_attrs, src) == cudaSuccess && src_attrs.device >= 0) {
+                    src_device = src_attrs.device;
+                }
+                // Use cudaMemcpyPeerAsync when devices differ and P2P is enabled
+                if (src_device >= 0 && dst_device >= 0 && src_device != dst_device &&
+                    has_peer_access(src_device, dst_device)) {
+                    err = cudaMemcpyPeerAsync(dst, dst_device, src, src_device, bytes, nullptr);
+                    if (err != cudaSuccess) {
+                        throw std::runtime_error(
+                            std::string("CUDA peer copy failed: ") + cudaGetErrorString(err));
+                    }
+                    return;
+                }
             }
             // Use async transfer for H2D and D2D — host doesn't need to wait
             // for the copy to complete, GPU-side ordering is guaranteed by stream.
@@ -450,6 +471,47 @@ private:
     // Cache pointer→device_id mapping to avoid cudaPointerGetAttributes() in deallocate()
     std::mutex ptr_device_mutex_;
     std::unordered_map<void*, int> ptr_device_map_;
+
+    // Peer access matrix: peer_access_[i][j] = true means GPU i can access GPU j directly
+    std::vector<std::vector<bool>> peer_access_;
+
+    void init_peer_access() {
+        int count = 0;
+        cudaGetDeviceCount(&count);
+        if (count <= 1) return;
+
+        peer_access_.resize(count, std::vector<bool>(count, false));
+
+        int saved_device = 0;
+        cudaGetDevice(&saved_device);
+
+        for (int i = 0; i < count; ++i) {
+            for (int j = 0; j < count; ++j) {
+                if (i == j) continue;
+                int can_access = 0;
+                cudaDeviceCanAccessPeer(&can_access, i, j);
+                if (can_access) {
+                    cudaSetDevice(i);
+                    cudaError_t err = cudaDeviceEnablePeerAccess(j, 0);
+                    if (err == cudaSuccess || err == cudaErrorPeerAccessAlreadyEnabled) {
+                        peer_access_[i][j] = true;
+                        if (err == cudaErrorPeerAccessAlreadyEnabled) {
+                            cudaGetLastError();  // Clear the error
+                        }
+                    }
+                }
+            }
+        }
+
+        cudaSetDevice(saved_device);
+    }
+
+    bool has_peer_access(int src_device, int dst_device) const {
+        if (src_device < 0 || dst_device < 0) return false;
+        if (static_cast<size_t>(src_device) >= peer_access_.size() ||
+            static_cast<size_t>(dst_device) >= peer_access_.size()) return false;
+        return peer_access_[src_device][dst_device];
+    }
 };
 
 extern "C" {

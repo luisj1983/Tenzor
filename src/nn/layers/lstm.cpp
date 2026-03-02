@@ -6,6 +6,7 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include <stdexcept>
 #include <sstream>
@@ -556,7 +557,7 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
             }
 
             OpAttributes attrs;
-            attrs["num_layers"] = std::to_string(num_layers_);
+            attrs.set(AttrKey::NumLayers, num_layers_);
             auto outputs = dispatch<OpId::LSTMMultiLayerForward>(kernel_inputs, attrs);
 
             Variable output(outputs[0], false);

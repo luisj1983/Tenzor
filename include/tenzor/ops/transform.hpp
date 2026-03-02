@@ -68,6 +68,9 @@ auto stack(std::span<const Tensor> tensors, int64_t dim = 0) -> Tensor;
 /** @brief Split tensor into chunks of specific size. */
 auto split(const Tensor& input, int64_t split_size, int64_t dim = 0) -> std::vector<Tensor>;
 
+/** @brief Split tensor into chunks with specified sizes. */
+auto split_with_sizes(const Tensor& input, const std::vector<int64_t>& split_sizes, int64_t dim = 0) -> std::vector<Tensor>;
+
 /** @brief Split tensor into specific number of chunks. */
 auto chunk(const Tensor& input, int64_t chunks, int64_t dim = 0) -> std::vector<Tensor>;
 

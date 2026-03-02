@@ -13,6 +13,7 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/backend/registry.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/backend/loader.hpp"
 #include <stdexcept>
 #include <cmath>
@@ -223,8 +224,8 @@ auto WindowAttention::get_relative_position_bias() const -> Tensor {
 
         // Use registered gather kernel via OpId dispatch
         OpAttributes attrs;
-        attrs["num_positions"] = std::to_string(num_positions);
-        attrs["num_heads"] = std::to_string(num_heads_);
+        attrs.set(AttrKey::NumPositions, num_positions);
+        attrs.set(AttrKey::NumHeads, num_heads_);
         std::vector<Tensor> inputs = {bias_flat, index_on_device};
         auto results = dispatch(OpId::GatherRelativePositionBias,
                                 std::span<const Tensor>(inputs), attrs);

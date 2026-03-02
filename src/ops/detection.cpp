@@ -10,6 +10,7 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include <algorithm>
 #include <numeric>
@@ -254,7 +255,7 @@ auto box_iou(const Tensor& boxes1, const Tensor& boxes2, IoUType iou_type) -> Te
         boxes1.device().type == Device::Type::CUDA ||
         boxes1.device().type == Device::Type::ROCm) {
         OpAttributes attrs;
-        attrs["iou_type"] = std::to_string(static_cast<int>(iou_type));
+        attrs.set(AttrKey::IouType, static_cast<int>(iou_type));
         std::vector<Tensor> inputs_vec = {boxes1, boxes2};
         auto results = dispatch<OpId::BoxIoU>(inputs_vec, attrs);
         return results[0];

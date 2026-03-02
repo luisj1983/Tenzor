@@ -1840,10 +1840,10 @@ auto VulkanBackend::dispatchIm2Col(const Tensor& input, const OpAttributes& attr
     int64_t width = input_shape[3];
 
     // Extract attributes
-    int64_t kernel_size = std::stoll(attrs.at("kernel_size"));
-    int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
-    int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
-    int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
+    int64_t kernel_size = attrs.get_int(AttrKey::KernelSize);
+    int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+    int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+    int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
 
     // Calculate output dimensions
     int64_t out_h = (height + 2*padding - dilation*(kernel_size-1) - 1) / stride + 1;
@@ -1938,13 +1938,13 @@ auto VulkanBackend::dispatchCol2Im(const Tensor& input, const OpAttributes& attr
     int64_t batch = input_shape[0];
 
     // Extract attributes
-    int64_t channels = std::stoll(attrs.at("channels"));
-    int64_t height = std::stoll(attrs.at("height"));
-    int64_t width = std::stoll(attrs.at("width"));
-    int64_t kernel_size = std::stoll(attrs.at("kernel_size"));
-    int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
-    int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
-    int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
+    int64_t channels = attrs.get_int(AttrKey::Channels);
+    int64_t height = attrs.get_int(AttrKey::Height);
+    int64_t width = attrs.get_int(AttrKey::Width);
+    int64_t kernel_size = attrs.get_int(AttrKey::KernelSize);
+    int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+    int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+    int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
 
     // Calculate output dimensions
     int64_t out_h = (height + 2*padding - dilation*(kernel_size-1) - 1) / stride + 1;
@@ -5328,7 +5328,7 @@ auto VulkanBackend::dispatchIndexSelect(const Tensor& input, int64_t dim, const 
         auto input_cpu = input.to(Device::cpu());
         auto indices_cpu = indices.to(Device::cpu());
         OpAttributes cpu_attrs;
-        cpu_attrs["dim"] = std::to_string(dim);
+        cpu_attrs.set(AttrKey::Dim, dim);
         std::vector<Tensor> cpu_inputs = {input_cpu, indices_cpu};
         auto cpu_results = tenzor::dispatch(OpId::IndexSelect, cpu_inputs, cpu_attrs);
         return cpu_results[0].to(input.device());
@@ -7392,13 +7392,13 @@ auto VulkanBackend::dispatchAvgPool2dForward(const Tensor& input, const OpAttrib
     }
 
     // Extract attributes
-    int64_t kernel_h = std::stoll(attrs.at("kernel_h"));
-    int64_t kernel_w = std::stoll(attrs.at("kernel_w"));
-    int64_t stride_h = attrs.contains("stride_h") ? std::stoll(attrs.at("stride_h")) : kernel_h;
-    int64_t stride_w = attrs.contains("stride_w") ? std::stoll(attrs.at("stride_w")) : kernel_w;
-    int64_t padding_h = attrs.contains("padding_h") ? std::stoll(attrs.at("padding_h")) : 0;
-    int64_t padding_w = attrs.contains("padding_w") ? std::stoll(attrs.at("padding_w")) : 0;
-    int64_t count_include_pad = attrs.contains("count_include_pad") ? std::stoll(attrs.at("count_include_pad")) : 1;
+    int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH);
+    int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW);
+    int64_t stride_h = attrs.has(AttrKey::StrideH) ? attrs.get_int(AttrKey::StrideH) : kernel_h;
+    int64_t stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : kernel_w;
+    int64_t padding_h = attrs.get_int(AttrKey::PaddingH, 0);
+    int64_t padding_w = attrs.get_int(AttrKey::PaddingW, 0);
+    int64_t count_include_pad = attrs.get_int(AttrKey::CountIncludePad, 1);
 
     int64_t batch = input_shape[0];
     int64_t channels = input_shape[1];
@@ -7506,14 +7506,14 @@ auto VulkanBackend::dispatchMaxPool2dForward(const Tensor& input, const OpAttrib
     }
 
     // Extract attributes
-    int64_t kernel_h = std::stoll(attrs.at("kernel_h"));
-    int64_t kernel_w = std::stoll(attrs.at("kernel_w"));
-    int64_t stride_h = attrs.contains("stride_h") ? std::stoll(attrs.at("stride_h")) : kernel_h;
-    int64_t stride_w = attrs.contains("stride_w") ? std::stoll(attrs.at("stride_w")) : kernel_w;
-    int64_t padding_h = attrs.contains("padding_h") ? std::stoll(attrs.at("padding_h")) : 0;
-    int64_t padding_w = attrs.contains("padding_w") ? std::stoll(attrs.at("padding_w")) : 0;
-    int64_t dilation_h = attrs.contains("dilation_h") ? std::stoll(attrs.at("dilation_h")) : 1;
-    int64_t dilation_w = attrs.contains("dilation_w") ? std::stoll(attrs.at("dilation_w")) : 1;
+    int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH);
+    int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW);
+    int64_t stride_h = attrs.has(AttrKey::StrideH) ? attrs.get_int(AttrKey::StrideH) : kernel_h;
+    int64_t stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : kernel_w;
+    int64_t padding_h = attrs.get_int(AttrKey::PaddingH, 0);
+    int64_t padding_w = attrs.get_int(AttrKey::PaddingW, 0);
+    int64_t dilation_h = attrs.get_int(AttrKey::DilationH, 1);
+    int64_t dilation_w = attrs.get_int(AttrKey::DilationW, 1);
 
     int64_t batch = input_shape[0];
     int64_t channels = input_shape[1];
@@ -7625,13 +7625,13 @@ auto VulkanBackend::dispatchAvgPool2dBackward(const Tensor& grad_output, const T
     }
 
     // Extract attributes
-    int64_t kernel_h = std::stoll(attrs.at("kernel_h"));
-    int64_t kernel_w = std::stoll(attrs.at("kernel_w"));
-    int64_t stride_h = attrs.contains("stride_h") ? std::stoll(attrs.at("stride_h")) : kernel_h;
-    int64_t stride_w = attrs.contains("stride_w") ? std::stoll(attrs.at("stride_w")) : kernel_w;
-    int64_t padding_h = attrs.contains("padding_h") ? std::stoll(attrs.at("padding_h")) : 0;
-    int64_t padding_w = attrs.contains("padding_w") ? std::stoll(attrs.at("padding_w")) : 0;
-    int64_t count_include_pad = attrs.contains("count_include_pad") ? std::stoll(attrs.at("count_include_pad")) : 1;
+    int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH);
+    int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW);
+    int64_t stride_h = attrs.has(AttrKey::StrideH) ? attrs.get_int(AttrKey::StrideH) : kernel_h;
+    int64_t stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : kernel_w;
+    int64_t padding_h = attrs.get_int(AttrKey::PaddingH, 0);
+    int64_t padding_w = attrs.get_int(AttrKey::PaddingW, 0);
+    int64_t count_include_pad = attrs.get_int(AttrKey::CountIncludePad, 1);
 
     int64_t batch = input_shape[0];
     int64_t channels = input_shape[1];
@@ -7742,14 +7742,14 @@ auto VulkanBackend::dispatchMaxPool2dBackward(const Tensor& grad_output, const T
     }
 
     // Extract attributes
-    int64_t kernel_h = std::stoll(attrs.at("kernel_h"));
-    int64_t kernel_w = std::stoll(attrs.at("kernel_w"));
-    int64_t stride_h = attrs.contains("stride_h") ? std::stoll(attrs.at("stride_h")) : kernel_h;
-    int64_t stride_w = attrs.contains("stride_w") ? std::stoll(attrs.at("stride_w")) : kernel_w;
-    int64_t padding_h = attrs.contains("padding_h") ? std::stoll(attrs.at("padding_h")) : 0;
-    int64_t padding_w = attrs.contains("padding_w") ? std::stoll(attrs.at("padding_w")) : 0;
-    int64_t dilation_h = attrs.contains("dilation_h") ? std::stoll(attrs.at("dilation_h")) : 1;
-    int64_t dilation_w = attrs.contains("dilation_w") ? std::stoll(attrs.at("dilation_w")) : 1;
+    int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH);
+    int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW);
+    int64_t stride_h = attrs.has(AttrKey::StrideH) ? attrs.get_int(AttrKey::StrideH) : kernel_h;
+    int64_t stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : kernel_w;
+    int64_t padding_h = attrs.get_int(AttrKey::PaddingH, 0);
+    int64_t padding_w = attrs.get_int(AttrKey::PaddingW, 0);
+    int64_t dilation_h = attrs.get_int(AttrKey::DilationH, 1);
+    int64_t dilation_w = attrs.get_int(AttrKey::DilationW, 1);
 
     int64_t batch = input_shape[0];
     int64_t channels = input_shape[1];
@@ -7967,10 +7967,10 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
     }
 
     // Extract attributes
-    int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
-    int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
-    int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
-    int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
+    int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+    int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+    int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+    int64_t groups = attrs.get_int(AttrKey::Groups, 1);
     bool has_bias = (bias != nullptr);
 
     int64_t batch = input_shape[0];
@@ -8105,11 +8105,11 @@ auto VulkanBackend::dispatchConvTranspose2dForward(const Tensor& input, const Te
     }
 
     // Extract attributes
-    int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
-    int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
-    int64_t output_padding = attrs.contains("output_padding") ? std::stoll(attrs.at("output_padding")) : 0;
-    int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
-    int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
+    int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+    int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+    int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
+    int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+    int64_t groups = attrs.get_int(AttrKey::Groups, 1);
     bool has_bias = (bias != nullptr);
 
     int64_t batch = input_shape[0];
@@ -9120,11 +9120,11 @@ auto VulkanBackend::dispatchInterpolate(const Tensor& input, const OpAttributes&
     }
 
     // Extract attributes
-    std::string mode = attrs.at("mode");
-    bool align_corners = attrs.contains("align_corners") && attrs.at("align_corners") == "1";
+    std::string mode(attrs.get_string(AttrKey::Mode));
+    bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
 
     // Parse output size from comma-separated string
-    std::string size_str = attrs.at("size");
+    std::string size_str(attrs.get_string(AttrKey::OutputSize));
     auto comma_pos = size_str.find(',');
     int64_t out_height = std::stoll(size_str.substr(0, comma_pos));
     int64_t out_width = std::stoll(size_str.substr(comma_pos + 1));
@@ -9232,11 +9232,11 @@ auto VulkanBackend::dispatchROIAlignForward(const Tensor& features, const Tensor
     int64_t feat_width = feat_shape[3];
     int64_t num_rois = rois.shape()[0];
 
-    int64_t output_h = std::stoll(attrs.at("output_h"));
-    int64_t output_w = std::stoll(attrs.at("output_w"));
-    float spatial_scale = std::stof(attrs.at("spatial_scale"));
-    int64_t sampling_ratio = attrs.contains("sampling_ratio") ? std::stoll(attrs.at("sampling_ratio")) : 0;
-    bool aligned = attrs.contains("aligned") && (attrs.at("aligned") == "1" || attrs.at("aligned") == "true");
+    int64_t output_h = attrs.get_int(AttrKey::OutputSizeH);
+    int64_t output_w = attrs.get_int(AttrKey::OutputSizeW);
+    float spatial_scale = static_cast<float>(attrs.get_float(AttrKey::SpatialScale));
+    int64_t sampling_ratio = attrs.get_int(AttrKey::SamplingRatio, 0);
+    bool aligned = attrs.get_bool(AttrKey::Aligned, false);
 
     int32_t device_id = features.device().index;
 
@@ -9331,12 +9331,12 @@ auto VulkanBackend::dispatchROIAlignBackward(const Tensor& grad_output, const Te
     int64_t output_w = grad_shape[3];
 
     // Extract feature map dimensions from attributes
-    int64_t batch_size = std::stoll(attrs.at("batch_size"));
-    int64_t feat_height = std::stoll(attrs.at("feat_height"));
-    int64_t feat_width = std::stoll(attrs.at("feat_width"));
-    float spatial_scale = std::stof(attrs.at("spatial_scale"));
-    int64_t sampling_ratio = attrs.contains("sampling_ratio") ? std::stoll(attrs.at("sampling_ratio")) : 0;
-    bool aligned = attrs.contains("aligned") && (attrs.at("aligned") == "1" || attrs.at("aligned") == "true");
+    int64_t batch_size = attrs.get_int(AttrKey::BatchSize);
+    int64_t feat_height = attrs.get_int(AttrKey::FeatHeight);
+    int64_t feat_width = attrs.get_int(AttrKey::FeatWidth);
+    float spatial_scale = static_cast<float>(attrs.get_float(AttrKey::SpatialScale));
+    int64_t sampling_ratio = attrs.get_int(AttrKey::SamplingRatio, 0);
+    bool aligned = attrs.get_bool(AttrKey::Aligned, false);
 
     int32_t device_id = grad_output.device().index;
 
@@ -9466,8 +9466,8 @@ auto VulkanBackend::dispatchArgSort(const Tensor& input, int64_t dim, bool desce
         Tensor cpu_input = input.to(cpu_device);
         std::vector<Tensor> cpu_inputs = {cpu_input};
         OpAttributes attrs;
-        attrs["dim"] = std::to_string(dim);
-        attrs["descending"] = descending ? "1" : "0";
+        attrs.set(AttrKey::Dim, dim);
+        attrs.set(AttrKey::Descending, descending);
         auto result = tenzor::dispatch(OpId::ArgSort, cpu_inputs, attrs)[0];
         return result.to(input.device());
     }

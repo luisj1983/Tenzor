@@ -134,8 +134,15 @@ auto get_numpy_itemsize(const py::array& arr) -> size_t {
 }
 
 auto can_zero_copy_tensor_to_numpy(const Tensor& tensor) -> bool {
-    // Zero-copy possible for all CPU tensors (NumPy supports strided arrays)
-    return tensor.device().type == Device::Type::CPU;
+    if (tensor.device().type != Device::Type::CPU) return false;
+    // Check alignment: data pointer must be aligned to dtype size
+    auto align = tensor.dtype_size();
+    if (align > 0 && reinterpret_cast<uintptr_t>(tensor.data_ptr()) % align != 0) return false;
+    // Check for negative strides (not safely representable in NumPy zero-copy)
+    for (auto s : tensor.strides()) {
+        if (s < 0) return false;
+    }
+    return true;
 }
 
 auto can_zero_copy_numpy_to_tensor(const py::array& arr) -> bool {

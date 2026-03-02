@@ -1,5 +1,6 @@
 #include "tenzor/ops/fused_ops.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
@@ -55,7 +56,7 @@ auto fused_linear_relu(
     }
 
     OpAttributes attrs;
-    attrs["has_bias"] = bias != nullptr ? "true" : "false";
+    attrs.set(AttrKey::HasBias, bias != nullptr);
 
     return dispatch(OpId::FusedLinearReLU, inputs, attrs)[0];
 }
@@ -109,9 +110,9 @@ auto fused_conv2d_relu(
     }
 
     OpAttributes attrs;
-    attrs["has_bias"] = bias != nullptr ? "true" : "false";
-    attrs["stride"] = std::to_string(stride);
-    attrs["padding"] = std::to_string(padding);
+    attrs.set(AttrKey::HasBias, bias != nullptr);
+    attrs.set(AttrKey::Stride, stride);
+    attrs.set(AttrKey::Padding, padding);
 
     return dispatch(OpId::FusedConv2dReLU, inputs, attrs)[0];
 }
@@ -159,9 +160,9 @@ static auto fused_conv2d_dispatch(
         inputs.push_back(*bias);
     }
     OpAttributes attrs;
-    attrs["has_bias"] = bias != nullptr ? "true" : "false";
-    attrs["stride"] = std::to_string(stride);
-    attrs["padding"] = std::to_string(padding);
+    attrs.set(AttrKey::HasBias, bias != nullptr);
+    attrs.set(AttrKey::Stride, stride);
+    attrs.set(AttrKey::Padding, padding);
     return dispatch(op_id, inputs, attrs)[0];
 }
 
@@ -243,10 +244,8 @@ auto fused_batchnorm_relu(
     // Prepare inputs for dispatcher
     std::vector<Tensor> inputs = {input, running_mean, running_var, weight, bias};
 
-    OpAttributes attrs;
-    char eps_buf[32];
-    snprintf(eps_buf, sizeof(eps_buf), "%.9e", eps);
-    attrs["eps"] = std::string(eps_buf);
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Eps, static_cast<double>(eps));
 
     return dispatch(OpId::FusedBatchNormReLU, inputs, attrs)[0];
 }
@@ -291,7 +290,7 @@ auto fused_softmax_cross_entropy(
     std::vector<Tensor> inputs = {logits, targets};
 
     OpAttributes attrs;
-    attrs["reduction"] = reduction;
+    attrs.set(AttrKey::Reduction, reduction);
 
     return dispatch(OpId::FusedSoftmaxCrossEntropy, inputs, attrs)[0];
 }
@@ -353,10 +352,8 @@ auto fused_layer_norm(
     // Prepare inputs for dispatcher
     std::vector<Tensor> inputs = {input, weight, bias};
 
-    OpAttributes attrs;
-    char eps_buf[32];
-    snprintf(eps_buf, sizeof(eps_buf), "%.9e", eps);
-    attrs["eps"] = std::string(eps_buf);
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Eps, static_cast<double>(eps));
 
     // Encode normalized_shape as comma-separated string
     std::string shape_str;
@@ -364,7 +361,7 @@ auto fused_layer_norm(
         if (i > 0) shape_str += ",";
         shape_str += std::to_string(normalized_shape[i]);
     }
-    attrs["normalized_shape"] = shape_str;
+    attrs.set(AttrKey::NormalizedShape, shape_str);
 
     return dispatch(OpId::FusedLayerNorm, inputs, attrs)[0];
 }

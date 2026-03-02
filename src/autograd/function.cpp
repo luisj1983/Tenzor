@@ -6,6 +6,7 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/utils/error.hpp"
 #include <cmath>
@@ -743,7 +744,7 @@ auto NegBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
 // LogSoftmaxBackward implementation
 auto LogSoftmaxBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     OpAttributes attrs;
-    attrs["dim"] = std::to_string(dim_);
+    attrs.set(AttrKey::Dim, dim_);
     std::vector<Tensor> input_tensors = {inputs[0].tensor()};
     auto result = dispatch(OpId::LogSoftmax, input_tensors, attrs)[0];
 
@@ -759,7 +760,7 @@ auto LogSoftmaxBackward::backward(std::vector<Tensor> grad_outputs) -> std::vect
     const auto& grad_output = grad_outputs[0];
 
     OpAttributes attrs;
-    attrs["dim"] = std::to_string(dim_);
+    attrs.set(AttrKey::Dim, dim_);
     std::vector<Tensor> inputs = {grad_output, output};
     auto grad_input = dispatch(OpId::LogSoftmaxBackward, inputs, attrs)[0];
 
@@ -779,7 +780,7 @@ auto LogSoftmaxBackward::backward_with_variables(std::vector<Variable> grad_outp
 // SoftmaxBackward implementation
 auto SoftmaxBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     OpAttributes attrs;
-    attrs["dim"] = std::to_string(dim_);
+    attrs.set(AttrKey::Dim, dim_);
     std::vector<Tensor> input_tensors = {inputs[0].tensor()};
     auto result = dispatch(OpId::Softmax, input_tensors, attrs)[0];
 
@@ -795,7 +796,7 @@ auto SoftmaxBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<
     const auto& grad_output = grad_outputs[0];  // dL/dy
 
     OpAttributes attrs;
-    attrs["dim"] = std::to_string(dim_);
+    attrs.set(AttrKey::Dim, dim_);
     std::vector<Tensor> inputs = {grad_output, output};
     auto grad_input = dispatch(OpId::SoftmaxBackward, inputs, attrs)[0];
 

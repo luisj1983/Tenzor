@@ -33,6 +33,7 @@ set(CPU_BACKEND_SOURCES
     kernels/batchnorm.cpp
     kernels/creation.cpp
     kernels/conv2d.cpp
+    kernels/conv3d.cpp
     kernels/fused_ops.cpp
     kernels/simd_dispatch.cpp
     kernels/pooling.cpp

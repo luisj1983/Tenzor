@@ -638,8 +638,8 @@ public:
         int32_t device_id = 0;
         if (!inputs.empty()) {
             device_id = inputs[0].device().index;
-        } else if (attrs.contains("device_id")) {
-            device_id = std::stoi(attrs.at("device_id"));
+        } else if (attrs.has(AttrKey::DeviceId)) {
+            device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
         }
 
         validate_device_id(device_id);
@@ -718,7 +718,7 @@ public:
             }
             else if (op_name == "pow") {
                 if (inputs.size() != 1) throw std::invalid_argument("pow requires 1 input");
-                float exponent = attrs.contains("exponent") ? std::stof(attrs.at("exponent")) : 2.0f;
+                float exponent = static_cast<float>(attrs.get_float(AttrKey::Exponent, 2.0));
                 return {oneapi::pow_kernel(inputs[0], exponent, queue)};
             }
             else if (op_name == "dot") {
@@ -761,32 +761,32 @@ public:
             }
             else if (op_name == "softmax") {
                 if (inputs.size() != 1) throw std::invalid_argument("softmax requires 1 input");
-                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+                int64_t dim = attrs.get_int(AttrKey::Dim, -1);
                 return {oneapi::softmax_kernel(inputs[0], dim, queue)};
             }
             else if (op_name == "softmax_backward") {
                 if (inputs.size() != 2) throw std::invalid_argument("softmax_backward requires 2 inputs");
-                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+                int64_t dim = attrs.get_int(AttrKey::Dim, -1);
                 return {oneapi::softmax_backward_kernel(inputs[0], inputs[1], dim, queue)};
             }
             else if (op_name == "log_softmax") {
                 if (inputs.size() != 1) throw std::invalid_argument("log_softmax requires 1 input");
-                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+                int64_t dim = attrs.get_int(AttrKey::Dim, -1);
                 return {oneapi::log_softmax_kernel(inputs[0], dim, queue)};
             }
             else if (op_name == "log_softmax_backward") {
                 if (inputs.size() != 2) throw std::invalid_argument("log_softmax_backward requires 2 inputs");
-                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+                int64_t dim = attrs.get_int(AttrKey::Dim, -1);
                 return {oneapi::log_softmax_backward_kernel(inputs[0], inputs[1], dim, queue)};
             }
             else if (op_name == "leaky_relu") {
                 if (inputs.size() != 1) throw std::invalid_argument("leaky_relu requires 1 input");
-                float alpha = attrs.contains("alpha") ? std::stof(attrs.at("alpha")) : 0.01f;
+                float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
                 return {oneapi::leaky_relu_kernel(inputs[0], alpha, queue)};
             }
             else if (op_name == "leaky_relu_backward") {
                 if (inputs.size() != 2) throw std::invalid_argument("leaky_relu_backward requires 2 inputs");
-                float alpha = attrs.contains("alpha") ? std::stof(attrs.at("alpha")) : 0.01f;
+                float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
                 return {oneapi::leaky_relu_backward_kernel(inputs[0], inputs[1], alpha, queue)};
             }
             else if (op_name == "swish") {
@@ -802,69 +802,69 @@ public:
             // Use INT64_MIN as sentinel for "full reduction" when dim is not specified
             else if (op_name == "sum") {
                 if (inputs.size() != 1) throw std::invalid_argument("sum requires 1 input");
-                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : INT64_MIN;
-                bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
+                int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+                bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
                 return {oneapi::sum_kernel(inputs[0], dim, keepdim, queue)};
             }
             else if (op_name == "mean") {
                 if (inputs.size() != 1) throw std::invalid_argument("mean requires 1 input");
-                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : INT64_MIN;
-                bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
+                int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+                bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
                 return {oneapi::mean_kernel(inputs[0], dim, keepdim, queue)};
             }
             else if (op_name == "max") {
                 if (inputs.size() != 1) throw std::invalid_argument("max requires 1 input");
-                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : INT64_MIN;
-                bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
+                int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+                bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
                 return {oneapi::max_kernel(inputs[0], dim, keepdim, queue)};
             }
             else if (op_name == "min") {
                 if (inputs.size() != 1) throw std::invalid_argument("min requires 1 input");
-                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : INT64_MIN;
-                bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
+                int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+                bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
                 return {oneapi::min_kernel(inputs[0], dim, keepdim, queue)};
             }
 
             // Transform operations
             else if (op_name == "reshape") {
                 if (inputs.size() != 1) throw std::invalid_argument("reshape requires 1 input");
-                std::vector<int64_t> shape = parse_shape(attrs.at("shape"));
+                std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
                 return {oneapi::reshape_kernel(inputs[0], shape, queue)};
             }
             else if (op_name == "transpose") {
                 if (inputs.size() != 1) throw std::invalid_argument("transpose requires 1 input");
-                int64_t dim0 = attrs.contains("dim0") ? std::stoll(attrs.at("dim0")) : 0;
-                int64_t dim1 = attrs.contains("dim1") ? std::stoll(attrs.at("dim1")) : 1;
+                int64_t dim0 = attrs.get_int(AttrKey::Dim0, 0);
+                int64_t dim1 = attrs.get_int(AttrKey::Dim1, 1);
                 return {oneapi::transpose_kernel(inputs[0], dim0, dim1, queue)};
             }
             else if (op_name == "permute") {
                 if (inputs.size() != 1) throw std::invalid_argument("permute requires 1 input");
-                std::vector<int64_t> dims = parse_shape(attrs.at("dims"));
+                std::vector<int64_t> dims = attrs.get_int_list(AttrKey::Dims);
                 return {oneapi::permute_kernel(inputs[0], dims, queue)};
             }
             else if (op_name == "squeeze") {
                 if (inputs.size() != 1) throw std::invalid_argument("squeeze requires 1 input");
-                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+                int64_t dim = attrs.get_int(AttrKey::Dim, -1);
                 return {oneapi::squeeze_kernel(inputs[0], dim, queue)};
             }
             else if (op_name == "unsqueeze") {
                 if (inputs.size() != 1) throw std::invalid_argument("unsqueeze requires 1 input");
-                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : 0;
+                int64_t dim = attrs.get_int(AttrKey::Dim, 0);
                 return {oneapi::unsqueeze_kernel(inputs[0], dim, queue)};
             }
             else if (op_name == "index_select") {
                 if (inputs.size() != 2) throw std::invalid_argument("index_select requires 2 inputs");
-                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : 0;
+                int64_t dim = attrs.get_int(AttrKey::Dim, 0);
                 return {oneapi::index_select_kernel(inputs[0], dim, inputs[1], queue)};
             }
             else if (op_name == "gather") {
                 if (inputs.size() != 2) throw std::invalid_argument("gather requires 2 inputs");
-                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : 0;
+                int64_t dim = attrs.get_int(AttrKey::Dim, 0);
                 return {oneapi::gather_kernel(inputs[0], dim, inputs[1], queue)};
             }
             else if (op_name == "scatter") {
                 if (inputs.size() != 3) throw std::invalid_argument("scatter requires 3 inputs");
-                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : 0;
+                int64_t dim = attrs.get_int(AttrKey::Dim, 0);
                 return {oneapi::scatter_kernel(inputs[0], dim, inputs[1], inputs[2], queue)};
             }
             else if (op_name == "masked_select") {
@@ -873,8 +873,8 @@ public:
             }
             else if (op_name == "masked_fill") {
                 if (inputs.size() != 2) throw std::invalid_argument("masked_fill requires 2 inputs");
-                if (!attrs.contains("value")) throw std::invalid_argument("masked_fill requires value attribute");
-                float value = std::stof(attrs.at("value"));
+                if (!attrs.has(AttrKey::Value)) throw std::invalid_argument("masked_fill requires value attribute");
+                float value = static_cast<float>(attrs.get_float(AttrKey::Value));
                 return {oneapi::masked_fill_kernel(inputs[0], inputs[1], value, queue)};
             }
             else if (op_name == "contiguous") {
@@ -888,21 +888,21 @@ public:
 
             // Fill operations
             else if (op_name == "zeros") {
-                std::vector<int64_t> shape = parse_shape(attrs.at("shape"));
+                std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
                 DType dtype = parse_dtype(attrs);
                 Device device = inputs.empty() ? Device::oneapi(device_id) : inputs[0].device();
                 return {oneapi::zeros_kernel(shape, dtype, device, queue)};
             }
             else if (op_name == "ones") {
-                std::vector<int64_t> shape = parse_shape(attrs.at("shape"));
+                std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
                 DType dtype = parse_dtype(attrs);
                 Device device = inputs.empty() ? Device::oneapi(device_id) : inputs[0].device();
                 return {oneapi::ones_kernel(shape, dtype, device, queue)};
             }
             else if (op_name == "full") {
-                std::vector<int64_t> shape = parse_shape(attrs.at("shape"));
+                std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
                 // Use stod for better precision with very small values like denormalized floats
-                float value = static_cast<float>(std::stod(attrs.at("value")));
+                float value = static_cast<float>(attrs.get_float(AttrKey::Value));
                 DType dtype = parse_dtype(attrs);
                 Device device = inputs.empty() ? Device::oneapi(device_id) : inputs[0].device();
                 return {oneapi::full_kernel(shape, value, dtype, device, queue)};
@@ -910,19 +910,19 @@ public:
             else if (op_name == "fill") {
                 if (inputs.size() != 1) throw std::invalid_argument("fill requires 1 input");
                 // Use stod for better precision with very small values like denormalized floats
-                float value = static_cast<float>(std::stod(attrs.at("value")));
+                float value = static_cast<float>(attrs.get_float(AttrKey::Value));
                 return {oneapi::fill_kernel(inputs[0], value, queue)};
             }
 
             // Random number generation
             else if (op_name == "randn") {
-                std::vector<int64_t> shape = parse_shape(attrs.at("shape"));
+                std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
                 DType dtype = parse_dtype(attrs);
                 Device device = inputs.empty() ? Device::oneapi(device_id) : inputs[0].device();
                 return {oneapi::randn_kernel(shape, dtype, device, queue)};
             }
             else if (op_name == "rand") {
-                std::vector<int64_t> shape = parse_shape(attrs.at("shape"));
+                std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
                 DType dtype = parse_dtype(attrs);
                 Device device = inputs.empty() ? Device::oneapi(device_id) : inputs[0].device();
                 return {oneapi::rand_kernel(shape, dtype, device, queue)};
@@ -935,7 +935,7 @@ public:
             }
             else if (op_name == "batchnorm2d_update_running_stats") {
                 if (inputs.size() != 4) throw std::invalid_argument("batchnorm2d_update_running_stats requires 4 inputs");
-                float momentum = attrs.contains("momentum") ? std::stof(attrs.at("momentum")) : 0.1f;
+                float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.1));
                 // Clone the running stats as we'll modify them
                 Tensor updated_mean = inputs[0].clone();
                 Tensor updated_var = inputs[1].clone();
@@ -944,18 +944,18 @@ public:
             }
             else if (op_name == "batchnorm2d_forward") {
                 if (inputs.size() != 3) throw std::invalid_argument("batchnorm2d_forward requires 3 inputs");
-                float epsilon = attrs.contains("epsilon") ? std::stof(attrs.at("epsilon")) : 1e-5f;
+                float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
                 return {oneapi::batchnorm2d_forward(inputs[0], inputs[1], inputs[2], epsilon, queue)};
             }
             else if (op_name == "batchnorm2d_forward_affine") {
                 if (inputs.size() != 5) throw std::invalid_argument("batchnorm2d_forward_affine requires 5 inputs");
-                float epsilon = attrs.contains("epsilon") ? std::stof(attrs.at("epsilon")) : 1e-5f;
+                float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
                 return {oneapi::batchnorm2d_forward_affine(inputs[0], inputs[1], inputs[2],
                                                            inputs[3], inputs[4], epsilon, queue)};
             }
             else if (op_name == "batchnorm2d_backward") {
                 if (inputs.size() != 5) throw std::invalid_argument("batchnorm2d_backward requires 5 inputs");
-                float epsilon = attrs.contains("epsilon") ? std::stof(attrs.at("epsilon")) : 1e-5f;
+                float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
                 auto [grad_input, grad_gamma, grad_beta] = oneapi::batchnorm2d_backward(
                     inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], epsilon, queue);
                 return {grad_input, grad_gamma, grad_beta};
@@ -967,22 +967,22 @@ public:
                     throw std::invalid_argument("conv2d_forward requires 2 or 3 inputs");
                 }
                 const Tensor* bias = inputs.size() == 3 ? &inputs[2] : nullptr;
-                int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
-                int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
-                int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
-                int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
+                int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+                int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+                int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+                int64_t groups = attrs.get_int(AttrKey::Groups, 1);
                 return {oneapi::conv2d_forward(inputs[0], inputs[1], bias, stride, padding,
                                                dilation, groups, queue)};
             }
             else if (op_name == "conv2d_backward") {
                 if (inputs.size() != 3) throw std::invalid_argument("conv2d_backward requires 3 inputs");
-                int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
-                int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
-                int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
-                int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
-                bool compute_grad_input = !attrs.contains("compute_grad_input") || attrs.at("compute_grad_input") == "1";
-                bool compute_grad_weight = !attrs.contains("compute_grad_weight") || attrs.at("compute_grad_weight") == "1";
-                bool compute_grad_bias = !attrs.contains("compute_grad_bias") || attrs.at("compute_grad_bias") == "1";
+                int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+                int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+                int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+                int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+                bool compute_grad_input = !attrs.has(AttrKey::ComputeGradInput) || attrs.get_bool(AttrKey::ComputeGradInput, true);
+                bool compute_grad_weight = !attrs.has(AttrKey::ComputeGradWeight) || attrs.get_bool(AttrKey::ComputeGradWeight, true);
+                bool compute_grad_bias = !attrs.has(AttrKey::ComputeGradBias) || attrs.get_bool(AttrKey::ComputeGradBias, true);
 
                 const Tensor& grad_output = inputs[0];
                 const Tensor& input = inputs[1];
@@ -1022,8 +1022,8 @@ public:
 
                 // Parse input_shape from comma-separated string
                 std::vector<int64_t> input_shape;
-                if (attrs.contains("input_shape")) {
-                    std::string shape_str = attrs.at("input_shape");
+                if (attrs.has(AttrKey::InputShape)) {
+                    std::string shape_str = std::string(attrs.get_string(AttrKey::InputShape));
                     size_t pos = 0;
                     while (pos < shape_str.size()) {
                         size_t comma = shape_str.find(',', pos);
@@ -1039,10 +1039,10 @@ public:
                 }
 
                 // Extract attributes
-                int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
-                int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
-                int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
-                int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
+                int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+                int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+                int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+                int64_t groups = attrs.get_int(AttrKey::Groups, 1);
 
                 return {oneapi::conv2d_backward_input(inputs[0], inputs[1], input_shape,
                                                       stride, padding, dilation, groups, queue)};
@@ -1054,8 +1054,8 @@ public:
 
                 // Parse weight_shape from comma-separated string
                 std::vector<int64_t> weight_shape;
-                if (attrs.contains("weight_shape")) {
-                    std::string shape_str = attrs.at("weight_shape");
+                if (attrs.has(AttrKey::WeightShape)) {
+                    std::string shape_str = std::string(attrs.get_string(AttrKey::WeightShape));
                     size_t pos = 0;
                     while (pos < shape_str.size()) {
                         size_t comma = shape_str.find(',', pos);
@@ -1071,10 +1071,10 @@ public:
                 }
 
                 // Extract attributes
-                int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
-                int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
-                int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
-                int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
+                int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+                int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+                int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+                int64_t groups = attrs.get_int(AttrKey::Groups, 1);
 
                 return {oneapi::conv2d_backward_weight(inputs[0], inputs[1], weight_shape,
                                                        stride, padding, dilation, groups, queue)};
@@ -1093,11 +1093,11 @@ public:
                     throw std::invalid_argument("conv_transpose2d_forward requires 2 or 3 inputs");
                 }
                 const Tensor* bias = inputs.size() == 3 ? &inputs[2] : nullptr;
-                int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
-                int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
-                int64_t output_padding = attrs.contains("output_padding") ? std::stoll(attrs.at("output_padding")) : 0;
-                int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
-                int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
+                int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+                int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+                int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
+                int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+                int64_t groups = attrs.get_int(AttrKey::Groups, 1);
                 return {oneapi::conv_transpose2d_forward(inputs[0], inputs[1], bias, stride, padding,
                                                          output_padding, dilation, groups, queue)};
             }
@@ -1105,28 +1105,28 @@ public:
             // Argsort operation
             else if (op_name == "argsort") {
                 if (inputs.size() != 1) throw std::invalid_argument("argsort requires 1 input");
-                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
-                bool descending = attrs.contains("descending") && attrs.at("descending") == "1";
+                int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+                bool descending = attrs.get_bool(AttrKey::Descending, false);
                 return {oneapi::argsort_kernel(inputs[0], dim, descending, queue)};
             }
 
             // Embedding operations
             else if (op_name == "embedding_lookup") {
                 if (inputs.size() != 2) throw std::invalid_argument("embedding_lookup requires 2 inputs");
-                int64_t padding_idx = attrs.contains("padding_idx") ? std::stoll(attrs.at("padding_idx")) : -1;
+                int64_t padding_idx = attrs.get_int(AttrKey::PaddingIdx, -1);
                 // inputs[0] = weights, inputs[1] = indices (from nn::Embedding layer)
                 return {oneapi::embedding_lookup_kernel(inputs[1], inputs[0], padding_idx, queue)};
             }
             else if (op_name == "embedding_backward") {
                 if (inputs.size() != 2) throw std::invalid_argument("embedding_backward requires 2 inputs");
-                int64_t vocab_size = std::stoll(attrs.at("num_embeddings"));
+                int64_t vocab_size = attrs.get_int(AttrKey::NumEmbeddings);
                 int64_t embedding_dim = inputs[0].shape().back();
                 return {oneapi::embedding_backward_kernel(inputs[0], inputs[1], vocab_size, embedding_dim, queue)};
             }
             else if (op_name == "embedding_bag_forward") {
                 if (inputs.size() != 2) throw std::invalid_argument("embedding_bag_forward requires 2 inputs");
-                std::string mode = attrs.contains("mode") ? attrs.at("mode") : "mean";
-                bool include_last_offset = attrs.contains("include_last_offset") && attrs.at("include_last_offset") == "1";
+                std::string mode = std::string(attrs.get_string(AttrKey::Mode, "mean"));
+                bool include_last_offset = attrs.get_bool(AttrKey::CountIncludePad, false);
                 return {oneapi::embedding_bag_forward_kernel(inputs[0], inputs[1], mode, include_last_offset, queue)};
             }
 
@@ -1159,16 +1159,16 @@ public:
             // Utility operations
             else if (op_name == "cat") {
                 if (inputs.empty()) throw std::invalid_argument("cat requires at least one input");
-                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : 0;
+                int64_t dim = attrs.get_int(AttrKey::Dim, 0);
                 return {oneapi::cat_kernel(inputs, dim, queue)};
             }
             else if (op_name == "clamp") {
                 if (inputs.size() != 1) throw std::invalid_argument("clamp requires 1 input");
-                if (!attrs.contains("min") || !attrs.contains("max")) {
+                if (!attrs.has(AttrKey::Min) || !attrs.has(AttrKey::Max)) {
                     throw std::invalid_argument("clamp requires 'min' and 'max' attributes");
                 }
-                float min_val = std::stof(attrs.at("min"));
-                float max_val = std::stof(attrs.at("max"));
+                float min_val = static_cast<float>(attrs.get_float(AttrKey::Min));
+                float max_val = static_cast<float>(attrs.get_float(AttrKey::Max));
                 return {oneapi::clamp_kernel(inputs[0], min_val, max_val, queue)};
             }
             else if (op_name == "sign") {
@@ -1213,9 +1213,9 @@ public:
             else if (op_name == "avg_pool2d_backward") {
                 if (inputs.size() == 2) {
                     return {oneapi::avg_pool2d_backward_kernel(inputs[0], inputs[1], attrs, queue)};
-                } else if (inputs.size() == 1 && attrs.contains("input_shape")) {
+                } else if (inputs.size() == 1 && attrs.has(AttrKey::InputShape)) {
                     // Autograd path: input shape passed via attributes, create placeholder tensor
-                    auto input_shape = parse_shape(attrs.at("input_shape"));
+                    auto input_shape = attrs.get_int_list(AttrKey::InputShape);
                     Tensor dummy_input(input_shape, inputs[0].dtype(), inputs[0].device());
                     return {oneapi::avg_pool2d_backward_kernel(inputs[0], dummy_input, attrs, queue)};
                 } else {
@@ -1225,22 +1225,22 @@ public:
             else if (op_name == "max_pool2d_backward") {
                 if (inputs.size() != 2) throw std::invalid_argument("max_pool2d_backward requires 2 inputs: grad_output, indices");
                 int64_t H_in = 0, W_in = 0;
-                if (attrs.contains("H_in")) {
-                    H_in = std::stoll(attrs.at("H_in"));
+                if (attrs.has(AttrKey::InputH)) {
+                    H_in = attrs.get_int(AttrKey::InputH);
                 }
-                if (attrs.contains("W_in")) {
-                    W_in = std::stoll(attrs.at("W_in"));
+                if (attrs.has(AttrKey::InputW)) {
+                    W_in = attrs.get_int(AttrKey::InputW);
                 }
                 return {oneapi::max_pool2d_backward_with_indices(inputs[0], inputs[1], H_in, W_in, queue)};
             }
             else if (op_name == "adaptive_avg_pool2d_backward") {
                 if (inputs.size() != 1) throw std::invalid_argument("adaptive_avg_pool2d_backward requires 1 input: grad_output");
                 int64_t H_in = 0, W_in = 0;
-                if (attrs.contains("H_in")) {
-                    H_in = std::stoll(attrs.at("H_in"));
+                if (attrs.has(AttrKey::InputH)) {
+                    H_in = attrs.get_int(AttrKey::InputH);
                 }
-                if (attrs.contains("W_in")) {
-                    W_in = std::stoll(attrs.at("W_in"));
+                if (attrs.has(AttrKey::InputW)) {
+                    W_in = attrs.get_int(AttrKey::InputW);
                 }
                 return {oneapi::adaptive_avgpool2d_backward(inputs[0], H_in, W_in, queue)};
             }
@@ -1266,14 +1266,14 @@ public:
             // Argmax/Argmin operations
             else if (op_name == "argmax") {
                 if (inputs.size() != 1) throw std::invalid_argument("argmax requires 1 input");
-                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
-                bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
+                int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+                bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
                 return {oneapi::argmax_kernel(inputs[0], dim, keepdim, queue)};
             }
             else if (op_name == "argmin") {
                 if (inputs.size() != 1) throw std::invalid_argument("argmin requires 1 input");
-                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
-                bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
+                int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+                bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
                 return {oneapi::argmin_kernel(inputs[0], dim, keepdim, queue)};
             }
 
@@ -1346,12 +1346,12 @@ public:
             // ================================================================
             else if (op_name == "clamp_min") {
                 if (inputs.size() != 1) throw std::invalid_argument("clamp_min requires 1 input");
-                float min_val = attrs.contains("min") ? std::stof(attrs.at("min")) : 0.0f;
+                float min_val = static_cast<float>(attrs.get_float(AttrKey::Min, 0.0));
                 return {oneapi::clamp_min_kernel(inputs[0], min_val, queue)};
             }
             else if (op_name == "clamp_max") {
                 if (inputs.size() != 1) throw std::invalid_argument("clamp_max requires 1 input");
-                float max_val = attrs.contains("max") ? std::stof(attrs.at("max")) : 1.0f;
+                float max_val = static_cast<float>(attrs.get_float(AttrKey::Max, 1.0));
                 return {oneapi::clamp_max_kernel(inputs[0], max_val, queue)};
             }
             else if (op_name == "where") {
@@ -1360,7 +1360,7 @@ public:
             }
             else if (op_name == "repeat") {
                 if (inputs.size() != 1) throw std::invalid_argument("repeat requires 1 input");
-                auto repeats = parse_shape(attrs.at("repeats"));
+                auto repeats = attrs.get_int_list(AttrKey::Repeats);
                 return {oneapi::repeat_kernel(inputs[0], repeats, queue)};
             }
 
@@ -1377,15 +1377,15 @@ public:
             }
             else if (op_name == "fused_layer_norm") {
                 if (inputs.size() != 3) throw std::invalid_argument("fused_layer_norm requires 3 inputs");
-                auto normalized_shape = parse_shape(attrs.at("normalized_shape"));
-                float epsilon = attrs.contains("epsilon") ? std::stof(attrs.at("epsilon")) : 1e-5f;
+                auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
+                float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
                 auto [output, mean, inv_std] = oneapi::fused_layer_norm_kernel(
                     inputs[0], inputs[1], inputs[2], normalized_shape, epsilon, queue);
                 return {output, mean, inv_std};
             }
             else if (op_name == "fused_layer_norm_backward") {
                 if (inputs.size() != 5) throw std::invalid_argument("fused_layer_norm_backward requires 5 inputs");
-                auto normalized_shape = parse_shape(attrs.at("normalized_shape"));
+                auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
                 auto [grad_input, grad_weight, grad_bias] = oneapi::fused_layer_norm_backward_kernel(
                     inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], normalized_shape, queue);
                 return {grad_input, grad_weight, grad_bias};
@@ -1397,7 +1397,7 @@ public:
             }
             else if (op_name == "fused_batchnorm_relu") {
                 if (inputs.size() != 5) throw std::invalid_argument("fused_batchnorm_relu requires 5 inputs");
-                float epsilon = attrs.contains("epsilon") ? std::stof(attrs.at("epsilon")) : 1e-5f;
+                float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
                 return {oneapi::fused_batchnorm_relu_kernel(
                     inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], epsilon, queue)};
             }
@@ -1407,12 +1407,12 @@ public:
             }
             else if (op_name == "fused_softmax_cross_entropy") {
                 if (inputs.size() != 2) throw std::invalid_argument("fused_softmax_cross_entropy requires 2 inputs");
-                std::string reduction = attrs.contains("reduction") ? attrs.at("reduction") : "mean";
+                std::string reduction = std::string(attrs.get_string(AttrKey::Reduction, "mean"));
                 return {oneapi::fused_softmax_cross_entropy_kernel(inputs[0], inputs[1], reduction, queue)};
             }
             else if (op_name == "fused_rms_norm") {
                 if (inputs.size() != 2) throw std::invalid_argument("fused_rms_norm requires 2 inputs");
-                float epsilon = attrs.contains("eps") ? std::stof(attrs.at("eps")) : 1e-5f;
+                float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
                 auto [output, rrms] = oneapi::fused_rms_norm_kernel(inputs[0], inputs[1], epsilon, queue);
                 return {output, rrms};
             }
@@ -1430,16 +1430,16 @@ public:
             // ================================================================
             else if (op_name == "lstm_cell_forward") {
                 if (inputs.size() != 2) throw std::invalid_argument("lstm_cell_forward requires 2 inputs");
-                int64_t batch_size = std::stoll(attrs.at("batch_size"));
-                int64_t hidden_size = std::stoll(attrs.at("hidden_size"));
+                int64_t batch_size = attrs.get_int(AttrKey::BatchSize);
+                int64_t hidden_size = attrs.get_int(AttrKey::HiddenSize);
                 auto [h_out, c_out] = oneapi::lstm_cell_forward_kernel(
                     inputs[0], inputs[1], batch_size, hidden_size, queue);
                 return {h_out, c_out};
             }
             else if (op_name == "lstm_cell_backward") {
                 if (inputs.size() != 5) throw std::invalid_argument("lstm_cell_backward requires 5 inputs");
-                int64_t batch_size = std::stoll(attrs.at("batch_size"));
-                int64_t hidden_size = std::stoll(attrs.at("hidden_size"));
+                int64_t batch_size = attrs.get_int(AttrKey::BatchSize);
+                int64_t hidden_size = attrs.get_int(AttrKey::HiddenSize);
                 auto [grad_gates, grad_c_prev] = oneapi::lstm_cell_backward_kernel(
                     inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
                     batch_size, hidden_size, queue);
@@ -1451,16 +1451,16 @@ public:
             // ================================================================
             else if (op_name == "gru_cell_forward") {
                 if (inputs.size() != 5) throw std::invalid_argument("gru_cell_forward requires 5 inputs");
-                int64_t batch_size = std::stoll(attrs.at("batch_size"));
-                int64_t hidden_size = std::stoll(attrs.at("hidden_size"));
+                int64_t batch_size = attrs.get_int(AttrKey::BatchSize);
+                int64_t hidden_size = attrs.get_int(AttrKey::HiddenSize);
                 return {oneapi::gru_cell_forward_kernel(
                     inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
                     batch_size, hidden_size, queue)};
             }
             else if (op_name == "gru_cell_backward") {
                 if (inputs.size() != 6) throw std::invalid_argument("gru_cell_backward requires 6 inputs");
-                int64_t batch_size = std::stoll(attrs.at("batch_size"));
-                int64_t hidden_size = std::stoll(attrs.at("hidden_size"));
+                int64_t batch_size = attrs.get_int(AttrKey::BatchSize);
+                int64_t hidden_size = attrs.get_int(AttrKey::HiddenSize);
                 auto outputs = oneapi::gru_cell_backward_kernel(
                     inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5],
                     batch_size, hidden_size, queue);
@@ -1473,43 +1473,43 @@ public:
             // ================================================================
             else if (op_name == "nms") {
                 if (inputs.size() != 2) throw std::invalid_argument("nms requires 2 inputs (boxes, scores)");
-                float iou_threshold = attrs.contains("iou_threshold") ? std::stof(attrs.at("iou_threshold")) : 0.5f;
+                float iou_threshold = static_cast<float>(attrs.get_float(AttrKey::Threshold, 0.5));
                 return {oneapi::nms_kernel(inputs[0], inputs[1], iou_threshold, queue)};
             }
             else if (op_name == "roi_align") {
                 if (inputs.size() != 2) throw std::invalid_argument("roi_align requires 2 inputs");
-                int64_t output_height = attrs.contains("output_height") ? std::stoll(attrs.at("output_height"))
-                    : std::stoll(attrs.at("output_h"));
-                int64_t output_width = attrs.contains("output_width") ? std::stoll(attrs.at("output_width"))
-                    : std::stoll(attrs.at("output_w"));
-                float spatial_scale = attrs.contains("spatial_scale") ? std::stof(attrs.at("spatial_scale")) : 1.0f;
-                int64_t sampling_ratio = attrs.contains("sampling_ratio") ? std::stoll(attrs.at("sampling_ratio")) : 0;
-                bool aligned = attrs.contains("aligned") && attrs.at("aligned") == "1";
+                int64_t output_height = attrs.has(AttrKey::OutputHeight) ? attrs.get_int(AttrKey::OutputHeight)
+                    : attrs.get_int(AttrKey::OutputSizeH);
+                int64_t output_width = attrs.has(AttrKey::OutputWidth) ? attrs.get_int(AttrKey::OutputWidth)
+                    : attrs.get_int(AttrKey::OutputSizeW);
+                float spatial_scale = static_cast<float>(attrs.get_float(AttrKey::SpatialScale, 1.0));
+                int64_t sampling_ratio = attrs.get_int(AttrKey::SamplingRatio, 0);
+                bool aligned = attrs.get_bool(AttrKey::Aligned, false);
                 return {oneapi::roi_align_kernel(inputs[0], inputs[1], output_height, output_width,
                                                  spatial_scale, sampling_ratio, aligned, queue)};
             }
             else if (op_name == "roi_align_backward") {
                 if (inputs.size() != 2) throw std::invalid_argument("roi_align_backward requires 2 inputs (grad_output, rois)");
-                int64_t batch_size = std::stoll(attrs.at("batch_size"));
+                int64_t batch_size = attrs.get_int(AttrKey::BatchSize);
                 int64_t channels = inputs[0].shape()[1]; // channels from grad_output shape
-                int64_t feat_height = std::stoll(attrs.at("feat_height"));
-                int64_t feat_width = std::stoll(attrs.at("feat_width"));
-                float spatial_scale = attrs.contains("spatial_scale") ? std::stof(attrs.at("spatial_scale")) : 1.0f;
-                int64_t sampling_ratio = attrs.contains("sampling_ratio") ? std::stoll(attrs.at("sampling_ratio")) : 0;
-                bool aligned = attrs.contains("aligned") && attrs.at("aligned") == "1";
+                int64_t feat_height = attrs.get_int(AttrKey::FeatHeight);
+                int64_t feat_width = attrs.get_int(AttrKey::FeatWidth);
+                float spatial_scale = static_cast<float>(attrs.get_float(AttrKey::SpatialScale, 1.0));
+                int64_t sampling_ratio = attrs.get_int(AttrKey::SamplingRatio, 0);
+                bool aligned = attrs.get_bool(AttrKey::Aligned, false);
                 return {oneapi::roi_align_backward_kernel(inputs[0], inputs[1], batch_size, channels,
                                                           feat_height, feat_width, spatial_scale,
                                                           sampling_ratio, aligned, queue)};
             }
             else if (op_name == "gather_relative_position_bias") {
                 if (inputs.size() != 2) throw std::invalid_argument("gather_relative_position_bias requires 2 inputs (table, indices)");
-                int64_t num_positions = std::stoll(attrs.at("num_positions"));
-                int64_t num_heads = std::stoll(attrs.at("num_heads"));
+                int64_t num_positions = attrs.get_int(AttrKey::NumPositions);
+                int64_t num_heads = attrs.get_int(AttrKey::NumHeads);
                 return {oneapi::gather_relative_position_bias_kernel(inputs[0], inputs[1], num_positions, num_heads, queue)};
             }
             else if (op_name == "interpolate") {
                 if (inputs.size() != 1) throw std::invalid_argument("interpolate requires 1 input");
-                auto size_str = attrs.at("size");
+                auto size_str = std::string(attrs.get_string(AttrKey::OutputSize));
                 std::vector<int64_t> size;
                 std::string s = size_str;
                 size_t pos = 0;
@@ -1518,8 +1518,8 @@ public:
                     s.erase(0, pos + 1);
                 }
                 if (!s.empty()) size.push_back(std::stoll(s));
-                std::string mode = attrs.contains("mode") ? attrs.at("mode") : "bilinear";
-                bool align_corners = attrs.contains("align_corners") && attrs.at("align_corners") == "1";
+                std::string mode = std::string(attrs.get_string(AttrKey::Mode, "bilinear"));
+                bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
                 return {oneapi::interpolate_kernel(inputs[0], size, mode, align_corners, queue)};
             }
 
@@ -1546,7 +1546,7 @@ public:
             }
             else if (op_name == "leaky_relu_inplace") {
                 if (inputs.size() != 1) throw std::invalid_argument("leaky_relu_inplace requires 1 input");
-                float alpha = attrs.contains("alpha") ? std::stof(attrs.at("alpha")) : 0.01f;
+                float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
                 Tensor result = inputs[0];
                 oneapi::leaky_relu_inplace_kernel(result, alpha, queue);
                 return {result};
@@ -1567,10 +1567,10 @@ public:
             }
             else if (op_name == "one_hot") {
                 if (inputs.size() != 1) throw std::invalid_argument("one_hot requires 1 input");
-                int64_t num_classes = std::stoll(attrs.at("num_classes"));
+                int64_t num_classes = attrs.get_int(AttrKey::NumClasses);
                 DType output_dtype = DType::Float32;
-                if (attrs.contains("dtype")) {
-                    auto dt = attrs.at("dtype");
+                if (attrs.has(AttrKey::Dtype)) {
+                    auto dt = std::string(attrs.get_string(AttrKey::Dtype));
                     if (dt == "float64") output_dtype = DType::Float64;
                     else if (dt == "float16") output_dtype = DType::Float16;
                 }
@@ -1582,25 +1582,25 @@ public:
             // ================================================================
             else if (op_name == "quantize") {
                 if (inputs.size() != 1) throw std::invalid_argument("quantize requires 1 input");
-                float scale = std::stof(attrs.at("scale"));
-                int32_t zero_point = std::stoi(attrs.at("zero_point"));
+                float scale = static_cast<float>(attrs.get_float(AttrKey::Scale));
+                int32_t zero_point = static_cast<int32_t>(attrs.get_int(AttrKey::ZeroPoint));
                 return {oneapi::quantize_kernel(inputs[0], scale, zero_point, queue)};
             }
             else if (op_name == "dequantize") {
                 if (inputs.size() != 1) throw std::invalid_argument("dequantize requires 1 input");
-                float scale = std::stof(attrs.at("scale"));
-                int32_t zero_point = std::stoi(attrs.at("zero_point"));
+                float scale = static_cast<float>(attrs.get_float(AttrKey::Scale));
+                int32_t zero_point = static_cast<int32_t>(attrs.get_int(AttrKey::ZeroPoint));
                 return {oneapi::dequantize_kernel(inputs[0], scale, zero_point, queue)};
             }
             else if (op_name == "quantized_linear") {
                 if (inputs.size() < 2) throw std::invalid_argument("quantized_linear requires 2-3 inputs");
                 const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
-                float input_scale = std::stof(attrs.at("input_scale"));
-                int32_t input_zero_point = std::stoi(attrs.at("input_zero_point"));
-                float weight_scale = std::stof(attrs.at("weight_scale"));
-                int32_t weight_zero_point = std::stoi(attrs.at("weight_zero_point"));
-                float output_scale = attrs.contains("output_scale") ? std::stof(attrs.at("output_scale")) : 1.0f;
-                int32_t output_zero_point = attrs.contains("output_zero_point") ? std::stoi(attrs.at("output_zero_point")) : 0;
+                float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale));
+                int32_t input_zero_point = static_cast<int32_t>(attrs.get_int(AttrKey::InputZeroPoint));
+                float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ));
+                int32_t weight_zero_point = static_cast<int32_t>(attrs.get_int(AttrKey::WeightZeroPoint));
+                float output_scale = static_cast<float>(attrs.get_float(AttrKey::OutputScale, 1.0));
+                int32_t output_zero_point = static_cast<int32_t>(attrs.get_int(AttrKey::OutputZeroPoint, 0));
                 return {oneapi::quantized_linear_kernel(inputs[0], inputs[1], bias,
                                                         input_scale, input_zero_point,
                                                         weight_scale, weight_zero_point,
@@ -1609,14 +1609,14 @@ public:
             else if (op_name == "quantized_conv2d") {
                 if (inputs.size() < 2) throw std::invalid_argument("quantized_conv2d requires 2-3 inputs");
                 const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
-                int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
-                int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
-                int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
-                int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
-                float input_scale = std::stof(attrs.at("input_scale"));
-                int32_t input_zero_point = std::stoi(attrs.at("input_zero_point"));
-                float weight_scale = std::stof(attrs.at("weight_scale"));
-                int32_t weight_zero_point = std::stoi(attrs.at("weight_zero_point"));
+                int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+                int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+                int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+                int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+                float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale));
+                int32_t input_zero_point = static_cast<int32_t>(attrs.get_int(AttrKey::InputZeroPoint));
+                float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ));
+                int32_t weight_zero_point = static_cast<int32_t>(attrs.get_int(AttrKey::WeightZeroPoint));
                 return {oneapi::quantized_conv2d_kernel(inputs[0], inputs[1], bias,
                                                         stride, padding, dilation, groups,
                                                         input_scale, input_zero_point,
@@ -1628,7 +1628,7 @@ public:
             // ================================================================
             else if (op_name == "stack") {
                 if (inputs.empty()) throw std::invalid_argument("stack requires at least one input");
-                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : 0;
+                int64_t dim = attrs.get_int(AttrKey::Dim, 0);
                 // Stack = unsqueeze each tensor at dim, then cat
                 std::vector<Tensor> unsqueezed;
                 unsqueezed.reserve(inputs.size());
@@ -1642,26 +1642,26 @@ public:
             // Creation operations (arange, linspace, eye)
             // ================================================================
             else if (op_name == "arange") {
-                double start = attrs.contains("start") ? std::stod(attrs.at("start")) : 0.0;
-                double end_val = std::stod(attrs.at("end"));
-                double step = attrs.contains("step") ? std::stod(attrs.at("step")) : 1.0;
+                double start = attrs.get_float(AttrKey::Start, 0.0);
+                double end_val = attrs.get_float(AttrKey::End);
+                double step = attrs.get_float(AttrKey::Step, 1.0);
                 DType dtype = parse_dtype(attrs);
-                int32_t device_id = attrs.contains("device_id") ? std::stoi(attrs.at("device_id")) : 0;
+                int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
                 return {oneapi::arange_kernel(start, end_val, step, dtype, Device(Device::Type::OneAPI, device_id), queue)};
             }
             else if (op_name == "linspace") {
-                double start = std::stod(attrs.at("start"));
-                double end_val = std::stod(attrs.at("end"));
-                int64_t steps = std::stoll(attrs.at("steps"));
+                double start = attrs.get_float(AttrKey::Start);
+                double end_val = attrs.get_float(AttrKey::End);
+                int64_t steps = attrs.get_int(AttrKey::Steps);
                 DType dtype = parse_dtype(attrs);
-                int32_t device_id = attrs.contains("device_id") ? std::stoi(attrs.at("device_id")) : 0;
+                int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
                 return {oneapi::linspace_kernel(start, end_val, steps, dtype, Device(Device::Type::OneAPI, device_id), queue)};
             }
             else if (op_name == "eye") {
-                int64_t n = std::stoll(attrs.at("n"));
-                int64_t m = attrs.contains("m") ? std::stoll(attrs.at("m")) : n;
+                int64_t n = attrs.get_int(AttrKey::N);
+                int64_t m = attrs.has(AttrKey::M) ? attrs.get_int(AttrKey::M) : n;
                 DType dtype = parse_dtype(attrs);
-                int32_t device_id = attrs.contains("device_id") ? std::stoi(attrs.at("device_id")) : 0;
+                int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
                 return {oneapi::eye_kernel(n, m, dtype, Device(Device::Type::OneAPI, device_id), queue)};
             }
 
@@ -1670,8 +1670,8 @@ public:
             // ================================================================
             else if (op_name == "group_norm") {
                 if (inputs.size() < 1) throw std::invalid_argument("group_norm requires at least 1 input");
-                int64_t num_groups = attrs.contains("num_groups") ? std::stoll(attrs.at("num_groups")) : 1;
-                float eps = attrs.contains("eps") ? std::stof(attrs.at("eps")) : 1e-5f;
+                int64_t num_groups = attrs.get_int(AttrKey::NumGroups, 1);
+                float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
                 const Tensor* weight = inputs.size() > 1 ? &inputs[1] : nullptr;
                 const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
                 return oneapi::group_norm_kernel(inputs[0], num_groups, weight, bias, eps, queue);
@@ -1683,7 +1683,7 @@ public:
             else if (op_name == "group_norm_backward") {
                 // inputs: [grad_output, input, mean, rstd, weight]
                 if (inputs.size() < 5) throw std::invalid_argument("group_norm_backward requires 5 inputs");
-                int64_t num_groups = attrs.contains("num_groups") ? std::stoll(attrs.at("num_groups")) : 1;
+                int64_t num_groups = attrs.get_int(AttrKey::NumGroups, 1);
                 return oneapi::group_norm_backward_kernel(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], num_groups, queue);
             }
 
@@ -1741,11 +1741,11 @@ private:
     }
 
     auto parse_dtype(const OpAttributes& attrs) const -> DType {
-        if (!attrs.contains("dtype")) {
+        if (!attrs.has(AttrKey::Dtype)) {
             return DType::Float32;
         }
 
-        const auto& dtype_str = attrs.at("dtype");
+        const auto& dtype_str = std::string(attrs.get_string(AttrKey::Dtype));
         if (dtype_str == "float32") return DType::Float32;
         if (dtype_str == "float64") return DType::Float64;
         if (dtype_str == "float16") return DType::Float16;

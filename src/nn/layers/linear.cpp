@@ -28,6 +28,11 @@ public:
         // Pass gradient through as-is (in computation dtype)
         return {grad_outputs[0]};
     }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        // Pass gradient through as-is (in computation dtype)
+        return {grad_outputs[0]};
+    }
 };
 
 // Helper function to cast a Variable to a new dtype with autograd support

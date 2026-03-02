@@ -1,6 +1,7 @@
 #include "tenzor/nn/optim/sgd.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 
 namespace tenzor::optim {
@@ -31,12 +32,12 @@ auto SGD::step_impl() -> void {
             }
 
             // Prepare attributes
-            OpAttributes attrs;
-            attrs["lr"] = std::to_string(static_cast<float>(lr_));
-            attrs["momentum"] = std::to_string(static_cast<float>(momentum_));
-            attrs["weight_decay"] = std::to_string(static_cast<float>(weight_decay_));
-            attrs["dampening"] = std::to_string(static_cast<float>(dampening_));
-            attrs["nesterov"] = nesterov_ ? "true" : "false";
+            NewOpAttributes attrs;
+            attrs.set(AttrKey::Lr, static_cast<float>(lr_));
+            attrs.set(AttrKey::Momentum, static_cast<float>(momentum_));
+            attrs.set(AttrKey::WeightDecay, static_cast<float>(weight_decay_));
+            attrs.set(AttrKey::Dampening, static_cast<float>(dampening_));
+            attrs.set(AttrKey::Nesterov, nesterov_);
 
             // Dispatch to fused kernel (modifies param and momentum buffer in-place)
             dispatch(OpId::FusedSGDStep, inputs, attrs);

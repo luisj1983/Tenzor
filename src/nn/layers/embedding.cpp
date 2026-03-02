@@ -8,6 +8,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include <stdexcept>
 #include <cmath>
@@ -124,8 +125,8 @@ public:
             Tensor indices_dev = (indices_.device() == grad_output.device())
                                ? indices_ : indices_.to(grad_output.device());
 
-            OpAttributes attrs;
-            attrs["num_embeddings"] = std::to_string(num_embeddings_);
+            NewOpAttributes attrs;
+            attrs.set(AttrKey::NumEmbeddings, num_embeddings_);
             std::vector<Tensor> inputs_vec = {grad_output, indices_dev};
             auto results = dispatch<OpId::EmbeddingBackward>(inputs_vec, attrs);
             return results;
@@ -204,6 +205,16 @@ public:
         }
 
         return {grad_weight};
+    }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        // Embedding backward uses scatter/index operations -- delegate to tensor backward and wrap results
+        std::vector<Tensor> tensor_grads;
+        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
+        auto results = backward(std::move(tensor_grads));
+        std::vector<Variable> var_results;
+        for (auto& t : results) var_results.emplace_back(t, false);
+        return var_results;
     }
 
 private:

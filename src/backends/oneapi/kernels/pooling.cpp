@@ -1,5 +1,6 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/backend/backend.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include <sycl/sycl.hpp>
 #include <limits>
 #include <stdexcept>
@@ -1127,14 +1128,14 @@ auto adaptive_maxpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
  * @return Tensor Pooled output tensor
  */
 auto avg_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
-    if (!attrs.contains("kernel_size")) {
+    if (!attrs.has(AttrKey::KernelSize)) {
         throw std::invalid_argument("avg_pool2d: 'kernel_size' attribute is required");
     }
 
-    int64_t kernel_size = std::stoll(attrs.at("kernel_size"));
-    int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : kernel_size;
-    int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
-    bool count_include_pad = attrs.contains("count_include_pad") && attrs.at("count_include_pad") == "1";
+    int64_t kernel_size = attrs.get_int(AttrKey::KernelSize);
+    int64_t stride = attrs.has(AttrKey::Stride) ? attrs.get_int(AttrKey::Stride) : kernel_size;
+    int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+    bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, false);
 
     return avgpool2d_forward(input, kernel_size, stride, padding, count_include_pad, queue);
 }
@@ -1152,14 +1153,14 @@ auto avg_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::que
  * @return std::pair<Tensor, Tensor> Pooled output tensor and indices tensor
  */
 auto max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> std::pair<Tensor, Tensor> {
-    if (!attrs.contains("kernel_size")) {
+    if (!attrs.has(AttrKey::KernelSize)) {
         throw std::invalid_argument("max_pool2d: 'kernel_size' attribute is required");
     }
 
-    int64_t kernel_size = std::stoll(attrs.at("kernel_size"));
-    int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : kernel_size;
-    int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
-    int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
+    int64_t kernel_size = attrs.get_int(AttrKey::KernelSize);
+    int64_t stride = attrs.has(AttrKey::Stride) ? attrs.get_int(AttrKey::Stride) : kernel_size;
+    int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+    int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
 
     return maxpool2d_forward_with_indices(input, kernel_size, stride, padding, dilation, queue);
 }
@@ -1179,21 +1180,20 @@ auto adaptive_avg_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, 
     int64_t output_h = 1, output_w = 1;
 
     // Support both formats: "output_size" (H,W string) and "output_h"/"output_w" (separate integers)
-    if (attrs.contains("output_size")) {
+    if (attrs.has(AttrKey::OutputSize)) {
         // Parse output_size (format: "H,W")
-        std::string output_size_str = attrs.at("output_size");
-        size_t comma_pos = output_size_str.find(',');
-        if (comma_pos == std::string::npos) {
-            throw std::invalid_argument("adaptive_avg_pool2d: output_size must be in format 'H,W'");
+        auto sizes = attrs.get_int_list(AttrKey::OutputSize);
+        if (sizes.size() != 2) {
+            throw std::invalid_argument("adaptive_avg_pool2d: output_size must have 2 values");
         }
-        output_h = std::stoll(output_size_str.substr(0, comma_pos));
-        output_w = std::stoll(output_size_str.substr(comma_pos + 1));
-    } else if (attrs.contains("output_h") && attrs.contains("output_w")) {
-        output_h = std::stoll(attrs.at("output_h"));
-        output_w = std::stoll(attrs.at("output_w"));
-    } else if (attrs.contains("output_h")) {
+        output_h = sizes[0];
+        output_w = sizes[1];
+    } else if (attrs.has(AttrKey::OutputSizeH) && attrs.has(AttrKey::OutputSizeW)) {
+        output_h = attrs.get_int(AttrKey::OutputSizeH);
+        output_w = attrs.get_int(AttrKey::OutputSizeW);
+    } else if (attrs.has(AttrKey::OutputSizeH)) {
         // Square output if only output_h is provided
-        output_h = std::stoll(attrs.at("output_h"));
+        output_h = attrs.get_int(AttrKey::OutputSizeH);
         output_w = output_h;
     } else {
         throw std::invalid_argument("adaptive_avg_pool2d: 'output_size' or 'output_h'/'output_w' attributes are required");
@@ -1217,21 +1217,20 @@ auto adaptive_max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, 
     int64_t output_h = 1, output_w = 1;
 
     // Support both formats: "output_size" (H,W string) and "output_h"/"output_w" (separate integers)
-    if (attrs.contains("output_size")) {
+    if (attrs.has(AttrKey::OutputSize)) {
         // Parse output_size (format: "H,W")
-        std::string output_size_str = attrs.at("output_size");
-        size_t comma_pos = output_size_str.find(',');
-        if (comma_pos == std::string::npos) {
-            throw std::invalid_argument("adaptive_max_pool2d: output_size must be in format 'H,W'");
+        auto sizes = attrs.get_int_list(AttrKey::OutputSize);
+        if (sizes.size() != 2) {
+            throw std::invalid_argument("adaptive_max_pool2d: output_size must have 2 values");
         }
-        output_h = std::stoll(output_size_str.substr(0, comma_pos));
-        output_w = std::stoll(output_size_str.substr(comma_pos + 1));
-    } else if (attrs.contains("output_h") && attrs.contains("output_w")) {
-        output_h = std::stoll(attrs.at("output_h"));
-        output_w = std::stoll(attrs.at("output_w"));
-    } else if (attrs.contains("output_h")) {
+        output_h = sizes[0];
+        output_w = sizes[1];
+    } else if (attrs.has(AttrKey::OutputSizeH) && attrs.has(AttrKey::OutputSizeW)) {
+        output_h = attrs.get_int(AttrKey::OutputSizeH);
+        output_w = attrs.get_int(AttrKey::OutputSizeW);
+    } else if (attrs.has(AttrKey::OutputSizeH)) {
         // Square output if only output_h is provided
-        output_h = std::stoll(attrs.at("output_h"));
+        output_h = attrs.get_int(AttrKey::OutputSizeH);
         output_w = output_h;
     } else {
         throw std::invalid_argument("adaptive_max_pool2d: 'output_size' or 'output_h'/'output_w' attributes are required");
@@ -1254,7 +1253,7 @@ auto adaptive_max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, 
  */
 auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
                                 const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
-    if (!attrs.contains("kernel_size")) {
+    if (!attrs.has(AttrKey::KernelSize)) {
         throw std::invalid_argument("avg_pool2d_backward: 'kernel_size' attribute is required");
     }
 
@@ -1265,10 +1264,10 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
         throw std::invalid_argument("avg_pool2d_backward requires 4D inputs (N, C, H, W)");
     }
 
-    int64_t kernel_size = std::stoll(attrs.at("kernel_size"));
-    int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : kernel_size;
-    int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
-    bool count_include_pad = attrs.contains("count_include_pad") && attrs.at("count_include_pad") == "1";
+    int64_t kernel_size = attrs.get_int(AttrKey::KernelSize);
+    int64_t stride = attrs.has(AttrKey::Stride) ? attrs.get_int(AttrKey::Stride) : kernel_size;
+    int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+    bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, false);
 
     const int64_t N = input_shape[0];
     const int64_t C = input_shape[1];
@@ -1529,7 +1528,7 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
  */
 auto max_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
                                 const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
-    if (!attrs.contains("kernel_size")) {
+    if (!attrs.has(AttrKey::KernelSize)) {
         throw std::invalid_argument("max_pool2d_backward: 'kernel_size' attribute is required");
     }
 
@@ -1540,10 +1539,10 @@ auto max_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
         throw std::invalid_argument("max_pool2d_backward requires 4D inputs (N, C, H, W)");
     }
 
-    int64_t kernel_size = std::stoll(attrs.at("kernel_size"));
-    int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : kernel_size;
-    int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
-    int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
+    int64_t kernel_size = attrs.get_int(AttrKey::KernelSize);
+    int64_t stride = attrs.has(AttrKey::Stride) ? attrs.get_int(AttrKey::Stride) : kernel_size;
+    int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+    int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
 
     const int64_t N = input_shape[0];
     const int64_t C = input_shape[1];
@@ -1748,11 +1747,11 @@ auto adaptive_avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor
     int64_t W_in = input_shape[3];
 
     // Allow override from attrs if provided
-    if (attrs.contains("input_h")) {
-        H_in = std::stoll(attrs.at("input_h"));
+    if (attrs.has(AttrKey::InputH)) {
+        H_in = attrs.get_int(AttrKey::InputH);
     }
-    if (attrs.contains("input_w")) {
-        W_in = std::stoll(attrs.at("input_w"));
+    if (attrs.has(AttrKey::InputW)) {
+        W_in = attrs.get_int(AttrKey::InputW);
     }
 
     return adaptive_avgpool2d_backward(grad_output, H_in, W_in, queue);

@@ -9,6 +9,7 @@
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/tenzor.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include <cmath>
 #include <algorithm>
 
@@ -81,12 +82,12 @@ TEST_F(VulkanOpsTest, MaxPool2dForward) {
 
     // MaxPool2d with kernel=2, stride=2
     OpAttributes attrs;
-    attrs["kernel_h"] = "2";
-    attrs["kernel_w"] = "2";
-    attrs["stride_h"] = "2";
-    attrs["stride_w"] = "2";
-    attrs["padding_h"] = "0";
-    attrs["padding_w"] = "0";
+    attrs.set(AttrKey::KernelSizeH, 2);
+    attrs.set(AttrKey::KernelSizeW, 2);
+    attrs.set(AttrKey::StrideH, 2);
+    attrs.set(AttrKey::StrideW, 2);
+    attrs.set(AttrKey::PaddingH, 0);
+    attrs.set(AttrKey::PaddingW, 0);
 
     auto& registry = backend_registry();
     auto* backend = registry.get_backend("vulkan");
@@ -121,10 +122,10 @@ TEST_F(VulkanOpsTest, AvgPool2dForward) {
     input = input.to(vulkan_device);
 
     OpAttributes attrs;
-    attrs["kernel_h"] = "2";
-    attrs["kernel_w"] = "2";
-    attrs["stride_h"] = "2";
-    attrs["stride_w"] = "2";
+    attrs.set(AttrKey::KernelSizeH, 2);
+    attrs.set(AttrKey::KernelSizeW, 2);
+    attrs.set(AttrKey::StrideH, 2);
+    attrs.set(AttrKey::StrideW, 2);
 
     auto& registry = backend_registry();
     auto* backend = registry.get_backend("vulkan");
@@ -156,8 +157,8 @@ TEST_F(VulkanOpsTest, AdaptiveMaxPool2d) {
     input = input.to(vulkan_device);
 
     OpAttributes attrs;
-    attrs["output_height"] = "2";
-    attrs["output_width"] = "2";
+    attrs.set(AttrKey::OutputSizeH, 2);
+    attrs.set(AttrKey::OutputSizeW, 2);
 
     auto& registry = backend_registry();
     auto* backend = registry.get_backend("vulkan");
@@ -183,8 +184,8 @@ TEST_F(VulkanOpsTest, AdaptiveAvgPool2d) {
     input = input.to(vulkan_device);
 
     OpAttributes attrs;
-    attrs["output_height"] = "2";
-    attrs["output_width"] = "2";
+    attrs.set(AttrKey::OutputSizeH, 2);
+    attrs.set(AttrKey::OutputSizeW, 2);
 
     auto& registry = backend_registry();
     auto* backend = registry.get_backend("vulkan");
@@ -214,7 +215,7 @@ TEST_F(VulkanOpsTest, Softmax) {
     input = input.to(vulkan_device);
 
     OpAttributes attrs;
-    attrs["dim"] = "-1";
+    attrs.set(AttrKey::Dim, -1);
 
     auto& registry = backend_registry();
     auto* backend = registry.get_backend("vulkan");
@@ -248,7 +249,7 @@ TEST_F(VulkanOpsTest, LogSoftmax) {
     input = input.to(vulkan_device);
 
     OpAttributes attrs;
-    attrs["dim"] = "-1";
+    attrs.set(AttrKey::Dim, -1);
 
     auto& registry = backend_registry();
     auto* backend = registry.get_backend("vulkan");
@@ -277,8 +278,8 @@ TEST_F(VulkanOpsTest, Argmax) {
     input = input.to(vulkan_device);
 
     OpAttributes attrs;
-    attrs["dim"] = "1";
-    attrs["keepdim"] = "0";
+    attrs.set(AttrKey::Dim, 1);
+    attrs.set(AttrKey::Keepdim, false);
 
     auto& registry = backend_registry();
     auto* backend = registry.get_backend("vulkan");
@@ -301,8 +302,8 @@ TEST_F(VulkanOpsTest, Argmin) {
     input = input.to(vulkan_device);
 
     OpAttributes attrs;
-    attrs["dim"] = "1";
-    attrs["keepdim"] = "0";
+    attrs.set(AttrKey::Dim, 1);
+    attrs.set(AttrKey::Keepdim, false);
 
     auto& registry = backend_registry();
     auto* backend = registry.get_backend("vulkan");
@@ -324,9 +325,9 @@ TEST_F(VulkanOpsTest, Variance) {
     input = input.to(vulkan_device);
 
     OpAttributes attrs;
-    attrs["dim"] = "1";
-    attrs["unbiased"] = "0";
-    attrs["keepdim"] = "0";
+    attrs.set(AttrKey::Dim, 1);
+    attrs.set(AttrKey::Unbiased, false);
+    attrs.set(AttrKey::Keepdim, false);
 
     auto& registry = backend_registry();
     auto* backend = registry.get_backend("vulkan");
@@ -348,9 +349,9 @@ TEST_F(VulkanOpsTest, Std) {
     input = input.to(vulkan_device);
 
     OpAttributes attrs;
-    attrs["dim"] = "1";
-    attrs["unbiased"] = "0";
-    attrs["keepdim"] = "0";
+    attrs.set(AttrKey::Dim, 1);
+    attrs.set(AttrKey::Unbiased, false);
+    attrs.set(AttrKey::Keepdim, false);
 
     auto& registry = backend_registry();
     auto* backend = registry.get_backend("vulkan");
@@ -372,8 +373,8 @@ TEST_F(VulkanOpsTest, Prod) {
     input = input.to(vulkan_device);
 
     OpAttributes attrs;
-    attrs["dim"] = "1";
-    attrs["keepdim"] = "0";
+    attrs.set(AttrKey::Dim, 1);
+    attrs.set(AttrKey::Keepdim, false);
 
     auto& registry = backend_registry();
     auto* backend = registry.get_backend("vulkan");
@@ -409,7 +410,7 @@ TEST_F(VulkanOpsTest, Embedding) {
     indices = indices.to(vulkan_device);
 
     OpAttributes attrs;
-    attrs["padding_idx"] = "-1";
+    attrs.set(AttrKey::PaddingIdx, static_cast<int64_t>(-1));
 
     auto& registry = backend_registry();
     auto* backend = registry.get_backend("vulkan");
@@ -445,7 +446,7 @@ TEST_F(VulkanOpsTest, Gather) {
     indices = indices.to(vulkan_device);
 
     OpAttributes attrs;
-    attrs["dim"] = "1";
+    attrs.set(AttrKey::Dim, static_cast<int64_t>(1));
 
     auto& registry = backend_registry();
     auto* backend = registry.get_backend("vulkan");
@@ -479,7 +480,7 @@ TEST_F(VulkanOpsTest, IndexSelect) {
     indices = indices.to(vulkan_device);
 
     OpAttributes attrs;
-    attrs["dim"] = "0";
+    attrs.set(AttrKey::Dim, 0);
 
     auto& registry = backend_registry();
     auto* backend = registry.get_backend("vulkan");
@@ -519,8 +520,8 @@ TEST_F(VulkanOpsTest, DISABLED_BenchmarkLargeConv2d) {
     Tensor weight({128, 64, 3, 3}, DType::Float32, vulkan_device);
 
     OpAttributes attrs;
-    attrs["stride"] = "1";
-    attrs["padding"] = "1";
+    attrs.set(AttrKey::Stride, 1);
+    attrs.set(AttrKey::Padding, 1);
 
     auto& registry = backend_registry();
     auto* backend = registry.get_backend("vulkan");

@@ -2,6 +2,7 @@
 #include "tenzor/backend/dispatch.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/loader.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include <random>
 #include <cstring>
 #include <stdexcept>
@@ -74,9 +75,9 @@ auto zeros(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
     // Use OpId dispatch for non-CPU devices
     if (device.type != Device::Type::CPU) {
         OpAttributes attrs;
-        attrs["shape"] = shape_to_string(shape);
-        attrs["dtype"] = dtype_to_string(dtype);
-        attrs["device_id"] = std::to_string(device.index);
+        attrs.set(AttrKey::Shape, shape_to_string(shape));
+        attrs.set(AttrKey::Dtype, dtype_to_string(dtype));
+        attrs.set(AttrKey::Device, static_cast<int64_t>(device.index));
 
         return dispatch_to_device(OpId::Zeros, device.type, {}, attrs)[0];
     }
@@ -89,9 +90,9 @@ auto ones(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
     // Use OpId dispatch for non-CPU devices
     if (device.type != Device::Type::CPU) {
         OpAttributes attrs;
-        attrs["shape"] = shape_to_string(shape);
-        attrs["dtype"] = dtype_to_string(dtype);
-        attrs["device_id"] = std::to_string(device.index);
+        attrs.set(AttrKey::Shape, shape_to_string(shape));
+        attrs.set(AttrKey::Dtype, dtype_to_string(dtype));
+        attrs.set(AttrKey::Device, static_cast<int64_t>(device.index));
 
         return dispatch_to_device(OpId::Ones, device.type, {}, attrs)[0];
     }
@@ -176,12 +177,10 @@ auto full(std::vector<int64_t> shape, float value, DType dtype, Device device) -
     // Use OpId dispatch for non-CPU devices
     if (device.type != Device::Type::CPU) {
         OpAttributes attrs;
-        attrs["shape"] = shape_to_string(shape);
-        std::ostringstream oss;
-        oss << std::scientific << std::setprecision(std::numeric_limits<float>::max_digits10) << value;
-        attrs["value"] = oss.str();
-        attrs["dtype"] = dtype_to_string(dtype);
-        attrs["device_id"] = std::to_string(device.index);
+        attrs.set(AttrKey::Shape, shape_to_string(shape));
+        attrs.set(AttrKey::Value, static_cast<double>(value));
+        attrs.set(AttrKey::Dtype, dtype_to_string(dtype));
+        attrs.set(AttrKey::Device, static_cast<int64_t>(device.index));
 
         return dispatch_to_device(OpId::Full, device.type, {}, attrs)[0];
     }
@@ -260,12 +259,10 @@ auto full(std::vector<int64_t> shape, double value, DType dtype, Device device) 
     // Use OpId dispatch for non-CPU devices
     if (device.type != Device::Type::CPU) {
         OpAttributes attrs;
-        attrs["shape"] = shape_to_string(shape);
-        std::ostringstream oss;
-        oss << std::scientific << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
-        attrs["value"] = oss.str();
-        attrs["dtype"] = dtype_to_string(dtype);
-        attrs["device_id"] = std::to_string(device.index);
+        attrs.set(AttrKey::Shape, shape_to_string(shape));
+        attrs.set(AttrKey::Value, value);
+        attrs.set(AttrKey::Dtype, dtype_to_string(dtype));
+        attrs.set(AttrKey::Device, static_cast<int64_t>(device.index));
 
         return dispatch_to_device(OpId::Full, device.type, {}, attrs)[0];
     }
@@ -349,9 +346,9 @@ auto rand(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
     // Use OpId dispatch for non-CPU devices
     if (device.type != Device::Type::CPU) {
         OpAttributes attrs;
-        attrs["shape"] = shape_to_string(shape);
-        attrs["dtype"] = dtype_to_string(dtype);
-        attrs["device_id"] = std::to_string(device.index);
+        attrs.set(AttrKey::Shape, shape_to_string(shape));
+        attrs.set(AttrKey::Dtype, dtype_to_string(dtype));
+        attrs.set(AttrKey::Device, static_cast<int64_t>(device.index));
 
         return dispatch_to_device(OpId::Rand, device.type, {}, attrs)[0];
     }
@@ -410,9 +407,9 @@ auto randn(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
     // Use OpId dispatch for non-CPU devices
     if (device.type != Device::Type::CPU) {
         OpAttributes attrs;
-        attrs["shape"] = shape_to_string(shape);
-        attrs["dtype"] = dtype_to_string(dtype);
-        attrs["device_id"] = std::to_string(device.index);
+        attrs.set(AttrKey::Shape, shape_to_string(shape));
+        attrs.set(AttrKey::Dtype, dtype_to_string(dtype));
+        attrs.set(AttrKey::Device, static_cast<int64_t>(device.index));
 
         return dispatch_to_device(OpId::Randn, device.type, {}, attrs)[0];
     }
@@ -537,15 +534,11 @@ auto arange(double start, double end, double step, DType dtype, Device device) -
     // Use OpId dispatch for non-CPU devices
     if (device.type != Device::Type::CPU) {
         OpAttributes attrs;
-        std::ostringstream oss_s, oss_e, oss_st;
-        oss_s << std::scientific << std::setprecision(std::numeric_limits<double>::max_digits10) << start;
-        oss_e << std::scientific << std::setprecision(std::numeric_limits<double>::max_digits10) << end;
-        oss_st << std::scientific << std::setprecision(std::numeric_limits<double>::max_digits10) << step;
-        attrs["start"] = oss_s.str();
-        attrs["end"] = oss_e.str();
-        attrs["step"] = oss_st.str();
-        attrs["dtype"] = dtype_to_string(dtype);
-        attrs["device_id"] = std::to_string(device.index);
+        attrs.set(AttrKey::Start, start);
+        attrs.set(AttrKey::End, end);
+        attrs.set(AttrKey::Step, step);
+        attrs.set(AttrKey::Dtype, dtype_to_string(dtype));
+        attrs.set(AttrKey::Device, static_cast<int64_t>(device.index));
 
         return dispatch_to_device(OpId::Arange, device.type, {}, attrs)[0];
     }
@@ -632,11 +625,11 @@ auto linspace(float start, float end, int64_t steps, DType dtype, Device device)
     // Use OpId dispatch for non-CPU devices
     if (device.type != Device::Type::CPU) {
         OpAttributes attrs;
-        attrs["start"] = std::to_string(start);
-        attrs["end"] = std::to_string(end);
-        attrs["steps"] = std::to_string(steps);
-        attrs["dtype"] = dtype_to_string(dtype);
-        attrs["device_id"] = std::to_string(device.index);
+        attrs.set(AttrKey::Start, static_cast<double>(start));
+        attrs.set(AttrKey::End, static_cast<double>(end));
+        attrs.set(AttrKey::Steps, steps);
+        attrs.set(AttrKey::Dtype, dtype_to_string(dtype));
+        attrs.set(AttrKey::Device, static_cast<int64_t>(device.index));
 
         return dispatch_to_device(OpId::Linspace, device.type, {}, attrs)[0];
     }
@@ -716,10 +709,10 @@ auto eye(int64_t n, std::optional<int64_t> m, DType dtype, Device device) -> Ten
     // Use OpId dispatch for non-CPU devices
     if (device.type != Device::Type::CPU) {
         OpAttributes attrs;
-        attrs["n"] = std::to_string(n);
-        attrs["m"] = std::to_string(cols);
-        attrs["dtype"] = dtype_to_string(dtype);
-        attrs["device_id"] = std::to_string(device.index);
+        attrs.set(AttrKey::N, n);
+        attrs.set(AttrKey::Shape, std::to_string(cols));
+        attrs.set(AttrKey::Dtype, dtype_to_string(dtype));
+        attrs.set(AttrKey::Device, static_cast<int64_t>(device.index));
 
         return dispatch_to_device(OpId::Eye, device.type, {}, attrs)[0];
     }

@@ -11,11 +11,11 @@
 #include "oneapi_internal.hpp"
 #include "tenzor/backend/dispatch_table.hpp"
 #include "tenzor/backend/kernel_registry.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/core/tensor.hpp"
 #include <climits>
 #include <cstdint>
-#include <sstream>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -329,29 +329,12 @@ static sycl::queue& get_q_device(int32_t device_id) {
 }
 
 // ============================================================================
-// Helper: parse comma-separated shape from attributes
-// ============================================================================
-static std::vector<int64_t> parse_shape(const std::string& shape_str) {
-    std::vector<int64_t> shape;
-    std::string str = shape_str;
-    size_t pos = 0;
-    while ((pos = str.find(',')) != std::string::npos) {
-        shape.push_back(std::stoll(str.substr(0, pos)));
-        str.erase(0, pos + 1);
-    }
-    if (!str.empty()) {
-        shape.push_back(std::stoll(str));
-    }
-    return shape;
-}
-
-// ============================================================================
-// Helper: parse DType from attributes
+// Helper: parse DType from typed attributes
 // ============================================================================
 static DType parse_dtype(const OpAttributes& attrs) {
-    if (!attrs.contains("dtype")) return DType::Float32;
+    if (!attrs.has(AttrKey::Dtype)) return DType::Float32;
 
-    const auto& s = attrs.at("dtype");
+    auto s = attrs.get_string(AttrKey::Dtype, "float32");
     if (s == "float32") return DType::Float32;
     if (s == "float64") return DType::Float64;
     if (s == "float16") return DType::Float16;
@@ -416,7 +399,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Pow,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            float exponent = parse_attr<float>(attrs, "exponent", 2.0f);
+            float exponent = static_cast<float>(attrs.get_float(AttrKey::Exponent, 2.0));
             return {oneapi::pow_kernel(inputs[0], exponent, get_q(inputs))};
         });
 
@@ -572,20 +555,20 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Clamp,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            float min_val = parse_attr<float>(attrs, "min", 0.0f);
-            float max_val = parse_attr<float>(attrs, "max", 1.0f);
+            float min_val = static_cast<float>(attrs.get_float(AttrKey::Min, 0.0));
+            float max_val = static_cast<float>(attrs.get_float(AttrKey::Max, 1.0));
             return {oneapi::clamp_kernel(inputs[0], min_val, max_val, get_q(inputs))};
         });
 
     table.register_kernel(OpId::ClampMin,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            float min_val = parse_attr<float>(attrs, "min", 0.0f);
+            float min_val = static_cast<float>(attrs.get_float(AttrKey::Min, 0.0));
             return {oneapi::clamp_min_kernel(inputs[0], min_val, get_q(inputs))};
         });
 
     table.register_kernel(OpId::ClampMax,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            float max_val = parse_attr<float>(attrs, "max", 1.0f);
+            float max_val = static_cast<float>(attrs.get_float(AttrKey::Max, 1.0));
             return {oneapi::clamp_max_kernel(inputs[0], max_val, get_q(inputs))};
         });
 
@@ -629,43 +612,43 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Sum,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t dim = parse_attr<int64_t>(attrs, "dim", INT64_MIN);
-            bool keepdim = parse_attr<bool>(attrs, "keepdim", false);
+            int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             return {oneapi::sum_kernel(inputs[0], dim, keepdim, get_q(inputs))};
         });
 
     table.register_kernel(OpId::Mean,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t dim = parse_attr<int64_t>(attrs, "dim", INT64_MIN);
-            bool keepdim = parse_attr<bool>(attrs, "keepdim", false);
+            int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             return {oneapi::mean_kernel(inputs[0], dim, keepdim, get_q(inputs))};
         });
 
     table.register_kernel(OpId::Max,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t dim = parse_attr<int64_t>(attrs, "dim", INT64_MIN);
-            bool keepdim = parse_attr<bool>(attrs, "keepdim", false);
+            int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             return {oneapi::max_kernel(inputs[0], dim, keepdim, get_q(inputs))};
         });
 
     table.register_kernel(OpId::Min,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t dim = parse_attr<int64_t>(attrs, "dim", INT64_MIN);
-            bool keepdim = parse_attr<bool>(attrs, "keepdim", false);
+            int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             return {oneapi::min_kernel(inputs[0], dim, keepdim, get_q(inputs))};
         });
 
     table.register_kernel(OpId::ArgMax,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
-            bool keepdim = parse_attr<bool>(attrs, "keepdim", false);
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             return {oneapi::argmax_kernel(inputs[0], dim, keepdim, get_q(inputs))};
         });
 
     table.register_kernel(OpId::ArgMin,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
-            bool keepdim = parse_attr<bool>(attrs, "keepdim", false);
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             return {oneapi::argmin_kernel(inputs[0], dim, keepdim, get_q(inputs))};
         });
 
@@ -692,8 +675,8 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::ArgSort,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
-            bool descending = parse_attr<bool>(attrs, "descending", false);
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool descending = attrs.get_bool(AttrKey::Descending, false);
             return {oneapi::argsort_kernel(inputs[0], dim, descending, get_q(inputs))};
         });
 
@@ -748,37 +731,37 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::LeakyReLU,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            float alpha = parse_attr<float>(attrs, "alpha", 0.01f);
+            float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
             return {oneapi::leaky_relu_kernel(inputs[0], alpha, get_q(inputs))};
         });
 
     table.register_kernel(OpId::LeakyReLUBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            float alpha = parse_attr<float>(attrs, "alpha", 0.01f);
+            float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
             return {oneapi::leaky_relu_backward_kernel(inputs[0], inputs[1], alpha, get_q(inputs))};
         });
 
     table.register_kernel(OpId::Softmax,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
             return {oneapi::softmax_kernel(inputs[0], dim, get_q(inputs))};
         });
 
     table.register_kernel(OpId::SoftmaxBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
             return {oneapi::softmax_backward_kernel(inputs[0], inputs[1], dim, get_q(inputs))};
         });
 
     table.register_kernel(OpId::LogSoftmax,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
             return {oneapi::log_softmax_kernel(inputs[0], dim, get_q(inputs))};
         });
 
     table.register_kernel(OpId::LogSoftmaxBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
             return {oneapi::log_softmax_backward_kernel(inputs[0], inputs[1], dim, get_q(inputs))};
         });
 
@@ -809,7 +792,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_inplace_kernel(OpId::LeakyReLUInplace,
         [](Tensor& target, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
-            float alpha = parse_attr<float>(attrs, "alpha", 0.01f);
+            float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
             auto& q = oneapi_internal::get_queue(target.device().index);
             oneapi::leaky_relu_inplace_kernel(target, alpha, q);
             return target;
@@ -828,32 +811,32 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Reshape,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto shape = parse_shape(attrs.at("shape"));
+            auto shape = attrs.get_int_list(AttrKey::Shape);
             return {oneapi::reshape_kernel(inputs[0], shape, get_q(inputs))};
         });
 
     table.register_kernel(OpId::Transpose,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t dim0 = parse_attr<int64_t>(attrs, "dim0", 0);
-            int64_t dim1 = parse_attr<int64_t>(attrs, "dim1", 1);
+            int64_t dim0 = attrs.get_int(AttrKey::Dim0, 0);
+            int64_t dim1 = attrs.get_int(AttrKey::Dim1, 1);
             return {oneapi::transpose_kernel(inputs[0], dim0, dim1, get_q(inputs))};
         });
 
     table.register_kernel(OpId::Permute,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto dims = parse_shape(attrs.at("dims"));
+            auto dims = attrs.get_int_list(AttrKey::Dims);
             return {oneapi::permute_kernel(inputs[0], dims, get_q(inputs))};
         });
 
     table.register_kernel(OpId::Squeeze,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
             return {oneapi::squeeze_kernel(inputs[0], dim, get_q(inputs))};
         });
 
     table.register_kernel(OpId::Unsqueeze,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
             return {oneapi::unsqueeze_kernel(inputs[0], dim, get_q(inputs))};
         });
 
@@ -869,13 +852,13 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Fill,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            float value = static_cast<float>(parse_attr<double>(attrs, "value", 0.0));
+            float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
             return {oneapi::fill_kernel(inputs[0], value, get_q(inputs))};
         });
 
     table.register_kernel(OpId::Repeat,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto repeats = parse_shape(attrs.at("repeats"));
+            auto repeats = attrs.get_int_list(AttrKey::Repeats);
             return {oneapi::repeat_kernel(inputs[0], repeats, get_q(inputs))};
         });
 
@@ -886,13 +869,13 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Cat,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
             return {oneapi::cat_kernel(inputs, dim, get_q(inputs))};
         });
 
     table.register_kernel(OpId::Stack,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
             auto& q = get_q(inputs);
             // Stack = unsqueeze each tensor at dim, then cat
             std::vector<Tensor> unsqueezed;
@@ -910,19 +893,19 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::IndexSelect,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
             return {oneapi::index_select_kernel(inputs[0], dim, inputs[1], get_q(inputs))};
         });
 
     table.register_kernel(OpId::Gather,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
             return {oneapi::gather_kernel(inputs[0], dim, inputs[1], get_q(inputs))};
         });
 
     table.register_kernel(OpId::Scatter,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
             return {oneapi::scatter_kernel(inputs[0], dim, inputs[1], inputs[2], get_q(inputs))};
         });
 
@@ -933,7 +916,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::MaskedFill,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            float value = parse_attr<float>(attrs, "value", 0.0f);
+            float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
             return {oneapi::masked_fill_kernel(inputs[0], inputs[1], value, get_q(inputs))};
         });
 
@@ -949,10 +932,10 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::OneHot,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t num_classes = parse_attr<int64_t>(attrs, "num_classes", -1);
+            int64_t num_classes = attrs.get_int(AttrKey::NumClasses, -1);
             DType output_dtype = DType::Float32;
-            if (attrs.contains("dtype")) {
-                auto dt = attrs.at("dtype");
+            if (attrs.has(AttrKey::Dtype)) {
+                auto dt = attrs.get_string(AttrKey::Dtype);
                 if (dt == "float64") output_dtype = DType::Float64;
                 else if (dt == "float16") output_dtype = DType::Float16;
             }
@@ -966,32 +949,32 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::Conv2dForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
-            int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
-            int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-            int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
-            int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
             return {oneapi::conv2d_forward(inputs[0], inputs[1], bias,
                                            stride, padding, dilation, groups, get_q(inputs))};
         });
 
     table.register_kernel(OpId::Conv2dBackwardInput,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto input_shape = parse_int_list(attrs, "input_shape");
-            int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
-            int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-            int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
-            int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+            auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
             return {oneapi::conv2d_backward_input(inputs[0], inputs[1], input_shape,
                                                    stride, padding, dilation, groups, get_q(inputs))};
         });
 
     table.register_kernel(OpId::Conv2dBackwardWeight,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto weight_shape = parse_int_list(attrs, "weight_shape");
-            int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
-            int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-            int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
-            int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+            auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
+            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
             return {oneapi::conv2d_backward_weight(inputs[0], inputs[1], weight_shape,
                                                     stride, padding, dilation, groups, get_q(inputs))};
         });
@@ -1004,11 +987,11 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::ConvTranspose2dForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
-            int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
-            int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-            int64_t output_padding = parse_attr<int64_t>(attrs, "output_padding", 0);
-            int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
-            int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
+            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
             return {oneapi::conv_transpose2d_forward(inputs[0], inputs[1], bias,
                                                       stride, padding, output_padding,
                                                       dilation, groups, get_q(inputs))};
@@ -1043,9 +1026,9 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             if (inputs.size() >= 2) {
                 return {oneapi::avg_pool2d_backward_kernel(inputs[0], inputs[1], attrs, get_q(inputs))};
-            } else if (attrs.contains("input_shape")) {
+            } else if (attrs.has(AttrKey::InputShape)) {
                 // Autograd path: input shape passed via attributes
-                auto input_shape = parse_shape(attrs.at("input_shape"));
+                auto input_shape = attrs.get_int_list(AttrKey::InputShape);
                 Tensor dummy_input(input_shape, inputs[0].dtype(), inputs[0].device());
                 return {oneapi::avg_pool2d_backward_kernel(inputs[0], dummy_input, attrs, get_q(inputs))};
             } else {
@@ -1055,15 +1038,15 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::MaxPool2dBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t H_in = parse_attr<int64_t>(attrs, "H_in", 0);
-            int64_t W_in = parse_attr<int64_t>(attrs, "W_in", 0);
+            int64_t H_in = attrs.get_int(AttrKey::InputH, 0);
+            int64_t W_in = attrs.get_int(AttrKey::InputW, 0);
             return {oneapi::max_pool2d_backward_with_indices(inputs[0], inputs[1], H_in, W_in, get_q(inputs))};
         });
 
     table.register_kernel(OpId::AdaptiveAvgPool2dBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t H_in = parse_attr<int64_t>(attrs, "H_in", 0);
-            int64_t W_in = parse_attr<int64_t>(attrs, "W_in", 0);
+            int64_t H_in = attrs.get_int(AttrKey::InputH, 0);
+            int64_t W_in = attrs.get_int(AttrKey::InputW, 0);
             return {oneapi::adaptive_avgpool2d_backward(inputs[0], H_in, W_in, get_q(inputs))};
         });
 
@@ -1078,20 +1061,20 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::BatchNorm2dForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            float epsilon = parse_attr<float>(attrs, "epsilon", 1e-5f);
+            float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
             return {oneapi::batchnorm2d_forward(inputs[0], inputs[1], inputs[2], epsilon, get_q(inputs))};
         });
 
     table.register_kernel(OpId::BatchNorm2dForwardAffine,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            float epsilon = parse_attr<float>(attrs, "epsilon", 1e-5f);
+            float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
             return {oneapi::batchnorm2d_forward_affine(inputs[0], inputs[1], inputs[2],
                                                         inputs[3], inputs[4], epsilon, get_q(inputs))};
         });
 
     table.register_kernel(OpId::BatchNorm2dUpdateRunningStats,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            float momentum = parse_attr<float>(attrs, "momentum", 0.1f);
+            float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.1));
             Tensor updated_mean = inputs[0].clone();
             Tensor updated_var = inputs[1].clone();
             auto& q = get_q(inputs);
@@ -1102,7 +1085,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::BatchNorm2dBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            float epsilon = parse_attr<float>(attrs, "epsilon", 1e-5f);
+            float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
             auto [grad_input, grad_gamma, grad_beta] = oneapi::batchnorm2d_backward(
                 inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], epsilon, get_q(inputs));
             return {grad_input, grad_gamma, grad_beta};
@@ -1114,8 +1097,8 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::GroupNorm,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t num_groups = parse_attr<int64_t>(attrs, "num_groups", 1);
-            float eps = parse_attr<float>(attrs, "eps", 1e-5f);
+            int64_t num_groups = attrs.get_int(AttrKey::Groups, 1);
+            float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
             const Tensor* weight = inputs.size() > 1 ? &inputs[1] : nullptr;
             const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
             return oneapi::group_norm_kernel(inputs[0], num_groups, weight, bias, eps, get_q(inputs));
@@ -1123,7 +1106,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::GroupNormBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t num_groups = parse_attr<int64_t>(attrs, "num_groups", 1);
+            int64_t num_groups = attrs.get_int(AttrKey::Groups, 1);
             return oneapi::group_norm_backward_kernel(inputs[0], inputs[1], inputs[2],
                                                       inputs[3], inputs[4], num_groups, get_q(inputs));
         });
@@ -1134,57 +1117,57 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Zeros,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto shape = parse_shape(attrs.at("shape"));
+            auto shape = attrs.get_int_list(AttrKey::Shape);
             DType dtype = parse_dtype(attrs);
-            int32_t device_id = parse_attr<int>(attrs, "device_id", 0);
+            int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
             Device device = inputs.empty() ? Device::oneapi(device_id) : inputs[0].device();
             return {oneapi::zeros_kernel(shape, dtype, device, get_q_device(device_id))};
         });
 
     table.register_kernel(OpId::Ones,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto shape = parse_shape(attrs.at("shape"));
+            auto shape = attrs.get_int_list(AttrKey::Shape);
             DType dtype = parse_dtype(attrs);
-            int32_t device_id = parse_attr<int>(attrs, "device_id", 0);
+            int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
             Device device = inputs.empty() ? Device::oneapi(device_id) : inputs[0].device();
             return {oneapi::ones_kernel(shape, dtype, device, get_q_device(device_id))};
         });
 
     table.register_kernel(OpId::Full,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto shape = parse_shape(attrs.at("shape"));
-            float value = static_cast<float>(parse_attr<double>(attrs, "value", 0.0));
+            auto shape = attrs.get_int_list(AttrKey::Shape);
+            float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
             DType dtype = parse_dtype(attrs);
-            int32_t device_id = parse_attr<int>(attrs, "device_id", 0);
+            int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
             Device device = inputs.empty() ? Device::oneapi(device_id) : inputs[0].device();
             return {oneapi::full_kernel(shape, value, dtype, device, get_q_device(device_id))};
         });
 
     table.register_kernel(OpId::Rand,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto shape = parse_shape(attrs.at("shape"));
+            auto shape = attrs.get_int_list(AttrKey::Shape);
             DType dtype = parse_dtype(attrs);
-            int32_t device_id = parse_attr<int>(attrs, "device_id", 0);
+            int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
             Device device = inputs.empty() ? Device::oneapi(device_id) : inputs[0].device();
             return {oneapi::rand_kernel(shape, dtype, device, get_q_device(device_id))};
         });
 
     table.register_kernel(OpId::Randn,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto shape = parse_shape(attrs.at("shape"));
+            auto shape = attrs.get_int_list(AttrKey::Shape);
             DType dtype = parse_dtype(attrs);
-            int32_t device_id = parse_attr<int>(attrs, "device_id", 0);
+            int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
             Device device = inputs.empty() ? Device::oneapi(device_id) : inputs[0].device();
             return {oneapi::randn_kernel(shape, dtype, device, get_q_device(device_id))};
         });
 
     table.register_kernel(OpId::Arange,
         [](std::span<const Tensor>, const OpAttributes& attrs) -> std::vector<Tensor> {
-            double start = parse_attr<double>(attrs, "start", 0.0);
-            double end_val = parse_attr<double>(attrs, "end", 0.0);
-            double step = parse_attr<double>(attrs, "step", 1.0);
+            double start = attrs.get_float(AttrKey::Start, 0.0);
+            double end_val = attrs.get_float(AttrKey::End, 0.0);
+            double step = attrs.get_float(AttrKey::Step, 1.0);
             DType dtype = parse_dtype(attrs);
-            int32_t device_id = parse_attr<int>(attrs, "device_id", 0);
+            int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
             return {oneapi::arange_kernel(start, end_val, step, dtype,
                                            Device(Device::Type::OneAPI, device_id),
                                            get_q_device(device_id))};
@@ -1192,11 +1175,11 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Linspace,
         [](std::span<const Tensor>, const OpAttributes& attrs) -> std::vector<Tensor> {
-            double start = parse_attr<double>(attrs, "start", 0.0);
-            double end_val = parse_attr<double>(attrs, "end", 1.0);
-            int64_t steps = parse_attr<int64_t>(attrs, "steps", 100);
+            double start = attrs.get_float(AttrKey::Start, 0.0);
+            double end_val = attrs.get_float(AttrKey::End, 1.0);
+            int64_t steps = attrs.get_int(AttrKey::Steps, 100);
             DType dtype = parse_dtype(attrs);
-            int32_t device_id = parse_attr<int>(attrs, "device_id", 0);
+            int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
             return {oneapi::linspace_kernel(start, end_val, steps, dtype,
                                              Device(Device::Type::OneAPI, device_id),
                                              get_q_device(device_id))};
@@ -1204,10 +1187,10 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Eye,
         [](std::span<const Tensor>, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t n = parse_attr<int64_t>(attrs, "n", 1);
-            int64_t m = parse_attr<int64_t>(attrs, "m", n);
+            int64_t n = attrs.get_int(AttrKey::N, 1);
+            int64_t m = attrs.get_int(AttrKey::M, n);
             DType dtype = parse_dtype(attrs);
-            int32_t device_id = parse_attr<int>(attrs, "device_id", 0);
+            int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
             return {oneapi::eye_kernel(n, m, dtype,
                                         Device(Device::Type::OneAPI, device_id),
                                         get_q_device(device_id))};
@@ -1219,14 +1202,14 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Embedding,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t padding_idx = parse_attr<int64_t>(attrs, "padding_idx", -1);
+            int64_t padding_idx = attrs.get_int(AttrKey::PaddingIdx, -1);
             // inputs[0] = weights, inputs[1] = indices (from nn::Embedding layer)
             return {oneapi::embedding_lookup_kernel(inputs[1], inputs[0], padding_idx, get_q(inputs))};
         });
 
     table.register_kernel(OpId::EmbeddingBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t vocab_size = parse_attr<int64_t>(attrs, "num_embeddings", 0);
+            int64_t vocab_size = attrs.get_int(AttrKey::NumEmbeddings, 0);
             int64_t embedding_dim = inputs[0].shape().back();
             return {oneapi::embedding_backward_kernel(inputs[0], inputs[1], vocab_size,
                                                        embedding_dim, get_q(inputs))};
@@ -1238,8 +1221,8 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::LSTMCellForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t batch_size = parse_attr<int64_t>(attrs, "batch_size", 0);
-            int64_t hidden_size = parse_attr<int64_t>(attrs, "hidden_size", 0);
+            int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 0);
+            int64_t hidden_size = attrs.get_int(AttrKey::HiddenSize, 0);
             auto [h_out, c_out] = oneapi::lstm_cell_forward_kernel(
                 inputs[0], inputs[1], batch_size, hidden_size, get_q(inputs));
             return {h_out, c_out};
@@ -1247,8 +1230,8 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::LSTMCellBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t batch_size = parse_attr<int64_t>(attrs, "batch_size", 0);
-            int64_t hidden_size = parse_attr<int64_t>(attrs, "hidden_size", 0);
+            int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 0);
+            int64_t hidden_size = attrs.get_int(AttrKey::HiddenSize, 0);
             auto [grad_gates, grad_c_prev] = oneapi::lstm_cell_backward_kernel(
                 inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
                 batch_size, hidden_size, get_q(inputs));
@@ -1257,8 +1240,8 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::GRUCellForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t batch_size = parse_attr<int64_t>(attrs, "batch_size", 0);
-            int64_t hidden_size = parse_attr<int64_t>(attrs, "hidden_size", 0);
+            int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 0);
+            int64_t hidden_size = attrs.get_int(AttrKey::HiddenSize, 0);
             return {oneapi::gru_cell_forward_kernel(
                 inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
                 batch_size, hidden_size, get_q(inputs))};
@@ -1266,8 +1249,8 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::GRUCellBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t batch_size = parse_attr<int64_t>(attrs, "batch_size", 0);
-            int64_t hidden_size = parse_attr<int64_t>(attrs, "hidden_size", 0);
+            int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 0);
+            int64_t hidden_size = attrs.get_int(AttrKey::HiddenSize, 0);
             auto outputs = oneapi::gru_cell_backward_kernel(
                 inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5],
                 batch_size, hidden_size, get_q(inputs));
@@ -1291,8 +1274,8 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::FusedLayerNorm,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto normalized_shape = parse_shape(attrs.at("normalized_shape"));
-            float epsilon = parse_attr<float>(attrs, "epsilon", 1e-5f);
+            auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
+            float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
             auto [output, mean, inv_std] = oneapi::fused_layer_norm_kernel(
                 inputs[0], inputs[1], inputs[2], normalized_shape, epsilon, get_q(inputs));
             return {output, mean, inv_std};
@@ -1300,7 +1283,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::LayerNormBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto normalized_shape = parse_shape(attrs.at("normalized_shape"));
+            auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
             auto [grad_input, grad_weight, grad_bias] = oneapi::fused_layer_norm_backward_kernel(
                 inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], normalized_shape, get_q(inputs));
             return {grad_input, grad_weight, grad_bias};
@@ -1309,7 +1292,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     // Note: OpId::FusedLayerNormBackward also maps to fused_layer_norm_backward
     table.register_kernel(OpId::FusedLayerNormBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto normalized_shape = parse_shape(attrs.at("normalized_shape"));
+            auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
             auto [grad_input, grad_weight, grad_bias] = oneapi::fused_layer_norm_backward_kernel(
                 inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], normalized_shape, get_q(inputs));
             return {grad_input, grad_weight, grad_bias};
@@ -1323,20 +1306,20 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::FusedBatchNormReLU,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            float epsilon = parse_attr<float>(attrs, "epsilon", 1e-5f);
+            float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
             return {oneapi::fused_batchnorm_relu_kernel(
                 inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], epsilon, get_q(inputs))};
         });
 
     table.register_kernel(OpId::FusedSoftmaxCrossEntropy,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            std::string reduction = parse_attr<std::string>(attrs, "reduction", "mean");
+            std::string reduction = std::string(attrs.get_string(AttrKey::Reduction, "mean"));
             return {oneapi::fused_softmax_cross_entropy_kernel(inputs[0], inputs[1], reduction, get_q(inputs))};
         });
 
     table.register_kernel(OpId::FusedRMSNorm,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            float epsilon = parse_attr<float>(attrs, "eps", 1e-5f);
+            float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
             auto [output, rrms] = oneapi::fused_rms_norm_kernel(inputs[0], inputs[1], epsilon, get_q(inputs));
             return {output, rrms};
         });
@@ -1356,28 +1339,24 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::ROIAlignForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t output_height = attrs.contains("output_height")
-                ? parse_attr<int64_t>(attrs, "output_height", 0)
-                : parse_attr<int64_t>(attrs, "output_h", 0);
-            int64_t output_width = attrs.contains("output_width")
-                ? parse_attr<int64_t>(attrs, "output_width", 0)
-                : parse_attr<int64_t>(attrs, "output_w", 0);
-            float spatial_scale = parse_attr<float>(attrs, "spatial_scale", 1.0f);
-            int64_t sampling_ratio = parse_attr<int64_t>(attrs, "sampling_ratio", 0);
-            bool aligned = parse_attr<bool>(attrs, "aligned", false);
+            int64_t output_height = attrs.get_int(AttrKey::OutputSizeH, 0);
+            int64_t output_width = attrs.get_int(AttrKey::OutputSizeW, 0);
+            float spatial_scale = static_cast<float>(attrs.get_float(AttrKey::SpatialScale, 1.0));
+            int64_t sampling_ratio = attrs.get_int(AttrKey::SamplingRatio, 0);
+            bool aligned = attrs.get_bool(AttrKey::Aligned, false);
             return {oneapi::roi_align_kernel(inputs[0], inputs[1], output_height, output_width,
                                               spatial_scale, sampling_ratio, aligned, get_q(inputs))};
         });
 
     table.register_kernel(OpId::ROIAlignBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t batch_size = parse_attr<int64_t>(attrs, "batch_size", 0);
+            int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 0);
             int64_t channels = inputs[0].shape()[1];
-            int64_t feat_height = parse_attr<int64_t>(attrs, "feat_height", 0);
-            int64_t feat_width = parse_attr<int64_t>(attrs, "feat_width", 0);
-            float spatial_scale = parse_attr<float>(attrs, "spatial_scale", 1.0f);
-            int64_t sampling_ratio = parse_attr<int64_t>(attrs, "sampling_ratio", 0);
-            bool aligned = parse_attr<bool>(attrs, "aligned", false);
+            int64_t feat_height = attrs.get_int(AttrKey::FeatHeight, 0);
+            int64_t feat_width = attrs.get_int(AttrKey::FeatWidth, 0);
+            float spatial_scale = static_cast<float>(attrs.get_float(AttrKey::SpatialScale, 1.0));
+            int64_t sampling_ratio = attrs.get_int(AttrKey::SamplingRatio, 0);
+            bool aligned = attrs.get_bool(AttrKey::Aligned, false);
             return {oneapi::roi_align_backward_kernel(inputs[0], inputs[1], batch_size, channels,
                                                        feat_height, feat_width, spatial_scale,
                                                        sampling_ratio, aligned, get_q(inputs))};
@@ -1385,16 +1364,16 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Interpolate,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto size = parse_int_list(attrs, "size");
-            std::string mode = parse_attr<std::string>(attrs, "mode", "bilinear");
-            bool align_corners = parse_attr<bool>(attrs, "align_corners", false);
+            auto size = attrs.get_int_list(AttrKey::OutputSize);
+            std::string mode = std::string(attrs.get_string(AttrKey::Mode, "bilinear"));
+            bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
             return {oneapi::interpolate_kernel(inputs[0], size, mode, align_corners, get_q(inputs))};
         });
 
     table.register_kernel(OpId::GatherRelativePositionBias,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t num_positions = parse_attr<int64_t>(attrs, "num_positions", 0);
-            int64_t num_heads = parse_attr<int64_t>(attrs, "num_heads", 0);
+            int64_t num_positions = attrs.get_int(AttrKey::NumPositions, 0);
+            int64_t num_heads = attrs.get_int(AttrKey::NumHeads, 0);
             return {oneapi::gather_relative_position_bias_kernel(
                 inputs[0], inputs[1], num_positions, num_heads, get_q(inputs))};
         });

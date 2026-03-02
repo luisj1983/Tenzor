@@ -12,6 +12,7 @@
 #include <vector>
 #include <mutex>
 #include <cstdint>
+#include <cstdlib>
 #include <stdexcept>
 
 namespace tenzor::cuda {
@@ -175,7 +176,15 @@ private:
     void ensure_initialized(int32_t device_id) {
         if (device_id >= static_cast<int32_t>(device_pools_.size()) ||
             device_pools_[device_id].streams.empty()) {
-            init(device_id);
+            size_t pool_size = DEFAULT_POOL_SIZE;
+            const char* env = std::getenv("TENZOR_CUDA_STREAM_POOL_SIZE");
+            if (env) {
+                int val = std::atoi(env);
+                if (val > 0 && val <= 256) {
+                    pool_size = static_cast<size_t>(val);
+                }
+            }
+            init(device_id, pool_size);
         }
     }
 

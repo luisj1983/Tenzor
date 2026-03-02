@@ -9,6 +9,7 @@
 #include "tenzor/backend/dispatch_table.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/kernel_registry.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/core/tensor.hpp"
@@ -18,7 +19,6 @@
 #endif
 #include <cuda_runtime.h>
 #include <cstdlib>
-#include <charconv>
 #include <limits>
 #include <tuple>
 
@@ -26,9 +26,9 @@ namespace tenzor {
 
 // Helper to extract CUDA stream from attributes
 inline cudaStream_t get_cuda_stream(const OpAttributes& attrs) {
-    if (attrs.contains("stream")) {
+    if (attrs.has(AttrKey::Stream)) {
         return static_cast<cudaStream_t>(
-            reinterpret_cast<void*>(std::stoull(attrs.at("stream")))
+            reinterpret_cast<void*>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream)))
         );
     }
     return nullptr;  // Default stream
@@ -527,7 +527,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     });
 
     table.register_inplace_kernel(OpId::LeakyReLUInplace, [](Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs) -> Tensor& {
-        float alpha = parse_attr<float>(attrs, "alpha", 0.01f);
+        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
         cuda::leaky_relu_inplace_kernel(target, alpha, get_cuda_stream(attrs));
         return target;
     });
@@ -541,56 +541,56 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // Reduction Operations
     // =========================================================================
     table.register_kernel(OpId::Sum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", INT64_MIN);
-        bool keepdim = parse_attr<bool>(attrs, "keepdim", false);
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return std::vector<Tensor>{cuda::sum_kernel(inputs[0], dim, keepdim, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::Mean, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", INT64_MIN);
-        bool keepdim = parse_attr<bool>(attrs, "keepdim", false);
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return std::vector<Tensor>{cuda::mean_kernel(inputs[0], dim, keepdim, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::Max, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", INT64_MIN);
-        bool keepdim = parse_attr<bool>(attrs, "keepdim", false);
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return std::vector<Tensor>{cuda::max_kernel(inputs[0], dim, keepdim, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::Min, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", INT64_MIN);
-        bool keepdim = parse_attr<bool>(attrs, "keepdim", false);
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return std::vector<Tensor>{cuda::min_kernel(inputs[0], dim, keepdim, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::ArgMax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", INT64_MIN);
-        bool keepdim = parse_attr<bool>(attrs, "keepdim", false);
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return std::vector<Tensor>{cuda::argmax_kernel(inputs[0], dim, keepdim, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::ArgMin, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", INT64_MIN);
-        bool keepdim = parse_attr<bool>(attrs, "keepdim", false);
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return std::vector<Tensor>{cuda::argmin_kernel(inputs[0], dim, keepdim, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::Prod, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", INT64_MIN);
-        bool keepdim = parse_attr<bool>(attrs, "keepdim", false);
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return std::vector<Tensor>{cuda::prod_kernel(inputs[0], dim, keepdim, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::Var, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", INT64_MIN);
-        bool keepdim = parse_attr<bool>(attrs, "keepdim", false);
-        int64_t correction = parse_attr<int64_t>(attrs, "correction", 1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        int64_t correction = attrs.get_int(AttrKey::Correction, 1);
         return std::vector<Tensor>{cuda::var_kernel(inputs[0], dim, keepdim, correction, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::Std, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", INT64_MIN);
-        bool keepdim = parse_attr<bool>(attrs, "keepdim", false);
-        int64_t correction = parse_attr<int64_t>(attrs, "correction", 1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        int64_t correction = attrs.get_int(AttrKey::Correction, 1);
         return std::vector<Tensor>{cuda::std_kernel(inputs[0], dim, keepdim, correction, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::Norm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float p = parse_attr<float>(attrs, "p", 2.0f);
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", INT64_MIN);
-        bool keepdim = parse_attr<bool>(attrs, "keepdim", false);
+        float p = static_cast<float>(attrs.get_float(AttrKey::P, 2.0));
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return std::vector<Tensor>{cuda::norm_kernel(inputs[0], p, dim, keepdim, get_cuda_stream(attrs))};
     });
 
@@ -609,20 +609,20 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::Round, cuda::round_dispatch);
     table.register_single_output_kernel(OpId::Trunc, cuda::trunc_dispatch);
     table.register_kernel(OpId::Pow, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float exponent = parse_attr<float>(attrs, "exponent", 2.0f);
+        float exponent = static_cast<float>(attrs.get_float(AttrKey::Exponent, 2.0));
         return std::vector<Tensor>{cuda::pow_kernel(inputs[0], exponent, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::Clamp, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float min_val = parse_attr<float>(attrs, "min", -std::numeric_limits<float>::infinity());
-        float max_val = parse_attr<float>(attrs, "max", std::numeric_limits<float>::infinity());
+        float min_val = static_cast<float>(attrs.get_float(AttrKey::Min, -std::numeric_limits<float>::infinity()));
+        float max_val = static_cast<float>(attrs.get_float(AttrKey::Max, std::numeric_limits<float>::infinity()));
         return std::vector<Tensor>{cuda::clamp_kernel(inputs[0], min_val, max_val, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::ClampMin, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float min_val = parse_attr<float>(attrs, "min", 0.0f);
+        float min_val = static_cast<float>(attrs.get_float(AttrKey::Min, 0.0));
         return std::vector<Tensor>{cuda::clamp_min_kernel(inputs[0], min_val, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::ClampMax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float max_val = parse_attr<float>(attrs, "max", 0.0f);
+        float max_val = static_cast<float>(attrs.get_float(AttrKey::Max, 0.0));
         return std::vector<Tensor>{cuda::clamp_max_kernel(inputs[0], max_val, get_cuda_stream(attrs))};
     });
 
@@ -669,29 +669,29 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 
     // Parameterized activations (keep lambdas for attribute parsing)
     table.register_single_output_kernel(OpId::LeakyReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        float alpha = parse_attr<float>(attrs, "alpha", 0.01f);
+        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
         return cuda::leaky_relu_kernel(inputs[0], alpha, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::LeakyReLUBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        float alpha = parse_attr<float>(attrs, "alpha", 0.01f);
+        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
         return cuda::leaky_relu_backward_kernel(inputs[0], inputs[1], alpha, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Elu, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        float alpha = parse_attr<float>(attrs, "alpha", 1.0f);
+        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 1.0));
         return cuda::elu_kernel(inputs[0], alpha, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::EluBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        float alpha = parse_attr<float>(attrs, "alpha", 1.0f);
+        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 1.0));
         return cuda::elu_backward_kernel(inputs[0], inputs[1], alpha, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Softplus, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        float beta = parse_attr<float>(attrs, "beta", 1.0f);
-        float threshold = parse_attr<float>(attrs, "threshold", 20.0f);
+        float beta = static_cast<float>(attrs.get_float(AttrKey::Beta, 1.0));
+        float threshold = static_cast<float>(attrs.get_float(AttrKey::Threshold, 20.0));
         return cuda::softplus_kernel(inputs[0], beta, threshold, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::SoftplusBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        float beta = parse_attr<float>(attrs, "beta", 1.0f);
-        float threshold = parse_attr<float>(attrs, "threshold", 20.0f);
+        float beta = static_cast<float>(attrs.get_float(AttrKey::Beta, 1.0));
+        float threshold = static_cast<float>(attrs.get_float(AttrKey::Threshold, 20.0));
         return cuda::softplus_backward_kernel(inputs[0], inputs[1], beta, threshold, get_cuda_stream(attrs));
     });
 
@@ -699,36 +699,36 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // Uses single-output registration for efficiency
 #ifdef TENZOR_HAS_CUDNN
     table.register_single_output_kernel(OpId::Softmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         return cuda::cudnn_softmax_forward(inputs[0], dim, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::SoftmaxBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         return cuda::cudnn_softmax_backward(inputs[0], inputs[1], dim, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::LogSoftmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         return cuda::cudnn_log_softmax_forward(inputs[0], dim, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::LogSoftmaxBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         return cuda::cudnn_log_softmax_backward(inputs[0], inputs[1], dim, get_cuda_stream(attrs));
     });
 #else
     table.register_single_output_kernel(OpId::Softmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         return cuda::softmax_kernel(inputs[0], dim, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::SoftmaxBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         return cuda::softmax_backward_kernel(inputs[0], inputs[1], dim, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::LogSoftmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         return cuda::log_softmax_kernel(inputs[0], dim, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::LogSoftmaxBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         return cuda::log_softmax_backward_kernel(inputs[0], inputs[1], dim, get_cuda_stream(attrs));
     });
 #endif
@@ -743,50 +743,50 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return cuda::clone_kernel(inputs[0], get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Fill, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        float value = parse_attr<float>(attrs, "value", 0.0f);
+        float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
         return cuda::fill_kernel(inputs[0], value, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Reshape, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        auto shape = parse_int_list(attrs, "shape");
+        auto shape = attrs.get_int_list(AttrKey::Shape);
         return cuda::reshape_kernel(inputs[0], shape, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Expand, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        auto shape = parse_int_list(attrs, "shape");
+        auto shape = attrs.get_int_list(AttrKey::Shape);
         return cuda::expand_kernel(inputs[0], shape, static_cast<void*>(get_cuda_stream(attrs)));
     });
     table.register_single_output_kernel(OpId::Transpose, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim0 = parse_attr<int64_t>(attrs, "dim0", 0);
-        int64_t dim1 = parse_attr<int64_t>(attrs, "dim1", 1);
+        int64_t dim0 = attrs.get_int(AttrKey::Dim0, 0);
+        int64_t dim1 = attrs.get_int(AttrKey::Dim1, 1);
         return cuda::transpose_kernel(inputs[0], dim0, dim1, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Permute, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        auto dims = parse_int_list(attrs, "dims");
+        auto dims = attrs.get_int_list(AttrKey::Dims);
         return cuda::permute_kernel(inputs[0], dims, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Squeeze, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         return cuda::squeeze_kernel(inputs[0], dim, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Unsqueeze, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         return cuda::unsqueeze_kernel(inputs[0], dim, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Cat, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         return cuda::cat_kernel(inputs, dim, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Repeat, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        auto repeats = parse_int_list(attrs, "repeats");
+        auto repeats = attrs.get_int_list(AttrKey::Repeats);
         return cuda::repeat_kernel(inputs[0], repeats, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::ToMemoryFormat, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int format_int = parse_attr<int>(attrs, "memory_format", 0);
+        int format_int = static_cast<int>(attrs.get_int(AttrKey::MemoryFormat, 0));
         MemoryFormat format = static_cast<MemoryFormat>(format_int);
         return cuda::to_memory_format_kernel(inputs[0], format, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Roll, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t shift = parse_attr<int64_t>(attrs, "shift", 0);
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+        int64_t shift = attrs.get_int(AttrKey::Shift, 0);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         return cuda::roll_kernel(inputs[0], shift, dim, get_cuda_stream(attrs));
     });
 
@@ -794,22 +794,22 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // Indexing Operations (single-output registration for efficiency)
     // =========================================================================
     table.register_single_output_kernel(OpId::IndexSelect, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         return cuda::index_select_kernel(inputs[0], dim, inputs[1], get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Gather, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         return cuda::gather_kernel(inputs[0], dim, inputs[1], get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Scatter, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         return cuda::scatter_kernel(inputs[0], dim, inputs[1], inputs[2], get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::MaskedSelect, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         return cuda::masked_select_kernel(inputs[0], inputs[1], get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::MaskedFill, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        double value = parse_attr<double>(attrs, "value", 0.0);
+        double value = attrs.get_float(AttrKey::Value, 0.0);
         return cuda::masked_fill_kernel(inputs[0], inputs[1], value, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Where, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -819,7 +819,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return cuda::nonzero_kernel(inputs[0], get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::OneHot, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t num_classes = parse_attr<int64_t>(attrs, "num_classes", 0);
+        int64_t num_classes = attrs.get_int(AttrKey::NumClasses, 0);
         return cuda::one_hot_kernel(inputs[0], num_classes, get_cuda_stream(attrs));
     });
 
@@ -829,31 +829,31 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // =========================================================================
 #ifdef TENZOR_HAS_CUDNN
     table.register_kernel(OpId::MaxPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t kernel_size = parse_attr<int64_t>(attrs, "kernel_size", 2);
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", kernel_size);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
+        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         auto [output, indices] = cuda::cudnn_maxpool2d_forward(inputs[0], kernel_size, stride, padding, get_cuda_stream(attrs));
         return std::vector<Tensor>{output, indices};
     });
     table.register_single_output_kernel(OpId::AvgPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t kernel_size = parse_attr<int64_t>(attrs, "kernel_size", 2);
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", kernel_size);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
+        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         return cuda::cudnn_avgpool2d_forward(inputs[0], kernel_size, stride, padding, get_cuda_stream(attrs));
     });
 #else
     table.register_kernel(OpId::MaxPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t kernel_size = parse_attr<int64_t>(attrs, "kernel_size", 2);
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", kernel_size);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
+        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         auto [output, indices] = cuda::maxpool2d_forward_kernel(inputs[0], kernel_size, stride, padding, dilation, get_cuda_stream(attrs));
         return std::vector<Tensor>{output, indices};
     });
     table.register_single_output_kernel(OpId::AvgPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t kernel_size = parse_attr<int64_t>(attrs, "kernel_size", 2);
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", kernel_size);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
+        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         return cuda::avgpool2d_forward_kernel(inputs[0], kernel_size, stride, padding, get_cuda_stream(attrs));
     });
 #endif
@@ -864,30 +864,30 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 #ifdef TENZOR_HAS_CUDNN
     table.register_single_output_kernel(OpId::MaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         // inputs: [grad_output, input, output]
-        int64_t kernel_size = parse_attr<int64_t>(attrs, "kernel_size", 2);
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", kernel_size);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
+        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         return cuda::cudnn_maxpool2d_backward(inputs[0], inputs[1], inputs[2], kernel_size, stride, padding, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::AvgPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         // inputs: [grad_output, input]
-        int64_t kernel_size = parse_attr<int64_t>(attrs, "kernel_size", 2);
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", kernel_size);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
+        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         return cuda::cudnn_avgpool2d_backward(inputs[0], inputs[1], kernel_size, stride, padding, get_cuda_stream(attrs));
     });
 #else
     table.register_single_output_kernel(OpId::MaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         // inputs: [grad_output, indices], attrs: input_shape
-        auto input_shape = parse_int_list(attrs, "input_shape");
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
         return cuda::maxpool2d_backward_kernel(inputs[0], inputs[1], input_shape, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::AvgPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         // inputs: [grad_output], attrs: input_shape, kernel_size, stride, padding
-        auto input_shape = parse_int_list(attrs, "input_shape");
-        int64_t kernel_size = parse_attr<int64_t>(attrs, "kernel_size", 2);
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", kernel_size);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
+        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         return cuda::avgpool2d_backward_kernel(inputs[0], input_shape, kernel_size, stride, padding, get_cuda_stream(attrs));
     });
 #endif
@@ -902,11 +902,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{mean, variance};
     });
     table.register_kernel(OpId::BatchNorm2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float epsilon = parse_attr<float>(attrs, "epsilon", 1e-5f);
+        float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         return std::vector<Tensor>{cuda::batchnorm2d_forward(inputs[0], inputs[1], inputs[2], epsilon, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::BatchNorm2dForwardAffine, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float epsilon = parse_attr<float>(attrs, "epsilon", 1e-5f);
+        float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         // Use optimized vectorized kernel for inference (faster than cuDNN due to lower overhead)
         // inputs: [input, mean, variance, gamma, beta]
         return std::vector<Tensor>{cuda::batchnorm2d_forward_affine_optimized(
@@ -914,7 +914,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         )};
     });
     table.register_kernel(OpId::BatchNorm2dUpdateRunningStats, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float momentum = parse_attr<float>(attrs, "momentum", 0.1f);
+        float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.1));
         Tensor running_mean = inputs[0];
         Tensor running_var = inputs[1];
         cuda::batchnorm2d_update_running_stats(running_mean, running_var, inputs[2], inputs[3], momentum, get_cuda_stream(attrs));
@@ -925,8 +925,8 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // Fused BatchNorm training: computes mean/var, normalizes, and updates running stats in one call
     table.register_kernel(OpId::BatchNorm2dFusedTraining, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [input, running_mean, running_var, gamma, beta]
-        float epsilon = parse_attr<float>(attrs, "epsilon", 1e-5f);
-        float momentum = parse_attr<float>(attrs, "momentum", 0.1f);
+        float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+        float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.1));
         Tensor running_mean = inputs[1];
         Tensor running_var = inputs[2];
         auto [output, saved_mean, saved_inv_var] = cuda::cudnn_batchnorm2d_forward_training(
@@ -939,7 +939,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // cuDNN BatchNorm2d backward - significantly faster than separate tensor ops
     table.register_kernel(OpId::BatchNorm2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [grad_output, input, gamma, saved_mean, saved_inv_var]
-        float epsilon = parse_attr<float>(attrs, "epsilon", 1e-5f);
+        float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         auto [grad_input, grad_gamma, grad_beta] = cuda::cudnn_batchnorm2d_backward(
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
             epsilon, get_cuda_stream(attrs)
@@ -950,8 +950,8 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // Fallback: compose batchnorm2d operations when cuDNN is unavailable
     table.register_kernel(OpId::BatchNorm2dFusedTraining, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [input, running_mean, running_var, gamma, beta]
-        float epsilon = parse_attr<float>(attrs, "epsilon", 1e-5f);
-        float momentum = parse_attr<float>(attrs, "momentum", 0.1f);
+        float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+        float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.1));
         auto stream = get_cuda_stream(attrs);
 
         // Compute batch mean and variance
@@ -976,7 +976,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // Custom CUDA kernel backward - fallback when cuDNN is not available
     table.register_kernel(OpId::BatchNorm2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [grad_output, input, mean, variance, gamma]
-        float epsilon = parse_attr<float>(attrs, "epsilon", 1e-5f);
+        float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         auto [grad_input, grad_gamma, grad_beta] = cuda::batchnorm2d_backward(
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
             epsilon, get_cuda_stream(attrs)
@@ -991,8 +991,8 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::FusedLayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [input, weight, bias]
         // attrs: normalized_shape (comma-separated), eps
-        float eps = parse_attr<float>(attrs, "eps", 1e-5f);
-        auto normalized_shape = parse_int_list(attrs, "normalized_shape");
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+        auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
 
 #ifdef TENZOR_HAS_CUDNN
         // Use optimized kernel with warp shuffles (2x faster than naive)
@@ -1014,7 +1014,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::FusedRMSNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [input, weight]
         // attrs: eps
-        float eps = parse_attr<float>(attrs, "eps", 1e-5f);
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         auto [output, rrms] = cuda::fused_rms_norm_cuda(inputs[0], inputs[1], eps);
         return std::vector<Tensor>{output, rrms};
     });
@@ -1027,11 +1027,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         //   - 4D: (batch, num_heads, seq_len, head_dim) for cuDNN SDPA
         //   - 3D: (batch_heads, seq_len, head_dim) for custom kernel
         // attrs: scale, use_cudnn_sdpa (optional)
-        float scale = parse_attr<float>(attrs, "scale", 1.0f);
+        float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
 
 #ifdef TENZOR_HAS_CUDNN_FRONTEND
         // Check if cuDNN SDPA is requested and input is 4D
-        bool use_cudnn_sdpa = parse_attr<bool>(attrs, "use_cudnn_sdpa", false);
+        bool use_cudnn_sdpa = attrs.get_bool(AttrKey::UseCudnnSdpa, false);
         if (use_cudnn_sdpa && inputs[0].shape().size() == 4) {
             // 4D input: use cuDNN SDPA directly
             auto output = cuda::cudnn_sdpa_forward(inputs[0], inputs[1], inputs[2], scale);
@@ -1065,11 +1065,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         // inputs: [param, grad, momentum_buffer (optional)]
         // attrs: lr, momentum, weight_decay, dampening, nesterov
         // Note: param and momentum_buffer are modified in-place
-        float lr = parse_attr<float>(attrs, "lr", 0.01f);
-        float momentum = parse_attr<float>(attrs, "momentum", 0.0f);
-        float weight_decay = parse_attr<float>(attrs, "weight_decay", 0.0f);
-        float dampening = parse_attr<float>(attrs, "dampening", 0.0f);
-        bool nesterov = parse_attr<bool>(attrs, "nesterov", false);
+        float lr = static_cast<float>(attrs.get_float(AttrKey::Lr, 0.01));
+        float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.0));
+        float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
+        float dampening = static_cast<float>(attrs.get_float(AttrKey::Dampening, 0.0));
+        bool nesterov = attrs.get_bool(AttrKey::Nesterov, false);
 
         // Cast away const for in-place modification (safe because we control the API)
         Tensor& param = const_cast<Tensor&>(inputs[0]);
@@ -1107,14 +1107,14 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             amsgrad = p[7] != 0.0;
         } else {
             // Legacy string-attribute path (backwards compatibility)
-            lr = parse_attr<double>(attrs, "lr", 0.001);
-            beta1 = parse_attr<double>(attrs, "beta1", 0.9);
-            beta2 = parse_attr<double>(attrs, "beta2", 0.999);
-            eps = parse_attr<double>(attrs, "eps", 1e-8);
-            weight_decay = parse_attr<double>(attrs, "weight_decay", 0.0);
-            step = parse_attr<int64_t>(attrs, "step", 1);
-            decoupled = parse_attr<bool>(attrs, "decoupled", false);
-            amsgrad = parse_attr<bool>(attrs, "amsgrad", false);
+            lr = attrs.get_float(AttrKey::Lr, 0.001);
+            beta1 = attrs.get_float(AttrKey::Beta1, 0.9);
+            beta2 = attrs.get_float(AttrKey::Beta2, 0.999);
+            eps = attrs.get_float(AttrKey::Eps, 1e-8);
+            weight_decay = attrs.get_float(AttrKey::WeightDecay, 0.0);
+            step = attrs.get_int(AttrKey::Step, 1);
+            decoupled = attrs.get_bool(AttrKey::Decoupled, false);
+            amsgrad = attrs.get_bool(AttrKey::Amsgrad, false);
         }
 
         // Cast away const for in-place modification
@@ -1144,7 +1144,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::EmbeddingBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         // inputs: [grad_output, indices]
         // attrs: num_embeddings
-        int64_t num_embeddings = parse_attr<int64_t>(attrs, "num_embeddings", 0);
+        int64_t num_embeddings = attrs.get_int(AttrKey::NumEmbeddings, 0);
         return cuda::embedding_backward_kernel(inputs[0], inputs[1], num_embeddings, get_cuda_stream(attrs));
     });
 
@@ -1159,7 +1159,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 
     table.register_single_output_kernel(OpId::FusedBatchNormReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         // inputs: [input, running_mean, running_var, weight, bias]
-        float eps = parse_attr<float>(attrs, "eps", 1e-5f);
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         return cuda::fused_batchnorm_relu_cuda(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], eps);
     });
 
@@ -1175,74 +1175,74 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 
 #ifdef TENZOR_HAS_CUDNN
     table.register_single_output_kernel(OpId::FusedConv2dReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
-        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return cuda::cudnn_fused_conv2d_relu_forward(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
     });
 
     table.register_single_output_kernel(OpId::FusedConv2dSigmoid, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
-        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return cuda::cudnn_fused_conv2d_sigmoid_forward(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
     });
 
     table.register_single_output_kernel(OpId::FusedConv2dTanh, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
-        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return cuda::cudnn_fused_conv2d_tanh_forward(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
     });
 
     table.register_single_output_kernel(OpId::FusedConv2dSwish, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
-        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return cuda::cudnn_fused_conv2d_swish_forward(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
     });
 #else
     // Fallback: compose conv2d + activation when cuDNN is unavailable
     table.register_single_output_kernel(OpId::FusedConv2dReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
-        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         Tensor result = cuda::conv2d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
         return cuda::relu_kernel(result, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::FusedConv2dSigmoid, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
-        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         Tensor result = cuda::conv2d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
         return cuda::sigmoid_kernel(result, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::FusedConv2dTanh, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
-        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         Tensor result = cuda::conv2d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
         return cuda::tanh_kernel(result, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::FusedConv2dSwish, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
-        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         Tensor result = cuda::conv2d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
         return cuda::swish_kernel(result, get_cuda_stream(attrs));
@@ -1255,9 +1255,9 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::Interpolate, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         // inputs: [input]
         // attrs: size (comma-separated), mode, align_corners
-        auto size = parse_int_list(attrs, "size");
-        std::string mode = parse_attr<std::string>(attrs, "mode", "bilinear");
-        bool align_corners = parse_attr<bool>(attrs, "align_corners", false);
+        auto size = attrs.get_int_list(AttrKey::OutputSize);
+        std::string mode = std::string(attrs.get_string(AttrKey::Mode, "bilinear"));
+        bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
         return cuda::interpolate_cuda(inputs[0], size, mode, align_corners);
     });
 
@@ -1267,11 +1267,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::ROIAlignForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
         // inputs: [features, rois]
         // attrs: output_h, output_w, spatial_scale, sampling_ratio, aligned
-        int64_t output_h = parse_attr<int64_t>(attrs, "output_h", 7);
-        int64_t output_w = parse_attr<int64_t>(attrs, "output_w", 7);
-        float spatial_scale = parse_attr<float>(attrs, "spatial_scale", 1.0f / 16.0f);
-        int64_t sampling_ratio = parse_attr<int64_t>(attrs, "sampling_ratio", 0);
-        bool aligned = parse_attr<bool>(attrs, "aligned", true);
+        int64_t output_h = attrs.get_int(AttrKey::OutputSizeH, 7);
+        int64_t output_w = attrs.get_int(AttrKey::OutputSizeW, 7);
+        float spatial_scale = static_cast<float>(attrs.get_float(AttrKey::SpatialScale, 1.0 / 16.0));
+        int64_t sampling_ratio = attrs.get_int(AttrKey::SamplingRatio, 0);
+        bool aligned = attrs.get_bool(AttrKey::Aligned, true);
 
         return {cuda::roi_align_forward(inputs[0], inputs[1],
                                         output_h, output_w, spatial_scale,
@@ -1281,12 +1281,12 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::ROIAlignBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
         // inputs: [grad_output, rois]
         // attrs: batch_size, feat_height, feat_width, spatial_scale, sampling_ratio, aligned
-        int64_t batch_size = parse_attr<int64_t>(attrs, "batch_size", 1);
-        int64_t feat_height = parse_attr<int64_t>(attrs, "feat_height", 0);
-        int64_t feat_width = parse_attr<int64_t>(attrs, "feat_width", 0);
-        float spatial_scale = parse_attr<float>(attrs, "spatial_scale", 1.0f / 16.0f);
-        int64_t sampling_ratio = parse_attr<int64_t>(attrs, "sampling_ratio", 0);
-        bool aligned = parse_attr<bool>(attrs, "aligned", true);
+        int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 1);
+        int64_t feat_height = attrs.get_int(AttrKey::FeatHeight, 0);
+        int64_t feat_width = attrs.get_int(AttrKey::FeatWidth, 0);
+        float spatial_scale = static_cast<float>(attrs.get_float(AttrKey::SpatialScale, 1.0 / 16.0));
+        int64_t sampling_ratio = attrs.get_int(AttrKey::SamplingRatio, 0);
+        bool aligned = attrs.get_bool(AttrKey::Aligned, true);
 
         return {cuda::roi_align_backward(inputs[0], inputs[1],
                                          batch_size, feat_height, feat_width,
@@ -1299,72 +1299,72 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 #ifdef TENZOR_HAS_CUDNN
     table.register_single_output_kernel(OpId::Conv2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         // inputs: [input, weight] or [input, weight, bias]
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
-        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return cuda::cudnn_conv2d_forward(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
     });
     table.register_kernel(OpId::Conv2dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
-        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv2d_backward(
             inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, true, false, false, get_cuda_stream(attrs));
         return {grad_input};
     });
     table.register_kernel(OpId::Conv2dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
-        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv2d_backward(
             inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, false, true, false, get_cuda_stream(attrs));
         return {grad_weight};
     });
     table.register_kernel(OpId::Conv2dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
-        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv2d_backward(
             inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, false, false, true, get_cuda_stream(attrs));
         return {grad_bias};
     });
 #else
     table.register_single_output_kernel(OpId::Conv2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
-        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return cuda::conv2d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
     });
     table.register_kernel(OpId::Conv2dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
-        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         auto [grad_input, grad_weight, grad_bias] = cuda::conv2d_backward_kernel(
             inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, true, false, false, get_cuda_stream(attrs));
         return {grad_input};
     });
     table.register_kernel(OpId::Conv2dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
-        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         auto [grad_input, grad_weight, grad_bias] = cuda::conv2d_backward_kernel(
             inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, false, true, false, get_cuda_stream(attrs));
         return {grad_weight};
     });
     table.register_kernel(OpId::Conv2dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
-        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         auto [grad_input, grad_weight, grad_bias] = cuda::conv2d_backward_kernel(
             inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, false, false, true, get_cuda_stream(attrs));
         return {grad_bias};
@@ -1372,19 +1372,19 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 #endif
 
     table.register_single_output_kernel(OpId::ConvTranspose2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-        int64_t output_padding = parse_attr<int64_t>(attrs, "output_padding", 0);
-        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
-        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return cuda::conv_transpose2d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, output_padding, dilation, groups, get_cuda_stream(attrs));
     });
 
     table.register_single_output_kernel(OpId::DepthwiseConv2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return cuda::depthwise_conv2d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, get_cuda_stream(attrs));
     });
@@ -1393,13 +1393,13 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // Dropout Operations (Phase 1B - CRITICAL)
     // =========================================================================
     table.register_kernel(OpId::Dropout, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float p = parse_attr<float>(attrs, "p", 0.5f);
-        bool training = parse_attr<bool>(attrs, "training", true);
+        float p = static_cast<float>(attrs.get_float(AttrKey::P, 0.5));
+        bool training = attrs.get_bool(AttrKey::Training, true);
         auto [output, mask] = cuda::dropout_forward_kernel(inputs[0], p, training, get_cuda_stream(attrs));
         return std::vector<Tensor>{output, mask};
     });
     table.register_single_output_kernel(OpId::DropoutBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        float p = parse_attr<float>(attrs, "p", 0.5f);
+        float p = static_cast<float>(attrs.get_float(AttrKey::P, 0.5));
         return cuda::dropout_backward_kernel(inputs[0], inputs[1], p, get_cuda_stream(attrs));
     });
 
@@ -1408,15 +1408,15 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // =========================================================================
     table.register_kernel(OpId::LSTMCellForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [gates, c_prev]
-        int64_t batch_size = parse_attr<int64_t>(attrs, "batch_size", 0);
-        int64_t hidden_size = parse_attr<int64_t>(attrs, "hidden_size", 0);
+        int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 0);
+        int64_t hidden_size = attrs.get_int(AttrKey::HiddenSize, 0);
         auto [h_out, c_out] = cuda::lstm_cell_forward_kernel(inputs[0], inputs[1], batch_size, hidden_size, get_cuda_stream(attrs));
         return std::vector<Tensor>{h_out, c_out};
     });
     table.register_kernel(OpId::LSTMCellBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [grad_h, grad_c, gates, c_prev, c_out]
-        int64_t batch_size = parse_attr<int64_t>(attrs, "batch_size", 0);
-        int64_t hidden_size = parse_attr<int64_t>(attrs, "hidden_size", 0);
+        int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 0);
+        int64_t hidden_size = attrs.get_int(AttrKey::HiddenSize, 0);
         auto [grad_gates, grad_c_prev] = cuda::lstm_cell_backward_kernel(
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
             batch_size, hidden_size, get_cuda_stream(attrs));
@@ -1428,8 +1428,8 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // =========================================================================
     table.register_kernel(OpId::GRUCellForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [reset_gates, update_gates, new_gates_input, new_gates_hidden, h_prev]
-        int64_t batch_size = parse_attr<int64_t>(attrs, "batch_size", 0);
-        int64_t hidden_size = parse_attr<int64_t>(attrs, "hidden_size", 0);
+        int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 0);
+        int64_t hidden_size = attrs.get_int(AttrKey::HiddenSize, 0);
         auto h_out = cuda::gru_cell_forward_kernel(
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
             batch_size, hidden_size, get_cuda_stream(attrs));
@@ -1437,8 +1437,8 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     });
     table.register_kernel(OpId::GRUCellBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [grad_h, reset_gates, update_gates, new_gates_input, new_gates_hidden, h_prev]
-        int64_t batch_size = parse_attr<int64_t>(attrs, "batch_size", 0);
-        int64_t hidden_size = parse_attr<int64_t>(attrs, "hidden_size", 0);
+        int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 0);
+        int64_t hidden_size = attrs.get_int(AttrKey::HiddenSize, 0);
         auto result = cuda::gru_cell_backward_kernel(
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5],
             batch_size, hidden_size, get_cuda_stream(attrs));
@@ -1451,29 +1451,29 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 #ifdef TENZOR_HAS_CUDNN
     table.register_kernel(OpId::LayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [input, weight, bias]
-        float eps = parse_attr<float>(attrs, "eps", 1e-5f);
-        auto normalized_shape = parse_int_list(attrs, "normalized_shape");
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+        auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
         auto [output, mean, inv_std] = cuda::cudnn_layer_norm_forward(
             inputs[0], normalized_shape, inputs[1], inputs[2], eps, get_cuda_stream(attrs));
         return std::vector<Tensor>{output, mean, inv_std};
     });
     table.register_kernel(OpId::LayerNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [grad_output, input, weight, mean, inv_std]
-        auto normalized_shape = parse_int_list(attrs, "normalized_shape");
+        auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
         auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_layer_norm_backward(
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], normalized_shape, get_cuda_stream(attrs));
         return std::vector<Tensor>{grad_input, grad_weight, grad_bias};
     });
 #else
     table.register_kernel(OpId::LayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float eps = parse_attr<float>(attrs, "eps", 1e-5f);
-        auto normalized_shape = parse_int_list(attrs, "normalized_shape");
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+        auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
         auto [output, mean, inv_std] = cuda::fused_layer_norm_cuda(
             inputs[0], normalized_shape, inputs[1], inputs[2], eps);
         return std::vector<Tensor>{output, mean, inv_std};
     });
     table.register_kernel(OpId::LayerNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto normalized_shape = parse_int_list(attrs, "normalized_shape");
+        auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
         auto [grad_input, grad_weight, grad_bias] = cuda::fused_layer_norm_backward_cuda(
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], normalized_shape);
         return std::vector<Tensor>{grad_input, grad_weight, grad_bias};
@@ -1484,24 +1484,24 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // Adaptive Pooling Operations (Phase 1E / 3D - HIGH)
     // =========================================================================
     table.register_single_output_kernel(OpId::AdaptiveAvgPool2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t output_h = parse_attr<int64_t>(attrs, "output_h", 1);
-        int64_t output_w = parse_attr<int64_t>(attrs, "output_w", 1);
+        int64_t output_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t output_w = attrs.get_int(AttrKey::OutputSizeW, 1);
         return cuda::adaptive_avg_pool2d_forward(inputs[0], output_h, output_w, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::AdaptiveAvgPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         // Autograd sends "H_in" and "W_in"; also support "input_h"/"input_w" for compatibility
-        int64_t H_in = parse_attr<int64_t>(attrs, "H_in", parse_attr<int64_t>(attrs, "input_h", 0));
-        int64_t W_in = parse_attr<int64_t>(attrs, "W_in", parse_attr<int64_t>(attrs, "input_w", 0));
+        int64_t H_in = attrs.get_int(AttrKey::InputH, 0);
+        int64_t W_in = attrs.get_int(AttrKey::InputW, 0);
         return cuda::adaptive_avg_pool2d_backward(inputs[0], H_in, W_in, get_cuda_stream(attrs));
     });
     table.register_kernel(OpId::AdaptiveMaxPool2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t output_h = parse_attr<int64_t>(attrs, "output_h", 1);
-        int64_t output_w = parse_attr<int64_t>(attrs, "output_w", 1);
+        int64_t output_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t output_w = attrs.get_int(AttrKey::OutputSizeW, 1);
         auto [output, indices] = cuda::adaptive_max_pool2d_forward(inputs[0], output_h, output_w, get_cuda_stream(attrs));
         return std::vector<Tensor>{output, indices};
     });
     table.register_single_output_kernel(OpId::AdaptiveMaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        auto input_shape = parse_int_list(attrs, "input_shape");
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
         return cuda::adaptive_max_pool2d_backward(inputs[0], inputs[1], input_shape, get_cuda_stream(attrs));
     });
 
@@ -1510,21 +1510,21 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // =========================================================================
     table.register_kernel(OpId::GroupNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [input, weight, bias]
-        int64_t num_groups = parse_attr<int64_t>(attrs, "num_groups", 1);
-        float eps = parse_attr<float>(attrs, "eps", 1e-5f);
+        int64_t num_groups = attrs.get_int(AttrKey::Groups, 1);
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         auto [output, mean, inv_std] = cuda::group_norm_forward_kernel(
             inputs[0], inputs[1], inputs[2], num_groups, eps, get_cuda_stream(attrs));
         return std::vector<Tensor>{output, mean, inv_std};
     });
     table.register_kernel(OpId::GroupNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [grad_output, input, weight, mean, inv_std]
-        int64_t num_groups = parse_attr<int64_t>(attrs, "num_groups", 1);
+        int64_t num_groups = attrs.get_int(AttrKey::Groups, 1);
         auto [grad_input, grad_weight, grad_bias] = cuda::group_norm_backward_kernel(
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], num_groups, get_cuda_stream(attrs));
         return std::vector<Tensor>{grad_input, grad_weight, grad_bias};
     });
     table.register_kernel(OpId::InstanceNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float eps = parse_attr<float>(attrs, "eps", 1e-5f);
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         auto [output, mean, inv_std] = cuda::instance_norm_forward_kernel(
             inputs[0], inputs[1], inputs[2], eps, get_cuda_stream(attrs));
         return std::vector<Tensor>{output, mean, inv_std};
@@ -1549,8 +1549,8 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // ArgSort - GPU implementation (Phase 2D - HIGH)
     // =========================================================================
     table.register_single_output_kernel(OpId::ArgSort, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
-        bool descending = parse_attr<bool>(attrs, "descending", false);
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        bool descending = attrs.get_bool(AttrKey::Descending, false);
         return cuda::argsort_kernel(inputs[0], dim, descending, get_cuda_stream(attrs));
     });
 
@@ -1558,76 +1558,76 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // Creation Operations (Phase 3E - MEDIUM)
     // =========================================================================
     table.register_kernel(OpId::Zeros, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto shape = parse_int_list(attrs, "shape");
-        int dtype_int = parse_attr<int>(attrs, "dtype", static_cast<int>(DType::Float32));
+        auto shape = attrs.get_int_list(AttrKey::Shape);
+        int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int>(DType::Float32)));
         DType dtype = static_cast<DType>(dtype_int);
-        int device_idx = parse_attr<int>(attrs, "device_index", 0);
+        int device_idx = static_cast<int>(attrs.get_int(AttrKey::DeviceIndex, 0));
         Device device = Device::cuda(device_idx);
         Tensor output(shape, dtype, device);
         cudaMemsetAsync(output.data_ptr(), 0, output.numel() * dtype_size(dtype), get_cuda_stream(attrs));
         return std::vector<Tensor>{output};
     });
     table.register_kernel(OpId::Ones, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto shape = parse_int_list(attrs, "shape");
-        int dtype_int = parse_attr<int>(attrs, "dtype", static_cast<int>(DType::Float32));
+        auto shape = attrs.get_int_list(AttrKey::Shape);
+        int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int>(DType::Float32)));
         DType dtype = static_cast<DType>(dtype_int);
-        int device_idx = parse_attr<int>(attrs, "device_index", 0);
+        int device_idx = static_cast<int>(attrs.get_int(AttrKey::DeviceIndex, 0));
         Device device = Device::cuda(device_idx);
         Tensor output(shape, dtype, device);
         return std::vector<Tensor>{cuda::fill_kernel(output, 1.0f, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::Full, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto shape = parse_int_list(attrs, "shape");
-        float value = parse_attr<float>(attrs, "value", 0.0f);
-        int dtype_int = parse_attr<int>(attrs, "dtype", static_cast<int>(DType::Float32));
+        auto shape = attrs.get_int_list(AttrKey::Shape);
+        float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
+        int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int>(DType::Float32)));
         DType dtype = static_cast<DType>(dtype_int);
-        int device_idx = parse_attr<int>(attrs, "device_index", 0);
+        int device_idx = static_cast<int>(attrs.get_int(AttrKey::DeviceIndex, 0));
         Device device = Device::cuda(device_idx);
         Tensor output(shape, dtype, device);
         return std::vector<Tensor>{cuda::fill_kernel(output, value, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::Rand, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto shape = parse_int_list(attrs, "shape");
-        int dtype_int = parse_attr<int>(attrs, "dtype", static_cast<int>(DType::Float32));
+        auto shape = attrs.get_int_list(AttrKey::Shape);
+        int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int>(DType::Float32)));
         DType dtype = static_cast<DType>(dtype_int);
-        int device_idx = parse_attr<int>(attrs, "device_index", 0);
+        int device_idx = static_cast<int>(attrs.get_int(AttrKey::DeviceIndex, 0));
         Device device = Device::cuda(device_idx);
         return std::vector<Tensor>{cuda::rand_kernel(shape, dtype, device, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::Randn, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto shape = parse_int_list(attrs, "shape");
-        int dtype_int = parse_attr<int>(attrs, "dtype", static_cast<int>(DType::Float32));
+        auto shape = attrs.get_int_list(AttrKey::Shape);
+        int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int>(DType::Float32)));
         DType dtype = static_cast<DType>(dtype_int);
-        int device_idx = parse_attr<int>(attrs, "device_index", 0);
+        int device_idx = static_cast<int>(attrs.get_int(AttrKey::DeviceIndex, 0));
         Device device = Device::cuda(device_idx);
         return std::vector<Tensor>{cuda::randn_kernel(shape, dtype, device, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::Arange, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float start = parse_attr<float>(attrs, "start", 0.0f);
-        float end = parse_attr<float>(attrs, "end", 0.0f);
-        float step = parse_attr<float>(attrs, "step", 1.0f);
-        int dtype_int = parse_attr<int>(attrs, "dtype", static_cast<int>(DType::Float32));
+        float start = static_cast<float>(attrs.get_float(AttrKey::Start, 0.0));
+        float end = static_cast<float>(attrs.get_float(AttrKey::End, 0.0));
+        float step = static_cast<float>(attrs.get_float(AttrKey::Step, 1.0));
+        int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int>(DType::Float32)));
         DType dtype = static_cast<DType>(dtype_int);
-        int device_idx = parse_attr<int>(attrs, "device_index", 0);
+        int device_idx = static_cast<int>(attrs.get_int(AttrKey::DeviceIndex, 0));
         Device device = Device::cuda(device_idx);
         return std::vector<Tensor>{cuda::arange_kernel(start, end, step, dtype, device, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::Linspace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float start = parse_attr<float>(attrs, "start", 0.0f);
-        float end = parse_attr<float>(attrs, "end", 1.0f);
-        int64_t steps = parse_attr<int64_t>(attrs, "steps", 100);
-        int dtype_int = parse_attr<int>(attrs, "dtype", static_cast<int>(DType::Float32));
+        float start = static_cast<float>(attrs.get_float(AttrKey::Start, 0.0));
+        float end = static_cast<float>(attrs.get_float(AttrKey::End, 1.0));
+        int64_t steps = attrs.get_int(AttrKey::Steps, 100);
+        int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int>(DType::Float32)));
         DType dtype = static_cast<DType>(dtype_int);
-        int device_idx = parse_attr<int>(attrs, "device_index", 0);
+        int device_idx = static_cast<int>(attrs.get_int(AttrKey::DeviceIndex, 0));
         Device device = Device::cuda(device_idx);
         return std::vector<Tensor>{cuda::linspace_kernel(start, end, steps, dtype, device, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::Eye, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t n = parse_attr<int64_t>(attrs, "n", 0);
-        int64_t m = parse_attr<int64_t>(attrs, "m", -1);
-        int dtype_int = parse_attr<int>(attrs, "dtype", static_cast<int>(DType::Float32));
+        int64_t n = attrs.get_int(AttrKey::N, 0);
+        int64_t m = attrs.get_int(AttrKey::M, -1);
+        int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int>(DType::Float32)));
         DType dtype = static_cast<DType>(dtype_int);
-        int device_idx = parse_attr<int>(attrs, "device_index", 0);
+        int device_idx = static_cast<int>(attrs.get_int(AttrKey::DeviceIndex, 0));
         Device device = Device::cuda(device_idx);
         return std::vector<Tensor>{cuda::eye_kernel(n, m, dtype, device, get_cuda_stream(attrs))};
     });
@@ -1636,32 +1636,32 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // Shape/Transform Operations (Phase 3F - MEDIUM)
     // =========================================================================
     table.register_single_output_kernel(OpId::Flatten, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t start_dim = parse_attr<int64_t>(attrs, "start_dim", 0);
-        int64_t end_dim = parse_attr<int64_t>(attrs, "end_dim", -1);
+        int64_t start_dim = attrs.get_int(AttrKey::StartDim, 0);
+        int64_t end_dim = attrs.get_int(AttrKey::EndDim, -1);
         return cuda::flatten_kernel(inputs[0], start_dim, end_dim, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Slice, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        auto starts = parse_int_list(attrs, "starts");
-        auto ends = parse_int_list(attrs, "ends");
-        auto steps = parse_int_list(attrs, "steps");
+        auto starts = attrs.get_int_list(AttrKey::Starts);
+        auto ends = attrs.get_int_list(AttrKey::Ends);
+        auto steps = attrs.get_int_list(AttrKey::Steps);
         return cuda::slice_kernel(inputs[0], starts, ends, steps, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Stack, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         return cuda::stack_kernel(inputs, dim, get_cuda_stream(attrs));
     });
     table.register_kernel(OpId::Split, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t split_size = parse_attr<int64_t>(attrs, "split_size", 1);
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+        int64_t split_size = attrs.get_int(AttrKey::SplitSize, 1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         return cuda::split_kernel(inputs[0], split_size, dim, get_cuda_stream(attrs));
     });
     table.register_kernel(OpId::Chunk, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t chunks = parse_attr<int64_t>(attrs, "chunks", 1);
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+        int64_t chunks = attrs.get_int(AttrKey::Chunks, 1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         return cuda::chunk_kernel(inputs[0], chunks, dim, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Tile, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        auto reps = parse_int_list(attrs, "reps");
+        auto reps = attrs.get_int_list(AttrKey::Reps);
         return cuda::tile_kernel(inputs[0], reps, get_cuda_stream(attrs));
     });
 
@@ -1670,7 +1670,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // =========================================================================
     table.register_kernel(OpId::FusedSoftmaxCrossEntropy, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [logits, targets]
-        bool compute_grad = parse_attr<bool>(attrs, "compute_grad", true);
+        bool compute_grad = attrs.get_bool(AttrKey::ComputeGrad, true);
         auto [loss, grad_logits] = cuda::fused_softmax_cross_entropy_cuda(inputs[0], inputs[1], compute_grad);
         if (compute_grad) {
             return std::vector<Tensor>{loss, grad_logits};
@@ -1683,12 +1683,12 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // =========================================================================
     table.register_kernel(OpId::FusedRMSPropStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [param, grad, square_avg, grad_avg (optional), momentum_buffer (optional)]
-        float lr = parse_attr<float>(attrs, "lr", 0.01f);
-        float alpha = parse_attr<float>(attrs, "alpha", 0.99f);
-        float eps = parse_attr<float>(attrs, "eps", 1e-8f);
-        float weight_decay = parse_attr<float>(attrs, "weight_decay", 0.0f);
-        float momentum = parse_attr<float>(attrs, "momentum", 0.0f);
-        bool centered = parse_attr<bool>(attrs, "centered", false);
+        float lr = static_cast<float>(attrs.get_float(AttrKey::Lr, 0.01));
+        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.99));
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-8));
+        float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
+        float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.0));
+        bool centered = attrs.get_bool(AttrKey::Centered, false);
 
         Tensor& param = const_cast<Tensor&>(inputs[0]);
         Tensor& square_avg = const_cast<Tensor&>(inputs[2]);
@@ -1702,10 +1702,10 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::FusedAdadeltaStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [param, grad, square_avg, acc_delta]
-        float rho = parse_attr<float>(attrs, "rho", 0.9f);
-        float eps = parse_attr<float>(attrs, "eps", 1e-6f);
-        float lr = parse_attr<float>(attrs, "lr", 1.0f);
-        float weight_decay = parse_attr<float>(attrs, "weight_decay", 0.0f);
+        float rho = static_cast<float>(attrs.get_float(AttrKey::Rho, 0.9));
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-6));
+        float lr = static_cast<float>(attrs.get_float(AttrKey::Lr, 1.0));
+        float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
 
         Tensor& param = const_cast<Tensor&>(inputs[0]);
         Tensor& square_avg = const_cast<Tensor&>(inputs[2]);
@@ -1718,11 +1718,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::FusedAdagradStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [param, grad, sum_sq]
-        float lr = parse_attr<float>(attrs, "lr", 0.01f);
-        float lr_decay = parse_attr<float>(attrs, "lr_decay", 0.0f);
-        float eps = parse_attr<float>(attrs, "eps", 1e-10f);
-        float weight_decay = parse_attr<float>(attrs, "weight_decay", 0.0f);
-        int64_t step = parse_attr<int64_t>(attrs, "step", 1);
+        float lr = static_cast<float>(attrs.get_float(AttrKey::Lr, 0.01));
+        float lr_decay = static_cast<float>(attrs.get_float(AttrKey::LrDecay, 0.0));
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-10));
+        float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
+        int64_t step = attrs.get_int(AttrKey::Step, 1);
 
         Tensor& param = const_cast<Tensor&>(inputs[0]);
         Tensor& sum_sq = const_cast<Tensor&>(inputs[2]);
@@ -1738,13 +1738,13 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::FusedAdamAtan2Step, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [param, grad, exp_avg, exp_avg_sq, max_exp_avg_sq (optional)]
         // attrs: lr, beta1, beta2, eps, weight_decay, step, amsgrad
-        float lr = parse_attr<float>(attrs, "lr", 0.001f);
-        float beta1 = parse_attr<float>(attrs, "beta1", 0.9f);
-        float beta2 = parse_attr<float>(attrs, "beta2", 0.999f);
-        float eps = parse_attr<float>(attrs, "eps", 1e-8f);
-        float weight_decay = parse_attr<float>(attrs, "weight_decay", 0.0f);
-        int64_t step = parse_attr<int64_t>(attrs, "step", 1);
-        bool amsgrad = parse_attr<bool>(attrs, "amsgrad", false);
+        float lr = static_cast<float>(attrs.get_float(AttrKey::Lr, 0.001));
+        float beta1 = static_cast<float>(attrs.get_float(AttrKey::Beta1, 0.9));
+        float beta2 = static_cast<float>(attrs.get_float(AttrKey::Beta2, 0.999));
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-8));
+        float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
+        int64_t step = attrs.get_int(AttrKey::Step, 1);
+        bool amsgrad = attrs.get_bool(AttrKey::Amsgrad, false);
 
         Tensor& param = const_cast<Tensor&>(inputs[0]);
         Tensor& exp_avg = const_cast<Tensor&>(inputs[2]);
@@ -1778,7 +1778,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 
     // inputs: [input, h0, c0, W_ih_0, W_hh_0, bias_0, W_ih_1, W_hh_1, bias_1, ...]
     table.register_kernel(OpId::LSTMMultiLayerForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t num_layers = parse_attr<int64_t>(attrs, "num_layers", 1);
+        int64_t num_layers = attrs.get_int(AttrKey::NumLayers, 1);
 
         const Tensor& input = inputs[0];
         const Tensor& h0 = inputs[1];
@@ -1797,7 +1797,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 
     // inputs: [input, h0, W_ih_0, W_hh_0, bias_0, W_ih_1, W_hh_1, bias_1, ...]
     table.register_kernel(OpId::GRUMultiLayerForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t num_layers = parse_attr<int64_t>(attrs, "num_layers", 1);
+        int64_t num_layers = attrs.get_int(AttrKey::NumLayers, 1);
 
         const Tensor& input = inputs[0];
         const Tensor& h0 = inputs[1];
@@ -1836,7 +1836,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // inputs: [input, indices, source]
     // attrs: accumulate (bool)
     table.register_single_output_kernel(OpId::Put, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        bool accumulate = parse_attr<bool>(attrs, "accumulate", false);
+        bool accumulate = attrs.get_bool(AttrKey::Accumulate, false);
         Tensor input = inputs[0];
         return cuda::put_kernel(input, inputs[1], inputs[2], accumulate, get_cuda_stream(attrs));
     });
@@ -1848,21 +1848,21 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // inputs: [input]
     // attrs: kernel_size, stride, padding, dilation
     table.register_single_output_kernel(OpId::Unfold, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t kernel_size = parse_attr<int64_t>(attrs, "kernel_size", 3);
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 3);
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         return cuda::unfold_cuda(inputs[0], kernel_size, stride, padding, dilation);
     });
 
     // inputs: [input]
     // attrs: output_size, kernel_size, stride, padding, dilation
     table.register_single_output_kernel(OpId::Fold, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        auto output_size = parse_int_list(attrs, "output_size");
-        int64_t kernel_size = parse_attr<int64_t>(attrs, "kernel_size", 3);
-        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
-        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        auto output_size = attrs.get_int_list(AttrKey::OutputSize);
+        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 3);
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         return cuda::fold_cuda(inputs[0], output_size, kernel_size, stride, padding, dilation);
     });
 
@@ -1873,17 +1873,14 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // inputs: [boxes1, boxes2]
     // attrs: iou_type (0=IoU, 1=GIoU)
     table.register_single_output_kernel(OpId::BoxIoU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int iou_type = static_cast<int>(parse_attr<int64_t>(attrs, "iou_type", 0));
+        int iou_type = static_cast<int>(attrs.get_int(AttrKey::IouType, 0));
         return cuda::box_iou_cuda(inputs[0], inputs[1], iou_type);
     });
 
     table.register_kernel(OpId::GatherRelativePositionBias,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t num_positions = 0, num_heads = 0;
-            if (attrs.contains("num_positions"))
-                num_positions = std::stoll(attrs.at("num_positions"));
-            if (attrs.contains("num_heads"))
-                num_heads = std::stoll(attrs.at("num_heads"));
+            int64_t num_positions = attrs.get_int(AttrKey::NumPositions, 0);
+            int64_t num_heads = attrs.get_int(AttrKey::NumHeads, 0);
             return {cuda::gather_relative_position_bias(inputs[0], inputs[1], num_positions, num_heads)};
         });
 
@@ -1891,31 +1888,31 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // Advanced Operations (topk, sort, cumsum, cumprod, unique)
     // =========================================================================
     table.register_kernel(OpId::TopK, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t k = parse_attr<int64_t>(attrs, "k", 1);
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
-        bool largest = parse_attr<bool>(attrs, "largest", true);
-        bool sorted = parse_attr<bool>(attrs, "sorted", true);
+        int64_t k = attrs.get_int(AttrKey::K, 1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        bool largest = attrs.get_bool(AttrKey::Largest, true);
+        bool sorted = attrs.get_bool(AttrKey::Sorted, true);
         auto [values, indices] = cuda::topk_kernel(inputs[0], k, dim, largest, sorted, get_cuda_stream(attrs));
         return std::vector<Tensor>{values, indices};
     });
     table.register_kernel(OpId::Sort, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
-        bool descending = parse_attr<bool>(attrs, "descending", false);
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        bool descending = attrs.get_bool(AttrKey::Descending, false);
         auto [values, indices] = cuda::sort_kernel(inputs[0], dim, descending, get_cuda_stream(attrs));
         return std::vector<Tensor>{values, indices};
     });
     table.register_single_output_kernel(OpId::CumSum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         return cuda::cumsum_kernel(inputs[0], dim, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::CumProd, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         return cuda::cumprod_kernel(inputs[0], dim, get_cuda_stream(attrs));
     });
     table.register_kernel(OpId::Unique, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        bool sorted = parse_attr<bool>(attrs, "sorted", true);
-        bool return_inverse = parse_attr<bool>(attrs, "return_inverse", false);
-        bool return_counts = parse_attr<bool>(attrs, "return_counts", false);
+        bool sorted = attrs.get_bool(AttrKey::Sorted, true);
+        bool return_inverse = attrs.get_bool(AttrKey::ReturnInverse, false);
+        bool return_counts = attrs.get_bool(AttrKey::ReturnCounts, false);
         auto [unique_vals, inverse, counts] = cuda::unique_kernel(inputs[0], sorted, return_inverse, return_counts, get_cuda_stream(attrs));
         return std::vector<Tensor>{unique_vals, inverse, counts};
     });

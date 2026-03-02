@@ -6,6 +6,7 @@
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/dispatch_table.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/utils/error.hpp"
 #include <numeric>
@@ -427,7 +428,7 @@ auto Tensor::to(DType dtype) const -> Tensor {
         // Ensure contiguous layout for the cast kernel
         Tensor src = is_contiguous() ? *this : contiguous();
         OpAttributes attrs;
-        attrs["target_dtype"] = std::to_string(static_cast<uint8_t>(dtype));
+        attrs.set(AttrKey::TargetDtype, static_cast<int64_t>(static_cast<uint8_t>(dtype)));
         Tensor result = dispatch_single(OpId::Cast, std::span<const Tensor>(&src, 1), attrs);
         result.impl_->requires_grad = impl_->requires_grad;
         return result;
@@ -862,7 +863,7 @@ auto Tensor::reshape(std::vector<int64_t> new_shape) const -> Tensor {
         if (i > 0) shape_str += ",";
         shape_str += std::to_string(new_shape[i]);
     }
-    attrs["shape"] = shape_str;
+    attrs.set(AttrKey::Shape, shape_str);
 
     // Dispatch to backend for reshape operation
     std::vector<Tensor> inputs = {*this};
@@ -1411,7 +1412,7 @@ auto Tensor::to(MemoryFormat format) const -> Tensor {
 
     // Dispatch to backend for memory format conversion
     OpAttributes attrs;
-    attrs["memory_format"] = std::to_string(static_cast<int>(format));
+    attrs.set(AttrKey::MemoryFormat, static_cast<int64_t>(static_cast<int>(format)));
 
     std::vector<Tensor> inputs = {*this};
     return dispatch(OpId::ToMemoryFormat, inputs, attrs)[0];

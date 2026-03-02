@@ -8,6 +8,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include <cmath>
 #include <cstring>
@@ -109,10 +110,10 @@ auto Adagrad::step_impl() -> void {
 
             std::vector<Tensor> inputs = {grad_orig, param->tensor(), sum_[i]};
 
-            OpAttributes attrs;
-            attrs["lr"] = std::to_string(static_cast<float>(current_lr));
-            attrs["eps"] = std::to_string(static_cast<float>(eps_));
-            attrs["weight_decay"] = std::to_string(static_cast<float>(weight_decay_));
+            NewOpAttributes attrs;
+            attrs.set(AttrKey::Lr, static_cast<float>(current_lr));
+            attrs.set(AttrKey::Eps, static_cast<float>(eps_));
+            attrs.set(AttrKey::WeightDecay, static_cast<float>(weight_decay_));
 
             dispatch(OpId::FusedAdagradStep, inputs, attrs);
             continue;
@@ -125,12 +126,12 @@ auto Adagrad::step_impl() -> void {
             // CUDA registry expects: [param, grad, sum_sq]
             std::vector<Tensor> inputs = {param->tensor(), grad_orig, sum_[i]};
 
-            OpAttributes attrs;
-            attrs["lr"] = std::to_string(static_cast<float>(current_lr));
-            attrs["lr_decay"] = std::to_string(static_cast<float>(lr_decay_));
-            attrs["eps"] = std::to_string(static_cast<float>(eps_));
-            attrs["weight_decay"] = std::to_string(static_cast<float>(weight_decay_));
-            attrs["step"] = std::to_string(step_count_);
+            NewOpAttributes attrs;
+            attrs.set(AttrKey::Lr, static_cast<float>(current_lr));
+            attrs.set(AttrKey::LrDecay, static_cast<float>(lr_decay_));
+            attrs.set(AttrKey::Eps, static_cast<float>(eps_));
+            attrs.set(AttrKey::WeightDecay, static_cast<float>(weight_decay_));
+            attrs.set(AttrKey::Step, step_count_);
 
             dispatch(OpId::FusedAdagradStep, inputs, attrs);
             continue;

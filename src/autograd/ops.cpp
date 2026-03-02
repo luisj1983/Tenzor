@@ -5,6 +5,7 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include <array>
 
@@ -182,7 +183,7 @@ auto neg(const Variable& input) -> Variable {
 auto softmax(const Variable& input, int64_t dim) -> Variable {
     if (!input.requires_grad() || !is_grad_enabled()) {
         OpAttributes attrs;
-        attrs["dim"] = std::to_string(dim);
+        attrs.set(AttrKey::Dim, dim);
         std::vector<Tensor> inputs = {input.tensor()};
         auto result = dispatch(OpId::Softmax, inputs, attrs)[0];
         return Variable(result, false);
@@ -192,7 +193,7 @@ auto softmax(const Variable& input, int64_t dim) -> Variable {
 
     // Compute forward and save output for backward
     OpAttributes attrs;
-    attrs["dim"] = std::to_string(dim);
+    attrs.set(AttrKey::Dim, dim);
     std::vector<Tensor> input_tensors = {input.tensor()};
     auto result_tensor = dispatch(OpId::Softmax, input_tensors, attrs)[0];
 
@@ -222,7 +223,7 @@ auto softmax(const Variable& input, int64_t dim) -> Variable {
 auto log_softmax(const Variable& input, int64_t dim) -> Variable {
     if (!input.requires_grad() || !is_grad_enabled()) {
         OpAttributes attrs;
-        attrs["dim"] = std::to_string(dim);
+        attrs.set(AttrKey::Dim, dim);
         std::vector<Tensor> inputs = {input.tensor()};
         auto result = dispatch(OpId::LogSoftmax, inputs, attrs)[0];
         return Variable(result, false);
@@ -232,7 +233,7 @@ auto log_softmax(const Variable& input, int64_t dim) -> Variable {
 
     // Compute forward and save output for backward
     OpAttributes attrs;
-    attrs["dim"] = std::to_string(dim);
+    attrs.set(AttrKey::Dim, dim);
     std::vector<Tensor> input_tensors = {input.tensor()};
     auto result_tensor = dispatch(OpId::LogSoftmax, input_tensors, attrs)[0];
 

@@ -200,6 +200,10 @@ enum class OpId : uint16_t {
     Conv2dBackwardBias,
     ConvTranspose2dForward,
     DepthwiseConv2d,
+    ConvTranspose3dForward,      // 176
+    ConvTranspose3dBackwardInput,
+    ConvTranspose3dBackwardWeight,
+    ConvTranspose3dBackwardBias,
 
     // =========================================================================
     // Pooling Operations (190-209)

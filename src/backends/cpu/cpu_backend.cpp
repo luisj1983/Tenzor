@@ -1,5 +1,6 @@
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/backend/dispatch_table.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/backend/cpu_caching_allocator.hpp"
 #include <cstring>
 #include <stdexcept>
@@ -331,14 +332,11 @@ public:
             // Parse attributes
             int64_t dim = -1;
             bool keepdim = false;
-            bool dim_specified = false;
-            if (attrs.contains("dim")) {
-                dim = std::stoll(attrs.at("dim"));
-                dim_specified = true;
+            bool dim_specified = attrs.has(AttrKey::Dim);
+            if (dim_specified) {
+                dim = attrs.get_int(AttrKey::Dim, -1);
             }
-            if (attrs.contains("keepdim")) {
-                keepdim = (attrs.at("keepdim") == "1");
-            }
+            keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             // Convert negative dim to positive when explicitly specified
             if (dim_specified && dim < 0) {
                 int64_t ndim = static_cast<int64_t>(inputs[0].shape().size());
@@ -350,152 +348,83 @@ public:
             if (inputs.size() != 1) {
                 throw std::invalid_argument("mean operation requires exactly 1 input");
             }
-            int64_t dim = -1;
-            bool keepdim = false;
-            if (attrs.contains("dim")) {
-                dim = std::stoll(attrs.at("dim"));
-            }
-            if (attrs.contains("keepdim")) {
-                keepdim = (attrs.at("keepdim") == "1");
-            }
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             return {cpu::mean_kernel(inputs[0], dim, keepdim)};
         }
         else if (op_name == "max") {
             if (inputs.size() != 1) {
                 throw std::invalid_argument("max operation requires exactly 1 input");
             }
-            int64_t dim = -1;
-            bool keepdim = false;
-            if (attrs.contains("dim")) {
-                dim = std::stoll(attrs.at("dim"));
-            }
-            if (attrs.contains("keepdim")) {
-                keepdim = (attrs.at("keepdim") == "1");
-            }
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             return {cpu::max_kernel(inputs[0], dim, keepdim)};
         }
         else if (op_name == "min") {
             if (inputs.size() != 1) {
                 throw std::invalid_argument("min operation requires exactly 1 input");
             }
-            int64_t dim = -1;
-            bool keepdim = false;
-            if (attrs.contains("dim")) {
-                dim = std::stoll(attrs.at("dim"));
-            }
-            if (attrs.contains("keepdim")) {
-                keepdim = (attrs.at("keepdim") == "1");
-            }
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             return {cpu::min_kernel(inputs[0], dim, keepdim)};
         }
         else if (op_name == "argmax") {
             if (inputs.size() != 1) {
                 throw std::invalid_argument("argmax operation requires exactly 1 input");
             }
-            int64_t dim = -1;
-            bool keepdim = false;
-            if (attrs.contains("dim")) {
-                dim = std::stoll(attrs.at("dim"));
-            }
-            if (attrs.contains("keepdim")) {
-                keepdim = (attrs.at("keepdim") == "1");
-            }
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             return {cpu::argmax_kernel(inputs[0], dim, keepdim)};
         }
         else if (op_name == "argmin") {
             if (inputs.size() != 1) {
                 throw std::invalid_argument("argmin operation requires exactly 1 input");
             }
-            int64_t dim = -1;
-            bool keepdim = false;
-            if (attrs.contains("dim")) {
-                dim = std::stoll(attrs.at("dim"));
-            }
-            if (attrs.contains("keepdim")) {
-                keepdim = (attrs.at("keepdim") == "1");
-            }
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             return {cpu::argmin_kernel(inputs[0], dim, keepdim)};
         }
         else if (op_name == "prod") {
             if (inputs.size() != 1) {
                 throw std::invalid_argument("prod operation requires exactly 1 input");
             }
-            int64_t dim = -1;
-            bool keepdim = false;
-            if (attrs.contains("dim")) {
-                dim = std::stoll(attrs.at("dim"));
-            }
-            if (attrs.contains("keepdim")) {
-                keepdim = (attrs.at("keepdim") == "1");
-            }
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             return {cpu::prod_kernel(inputs[0], dim, keepdim)};
         }
         else if (op_name == "var") {
             if (inputs.size() != 1) {
                 throw std::invalid_argument("var operation requires exactly 1 input");
             }
-            int64_t dim = -1;
-            bool keepdim = false;
-            int64_t correction = 1;
-            if (attrs.contains("dim")) {
-                dim = std::stoll(attrs.at("dim"));
-            }
-            if (attrs.contains("keepdim")) {
-                keepdim = (attrs.at("keepdim") == "1");
-            }
-            if (attrs.contains("correction")) {
-                correction = std::stoll(attrs.at("correction"));
-            }
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            int64_t correction = attrs.get_int(AttrKey::Correction, 1);
             return {cpu::var_kernel(inputs[0], dim, keepdim, correction)};
         }
         else if (op_name == "std") {
             if (inputs.size() != 1) {
                 throw std::invalid_argument("std operation requires exactly 1 input");
             }
-            int64_t dim = -1;
-            bool keepdim = false;
-            int64_t correction = 1;
-            if (attrs.contains("dim")) {
-                dim = std::stoll(attrs.at("dim"));
-            }
-            if (attrs.contains("keepdim")) {
-                keepdim = (attrs.at("keepdim") == "1");
-            }
-            if (attrs.contains("correction")) {
-                correction = std::stoll(attrs.at("correction"));
-            }
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            int64_t correction = attrs.get_int(AttrKey::Correction, 1);
             return {cpu::std_kernel(inputs[0], dim, keepdim, correction)};
         }
         else if (op_name == "norm") {
             if (inputs.size() != 1) {
                 throw std::invalid_argument("norm operation requires exactly 1 input");
             }
-            float p = 2.0f;
-            int64_t dim = -1;
-            bool keepdim = false;
-            if (attrs.contains("p")) {
-                p = std::stof(attrs.at("p"));
-            }
-            if (attrs.contains("dim")) {
-                dim = std::stoll(attrs.at("dim"));
-            }
-            if (attrs.contains("keepdim")) {
-                keepdim = (attrs.at("keepdim") == "1");
-            }
+            float p = static_cast<float>(attrs.get_float(AttrKey::P, 2.0));
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             return {cpu::norm_kernel(inputs[0], p, dim, keepdim)};
         }
         else if (op_name == "argsort") {
             if (inputs.size() != 1) {
                 throw std::invalid_argument("argsort operation requires exactly 1 input");
             }
-            int64_t dim = 0;
-            bool descending = false;
-            if (attrs.contains("dim")) {
-                dim = std::stoll(attrs.at("dim"));
-            }
-            if (attrs.contains("descending")) {
-                descending = (attrs.at("descending") == "1");
-            }
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            bool descending = attrs.get_bool(AttrKey::Descending, false);
             return {cpu::argsort_kernel(inputs[0], dim, descending)};
         }
         else if (op_name == "sqrt") {
@@ -527,34 +456,22 @@ public:
                 throw std::invalid_argument("clamp operation requires exactly 1 input");
             }
             // Parse min and max from attributes
-            float min_val = -std::numeric_limits<float>::infinity();
-            float max_val = std::numeric_limits<float>::infinity();
-            if (attrs.contains("min")) {
-                min_val = std::stof(attrs.at("min"));
-            }
-            if (attrs.contains("max")) {
-                max_val = std::stof(attrs.at("max"));
-            }
+            float min_val = static_cast<float>(attrs.get_float(AttrKey::Min, -std::numeric_limits<double>::infinity()));
+            float max_val = static_cast<float>(attrs.get_float(AttrKey::Max, std::numeric_limits<double>::infinity()));
             return {cpu::clamp_kernel(inputs[0], min_val, max_val)};
         }
         else if (op_name == "clamp_min") {
             if (inputs.size() != 1) {
                 throw std::invalid_argument("clamp_min operation requires exactly 1 input");
             }
-            float min_val = -std::numeric_limits<float>::infinity();
-            if (attrs.contains("min")) {
-                min_val = std::stof(attrs.at("min"));
-            }
+            float min_val = static_cast<float>(attrs.get_float(AttrKey::Min, -std::numeric_limits<double>::infinity()));
             return {cpu::clamp_kernel(inputs[0], min_val, std::numeric_limits<float>::infinity())};
         }
         else if (op_name == "clamp_max") {
             if (inputs.size() != 1) {
                 throw std::invalid_argument("clamp_max operation requires exactly 1 input");
             }
-            float max_val = std::numeric_limits<float>::infinity();
-            if (attrs.contains("max")) {
-                max_val = std::stof(attrs.at("max"));
-            }
+            float max_val = static_cast<float>(attrs.get_float(AttrKey::Max, std::numeric_limits<double>::infinity()));
             return {cpu::clamp_kernel(inputs[0], -std::numeric_limits<float>::infinity(), max_val)};
         }
         else if (op_name == "log") {
@@ -573,10 +490,7 @@ public:
             if (inputs.size() != 1) {
                 throw std::invalid_argument("pow operation requires exactly 1 input");
             }
-            float exponent = 2.0f;
-            if (attrs.contains("exponent")) {
-                exponent = std::stof(attrs.at("exponent"));
-            }
+            float exponent = static_cast<float>(attrs.get_float(AttrKey::Exponent, 2.0));
             return {cpu::pow_kernel(inputs[0], exponent)};
         }
         else if (op_name == "relu") {
@@ -643,40 +557,28 @@ public:
             if (inputs.size() != 1) {
                 throw std::invalid_argument("leaky_relu operation requires exactly 1 input");
             }
-            float alpha = 0.01f;
-            if (attrs.contains("alpha")) {
-                alpha = std::stof(attrs.at("alpha"));
-            }
+            float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
             return {cpu::leaky_relu_kernel(inputs[0], alpha)};
         }
         else if (op_name == "leaky_relu_backward") {
             if (inputs.size() != 2) {
                 throw std::invalid_argument("leaky_relu_backward operation requires exactly 2 inputs");
             }
-            float alpha = 0.01f;
-            if (attrs.contains("alpha")) {
-                alpha = std::stof(attrs.at("alpha"));
-            }
+            float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
             return {cpu::leaky_relu_backward_kernel(inputs[0], inputs[1], alpha)};
         }
         else if (op_name == "elu") {
             if (inputs.size() != 1) {
                 throw std::invalid_argument("elu operation requires exactly 1 input");
             }
-            float alpha = 1.0f;
-            if (attrs.contains("alpha")) {
-                alpha = std::stof(attrs.at("alpha"));
-            }
+            float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 1.0));
             return {cpu::elu_kernel(inputs[0], alpha)};
         }
         else if (op_name == "elu_backward") {
             if (inputs.size() != 2) {
                 throw std::invalid_argument("elu_backward operation requires exactly 2 inputs");
             }
-            float alpha = 1.0f;
-            if (attrs.contains("alpha")) {
-                alpha = std::stof(attrs.at("alpha"));
-            }
+            float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 1.0));
             return {cpu::elu_backward_kernel(inputs[0], inputs[1], alpha)};
         }
         else if (op_name == "selu") {
@@ -707,68 +609,44 @@ public:
             if (inputs.size() != 1) {
                 throw std::invalid_argument("softplus operation requires exactly 1 input");
             }
-            float beta = 1.0f;
-            float threshold = 20.0f;
-            if (attrs.contains("beta")) {
-                beta = std::stof(attrs.at("beta"));
-            }
-            if (attrs.contains("threshold")) {
-                threshold = std::stof(attrs.at("threshold"));
-            }
+            float beta = static_cast<float>(attrs.get_float(AttrKey::Beta, 1.0));
+            float threshold = static_cast<float>(attrs.get_float(AttrKey::Threshold, 20.0));
             return {cpu::softplus_kernel(inputs[0], beta, threshold)};
         }
         else if (op_name == "softplus_backward") {
             if (inputs.size() != 2) {
                 throw std::invalid_argument("softplus_backward operation requires exactly 2 inputs");
             }
-            float beta = 1.0f;
-            float threshold = 20.0f;
-            if (attrs.contains("beta")) {
-                beta = std::stof(attrs.at("beta"));
-            }
-            if (attrs.contains("threshold")) {
-                threshold = std::stof(attrs.at("threshold"));
-            }
+            float beta = static_cast<float>(attrs.get_float(AttrKey::Beta, 1.0));
+            float threshold = static_cast<float>(attrs.get_float(AttrKey::Threshold, 20.0));
             return {cpu::softplus_backward_kernel(inputs[0], inputs[1], beta, threshold)};
         }
         else if (op_name == "softmax") {
             if (inputs.size() != 1) {
                 throw std::invalid_argument("softmax operation requires exactly 1 input");
             }
-            int64_t dim = -1;
-            if (attrs.contains("dim")) {
-                dim = std::stoll(attrs.at("dim"));
-            }
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
             return {cpu::softmax_kernel(inputs[0], dim)};
         }
         else if (op_name == "softmax_backward") {
             if (inputs.size() != 2) {
                 throw std::invalid_argument("softmax_backward operation requires exactly 2 inputs");
             }
-            int64_t dim = -1;
-            if (attrs.contains("dim")) {
-                dim = std::stoll(attrs.at("dim"));
-            }
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
             return {cpu::softmax_backward_kernel(inputs[0], inputs[1], dim)};
         }
         else if (op_name == "log_softmax") {
             if (inputs.size() != 1) {
                 throw std::invalid_argument("log_softmax operation requires exactly 1 input");
             }
-            int64_t dim = -1;
-            if (attrs.contains("dim")) {
-                dim = std::stoll(attrs.at("dim"));
-            }
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
             return {cpu::log_softmax_kernel(inputs[0], dim)};
         }
         else if (op_name == "log_softmax_backward") {
             if (inputs.size() != 2) {
                 throw std::invalid_argument("log_softmax_backward operation requires exactly 2 inputs");
             }
-            int64_t dim = -1;
-            if (attrs.contains("dim")) {
-                dim = std::stoll(attrs.at("dim"));
-            }
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
             return {cpu::log_softmax_backward_kernel(inputs[0], inputs[1], dim)};
         }
         else if (op_name == "contiguous") {
@@ -781,10 +659,7 @@ public:
             if (inputs.size() != 1) {
                 throw std::invalid_argument("fill operation requires exactly 1 input");
             }
-            float value = 0.0f;
-            if (attrs.contains("value")) {
-                value = std::stof(attrs.at("value"));
-            }
+            float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
             return {cpu::fill_kernel(inputs[0], value)};
         }
         else if (op_name == "clone") {
@@ -797,106 +672,57 @@ public:
             if (inputs.size() != 1) {
                 throw std::invalid_argument("reshape operation requires exactly 1 input");
             }
-            // Parse shape from comma-separated string
-            std::vector<int64_t> shape;
-            if (attrs.contains("shape")) {
-                std::string shape_str = attrs.at("shape");
-                size_t pos = 0;
-                while (pos < shape_str.size()) {
-                    size_t comma = shape_str.find(',', pos);
-                    if (comma == std::string::npos) {
-                        shape.push_back(std::stoll(shape_str.substr(pos)));
-                        break;
-                    }
-                    shape.push_back(std::stoll(shape_str.substr(pos, comma - pos)));
-                    pos = comma + 1;
-                }
-            }
+            std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
             return {cpu::reshape_kernel(inputs[0], shape)};
         }
         else if (op_name == "transpose") {
             if (inputs.size() != 1) {
                 throw std::invalid_argument("transpose operation requires exactly 1 input");
             }
-            int64_t dim0 = 0;
-            int64_t dim1 = 1;
-            if (attrs.contains("dim0")) {
-                dim0 = std::stoll(attrs.at("dim0"));
-            }
-            if (attrs.contains("dim1")) {
-                dim1 = std::stoll(attrs.at("dim1"));
-            }
+            int64_t dim0 = attrs.get_int(AttrKey::Dim0, 0);
+            int64_t dim1 = attrs.get_int(AttrKey::Dim1, 1);
             return {cpu::transpose_kernel(inputs[0], dim0, dim1)};
         }
         else if (op_name == "permute") {
             if (inputs.size() != 1) {
                 throw std::invalid_argument("permute operation requires exactly 1 input");
             }
-            // Parse dims from comma-separated string
-            std::vector<int64_t> dims;
-            if (attrs.contains("dims")) {
-                std::string dims_str = attrs.at("dims");
-                size_t pos = 0;
-                while (pos < dims_str.size()) {
-                    size_t comma = dims_str.find(',', pos);
-                    if (comma == std::string::npos) {
-                        dims.push_back(std::stoll(dims_str.substr(pos)));
-                        break;
-                    }
-                    dims.push_back(std::stoll(dims_str.substr(pos, comma - pos)));
-                    pos = comma + 1;
-                }
-            }
+            std::vector<int64_t> dims = attrs.get_int_list(AttrKey::Dims);
             return {cpu::permute_kernel(inputs[0], dims)};
         }
         else if (op_name == "squeeze") {
             if (inputs.size() != 1) {
                 throw std::invalid_argument("squeeze operation requires exactly 1 input");
             }
-            int64_t dim = -1;
-            if (attrs.contains("dim")) {
-                dim = std::stoll(attrs.at("dim"));
-            }
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
             return {cpu::squeeze_kernel(inputs[0], dim)};
         }
         else if (op_name == "unsqueeze") {
             if (inputs.size() != 1) {
                 throw std::invalid_argument("unsqueeze operation requires exactly 1 input");
             }
-            int64_t dim = 0;
-            if (attrs.contains("dim")) {
-                dim = std::stoll(attrs.at("dim"));
-            }
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
             return {cpu::unsqueeze_kernel(inputs[0], dim)};
         }
         else if (op_name == "index_select") {
             if (inputs.size() != 2) {
                 throw std::invalid_argument("index_select operation requires exactly 2 inputs");
             }
-            int64_t dim = 0;
-            if (attrs.contains("dim")) {
-                dim = std::stoll(attrs.at("dim"));
-            }
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
             return {cpu::index_select_kernel(inputs[0], dim, inputs[1])};
         }
         else if (op_name == "gather") {
             if (inputs.size() != 2) {
                 throw std::invalid_argument("gather operation requires exactly 2 inputs");
             }
-            int64_t dim = 0;
-            if (attrs.contains("dim")) {
-                dim = std::stoll(attrs.at("dim"));
-            }
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
             return {cpu::gather_kernel(inputs[0], dim, inputs[1])};
         }
         else if (op_name == "scatter") {
             if (inputs.size() != 3) {
                 throw std::invalid_argument("scatter operation requires exactly 3 inputs");
             }
-            int64_t dim = 0;
-            if (attrs.contains("dim")) {
-                dim = std::stoll(attrs.at("dim"));
-            }
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
             return {cpu::scatter_kernel(inputs[0], dim, inputs[1], inputs[2])};
         }
         else if (op_name == "masked_select") {
@@ -909,10 +735,10 @@ public:
             if (inputs.size() != 2) {
                 throw std::invalid_argument("masked_fill operation requires exactly 2 inputs");
             }
-            if (!attrs.contains("value")) {
+            if (!attrs.has(AttrKey::Value)) {
                 throw std::invalid_argument("masked_fill operation requires 'value' attribute");
             }
-            float value = std::stof(attrs.at("value"));
+            float value = static_cast<float>(attrs.get_float(AttrKey::Value));
             return {cpu::masked_fill_kernel(inputs[0], inputs[1], value)};
         }
         else if (op_name == "where") {
@@ -931,30 +757,21 @@ public:
             if (inputs.size() != 3) {
                 throw std::invalid_argument("batchnorm2d_forward operation requires exactly 3 inputs");
             }
-            float epsilon = 1e-5f;
-            if (attrs.contains("epsilon")) {
-                epsilon = std::stof(attrs.at("epsilon"));
-            }
+            float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
             return {cpu::batchnorm2d_forward_kernel(inputs[0], inputs[1], inputs[2], epsilon)};
         }
         else if (op_name == "batchnorm2d_forward_affine") {
             if (inputs.size() != 5) {
                 throw std::invalid_argument("batchnorm2d_forward_affine operation requires exactly 5 inputs");
             }
-            float epsilon = 1e-5f;
-            if (attrs.contains("epsilon")) {
-                epsilon = std::stof(attrs.at("epsilon"));
-            }
+            float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
             return {cpu::batchnorm2d_forward_affine_kernel(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], epsilon)};
         }
         else if (op_name == "batchnorm2d_update_running_stats") {
             if (inputs.size() != 4) {
                 throw std::invalid_argument("batchnorm2d_update_running_stats operation requires exactly 4 inputs");
             }
-            float momentum = 0.1f;
-            if (attrs.contains("momentum")) {
-                momentum = std::stof(attrs.at("momentum"));
-            }
+            float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.1));
             // Create copies that will be modified by the kernel
             Tensor updated_mean = inputs[0].clone();
             Tensor updated_var = inputs[1].clone();
@@ -965,33 +782,15 @@ public:
             if (inputs.size() != 5) {
                 throw std::invalid_argument("batchnorm2d_backward operation requires exactly 5 inputs");
             }
-            float epsilon = 1e-5f;
-            if (attrs.contains("epsilon")) {
-                epsilon = std::stof(attrs.at("epsilon"));
-            }
+            float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
             return cpu::batchnorm2d_backward_kernel(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], epsilon);
         }
         else if (op_name == "zeros") {
-            // Parse shape from comma-separated string
-            std::vector<int64_t> shape;
-            if (attrs.contains("shape")) {
-                std::string shape_str = attrs.at("shape");
-                size_t pos = 0;
-                while (pos < shape_str.size()) {
-                    size_t comma = shape_str.find(',', pos);
-                    if (comma == std::string::npos) {
-                        shape.push_back(std::stoll(shape_str.substr(pos)));
-                        break;
-                    }
-                    shape.push_back(std::stoll(shape_str.substr(pos, comma - pos)));
-                    pos = comma + 1;
-                }
-            }
+            std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
             DType dtype = inputs.empty() ? DType::Float32 : inputs[0].dtype();
             Device device = inputs.empty() ? Device{Device::Type::CPU, 0} : inputs[0].device();
-            if (attrs.contains("dtype")) {
-                // Parse dtype if provided
-                std::string dtype_str = attrs.at("dtype");
+            if (attrs.has(AttrKey::Dtype)) {
+                std::string dtype_str(attrs.get_string(AttrKey::Dtype));
                 if (dtype_str == "float32") dtype = DType::Float32;
                 else if (dtype_str == "float64") dtype = DType::Float64;
                 else if (dtype_str == "int32") dtype = DType::Int32;
@@ -1000,25 +799,11 @@ public:
             return {cpu::zeros_kernel(shape, dtype, device)};
         }
         else if (op_name == "ones") {
-            // Parse shape from comma-separated string
-            std::vector<int64_t> shape;
-            if (attrs.contains("shape")) {
-                std::string shape_str = attrs.at("shape");
-                size_t pos = 0;
-                while (pos < shape_str.size()) {
-                    size_t comma = shape_str.find(',', pos);
-                    if (comma == std::string::npos) {
-                        shape.push_back(std::stoll(shape_str.substr(pos)));
-                        break;
-                    }
-                    shape.push_back(std::stoll(shape_str.substr(pos, comma - pos)));
-                    pos = comma + 1;
-                }
-            }
+            std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
             DType dtype = inputs.empty() ? DType::Float32 : inputs[0].dtype();
             Device device = inputs.empty() ? Device{Device::Type::CPU, 0} : inputs[0].device();
-            if (attrs.contains("dtype")) {
-                std::string dtype_str = attrs.at("dtype");
+            if (attrs.has(AttrKey::Dtype)) {
+                std::string dtype_str(attrs.get_string(AttrKey::Dtype));
                 if (dtype_str == "float32") dtype = DType::Float32;
                 else if (dtype_str == "float64") dtype = DType::Float64;
                 else if (dtype_str == "int32") dtype = DType::Int32;
@@ -1027,50 +812,22 @@ public:
             return {cpu::ones_kernel(shape, dtype, device)};
         }
         else if (op_name == "rand") {
-            // Parse shape from comma-separated string
-            std::vector<int64_t> shape;
-            if (attrs.contains("shape")) {
-                std::string shape_str = attrs.at("shape");
-                size_t pos = 0;
-                while (pos < shape_str.size()) {
-                    size_t comma = shape_str.find(',', pos);
-                    if (comma == std::string::npos) {
-                        shape.push_back(std::stoll(shape_str.substr(pos)));
-                        break;
-                    }
-                    shape.push_back(std::stoll(shape_str.substr(pos, comma - pos)));
-                    pos = comma + 1;
-                }
-            }
+            std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
             DType dtype = inputs.empty() ? DType::Float32 : inputs[0].dtype();
             Device device = inputs.empty() ? Device{Device::Type::CPU, 0} : inputs[0].device();
-            if (attrs.contains("dtype")) {
-                std::string dtype_str = attrs.at("dtype");
+            if (attrs.has(AttrKey::Dtype)) {
+                std::string dtype_str(attrs.get_string(AttrKey::Dtype));
                 if (dtype_str == "float32") dtype = DType::Float32;
                 else if (dtype_str == "float64") dtype = DType::Float64;
             }
             return {cpu::rand_kernel(shape, dtype, device)};
         }
         else if (op_name == "randn") {
-            // Parse shape from comma-separated string
-            std::vector<int64_t> shape;
-            if (attrs.contains("shape")) {
-                std::string shape_str = attrs.at("shape");
-                size_t pos = 0;
-                while (pos < shape_str.size()) {
-                    size_t comma = shape_str.find(',', pos);
-                    if (comma == std::string::npos) {
-                        shape.push_back(std::stoll(shape_str.substr(pos)));
-                        break;
-                    }
-                    shape.push_back(std::stoll(shape_str.substr(pos, comma - pos)));
-                    pos = comma + 1;
-                }
-            }
+            std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
             DType dtype = inputs.empty() ? DType::Float32 : inputs[0].dtype();
             Device device = inputs.empty() ? Device{Device::Type::CPU, 0} : inputs[0].device();
-            if (attrs.contains("dtype")) {
-                std::string dtype_str = attrs.at("dtype");
+            if (attrs.has(AttrKey::Dtype)) {
+                std::string dtype_str(attrs.get_string(AttrKey::Dtype));
                 if (dtype_str == "float32") dtype = DType::Float32;
                 else if (dtype_str == "float64") dtype = DType::Float64;
             }
@@ -1081,96 +838,32 @@ public:
                 throw std::invalid_argument("conv2d_forward operation requires at least 2 inputs (input, weight)");
             }
             const Tensor* bias = (inputs.size() >= 3) ? &inputs[2] : nullptr;
-            int64_t stride = 1;
-            int64_t padding = 0;
-            int64_t dilation = 1;
-            int64_t groups = 1;
-            if (attrs.contains("stride")) {
-                stride = std::stoll(attrs.at("stride"));
-            }
-            if (attrs.contains("padding")) {
-                padding = std::stoll(attrs.at("padding"));
-            }
-            if (attrs.contains("dilation")) {
-                dilation = std::stoll(attrs.at("dilation"));
-            }
-            if (attrs.contains("groups")) {
-                groups = std::stoll(attrs.at("groups"));
-            }
+            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
             return {cpu::conv2d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups)};
         }
         else if (op_name == "conv2d_backward_input") {
             if (inputs.size() != 2) {
                 throw std::invalid_argument("conv2d_backward_input operation requires exactly 2 inputs (grad_output, weight)");
             }
-            // Parse input_shape from comma-separated string
-            std::vector<int64_t> input_shape;
-            if (attrs.contains("input_shape")) {
-                std::string shape_str = attrs.at("input_shape");
-                size_t pos = 0;
-                while (pos < shape_str.size()) {
-                    size_t comma = shape_str.find(',', pos);
-                    if (comma == std::string::npos) {
-                        input_shape.push_back(std::stoll(shape_str.substr(pos)));
-                        break;
-                    }
-                    input_shape.push_back(std::stoll(shape_str.substr(pos, comma - pos)));
-                    pos = comma + 1;
-                }
-            }
-            int64_t stride = 1;
-            int64_t padding = 0;
-            int64_t dilation = 1;
-            int64_t groups = 1;
-            if (attrs.contains("stride")) {
-                stride = std::stoll(attrs.at("stride"));
-            }
-            if (attrs.contains("padding")) {
-                padding = std::stoll(attrs.at("padding"));
-            }
-            if (attrs.contains("dilation")) {
-                dilation = std::stoll(attrs.at("dilation"));
-            }
-            if (attrs.contains("groups")) {
-                groups = std::stoll(attrs.at("groups"));
-            }
+            std::vector<int64_t> input_shape = attrs.get_int_list(AttrKey::InputShape);
+            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
             return {cpu::conv2d_backward_input_kernel(inputs[0], inputs[1], input_shape, stride, padding, dilation, groups)};
         }
         else if (op_name == "conv2d_backward_weight") {
             if (inputs.size() != 2) {
                 throw std::invalid_argument("conv2d_backward_weight operation requires exactly 2 inputs (grad_output, input)");
             }
-            // Parse weight_shape from comma-separated string
-            std::vector<int64_t> weight_shape;
-            if (attrs.contains("weight_shape")) {
-                std::string shape_str = attrs.at("weight_shape");
-                size_t pos = 0;
-                while (pos < shape_str.size()) {
-                    size_t comma = shape_str.find(',', pos);
-                    if (comma == std::string::npos) {
-                        weight_shape.push_back(std::stoll(shape_str.substr(pos)));
-                        break;
-                    }
-                    weight_shape.push_back(std::stoll(shape_str.substr(pos, comma - pos)));
-                    pos = comma + 1;
-                }
-            }
-            int64_t stride = 1;
-            int64_t padding = 0;
-            int64_t dilation = 1;
-            int64_t groups = 1;
-            if (attrs.contains("stride")) {
-                stride = std::stoll(attrs.at("stride"));
-            }
-            if (attrs.contains("padding")) {
-                padding = std::stoll(attrs.at("padding"));
-            }
-            if (attrs.contains("dilation")) {
-                dilation = std::stoll(attrs.at("dilation"));
-            }
-            if (attrs.contains("groups")) {
-                groups = std::stoll(attrs.at("groups"));
-            }
+            std::vector<int64_t> weight_shape = attrs.get_int_list(AttrKey::WeightShape);
+            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
             return {cpu::conv2d_backward_weight_kernel(inputs[0], inputs[1], weight_shape, stride, padding, dilation, groups)};
         }
         else if (op_name == "conv2d_backward_bias") {
@@ -1189,16 +882,13 @@ public:
             const Tensor& input = inputs[1];
             const Tensor& weight = inputs[2];
 
-            int64_t stride = 1, padding = 0, dilation = 1, groups = 1;
-            bool compute_grad_input = true, compute_grad_weight = true, compute_grad_bias = false;
-
-            if (attrs.contains("stride")) stride = std::stoll(attrs.at("stride"));
-            if (attrs.contains("padding")) padding = std::stoll(attrs.at("padding"));
-            if (attrs.contains("dilation")) dilation = std::stoll(attrs.at("dilation"));
-            if (attrs.contains("groups")) groups = std::stoll(attrs.at("groups"));
-            if (attrs.contains("compute_grad_input")) compute_grad_input = (attrs.at("compute_grad_input") == "1");
-            if (attrs.contains("compute_grad_weight")) compute_grad_weight = (attrs.at("compute_grad_weight") == "1");
-            if (attrs.contains("compute_grad_bias")) compute_grad_bias = (attrs.at("compute_grad_bias") == "1");
+            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+            bool compute_grad_input = attrs.get_bool(AttrKey::ComputeGradInput, true);
+            bool compute_grad_weight = attrs.get_bool(AttrKey::ComputeGradWeight, true);
+            bool compute_grad_bias = attrs.get_bool(AttrKey::ComputeGradBias, false);
 
             std::vector<int64_t> input_shape(input.shape().begin(), input.shape().end());
             std::vector<int64_t> weight_shape(weight.shape().begin(), weight.shape().end());
@@ -1227,26 +917,11 @@ public:
                 throw std::invalid_argument("conv_transpose2d_forward operation requires at least 2 inputs (input, weight)");
             }
             const Tensor* bias = (inputs.size() >= 3) ? &inputs[2] : nullptr;
-            int64_t stride = 1;
-            int64_t padding = 0;
-            int64_t output_padding = 0;
-            int64_t dilation = 1;
-            int64_t groups = 1;
-            if (attrs.contains("stride")) {
-                stride = std::stoll(attrs.at("stride"));
-            }
-            if (attrs.contains("padding")) {
-                padding = std::stoll(attrs.at("padding"));
-            }
-            if (attrs.contains("output_padding")) {
-                output_padding = std::stoll(attrs.at("output_padding"));
-            }
-            if (attrs.contains("dilation")) {
-                dilation = std::stoll(attrs.at("dilation"));
-            }
-            if (attrs.contains("groups")) {
-                groups = std::stoll(attrs.at("groups"));
-            }
+            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
+            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
             return {cpu::conv_transpose2d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, output_padding, dilation, groups)};
         }
         else if (op_name == "fused_linear_relu") {
@@ -1261,42 +936,24 @@ public:
                 throw std::invalid_argument("fused_conv2d_relu operation requires at least 2 inputs");
             }
             const Tensor* bias = (inputs.size() >= 3) ? &inputs[2] : nullptr;
-            int64_t stride = 1;
-            int64_t padding = 0;
-            int64_t dilation = 1;
-            int64_t groups = 1;
-            if (attrs.contains("stride")) {
-                stride = std::stoll(attrs.at("stride"));
-            }
-            if (attrs.contains("padding")) {
-                padding = std::stoll(attrs.at("padding"));
-            }
-            if (attrs.contains("dilation")) {
-                dilation = std::stoll(attrs.at("dilation"));
-            }
-            if (attrs.contains("groups")) {
-                groups = std::stoll(attrs.at("groups"));
-            }
+            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
             return {cpu::fused_conv2d_relu_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups)};
         }
         else if (op_name == "fused_batchnorm_relu") {
             if (inputs.size() != 5) {
                 throw std::invalid_argument("fused_batchnorm_relu operation requires exactly 5 inputs");
             }
-            float eps = 1e-5f;
-            if (attrs.contains("eps")) {
-                eps = std::stof(attrs.at("eps"));
-            }
+            float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
             return {cpu::fused_batchnorm_relu_kernel(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], eps)};
         }
         else if (op_name == "fused_softmax_cross_entropy") {
             if (inputs.size() != 2) {
                 throw std::invalid_argument("fused_softmax_cross_entropy operation requires exactly 2 inputs");
             }
-            bool compute_grad = false;
-            if (attrs.contains("compute_grad")) {
-                compute_grad = (attrs.at("compute_grad") == "1" || attrs.at("compute_grad") == "true");
-            }
+            bool compute_grad = attrs.get_bool(AttrKey::ComputeGrad, false);
             return cpu::fused_softmax_cross_entropy_kernel(inputs[0], inputs[1], compute_grad);
         }
         else if (op_name == "fused_add_relu") {
@@ -1315,25 +972,8 @@ public:
             if (inputs.size() != 3) {
                 throw std::invalid_argument("fused_layer_norm operation requires exactly 3 inputs");
             }
-            // Parse normalized_shape from comma-separated string
-            std::vector<int64_t> normalized_shape;
-            if (attrs.contains("normalized_shape")) {
-                std::string shape_str = attrs.at("normalized_shape");
-                size_t pos = 0;
-                while (pos < shape_str.size()) {
-                    size_t comma = shape_str.find(',', pos);
-                    if (comma == std::string::npos) {
-                        normalized_shape.push_back(std::stoll(shape_str.substr(pos)));
-                        break;
-                    }
-                    normalized_shape.push_back(std::stoll(shape_str.substr(pos, comma - pos)));
-                    pos = comma + 1;
-                }
-            }
-            float eps = 1e-5f;
-            if (attrs.contains("eps")) {
-                eps = std::stof(attrs.at("eps"));
-            }
+            std::vector<int64_t> normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
+            float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
             return {cpu::fused_layer_norm_kernel(inputs[0], normalized_shape, inputs[1], inputs[2], eps)};
         }
         else if (op_name == "eq") {

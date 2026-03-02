@@ -3,6 +3,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/core/device.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include <cmath>
 
@@ -52,7 +53,7 @@ auto Adam::step_impl() -> void {
                 inputs.push_back(max_exp_avg_sq_[i]);
             }
 
-            OpAttributes attrs;
+            NewOpAttributes attrs;
             // Use dispatch_to_device to bypass device check: packed_params is a
             // small CPU tensor read by the host-side kernel lambda, while the
             // other inputs live on CUDA.
@@ -260,15 +261,15 @@ auto AdamW::step_impl() -> void {
             }
 
             // Prepare attributes (use double precision for Float64 accuracy)
-            OpAttributes attrs;
-            attrs["lr"] = std::to_string(lr_);
-            attrs["beta1"] = std::to_string(beta1_);
-            attrs["beta2"] = std::to_string(beta2_);
-            attrs["eps"] = std::to_string(eps_);
-            attrs["weight_decay"] = std::to_string(weight_decay_);
-            attrs["step"] = std::to_string(step_count_);
-            attrs["decoupled"] = "true";  // Decoupled weight decay for AdamW
-            attrs["amsgrad"] = amsgrad_ ? "true" : "false";
+            NewOpAttributes attrs;
+            attrs.set(AttrKey::Lr, lr_);
+            attrs.set(AttrKey::Beta1, beta1_);
+            attrs.set(AttrKey::Beta2, beta2_);
+            attrs.set(AttrKey::Eps, eps_);
+            attrs.set(AttrKey::WeightDecay, weight_decay_);
+            attrs.set(AttrKey::Step, step_count_);
+            attrs.set(AttrKey::Decoupled, true);   // Decoupled weight decay for AdamW
+            attrs.set(AttrKey::Amsgrad, amsgrad_);
 
             dispatch(OpId::FusedAdamStep, inputs, attrs);
             continue;

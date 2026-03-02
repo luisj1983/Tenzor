@@ -1,5 +1,6 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/transform.hpp"
@@ -91,12 +92,6 @@ auto div(const Tensor& a, const Tensor& b) -> Tensor {
 // Scalar arithmetic overloads — avoid creating temporary scalar tensors.
 // Creates a size-{1} scalar tensor once and delegates to the tensor overload,
 // but backends can optimize this path internally.
-// Helper: format scalar with full double precision for OpAttributes
-static auto scalar_to_string(double scalar) -> std::string {
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%.17g", scalar);
-    return std::string(buf);
-}
 
 auto add(const Tensor& a, double scalar) -> Tensor {
     if (!a.impl()) {
@@ -104,7 +99,8 @@ auto add(const Tensor& a, double scalar) -> Tensor {
     }
     auto scalar_tensor = full({1}, scalar, a.dtype(), a.device());
     std::vector<Tensor> inputs = {a.is_contiguous() ? a : a.contiguous(), scalar_tensor};
-    OpAttributes attrs{{"scalar_b", scalar_to_string(scalar)}};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::ScalarB, scalar);
     return dispatch(OpId::Add, inputs, attrs)[0];
 }
 
@@ -114,7 +110,8 @@ auto sub(const Tensor& a, double scalar) -> Tensor {
     }
     auto scalar_tensor = full({1}, scalar, a.dtype(), a.device());
     std::vector<Tensor> inputs = {a.is_contiguous() ? a : a.contiguous(), scalar_tensor};
-    OpAttributes attrs{{"scalar_b", scalar_to_string(scalar)}};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::ScalarB, scalar);
     return dispatch(OpId::Sub, inputs, attrs)[0];
 }
 
@@ -124,7 +121,8 @@ auto mul(const Tensor& a, double scalar) -> Tensor {
     }
     auto scalar_tensor = full({1}, scalar, a.dtype(), a.device());
     std::vector<Tensor> inputs = {a.is_contiguous() ? a : a.contiguous(), scalar_tensor};
-    OpAttributes attrs{{"scalar_b", scalar_to_string(scalar)}};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::ScalarB, scalar);
     return dispatch(OpId::Mul, inputs, attrs)[0];
 }
 
@@ -134,7 +132,8 @@ auto div(const Tensor& a, double scalar) -> Tensor {
     }
     auto scalar_tensor = full({1}, scalar, a.dtype(), a.device());
     std::vector<Tensor> inputs = {a.is_contiguous() ? a : a.contiguous(), scalar_tensor};
-    OpAttributes attrs{{"scalar_b", scalar_to_string(scalar)}};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::ScalarB, scalar);
     return dispatch(OpId::Div, inputs, attrs)[0];
 }
 
@@ -201,11 +200,8 @@ auto dot(const Tensor& a, const Tensor& b) -> Tensor {
 }
 
 auto pow(const Tensor& input, float exponent) -> Tensor {
-    OpAttributes attrs;
-    // Use full float precision (9 significant digits for IEEE 754 float)
-    char exp_buf[32];
-    snprintf(exp_buf, sizeof(exp_buf), "%.9g", static_cast<double>(exponent));
-    attrs["exponent"] = std::string(exp_buf);
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Exponent, static_cast<double>(exponent));
     std::vector<Tensor> inputs = {input};
     return dispatch(OpId::Pow, inputs, attrs)[0];
 }
@@ -304,30 +300,23 @@ auto round(const Tensor& input) -> Tensor {
 }
 
 auto clamp(const Tensor& input, float min, float max) -> Tensor {
-    OpAttributes attrs;
-    char min_buf[32], max_buf[32];
-    snprintf(min_buf, sizeof(min_buf), "%.9g", static_cast<double>(min));
-    snprintf(max_buf, sizeof(max_buf), "%.9g", static_cast<double>(max));
-    attrs["min"] = std::string(min_buf);
-    attrs["max"] = std::string(max_buf);
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Min, static_cast<double>(min));
+    attrs.set(AttrKey::Max, static_cast<double>(max));
     std::vector<Tensor> inputs = {input};
     return dispatch(OpId::Clamp, inputs, attrs)[0];
 }
 
 auto clamp_min(const Tensor& input, float min) -> Tensor {
-    OpAttributes attrs;
-    char min_buf[32];
-    snprintf(min_buf, sizeof(min_buf), "%.9g", static_cast<double>(min));
-    attrs["min"] = std::string(min_buf);
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Min, static_cast<double>(min));
     std::vector<Tensor> inputs = {input};
     return dispatch(OpId::ClampMin, inputs, attrs)[0];
 }
 
 auto clamp_max(const Tensor& input, float max) -> Tensor {
-    OpAttributes attrs;
-    char max_buf[32];
-    snprintf(max_buf, sizeof(max_buf), "%.9g", static_cast<double>(max));
-    attrs["max"] = std::string(max_buf);
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Max, static_cast<double>(max));
     std::vector<Tensor> inputs = {input};
     return dispatch(OpId::ClampMax, inputs, attrs)[0];
 }
@@ -669,8 +658,8 @@ auto searchsorted(const Tensor& sorted_sequence, const Tensor& values, bool righ
     // Try OpId dispatch first (backend-optimized kernel)
     try {
         std::array<Tensor, 2> inputs = {sorted_sequence, values};
-        OpAttributes attrs;
-        attrs["right"] = right ? "1" : "0";
+        NewOpAttributes attrs;
+        attrs.set(AttrKey::Right, right);
         return dispatch<OpId::SearchSorted>(inputs, attrs)[0];
     } catch (const std::runtime_error&) {
         // Fall through to CPU inline implementation
@@ -758,10 +747,10 @@ auto gumbel_softmax(const Tensor& logits, double tau, bool hard, int64_t dim) ->
     // Try OpId dispatch first
     try {
         std::array<Tensor, 1> inputs = {logits};
-        OpAttributes attrs;
-        attrs["tau"] = std::to_string(tau);
-        attrs["hard"] = hard ? "1" : "0";
-        attrs["dim"] = std::to_string(dim);
+        NewOpAttributes attrs;
+        attrs.set(AttrKey::Tau, tau);
+        attrs.set(AttrKey::Hard, hard);
+        attrs.set(AttrKey::Dim, dim);
         return dispatch<OpId::GumbelSoftmax>(inputs, attrs)[0];
     } catch (const std::runtime_error&) {
         // Fall through to inline implementation
@@ -786,8 +775,8 @@ auto gumbel_softmax(const Tensor& logits, double tau, bool hard, int64_t dim) ->
 
     // Softmax
     std::array<Tensor, 1> sm_inputs = {scaled};
-    OpAttributes sm_attrs;
-    sm_attrs["dim"] = std::to_string(dim);
+    NewOpAttributes sm_attrs;
+    sm_attrs.set(AttrKey::Dim, dim);
     Tensor y_soft = dispatch<OpId::Softmax>(sm_inputs, sm_attrs)[0];
 
     if (!hard) {
@@ -805,8 +794,8 @@ auto gumbel_softmax(const Tensor& logits, double tau, bool hard, int64_t dim) ->
     std::array<Tensor, 3> scatter_inputs = {y_hard, indices,
         full(std::vector<int64_t>(indices.shape().begin(), indices.shape().end()),
              1.0, logits.dtype(), logits.device())};
-    OpAttributes scatter_attrs;
-    scatter_attrs["dim"] = std::to_string(actual_dim);
+    NewOpAttributes scatter_attrs;
+    scatter_attrs.set(AttrKey::Dim, actual_dim);
     y_hard = dispatch<OpId::Scatter>(scatter_inputs, scatter_attrs)[0];
 
     // Straight-through: y_hard - y_soft.detach() + y_soft

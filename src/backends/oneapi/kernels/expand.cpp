@@ -1,5 +1,6 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/backend/backend.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include <sycl/sycl.hpp>
 #include <stdexcept>
 #include <sstream>
@@ -149,11 +150,11 @@ void expand_kernel_impl(const T* input_data, T* output_data,
  */
 auto expand_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
     // Extract target shape from attributes
-    if (!attrs.contains("shape")) {
+    if (!attrs.has(AttrKey::Shape)) {
         throw std::invalid_argument("expand: 'shape' attribute is required");
     }
 
-    std::vector<int64_t> target_shape = parse_shape_string(attrs.at("shape"));
+    std::vector<int64_t> target_shape = attrs.get_int_list(AttrKey::Shape);
     auto input_shape_span = input.shape();
     std::vector<int64_t> input_shape(input_shape_span.begin(), input_shape_span.end());
 

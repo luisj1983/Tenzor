@@ -363,6 +363,16 @@ public:
         */
     }
 
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        // Delegate to tensor backward and wrap results
+        std::vector<Tensor> tensor_grads;
+        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
+        auto results = backward(std::move(tensor_grads));
+        std::vector<Variable> var_results;
+        for (auto& t : results) var_results.emplace_back(t, false);
+        return var_results;
+    }
+
 private:
     int64_t stride_;
     int64_t padding_;
@@ -592,6 +602,16 @@ public:
         throw std::runtime_error("Conv1d backward not yet fully implemented");
     }
 
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        // Delegate to tensor backward and wrap results
+        std::vector<Tensor> tensor_grads;
+        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
+        auto results = backward(std::move(tensor_grads));
+        std::vector<Variable> var_results;
+        for (auto& t : results) var_results.emplace_back(t, false);
+        return var_results;
+    }
+
 private:
     int64_t stride_;
     int64_t padding_;
@@ -669,6 +689,16 @@ public:
         // (Implementation would mirror Conv2d forward with role reversal)
 
         throw std::runtime_error("ConvTranspose2d backward not yet fully implemented");
+    }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        // Delegate to tensor backward and wrap results
+        std::vector<Tensor> tensor_grads;
+        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
+        auto results = backward(std::move(tensor_grads));
+        std::vector<Variable> var_results;
+        for (auto& t : results) var_results.emplace_back(t, false);
+        return var_results;
     }
 
 private:

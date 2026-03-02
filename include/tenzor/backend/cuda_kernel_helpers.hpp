@@ -44,22 +44,13 @@ inline cudaStream_t extract_stream(const OpAttributes& attrs) noexcept {
     }
 
     // Check for stream key
-    auto it = attrs.find("stream");
-    if (it == attrs.end()) [[likely]] {
+    if (!attrs.has(AttrKey::Stream)) [[likely]] {
         return nullptr;
     }
 
-    // Parse stream pointer from string (only reached for custom streams)
-    uint64_t val = 0;
-    auto [ptr, ec] = std::from_chars(
-        it->second.data(),
-        it->second.data() + it->second.size(),
-        val
-    );
-
-    return (ec == std::errc{})
-        ? reinterpret_cast<cudaStream_t>(val)
-        : nullptr;
+    // Stream stored as int64_t (pointer cast to integer)
+    auto val = static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0));
+    return reinterpret_cast<cudaStream_t>(val);
 }
 
 // ============================================================================

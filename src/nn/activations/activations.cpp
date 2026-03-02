@@ -1,5 +1,6 @@
 #include "tenzor/nn/activations/activations.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/autograd/function.hpp"
@@ -375,8 +376,8 @@ auto tanh(const Variable& input) -> Variable {
 }
 
 auto leaky_relu(const Variable& input, double negative_slope) -> Variable {
-    OpAttributes attrs;
-    attrs["alpha"] = std::to_string(static_cast<float>(negative_slope));
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Alpha, static_cast<double>(negative_slope));
     std::vector<Tensor> inputs = {input.tensor()};
     auto result = dispatch(OpId::LeakyReLU, inputs, attrs)[0];
     return Variable(result, input.requires_grad());
@@ -471,16 +472,16 @@ ELU::ELU(double alpha) : alpha_(alpha) {}
 
 auto elu(const Variable& input, double alpha) -> Variable {
     if (!input.requires_grad() || !is_grad_enabled()) {
-        OpAttributes attrs;
-        attrs["alpha"] = std::to_string(static_cast<float>(alpha));
+        NewOpAttributes attrs;
+        attrs.set(AttrKey::Alpha, static_cast<double>(alpha));
         std::vector<Tensor> inputs = {input.tensor()};
         auto result = dispatch(OpId::Elu, inputs, attrs)[0];
         return Variable(result, false);
     }
 
     // Compute forward
-    OpAttributes attrs;
-    attrs["alpha"] = std::to_string(static_cast<float>(alpha));
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Alpha, static_cast<double>(alpha));
     std::vector<Tensor> inputs_vec = {input.tensor()};
     auto result_tensor = dispatch(OpId::Elu, inputs_vec, attrs)[0];
 
@@ -645,8 +646,8 @@ auto leaky_relu_(Tensor& input, double negative_slope) -> Tensor& {
         throw std::runtime_error("In-place leaky_relu requires contiguous tensor");
     }
 
-    OpAttributes attrs;
-    attrs["negative_slope"] = negative_slope;
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Negative_slope, negative_slope);
     dispatch_inplace(OpId::LeakyReLUInplace, input, std::span<const Tensor>{}, attrs);
 
     return input;

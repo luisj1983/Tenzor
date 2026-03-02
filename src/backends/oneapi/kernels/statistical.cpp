@@ -1,5 +1,6 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/backend/backend.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include <sycl/sycl.hpp>
 #include <limits>
 #include <stdexcept>
@@ -37,9 +38,9 @@ inline auto get_data_ptr(const Tensor& t) -> T* {
  * @return Tensor Standard deviation tensor
  */
 auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
-    int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
-    bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
-    int64_t correction = attrs.contains("correction") ? std::stoll(attrs.at("correction")) : 1;
+    int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+    bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+    int64_t correction = attrs.get_int(AttrKey::Correction, 1);
 
     auto shape = input.shape();
 
@@ -188,9 +189,9 @@ auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
  * @return Tensor Variance tensor
  */
 auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
-    int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
-    bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
-    int64_t correction = attrs.contains("correction") ? std::stoll(attrs.at("correction")) : 1;
+    int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+    bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+    int64_t correction = attrs.get_int(AttrKey::Correction, 1);
 
     auto shape = input.shape();
 
@@ -331,8 +332,8 @@ auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
  * @return Tensor Product tensor
  */
 auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
-    int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
-    bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
+    int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+    bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
 
     auto shape_span = input.shape();
     std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
@@ -540,9 +541,9 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
 
 // Norm kernel - compute Lp norm
 auto norm_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
-    float p = attrs.contains("p") ? std::stof(attrs.at("p")) : 2.0f;
-    int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
-    bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
+    float p = static_cast<float>(attrs.get_float(AttrKey::P, 2.0));
+    int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+    bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
 
     auto shape_span = input.shape();
     std::vector<int64_t> shape(shape_span.begin(), shape_span.end());

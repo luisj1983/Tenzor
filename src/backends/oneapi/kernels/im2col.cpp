@@ -1,5 +1,6 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/backend/backend.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include <sycl/sycl.hpp>
 #include <stdexcept>
 
@@ -147,14 +148,14 @@ auto im2col_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& 
     }
 
     // Extract parameters from attributes
-    if (!attrs.contains("kernel_size")) {
+    if (!attrs.has(AttrKey::KernelSize)) {
         throw std::invalid_argument("im2col: 'kernel_size' attribute is required");
     }
 
-    int64_t kernel_size = std::stoll(attrs.at("kernel_size"));
-    int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
-    int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
-    int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
+    int64_t kernel_size = attrs.get_int(AttrKey::KernelSize);
+    int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+    int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+    int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
 
     const int64_t N = input_shape[0];        // Batch size
     const int64_t C = input_shape[1];        // Input channels
@@ -236,16 +237,16 @@ auto col2im_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& 
     }
 
     // Extract parameters from attributes
-    if (!attrs.contains("kernel_size") || !attrs.contains("output_height") || !attrs.contains("output_width")) {
+    if (!attrs.has(AttrKey::KernelSize) || !attrs.has(AttrKey::OutputHeight) || !attrs.has(AttrKey::OutputWidth)) {
         throw std::invalid_argument("col2im: 'kernel_size', 'output_height', and 'output_width' attributes are required");
     }
 
-    int64_t kernel_size = std::stoll(attrs.at("kernel_size"));
-    int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
-    int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
-    int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
-    int64_t output_height = std::stoll(attrs.at("output_height"));
-    int64_t output_width = std::stoll(attrs.at("output_width"));
+    int64_t kernel_size = attrs.get_int(AttrKey::KernelSize);
+    int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+    int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+    int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+    int64_t output_height = attrs.get_int(AttrKey::OutputHeight);
+    int64_t output_width = attrs.get_int(AttrKey::OutputWidth);
 
     const int64_t N = input_shape[0];                    // Batch size
     const int64_t K_h = kernel_size;                     // Kernel height

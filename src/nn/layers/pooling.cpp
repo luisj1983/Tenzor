@@ -4,6 +4,7 @@
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/backend/dispatch.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <limits>
@@ -64,8 +65,11 @@ public:
         // Use OpId dispatch for non-CPU devices (CUDA, Vulkan, etc.)
         if (grad_output.device().type != Device::Type::CPU) {
             std::vector<Tensor> inputs = {grad_output, indices};
+            OpAttributes bwd_attrs;
+            bwd_attrs.set(AttrKey::InputH, H_in);
+            bwd_attrs.set(AttrKey::InputW, W_in);
             auto result = dispatch_to_device(OpId::MaxPool2dBackward, grad_output.device().type,
-                inputs, {{"H_in", std::to_string(H_in)}, {"W_in", std::to_string(W_in)}});
+                inputs, bwd_attrs);
             return {result[0]};
         }
 
@@ -139,6 +143,16 @@ public:
         return {grad_input};
     }
 
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        // Pooling backward uses index-based scatter -- delegate to tensor backward and wrap results
+        std::vector<Tensor> tensor_grads;
+        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
+        auto results = backward(std::move(tensor_grads));
+        std::vector<Variable> var_results;
+        for (auto& t : results) var_results.emplace_back(t, false);
+        return var_results;
+    }
+
 private:
     int64_t kernel_size_;
     int64_t stride_;
@@ -177,10 +191,12 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
     // Use OpId dispatch for non-CPU devices (CUDA, Vulkan, etc.)
     if (original_device.type != Device::Type::CPU) {
         std::vector<Tensor> inputs = {input.tensor()};
+        OpAttributes fwd_attrs;
+        fwd_attrs.set(AttrKey::KernelSize, kernel_size_);
+        fwd_attrs.set(AttrKey::Stride, stride_);
+        fwd_attrs.set(AttrKey::Padding, padding_);
         auto result = dispatch_to_device(OpId::MaxPool2dForward, original_device.type,
-            inputs, {{"kernel_size", std::to_string(kernel_size_)},
-                     {"stride", std::to_string(stride_)},
-                     {"padding", std::to_string(padding_)}});
+            inputs, fwd_attrs);
         output = result[0];
         indices = result[1];
     } else {
@@ -407,11 +423,13 @@ public:
         // Use OpId dispatch for non-CPU devices (CUDA, Vulkan, etc.)
         if (grad_output.device().type != Device::Type::CPU) {
             std::vector<Tensor> inputs = {grad_output};
+            OpAttributes bwd_attrs;
+            bwd_attrs.set(AttrKey::InputShape, std::to_string(N) + "," + std::to_string(C) + "," + std::to_string(H_in_) + "," + std::to_string(W_in_));
+            bwd_attrs.set(AttrKey::KernelSize, kernel_size_);
+            bwd_attrs.set(AttrKey::Stride, stride_);
+            bwd_attrs.set(AttrKey::Padding, padding_);
             auto result = dispatch_to_device(OpId::AvgPool2dBackward, grad_output.device().type,
-                inputs, {{"input_shape", std::to_string(N) + "," + std::to_string(C) + "," + std::to_string(H_in_) + "," + std::to_string(W_in_)},
-                         {"kernel_size", std::to_string(kernel_size_)},
-                         {"stride", std::to_string(stride_)},
-                         {"padding", std::to_string(padding_)}});
+                inputs, bwd_attrs);
             return {result[0]};
         }
 
@@ -536,6 +554,16 @@ public:
         return {grad_input};
     }
 
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        // Pooling backward uses scatter operations -- delegate to tensor backward and wrap results
+        std::vector<Tensor> tensor_grads;
+        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
+        auto results = backward(std::move(tensor_grads));
+        std::vector<Variable> var_results;
+        for (auto& t : results) var_results.emplace_back(t, false);
+        return var_results;
+    }
+
 private:
     int64_t kernel_size_;
     int64_t stride_;
@@ -566,10 +594,12 @@ auto AvgPool2d::forward_impl(const Variable& input) -> Variable {
     // Use OpId dispatch for non-CPU devices (CUDA, Vulkan, etc.)
     if (original_device.type != Device::Type::CPU) {
         std::vector<Tensor> inputs = {input.tensor()};
+        OpAttributes fwd_attrs;
+        fwd_attrs.set(AttrKey::KernelSize, kernel_size_);
+        fwd_attrs.set(AttrKey::Stride, stride_);
+        fwd_attrs.set(AttrKey::Padding, padding_);
         auto result = dispatch_to_device(OpId::AvgPool2dForward, original_device.type,
-            inputs, {{"kernel_size", std::to_string(kernel_size_)},
-                     {"stride", std::to_string(stride_)},
-                     {"padding", std::to_string(padding_)}});
+            inputs, fwd_attrs);
         output = result[0];
     } else {
         // CPU path
@@ -742,8 +772,8 @@ public:
         // Use operation registry to dispatch to appropriate backend
         if (target_device.type != Device::Type::CPU) {
             OpAttributes attrs;
-            attrs["H_in"] = std::to_string(H_in_);
-            attrs["W_in"] = std::to_string(W_in_);
+            attrs.set(AttrKey::InputH, H_in_);
+            attrs.set(AttrKey::InputW, W_in_);
             std::vector<Tensor> inputs = {grad_output};
             return dispatch<OpId::AdaptiveAvgPool2dBackward>(inputs, attrs);
         }
@@ -846,6 +876,16 @@ public:
         return {grad_input};
     }
 
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        // Adaptive pooling backward uses scatter operations -- delegate to tensor backward and wrap results
+        std::vector<Tensor> tensor_grads;
+        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
+        auto results = backward(std::move(tensor_grads));
+        std::vector<Variable> var_results;
+        for (auto& t : results) var_results.emplace_back(t, false);
+        return var_results;
+    }
+
 private:
     int64_t H_in_;
     int64_t W_in_;
@@ -881,8 +921,8 @@ auto AdaptiveAvgPool2d::forward_impl(const Variable& input) -> Variable {
     // Use operation registry to dispatch to appropriate backend
     if (target_device.type != Device::Type::CPU) {
         OpAttributes attrs;
-        attrs["output_h"] = std::to_string(H_out);
-        attrs["output_w"] = std::to_string(W_out);
+        attrs.set(AttrKey::OutputSizeH, H_out);
+        attrs.set(AttrKey::OutputSizeW, W_out);
         std::vector<Tensor> inputs = {input.tensor()};
         auto results = dispatch<OpId::AdaptiveAvgPool2d>(inputs, attrs);
         output = results[0];
@@ -1091,10 +1131,12 @@ auto MaxPool3d::forward_impl(const Variable& input) -> Variable {
     // GPU path: OpId dispatch
     if (original_device.type != Device::Type::CPU) {
         std::vector<Tensor> inputs = {input.tensor()};
+        OpAttributes fwd_attrs;
+        fwd_attrs.set(AttrKey::KernelSize, kernel_size_);
+        fwd_attrs.set(AttrKey::Stride, stride_);
+        fwd_attrs.set(AttrKey::Padding, padding_);
         auto result = dispatch_to_device(OpId::MaxPool3dForward, original_device.type,
-            inputs, {{"kernel_size", std::to_string(kernel_size_)},
-                     {"stride", std::to_string(stride_)},
-                     {"padding", std::to_string(padding_)}});
+            inputs, fwd_attrs);
         return Variable(result[0], input.requires_grad());
     }
 
@@ -1216,10 +1258,12 @@ auto AvgPool3d::forward_impl(const Variable& input) -> Variable {
     // GPU path: OpId dispatch
     if (original_device.type != Device::Type::CPU) {
         std::vector<Tensor> inputs = {input.tensor()};
+        OpAttributes fwd_attrs;
+        fwd_attrs.set(AttrKey::KernelSize, kernel_size_);
+        fwd_attrs.set(AttrKey::Stride, stride_);
+        fwd_attrs.set(AttrKey::Padding, padding_);
         auto result = dispatch_to_device(OpId::AvgPool3dForward, original_device.type,
-            inputs, {{"kernel_size", std::to_string(kernel_size_)},
-                     {"stride", std::to_string(stride_)},
-                     {"padding", std::to_string(padding_)}});
+            inputs, fwd_attrs);
         return Variable(result[0], input.requires_grad());
     }
 

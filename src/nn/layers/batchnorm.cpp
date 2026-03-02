@@ -5,9 +5,8 @@
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include <cmath>
-#include <sstream>
-#include <iomanip>
 
 // SIMD headers for optimized BatchNorm
 #if defined(__x86_64__) || defined(_M_X64)
@@ -81,9 +80,7 @@ public:
             // Dispatch to cuDNN/CUDA kernel for BatchNorm backward
             // inputs: [grad_output, input, gamma, saved_mean, saved_inv_var]
             OpAttributes backward_attrs;
-            std::ostringstream eps_ss;
-            eps_ss << std::scientific << std::setprecision(9) << static_cast<float>(eps_);
-            backward_attrs["epsilon"] = eps_ss.str();
+            backward_attrs.set(AttrKey::Eps, static_cast<float>(eps_));
 
             std::vector<Tensor> backward_inputs = {grad_output, input, weight, mean, invstd};
             std::vector<Tensor> backward_results = dispatch(OpId::BatchNorm2dBackward, backward_inputs, backward_attrs);
@@ -154,6 +151,16 @@ public:
 
         // Return gradients in the order of input_vars: [input, weight, bias]
         return {grad_input, grad_weight, grad_bias};
+    }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        // Complex batch normalization backward -- delegate to tensor backward and wrap results
+        std::vector<Tensor> tensor_grads;
+        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
+        auto results = backward(std::move(tensor_grads));
+        std::vector<Variable> var_results;
+        for (auto& t : results) var_results.emplace_back(t, false);
+        return var_results;
     }
 
 private:
@@ -359,11 +366,8 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
             }
 
             OpAttributes fused_attrs;
-            std::ostringstream eps_ss, mom_ss;
-            eps_ss << std::scientific << std::setprecision(9) << static_cast<float>(eps_);
-            mom_ss << std::scientific << std::setprecision(9) << static_cast<float>(momentum_);
-            fused_attrs["epsilon"] = eps_ss.str();
-            fused_attrs["momentum"] = mom_ss.str();
+            fused_attrs.set(AttrKey::Eps, static_cast<float>(eps_));
+            fused_attrs.set(AttrKey::Momentum, static_cast<float>(momentum_));
 
             std::vector<Tensor> fused_inputs = {input_work, running_mean, running_var, weight, bias};
             std::vector<Tensor> fused_results = dispatch(OpId::BatchNorm2dFusedTraining, fused_inputs, fused_attrs);
@@ -458,10 +462,8 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
             }
 
             // Use backend kernel for running stats update
-            OpAttributes update_attrs;
-            std::ostringstream momentum_ss;
-            momentum_ss << std::scientific << std::setprecision(9) << static_cast<float>(momentum_);
-            update_attrs["momentum"] = momentum_ss.str();
+            NewOpAttributes update_attrs;
+            update_attrs.set(AttrKey::Momentum, static_cast<double>(momentum_));
             std::vector<Tensor> update_inputs = {running_mean_on_device, running_var_on_device, batch_mean, unbiased_var};
             std::vector<Tensor> updated_stats = dispatch(OpId::BatchNorm2dUpdateRunningStats, update_inputs, update_attrs);
 
@@ -499,9 +501,7 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
     // Normalize using backend kernel
     Tensor output;
     OpAttributes forward_attrs;
-    std::ostringstream epsilon_ss;
-    epsilon_ss << std::scientific << std::setprecision(9) << static_cast<float>(eps_);
-    forward_attrs["epsilon"] = epsilon_ss.str();
+    forward_attrs.set(AttrKey::Eps, static_cast<float>(eps_));
 
     if (affine_ && cached_weight_ && cached_bias_) {
         // Use affine forward kernel: output = gamma * (x - mean) / sqrt(var + eps) + beta
@@ -720,6 +720,16 @@ public:
         }
 
         return {grad_input, grad_weight, grad_bias};
+    }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        // Complex batch normalization backward -- delegate to tensor backward and wrap results
+        std::vector<Tensor> tensor_grads;
+        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
+        auto results = backward(std::move(tensor_grads));
+        std::vector<Variable> var_results;
+        for (auto& t : results) var_results.emplace_back(t, false);
+        return var_results;
     }
 
 private:

@@ -6,6 +6,7 @@
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 
 namespace tenzor::nn {
@@ -121,8 +122,8 @@ auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> V
         auto batch_size = input.tensor().shape()[0];
 
         // Use backend dispatch for one-hot encoding (avoids GPU→CPU→GPU round-trip)
-        OpAttributes oh_attrs;
-        oh_attrs["num_classes"] = std::to_string(num_classes);
+        NewOpAttributes oh_attrs;
+        oh_attrs.set(AttrKey::NumClasses, num_classes);
 
         // Ensure target is on same device as input for dispatch
         Tensor target_dev = (target.device() == input.tensor().device())

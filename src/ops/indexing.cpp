@@ -1,5 +1,6 @@
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/core/dtype.hpp"
@@ -13,22 +14,22 @@ auto slice(const Tensor& input, int64_t dim, int64_t start,
 }
 
 auto index_select(const Tensor& input, int64_t dim, const Tensor& index) -> Tensor {
-    OpAttributes attrs;
-    attrs["dim"] = std::to_string(dim);
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
     std::vector<Tensor> inputs = {input, index};
     return dispatch(OpId::IndexSelect, inputs, attrs)[0];
 }
 
 auto gather(const Tensor& input, int64_t dim, const Tensor& index) -> Tensor {
-    OpAttributes attrs;
-    attrs["dim"] = std::to_string(dim);
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
     std::vector<Tensor> inputs = {input, index};
     return dispatch(OpId::Gather, inputs, attrs)[0];
 }
 
 auto scatter(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src) -> Tensor {
-    OpAttributes attrs;
-    attrs["dim"] = std::to_string(dim);
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
     std::vector<Tensor> inputs = {input, index, src};
     return dispatch(OpId::Scatter, inputs, attrs)[0];
 }
@@ -39,10 +40,8 @@ auto masked_select(const Tensor& input, const Tensor& mask) -> Tensor {
 }
 
 auto masked_fill(const Tensor& input, const Tensor& mask, float value) -> Tensor {
-    OpAttributes attrs;
-    char value_buf[32];
-    snprintf(value_buf, sizeof(value_buf), "%.9e", value);
-    attrs["value"] = std::string(value_buf);
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Value, static_cast<double>(value));
     std::vector<Tensor> inputs = {input, mask};
     return dispatch(OpId::MaskedFill, inputs, attrs)[0];
 }
@@ -75,8 +74,8 @@ auto nonzero(const Tensor& input) -> Tensor {
             if (i > 0) shape_str += ",";
             shape_str += std::to_string(shape[i]);
         }
-        attrs["shape"] = shape_str;
-        attrs["ndim"] = std::to_string(ndim);
+        attrs.set(AttrKey::Shape, shape_str);
+        attrs.set(AttrKey::Dim, ndim);
 
         std::vector<Tensor> inputs = {input};
         auto results = dispatch(OpId::Nonzero, inputs, attrs);

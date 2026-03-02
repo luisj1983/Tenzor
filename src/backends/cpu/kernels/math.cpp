@@ -233,6 +233,14 @@ static void matmul_microkernel_float64(
                 __m512d c_vec = _mm512_loadu_pd(&C[i * ldc + j]);
 
                 for (int64_t k = 0; k < K; ++k) {
+                    // Prefetch next A and B values
+                    if (k + PREFETCH_A < static_cast<size_t>(K)) {
+                        _mm_prefetch(reinterpret_cast<const char*>(&A[i * lda + k + PREFETCH_A]), _MM_HINT_T0);
+                    }
+                    if (k + PREFETCH_B < static_cast<size_t>(K)) {
+                        _mm_prefetch(reinterpret_cast<const char*>(&B[(k + PREFETCH_B) * ldb + j]), _MM_HINT_T0);
+                    }
+
                     __m512d a_vec = _mm512_set1_pd(A[i * lda + k]);
                     __m512d b_vec = _mm512_loadu_pd(&B[k * ldb + j]);
                     c_vec = _mm512_fmadd_pd(a_vec, b_vec, c_vec);

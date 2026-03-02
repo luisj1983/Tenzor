@@ -10,6 +10,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <limits>
@@ -223,8 +224,8 @@ auto MultiheadAttention::scaled_dot_product_attention(
 
             // Use dispatch to call cuDNN SDPA - pass 4D tensors directly
             OpAttributes attrs;
-            attrs["scale"] = std::to_string(scale_f);
-            attrs["use_cudnn_sdpa"] = "true";  // Signal to use cuDNN SDPA
+            attrs.set(AttrKey::Scale, static_cast<double>(scale_f));
+            attrs.set(AttrKey::UseCudnnSdpa, true);
             std::vector<Tensor> fused_inputs = {q_contig, k_contig, v_contig};
             Tensor output = dispatch<OpId::FusedAttention>(fused_inputs, attrs)[0];
 
@@ -266,10 +267,10 @@ auto MultiheadAttention::scaled_dot_product_attention(
             // which is more efficient than building and applying an explicit mask tensor
             // Dropout is fused into the kernel using Philox counter-based RNG
             OpAttributes attrs;
-            attrs["scale"] = std::to_string(scale_f);
-            attrs["causal"] = is_causal_ ? "true" : "false";
-            attrs["dropout_p"] = std::to_string(static_cast<float>(dropout_p));
-            attrs["is_training"] = is_training() ? "true" : "false";
+            attrs.set(AttrKey::Scale, static_cast<double>(scale_f));
+            attrs.set(AttrKey::Causal, is_causal_);
+            attrs.set(AttrKey::DropoutP, static_cast<double>(dropout_p));
+            attrs.set(AttrKey::IsTraining, is_training());
             std::vector<Tensor> flash_inputs = {q_contig, k_contig, v_contig};
             Tensor output = dispatch<OpId::FlashAttention>(flash_inputs, attrs)[0];
 

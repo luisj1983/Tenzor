@@ -26,6 +26,10 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
         return {grad_outputs[0]};
     }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        return {grad_outputs[0]};
+    }
 };
 
 // Helper function to cast a Variable to a new dtype with autograd support

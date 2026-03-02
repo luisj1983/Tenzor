@@ -220,6 +220,12 @@ __all__ = [
     "cumsum",
     "cumprod",
 
+    # Search/sampling operations
+    "searchsorted",
+    "gumbel_softmax",
+    "roll",
+    "split_with_sizes",
+
     # Neural network
     "nn",
     "optim",
@@ -235,4 +241,9 @@ __all__ = [
     "no_grad",
     "enable_grad",
     "initialize",
+    "empty_cache",
+    "memory_stats",
+    "reset_memory_stats",
+    "set_anomaly_detection",
+    "is_anomaly_detection_enabled",
 ]

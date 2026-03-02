@@ -8,6 +8,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include <cmath>
 #include <cstring>
@@ -76,11 +77,11 @@ auto Adadelta::step_impl() -> void {
                 grad_orig, param->tensor(), square_avg_[i], acc_delta_[i]
             };
 
-            OpAttributes attrs;
-            attrs["lr"] = std::to_string(static_cast<float>(lr_));
-            attrs["rho"] = std::to_string(static_cast<float>(rho_));
-            attrs["eps"] = std::to_string(static_cast<float>(eps_));
-            attrs["weight_decay"] = std::to_string(static_cast<float>(weight_decay_));
+            NewOpAttributes attrs;
+            attrs.set(AttrKey::Lr, static_cast<float>(lr_));
+            attrs.set(AttrKey::Rho, static_cast<float>(rho_));
+            attrs.set(AttrKey::Eps, static_cast<float>(eps_));
+            attrs.set(AttrKey::WeightDecay, static_cast<float>(weight_decay_));
 
             dispatch(OpId::FusedAdadeltaStep, inputs, attrs);
             continue;
@@ -95,11 +96,11 @@ auto Adadelta::step_impl() -> void {
                 param->tensor(), grad_orig, square_avg_[i], acc_delta_[i]
             };
 
-            OpAttributes attrs;
-            attrs["rho"] = std::to_string(static_cast<float>(rho_));
-            attrs["eps"] = std::to_string(static_cast<float>(eps_));
-            attrs["lr"] = std::to_string(static_cast<float>(lr_));
-            attrs["weight_decay"] = std::to_string(static_cast<float>(weight_decay_));
+            NewOpAttributes attrs;
+            attrs.set(AttrKey::Rho, static_cast<float>(rho_));
+            attrs.set(AttrKey::Eps, static_cast<float>(eps_));
+            attrs.set(AttrKey::Lr, static_cast<float>(lr_));
+            attrs.set(AttrKey::WeightDecay, static_cast<float>(weight_decay_));
 
             dispatch(OpId::FusedAdadeltaStep, inputs, attrs);
             continue;

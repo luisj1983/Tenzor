@@ -52,6 +52,7 @@ enum class AttrKey : uint16_t {
     Dilation,
     DilationH,
     DilationW,
+    DilationD,
     Groups,
     KernelSize,
     KernelSizeH,
@@ -60,17 +61,32 @@ enum class AttrKey : uint16_t {
     OutputPadding,
     OutputPaddingH,
     OutputPaddingW,
+    OutputPaddingD,
+
+    // Input/output dimensions (for ops needing explicit sizes)
+    InputH,
+    InputW,
 
     // Numeric parameters
     Eps,
     Momentum,
     Alpha,
     Beta,
+    Beta1,
+    Beta2,
     Tau,
     Value,
     Lr,
+    LrDecay,
     WeightDecay,
     Rho,
+    Dampening,
+    Scale,
+    Threshold,
+    Correction,
+    SpatialScale,
+    SamplingRatio,
+    DropoutP,
 
     // Boolean flags
     Keepdim,
@@ -81,6 +97,22 @@ enum class AttrKey : uint16_t {
     Hard,
     Centered,
     Accumulate,
+    Descending,
+    Unbiased,
+    Nesterov,
+    Decoupled,
+    Amsgrad,
+    Largest,
+    Sorted,
+    ReturnInverse,
+    ReturnCounts,
+    AlignCorners,
+    Aligned,
+    Causal,
+    ComputeGrad,
+    ComputeGradInput,
+    ComputeGradWeight,
+    ComputeGradBias,
 
     // Shape/size lists (stored as comma-separated in legacy, direct int list in new)
     Shape,
@@ -89,6 +121,9 @@ enum class AttrKey : uint16_t {
     OutputSizeH,
     OutputSizeW,
     OutputSizeD,
+    Chunks,
+    SplitSize,
+    Steps,
 
     // Dtype/device
     Dtype,
@@ -109,9 +144,70 @@ enum class AttrKey : uint16_t {
     P,               // Dropout probability
     Norm,            // FFT normalization mode
     N,               // FFT signal length
+    K,               // Top-k count
+    M,               // Dimension parameter
+    Diagonal,        // Diagonal offset
+    Mode,            // Operation mode string
+    Reduction,       // Loss reduction mode
+    HiddenSize,      // RNN hidden size
+    NumHeads,        // Attention head count
+    NumLayers,       // RNN layer count
+    NumPositions,    // Position count
+    PaddingIdx,      // Embedding padding index
+    BatchSize,       // Batch size
+    DeviceId,        // Device identifier
+    DeviceIndex,     // Device index
+    IouType,         // IoU type string
+    FeatHeight,      // Feature map height
+    FeatWidth,       // Feature map width
+    UseCudnnSdpa,    // Use cuDNN SDPA flag
+
+    // Clamp/scalar parameters
+    Min,
+    Max,
+    Exponent,
+    ScalarB,
 
     // Stream handle
     Stream,
+
+    // Shape descriptors (stored as comma-separated strings for backward compat)
+    InputShape,
+    WeightShape,
+
+    // Additional list attributes (for slice, permute, tile)
+    Starts,          // Slice start indices
+    Ends,            // Slice end indices
+    Dims,            // Permute dimension order
+    Reps,            // Tile repetition counts
+
+    // Fused operation flags
+    HasBias,         // Whether bias is present
+    IsTraining,      // Whether in training mode
+    NumGroups,       // Number of groups (GroupNorm, grouped convolution)
+    TargetDtype,     // Target dtype for cast operations
+
+    // Im2col/Col2im parameters
+    Channels,        // Number of channels
+    Height,          // Input/output height
+    Width,           // Input/output width
+    OutputHeight,    // Explicit output height
+    OutputWidth,     // Explicit output width
+
+    // Quantization parameters
+    InputScale,
+    InputZeroPoint,
+    WeightScaleQ,    // quantization weight scale (WeightShape already taken)
+    WeightZeroPoint,
+    OutputScale,
+    OutputZeroPoint,
+    ZeroPoint,
+
+    // Vision / detection
+    IouThreshold,    // NMS IoU threshold
+
+    // Embedding
+    IncludeLastOffset, // EmbeddingBag flag
 
     // Sentinel
     _Count
@@ -231,6 +327,34 @@ public:
     auto get_string(AttrKey key, std::string_view default_val = "") const -> std::string_view {
         if (auto* e = find(key)) return e->value.as_string();
         return default_val;
+    }
+
+    /**
+     * @brief Parse comma-separated integer list from a string attribute.
+     *
+     * @param key Attribute key (must be stored as string, e.g. "2,3,4")
+     * @return Vector of parsed int64_t values, empty if key not found
+     */
+    auto get_int_list(AttrKey key) const -> std::vector<int64_t> {
+        auto* e = find(key);
+        if (!e) return {};
+        if (e->value.tag() == AttrValue::Tag::Int64) {
+            return {e->value.as_int()};
+        }
+        if (e->value.tag() != AttrValue::Tag::String) return {};
+        const auto& str = e->value.as_string();
+        std::vector<int64_t> result;
+        size_t start = 0;
+        size_t end = str.find(',');
+        while (start < str.size()) {
+            if (end == std::string::npos) end = str.size();
+            int64_t val;
+            auto [ptr, ec] = std::from_chars(str.data() + start, str.data() + end, val);
+            if (ec == std::errc{}) result.push_back(val);
+            start = end + 1;
+            end = str.find(',', start);
+        }
+        return result;
     }
 
     auto has(AttrKey key) const -> bool {

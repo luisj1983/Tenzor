@@ -5,6 +5,7 @@
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include <cmath>
 #include <stdexcept>
 
@@ -429,8 +430,8 @@ public:
             auto rs = rstd_orig.contiguous();
             auto wt = weight_orig.contiguous();
 
-            OpAttributes attrs;
-            attrs["normalized_shape"] = std::to_string(normalized_size_);
+            NewOpAttributes attrs;
+            attrs.set(AttrKey::NormalizedShape, std::to_string(normalized_size_));
             std::vector<Tensor> inputs_vec = {go, inp, mn, rs, wt};
             auto results = dispatch<OpId::LayerNormBackward>(inputs_vec, attrs);
             return results;
@@ -538,6 +539,16 @@ public:
                 grad_bias.contiguous().to(original_dtype)};
     }
 
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        // Complex normalization backward -- delegate to tensor backward and wrap results
+        std::vector<Tensor> tensor_grads;
+        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
+        auto results = backward(std::move(tensor_grads));
+        std::vector<Variable> var_results;
+        for (auto& t : results) var_results.emplace_back(t, false);
+        return var_results;
+    }
+
 private:
     bool elementwise_affine_;
     double eps_;
@@ -631,9 +642,9 @@ auto LayerNorm::forward_impl(const Variable& input) -> Variable {
         }
 
         // Dispatch to fused CUDA kernel (single kernel launch for max performance)
-        OpAttributes attrs;
-        attrs["normalized_shape"] = norm_shape_str;
-        attrs["eps"] = std::to_string(eps_);
+        NewOpAttributes attrs;
+        attrs.set(AttrKey::NormalizedShape, std::string_view(norm_shape_str));
+        attrs.set(AttrKey::Eps, static_cast<double>(eps_));
 
         std::vector<Tensor> inputs_vec = {x, weight_cuda, bias_cuda};
         auto results = dispatch<OpId::FusedLayerNorm>(inputs_vec, attrs);
@@ -1278,7 +1289,7 @@ public:
             auto wt = weight_orig.contiguous();
 
             OpAttributes attrs;
-            attrs["num_groups"] = std::to_string(num_groups_);
+            attrs.set(AttrKey::NumGroups, num_groups_);
             std::vector<Tensor> inputs_vec = {go, inp, mn, rs, wt};
             auto results = dispatch<OpId::GroupNormBackward>(inputs_vec, attrs);
             return results;
@@ -1369,6 +1380,16 @@ public:
                 grad_bias.to(original_dtype).to(original_device).contiguous()};
     }
 
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        // Complex normalization backward -- delegate to tensor backward and wrap results
+        std::vector<Tensor> tensor_grads;
+        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
+        auto results = backward(std::move(tensor_grads));
+        std::vector<Variable> var_results;
+        for (auto& t : results) var_results.emplace_back(t, false);
+        return var_results;
+    }
+
 private:
     bool affine_;
     double eps_;
@@ -1436,8 +1457,8 @@ auto GroupNorm::forward_impl(const Variable& input) -> Variable {
             : zeros({C}, input.tensor().dtype(), input.tensor().device());
 
         OpAttributes attrs;
-        attrs["num_groups"] = std::to_string(num_groups_);
-        attrs["eps"] = std::to_string(static_cast<float>(eps_));
+        attrs.set(AttrKey::NumGroups, num_groups_);
+        attrs.set(AttrKey::Eps, eps_);
         std::vector<Tensor> inputs_vec = {input.tensor(), weight_tensor, bias_tensor};
         auto results = dispatch<OpId::GroupNorm>(inputs_vec, attrs);
 
@@ -1763,6 +1784,16 @@ public:
                 results[2].to(original_dtype).to(original_device).contiguous()};
     }
 
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        // Complex normalization backward -- delegate to tensor backward and wrap results
+        std::vector<Tensor> tensor_grads;
+        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
+        auto results = backward(std::move(tensor_grads));
+        std::vector<Variable> var_results;
+        for (auto& t : results) var_results.emplace_back(t, false);
+        return var_results;
+    }
+
 private:
     bool affine_;
     double eps_;
@@ -1810,8 +1841,8 @@ auto InstanceNorm2d::forward_impl(const Variable& input) -> Variable {
         : zeros({C}, original_dtype, original_device);
 
     // Dispatch to backend kernel
-    OpAttributes attrs;
-    attrs["eps"] = std::to_string(static_cast<float>(eps_));
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Eps, static_cast<double>(eps_));
     std::vector<Tensor> inputs_vec = {input.tensor(), weight_tensor, bias_tensor};
     auto results = dispatch<OpId::InstanceNorm>(inputs_vec, attrs);
 
@@ -1921,8 +1952,8 @@ auto InstanceNorm1d::forward_impl(const Variable& input) -> Variable {
         ? parameters_["bias"]->tensor().to(original_dtype).to(original_device)
         : zeros({C}, original_dtype, original_device);
 
-    OpAttributes attrs;
-    attrs["eps"] = std::to_string(static_cast<float>(eps_));
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Eps, static_cast<double>(eps_));
     std::vector<Tensor> inputs_vec = {input_4d, weight_tensor, bias_tensor};
     auto results = dispatch<OpId::InstanceNorm>(inputs_vec, attrs);
 
@@ -2018,8 +2049,8 @@ public:
             auto rm = rrms_orig.contiguous();
             auto wt = weight_orig.contiguous();
 
-            OpAttributes attrs;
-            attrs["normalized_shape"] = std::to_string(normalized_size_);
+            NewOpAttributes attrs;
+            attrs.set(AttrKey::NormalizedShape, std::to_string(normalized_size_));
             std::vector<Tensor> inputs_vec = {go, inp, rm, wt};
             auto results = dispatch<OpId::RMSNormBackward>(inputs_vec, attrs);
             return results;
@@ -2102,6 +2133,16 @@ public:
         return {grad_input_final, grad_weight_final};
     }
 
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        // Complex normalization backward -- delegate to tensor backward and wrap results
+        std::vector<Tensor> tensor_grads;
+        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
+        auto results = backward(std::move(tensor_grads));
+        std::vector<Variable> var_results;
+        for (auto& t : results) var_results.emplace_back(t, false);
+        return var_results;
+    }
+
 private:
     double eps_;
     int64_t normalized_size_;
@@ -2160,8 +2201,8 @@ auto RMSNorm::forward_impl(const Variable& input) -> Variable {
         }
 
         // Dispatch to fused CUDA kernel (single kernel launch for max performance)
-        OpAttributes attrs;
-        attrs["eps"] = std::to_string(eps_);
+        NewOpAttributes attrs;
+        attrs.set(AttrKey::Eps, eps_);
 
         std::vector<Tensor> inputs_vec = {x, weight_cuda};
         auto results = dispatch<OpId::FusedRMSNorm>(inputs_vec, attrs);
@@ -2177,8 +2218,8 @@ auto RMSNorm::forward_impl(const Variable& input) -> Variable {
             weight_vk = weight_vk.to(input.tensor().device());
         }
 
-        OpAttributes attrs;
-        attrs["eps"] = std::to_string(eps_);
+        NewOpAttributes attrs;
+        attrs.set(AttrKey::Eps, eps_);
 
         std::vector<Tensor> inputs_vec = {x, weight_vk};
         auto results = dispatch<OpId::FusedRMSNorm>(inputs_vec, attrs);
@@ -2251,8 +2292,8 @@ auto RMSNorm::forward_impl(const Variable& input) -> Variable {
             weight_dev = weight_dev.to(original_device);
         }
 
-        OpAttributes attrs;
-        attrs["eps"] = std::to_string(eps_);
+        NewOpAttributes attrs;
+        attrs.set(AttrKey::Eps, eps_);
 
         std::vector<Tensor> inputs_vec = {x, weight_dev};
         auto results = dispatch<OpId::FusedRMSNorm>(inputs_vec, attrs);

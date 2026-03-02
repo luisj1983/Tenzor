@@ -47,6 +47,20 @@ public:
         return result;
     }
 
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        if (grad_outputs.size() != 1) {
+            throw std::invalid_argument("DropoutBackward expects 1 gradient output");
+        }
+
+        // Gradient: grad_input = grad_output * mask * scale
+        // mask is a constant (no grad tracking needed)
+        auto& grad = grad_outputs[0];
+        Variable mask_var(mask_, false);
+        auto grad_masked = grad * mask_var;
+        auto grad_input = grad_masked * scale_;
+        return {grad_input};
+    }
+
 private:
     Tensor mask_;
     double scale_;
@@ -270,6 +284,20 @@ public:
         std::vector<Tensor> result;
         result.push_back(grad_input);
         return result;
+    }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        if (grad_outputs.size() != 1) {
+            throw std::invalid_argument("AlphaDropoutBackward expects 1 gradient output");
+        }
+
+        // Gradient: grad_input = grad_output * a * mask
+        // mask and a are constants (no grad tracking needed)
+        auto& grad = grad_outputs[0];
+        Variable mask_var(mask_, false);
+        auto grad_scaled = grad * a_;
+        auto grad_input = grad_scaled * mask_var;
+        return {grad_input};
     }
 
 private:

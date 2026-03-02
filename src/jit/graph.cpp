@@ -1068,11 +1068,11 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         case OpType::MaxPool2d:
             if (!input_vars.empty()) {
                 OpAttributes pool_attrs;
-                pool_attrs["kernel_size"] = std::to_string(node->get_int_attr("kernel_size"));
-                pool_attrs["stride"] = std::to_string(node->has_attr("stride") ?
+                pool_attrs.set(AttrKey::KernelSize, node->get_int_attr("kernel_size"));
+                pool_attrs.set(AttrKey::Stride, node->has_attr("stride") ?
                     node->get_int_attr("stride") : node->get_int_attr("kernel_size"));
-                pool_attrs["padding"] = std::to_string(node->has_attr("padding") ?
-                    node->get_int_attr("padding") : 0);
+                pool_attrs.set(AttrKey::Padding, node->has_attr("padding") ?
+                    node->get_int_attr("padding") : static_cast<int64_t>(0));
                 std::vector<Tensor> inputs = {input_vars[0].tensor()};
                 auto result = dispatch(OpId::MaxPool2dForward, inputs, pool_attrs);
                 if (!result.empty()) {
@@ -1084,11 +1084,11 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         case OpType::AvgPool2d:
             if (!input_vars.empty()) {
                 OpAttributes pool_attrs;
-                pool_attrs["kernel_size"] = std::to_string(node->get_int_attr("kernel_size"));
-                pool_attrs["stride"] = std::to_string(node->has_attr("stride") ?
+                pool_attrs.set(AttrKey::KernelSize, node->get_int_attr("kernel_size"));
+                pool_attrs.set(AttrKey::Stride, node->has_attr("stride") ?
                     node->get_int_attr("stride") : node->get_int_attr("kernel_size"));
-                pool_attrs["padding"] = std::to_string(node->has_attr("padding") ?
-                    node->get_int_attr("padding") : 0);
+                pool_attrs.set(AttrKey::Padding, node->has_attr("padding") ?
+                    node->get_int_attr("padding") : static_cast<int64_t>(0));
                 std::vector<Tensor> inputs = {input_vars[0].tensor()};
                 auto result = dispatch(OpId::AvgPool2dForward, inputs, pool_attrs);
                 if (!result.empty()) {
@@ -1102,8 +1102,8 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 OpAttributes pool_attrs;
                 auto output_size = node->get_vec_attr("output_size");
                 if (output_size.size() >= 2) {
-                    pool_attrs["output_h"] = std::to_string(output_size[0]);
-                    pool_attrs["output_w"] = std::to_string(output_size[1]);
+                    pool_attrs.set(AttrKey::OutputSizeH, output_size[0]);
+                    pool_attrs.set(AttrKey::OutputSizeW, output_size[1]);
                 }
                 std::vector<Tensor> inputs = {input_vars[0].tensor()};
                 auto result = dispatch(OpId::AdaptiveAvgPool2d, inputs, pool_attrs);
@@ -1119,14 +1119,14 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         case OpType::Conv2d:
             if (input_vars.size() >= 2) {
                 OpAttributes conv_attrs;
-                conv_attrs["stride"] = std::to_string(node->has_attr("stride_h") ?
-                    node->get_int_attr("stride_h") : 1);
-                conv_attrs["padding"] = std::to_string(node->has_attr("padding_h") ?
-                    node->get_int_attr("padding_h") : 0);
-                conv_attrs["dilation"] = std::to_string(node->has_attr("dilation") ?
-                    node->get_int_attr("dilation") : 1);
-                conv_attrs["groups"] = std::to_string(node->has_attr("groups") ?
-                    node->get_int_attr("groups") : 1);
+                conv_attrs.set(AttrKey::Stride, node->has_attr("stride_h") ?
+                    node->get_int_attr("stride_h") : static_cast<int64_t>(1));
+                conv_attrs.set(AttrKey::Padding, node->has_attr("padding_h") ?
+                    node->get_int_attr("padding_h") : static_cast<int64_t>(0));
+                conv_attrs.set(AttrKey::Dilation, node->has_attr("dilation") ?
+                    node->get_int_attr("dilation") : static_cast<int64_t>(1));
+                conv_attrs.set(AttrKey::Groups, node->has_attr("groups") ?
+                    node->get_int_attr("groups") : static_cast<int64_t>(1));
                 std::vector<Tensor> inputs = {input_vars[0].tensor(), input_vars[1].tensor()};
                 if (input_vars.size() >= 3) {
                     inputs.push_back(input_vars[2].tensor());
@@ -1144,10 +1144,10 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         case OpType::BatchNorm2d:
             if (!input_vars.empty()) {
                 OpAttributes bn_attrs;
-                bn_attrs["eps"] = std::to_string(node->has_attr("eps") ?
+                bn_attrs.set(AttrKey::Eps, node->has_attr("eps") ?
                     static_cast<double>(node->get_attr("eps")) : 1e-5);
-                bn_attrs["momentum"] = "0.1";
-                bn_attrs["training"] = "0";
+                bn_attrs.set(AttrKey::Momentum, 0.1);
+                bn_attrs.set(AttrKey::Training, false);
                 std::vector<Tensor> inputs;
                 for (auto& iv : input_vars) {
                     inputs.push_back(iv.tensor());
@@ -1162,14 +1162,15 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         case OpType::LayerNorm:
             if (!input_vars.empty()) {
                 OpAttributes ln_attrs;
-                ln_attrs["eps"] = std::to_string(node->has_attr("eps") ?
+                ln_attrs.set(AttrKey::Eps, node->has_attr("eps") ?
                     static_cast<double>(node->get_attr("eps")) : 1e-5);
                 auto normalized_shape = node->get_vec_attr("normalized_shape");
+                std::string ns_str;
                 for (size_t i = 0; i < normalized_shape.size(); ++i) {
-                    ln_attrs["normalized_shape_" + std::to_string(i)] =
-                        std::to_string(normalized_shape[i]);
+                    if (i > 0) ns_str += ',';
+                    ns_str += std::to_string(normalized_shape[i]);
                 }
-                ln_attrs["normalized_shape_size"] = std::to_string(normalized_shape.size());
+                ln_attrs.set(AttrKey::NormalizedShape, ns_str);
                 std::vector<Tensor> inputs;
                 for (auto& iv : input_vars) {
                     inputs.push_back(iv.tensor());

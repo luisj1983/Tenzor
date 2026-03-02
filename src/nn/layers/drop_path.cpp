@@ -32,6 +32,20 @@ public:
         return {grad_input};
     }
 
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        if (grad_outputs.size() != 1) {
+            throw std::invalid_argument("DropPathBackward expects 1 gradient output");
+        }
+
+        // Gradient: grad_input = grad_output * mask * scale
+        // mask is a constant (no grad tracking needed), broadcasts automatically
+        auto& grad = grad_outputs[0];
+        Variable mask_var(mask_, false);
+        auto grad_masked = grad * mask_var;
+        auto grad_input = grad_masked * scale_;
+        return {grad_input};
+    }
+
 private:
     Tensor mask_;
     double scale_;

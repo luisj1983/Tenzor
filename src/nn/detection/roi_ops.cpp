@@ -6,6 +6,7 @@
 #include "tenzor/nn/detection/roi_ops.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include <cmath>
 #include <algorithm>
@@ -68,11 +69,11 @@ auto ROIAlignOp::apply(const Tensor& features, const Tensor& rois,
     // Dispatch to GPU backend if not on CPU
     if (features.device().type != Device::Type::CPU) {
         OpAttributes attrs;
-        attrs["output_h"] = std::to_string(output_h);
-        attrs["output_w"] = std::to_string(output_w);
-        attrs["spatial_scale"] = std::to_string(static_cast<float>(spatial_scale));
-        attrs["sampling_ratio"] = std::to_string(sampling_ratio);
-        attrs["aligned"] = aligned ? "1" : "0";
+        attrs.set(AttrKey::OutputSizeH, output_h);
+        attrs.set(AttrKey::OutputSizeW, output_w);
+        attrs.set(AttrKey::SpatialScale, spatial_scale);
+        attrs.set(AttrKey::SamplingRatio, sampling_ratio);
+        attrs.set(AttrKey::Aligned, aligned);
 
         std::array<Tensor, 2> inputs = {features, rois};
         auto results = dispatch<OpId::ROIAlignForward>(inputs, attrs);
@@ -191,12 +192,12 @@ auto ROIAlignOp::apply_backward(const Tensor& grad_output, const Tensor& feature
     // Dispatch to GPU backend if not on CPU
     if (grad_output.device().type != Device::Type::CPU) {
         OpAttributes attrs;
-        attrs["batch_size"] = std::to_string(features.shape()[0]);
-        attrs["feat_height"] = std::to_string(features.shape()[2]);
-        attrs["feat_width"] = std::to_string(features.shape()[3]);
-        attrs["spatial_scale"] = std::to_string(static_cast<float>(spatial_scale));
-        attrs["sampling_ratio"] = std::to_string(sampling_ratio);
-        attrs["aligned"] = aligned ? "1" : "0";
+        attrs.set(AttrKey::BatchSize, features.shape()[0]);
+        attrs.set(AttrKey::FeatHeight, features.shape()[2]);
+        attrs.set(AttrKey::FeatWidth, features.shape()[3]);
+        attrs.set(AttrKey::SpatialScale, spatial_scale);
+        attrs.set(AttrKey::SamplingRatio, sampling_ratio);
+        attrs.set(AttrKey::Aligned, aligned);
 
         std::array<Tensor, 2> inputs = {grad_output, rois};
         auto results = dispatch<OpId::ROIAlignBackward>(inputs, attrs);

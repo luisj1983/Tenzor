@@ -5,6 +5,7 @@
 
 #include "vulkan_helpers.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 
 #include <limits>
 #include <sstream>
@@ -27,8 +28,8 @@ auto VulkanBackend::dispatch(const std::string& op_name,
             break;
         }
     }
-    if (attrs.contains("device_id")) {
-        dispatch_device_id = std::stoi(attrs.at("device_id"));
+    if (attrs.has(AttrKey::DeviceId)) {
+        dispatch_device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId));
     }
     // Lock per-device mutex for independent multi-GPU operation.
     std::lock_guard<std::recursive_mutex> lock(devices_[dispatch_device_id].mutex);
@@ -213,7 +214,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         else if (base_op == "gelu") opcode = 3;
         else if (base_op == "leaky_relu") {
             opcode = 4;
-            param = attrs.contains("alpha") ? std::stof(attrs.at("alpha")) : 0.01f;
+            param = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
         }
 
         // Dispatch out-of-place activation, then copy result back
@@ -256,7 +257,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
     // LeakyReLU activation
     if (op_name == "leaky_relu") {
         if (inputs.size() != 1) throw std::invalid_argument("leaky_relu requires 1 input");
-        float alpha = attrs.contains("alpha") ? std::stof(attrs.at("alpha")) : 0.01f;
+        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
         return {dispatchActivation("leaky_relu", inputs[0], 4, alpha)};
     }
 
@@ -269,7 +270,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
     // ELU activation
     if (op_name == "elu") {
         if (inputs.size() != 1) throw std::invalid_argument("elu requires 1 input");
-        float alpha = attrs.contains("alpha") ? std::stof(attrs.at("alpha")) : 1.0f;
+        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 1.0));
         return {dispatchActivation("elu", inputs[0], 6, alpha)};
     }
 
@@ -288,7 +289,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
     // Softplus activation
     if (op_name == "softplus") {
         if (inputs.size() != 1) throw std::invalid_argument("softplus requires 1 input");
-        float beta = attrs.contains("beta") ? std::stof(attrs.at("beta")) : 1.0f;
+        float beta = static_cast<float>(attrs.get_float(AttrKey::Beta, 1.0));
         return {dispatchActivation("softplus", inputs[0], 9, beta)};
     }
 
@@ -325,7 +326,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() != 1) {
             throw std::invalid_argument("pow requires 1 input");
         }
-        float exponent = attrs.contains("exponent") ? std::stof(attrs.at("exponent")) : 2.0f;
+        float exponent = static_cast<float>(attrs.get_float(AttrKey::Exponent, 2.0));
         return {dispatchUnaryOpWithParam(op_name, inputs[0], exponent)};
     }
 
@@ -347,7 +348,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
 
     if (op_name == "leaky_relu_backward") {
         if (inputs.size() != 2) throw std::invalid_argument("leaky_relu_backward requires 2 inputs");
-        float alpha = attrs.contains("alpha") ? std::stof(attrs.at("alpha")) : 0.01f;
+        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
         return {dispatchActivationBackward("leaky_relu_backward", inputs[0], inputs[1], 3, alpha)};
     }
 
@@ -358,7 +359,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
 
     if (op_name == "elu_backward") {
         if (inputs.size() != 2) throw std::invalid_argument("elu_backward requires 2 inputs");
-        float alpha = attrs.contains("alpha") ? std::stof(attrs.at("alpha")) : 1.0f;
+        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 1.0));
         return {dispatchActivationBackward("elu_backward", inputs[0], inputs[1], 5, alpha)};
     }
 
@@ -374,7 +375,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
 
     if (op_name == "softplus_backward") {
         if (inputs.size() != 2) throw std::invalid_argument("softplus_backward requires 2 inputs");
-        float beta = attrs.contains("beta") ? std::stof(attrs.at("beta")) : 1.0f;
+        float beta = static_cast<float>(attrs.get_float(AttrKey::Beta, 1.0));
         return {dispatchActivationBackward("softplus_backward", inputs[0], inputs[1], 8, beta)};
     }
 
@@ -385,53 +386,37 @@ auto VulkanBackend::dispatch(const std::string& op_name,
 
     if (op_name == "softmax_backward") {
         if (inputs.size() != 2) throw std::invalid_argument("softmax_backward requires 2 inputs");
-        int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         return {dispatchSoftmaxBackward(inputs[0], inputs[1], dim)};
     }
 
     if (op_name == "log_softmax_backward") {
         if (inputs.size() != 2) throw std::invalid_argument("log_softmax_backward requires 2 inputs");
-        int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         return {dispatchLogSoftmaxBackward(inputs[0], inputs[1], dim)};
     }
 
     // Conv2d backward operations
     if (op_name == "conv2d_backward_input") {
         if (inputs.size() != 2) throw std::invalid_argument("conv2d_backward_input requires 2 inputs (grad_output, weight)");
-        int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
-        int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
-        int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
 
         // Parse input shape from comma-separated string
-        std::vector<int64_t> input_shape;
-        std::string shape_str = attrs.at("input_shape");
-        size_t pos = 0;
-        while (pos < shape_str.size()) {
-            size_t comma = shape_str.find(',', pos);
-            if (comma == std::string::npos) comma = shape_str.size();
-            input_shape.push_back(std::stoll(shape_str.substr(pos, comma - pos)));
-            pos = comma + 1;
-        }
+        std::vector<int64_t> input_shape = attrs.get_int_list(AttrKey::InputShape);
 
         return {dispatchConv2dBackwardInput(inputs[0], inputs[1], stride, padding, dilation, input_shape)};
     }
 
     if (op_name == "conv2d_backward_weight") {
         if (inputs.size() != 2) throw std::invalid_argument("conv2d_backward_weight requires 2 inputs (grad_output, input)");
-        int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
-        int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
-        int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
 
         // Parse weight shape from comma-separated string
-        std::vector<int64_t> weight_shape;
-        std::string shape_str = attrs.at("weight_shape");
-        size_t pos = 0;
-        while (pos < shape_str.size()) {
-            size_t comma = shape_str.find(',', pos);
-            if (comma == std::string::npos) comma = shape_str.size();
-            weight_shape.push_back(std::stoll(shape_str.substr(pos, comma - pos)));
-            pos = comma + 1;
-        }
+        std::vector<int64_t> weight_shape = attrs.get_int_list(AttrKey::WeightShape);
 
         return {dispatchConv2dBackwardWeight(inputs[0], inputs[1], stride, padding, dilation, weight_shape)};
     }
@@ -451,16 +436,13 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         const Tensor& input = inputs[1];
         const Tensor& weight = inputs[2];
 
-        int64_t stride = 1, padding = 0, dilation = 1, groups = 1;
-        bool compute_grad_input = true, compute_grad_weight = true, compute_grad_bias = false;
-
-        if (attrs.contains("stride")) stride = std::stoll(attrs.at("stride"));
-        if (attrs.contains("padding")) padding = std::stoll(attrs.at("padding"));
-        if (attrs.contains("dilation")) dilation = std::stoll(attrs.at("dilation"));
-        if (attrs.contains("groups")) groups = std::stoll(attrs.at("groups"));
-        if (attrs.contains("compute_grad_input")) compute_grad_input = (attrs.at("compute_grad_input") == "1");
-        if (attrs.contains("compute_grad_weight")) compute_grad_weight = (attrs.at("compute_grad_weight") == "1");
-        if (attrs.contains("compute_grad_bias")) compute_grad_bias = (attrs.at("compute_grad_bias") == "1");
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        bool compute_grad_input = attrs.get_bool(AttrKey::ComputeGradInput, true);
+        bool compute_grad_weight = attrs.get_bool(AttrKey::ComputeGradWeight, true);
+        bool compute_grad_bias = attrs.get_bool(AttrKey::ComputeGradBias, false);
 
         std::vector<int64_t> input_shape(input.shape().begin(), input.shape().end());
         std::vector<int64_t> weight_shape(weight.shape().begin(), weight.shape().end());
@@ -492,14 +474,8 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         }
         // Use INT64_MIN as sentinel for "reduce all elements" (full reduction)
         // dim=-1, -2, etc. mean negative indexing from the end
-        int64_t dim = INT64_MIN;  // Sentinel for full reduction
-        bool keepdim = false;
-        if (attrs.contains("dim")) {
-            dim = std::stoll(attrs.at("dim"));
-        }
-        if (attrs.contains("keepdim")) {
-            keepdim = (attrs.at("keepdim") == "1");
-        }
+        int64_t dim = attrs.has(AttrKey::Dim) ? attrs.get_int(AttrKey::Dim) : INT64_MIN;
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return {dispatchReduction(op_name, inputs[0], dim, keepdim)};
     }
 
@@ -523,40 +499,40 @@ auto VulkanBackend::dispatch(const std::string& op_name,
     if (op_name == "max_pool2d") {
         // Support both kernel_h/kernel_w and kernel_size attributes
         int64_t kernel_h = 2, kernel_w = 2;
-        if (attrs.contains("kernel_h")) {
-            kernel_h = std::stoll(attrs.at("kernel_h"));
-            kernel_w = attrs.contains("kernel_w") ? std::stoll(attrs.at("kernel_w")) : kernel_h;
-        } else if (attrs.contains("kernel_size")) {
-            kernel_h = kernel_w = std::stoll(attrs.at("kernel_size"));
+        if (attrs.has(AttrKey::KernelSizeH)) {
+            kernel_h = attrs.get_int(AttrKey::KernelSizeH);
+            kernel_w = attrs.has(AttrKey::KernelSizeW) ? attrs.get_int(AttrKey::KernelSizeW) : kernel_h;
+        } else if (attrs.has(AttrKey::KernelSize)) {
+            kernel_h = kernel_w = attrs.get_int(AttrKey::KernelSize);
         }
 
         // Support both stride_h/stride_w and stride attributes
         int64_t stride_h = kernel_h, stride_w = kernel_w;
-        if (attrs.contains("stride_h")) {
-            stride_h = std::stoll(attrs.at("stride_h"));
-            stride_w = attrs.contains("stride_w") ? std::stoll(attrs.at("stride_w")) : stride_h;
-        } else if (attrs.contains("stride")) {
-            stride_h = stride_w = std::stoll(attrs.at("stride"));
+        if (attrs.has(AttrKey::StrideH)) {
+            stride_h = attrs.get_int(AttrKey::StrideH);
+            stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : stride_h;
+        } else if (attrs.has(AttrKey::Stride)) {
+            stride_h = stride_w = attrs.get_int(AttrKey::Stride);
         }
 
         // Support both padding_h/padding_w and padding attributes
         int64_t padding_h = 0, padding_w = 0;
-        if (attrs.contains("padding_h")) {
-            padding_h = std::stoll(attrs.at("padding_h"));
-            padding_w = attrs.contains("padding_w") ? std::stoll(attrs.at("padding_w")) : padding_h;
-        } else if (attrs.contains("padding")) {
-            padding_h = padding_w = std::stoll(attrs.at("padding"));
+        if (attrs.has(AttrKey::PaddingH)) {
+            padding_h = attrs.get_int(AttrKey::PaddingH);
+            padding_w = attrs.has(AttrKey::PaddingW) ? attrs.get_int(AttrKey::PaddingW) : padding_h;
+        } else if (attrs.has(AttrKey::Padding)) {
+            padding_h = padding_w = attrs.get_int(AttrKey::Padding);
         }
 
         // Float16: use max_pool2d_f16 shader via dispatch path (same as Float64)
         if (inputs[0].dtype() == DType::Float16) {
             OpAttributes pool_attrs;
-            pool_attrs["kernel_h"] = std::to_string(kernel_h);
-            pool_attrs["kernel_w"] = std::to_string(kernel_w);
-            pool_attrs["stride_h"] = std::to_string(stride_h);
-            pool_attrs["stride_w"] = std::to_string(stride_w);
-            pool_attrs["padding_h"] = std::to_string(padding_h);
-            pool_attrs["padding_w"] = std::to_string(padding_w);
+            pool_attrs.set(AttrKey::KernelSizeH, kernel_h);
+            pool_attrs.set(AttrKey::KernelSizeW, kernel_w);
+            pool_attrs.set(AttrKey::StrideH, stride_h);
+            pool_attrs.set(AttrKey::StrideW, stride_w);
+            pool_attrs.set(AttrKey::PaddingH, padding_h);
+            pool_attrs.set(AttrKey::PaddingW, padding_w);
             Tensor output = dispatchMaxPool2dForward(inputs[0], pool_attrs);
             std::vector<int64_t> out_shape_vec(output.shape().begin(), output.shape().end());
             Tensor pool_indices(out_shape_vec, DType::Int32, inputs[0].device());
@@ -567,12 +543,12 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         // Float64: use max_pool2d_f64 shader via new dispatch path
         if (inputs[0].dtype() == DType::Float64) {
             OpAttributes pool_attrs;
-            pool_attrs["kernel_h"] = std::to_string(kernel_h);
-            pool_attrs["kernel_w"] = std::to_string(kernel_w);
-            pool_attrs["stride_h"] = std::to_string(stride_h);
-            pool_attrs["stride_w"] = std::to_string(stride_w);
-            pool_attrs["padding_h"] = std::to_string(padding_h);
-            pool_attrs["padding_w"] = std::to_string(padding_w);
+            pool_attrs.set(AttrKey::KernelSizeH, kernel_h);
+            pool_attrs.set(AttrKey::KernelSizeW, kernel_w);
+            pool_attrs.set(AttrKey::StrideH, stride_h);
+            pool_attrs.set(AttrKey::StrideW, stride_w);
+            pool_attrs.set(AttrKey::PaddingH, padding_h);
+            pool_attrs.set(AttrKey::PaddingW, padding_w);
             Tensor output = dispatchMaxPool2dForward(inputs[0], pool_attrs);
             // Create indices tensor (Float64 max_pool2d doesn't produce indices)
             std::vector<int64_t> out_shape_vec(output.shape().begin(), output.shape().end());
@@ -589,23 +565,23 @@ auto VulkanBackend::dispatch(const std::string& op_name,
     if (op_name == "avg_pool2d") {
         // Support both kernel_h/kernel_w and kernel_size attributes
         int64_t kernel_h = 2, kernel_w = 2;
-        if (attrs.contains("kernel_h")) {
-            kernel_h = std::stoll(attrs.at("kernel_h"));
-            kernel_w = attrs.contains("kernel_w") ? std::stoll(attrs.at("kernel_w")) : kernel_h;
-        } else if (attrs.contains("kernel_size")) {
-            kernel_h = kernel_w = std::stoll(attrs.at("kernel_size"));
+        if (attrs.has(AttrKey::KernelSizeH)) {
+            kernel_h = attrs.get_int(AttrKey::KernelSizeH);
+            kernel_w = attrs.has(AttrKey::KernelSizeW) ? attrs.get_int(AttrKey::KernelSizeW) : kernel_h;
+        } else if (attrs.has(AttrKey::KernelSize)) {
+            kernel_h = kernel_w = attrs.get_int(AttrKey::KernelSize);
         }
 
         // Support both stride_h/stride_w and stride attributes
         int64_t stride_h = kernel_h, stride_w = kernel_w;
-        if (attrs.contains("stride_h")) {
-            stride_h = std::stoll(attrs.at("stride_h"));
-            stride_w = attrs.contains("stride_w") ? std::stoll(attrs.at("stride_w")) : stride_h;
-        } else if (attrs.contains("stride")) {
-            stride_h = stride_w = std::stoll(attrs.at("stride"));
+        if (attrs.has(AttrKey::StrideH)) {
+            stride_h = attrs.get_int(AttrKey::StrideH);
+            stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : stride_h;
+        } else if (attrs.has(AttrKey::Stride)) {
+            stride_h = stride_w = attrs.get_int(AttrKey::Stride);
         }
-        int64_t padding_h = attrs.contains("padding_h") ? std::stoll(attrs.at("padding_h")) : 0;
-        int64_t padding_w = attrs.contains("padding_w") ? std::stoll(attrs.at("padding_w")) : 0;
+        int64_t padding_h = attrs.get_int(AttrKey::PaddingH, 0);
+        int64_t padding_w = attrs.get_int(AttrKey::PaddingW, 0);
 
         // Float16: use avg_pool2d_f16 shader on GPU
         // (Falls through to dispatchAvgPool2d which will select the correct shader)
@@ -616,20 +592,20 @@ auto VulkanBackend::dispatch(const std::string& op_name,
 
     if (op_name == "adaptive_max_pool2d") {
         // Support both naming conventions: output_height/output_width and output_h/output_w
-        int64_t out_h = attrs.contains("output_height") ? std::stoll(attrs.at("output_height"))
-                      : std::stoll(attrs.at("output_h"));
-        int64_t out_w = attrs.contains("output_width") ? std::stoll(attrs.at("output_width"))
-                      : std::stoll(attrs.at("output_w"));
+        int64_t out_h = attrs.has(AttrKey::OutputHeight) ? attrs.get_int(AttrKey::OutputHeight)
+                      : attrs.get_int(AttrKey::OutputSizeH);
+        int64_t out_w = attrs.has(AttrKey::OutputWidth) ? attrs.get_int(AttrKey::OutputWidth)
+                      : attrs.get_int(AttrKey::OutputSizeW);
         auto [output, indices] = dispatchAdaptiveMaxPool2d(inputs[0], out_h, out_w);
         return {output, indices};
     }
 
     if (op_name == "adaptive_avg_pool2d") {
         // Support both naming conventions: output_height/output_width and output_h/output_w
-        int64_t out_h = attrs.contains("output_height") ? std::stoll(attrs.at("output_height"))
-                      : std::stoll(attrs.at("output_h"));
-        int64_t out_w = attrs.contains("output_width") ? std::stoll(attrs.at("output_width"))
-                      : std::stoll(attrs.at("output_w"));
+        int64_t out_h = attrs.has(AttrKey::OutputHeight) ? attrs.get_int(AttrKey::OutputHeight)
+                      : attrs.get_int(AttrKey::OutputSizeH);
+        int64_t out_w = attrs.has(AttrKey::OutputWidth) ? attrs.get_int(AttrKey::OutputWidth)
+                      : attrs.get_int(AttrKey::OutputSizeW);
         return {dispatchAdaptiveAvgPool2d(inputs[0], out_h, out_w)};
     }
 
@@ -637,88 +613,88 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() != 1) {
             throw std::invalid_argument("adaptive_avg_pool2d_backward requires exactly 1 input (grad_output)");
         }
-        int64_t H_in = attrs.contains("H_in") ? std::stoll(attrs.at("H_in")) : 0;
-        int64_t W_in = attrs.contains("W_in") ? std::stoll(attrs.at("W_in")) : 0;
+        int64_t H_in = attrs.get_int(AttrKey::InputH, 0);
+        int64_t W_in = attrs.get_int(AttrKey::InputW, 0);
         return {dispatchAdaptiveAvgPool2dBackward(inputs[0], H_in, W_in)};
     }
 
     // Normalization
     if (op_name == "softmax") {
-        int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         return {dispatchSoftmax(inputs[0], dim)};
     }
 
     if (op_name == "log_softmax") {
-        int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         return {dispatchLogSoftmax(inputs[0], dim)};
     }
 
     // Advanced reductions
     if (op_name == "argmax") {
-        int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
-        bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return {dispatchArgmax(inputs[0], dim, keepdim)};
     }
 
     if (op_name == "argmin") {
-        int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
-        bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return {dispatchArgmin(inputs[0], dim, keepdim)};
     }
 
     if (op_name == "argsort") {
-        int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
-        bool descending = attrs.contains("descending") && (attrs.at("descending") == "1" || attrs.at("descending") == "true");
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        bool descending = attrs.get_bool(AttrKey::Descending, false);
         return {dispatchArgSort(inputs[0], dim, descending)};
     }
 
     if (op_name == "var" || op_name == "variance") {
-        int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
-        bool unbiased = !attrs.contains("unbiased") || attrs.at("unbiased") == "1";
-        bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        bool unbiased = attrs.get_bool(AttrKey::Unbiased, true);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return {dispatchVariance(inputs[0], dim, unbiased, keepdim)};
     }
 
     if (op_name == "std") {
-        int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
-        bool unbiased = !attrs.contains("unbiased") || attrs.at("unbiased") == "1";
-        bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        bool unbiased = attrs.get_bool(AttrKey::Unbiased, true);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return {dispatchStd(inputs[0], dim, unbiased, keepdim)};
     }
 
     if (op_name == "prod") {
-        int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
-        bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return {dispatchProd(inputs[0], dim, keepdim)};
     }
 
     if (op_name == "norm") {
-        float p = attrs.contains("p") ? std::stof(attrs.at("p")) : 2.0f;
+        float p = static_cast<float>(attrs.get_float(AttrKey::P, 2.0));
         // Use INT64_MIN to signal full reduction when dim is not specified
-        int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : INT64_MIN;
-        bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
+        int64_t dim = attrs.has(AttrKey::Dim) ? attrs.get_int(AttrKey::Dim) : INT64_MIN;
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return {dispatchNorm(inputs[0], p, dim, keepdim)};
     }
 
     // Indexing operations
     if (op_name == "embedding") {
-        int64_t padding_idx = attrs.contains("padding_idx") ? std::stoll(attrs.at("padding_idx")) : -1;
+        int64_t padding_idx = attrs.get_int(AttrKey::PaddingIdx, -1);
         return {dispatchEmbedding(inputs[0], inputs[1], padding_idx)};
     }
 
     if (op_name == "gather") {
-        int64_t dim = std::stoll(attrs.at("dim"));
+        int64_t dim = attrs.get_int(AttrKey::Dim);
         return {dispatchGather(inputs[0], dim, inputs[1])};
     }
 
     if (op_name == "scatter") {
-        int64_t dim = std::stoll(attrs.at("dim"));
-        int64_t reduction = attrs.contains("reduction") ? std::stoll(attrs.at("reduction")) : 0;
+        int64_t dim = attrs.get_int(AttrKey::Dim);
+        int64_t reduction = attrs.get_int(AttrKey::Reduction, 0);
         return {dispatchScatter(inputs[0], dim, inputs[1], inputs[2], reduction)};
     }
 
     if (op_name == "index_select") {
-        int64_t dim = std::stoll(attrs.at("dim"));
+        int64_t dim = attrs.get_int(AttrKey::Dim);
         return {dispatchIndexSelect(inputs[0], dim, inputs[1])};
     }
 
@@ -727,13 +703,8 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() != 2) {
             throw std::invalid_argument("gather_relative_position_bias operation requires exactly 2 inputs");
         }
-        int64_t num_positions = 0, num_heads = 0;
-        if (attrs.contains("num_positions")) {
-            num_positions = std::stoll(attrs.at("num_positions"));
-        }
-        if (attrs.contains("num_heads")) {
-            num_heads = std::stoll(attrs.at("num_heads"));
-        }
+        int64_t num_positions = attrs.get_int(AttrKey::NumPositions, 0);
+        int64_t num_heads = attrs.get_int(AttrKey::NumHeads, 0);
         return {dispatchGatherRelativePositionBias(inputs[0], inputs[1], num_positions, num_heads)};
     }
 
@@ -742,19 +713,10 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() != 1) {
             throw std::invalid_argument("reshape requires 1 input");
         }
-        if (!attrs.contains("shape")) {
+        if (!attrs.has(AttrKey::Shape)) {
             throw std::invalid_argument("reshape requires 'shape' attribute");
         }
-        // Parse shape from comma-separated string
-        std::vector<int64_t> new_shape;
-        std::string shape_str = attrs.at("shape");
-        size_t pos = 0;
-        while (pos < shape_str.size()) {
-            size_t comma = shape_str.find(',', pos);
-            if (comma == std::string::npos) comma = shape_str.size();
-            new_shape.push_back(std::stoll(shape_str.substr(pos, comma - pos)));
-            pos = comma + 1;
-        }
+        std::vector<int64_t> new_shape = attrs.get_int_list(AttrKey::Shape);
         return {dispatchReshape(inputs[0], new_shape)};
     }
 
@@ -762,8 +724,8 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() != 1) {
             throw std::invalid_argument("transpose requires 1 input");
         }
-        int64_t dim0 = std::stoll(attrs.at("dim0"));
-        int64_t dim1 = std::stoll(attrs.at("dim1"));
+        int64_t dim0 = attrs.get_int(AttrKey::Dim0);
+        int64_t dim1 = attrs.get_int(AttrKey::Dim1);
         return {dispatchTranspose(inputs[0], dim0, dim1)};
     }
 
@@ -771,16 +733,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() != 1) {
             throw std::invalid_argument("permute requires 1 input");
         }
-        // Parse dims from comma-separated string
-        std::vector<int64_t> dims;
-        std::string dims_str = attrs.at("dims");
-        size_t pos = 0;
-        while (pos < dims_str.size()) {
-            size_t comma = dims_str.find(',', pos);
-            if (comma == std::string::npos) comma = dims_str.size();
-            dims.push_back(std::stoll(dims_str.substr(pos, comma - pos)));
-            pos = comma + 1;
-        }
+        std::vector<int64_t> dims = attrs.get_int_list(AttrKey::Dims);
         return {dispatchPermute(inputs[0], dims)};
     }
 
@@ -788,7 +741,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() != 1) {
             throw std::invalid_argument("squeeze requires 1 input");
         }
-        int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         return {dispatchSqueeze(inputs[0], dim)};
     }
 
@@ -796,7 +749,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() != 1) {
             throw std::invalid_argument("unsqueeze requires 1 input");
         }
-        int64_t dim = std::stoll(attrs.at("dim"));
+        int64_t dim = attrs.get_int(AttrKey::Dim);
         return {dispatchUnsqueeze(inputs[0], dim)};
     }
 
@@ -809,21 +762,11 @@ auto VulkanBackend::dispatch(const std::string& op_name,
 
     // Memory operations
     if (op_name == "zeros") {
-        // Parse shape from comma-separated string
-        std::vector<int64_t> shape;
-        std::string shape_str = attrs.at("shape");
-        size_t pos = 0;
-        while (pos < shape_str.size()) {
-            size_t comma = shape_str.find(',', pos);
-            if (comma == std::string::npos) comma = shape_str.size();
-            shape.push_back(std::stoll(shape_str.substr(pos, comma - pos)));
-            pos = comma + 1;
-        }
+        std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
         // Get dtype and device from attributes or use defaults
         DType dtype = DType::Float32;
-        if (attrs.contains("dtype")) {
-            // Parse dtype string - must handle all dtypes
-            std::string dtype_str = attrs.at("dtype");
+        if (attrs.has(AttrKey::Dtype)) {
+            auto dtype_str = attrs.get_string(AttrKey::Dtype);
             if (dtype_str == "float32") dtype = DType::Float32;
             else if (dtype_str == "float64") dtype = DType::Float64;
             else if (dtype_str == "float16") dtype = DType::Float16;
@@ -840,7 +783,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
             else if (dtype_str == "complex64") dtype = DType::Complex64;
             else if (dtype_str == "complex128") dtype = DType::Complex128;
         }
-        int32_t device_id = attrs.contains("device_id") ? std::stoi(attrs.at("device_id")) : 0;
+        int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
         Device device = Device::vulkan(device_id);
         return {dispatchZeros(shape, dtype, device)};
     }
@@ -849,7 +792,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() != 1) {
             throw std::invalid_argument("fill requires 1 input");
         }
-        float value = std::stof(attrs.at("value"));
+        float value = static_cast<float>(attrs.get_float(AttrKey::Value));
         return {dispatchFill(inputs[0], value)};
     }
 
@@ -880,17 +823,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() != 1) {
             throw std::invalid_argument("expand requires 1 input");
         }
-        std::vector<int64_t> shape;
-        auto shape_str = attrs.at("shape");
-        // Parse shape string (format: "2,3,4")
-        size_t start = 0;
-        size_t end = shape_str.find(',');
-        while (end != std::string::npos) {
-            shape.push_back(std::stoll(shape_str.substr(start, end - start)));
-            start = end + 1;
-            end = shape_str.find(',', start);
-        }
-        shape.push_back(std::stoll(shape_str.substr(start)));
+        std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
         return {dispatchExpand(inputs[0], shape)};
     }
 
@@ -898,7 +831,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() < 2) {
             throw std::invalid_argument("cat requires at least 2 inputs");
         }
-        int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : 0;
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         std::vector<Tensor> input_tensors(inputs.begin(), inputs.end());
         return {dispatchCat(input_tensors, dim)};
     }
@@ -907,8 +840,8 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() != 1) {
             throw std::invalid_argument("clamp requires 1 input");
         }
-        float min_value = attrs.contains("min") ? std::stof(attrs.at("min")) : -std::numeric_limits<float>::infinity();
-        float max_value = attrs.contains("max") ? std::stof(attrs.at("max")) : std::numeric_limits<float>::infinity();
+        float min_value = static_cast<float>(attrs.get_float(AttrKey::Min, -std::numeric_limits<double>::infinity()));
+        float max_value = static_cast<float>(attrs.get_float(AttrKey::Max, std::numeric_limits<double>::infinity()));
         return {dispatchClamp(inputs[0], min_value, max_value)};
     }
 
@@ -916,7 +849,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() != 1) {
             throw std::invalid_argument("clamp_min requires 1 input");
         }
-        float min_value = attrs.contains("min") ? std::stof(attrs.at("min")) : -std::numeric_limits<float>::infinity();
+        float min_value = static_cast<float>(attrs.get_float(AttrKey::Min, -std::numeric_limits<double>::infinity()));
         return {dispatchClamp(inputs[0], min_value, std::numeric_limits<float>::infinity())};
     }
 
@@ -924,7 +857,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() != 1) {
             throw std::invalid_argument("clamp_max requires 1 input");
         }
-        float max_value = attrs.contains("max") ? std::stof(attrs.at("max")) : std::numeric_limits<float>::infinity();
+        float max_value = static_cast<float>(attrs.get_float(AttrKey::Max, std::numeric_limits<double>::infinity()));
         return {dispatchClamp(inputs[0], -std::numeric_limits<float>::infinity(), max_value)};
     }
 
@@ -942,7 +875,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         }
         const Tensor* gamma = (inputs.size() > 3) ? &inputs[3] : nullptr;
         const Tensor* beta = (inputs.size() > 4) ? &inputs[4] : nullptr;
-        float epsilon = attrs.contains("eps") ? std::stof(attrs.at("eps")) : 1e-5f;
+        float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         return {dispatchBatchNorm2dForward(inputs[0], inputs[1], inputs[2], gamma, beta, epsilon)};
     }
 
@@ -952,7 +885,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() < 5) {
             throw std::invalid_argument("batchnorm2d_forward_affine requires 5 inputs (input, mean, var, weight, bias)");
         }
-        float epsilon = attrs.contains("eps") ? std::stof(attrs.at("eps")) : 1e-5f;
+        float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         return {dispatchBatchNorm2dForward(inputs[0], inputs[1], inputs[2], &inputs[3], &inputs[4], epsilon)};
     }
 
@@ -962,7 +895,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
             throw std::invalid_argument("batchnorm2d_backward requires 5 inputs (grad_output, input, weight, mean, invstd)");
         }
         const Tensor* gamma = &inputs[2];  // weight = gamma
-        float epsilon = attrs.contains("eps") ? std::stof(attrs.at("eps")) : 1e-5f;
+        float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         // Pass mean=inputs[3], invstd=inputs[4] (shader uses invstd directly)
         auto [grad_input, grad_gamma, grad_beta] = dispatchBatchNorm2dBackward(
             inputs[0], inputs[1], inputs[3], inputs[4], gamma, epsilon);
@@ -983,10 +916,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
             throw std::invalid_argument("batchnorm2d_update_running_stats requires 4 inputs (running_mean, running_var, batch_mean, batch_var)");
         }
 
-        float momentum = 0.1f;
-        if (attrs.contains("momentum")) {
-            momentum = std::stof(attrs.at("momentum"));
-        }
+        float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.1));
 
         const Tensor& running_mean = inputs[0];
         const Tensor& running_var = inputs[1];
@@ -1084,49 +1014,45 @@ auto VulkanBackend::dispatch(const std::string& op_name,
 
             // Parse input shape from "input_shape" attribute (comma-separated "N,C,H,W")
             int64_t in_n = 0, in_c = 0, in_h = 0, in_w = 0;
-            if (attrs.contains("input_shape")) {
-                std::string shape_str = attrs.at("input_shape");
-                std::stringstream ss(shape_str);
-                std::string token;
-                std::vector<int64_t> dims;
-                while (std::getline(ss, token, ',')) {
-                    dims.push_back(std::stoll(token));
+            if (attrs.has(AttrKey::InputShape)) {
+                auto dims = attrs.get_int_list(AttrKey::InputShape);
+                if (dims.size() >= 4) {
+                    in_n = dims[0]; in_c = dims[1]; in_h = dims[2]; in_w = dims[3];
                 }
-                in_n = dims[0]; in_c = dims[1]; in_h = dims[2]; in_w = dims[3];
             }
 
             // Parse pooling parameters (support both single-value and h/w variants)
             int64_t kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w;
-            if (attrs.contains("kernel_h")) {
-                kernel_h = std::stoll(attrs.at("kernel_h"));
-                kernel_w = attrs.contains("kernel_w") ? std::stoll(attrs.at("kernel_w")) : kernel_h;
+            if (attrs.has(AttrKey::KernelSizeH)) {
+                kernel_h = attrs.get_int(AttrKey::KernelSizeH);
+                kernel_w = attrs.has(AttrKey::KernelSizeW) ? attrs.get_int(AttrKey::KernelSizeW) : kernel_h;
             } else {
-                kernel_h = kernel_w = std::stoll(attrs.at("kernel_size"));
+                kernel_h = kernel_w = attrs.get_int(AttrKey::KernelSize);
             }
-            if (attrs.contains("stride_h")) {
-                stride_h = std::stoll(attrs.at("stride_h"));
-                stride_w = attrs.contains("stride_w") ? std::stoll(attrs.at("stride_w")) : stride_h;
-            } else if (attrs.contains("stride")) {
-                stride_h = stride_w = std::stoll(attrs.at("stride"));
+            if (attrs.has(AttrKey::StrideH)) {
+                stride_h = attrs.get_int(AttrKey::StrideH);
+                stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : stride_h;
+            } else if (attrs.has(AttrKey::Stride)) {
+                stride_h = stride_w = attrs.get_int(AttrKey::Stride);
             } else {
                 stride_h = kernel_h; stride_w = kernel_w;
             }
-            if (attrs.contains("padding_h")) {
-                padding_h = std::stoll(attrs.at("padding_h"));
-                padding_w = attrs.contains("padding_w") ? std::stoll(attrs.at("padding_w")) : padding_h;
-            } else if (attrs.contains("padding")) {
-                padding_h = padding_w = std::stoll(attrs.at("padding"));
+            if (attrs.has(AttrKey::PaddingH)) {
+                padding_h = attrs.get_int(AttrKey::PaddingH);
+                padding_w = attrs.has(AttrKey::PaddingW) ? attrs.get_int(AttrKey::PaddingW) : padding_h;
+            } else if (attrs.has(AttrKey::Padding)) {
+                padding_h = padding_w = attrs.get_int(AttrKey::Padding);
             } else {
                 padding_h = padding_w = 0;
             }
 
-            bwd_attrs["kernel_h"] = std::to_string(kernel_h);
-            bwd_attrs["kernel_w"] = std::to_string(kernel_w);
-            bwd_attrs["stride_h"] = std::to_string(stride_h);
-            bwd_attrs["stride_w"] = std::to_string(stride_w);
-            bwd_attrs["padding_h"] = std::to_string(padding_h);
-            bwd_attrs["padding_w"] = std::to_string(padding_w);
-            bwd_attrs["count_include_pad"] = "1";
+            bwd_attrs.set(AttrKey::KernelSizeH, kernel_h);
+            bwd_attrs.set(AttrKey::KernelSizeW, kernel_w);
+            bwd_attrs.set(AttrKey::StrideH, stride_h);
+            bwd_attrs.set(AttrKey::StrideW, stride_w);
+            bwd_attrs.set(AttrKey::PaddingH, padding_h);
+            bwd_attrs.set(AttrKey::PaddingW, padding_w);
+            bwd_attrs.set(AttrKey::CountIncludePad, true);
 
             // Create a dummy input tensor with the right shape for dispatchAvgPool2dBackward
             Tensor dummy_input({in_n, in_c, in_h, in_w}, inputs[0].dtype(), inputs[0].device());
@@ -1141,8 +1067,8 @@ auto VulkanBackend::dispatch(const std::string& op_name,
             throw std::invalid_argument("max_pool2d_backward requires 2 inputs (grad_output, indices)");
         }
         // Extract H_in and W_in from attributes (required for output shape)
-        int64_t H_in = std::stoll(attrs.at("H_in"));
-        int64_t W_in = std::stoll(attrs.at("W_in"));
+        int64_t H_in = attrs.get_int(AttrKey::InputH);
+        int64_t W_in = attrs.get_int(AttrKey::InputW);
         return {dispatchMaxPool2dBackwardWithIndices(inputs[0], inputs[1], H_in, W_in)};
     }
 
@@ -1178,24 +1104,11 @@ auto VulkanBackend::dispatch(const std::string& op_name,
     // Full operation - create tensor filled with specific value
     if (op_name == "full") {
         // Extract shape and value from attributes
-        std::vector<int64_t> shape;
-        if (attrs.contains("shape")) {
-            // Parse shape string like "2,3,4"
-            std::string shape_str = attrs.at("shape");
-            size_t pos = 0;
-            while ((pos = shape_str.find(',')) != std::string::npos) {
-                shape.push_back(std::stoll(shape_str.substr(0, pos)));
-                shape_str.erase(0, pos + 1);
-            }
-            if (!shape_str.empty()) {
-                shape.push_back(std::stoll(shape_str));
-            }
-        }
-        float value = attrs.contains("value") ? std::stof(attrs.at("value")) : 0.0f;
+        std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
+        float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
         DType dtype = DType::Float32;  // Default dtype
-        if (attrs.contains("dtype")) {
-            // Parse dtype string to enum
-            std::string dtype_str = attrs.at("dtype");
+        if (attrs.has(AttrKey::Dtype)) {
+            auto dtype_str = attrs.get_string(AttrKey::Dtype);
             if (dtype_str == "int32" || dtype_str == "Int32") {
                 dtype = DType::Int32;
             } else if (dtype_str == "float32" || dtype_str == "Float32") {
@@ -1221,114 +1134,59 @@ auto VulkanBackend::dispatch(const std::string& op_name,
 
     // Ones operation - create tensor filled with 1.0
     if (op_name == "ones") {
-        // Extract shape from attributes
-        std::vector<int64_t> shape;
-        if (attrs.contains("shape")) {
-            // Parse shape string like "2,3,4"
-            std::string shape_str = attrs.at("shape");
-            size_t pos = 0;
-            while ((pos = shape_str.find(',')) != std::string::npos) {
-                shape.push_back(std::stoll(shape_str.substr(0, pos)));
-                shape_str.erase(0, pos + 1);
-            }
-            if (!shape_str.empty()) {
-                shape.push_back(std::stoll(shape_str));
-            }
-        }
-        DType dtype = DType::Float32;  // Default dtype
-        if (attrs.contains("dtype")) {
-            std::string dtype_str = attrs.at("dtype");
-            if (dtype_str == "float32") {
-                dtype = DType::Float32;
-            } else if (dtype_str == "float16") {
-                dtype = DType::Float16;
-            } else if (dtype_str == "bfloat16") {
-                dtype = DType::BFloat16;
-            } else if (dtype_str == "int32") {
-                dtype = DType::Int32;
-            } else if (dtype_str == "int64") {
-                dtype = DType::Int64;
-            } else if (dtype_str == "float64") {
-                dtype = DType::Float64;
-            } else if (dtype_str == "int8") {
-                dtype = DType::Int8;
-            } else if (dtype_str == "uint8") {
-                dtype = DType::UInt8;
-            } else if (dtype_str == "bool") {
-                dtype = DType::Bool;
-            }
+        std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
+        DType dtype = DType::Float32;
+        if (attrs.has(AttrKey::Dtype)) {
+            auto dtype_str = attrs.get_string(AttrKey::Dtype);
+            if (dtype_str == "float32" || dtype_str == "Float32") dtype = DType::Float32;
+            else if (dtype_str == "float16" || dtype_str == "Float16") dtype = DType::Float16;
+            else if (dtype_str == "bfloat16" || dtype_str == "BFloat16") dtype = DType::BFloat16;
+            else if (dtype_str == "int32" || dtype_str == "Int32") dtype = DType::Int32;
+            else if (dtype_str == "int64" || dtype_str == "Int64") dtype = DType::Int64;
+            else if (dtype_str == "float64" || dtype_str == "Float64") dtype = DType::Float64;
+            else if (dtype_str == "int8" || dtype_str == "Int8") dtype = DType::Int8;
+            else if (dtype_str == "uint8" || dtype_str == "UInt8") dtype = DType::UInt8;
+            else if (dtype_str == "bool" || dtype_str == "Bool") dtype = DType::Bool;
         }
         return {dispatchOnes(shape, dtype)};
     }
 
     // Rand operation - create tensor filled with uniform random values [0, 1)
     if (op_name == "rand") {
-        std::vector<int64_t> shape;
-        if (attrs.contains("shape")) {
-            std::string shape_str = attrs.at("shape");
-            size_t pos = 0;
-            while ((pos = shape_str.find(',')) != std::string::npos) {
-                shape.push_back(std::stoll(shape_str.substr(0, pos)));
-                shape_str.erase(0, pos + 1);
-            }
-            if (!shape_str.empty()) {
-                shape.push_back(std::stoll(shape_str));
-            }
-        }
+        std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
         DType dtype = DType::Float32;
-        if (attrs.contains("dtype")) {
-            std::string dtype_str = attrs.at("dtype");
-            if (dtype_str == "float32" || dtype_str == "Float32") {
-                dtype = DType::Float32;
-            } else if (dtype_str == "float64" || dtype_str == "Float64") {
-                dtype = DType::Float64;
-            } else if (dtype_str == "float16" || dtype_str == "Float16") {
-                dtype = DType::Float16;
-            } else if (dtype_str == "bfloat16" || dtype_str == "BFloat16") {
-                dtype = DType::BFloat16;
-            }
+        if (attrs.has(AttrKey::Dtype)) {
+            auto dtype_str = attrs.get_string(AttrKey::Dtype);
+            if (dtype_str == "float32" || dtype_str == "Float32") dtype = DType::Float32;
+            else if (dtype_str == "float64" || dtype_str == "Float64") dtype = DType::Float64;
+            else if (dtype_str == "float16" || dtype_str == "Float16") dtype = DType::Float16;
+            else if (dtype_str == "bfloat16" || dtype_str == "BFloat16") dtype = DType::BFloat16;
         }
         return {dispatchRand(shape, dtype)};
     }
 
     // Randn operation - create tensor filled with normal random values
     if (op_name == "randn") {
-        std::vector<int64_t> shape;
-        if (attrs.contains("shape")) {
-            std::string shape_str = attrs.at("shape");
-            size_t pos = 0;
-            while ((pos = shape_str.find(',')) != std::string::npos) {
-                shape.push_back(std::stoll(shape_str.substr(0, pos)));
-                shape_str.erase(0, pos + 1);
-            }
-            if (!shape_str.empty()) {
-                shape.push_back(std::stoll(shape_str));
-            }
-        }
+        std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
         DType dtype = DType::Float32;
-        if (attrs.contains("dtype")) {
-            std::string dtype_str = attrs.at("dtype");
-            if (dtype_str == "float32" || dtype_str == "Float32") {
-                dtype = DType::Float32;
-            } else if (dtype_str == "float64" || dtype_str == "Float64") {
-                dtype = DType::Float64;
-            } else if (dtype_str == "float16" || dtype_str == "Float16") {
-                dtype = DType::Float16;
-            } else if (dtype_str == "bfloat16" || dtype_str == "BFloat16") {
-                dtype = DType::BFloat16;
-            }
+        if (attrs.has(AttrKey::Dtype)) {
+            auto dtype_str = attrs.get_string(AttrKey::Dtype);
+            if (dtype_str == "float32" || dtype_str == "Float32") dtype = DType::Float32;
+            else if (dtype_str == "float64" || dtype_str == "Float64") dtype = DType::Float64;
+            else if (dtype_str == "float16" || dtype_str == "Float16") dtype = DType::Float16;
+            else if (dtype_str == "bfloat16" || dtype_str == "BFloat16") dtype = DType::BFloat16;
         }
         return {dispatchRandn(shape, dtype)};
     }
 
     // Arange operation
     if (op_name == "arange") {
-        float start = attrs.contains("start") ? std::stof(attrs.at("start")) : 0.0f;
-        float end_val = attrs.contains("end") ? std::stof(attrs.at("end")) : 0.0f;
-        float step = attrs.contains("step") ? std::stof(attrs.at("step")) : 1.0f;
+        float start = static_cast<float>(attrs.get_float(AttrKey::Start, 0.0));
+        float end_val = static_cast<float>(attrs.get_float(AttrKey::End, 0.0));
+        float step = static_cast<float>(attrs.get_float(AttrKey::Step, 1.0));
         DType dtype = DType::Float32;
-        if (attrs.contains("dtype")) {
-            std::string dtype_str = attrs.at("dtype");
+        if (attrs.has(AttrKey::Dtype)) {
+            auto dtype_str = attrs.get_string(AttrKey::Dtype);
             if (dtype_str == "float64" || dtype_str == "Float64") dtype = DType::Float64;
             else if (dtype_str == "float16" || dtype_str == "Float16") dtype = DType::Float16;
             else if (dtype_str == "bfloat16" || dtype_str == "BFloat16") dtype = DType::BFloat16;
@@ -1338,19 +1196,19 @@ auto VulkanBackend::dispatch(const std::string& op_name,
             else if (dtype_str == "uint8" || dtype_str == "UInt8") dtype = DType::UInt8;
             else if (dtype_str == "bool" || dtype_str == "Bool") dtype = DType::Bool;
         }
-        int32_t device_id = attrs.contains("device_id") ? std::stoi(attrs.at("device_id")) : 0;
+        int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
         Device device = Device::vulkan(device_id);
         return {dispatchArange(start, end_val, step, dtype, device)};
     }
 
     // Linspace operation
     if (op_name == "linspace") {
-        float start = attrs.contains("start") ? std::stof(attrs.at("start")) : 0.0f;
-        float end_val = attrs.contains("end") ? std::stof(attrs.at("end")) : 1.0f;
-        int64_t steps = attrs.contains("steps") ? std::stoll(attrs.at("steps")) : 100;
+        float start = static_cast<float>(attrs.get_float(AttrKey::Start, 0.0));
+        float end_val = static_cast<float>(attrs.get_float(AttrKey::End, 1.0));
+        int64_t steps = attrs.get_int(AttrKey::Steps, 100);
         DType dtype = DType::Float32;
-        if (attrs.contains("dtype")) {
-            std::string dtype_str = attrs.at("dtype");
+        if (attrs.has(AttrKey::Dtype)) {
+            auto dtype_str = attrs.get_string(AttrKey::Dtype);
             if (dtype_str == "float64" || dtype_str == "Float64") dtype = DType::Float64;
             else if (dtype_str == "float16" || dtype_str == "Float16") dtype = DType::Float16;
             else if (dtype_str == "bfloat16" || dtype_str == "BFloat16") dtype = DType::BFloat16;
@@ -1360,18 +1218,18 @@ auto VulkanBackend::dispatch(const std::string& op_name,
             else if (dtype_str == "uint8" || dtype_str == "UInt8") dtype = DType::UInt8;
             else if (dtype_str == "bool" || dtype_str == "Bool") dtype = DType::Bool;
         }
-        int32_t device_id = attrs.contains("device_id") ? std::stoi(attrs.at("device_id")) : 0;
+        int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
         Device device = Device::vulkan(device_id);
         return {dispatchLinspace(start, end_val, steps, dtype, device)};
     }
 
     // Eye operation
     if (op_name == "eye") {
-        int64_t n = attrs.contains("n") ? std::stoll(attrs.at("n")) : 0;
-        int64_t m = attrs.contains("m") ? std::stoll(attrs.at("m")) : -1;
+        int64_t n = attrs.get_int(AttrKey::N, 0);
+        int64_t m = attrs.get_int(AttrKey::M, -1);
         DType dtype = DType::Float32;
-        if (attrs.contains("dtype")) {
-            std::string dtype_str = attrs.at("dtype");
+        if (attrs.has(AttrKey::Dtype)) {
+            auto dtype_str = attrs.get_string(AttrKey::Dtype);
             if (dtype_str == "float64" || dtype_str == "Float64") dtype = DType::Float64;
             else if (dtype_str == "float16" || dtype_str == "Float16") dtype = DType::Float16;
             else if (dtype_str == "bfloat16" || dtype_str == "BFloat16") dtype = DType::BFloat16;
@@ -1381,7 +1239,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
             else if (dtype_str == "uint8" || dtype_str == "UInt8") dtype = DType::UInt8;
             else if (dtype_str == "bool" || dtype_str == "Bool") dtype = DType::Bool;
         }
-        int32_t device_id = attrs.contains("device_id") ? std::stoi(attrs.at("device_id")) : 0;
+        int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
         Device device = Device::vulkan(device_id);
         return {dispatchEye(n, m, dtype, device)};
     }
@@ -1391,19 +1249,10 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() != 1) {
             throw std::invalid_argument("repeat operation requires exactly 1 input");
         }
-        if (!attrs.contains("repeats")) {
+        if (!attrs.has(AttrKey::Repeats)) {
             throw std::invalid_argument("repeat operation requires 'repeats' attribute");
         }
-        std::vector<int64_t> repeats;
-        std::string repeats_str = attrs.at("repeats");
-        size_t pos = 0;
-        while ((pos = repeats_str.find(',')) != std::string::npos) {
-            repeats.push_back(std::stoll(repeats_str.substr(0, pos)));
-            repeats_str.erase(0, pos + 1);
-        }
-        if (!repeats_str.empty()) {
-            repeats.push_back(std::stoll(repeats_str));
-        }
+        std::vector<int64_t> repeats = attrs.get_int_list(AttrKey::Repeats);
         return {dispatchRepeat(inputs[0], repeats)};
     }
 
@@ -1420,10 +1269,10 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() != 2) {
             throw std::invalid_argument("masked_fill operation requires exactly 2 inputs");
         }
-        if (!attrs.contains("value")) {
+        if (!attrs.has(AttrKey::Value)) {
             throw std::invalid_argument("masked_fill operation requires 'value' attribute");
         }
-        float value = std::stof(attrs.at("value"));
+        float value = static_cast<float>(attrs.get_float(AttrKey::Value));
         return {dispatchMaskedFill(inputs[0], inputs[1], value)};
     }
 
@@ -1444,7 +1293,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() < 2) {
             throw std::invalid_argument("fused_linear_relu requires at least 2 inputs (input, weight)");
         }
-        bool has_bias = attrs.contains("has_bias") && attrs.at("has_bias") == "true";
+        bool has_bias = attrs.get_bool(AttrKey::HasBias, false);
 
         auto input_shape = inputs[0].shape();
         int64_t in_features = input_shape[input_shape.size() - 1];
@@ -1486,7 +1335,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
             throw std::invalid_argument("fused_batchnorm_relu requires 5 inputs (input, mean, var, weight, bias)");
         }
 
-        float eps = attrs.contains("eps") ? std::stof(attrs.at("eps")) : 1e-5f;
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         auto orig_shape = inputs[0].shape();
 
         // Reshape to 4D if needed: (N, C, ...) -> (N, C, H, W) where H*W = spatial_size
@@ -1540,14 +1389,15 @@ auto VulkanBackend::dispatch(const std::string& op_name,
             throw std::invalid_argument("fused_layer_norm requires 3 inputs (input, weight, bias)");
         }
         // Parse normalized_shape from comma-separated string to compute total size
-        std::string ns_str = attrs.at("normalized_shape");
+        auto ns_str = attrs.get_string(AttrKey::NormalizedShape);
         int64_t normalized_size = 1;
-        std::stringstream ss(ns_str);
+        std::string ns_s{ns_str};
+        std::stringstream ss(ns_s);
         std::string token;
         while (std::getline(ss, token, ',')) {
             normalized_size *= std::stoll(token);
         }
-        float eps = attrs.contains("eps") ? std::stof(attrs.at("eps")) : 1e-5f;
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         Tensor result = dispatchLayerNorm(inputs[0], normalized_size,
                                            &inputs[1], &inputs[2], eps);
         return {result};
@@ -1588,9 +1438,10 @@ auto VulkanBackend::dispatch(const std::string& op_name,
             throw std::invalid_argument("layer_norm requires at least 1 input");
         }
         int64_t normalized_size = 1;
-        if (attrs.contains("normalized_shape")) {
-            std::string ns_str = attrs.at("normalized_shape");
-            std::stringstream ss(ns_str);
+        if (attrs.has(AttrKey::NormalizedShape)) {
+            auto ns_str = attrs.get_string(AttrKey::NormalizedShape);
+            std::string ns_s{ns_str};
+            std::stringstream ss(ns_s);
             std::string token;
             while (std::getline(ss, token, ',')) {
                 normalized_size *= std::stoll(token);
@@ -1598,7 +1449,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         } else {
             normalized_size = inputs[0].shape().back();
         }
-        float eps = attrs.contains("eps") ? std::stof(attrs.at("eps")) : 1e-5f;
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         const Tensor* gamma = (inputs.size() > 1) ? &inputs[1] : nullptr;
         const Tensor* beta = (inputs.size() > 2) ? &inputs[2] : nullptr;
         return {dispatchLayerNorm(inputs[0], normalized_size, gamma, beta, eps)};
@@ -1610,8 +1461,8 @@ auto VulkanBackend::dispatch(const std::string& op_name,
             throw std::invalid_argument("layer_norm_backward requires 5 inputs (grad_output, input, mean, rstd, weight)");
         }
         int64_t normalized_shape = inputs[0].shape().back();
-        if (attrs.contains("normalized_shape")) {
-            normalized_shape = std::stoll(attrs.at("normalized_shape"));
+        if (attrs.has(AttrKey::NormalizedShape)) {
+            normalized_shape = attrs.get_int(AttrKey::NormalizedShape);
         }
         auto [grad_input, grad_weight, grad_bias] = dispatchLayerNormBackward(
             inputs[0], inputs[1], inputs[2], inputs[3], &inputs[4], normalized_shape);
@@ -1622,8 +1473,8 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() < 1) {
             throw std::invalid_argument("group_norm requires at least 1 input");
         }
-        int64_t num_groups = attrs.contains("num_groups") ? std::stoll(attrs.at("num_groups")) : 1;
-        float eps = attrs.contains("eps") ? std::stof(attrs.at("eps")) : 1e-5f;
+        int64_t num_groups = attrs.get_int(AttrKey::NumGroups, 1);
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         const Tensor* gamma = (inputs.size() > 1) ? &inputs[1] : nullptr;
         const Tensor* beta = (inputs.size() > 2) ? &inputs[2] : nullptr;
         return dispatchGroupNorm(inputs[0], num_groups, gamma, beta, eps);
@@ -1634,7 +1485,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() < 5) {
             throw std::invalid_argument("group_norm_backward requires 5 inputs (grad_output, input, mean, rstd, weight)");
         }
-        int64_t num_groups = attrs.contains("num_groups") ? std::stoll(attrs.at("num_groups")) : 1;
+        int64_t num_groups = attrs.get_int(AttrKey::NumGroups, 1);
         auto [grad_input, grad_weight, grad_bias] = dispatchGroupNormBackward(
             inputs[0], inputs[1], inputs[2], inputs[3], &inputs[4], num_groups);
         return {grad_input, grad_weight, grad_bias};
@@ -1648,7 +1499,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() < 2) {
             throw std::invalid_argument("embedding_backward requires 2 inputs (grad_output, indices)");
         }
-        int64_t num_embeddings = attrs.contains("num_embeddings") ? std::stoll(attrs.at("num_embeddings")) : 0;
+        int64_t num_embeddings = attrs.get_int(AttrKey::NumEmbeddings, 0);
         int64_t embedding_dim = inputs[0].shape().back();
         return {dispatchEmbeddingBackward(inputs[0], inputs[1], num_embeddings, embedding_dim)};
     }
@@ -1660,7 +1511,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() < 2) {
             throw std::invalid_argument("fused_rms_norm requires 2 inputs (input, weight)");
         }
-        float eps = attrs.contains("eps") ? std::stof(attrs.at("eps")) : 1e-5f;
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         int64_t normalized_shape = inputs[0].shape().back();
         auto [output, rrms] = dispatchRMSNorm(inputs[0], inputs[1], normalized_shape, eps);
         return {output, rrms};
@@ -1672,8 +1523,8 @@ auto VulkanBackend::dispatch(const std::string& op_name,
             throw std::invalid_argument("rms_norm_backward requires 4 inputs (grad_output, input, rrms, weight)");
         }
         int64_t normalized_shape = inputs[0].shape().back();
-        if (attrs.contains("normalized_shape")) {
-            normalized_shape = std::stoll(attrs.at("normalized_shape"));
+        if (attrs.has(AttrKey::NormalizedShape)) {
+            normalized_shape = attrs.get_int(AttrKey::NormalizedShape);
         }
         auto [grad_input, grad_weight] = dispatchRMSNormBackward(
             inputs[0], inputs[1], inputs[2], inputs[3], normalized_shape);
@@ -1694,7 +1545,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() < 1) {
             throw std::invalid_argument("one_hot requires 1 input (indices)");
         }
-        int64_t num_classes = attrs.contains("num_classes") ? std::stoll(attrs.at("num_classes")) : 10;
+        int64_t num_classes = attrs.get_int(AttrKey::NumClasses, 10);
         return {dispatchOneHot(inputs[0], num_classes)};
     }
 
@@ -1702,7 +1553,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() < 2) {
             throw std::invalid_argument("box_iou requires 2 inputs (boxes1, boxes2)");
         }
-        int64_t iou_type = attrs.contains("iou_type") ? std::stoll(attrs.at("iou_type")) : 0;
+        int64_t iou_type = attrs.get_int(AttrKey::IouType, 0);
         return {dispatchBoxIoU(inputs[0], inputs[1], iou_type)};
     }
 
@@ -1715,12 +1566,12 @@ auto VulkanBackend::dispatch(const std::string& op_name,
             throw std::invalid_argument("fused_rmsprop_step requires at least 3 inputs");
         }
         int64_t numel = inputs[0].numel();
-        float lr = attrs.contains("lr") ? std::stof(attrs.at("lr")) : 0.01f;
-        float alpha = attrs.contains("alpha") ? std::stof(attrs.at("alpha")) : 0.99f;
-        float eps = attrs.contains("eps") ? std::stof(attrs.at("eps")) : 1e-8f;
-        float weight_decay = attrs.contains("weight_decay") ? std::stof(attrs.at("weight_decay")) : 0.0f;
-        float momentum = attrs.contains("momentum") ? std::stof(attrs.at("momentum")) : 0.0f;
-        bool centered = attrs.contains("centered") && attrs.at("centered") == "1";
+        float lr = static_cast<float>(attrs.get_float(AttrKey::Lr, 0.01));
+        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.99));
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-8));
+        float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
+        float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.0));
+        bool centered = attrs.get_bool(AttrKey::Centered, false);
 
         int32_t device_id = inputs[0].device().index;
         auto* pipeline = getPipeline("fused_rmsprop_step", device_id);
@@ -1794,10 +1645,10 @@ auto VulkanBackend::dispatch(const std::string& op_name,
             throw std::invalid_argument("fused_adadelta_step requires 4 inputs");
         }
         int64_t numel = inputs[0].numel();
-        float lr = attrs.contains("lr") ? std::stof(attrs.at("lr")) : 1.0f;
-        float rho = attrs.contains("rho") ? std::stof(attrs.at("rho")) : 0.9f;
-        float eps = attrs.contains("eps") ? std::stof(attrs.at("eps")) : 1e-6f;
-        float weight_decay = attrs.contains("weight_decay") ? std::stof(attrs.at("weight_decay")) : 0.0f;
+        float lr = static_cast<float>(attrs.get_float(AttrKey::Lr, 1.0));
+        float rho = static_cast<float>(attrs.get_float(AttrKey::Rho, 0.9));
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-6));
+        float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
 
         int32_t device_id = inputs[0].device().index;
         auto* pipeline = getPipeline("fused_adadelta_step", device_id);
@@ -1852,9 +1703,9 @@ auto VulkanBackend::dispatch(const std::string& op_name,
             throw std::invalid_argument("fused_adagrad_step requires 3 inputs");
         }
         int64_t numel = inputs[0].numel();
-        float lr = attrs.contains("lr") ? std::stof(attrs.at("lr")) : 0.01f;
-        float eps = attrs.contains("eps") ? std::stof(attrs.at("eps")) : 1e-10f;
-        float weight_decay = attrs.contains("weight_decay") ? std::stof(attrs.at("weight_decay")) : 0.0f;
+        float lr = static_cast<float>(attrs.get_float(AttrKey::Lr, 0.01));
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-10));
+        float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
 
         int32_t device_id = inputs[0].device().index;
         auto* pipeline = getPipeline("fused_adagrad_step", device_id);
@@ -1896,15 +1747,9 @@ auto VulkanBackend::dispatch(const std::string& op_name,
 
     throw std::runtime_error("VulkanBackend: Operation '" + op_name + "' not implemented");
     } catch (const std::out_of_range& e) {
-        // Catch unordered_map::at errors and provide better diagnostics
-        std::string attr_list;
-        for (const auto& [key, val] : attrs) {
-            if (!attr_list.empty()) attr_list += ", ";
-            attr_list += key + "=" + val;
-        }
         throw std::runtime_error("VulkanBackend::dispatch '" + op_name +
                                "' failed with out_of_range: " + e.what() +
-                               ". Attrs: {" + attr_list + "}");
+                               " (attrs count: " + std::to_string(attrs.size()) + ")");
     }
 }
 

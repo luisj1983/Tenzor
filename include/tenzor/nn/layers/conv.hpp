@@ -331,5 +331,45 @@ private:
     auto reset_parameters() -> void;
 };
 
+/**
+ * @brief 3D transposed convolutional layer.
+ *
+ * Applies transposed 3D convolution (deconvolution) for volumetric upsampling.
+ *
+ * Shape transformations:
+ * - Input: (N, C_in, D_in, H_in, W_in)
+ * - Output: (N, C_out, D_out, H_out, W_out)
+ * - Weight: (C_in, C_out/groups, K, K, K)
+ *
+ * Output size formula per spatial dim:
+ *   out = (in - 1) * stride - 2 * padding + dilation * (kernel - 1) + output_padding + 1
+ */
+class ConvTranspose3d : public Module {
+public:
+    ConvTranspose3d(int64_t in_channels,
+                    int64_t out_channels,
+                    int64_t kernel_size,
+                    int64_t stride = 1,
+                    int64_t padding = 0,
+                    int64_t output_padding = 0,
+                    int64_t dilation = 1,
+                    int64_t groups = 1,
+                    bool bias = true);
+
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    int64_t in_channels_;
+    int64_t out_channels_;
+    int64_t kernel_size_;
+    int64_t stride_;
+    int64_t padding_;
+    int64_t output_padding_;
+    int64_t dilation_;
+    int64_t groups_;
+
+    auto reset_parameters() -> void;
+};
+
 } // namespace nn
 } // namespace tenzor

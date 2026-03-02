@@ -8,6 +8,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include <cmath>
 #include <algorithm>
@@ -55,14 +56,14 @@ auto AdamAtan2::step_impl() -> void {
                 inputs.push_back(max_exp_avg_sq_[i]);
             }
 
-            OpAttributes attrs;
-            attrs["lr"] = std::to_string(static_cast<float>(lr_));
-            attrs["beta1"] = std::to_string(static_cast<float>(beta1_));
-            attrs["beta2"] = std::to_string(static_cast<float>(beta2_));
-            attrs["eps"] = std::to_string(static_cast<float>(eps_));
-            attrs["weight_decay"] = std::to_string(static_cast<float>(weight_decay_));
-            attrs["step"] = std::to_string(step_count_);
-            attrs["amsgrad"] = amsgrad_ ? "true" : "false";
+            NewOpAttributes attrs;
+            attrs.set(AttrKey::Lr, static_cast<float>(lr_));
+            attrs.set(AttrKey::Beta1, static_cast<float>(beta1_));
+            attrs.set(AttrKey::Beta2, static_cast<float>(beta2_));
+            attrs.set(AttrKey::Eps, static_cast<float>(eps_));
+            attrs.set(AttrKey::WeightDecay, static_cast<float>(weight_decay_));
+            attrs.set(AttrKey::Step, step_count_);
+            attrs.set(AttrKey::Amsgrad, amsgrad_);
 
             dispatch(OpId::FusedAdamAtan2Step, inputs, attrs);
             total_params++;

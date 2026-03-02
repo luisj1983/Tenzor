@@ -8,6 +8,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include <cmath>
 #include <cstring>
@@ -94,13 +95,13 @@ auto RMSprop::step_impl() -> void {
                 inputs.push_back(grad_avg_[i]);
             }
 
-            OpAttributes attrs;
-            attrs["lr"] = std::to_string(static_cast<float>(lr_));
-            attrs["alpha"] = std::to_string(static_cast<float>(alpha_));
-            attrs["eps"] = std::to_string(static_cast<float>(eps_));
-            attrs["weight_decay"] = std::to_string(static_cast<float>(weight_decay_));
-            attrs["momentum"] = std::to_string(static_cast<float>(momentum_));
-            attrs["centered"] = centered_ ? "1" : "0";
+            NewOpAttributes attrs;
+            attrs.set(AttrKey::Lr, static_cast<float>(lr_));
+            attrs.set(AttrKey::Alpha, static_cast<float>(alpha_));
+            attrs.set(AttrKey::Eps, static_cast<float>(eps_));
+            attrs.set(AttrKey::WeightDecay, static_cast<float>(weight_decay_));
+            attrs.set(AttrKey::Momentum, static_cast<float>(momentum_));
+            attrs.set(AttrKey::Centered, centered_);
 
             dispatch(OpId::FusedRMSPropStep, inputs, attrs);
             continue;
@@ -119,13 +120,13 @@ auto RMSprop::step_impl() -> void {
                 inputs.push_back(momentum_buffer_[i]);
             }
 
-            OpAttributes attrs;
-            attrs["lr"] = std::to_string(static_cast<float>(lr_));
-            attrs["alpha"] = std::to_string(static_cast<float>(alpha_));
-            attrs["eps"] = std::to_string(static_cast<float>(eps_));
-            attrs["weight_decay"] = std::to_string(static_cast<float>(weight_decay_));
-            attrs["momentum"] = std::to_string(static_cast<float>(momentum_));
-            attrs["centered"] = centered_ ? "1" : "0";
+            NewOpAttributes attrs;
+            attrs.set(AttrKey::Lr, static_cast<float>(lr_));
+            attrs.set(AttrKey::Alpha, static_cast<float>(alpha_));
+            attrs.set(AttrKey::Eps, static_cast<float>(eps_));
+            attrs.set(AttrKey::WeightDecay, static_cast<float>(weight_decay_));
+            attrs.set(AttrKey::Momentum, static_cast<float>(momentum_));
+            attrs.set(AttrKey::Centered, centered_);
 
             dispatch(OpId::FusedRMSPropStep, inputs, attrs);
             continue;

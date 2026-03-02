@@ -5,6 +5,7 @@
 
 #include "tenzor/ops/vision.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include <stdexcept>
 #include <algorithm>
@@ -34,11 +35,11 @@ auto unfold(const Tensor& input,
     }
 
     // Set up operation attributes
-    OpAttributes attrs;
-    attrs["kernel_size"] = std::to_string(kernel_size);
-    attrs["stride"] = std::to_string(stride);
-    attrs["padding"] = std::to_string(padding);
-    attrs["dilation"] = std::to_string(dilation);
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::KernelSize, kernel_size);
+    attrs.set(AttrKey::Stride, stride);
+    attrs.set(AttrKey::Padding, padding);
+    attrs.set(AttrKey::Dilation, dilation);
 
     // Dispatch to appropriate backend
     std::vector<Tensor> inputs = {input};
@@ -91,12 +92,12 @@ auto fold(const Tensor& input,
     }
 
     // Set up operation attributes
-    OpAttributes attrs;
-    attrs["output_size"] = size_str;
-    attrs["kernel_size"] = std::to_string(kernel_size);
-    attrs["stride"] = std::to_string(stride);
-    attrs["padding"] = std::to_string(padding);
-    attrs["dilation"] = std::to_string(dilation);
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::OutputSize, size_str);
+    attrs.set(AttrKey::KernelSize, kernel_size);
+    attrs.set(AttrKey::Stride, stride);
+    attrs.set(AttrKey::Padding, padding);
+    attrs.set(AttrKey::Dilation, dilation);
 
     // Dispatch to appropriate backend
     std::vector<Tensor> inputs = {input};
@@ -141,9 +142,9 @@ auto interpolate(const Tensor& input,
 
     // Set up operation attributes
     OpAttributes attrs;
-    attrs["size"] = size_str;
-    attrs["mode"] = mode;
-    attrs["align_corners"] = align_corners ? "1" : "0";
+    attrs.set(AttrKey::OutputSize, size_str);
+    attrs.set(AttrKey::Mode, mode);
+    attrs.set(AttrKey::AlignCorners, align_corners);
 
     // Dispatch to appropriate backend
     std::vector<Tensor> inputs = {input};

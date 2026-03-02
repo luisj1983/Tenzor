@@ -1,5 +1,6 @@
 #include "tenzor/nn/layers/flatten.hpp"
 #include "tenzor/autograd/function.hpp"
+#include "tenzor/autograd/ops.hpp"
 #include <stdexcept>
 
 namespace tenzor::nn {
@@ -25,6 +26,10 @@ public:
         std::vector<Tensor> result;
         result.push_back(grad_input);
         return result;
+    }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        return {reshape(grad_outputs[0], input_shape_)};
     }
 
 private:
@@ -118,6 +123,10 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
         // Reshape gradient back to the flattened shape
         return {grad_outputs[0].reshape(input_shape_)};
+    }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        return {reshape(grad_outputs[0], input_shape_)};
     }
 
 private:
@@ -217,6 +226,42 @@ public:
         auto permuted = reshaped.permute(perm).contiguous();
         auto result = permuted.reshape(input_shape_);
         return {result};
+    }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        auto grad = grad_outputs[0];
+        auto shape = grad.tensor().shape();
+        auto ndim = static_cast<int64_t>(shape.size());
+        if (ndim < 3) throw std::runtime_error("PixelShuffleBackward: need at least 3D");
+
+        int64_t r = downscale_factor_;
+        int64_t C = shape[ndim - 3];
+        int64_t H_out = shape[ndim - 2];
+        int64_t W_out = shape[ndim - 1];
+
+        // Reverse: reshape (*, C, H*r, W*r) -> (*, C, H, r, W, r) -> permute -> (*, C*r*r, H, W)
+        std::vector<int64_t> new_shape;
+        for (int64_t i = 0; i < ndim - 3; ++i) new_shape.push_back(shape[i]);
+        new_shape.push_back(C);
+        new_shape.push_back(H_out / r);
+        new_shape.push_back(r);
+        new_shape.push_back(W_out / r);
+        new_shape.push_back(r);
+
+        auto reshaped = reshape(grad, new_shape);
+        auto rndim = static_cast<int64_t>(reshaped.tensor().shape().size());
+
+        // permute: move r dims next to C: (*, C, H, r, W, r) -> (*, C, r, r, H, W)
+        std::vector<int64_t> perm;
+        for (int64_t i = 0; i < rndim - 5; ++i) perm.push_back(i);
+        perm.push_back(rndim - 5);  // C
+        perm.push_back(rndim - 3);  // r (from H)
+        perm.push_back(rndim - 1);  // r (from W)
+        perm.push_back(rndim - 4);  // H
+        perm.push_back(rndim - 2);  // W
+
+        auto permuted = permute(reshaped, perm);
+        return {reshape(permuted, input_shape_)};
     }
 
 private:
@@ -345,6 +390,41 @@ public:
         auto permuted = reshaped.permute(perm).contiguous();
         auto result = permuted.reshape(input_shape_);
         return {result};
+    }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        auto grad = grad_outputs[0];
+        auto shape = grad.tensor().shape();
+        auto ndim = static_cast<int64_t>(shape.size());
+
+        int64_t r = upscale_factor_;
+        int64_t C_in = shape[ndim - 3];
+        int64_t H = shape[ndim - 2];
+        int64_t W = shape[ndim - 1];
+        int64_t C_out = C_in / (r * r);
+
+        // pixel_shuffle: reshape + permute + reshape
+        std::vector<int64_t> reshaped_shape;
+        for (int64_t i = 0; i < ndim - 3; ++i) reshaped_shape.push_back(shape[i]);
+        reshaped_shape.push_back(C_out);
+        reshaped_shape.push_back(r);
+        reshaped_shape.push_back(r);
+        reshaped_shape.push_back(H);
+        reshaped_shape.push_back(W);
+
+        auto reshaped = reshape(grad, reshaped_shape);
+        auto rndim = static_cast<int64_t>(reshaped.tensor().shape().size());
+
+        std::vector<int64_t> perm;
+        for (int64_t i = 0; i < rndim - 5; ++i) perm.push_back(i);
+        perm.push_back(rndim - 5);  // C
+        perm.push_back(rndim - 2);  // H
+        perm.push_back(rndim - 4);  // r
+        perm.push_back(rndim - 1);  // W
+        perm.push_back(rndim - 3);  // r
+
+        auto permuted = permute(reshaped, perm);
+        return {reshape(permuted, input_shape_)};
     }
 
 private:

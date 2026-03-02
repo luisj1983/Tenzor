@@ -197,9 +197,9 @@ auto upsample_bilinear(const Variable& input, int64_t target_h, int64_t target_w
 
     // Use backend dispatch for bilinear interpolation (avoids GPU→CPU→GPU round-trip)
     OpAttributes interp_attrs;
-    interp_attrs["mode"] = "bilinear";
-    interp_attrs["size"] = std::to_string(target_h) + "," + std::to_string(target_w);
-    interp_attrs["align_corners"] = "0";
+    interp_attrs.set(AttrKey::Mode, "bilinear");
+    interp_attrs.set(AttrKey::OutputSize, std::to_string(target_h) + "," + std::to_string(target_w));
+    interp_attrs.set(AttrKey::AlignCorners, false);
 
     std::vector<Tensor> interp_inputs = {input.tensor()};
     auto interp_results = dispatch(OpId::Interpolate, interp_inputs, interp_attrs);

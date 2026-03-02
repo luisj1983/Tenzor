@@ -42,18 +42,18 @@ enum class CopyKind {
 using StreamHandle = void*;
 
 /**
- * @brief Generic operation attributes for kernel parameters.
+ * @brief Operation attributes for kernel parameters.
  *
- * String-to-string map for passing backend-specific parameters to kernels.
- * Used for stride values, algorithm hints, workspace limits, etc.
+ * Compact, cache-friendly container with SBO for up to 8 key-value pairs.
+ * Uses typed AttrKey enum for O(1) lookup instead of string hashing.
  *
  * @code
  * OpAttributes attrs;
- * attrs["algorithm"] = "fft";
- * attrs["workspace_limit"] = "1073741824";  // 1GB
+ * attrs.set(AttrKey::Algorithm, "fft");
+ * attrs.set(AttrKey::WorkspaceLimit, int64_t(1073741824));  // 1GB
  * @endcode
  */
-using OpAttributes = std::unordered_map<std::string, std::string>;
+using OpAttributes = NewOpAttributes;
 
 /**
  * @brief Device information structure.

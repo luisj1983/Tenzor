@@ -3365,10 +3365,8 @@ namespace {
 // Helper to extract stream from attrs (inlined for performance)
 inline cudaStream_t get_stream(const OpAttributes& attrs) {
     if (attrs.empty()) return nullptr;
-    auto it = attrs.find("stream");
-    if (it == attrs.end()) return nullptr;
-    uint64_t val = 0;
-    std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+    if (!attrs.has(AttrKey::Stream)) return nullptr;
+    auto val = static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0));
     return reinterpret_cast<cudaStream_t>(val);
 }
 } // anonymous namespace

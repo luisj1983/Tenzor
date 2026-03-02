@@ -100,6 +100,24 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                 "(tensor has " + std::to_string(root.tensor().numel()) + " elements)");
         }
         gradient = ones_like(root.tensor());
+    } else {
+        // Validate user-supplied gradient shape matches root tensor shape
+        auto grad_shape = gradient->shape();
+        auto root_shape = root.tensor().shape();
+        if (grad_shape.size() != root_shape.size() ||
+            !std::equal(grad_shape.begin(), grad_shape.end(), root_shape.begin())) {
+            auto fmt = [](std::span<const int64_t> s) {
+                std::string r = "[";
+                for (size_t i = 0; i < s.size(); ++i) {
+                    if (i > 0) r += ", ";
+                    r += std::to_string(s[i]);
+                }
+                return r + "]";
+            };
+            throw AutogradException(
+                "User-supplied gradient shape mismatch: expected " +
+                fmt(root_shape) + " got " + fmt(grad_shape));
+        }
     }
 
     root.grad() = *gradient;

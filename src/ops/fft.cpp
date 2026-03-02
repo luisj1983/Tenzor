@@ -1,5 +1,6 @@
 #include "tenzor/ops/fft.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
@@ -180,10 +181,10 @@ auto fft(const Tensor& input, std::optional<int64_t> n, int64_t dim,
     // Try OpId dispatch
     try {
         std::array<Tensor, 1> inputs = {inp.contiguous()};
-        OpAttributes attrs;
-        attrs["dim"] = std::to_string(dim);
-        attrs["n"] = std::to_string(signal_len);
-        attrs["norm"] = norm;
+        NewOpAttributes attrs;
+        attrs.set(AttrKey::Dim, dim);
+        attrs.set(AttrKey::N, signal_len);
+        attrs.set(AttrKey::Norm, norm);
         return dispatch<OpId::FFT>(inputs, attrs)[0];
     } catch (const std::runtime_error&) {
         // CPU inline fallback using naive DFT
@@ -233,10 +234,10 @@ auto ifft(const Tensor& input, std::optional<int64_t> n, int64_t dim,
 
     try {
         std::array<Tensor, 1> inputs = {inp.contiguous()};
-        OpAttributes attrs;
-        attrs["dim"] = std::to_string(dim);
-        attrs["n"] = std::to_string(signal_len);
-        attrs["norm"] = norm;
+        NewOpAttributes attrs;
+        attrs.set(AttrKey::Dim, dim);
+        attrs.set(AttrKey::N, signal_len);
+        attrs.set(AttrKey::Norm, norm);
         return dispatch<OpId::IFFT>(inputs, attrs)[0];
     } catch (const std::runtime_error&) {
         // CPU inline fallback using naive IDFT
@@ -282,10 +283,10 @@ auto rfft(const Tensor& input, std::optional<int64_t> n, int64_t dim,
 
     try {
         std::array<Tensor, 1> inputs = {input.contiguous()};
-        OpAttributes attrs;
-        attrs["dim"] = std::to_string(dim);
-        attrs["n"] = std::to_string(signal_len);
-        attrs["norm"] = norm;
+        NewOpAttributes attrs;
+        attrs.set(AttrKey::Dim, dim);
+        attrs.set(AttrKey::N, signal_len);
+        attrs.set(AttrKey::Norm, norm);
         return dispatch<OpId::RFFT>(inputs, attrs)[0];
     } catch (const std::runtime_error&) {
         // Fallback: compute full fft and take first n/2+1 elements
@@ -308,10 +309,10 @@ auto irfft(const Tensor& input, std::optional<int64_t> n, int64_t dim,
 
     try {
         std::array<Tensor, 1> inputs = {input.contiguous()};
-        OpAttributes attrs;
-        attrs["dim"] = std::to_string(dim);
-        attrs["n"] = std::to_string(signal_len);
-        attrs["norm"] = norm;
+        NewOpAttributes attrs;
+        attrs.set(AttrKey::Dim, dim);
+        attrs.set(AttrKey::N, signal_len);
+        attrs.set(AttrKey::Norm, norm);
         return dispatch<OpId::IRFFT>(inputs, attrs)[0];
     } catch (const std::runtime_error&) {
         // CPU inline fallback using naive IRFFT with Hermitian reconstruction
