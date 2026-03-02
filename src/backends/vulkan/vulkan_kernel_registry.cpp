@@ -664,9 +664,8 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{mean, variance};
     });
 
-    // BatchNorm2dUpdateRunningStats — uses direct Vulkan API (no typed dispatch method)
     table.register_kernel(OpId::BatchNorm2dUpdateRunningStats, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return get_vulkan_backend()->dispatch("batchnorm2d_update_running_stats", inputs, attrs);
+        return get_vulkan_backend()->dispatchBatchNorm2dUpdateRunningStats(inputs, attrs);
     });
 
     // ========================================================================
@@ -757,18 +756,18 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     // ========================================================================
-    // Fused Optimizer Steps (direct Vulkan API — no typed dispatch methods)
+    // Fused Optimizer Steps
     // ========================================================================
     table.register_kernel(OpId::FusedRMSPropStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return get_vulkan_backend()->dispatch("fused_rmsprop_step", inputs, attrs);
+        return get_vulkan_backend()->dispatchFusedRMSPropStep(inputs, attrs);
     });
 
     table.register_kernel(OpId::FusedAdadeltaStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return get_vulkan_backend()->dispatch("fused_adadelta_step", inputs, attrs);
+        return get_vulkan_backend()->dispatchFusedAdadeltaStep(inputs, attrs);
     });
 
     table.register_kernel(OpId::FusedAdagradStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return get_vulkan_backend()->dispatch("fused_adagrad_step", inputs, attrs);
+        return get_vulkan_backend()->dispatchFusedAdagradStep(inputs, attrs);
     });
 
     // ========================================================================

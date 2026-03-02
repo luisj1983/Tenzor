@@ -1,0 +1,29 @@
+#version 450
+
+// Roll operation: shift elements along a dimension with wrap-around
+layout(local_size_x = 256) in;
+
+layout(binding = 0) readonly buffer Input { float in_data[]; };
+layout(binding = 1) buffer Output { float out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;              // Total number of elements
+    uint dim_size;       // Size of the roll dimension
+    uint shift;          // Shift amount (already normalized to [0, dim_size))
+    uint inner_size;     // Product of sizes of dims after the roll dim
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n) return;
+
+    uint inner_idx = idx % params.inner_size;
+    uint dim_idx = (idx / params.inner_size) % params.dim_size;
+    uint outer_idx = idx / (params.inner_size * params.dim_size);
+
+    // Source index with wrap-around
+    uint src_dim_idx = (dim_idx - params.shift + params.dim_size) % params.dim_size;
+    uint src_idx = (outer_idx * params.dim_size + src_dim_idx) * params.inner_size + inner_idx;
+
+    out_data[idx] = in_data[src_idx];
+}

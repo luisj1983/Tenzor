@@ -357,6 +357,7 @@ enum class OpId : uint16_t {
     Diag,            // Extract/construct diagonal
     Trace,           // Sum of diagonal elements
     Flip,            // Reverse along dimension
+    Roll,            // Shift elements along dimension
 
     // =========================================================================
     // Logical Operations (350-359)
@@ -382,6 +383,24 @@ enum class OpId : uint16_t {
     AdaptiveMaxPool1dBackward,
     AdaptiveAvgPool1d,
     AdaptiveAvgPool1dBackward,
+
+    // =========================================================================
+    // Search and Sampling Operations (390-399)
+    // =========================================================================
+    SearchSorted = 390,
+    GumbelSoftmax,
+
+    // =========================================================================
+    // FFT Operations (400-409)
+    // =========================================================================
+    FFT = 400,
+    IFFT,
+    RFFT,
+    IRFFT,
+    FFT2,
+    IFFT2,
+    FFTN,
+    IFFTN,
 
     // =========================================================================
     // Sentinel (MUST BE LAST)

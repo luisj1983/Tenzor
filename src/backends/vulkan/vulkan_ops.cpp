@@ -9356,14 +9356,7 @@ auto VulkanBackend::dispatchROIAlignBackward(const Tensor& grad_output, const Te
     Tensor grad_features(grad_features_shape, accum_dtype, grad_output.device());
 
     // Zero-initialize grad_features (atomicAdd accumulates into it)
-    {
-        std::array<Tensor, 1> fill_inputs = {grad_features};
-        OpAttributes fill_attrs = {{"value", "0"}};
-        auto zero_result = dispatch("fill", fill_inputs, fill_attrs);
-        if (!zero_result.empty()) {
-            grad_features = zero_result[0];
-        }
-    }
+    grad_features = dispatchFill(grad_features, 0.0f);
 
     VkBuffer buffer_grad_output = getVulkanBuffer(grad_output.data_ptr());
     VkBuffer buffer_rois = getVulkanBuffer(rois.data_ptr());
@@ -9609,5 +9602,29 @@ auto VulkanBackend::dispatchArgSort(const Tensor& input, int64_t dim, bool desce
     return output;
 }
 
+
+// ============================================================================
+// Typed dispatch wrappers for formerly string-dispatched operations
+// ============================================================================
+
+auto VulkanBackend::dispatchBatchNorm2dUpdateRunningStats(
+    std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+    return dispatch("batchnorm2d_update_running_stats", inputs, attrs);
+}
+
+auto VulkanBackend::dispatchFusedRMSPropStep(
+    std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+    return dispatch("fused_rmsprop_step", inputs, attrs);
+}
+
+auto VulkanBackend::dispatchFusedAdadeltaStep(
+    std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+    return dispatch("fused_adadelta_step", inputs, attrs);
+}
+
+auto VulkanBackend::dispatchFusedAdagradStep(
+    std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+    return dispatch("fused_adagrad_step", inputs, attrs);
+}
 
 } // namespace tenzor

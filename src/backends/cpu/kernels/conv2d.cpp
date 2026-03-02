@@ -1787,6 +1787,7 @@ void depthwise_conv2d_impl(const T* in_data, const T* w_data, const T* b_data, T
             for (int64_t oh = 0; oh < H_out; ++oh) {
                 for (int64_t ow = 0; ow < W_out; ++ow) {
                     float sum = 0.0f;
+                    float compensation = 0.0f;  // Kahan compensation
 
                     for (int64_t kh = 0; kh < kH; ++kh) {
                         for (int64_t kw = 0; kw < kW; ++kw) {
@@ -1794,14 +1795,19 @@ void depthwise_conv2d_impl(const T* in_data, const T* w_data, const T* b_data, T
                             int64_t w = ow * stride - padding + kw * dilation;
 
                             if (h >= 0 && h < H && w >= 0 && w < W) {
-                                sum += static_cast<float>(in_data[((n * C + c) * H + h) * W + w]) *
+                                float product = static_cast<float>(in_data[((n * C + c) * H + h) * W + w]) *
                                        static_cast<float>(w_data[(c * 1 + 0) * kH * kW + kh * kW + kw]);
+                                float y = product - compensation;
+                                float t = sum + y;
+                                compensation = (t - sum) - y;
+                                sum = t;
                             }
                         }
                     }
 
                     if (b_data) {
-                        sum += static_cast<float>(b_data[c]);
+                        float y = static_cast<float>(b_data[c]) - compensation;
+                        sum = sum + y;
                     }
 
                     out_data[((n * C + c) * H_out + oh) * W_out + ow] = static_cast<T>(sum);

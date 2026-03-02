@@ -1045,5 +1045,91 @@ auto to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* str
 
 #endif // !TENZOR_HAS_CUDNN
 
+// ============================================================================
+// Roll kernel — shift elements along a dimension with wrap-around
+// ============================================================================
+
+template<typename T>
+__global__ void roll_kernel_impl(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    int64_t total_elements,
+    int64_t dim_size,
+    int64_t shift,
+    int64_t inner_size  // product of sizes of dims after the roll dim
+) {
+    CUDA_GRID_STRIDE_LOOP(i, total_elements) {
+        // Decompose flat index into (outer, dim_idx, inner)
+        int64_t inner_idx = i % inner_size;
+        int64_t dim_idx = (i / inner_size) % dim_size;
+        int64_t outer_idx = i / (inner_size * dim_size);
+
+        // Compute source index with wrap-around
+        int64_t src_dim_idx = (dim_idx - shift + dim_size) % dim_size;
+        int64_t src_idx = (outer_idx * dim_size + src_dim_idx) * inner_size + inner_idx;
+
+        output[i] = input[src_idx];
+    }
+}
+
+auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim, cudaStream_t stream) -> Tensor {
+    auto shape = input.shape();
+    auto cont = input.is_contiguous() ? input : contiguous_kernel(input, stream);
+
+    auto output = Tensor::empty_uninitialized(
+        std::vector<int64_t>(shape.begin(), shape.end()),
+        input.dtype(), input.device());
+
+    int64_t total = input.numel();
+    if (total == 0) return output;
+
+    int64_t dim_size = shape[dim];
+    int64_t inner_size = 1;
+    for (int64_t d = dim + 1; d < static_cast<int64_t>(shape.size()); ++d) {
+        inner_size *= shape[d];
+    }
+
+    dim3 grid, block;
+    compute_launch_config_1d(total, grid, block);
+
+    switch (input.dtype()) {
+        case DType::Float32:
+            roll_kernel_impl<<<grid, block, 0, stream>>>(
+                cont.data<float>(), output.data<float>(),
+                total, dim_size, shift, inner_size);
+            break;
+        case DType::Float64:
+            roll_kernel_impl<<<grid, block, 0, stream>>>(
+                cont.data<double>(), output.data<double>(),
+                total, dim_size, shift, inner_size);
+            break;
+        case DType::Int32:
+            roll_kernel_impl<<<grid, block, 0, stream>>>(
+                cont.data<int32_t>(), output.data<int32_t>(),
+                total, dim_size, shift, inner_size);
+            break;
+        case DType::Int64:
+            roll_kernel_impl<<<grid, block, 0, stream>>>(
+                cont.data<int64_t>(), output.data<int64_t>(),
+                total, dim_size, shift, inner_size);
+            break;
+        case DType::Float16:
+            roll_kernel_impl<<<grid, block, 0, stream>>>(
+                cont.data<Float16>(), output.data<Float16>(),
+                total, dim_size, shift, inner_size);
+            break;
+        case DType::BFloat16:
+            roll_kernel_impl<<<grid, block, 0, stream>>>(
+                cont.data<BFloat16>(), output.data<BFloat16>(),
+                total, dim_size, shift, inner_size);
+            break;
+        default:
+            throw std::runtime_error("roll_kernel: unsupported dtype");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return output;
+}
+
 } // namespace cuda
 } // namespace tenzor

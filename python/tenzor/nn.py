@@ -87,28 +87,23 @@ class Module(_CppModule):
             object.__setattr__(self, name, value)
             return
 
-        # Invalidate caches when non-private attributes change
-        object.__setattr__(self, '_submodule_cache', None)
-        object.__setattr__(self, '_param_cache', None)
-        object.__setattr__(self, '_buffer_cache', None)
-
         # Handle Module assignment
         if isinstance(value, _CppModule):
-            # Register the module with C++ backend (single source of truth)
+            object.__setattr__(self, '_submodule_cache', None)
             self.register_module(name, value)
             return
 
         # Handle Variable assignment (potential parameter)
         if isinstance(value, _core.Variable):
-            # Check if requires_grad - if so, it's a parameter
             if value.requires_grad():
+                object.__setattr__(self, '_param_cache', None)
                 self.register_parameter(name, value)
             else:
-                # It's a buffer (non-trainable)
+                object.__setattr__(self, '_buffer_cache', None)
                 self.register_buffer(name, value)
             return
 
-        # Regular attribute
+        # Regular attribute — no cache invalidation needed
         object.__setattr__(self, name, value)
 
     def _get_own_named_params(self):
@@ -178,25 +173,32 @@ class Module(_CppModule):
     def __delattr__(self, name: str) -> None:
         """Remove attribute from appropriate registry.
 
-        Note: C++ does not expose unregister methods for parameters, buffers,
-        or submodules. For regular Python attributes, delegates to object.__delattr__.
-        For registered C++ state, this is a no-op (the C++ state persists).
+        C++ does not expose unregister methods for parameters, buffers,
+        or submodules. Raises NotImplementedError for registered C++ state.
+        For regular Python attributes, delegates to object.__delattr__.
         """
-        # Invalidate caches
-        object.__setattr__(self, '_submodule_cache', None)
-        object.__setattr__(self, '_param_cache', None)
-        object.__setattr__(self, '_buffer_cache', None)
-
         submodules = self.get_submodules()
         if name in submodules:
-            return
+            raise NotImplementedError(
+                f"Cannot delete registered submodule '{name}'. "
+                "Use register_module('{name}', None) to clear it if supported.")
         own_params = self._get_own_named_params()
         if name in own_params:
-            return
+            raise NotImplementedError(
+                f"Cannot delete registered parameter '{name}'.")
         own_buffers = self._get_own_named_buffers()
         if name in own_buffers:
-            return
+            raise NotImplementedError(
+                f"Cannot delete registered buffer '{name}'.")
         object.__delattr__(self, name)
+
+    def __dir__(self):
+        """Combine Python attributes with C++ submodule/parameter/buffer names."""
+        result = set(super().__dir__())
+        result.update(self.get_submodules().keys())
+        result.update(self._get_own_named_params().keys())
+        result.update(self._get_own_named_buffers().keys())
+        return sorted(result)
 
     def add_module(self, name: str, module) -> None:
         """
@@ -369,7 +371,18 @@ class Sequential(_CppSequential):
         return '\n'.join(lines) if len(self) > 0 else "Sequential()"
 
 
-class Parameter:
+class _ParameterMeta(type):
+    """Metaclass that enables isinstance(var, Parameter) checks.
+
+    Since Parameter is a factory (returns Variable, not a Parameter instance),
+    we override __instancecheck__ to look for the _is_parameter tag set during
+    construction.
+    """
+    def __instancecheck__(cls, instance):
+        return getattr(instance, '_is_parameter', False)
+
+
+class Parameter(metaclass=_ParameterMeta):
     """
     A kind of Variable that is automatically registered as a parameter when
     assigned as a Module attribute.
@@ -393,14 +406,17 @@ class Parameter:
 
     def __new__(cls, data=None, requires_grad=True):
         if data is None:
-            return _core.Variable()
-        if isinstance(data, _core.Tensor):
-            return _core.Variable(data, requires_grad)
-        if isinstance(data, _core.Variable):
+            var = _core.Variable()
+        elif isinstance(data, _core.Tensor):
+            var = _core.Variable(data, requires_grad)
+        elif isinstance(data, _core.Variable):
             if requires_grad:
                 data.requires_grad_(True)
-            return data
-        raise TypeError(f"Parameter data must be a Tensor, got {type(data)}")
+            var = data
+        else:
+            raise TypeError(f"Parameter data must be a Tensor, got {type(data)}")
+        var._is_parameter = True
+        return var
 
 
 # Override the nn module's Module and Sequential with our wrappers

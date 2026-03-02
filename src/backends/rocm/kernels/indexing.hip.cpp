@@ -1272,8 +1272,6 @@ auto gather_hip(
     const Tensor& indices,
     hipStream_t stream
 ) -> Tensor {
-    // Forward to the non-stream version (already uses default stream)
-    (void)stream;  // TODO: Update internal implementation to use stream
     auto input_shape = input.shape();
     auto indices_shape = indices.shape();
 

@@ -315,6 +315,23 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::AdaptiveAvgPool1d)] = "adaptive_avgpool1d";
     names[static_cast<size_t>(OpId::AdaptiveAvgPool1dBackward)] = "adaptive_avgpool1d_backward";
 
+    // Tensor Manipulation (continued)
+    names[static_cast<size_t>(OpId::Roll)] = "roll";
+
+    // Search and Sampling
+    names[static_cast<size_t>(OpId::SearchSorted)] = "searchsorted";
+    names[static_cast<size_t>(OpId::GumbelSoftmax)] = "gumbel_softmax";
+
+    // FFT Operations
+    names[static_cast<size_t>(OpId::FFT)] = "fft";
+    names[static_cast<size_t>(OpId::IFFT)] = "ifft";
+    names[static_cast<size_t>(OpId::RFFT)] = "rfft";
+    names[static_cast<size_t>(OpId::IRFFT)] = "irfft";
+    names[static_cast<size_t>(OpId::FFT2)] = "fft2";
+    names[static_cast<size_t>(OpId::IFFT2)] = "ifft2";
+    names[static_cast<size_t>(OpId::FFTN)] = "fftn";
+    names[static_cast<size_t>(OpId::IFFTN)] = "ifftn";
+
     return names;
 }();
 
@@ -329,7 +346,7 @@ constexpr size_t count_named_ops() {
 
 // Count of actual OpId enum values (excluding gap slots).
 // Update this when adding new OpIds to catch missing name entries at compile time.
-inline constexpr size_t EXPECTED_NAMED_OPS = 243;
+inline constexpr size_t EXPECTED_NAMED_OPS = 254;
 
 // If this fires, a new OpId was added without a corresponding name in op_names above
 static_assert(count_named_ops() == EXPECTED_NAMED_OPS,

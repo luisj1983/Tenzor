@@ -877,5 +877,91 @@ auto expand_kernel(const Tensor& input, const std::vector<int64_t>& new_shape, v
     return output;
 }
 
+// ============================================================================
+// Roll kernel — shift elements along a dimension with wrap-around
+// ============================================================================
+
+template<typename T>
+__global__ void roll_kernel_impl(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    int64_t total_elements,
+    int64_t dim_size,
+    int64_t shift,
+    int64_t inner_size
+) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total_elements) return;
+
+    int64_t inner_idx = i % inner_size;
+    int64_t dim_idx = (i / inner_size) % dim_size;
+    int64_t outer_idx = i / (inner_size * dim_size);
+
+    int64_t src_dim_idx = (dim_idx - shift + dim_size) % dim_size;
+    int64_t src_idx = (outer_idx * dim_size + src_dim_idx) * inner_size + inner_idx;
+
+    output[i] = input[src_idx];
+}
+
+auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim, hipStream_t stream) -> Tensor {
+    auto shape = input.shape();
+    auto cont = input.is_contiguous() ? input : input.contiguous();
+
+    auto output = Tensor::empty_uninitialized(
+        std::vector<int64_t>(shape.begin(), shape.end()),
+        input.dtype(), input.device());
+
+    int64_t total = input.numel();
+    if (total == 0) return output;
+
+    int64_t dim_size = shape[dim];
+    int64_t inner_size = 1;
+    for (int64_t d = dim + 1; d < static_cast<int64_t>(shape.size()); ++d) {
+        inner_size *= shape[d];
+    }
+
+    constexpr int BLOCK = 256;
+    int64_t num_blocks = (total + BLOCK - 1) / BLOCK;
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(roll_kernel_impl<float>,
+            dim3(num_blocks), dim3(BLOCK), 0, stream,
+            cont.data<float>(), output.data<float>(),
+            total, dim_size, shift, inner_size);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(roll_kernel_impl<double>,
+            dim3(num_blocks), dim3(BLOCK), 0, stream,
+            cont.data<double>(), output.data<double>(),
+            total, dim_size, shift, inner_size);
+    } else if (input.dtype() == DType::Int32) {
+        hipLaunchKernelGGL(roll_kernel_impl<int32_t>,
+            dim3(num_blocks), dim3(BLOCK), 0, stream,
+            cont.data<int32_t>(), output.data<int32_t>(),
+            total, dim_size, shift, inner_size);
+    } else if (input.dtype() == DType::Int64) {
+        hipLaunchKernelGGL(roll_kernel_impl<int64_t>,
+            dim3(num_blocks), dim3(BLOCK), 0, stream,
+            cont.data<int64_t>(), output.data<int64_t>(),
+            total, dim_size, shift, inner_size);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(roll_kernel_impl<__half>,
+            dim3(num_blocks), dim3(BLOCK), 0, stream,
+            reinterpret_cast<const __half*>(cont.data<Float16>()),
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            total, dim_size, shift, inner_size);
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(roll_kernel_impl<uint16_t>,
+            dim3(num_blocks), dim3(BLOCK), 0, stream,
+            reinterpret_cast<const uint16_t*>(cont.data<BFloat16>()),
+            reinterpret_cast<uint16_t*>(output.data<BFloat16>()),
+            total, dim_size, shift, inner_size);
+    } else {
+        throw std::runtime_error("roll_kernel: unsupported dtype");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return output;
+}
+
 } // namespace rocm
 } // namespace tenzor

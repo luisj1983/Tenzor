@@ -12,6 +12,7 @@
 #include <iostream>
 #include <type_traits>
 #include <limits>
+#include <complex>
 
 // SIMD intrinsics
 #if defined(__AVX512F__)
@@ -1550,6 +1551,22 @@ auto add_kernel(const Tensor& a, const Tensor& b) -> Tensor {
                 c_data[i] = (static_cast<int>(a_data[i]) + static_cast<int>(b_data[i])) != 0;
             }
 
+        } else if (a.dtype() == DType::Complex64) {
+            const auto* a_data = a.data<std::complex<float>>();
+            const auto* b_data = b.data<std::complex<float>>();
+            auto* c_data = result.data<std::complex<float>>();
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = a_data[i] + b_data[i];
+            }
+
+        } else if (a.dtype() == DType::Complex128) {
+            const auto* a_data = a.data<std::complex<double>>();
+            const auto* b_data = b.data<std::complex<double>>();
+            auto* c_data = result.data<std::complex<double>>();
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = a_data[i] + b_data[i];
+            }
+
         } else {
             throw std::runtime_error("Unsupported dtype for add operation");
         }
@@ -1622,6 +1639,20 @@ auto add_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             bool* c_data = result.data<bool>();
             detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](bool x, bool y) { return (static_cast<int>(x) + static_cast<int>(y)) != 0; });
+
+        } else if (a.dtype() == DType::Complex64) {
+            const auto* a_data = a.data<std::complex<float>>();
+            const auto* b_data = b.data<std::complex<float>>();
+            auto* c_data = result.data<std::complex<float>>();
+            detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](std::complex<float> x, std::complex<float> y) { return x + y; });
+
+        } else if (a.dtype() == DType::Complex128) {
+            const auto* a_data = a.data<std::complex<double>>();
+            const auto* b_data = b.data<std::complex<double>>();
+            auto* c_data = result.data<std::complex<double>>();
+            detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](std::complex<double> x, std::complex<double> y) { return x + y; });
 
         } else {
             throw std::runtime_error("Unsupported dtype for add operation");
@@ -1726,6 +1757,22 @@ auto sub_kernel(const Tensor& a, const Tensor& b) -> Tensor {
                 c_data[i] = (static_cast<int>(a_data[i]) - static_cast<int>(b_data[i])) != 0;
             }
 
+        } else if (a.dtype() == DType::Complex64) {
+            const auto* a_data = a.data<std::complex<float>>();
+            const auto* b_data = b.data<std::complex<float>>();
+            auto* c_data = result.data<std::complex<float>>();
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = a_data[i] - b_data[i];
+            }
+
+        } else if (a.dtype() == DType::Complex128) {
+            const auto* a_data = a.data<std::complex<double>>();
+            const auto* b_data = b.data<std::complex<double>>();
+            auto* c_data = result.data<std::complex<double>>();
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = a_data[i] - b_data[i];
+            }
+
         } else {
             throw std::runtime_error("Unsupported dtype for sub operation");
         }
@@ -1789,6 +1836,20 @@ auto sub_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             bool* c_data = result.data<bool>();
             detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](bool x, bool y) { return (static_cast<int>(x) - static_cast<int>(y)) != 0; });
+
+        } else if (a.dtype() == DType::Complex64) {
+            const auto* a_data = a.data<std::complex<float>>();
+            const auto* b_data = b.data<std::complex<float>>();
+            auto* c_data = result.data<std::complex<float>>();
+            detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](std::complex<float> x, std::complex<float> y) { return x - y; });
+
+        } else if (a.dtype() == DType::Complex128) {
+            const auto* a_data = a.data<std::complex<double>>();
+            const auto* b_data = b.data<std::complex<double>>();
+            auto* c_data = result.data<std::complex<double>>();
+            detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](std::complex<double> x, std::complex<double> y) { return x - y; });
 
         } else {
             throw std::runtime_error("Unsupported dtype for sub operation");
@@ -1892,6 +1953,22 @@ auto mul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
                 c_data[i] = BFloat16(static_cast<float>(a_data[i]) * static_cast<float>(b_data[i]));
             }
 
+        } else if (a.dtype() == DType::Complex64) {
+            const auto* a_data = a.data<std::complex<float>>();
+            const auto* b_data = b.data<std::complex<float>>();
+            auto* c_data = result.data<std::complex<float>>();
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = a_data[i] * b_data[i];
+            }
+
+        } else if (a.dtype() == DType::Complex128) {
+            const auto* a_data = a.data<std::complex<double>>();
+            const auto* b_data = b.data<std::complex<double>>();
+            auto* c_data = result.data<std::complex<double>>();
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = a_data[i] * b_data[i];
+            }
+
         } else {
             throw std::runtime_error("Unsupported dtype for mul operation");
         }
@@ -1949,6 +2026,20 @@ auto mul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
                                 [](BFloat16 x, BFloat16 y) {
                                     return BFloat16(static_cast<float>(x) * static_cast<float>(y));
                                 });
+
+        } else if (a.dtype() == DType::Complex64) {
+            const auto* a_data = a.data<std::complex<float>>();
+            const auto* b_data = b.data<std::complex<float>>();
+            auto* c_data = result.data<std::complex<float>>();
+            detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](std::complex<float> x, std::complex<float> y) { return x * y; });
+
+        } else if (a.dtype() == DType::Complex128) {
+            const auto* a_data = a.data<std::complex<double>>();
+            const auto* b_data = b.data<std::complex<double>>();
+            auto* c_data = result.data<std::complex<double>>();
+            detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](std::complex<double> x, std::complex<double> y) { return x * y; });
 
         } else {
             throw std::runtime_error("Unsupported dtype for mul operation");
@@ -2040,6 +2131,22 @@ auto div_kernel(const Tensor& a, const Tensor& b) -> Tensor {
                 c_data[i] = BFloat16(a_f32 / b_f32);
             }
 
+        } else if (a.dtype() == DType::Complex64) {
+            const auto* a_data = a.data<std::complex<float>>();
+            const auto* b_data = b.data<std::complex<float>>();
+            auto* c_data = result.data<std::complex<float>>();
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = a_data[i] / b_data[i];
+            }
+
+        } else if (a.dtype() == DType::Complex128) {
+            const auto* a_data = a.data<std::complex<double>>();
+            const auto* b_data = b.data<std::complex<double>>();
+            auto* c_data = result.data<std::complex<double>>();
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = a_data[i] / b_data[i];
+            }
+
         } else {
             throw std::runtime_error("Unsupported dtype for div operation");
         }
@@ -2097,6 +2204,20 @@ auto div_kernel(const Tensor& a, const Tensor& b) -> Tensor {
                                 [](BFloat16 x, BFloat16 y) {
                                     return BFloat16(static_cast<float>(x) / static_cast<float>(y));
                                 });
+
+        } else if (a.dtype() == DType::Complex64) {
+            const auto* a_data = a.data<std::complex<float>>();
+            const auto* b_data = b.data<std::complex<float>>();
+            auto* c_data = result.data<std::complex<float>>();
+            detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](std::complex<float> x, std::complex<float> y) { return x / y; });
+
+        } else if (a.dtype() == DType::Complex128) {
+            const auto* a_data = a.data<std::complex<double>>();
+            const auto* b_data = b.data<std::complex<double>>();
+            auto* c_data = result.data<std::complex<double>>();
+            detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](std::complex<double> x, std::complex<double> y) { return x / y; });
 
         } else {
             throw std::runtime_error("Unsupported dtype for div operation");

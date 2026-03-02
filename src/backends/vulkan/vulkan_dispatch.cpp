@@ -1522,13 +1522,8 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() != 2) {
             throw std::invalid_argument("fused_add_relu requires 2 inputs");
         }
-        // Add
-        std::vector<Tensor> add_inputs = {inputs[0], inputs[1]};
-        OpAttributes empty_attrs;
-        Tensor add_result = dispatch("add", add_inputs, empty_attrs)[0];
-        // ReLU
-        std::vector<Tensor> relu_inputs = {add_result};
-        return dispatch("relu", relu_inputs, empty_attrs);
+        Tensor add_result = dispatchBinaryOp("add", inputs[0], inputs[1]);
+        return {dispatchActivation("relu", add_result, 0, 0.0f)};
     }
 
     // Fused GELU
@@ -1536,9 +1531,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() != 1) {
             throw std::invalid_argument("fused_gelu requires 1 input");
         }
-        std::vector<Tensor> gelu_inputs = {inputs[0]};
-        OpAttributes empty_attrs;
-        return dispatch("gelu", gelu_inputs, empty_attrs);
+        return {dispatchActivation("gelu", inputs[0], 3, 0.0f)};
     }
 
     // Fused Layer Norm

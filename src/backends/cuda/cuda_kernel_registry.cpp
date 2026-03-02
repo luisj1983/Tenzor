@@ -136,6 +136,7 @@ namespace cuda {
     auto expand_kernel(const Tensor& input, const std::vector<int64_t>& shape, void* stream) -> Tensor;
     auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, cudaStream_t stream) -> Tensor;
     auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, cudaStream_t stream) -> Tensor;
+    auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim, cudaStream_t stream) -> Tensor;
 
     // Memory format conversion
     auto to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* stream) -> Tensor;
@@ -782,6 +783,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         int format_int = parse_attr<int>(attrs, "memory_format", 0);
         MemoryFormat format = static_cast<MemoryFormat>(format_int);
         return cuda::to_memory_format_kernel(inputs[0], format, get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::Roll, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t shift = parse_attr<int64_t>(attrs, "shift", 0);
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+        return cuda::roll_kernel(inputs[0], shift, dim, get_cuda_stream(attrs));
     });
 
     // =========================================================================

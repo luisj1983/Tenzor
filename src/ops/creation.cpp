@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <sstream>
 #include <chrono>
+#include <complex>
 
 namespace tenzor {
 
@@ -155,6 +156,16 @@ auto ones(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
             std::fill(ptr, ptr + numel, true);
             break;
         }
+        case DType::Complex64: {
+            auto* ptr = static_cast<std::complex<float>*>(data);
+            std::fill(ptr, ptr + numel, std::complex<float>(1.0f, 0.0f));
+            break;
+        }
+        case DType::Complex128: {
+            auto* ptr = static_cast<std::complex<double>*>(data);
+            std::fill(ptr, ptr + numel, std::complex<double>(1.0, 0.0));
+            break;
+        }
         default:
             throw std::runtime_error("Unsupported dtype for ones()");
     }
@@ -229,6 +240,16 @@ auto full(std::vector<int64_t> shape, float value, DType dtype, Device device) -
             std::fill(ptr, ptr + numel, value != 0.0f);
             break;
         }
+        case DType::Complex64: {
+            auto* ptr = static_cast<std::complex<float>*>(data);
+            std::fill(ptr, ptr + numel, std::complex<float>(static_cast<float>(value), 0.0f));
+            break;
+        }
+        case DType::Complex128: {
+            auto* ptr = static_cast<std::complex<double>*>(data);
+            std::fill(ptr, ptr + numel, std::complex<double>(static_cast<double>(value), 0.0));
+            break;
+        }
         default:
             throw std::runtime_error("Unsupported dtype for full()");
     }
@@ -301,6 +322,16 @@ auto full(std::vector<int64_t> shape, double value, DType dtype, Device device) 
         case DType::Bool: {
             bool* ptr = static_cast<bool*>(data);
             std::fill(ptr, ptr + numel, value != 0.0);
+            break;
+        }
+        case DType::Complex64: {
+            auto* ptr = static_cast<std::complex<float>*>(data);
+            std::fill(ptr, ptr + numel, std::complex<float>(static_cast<float>(value), 0.0f));
+            break;
+        }
+        case DType::Complex128: {
+            auto* ptr = static_cast<std::complex<double>*>(data);
+            std::fill(ptr, ptr + numel, std::complex<double>(value, 0.0));
             break;
         }
         default:
@@ -573,8 +604,22 @@ auto arange(double start, double end, double step, DType dtype, Device device) -
             }
             break;
         }
+        case DType::Complex64: {
+            auto* ptr = static_cast<std::complex<float>*>(data);
+            for (int64_t i = 0; i < numel; ++i) {
+                ptr[i] = std::complex<float>(static_cast<float>(start + i * step), 0.0f);
+            }
+            break;
+        }
+        case DType::Complex128: {
+            auto* ptr = static_cast<std::complex<double>*>(data);
+            for (int64_t i = 0; i < numel; ++i) {
+                ptr[i] = std::complex<double>(start + i * step, 0.0);
+            }
+            break;
+        }
         default:
-            throw std::runtime_error("Unsupported dtype for arange() - only Float32, Float64, Int32, Int64, Float16, Int8 are supported");
+            throw std::runtime_error("Unsupported dtype for arange()");
     }
     return tensor;
 }

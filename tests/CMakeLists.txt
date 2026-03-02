@@ -2882,3 +2882,57 @@ target_link_libraries(test_hrm PRIVATE
 )
 
 tenzor_discover_tests(test_hrm DISCOVERY_TIMEOUT 60)
+
+# ============================================================================
+# Sparse Tensor Tests
+# ============================================================================
+add_executable(test_sparse
+    unit/test_sparse.cpp
+)
+
+target_link_libraries(test_sparse PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+tenzor_discover_tests(test_sparse DISCOVERY_TIMEOUT 60)
+
+# ============================================================================
+# Autograd Hooks Tests
+# ============================================================================
+add_executable(test_hooks
+    autograd/test_hooks.cpp
+)
+
+target_link_libraries(test_hooks PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+tenzor_discover_tests(test_hooks DISCOVERY_TIMEOUT 60)
+
+# ============================================================================
+# Complex Arithmetic Tests
+# ============================================================================
+add_executable(test_complex_arithmetic
+    unit/test_complex_arithmetic.cpp
+)
+
+target_link_libraries(test_complex_arithmetic PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+tenzor_discover_tests(test_complex_arithmetic DISCOVERY_TIMEOUT 60)
+
+# ============================================================================
+add_executable(test_fft
+    unit/test_fft.cpp
+)
+
+target_link_libraries(test_fft PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+tenzor_discover_tests(test_fft DISCOVERY_TIMEOUT 60)

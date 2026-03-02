@@ -333,6 +333,35 @@ auto logical_xor(const Tensor& a, const Tensor& b) -> Tensor;
 auto cross(const Tensor& input, const Tensor& other, int64_t dim = -1) -> Tensor;
 /// @}
 
+/// @name Search Operations
+/// @{
+
+/**
+ * @brief Find indices where elements should be inserted to maintain sorted order.
+ *
+ * @param sorted_sequence 1-D sorted tensor to search in
+ * @param values Values to search for
+ * @param right If false (default), use lower_bound; if true, use upper_bound
+ * @return Int64 tensor with same shape as values containing insertion indices
+ */
+auto searchsorted(const Tensor& sorted_sequence, const Tensor& values, bool right = false) -> Tensor;
+/// @}
+
+/// @name Sampling Operations
+/// @{
+
+/**
+ * @brief Sample from a categorical distribution using the Gumbel-Softmax trick.
+ *
+ * @param logits Unnormalized log probabilities
+ * @param tau Temperature parameter (default 1.0, lower = more discrete)
+ * @param hard If true, use straight-through estimator for hard one-hot
+ * @param dim Dimension along which softmax is computed (default -1)
+ * @return Soft (or hard) samples from the categorical distribution
+ */
+auto gumbel_softmax(const Tensor& logits, double tau = 1.0, bool hard = false, int64_t dim = -1) -> Tensor;
+/// @}
+
 /** @} */ // end of tensor_math group
 
 } // namespace tenzor

@@ -272,6 +272,14 @@ public:
     auto dispatchBatchNorm2dForward(const Tensor& input, const Tensor& mean, const Tensor& var,
                                     const Tensor* gamma, const Tensor* beta, float epsilon) -> Tensor;
     auto dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair<Tensor, Tensor>;
+    auto dispatchBatchNorm2dUpdateRunningStats(std::span<const Tensor> inputs,
+                                                const OpAttributes& attrs) -> std::vector<Tensor>;
+    auto dispatchFusedRMSPropStep(std::span<const Tensor> inputs,
+                                   const OpAttributes& attrs) -> std::vector<Tensor>;
+    auto dispatchFusedAdadeltaStep(std::span<const Tensor> inputs,
+                                    const OpAttributes& attrs) -> std::vector<Tensor>;
+    auto dispatchFusedAdagradStep(std::span<const Tensor> inputs,
+                                   const OpAttributes& attrs) -> std::vector<Tensor>;
     auto dispatchLayerNorm(const Tensor& input, int64_t normalized_shape,
                           const Tensor* gamma, const Tensor* beta, float epsilon) -> Tensor;
     auto dispatchGroupNorm(const Tensor& input, int64_t num_groups,

@@ -18,6 +18,7 @@ set(TENZOR_CORE_SOURCES
     backend/simd_dispatch.cpp
     backend/runtime_simd.cpp
     backend/dispatch_table.cpp
+    backend/op_attributes.cpp
     backend/cuda_graph_stub.cpp
     ops/op_id.cpp
     ops/creation.cpp
@@ -28,6 +29,7 @@ set(TENZOR_CORE_SOURCES
     ops/transform.cpp
     ops/fused_ops.cpp
     ops/advanced.cpp
+    ops/fft.cpp
     ops/vision.cpp
     ops/detection.cpp
     ops/async_ops.cpp
@@ -150,6 +152,8 @@ set(TENZOR_CORE_SOURCES
     distributed/ddp.cpp
     distributed/launch.cpp
     distributed/gradient_compression.cpp
+    sparse/sparse_tensor.cpp
+    sparse/sparse_ops.cpp
 )
 
 # Create core library

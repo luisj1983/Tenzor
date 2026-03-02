@@ -523,8 +523,9 @@ auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor {
         return dispatch(OpId::Expand, inputs, attrs)[0];
     }
 
-    // CPU path: Manual implementation
-    auto input_shape_vec = std::vector<int64_t>(input_shape.begin(), input_shape.end());
+    // CPU path: Manual implementation — ensure contiguous layout
+    auto cont_input = input.is_contiguous() ? input : input.contiguous();
+    auto input_shape_vec = std::vector<int64_t>(cont_input.shape().begin(), cont_input.shape().end());
 
     // Create output tensor on CPU
     auto output = zeros(shape, input.dtype(), Device::cpu());
@@ -544,8 +545,8 @@ auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor {
     }
 
     // Fill output by replicating input - dtype-aware implementation
-    if (input.dtype() == DType::Float64) {
-        const double* input_data = input.data<double>();
+    if (cont_input.dtype() == DType::Float64) {
+        const double* input_data = cont_input.data<double>();
         double* output_data = output.data<double>();
 
         for (int64_t out_idx = 0; out_idx < total_elements; ++out_idx) {
@@ -572,8 +573,8 @@ auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor {
 
             output_data[out_idx] = input_data[in_idx];
         }
-    } else if (input.dtype() == DType::Float16) {
-        const Float16* input_data = input.data<Float16>();
+    } else if (cont_input.dtype() == DType::Float16) {
+        const Float16* input_data = cont_input.data<Float16>();
         Float16* output_data = output.data<Float16>();
 
         for (int64_t out_idx = 0; out_idx < total_elements; ++out_idx) {
@@ -603,7 +604,7 @@ auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor {
     } else {
         // Helper lambda for expand logic
         auto expand_impl = [&]<typename T>(T*) {
-            const T* input_data = input.data<T>();
+            const T* input_data = cont_input.data<T>();
             T* output_data = output.data<T>();
 
             for (int64_t out_idx = 0; out_idx < total_elements; ++out_idx) {
@@ -633,7 +634,7 @@ auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor {
         };
 
         // Dispatch based on dtype
-        switch (input.dtype()) {
+        switch (cont_input.dtype()) {
             case DType::Float16:
                 expand_impl(static_cast<Float16*>(nullptr));
                 break;
@@ -685,9 +686,18 @@ auto roll(const Tensor& input, int64_t shifts, int64_t dim) -> Tensor {
         return input.clone();
     }
 
-    // Roll by splitting at the shift point and concatenating in reverse order
-    // For positive shift: [a, b, c, d] shift by 2 => [c, d, a, b]
-    // Split: [a, b] and [c, d], then cat([c, d], [a, b])
+    // Try OpId dispatch for GPU backends
+    try {
+        std::array<Tensor, 1> inputs = {input};
+        OpAttributes attrs;
+        attrs["shift"] = std::to_string(shifts);
+        attrs["dim"] = std::to_string(dim);
+        return dispatch<OpId::Roll>(inputs, attrs)[0];
+    } catch (const std::runtime_error&) {
+        // Fall through to slice+cat fallback (CPU or unregistered backends)
+    }
+
+    // CPU fallback: roll by splitting and concatenating
     Tensor part1 = input.slice(dim, 0, dim_size - shifts);
     Tensor part2 = input.slice(dim, dim_size - shifts, dim_size);
 

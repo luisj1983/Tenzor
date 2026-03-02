@@ -330,6 +330,7 @@ namespace rocm {
     auto stack_kernel(const std::vector<Tensor>& tensors, int64_t dim, hipStream_t stream) -> std::vector<Tensor>;
     auto split_kernel(const Tensor& input, int64_t split_size, int64_t dim, hipStream_t stream) -> std::vector<Tensor>;
     auto expand_kernel(const Tensor& input, const std::vector<int64_t>& new_shape, void* stream_ptr) -> Tensor;
+    auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim, hipStream_t stream) -> Tensor;
 
     // Creation operations
     auto arange_kernel(double start, double end, double step, DType dtype, Device device, hipStream_t stream) -> Tensor;
@@ -1050,6 +1051,12 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t dim = parse_int64(attrs, "dim", 0);
         std::vector<Tensor> tensors(inputs.begin(), inputs.end());
         return std::vector<Tensor>{rocm::cat_hip(tensors, dim, get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::Roll, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t shift = parse_int64(attrs, "shift", 0);
+        int64_t dim = parse_int64(attrs, "dim", 0);
+        return std::vector<Tensor>{rocm::roll_kernel(inputs[0], shift, dim, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Take, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {

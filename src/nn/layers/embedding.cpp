@@ -622,9 +622,13 @@ auto EmbeddingBag::aggregate_embeddings(const Variable& embeddings, const Variab
         auto output_ptr = output.data<float>();
 
         if (mode_ == "sum" || mode_ == "mean") {
+            std::vector<float> compensation(embedding_dim, 0.0f);
             for (int64_t i = 0; i < total_elements; ++i) {
                 for (int64_t j = 0; j < embedding_dim; ++j) {
-                    output_ptr[j] += emb_ptr[i * embedding_dim + j];
+                    float y = emb_ptr[i * embedding_dim + j] - compensation[j];
+                    float t = output_ptr[j] + y;
+                    compensation[j] = (t - output_ptr[j]) - y;
+                    output_ptr[j] = t;
                 }
             }
 
@@ -692,9 +696,13 @@ auto EmbeddingBag::aggregate_embeddings(const Variable& embeddings, const Variab
         }
 
         if (mode_ == "sum" || mode_ == "mean") {
+            std::vector<float> compensation(embedding_dim, 0.0f);
             for (int64_t i = start_idx; i < end_idx; ++i) {
                 for (int64_t j = 0; j < embedding_dim; ++j) {
-                    output_ptr[bag * embedding_dim + j] += emb_ptr[i * embedding_dim + j];
+                    float y = emb_ptr[i * embedding_dim + j] - compensation[j];
+                    float t = output_ptr[bag * embedding_dim + j] + y;
+                    compensation[j] = (t - output_ptr[bag * embedding_dim + j]) - y;
+                    output_ptr[bag * embedding_dim + j] = t;
                 }
             }
 

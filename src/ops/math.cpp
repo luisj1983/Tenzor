@@ -4,6 +4,7 @@
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/type_promotion.hpp"
 #include <algorithm>
 #include <array>
@@ -654,6 +655,163 @@ auto cross(const Tensor& input, const Tensor& other, int64_t dim) -> Tensor {
     }
 
     return result;
+}
+
+// ============================================================================
+// Search Operations
+// ============================================================================
+
+auto searchsorted(const Tensor& sorted_sequence, const Tensor& values, bool right) -> Tensor {
+    if (sorted_sequence.ndim() != 1) {
+        throw std::runtime_error("searchsorted: sorted_sequence must be 1-D");
+    }
+
+    // Try OpId dispatch first (backend-optimized kernel)
+    try {
+        std::array<Tensor, 2> inputs = {sorted_sequence, values};
+        OpAttributes attrs;
+        attrs["right"] = right ? "1" : "0";
+        return dispatch<OpId::SearchSorted>(inputs, attrs)[0];
+    } catch (const std::runtime_error&) {
+        // Fall through to CPU inline implementation
+    }
+
+    // CPU inline fallback: binary search per element
+    Tensor seq_cont = sorted_sequence.contiguous();
+    Tensor val_cont = values.contiguous();
+    int64_t seq_len = seq_cont.shape()[0];
+    int64_t num_values = val_cont.numel();
+
+    Tensor result(std::vector<int64_t>(values.shape().begin(), values.shape().end()),
+                  DType::Int64, values.device());
+
+    auto search_typed = [&](const auto* seq_ptr, const auto* val_ptr, int64_t* out_ptr) {
+        #ifdef _OPENMP
+        #pragma omp parallel for if(num_values > 4096)
+        #endif
+        for (int64_t i = 0; i < num_values; ++i) {
+            auto v = val_ptr[i];
+            int64_t lo = 0, hi = seq_len;
+            while (lo < hi) {
+                int64_t mid = lo + (hi - lo) / 2;
+                bool go_right = right ? (seq_ptr[mid] <= v) : (seq_ptr[mid] < v);
+                if (go_right) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            out_ptr[i] = lo;
+        }
+    };
+
+    auto* out_ptr = result.data<int64_t>();
+    switch (sorted_sequence.dtype()) {
+        case DType::Float32:
+            search_typed(seq_cont.data<float>(), val_cont.data<float>(), out_ptr);
+            break;
+        case DType::Float64:
+            search_typed(seq_cont.data<double>(), val_cont.data<double>(), out_ptr);
+            break;
+        case DType::Int32:
+            search_typed(seq_cont.data<int32_t>(), val_cont.data<int32_t>(), out_ptr);
+            break;
+        case DType::Int64:
+            search_typed(seq_cont.data<int64_t>(), val_cont.data<int64_t>(), out_ptr);
+            break;
+        case DType::Int8:
+            search_typed(seq_cont.data<int8_t>(), val_cont.data<int8_t>(), out_ptr);
+            break;
+        case DType::UInt8:
+            search_typed(seq_cont.data<uint8_t>(), val_cont.data<uint8_t>(), out_ptr);
+            break;
+        case DType::Int16:
+            search_typed(seq_cont.data<int16_t>(), val_cont.data<int16_t>(), out_ptr);
+            break;
+        case DType::Float16: {
+            // Convert to Float32 for search
+            auto seq_f32 = sorted_sequence.to(DType::Float32).contiguous();
+            auto val_f32 = values.to(DType::Float32).contiguous();
+            search_typed(seq_f32.data<float>(), val_f32.data<float>(), out_ptr);
+            break;
+        }
+        case DType::BFloat16: {
+            // Convert to Float32 for search
+            auto seq_f32 = sorted_sequence.to(DType::Float32).contiguous();
+            auto val_f32 = values.to(DType::Float32).contiguous();
+            search_typed(seq_f32.data<float>(), val_f32.data<float>(), out_ptr);
+            break;
+        }
+        default:
+            throw std::runtime_error("searchsorted: unsupported dtype " +
+                                     std::string(dtype_name(sorted_sequence.dtype())));
+    }
+
+    return result;
+}
+
+// ============================================================================
+// Sampling Operations
+// ============================================================================
+
+auto gumbel_softmax(const Tensor& logits, double tau, bool hard, int64_t dim) -> Tensor {
+    // Try OpId dispatch first
+    try {
+        std::array<Tensor, 1> inputs = {logits};
+        OpAttributes attrs;
+        attrs["tau"] = std::to_string(tau);
+        attrs["hard"] = hard ? "1" : "0";
+        attrs["dim"] = std::to_string(dim);
+        return dispatch<OpId::GumbelSoftmax>(inputs, attrs)[0];
+    } catch (const std::runtime_error&) {
+        // Fall through to inline implementation
+    }
+
+    // Gumbel noise: -log(-log(U)) where U ~ Uniform(0, 1)
+    Tensor u = rand(std::vector<int64_t>(logits.shape().begin(), logits.shape().end()),
+                    logits.dtype(), logits.device());
+
+    // Clamp to avoid log(0)
+    Tensor eps_tensor = full(std::vector<int64_t>(logits.shape().begin(), logits.shape().end()),
+                            1e-20, logits.dtype(), logits.device());
+    u = add(u, eps_tensor);  // u + eps to avoid exact zeros
+
+    // gumbel = -log(-log(u))
+    Tensor gumbels = neg(log(neg(log(u))));
+
+    // (logits + gumbels) / tau
+    Tensor scaled = div(add(logits, gumbels),
+                        full(std::vector<int64_t>(logits.shape().begin(), logits.shape().end()),
+                             tau, logits.dtype(), logits.device()));
+
+    // Softmax
+    std::array<Tensor, 1> sm_inputs = {scaled};
+    OpAttributes sm_attrs;
+    sm_attrs["dim"] = std::to_string(dim);
+    Tensor y_soft = dispatch<OpId::Softmax>(sm_inputs, sm_attrs)[0];
+
+    if (!hard) {
+        return y_soft;
+    }
+
+    // Straight-through estimator: argmax -> scatter one-hot, gradients flow through y_soft
+    int64_t actual_dim = dim < 0 ? dim + logits.ndim() : dim;
+    Tensor indices = argmax(y_soft, std::make_optional(actual_dim), /*keepdim=*/true);
+
+    // Create zero tensor and scatter 1s at argmax positions
+    Tensor y_hard = zeros(std::vector<int64_t>(logits.shape().begin(), logits.shape().end()),
+                          logits.dtype(), logits.device());
+    // scatter_(dim, index, value=1.0) — fill 1.0 at index positions
+    std::array<Tensor, 3> scatter_inputs = {y_hard, indices,
+        full(std::vector<int64_t>(indices.shape().begin(), indices.shape().end()),
+             1.0, logits.dtype(), logits.device())};
+    OpAttributes scatter_attrs;
+    scatter_attrs["dim"] = std::to_string(actual_dim);
+    y_hard = dispatch<OpId::Scatter>(scatter_inputs, scatter_attrs)[0];
+
+    // Straight-through: y_hard - y_soft.detach() + y_soft
+    // Forward returns y_hard, backward sees y_soft gradients
+    return add(sub(y_hard, y_soft.detach()), y_soft);
 }
 
 } // namespace tenzor

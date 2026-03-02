@@ -33,6 +33,26 @@ auto numpy_dtype_to_tenzor(const py::array& arr) -> DType;
 auto get_numpy_itemsize(const py::array& arr) -> size_t;
 
 /**
+ * Prepare tensor for NumPy conversion (pure C++, no Python objects).
+ * Transfers non-CPU tensors to CPU and makes them contiguous if needed.
+ * Can be called without the GIL held.
+ *
+ * @param tensor The input tensor
+ * @return CPU tensor ready for NumPy array creation
+ */
+auto prepare_tensor_for_numpy(const Tensor& tensor) -> Tensor;
+
+/**
+ * Create NumPy array from a CPU tensor (requires GIL).
+ * The tensor MUST be on CPU. Use prepare_tensor_for_numpy() first for non-CPU tensors.
+ *
+ * @param tensor CPU tensor
+ * @param original_dtype Original dtype (for BFloat16 handling)
+ * @return NumPy array (may share memory with CPU tensor)
+ */
+auto create_numpy_array(const Tensor& tensor, DType original_dtype) -> py::array;
+
+/**
  * Convert Tensor to NumPy array
  * Zero-copy when tensor is on CPU (supports strided views)
  * Always copies when tensor is on non-CPU devices (CUDA, Vulkan, ROCm, OneAPI)

@@ -54,6 +54,9 @@
 #include <tenzor/models/resnet.hpp>
 #include <tenzor/onnx/importer.hpp>
 #include <tenzor/autograd/ops.hpp>
+#include <tenzor/ops/fft.hpp>
+#include <tenzor/sparse/sparse_tensor.hpp>
+#include <tenzor/sparse/sparse_ops.hpp>
 #include <tenzor/autograd/anomaly_mode.hpp>
 #include <tenzor/backend/cpu_caching_allocator.hpp>
 #include <tenzor/nn/utils/clip_grad.hpp>
@@ -489,7 +492,8 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::call_guard<py::gil_scoped_release>())
         .def("to", py::overload_cast<tenzor::MemoryFormat>(&tenzor::Tensor::to, py::const_),
              py::arg("memory_format"),
-             "Convert tensor to specified memory format (e.g., channels_last for NHWC)")
+             "Convert tensor to specified memory format (e.g., channels_last for NHWC)",
+             py::call_guard<py::gil_scoped_release>())
         .def("reshape", &tenzor::Tensor::reshape)
         // Shape manipulation
         .def("transpose", &tenzor::Tensor::transpose,
@@ -513,7 +517,16 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("zero_", &tenzor::Tensor::zero_,
              "Fill tensor with zeros in-place")
         // NumPy interoperability
-        .def("numpy", &tenzor::numpy::tensor_to_numpy,
+        .def("numpy", [](const tenzor::Tensor& t) {
+             // Release GIL during CPU transfer (pure C++ work)
+             tenzor::Tensor cpu_tensor;
+             {
+                 py::gil_scoped_release release;
+                 cpu_tensor = tenzor::numpy::prepare_tensor_for_numpy(t);
+             }
+             // GIL reacquired for NumPy array creation (Python objects)
+             return tenzor::numpy::create_numpy_array(cpu_tensor, t.dtype());
+             },
              "Convert tensor to NumPy array (zero-copy when possible)")
         .def_static("from_numpy", &tenzor::numpy::numpy_to_tensor,
              py::arg("array"), py::arg("device") = tenzor::Device::cpu(),
@@ -724,48 +737,64 @@ PYBIND11_MODULE(tenzor_core, m) {
         // Reduction operations (as member methods calling free functions)
         .def("sum", [](const tenzor::Tensor& t) {
              return tenzor::sum(t, std::nullopt, false);
-             }, "Sum all elements")
+             }, "Sum all elements",
+             py::call_guard<py::gil_scoped_release>())
         .def("sum", [](const tenzor::Tensor& t, int64_t dim, bool keepdim) {
              return tenzor::sum(t, std::make_optional(dim), keepdim);
              }, py::arg("dim"), py::arg("keepdim")=false,
-             "Sum along dimension")
+             "Sum along dimension",
+             py::call_guard<py::gil_scoped_release>())
         .def("mean", [](const tenzor::Tensor& t) {
              return tenzor::mean(t, std::nullopt, false);
-             }, "Mean of all elements")
+             }, "Mean of all elements",
+             py::call_guard<py::gil_scoped_release>())
         .def("mean", [](const tenzor::Tensor& t, int64_t dim, bool keepdim) {
              return tenzor::mean(t, std::make_optional(dim), keepdim);
              }, py::arg("dim"), py::arg("keepdim")=false,
-             "Mean along dimension")
+             "Mean along dimension",
+             py::call_guard<py::gil_scoped_release>())
         .def("max", [](const tenzor::Tensor& t) {
              return tenzor::max(t, std::nullopt, false);
-             }, "Maximum of all elements")
+             }, "Maximum of all elements",
+             py::call_guard<py::gil_scoped_release>())
         .def("max", [](const tenzor::Tensor& t, int64_t dim, bool keepdim) {
              return tenzor::max(t, std::make_optional(dim), keepdim);
              }, py::arg("dim"), py::arg("keepdim")=false,
-             "Maximum along dimension")
+             "Maximum along dimension",
+             py::call_guard<py::gil_scoped_release>())
         .def("min", [](const tenzor::Tensor& t) {
              return tenzor::min(t, std::nullopt, false);
-             }, "Minimum of all elements")
+             }, "Minimum of all elements",
+             py::call_guard<py::gil_scoped_release>())
         .def("min", [](const tenzor::Tensor& t, int64_t dim, bool keepdim) {
              return tenzor::min(t, std::make_optional(dim), keepdim);
              }, py::arg("dim"), py::arg("keepdim")=false,
-             "Minimum along dimension")
+             "Minimum along dimension",
+             py::call_guard<py::gil_scoped_release>())
         // Device transfer with overloads
         .def("cuda", [](const tenzor::Tensor& t, int32_t device_id) {
              return t.cuda(device_id);
-             }, py::arg("device_id")=0, "Move tensor to CUDA device")
+             }, py::arg("device_id")=0, "Move tensor to CUDA device",
+             py::call_guard<py::gil_scoped_release>())
         .def("cpu", [](const tenzor::Tensor& t) {
              return t.cpu();
-             }, "Move tensor to CPU")
+             }, "Move tensor to CPU",
+             py::call_guard<py::gil_scoped_release>())
         // DType conversion
         .def("to", py::overload_cast<tenzor::DType>(&tenzor::Tensor::to, py::const_),
-             py::arg("dtype"), "Convert to different dtype")
+             py::arg("dtype"), "Convert to different dtype",
+             py::call_guard<py::gil_scoped_release>())
         // PyTorch-style dtype casting methods
-        .def("float", [](const tenzor::Tensor& t) { return t.to(tenzor::DType::Float32); }, "Cast to float32")
-        .def("double", [](const tenzor::Tensor& t) { return t.to(tenzor::DType::Float64); }, "Cast to float64")
-        .def("half", [](const tenzor::Tensor& t) { return t.to(tenzor::DType::Float16); }, "Cast to float16")
-        .def("long", [](const tenzor::Tensor& t) { return t.to(tenzor::DType::Int64); }, "Cast to int64")
-        .def("int", [](const tenzor::Tensor& t) { return t.to(tenzor::DType::Int32); }, "Cast to int32")
+        .def("float", [](const tenzor::Tensor& t) { return t.to(tenzor::DType::Float32); }, "Cast to float32",
+             py::call_guard<py::gil_scoped_release>())
+        .def("double", [](const tenzor::Tensor& t) { return t.to(tenzor::DType::Float64); }, "Cast to float64",
+             py::call_guard<py::gil_scoped_release>())
+        .def("half", [](const tenzor::Tensor& t) { return t.to(tenzor::DType::Float16); }, "Cast to float16",
+             py::call_guard<py::gil_scoped_release>())
+        .def("long", [](const tenzor::Tensor& t) { return t.to(tenzor::DType::Int64); }, "Cast to int64",
+             py::call_guard<py::gil_scoped_release>())
+        .def("int", [](const tenzor::Tensor& t) { return t.to(tenzor::DType::Int32); }, "Cast to int32",
+             py::call_guard<py::gil_scoped_release>())
         // Properties
         .def("dim", &tenzor::Tensor::ndim, "Number of dimensions")
         .def("size", [](const tenzor::Tensor& t) -> py::tuple {
@@ -1646,46 +1675,53 @@ PYBIND11_MODULE(tenzor_core, m) {
          "Element-wise hyperbolic tangent", py::call_guard<py::gil_scoped_release>());
     // Extended math operations
     m.def("log2", [](const tenzor::Tensor& t) { return tenzor::log2(t); },
-         "Element-wise base-2 logarithm");
+         "Element-wise base-2 logarithm", py::call_guard<py::gil_scoped_release>());
     m.def("log10", [](const tenzor::Tensor& t) { return tenzor::log10(t); },
-         "Element-wise base-10 logarithm");
+         "Element-wise base-10 logarithm", py::call_guard<py::gil_scoped_release>());
     m.def("log1p", [](const tenzor::Tensor& t) { return tenzor::log1p(t); },
-         "Element-wise log(1 + x)");
+         "Element-wise log(1 + x)", py::call_guard<py::gil_scoped_release>());
     m.def("exp2", [](const tenzor::Tensor& t) { return tenzor::exp2(t); },
-         "Element-wise 2^x");
+         "Element-wise 2^x", py::call_guard<py::gil_scoped_release>());
     m.def("expm1", [](const tenzor::Tensor& t) { return tenzor::expm1(t); },
-         "Element-wise exp(x) - 1");
+         "Element-wise exp(x) - 1", py::call_guard<py::gil_scoped_release>());
     m.def("erf", [](const tenzor::Tensor& t) { return tenzor::erf(t); },
-         "Element-wise error function");
+         "Element-wise error function", py::call_guard<py::gil_scoped_release>());
     m.def("erfc", [](const tenzor::Tensor& t) { return tenzor::erfc(t); },
-         "Element-wise complementary error function");
+         "Element-wise complementary error function", py::call_guard<py::gil_scoped_release>());
     m.def("isnan", [](const tenzor::Tensor& t) { return tenzor::isnan(t); },
-         "Element-wise NaN test");
+         "Element-wise NaN test", py::call_guard<py::gil_scoped_release>());
     m.def("isinf", [](const tenzor::Tensor& t) { return tenzor::isinf(t); },
-         "Element-wise infinity test");
+         "Element-wise infinity test", py::call_guard<py::gil_scoped_release>());
     m.def("isfinite", [](const tenzor::Tensor& t) { return tenzor::isfinite(t); },
-         "Element-wise finiteness test");
+         "Element-wise finiteness test", py::call_guard<py::gil_scoped_release>());
     m.def("atan2", [](const tenzor::Tensor& y, const tenzor::Tensor& x) { return tenzor::atan2(y, x); },
-         "Element-wise atan2", py::arg("y"), py::arg("x"));
+         "Element-wise atan2", py::arg("y"), py::arg("x"),
+         py::call_guard<py::gil_scoped_release>());
     m.def("fmod", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::fmod(a, b); },
-         "Element-wise float modulo", py::arg("a"), py::arg("b"));
+         "Element-wise float modulo", py::arg("a"), py::arg("b"),
+         py::call_guard<py::gil_scoped_release>());
     m.def("remainder", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::remainder(a, b); },
-         "Element-wise remainder", py::arg("a"), py::arg("b"));
+         "Element-wise remainder", py::arg("a"), py::arg("b"),
+         py::call_guard<py::gil_scoped_release>());
     m.def("lerp", [](const tenzor::Tensor& start, const tenzor::Tensor& end, double weight) {
          return tenzor::lerp(start, end, weight);
          }, "Linear interpolation",
-         py::arg("start"), py::arg("end"), py::arg("weight"));
+         py::arg("start"), py::arg("end"), py::arg("weight"),
+         py::call_guard<py::gil_scoped_release>());
     m.def("logical_and", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
          return tenzor::logical_and(a, b);
-         }, "Element-wise logical AND", py::arg("a"), py::arg("b"));
+         }, "Element-wise logical AND", py::arg("a"), py::arg("b"),
+         py::call_guard<py::gil_scoped_release>());
     m.def("logical_or", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
          return tenzor::logical_or(a, b);
-         }, "Element-wise logical OR", py::arg("a"), py::arg("b"));
+         }, "Element-wise logical OR", py::arg("a"), py::arg("b"),
+         py::call_guard<py::gil_scoped_release>());
     m.def("logical_not", [](const tenzor::Tensor& t) { return tenzor::logical_not(t); },
-         "Element-wise logical NOT");
+         "Element-wise logical NOT", py::call_guard<py::gil_scoped_release>());
     m.def("logical_xor", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
          return tenzor::logical_xor(a, b);
-         }, "Element-wise logical XOR", py::arg("a"), py::arg("b"));
+         }, "Element-wise logical XOR", py::arg("a"), py::arg("b"),
+         py::call_guard<py::gil_scoped_release>());
     m.def("meshgrid", [](const std::vector<tenzor::Tensor>& tensors, const std::string& indexing) {
          return tenzor::meshgrid(tensors, indexing);
          }, "Generate coordinate grids from 1-D tensors",
@@ -1694,24 +1730,36 @@ PYBIND11_MODULE(tenzor_core, m) {
          return tenzor::cross(a, b, dim);
          }, "Cross product of two tensors along dimension",
          py::arg("input"), py::arg("other"), py::arg("dim") = -1);
+    // Search operations
+    m.def("searchsorted", [](const tenzor::Tensor& sorted_sequence, const tenzor::Tensor& values, bool right) {
+         return tenzor::searchsorted(sorted_sequence, values, right);
+         }, "Find insertion indices in sorted sequence",
+         py::arg("sorted_sequence"), py::arg("values"), py::arg("right") = false,
+         py::call_guard<py::gil_scoped_release>());
+    // Sampling operations
+    m.def("gumbel_softmax", [](const tenzor::Tensor& logits, double tau, bool hard, int64_t dim) {
+         return tenzor::gumbel_softmax(logits, tau, hard, dim);
+         }, "Sample from categorical distribution using Gumbel-Softmax trick",
+         py::arg("logits"), py::arg("tau") = 1.0, py::arg("hard") = false, py::arg("dim") = -1,
+         py::call_guard<py::gil_scoped_release>());
     // More trig/hyperbolic
     m.def("tan", [](const tenzor::Tensor& t) { return tenzor::tan(t); },
-         "Element-wise tangent");
+         "Element-wise tangent", py::call_guard<py::gil_scoped_release>());
     m.def("asin", [](const tenzor::Tensor& t) { return tenzor::asin(t); },
-         "Element-wise arcsine");
+         "Element-wise arcsine", py::call_guard<py::gil_scoped_release>());
     m.def("acos", [](const tenzor::Tensor& t) { return tenzor::acos(t); },
-         "Element-wise arccosine");
+         "Element-wise arccosine", py::call_guard<py::gil_scoped_release>());
     m.def("atan", [](const tenzor::Tensor& t) { return tenzor::atan(t); },
-         "Element-wise arctangent");
+         "Element-wise arctangent", py::call_guard<py::gil_scoped_release>());
     m.def("sinh", [](const tenzor::Tensor& t) { return tenzor::sinh(t); },
-         "Element-wise hyperbolic sine");
+         "Element-wise hyperbolic sine", py::call_guard<py::gil_scoped_release>());
     m.def("cosh", [](const tenzor::Tensor& t) { return tenzor::cosh(t); },
-         "Element-wise hyperbolic cosine");
+         "Element-wise hyperbolic cosine", py::call_guard<py::gil_scoped_release>());
     // Element-wise ops
     m.def("neg", [](const tenzor::Tensor& t) { return tenzor::neg(t); },
-         "Element-wise negation");
+         "Element-wise negation", py::call_guard<py::gil_scoped_release>());
     m.def("sign", [](const tenzor::Tensor& t) { return tenzor::sign(t); },
-         "Element-wise sign function");
+         "Element-wise sign function", py::call_guard<py::gil_scoped_release>());
     m.def("sigmoid", [](const tenzor::Tensor& t) { return tenzor::sigmoid(t); },
          "Element-wise sigmoid");
     m.def("reciprocal", [](const tenzor::Tensor& t) { return tenzor::reciprocal(t); },
@@ -2709,10 +2757,12 @@ PYBIND11_MODULE(tenzor_core, m) {
         // ====================================================================
         .def("to", py::overload_cast<tenzor::Device>(&tenzor::nn::Module::to),
              py::arg("device"),
-             "Move module to specified device")
+             "Move module to specified device",
+             py::call_guard<py::gil_scoped_release>())
         .def("to", py::overload_cast<tenzor::DType>(&tenzor::nn::Module::to),
              py::arg("dtype"),
-             "Convert module parameters to specified dtype")
+             "Convert module parameters to specified dtype",
+             py::call_guard<py::gil_scoped_release>())
         // String device overload for PyTorch compatibility
         .def("to", [](tenzor::nn::Module& self, const std::string& device) {
             if (device == "cpu") {
@@ -2731,12 +2781,15 @@ PYBIND11_MODULE(tenzor_core, m) {
                 throw std::runtime_error("Unknown device: " + device);
             }
         }, py::arg("device"),
-             "Move module to device specified by string ('cpu', 'cuda', 'cuda:0')")
+             "Move module to device specified by string ('cpu', 'cuda', 'cuda:0')",
+             py::call_guard<py::gil_scoped_release>())
         .def("cuda", &tenzor::nn::Module::cuda,
              py::arg("device_id") = 0,
-             "Move module to CUDA device")
+             "Move module to CUDA device",
+             py::call_guard<py::gil_scoped_release>())
         .def("cpu", &tenzor::nn::Module::cpu,
-             "Move module to CPU")
+             "Move module to CPU",
+             py::call_guard<py::gil_scoped_release>())
 
         // ====================================================================
         // Gradient management
@@ -5471,6 +5524,81 @@ PYBIND11_MODULE(tenzor_core, m) {
                    "Eigenvalues of symmetric matrix", py::arg("A"));
 
     // =========================================================================
+    // FFT submodule
+    // =========================================================================
+    auto fft_mod = m.def_submodule("fft", "Fast Fourier Transform operations");
+
+    fft_mod.def("fft", [](const tenzor::Tensor& input, std::optional<int64_t> n,
+                           int64_t dim, const std::string& norm) {
+        return tenzor::fft::fft(input, n, dim, norm);
+    }, "1-D complex-to-complex FFT",
+       py::arg("input"), py::arg("n") = py::none(), py::arg("dim") = -1,
+       py::arg("norm") = "backward",
+       py::call_guard<py::gil_scoped_release>());
+
+    fft_mod.def("ifft", [](const tenzor::Tensor& input, std::optional<int64_t> n,
+                            int64_t dim, const std::string& norm) {
+        return tenzor::fft::ifft(input, n, dim, norm);
+    }, "1-D inverse complex-to-complex FFT",
+       py::arg("input"), py::arg("n") = py::none(), py::arg("dim") = -1,
+       py::arg("norm") = "backward",
+       py::call_guard<py::gil_scoped_release>());
+
+    fft_mod.def("rfft", [](const tenzor::Tensor& input, std::optional<int64_t> n,
+                            int64_t dim, const std::string& norm) {
+        return tenzor::fft::rfft(input, n, dim, norm);
+    }, "1-D real-to-complex FFT",
+       py::arg("input"), py::arg("n") = py::none(), py::arg("dim") = -1,
+       py::arg("norm") = "backward",
+       py::call_guard<py::gil_scoped_release>());
+
+    fft_mod.def("irfft", [](const tenzor::Tensor& input, std::optional<int64_t> n,
+                             int64_t dim, const std::string& norm) {
+        return tenzor::fft::irfft(input, n, dim, norm);
+    }, "1-D complex-to-real inverse FFT",
+       py::arg("input"), py::arg("n") = py::none(), py::arg("dim") = -1,
+       py::arg("norm") = "backward",
+       py::call_guard<py::gil_scoped_release>());
+
+    fft_mod.def("fft2", [](const tenzor::Tensor& input,
+                            std::optional<std::vector<int64_t>> s,
+                            std::vector<int64_t> dim, const std::string& norm) {
+        return tenzor::fft::fft2(input, s, dim, norm);
+    }, "2-D complex-to-complex FFT",
+       py::arg("input"), py::arg("s") = py::none(),
+       py::arg("dim") = std::vector<int64_t>{-2, -1},
+       py::arg("norm") = "backward",
+       py::call_guard<py::gil_scoped_release>());
+
+    fft_mod.def("ifft2", [](const tenzor::Tensor& input,
+                             std::optional<std::vector<int64_t>> s,
+                             std::vector<int64_t> dim, const std::string& norm) {
+        return tenzor::fft::ifft2(input, s, dim, norm);
+    }, "2-D inverse complex-to-complex FFT",
+       py::arg("input"), py::arg("s") = py::none(),
+       py::arg("dim") = std::vector<int64_t>{-2, -1},
+       py::arg("norm") = "backward",
+       py::call_guard<py::gil_scoped_release>());
+
+    fft_mod.def("fftn", [](const tenzor::Tensor& input,
+                            std::optional<std::vector<int64_t>> s,
+                            std::optional<std::vector<int64_t>> dim, const std::string& norm) {
+        return tenzor::fft::fftn(input, s, dim, norm);
+    }, "N-D complex-to-complex FFT",
+       py::arg("input"), py::arg("s") = py::none(), py::arg("dim") = py::none(),
+       py::arg("norm") = "backward",
+       py::call_guard<py::gil_scoped_release>());
+
+    fft_mod.def("ifftn", [](const tenzor::Tensor& input,
+                             std::optional<std::vector<int64_t>> s,
+                             std::optional<std::vector<int64_t>> dim, const std::string& norm) {
+        return tenzor::fft::ifftn(input, s, dim, norm);
+    }, "N-D inverse complex-to-complex FFT",
+       py::arg("input"), py::arg("s") = py::none(), py::arg("dim") = py::none(),
+       py::arg("norm") = "backward",
+       py::call_guard<py::gil_scoped_release>());
+
+    // =========================================================================
     // JIT Module - Tracing, Compilation, and Graph Optimization
     // =========================================================================
     auto jit = m.def_submodule("jit", "JIT compilation and tracing");
@@ -6527,4 +6655,98 @@ void bind_compression(py::module& m) {
         }
     }, py::arg("bytes"), py::arg("device") = "cpu",
     "Set maximum cached memory for the specified device");
+
+    // =========================================================================
+    // Sparse submodule
+    // =========================================================================
+    auto sparse_mod = m.def_submodule("sparse", "Sparse tensor operations");
+
+    py::enum_<tenzor::SparseLayout>(sparse_mod, "SparseLayout")
+        .value("COO", tenzor::SparseLayout::COO)
+        .value("CSR", tenzor::SparseLayout::CSR);
+
+    py::class_<tenzor::SparseTensor>(sparse_mod, "SparseTensor")
+        .def_property_readonly("layout", &tenzor::SparseTensor::layout)
+        .def_property_readonly("shape", [](const tenzor::SparseTensor& s) {
+            return s.shape();
+        })
+        .def_property_readonly("dtype", &tenzor::SparseTensor::dtype)
+        .def_property_readonly("device", &tenzor::SparseTensor::device)
+        .def_property_readonly("nnz", &tenzor::SparseTensor::nnz)
+        .def_property_readonly("sparse_dim", &tenzor::SparseTensor::sparse_dim)
+        .def_property_readonly("dense_dim", &tenzor::SparseTensor::dense_dim)
+        .def_property_readonly("is_coalesced", &tenzor::SparseTensor::is_coalesced)
+        .def("indices", &tenzor::SparseTensor::indices, "Get COO indices tensor")
+        .def("values", &tenzor::SparseTensor::values, "Get values tensor")
+        .def("crow_indices", &tenzor::SparseTensor::crow_indices, "Get CSR compressed row indices")
+        .def("col_indices", &tenzor::SparseTensor::col_indices, "Get CSR column indices")
+        .def("to_dense", &tenzor::SparseTensor::to_dense, "Convert to dense tensor",
+             py::call_guard<py::gil_scoped_release>())
+        .def("to_coo", &tenzor::SparseTensor::to_coo, "Convert to COO format",
+             py::call_guard<py::gil_scoped_release>())
+        .def("to_csr", &tenzor::SparseTensor::to_csr, "Convert to CSR format",
+             py::call_guard<py::gil_scoped_release>())
+        .def("coalesce", &tenzor::SparseTensor::coalesce, "Coalesce COO tensor",
+             py::call_guard<py::gil_scoped_release>())
+        .def("to", &tenzor::SparseTensor::to, "Transfer to device",
+             py::arg("device"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("__repr__", [](const tenzor::SparseTensor& s) {
+            std::ostringstream ss;
+            ss << "SparseTensor(layout="
+               << (s.layout() == tenzor::SparseLayout::COO ? "COO" : "CSR")
+               << ", shape=[";
+            auto& shape = s.shape();
+            for (size_t i = 0; i < shape.size(); ++i) {
+                if (i > 0) ss << ", ";
+                ss << shape[i];
+            }
+            ss << "], nnz=" << s.nnz() << ", dtype=" << tenzor::dtype_name(s.dtype()) << ")";
+            return ss.str();
+        });
+
+    sparse_mod.def("sparse_coo", &tenzor::SparseTensor::sparse_coo,
+        "Create a COO sparse tensor",
+        py::arg("indices"), py::arg("values"), py::arg("shape"));
+
+    sparse_mod.def("sparse_csr", &tenzor::SparseTensor::sparse_csr,
+        "Create a CSR sparse tensor",
+        py::arg("crow_indices"), py::arg("col_indices"), py::arg("values"), py::arg("shape"));
+
+    sparse_mod.def("to_sparse", &tenzor::to_sparse,
+        "Convert dense tensor to sparse COO",
+        py::arg("dense"),
+        py::call_guard<py::gil_scoped_release>());
+
+    sparse_mod.def("to_sparse_csr", &tenzor::to_sparse_csr,
+        "Convert dense tensor to sparse CSR",
+        py::arg("dense"),
+        py::call_guard<py::gil_scoped_release>());
+
+    sparse_mod.def("spmm", &tenzor::sparse::spmm,
+        "Sparse-dense matrix multiplication",
+        py::arg("sparse"), py::arg("dense"),
+        py::call_guard<py::gil_scoped_release>());
+
+    sparse_mod.def("spmv", &tenzor::sparse::spmv,
+        "Sparse-dense matrix-vector multiplication",
+        py::arg("sparse"), py::arg("vec"),
+        py::call_guard<py::gil_scoped_release>());
+
+    sparse_mod.def("add", py::overload_cast<const tenzor::SparseTensor&, const tenzor::Tensor&>(
+        &tenzor::sparse::add),
+        "Sparse-dense addition",
+        py::arg("sparse"), py::arg("dense"),
+        py::call_guard<py::gil_scoped_release>());
+
+    sparse_mod.def("sparse_add", py::overload_cast<const tenzor::SparseTensor&, const tenzor::SparseTensor&>(
+        &tenzor::sparse::add),
+        "Sparse-sparse addition",
+        py::arg("a"), py::arg("b"),
+        py::call_guard<py::gil_scoped_release>());
+
+    sparse_mod.def("mul", &tenzor::sparse::mul,
+        "Scalar multiplication of sparse tensor",
+        py::arg("sparse"), py::arg("scalar"),
+        py::call_guard<py::gil_scoped_release>());
 }

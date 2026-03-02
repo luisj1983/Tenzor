@@ -144,89 +144,71 @@ auto can_zero_copy_numpy_to_tensor(const py::array& arr) -> bool {
     return (flags & py::array::c_style) && !(flags & py::array::f_style);
 }
 
-// Tensor to NumPy conversion
-auto tensor_to_numpy(const Tensor& tensor) -> py::array {
-    // Get tensor properties
+// Phase 1: Prepare tensor for NumPy (pure C++, GIL not required)
+auto prepare_tensor_for_numpy(const Tensor& tensor) -> Tensor {
+    if (tensor.device().type != Device::Type::CPU) {
+        return tensor.to(Device::cpu());
+    }
+    return tensor;
+}
+
+// Phase 2: Create NumPy array from CPU tensor (requires GIL)
+auto create_numpy_array(const Tensor& tensor, DType original_dtype) -> py::array {
     auto shape = tensor.shape();
     auto strides = tensor.strides();
     auto dtype = tensor.dtype();
-    auto device = tensor.device();
+    size_t element_size = dtype_size(dtype);
 
-    // Convert shape to vector
     std::vector<ssize_t> np_shape(shape.begin(), shape.end());
-
-    // Convert strides from element counts to byte counts
     std::vector<ssize_t> np_strides;
     np_strides.reserve(strides.size());
-    size_t element_size = dtype_size(dtype);
     for (auto s : strides) {
         np_strides.push_back(s * element_size);
     }
 
-    // Get NumPy format string
     std::string format = dtype_to_numpy_format(dtype);
 
-    // Handle non-CPU tensors - must copy to CPU first
-    if (device.type != Device::Type::CPU) {
-        // Copy to CPU (works for CUDA, Vulkan, ROCm, OneAPI)
-        Tensor cpu_tensor = tensor.to(Device::cpu());
+    // Validate that max accessible offset falls within storage bounds
+    int64_t max_offset = tensor.offset();
+    for (size_t d = 0; d < shape.size(); ++d) {
+        if (shape[d] > 0) {
+            max_offset += (shape[d] - 1) * strides[d];
+        }
+    }
+    int64_t storage_elements = static_cast<int64_t>(
+        tensor.storage()->size_bytes() / element_size);
 
-        // Create NumPy array with copied data
+    if (max_offset >= storage_elements) {
+        PyErr_WarnEx(PyExc_RuntimeWarning,
+            "Strided tensor view exceeds storage bounds, "
+            "falling back to contiguous copy for NumPy conversion", 1);
+        Tensor contiguous = tensor.contiguous();
         py::array result(py::dtype(format), np_shape);
-
-        // Copy data using data_ptr() which accounts for storage offset
-        void* src = cpu_tensor.data_ptr();
+        void* src = const_cast<void*>(contiguous.storage()->data());
         void* dst = result.mutable_data();
-        size_t total_bytes = cpu_tensor.numel() * element_size;
-        std::memcpy(dst, src, total_bytes);
-
-        return apply_bfloat16_dtype(result, dtype);
+        std::memcpy(dst, src, contiguous.numel() * element_size);
+        return apply_bfloat16_dtype(result, original_dtype);
     }
 
-    // CPU tensor - zero-copy path sharing storage with the tensor.
-    // Works for both contiguous and non-contiguous (strided) tensors since
-    // NumPy natively supports strided arrays.
-    {
-        // Validate that max accessible offset falls within storage bounds
-        int64_t max_offset = tensor.offset();
-        for (size_t d = 0; d < shape.size(); ++d) {
-            if (shape[d] > 0) {
-                max_offset += (shape[d] - 1) * strides[d];
-            }
-        }
-        int64_t storage_elements = static_cast<int64_t>(
-            tensor.storage()->size_bytes() / element_size);
+    // Account for storage offset
+    auto* base_ptr = static_cast<char*>(
+        const_cast<void*>(tensor.storage()->data()));
+    void* data_ptr = base_ptr + tensor.offset() * element_size;
 
-        if (max_offset >= storage_elements) {
-            // Strided view exceeds storage — fall back to contiguous copy.
-            // This can happen with advanced slicing that creates views with
-            // strides exceeding the underlying storage bounds.
-            PyErr_WarnEx(PyExc_RuntimeWarning,
-                "Strided tensor view exceeds storage bounds, "
-                "falling back to contiguous copy for NumPy conversion", 1);
-            Tensor contiguous = tensor.contiguous();
-            py::array result(py::dtype(format), np_shape);
-            void* src = const_cast<void*>(contiguous.storage()->data());
-            void* dst = result.mutable_data();
-            std::memcpy(dst, src, contiguous.numel() * element_size);
-            return apply_bfloat16_dtype(result, dtype);
-        }
+    // Create capsule that keeps the tensor's storage alive via shared_ptr refcount.
+    auto* storage_ptr = new std::shared_ptr<Storage>(tensor.storage());
+    py::capsule capsule(storage_ptr, [](void* ptr) {
+        delete static_cast<std::shared_ptr<Storage>*>(ptr);
+    });
 
-        // Account for storage offset
-        auto* base_ptr = static_cast<char*>(
-            const_cast<void*>(tensor.storage()->data()));
-        void* data_ptr = base_ptr + tensor.offset() * element_size;
+    py::array result(py::dtype(format), np_shape, np_strides, data_ptr, capsule);
+    return apply_bfloat16_dtype(result, original_dtype);
+}
 
-        // Create capsule that keeps the tensor's storage alive via shared_ptr refcount.
-        auto* storage_ptr = new std::shared_ptr<Storage>(tensor.storage());
-        py::capsule capsule(storage_ptr, [](void* ptr) {
-            delete static_cast<std::shared_ptr<Storage>*>(ptr);
-        });
-
-        // Create NumPy array with shared memory and original strides
-        py::array result(py::dtype(format), np_shape, np_strides, data_ptr, capsule);
-        return apply_bfloat16_dtype(result, dtype);
-    }
+// Tensor to NumPy conversion (convenience wrapper)
+auto tensor_to_numpy(const Tensor& tensor) -> py::array {
+    Tensor cpu_tensor = prepare_tensor_for_numpy(tensor);
+    return create_numpy_array(cpu_tensor, tensor.dtype());
 }
 
 // NumPy to Tensor conversion

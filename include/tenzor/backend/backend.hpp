@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include "../core/tensor.hpp"
 #include "../core/device.hpp"
+#include "op_attributes.hpp"
 
 namespace tenzor {
 
