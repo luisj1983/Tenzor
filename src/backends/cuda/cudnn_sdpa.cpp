@@ -17,6 +17,7 @@
 #include <mutex>
 
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/backend/caching_allocator.hpp"
 #include "tenzor/backend/fused_ops.hpp"
 
 namespace fe = cudnn_frontend;
@@ -171,9 +172,10 @@ private:
     std::mutex mutex_;
 };
 
-// Per-thread workspace buffer — each thread owns its own CUDA allocation,
+// Per-thread workspace buffer — each thread owns its own allocation,
 // eliminating the data race where one thread frees the buffer while another
-// thread's kernel is still using it.
+// thread's kernel is still using it. Routes through the caching allocator
+// to avoid raw cudaMalloc/cudaFree overhead.
 class SDPAWorkspace {
 public:
     static void* get(size_t required_size) {
@@ -188,23 +190,16 @@ private:
     SDPAWorkspace() : buffer_(nullptr), size_(0) {}
     ~SDPAWorkspace() {
         if (buffer_) {
-            cudaFree(buffer_);
+            backend::CachingAllocator::get().free(buffer_);
         }
     }
 
     void resize(size_t new_size) {
         if (buffer_) {
-            cudaDeviceSynchronize();
-            cudaFree(buffer_);
+            backend::CachingAllocator::get().free(buffer_);
         }
         size_ = new_size + (new_size / 4);  // 25% headroom
-        auto err = cudaMalloc(&buffer_, size_);
-        if (err != cudaSuccess) {
-            buffer_ = nullptr;
-            size_ = 0;
-            throw std::runtime_error("SDPA workspace cudaMalloc failed: " +
-                std::string(cudaGetErrorString(err)));
-        }
+        buffer_ = backend::CachingAllocator::get().allocate(size_);
     }
 
     void* buffer_;

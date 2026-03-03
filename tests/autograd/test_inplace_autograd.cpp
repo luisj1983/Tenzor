@@ -175,42 +175,24 @@ TEST_F(InplaceAutogradTest, InplaceMulRejectsRequiresGrad) {
 TEST_F(InplaceAutogradTest, InplaceAfterForwardDetectedOnBackward) {
     // Build a computation graph: y = x * x
     // Then modify x in-place before calling backward.
-    //
-    // NOTE: Built-in MulBackward/AddBackward directly assign saved_tensors_
-    // instead of calling save_for_backward(), so saved_versions_ is not
-    // populated and version mismatch detection is bypassed. This is a known
-    // limitation. The version check only works for custom Functions that
-    // properly call save_for_backward().
-    //
-    // This test documents the current behavior: backward succeeds even
-    // after in-place modification, but produces incorrect gradients.
+    // The engine validates saved tensor versions before backward(),
+    // so in-place modification should be detected and throw.
 
     auto x = Variable(ones({3, 3}, DType::Float32, Device::cpu()), /*requires_grad=*/true);
-    auto y = x * x;  // Forward: saves x for backward
+    auto y = x * x;  // Forward: MulBackward saves x via save_for_backward()
 
     // Modify the underlying tensor in-place via fill_
     x.tensor().fill_(999.0);
 
-    // Currently backward does NOT throw because built-in ops bypass
-    // save_for_backward() version tracking. This documents the status quo.
     auto loss = tenzor::sum(y);
-    EXPECT_NO_FATAL_FAILURE({
-        try {
-            loss.backward();
-            // If backward succeeds, the gradients will be wrong (using modified x=999
-            // instead of original x=1), but at least it doesn't crash.
-        } catch (const std::runtime_error& e) {
-            // If version detection IS working, the error message should mention in-place
-            std::string msg = e.what();
-            EXPECT_TRUE(msg.find("in-place") != std::string::npos ||
-                       msg.find("modified") != std::string::npos)
-                << "Error message should mention in-place modification, got: " << msg;
-        }
-    });
+    EXPECT_THROW(loss.backward(), std::runtime_error)
+        << "backward() should detect in-place modification of saved tensor";
 }
 
-TEST_F(InplaceAutogradTest, InplaceAfterForwardDetectedOnBackwardAdd) {
-    // Similar test but with addition: y = x + x
+TEST_F(InplaceAutogradTest, InplaceAfterForwardNoSavedTensorsAdd) {
+    // AddBackward does not save input tensors (only needs shapes for
+    // broadcasting reduction), so in-place modification of inputs
+    // does not trigger a version mismatch. backward() should succeed.
     auto x = Variable(ones({2, 2}, DType::Float32, Device::cpu()), /*requires_grad=*/true);
     auto y = x + x;
 
@@ -218,19 +200,8 @@ TEST_F(InplaceAutogradTest, InplaceAfterForwardDetectedOnBackwardAdd) {
     x.tensor().zero_();
 
     auto loss = tenzor::sum(y);
-    // Depending on whether add's backward accesses saved_tensors, this may or may not throw.
-    // The key is no crash.
-    EXPECT_NO_FATAL_FAILURE({
-        try {
-            loss.backward();
-        } catch (const std::runtime_error& e) {
-            // Expected: version mismatch detection
-            std::string msg = e.what();
-            EXPECT_TRUE(msg.find("in-place") != std::string::npos ||
-                       msg.find("modified") != std::string::npos)
-                << "Error message should mention in-place modification, got: " << msg;
-        }
-    });
+    EXPECT_NO_THROW(loss.backward())
+        << "AddBackward has no saved tensors, so in-place modification is undetected";
 }
 
 TEST_F(InplaceAutogradTest, NoModificationNoThrow) {
@@ -314,4 +285,63 @@ TEST_F(InplaceAutogradTest, SquaredGradientComputationWorks) {
         EXPECT_FLOAT_EQ(data[i], 6.0f)
             << "Gradient of sum(x*x) w.r.t. x (x=3) should be 6 at index " << i;
     }
+}
+
+// ============================================================================
+// Version Tracking for save_for_backward (Phase 1B)
+// ============================================================================
+
+TEST_F(InplaceAutogradTest, MulBackwardDetectsInplaceModification) {
+    // y = a * b; in-place modify a; then backward → should detect stale saved tensor
+    auto a_data = ones({2, 2}, DType::Float32, Device::cpu()) * 2.0f;
+    auto b_data = ones({2, 2}, DType::Float32, Device::cpu()) * 3.0f;
+    auto a = Variable(a_data, /*requires_grad=*/true);
+    auto b = Variable(b_data, /*requires_grad=*/true);
+    auto y = a * b;  // MulBackward saves a and b
+
+    // In-place modify a's underlying tensor after it was saved
+    a_data.fill_(99.0f);
+
+    // backward should detect the version mismatch and throw
+    EXPECT_THROW(tenzor::sum(y).backward(), std::runtime_error)
+        << "MulBackward should detect in-place modification of saved tensor";
+}
+
+TEST_F(InplaceAutogradTest, DivBackwardDetectsInplaceModification) {
+    auto a_data = ones({2, 2}, DType::Float32, Device::cpu()) * 6.0f;
+    auto b_data = ones({2, 2}, DType::Float32, Device::cpu()) * 3.0f;
+    auto a = Variable(a_data, /*requires_grad=*/true);
+    auto b = Variable(b_data, /*requires_grad=*/true);
+    auto y = a / b;  // DivBackward saves a and b
+
+    b_data.fill_(99.0f);
+
+    EXPECT_THROW(tenzor::sum(y).backward(), std::runtime_error)
+        << "DivBackward should detect in-place modification of saved tensor";
+}
+
+TEST_F(InplaceAutogradTest, MatMulBackwardDetectsInplaceModification) {
+    auto a_data = ones({2, 3}, DType::Float32, Device::cpu());
+    auto b_data = ones({3, 2}, DType::Float32, Device::cpu());
+    auto a = Variable(a_data, /*requires_grad=*/true);
+    auto b = Variable(b_data, /*requires_grad=*/true);
+    auto y = matmul(a, b);  // MatMulBackward saves a and b
+
+    a_data.fill_(99.0f);
+
+    EXPECT_THROW(tenzor::sum(y).backward(), std::runtime_error)
+        << "MatMulBackward should detect in-place modification of saved tensor";
+}
+
+TEST_F(InplaceAutogradTest, AddBackwardWithVersionTracking) {
+    // AddBackward in variable.cpp operator+ now uses save_for_backward
+    // Verify normal backward still works (no false positive)
+    auto a = Variable(ones({2, 2}, DType::Float32, Device::cpu()) * 2.0f, true);
+    auto b = Variable(ones({2, 2}, DType::Float32, Device::cpu()) * 3.0f, true);
+    auto y = a + b;
+    auto loss = tenzor::sum(y);
+
+    // No in-place modification → backward should succeed
+    EXPECT_NO_THROW(loss.backward());
+    EXPECT_TRUE(a.has_grad());
 }

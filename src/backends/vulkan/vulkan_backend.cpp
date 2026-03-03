@@ -556,6 +556,14 @@ void VulkanBackend::createLogicalDevices() {
         // Initialize frame fences for batched execution
         initFrameFences(ctx);
 
+        // Configurable fence timeout from environment (seconds → nanoseconds)
+        if (const char* env = std::getenv("TENZOR_VULKAN_FENCE_TIMEOUT_S")) {
+            auto secs = std::strtoul(env, nullptr, 10);
+            if (secs > 0) {
+                ctx.fence_timeout_ns = static_cast<uint64_t>(secs) * 1'000'000'000ULL;
+            }
+        }
+
         // Initialize VulkanCachingAllocator for this device
         backend::VulkanCachingAllocator::get().initialize(
             ctx.device, ctx.physicalDevice, static_cast<int>(device_idx));

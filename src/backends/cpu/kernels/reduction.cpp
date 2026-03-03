@@ -3267,5 +3267,55 @@ auto all_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
     return output;
 }
 
+// has_inf_nan() reduction - returns true if any element is inf or nan
+auto has_inf_nan_kernel(const Tensor& input, int64_t /*dim*/, bool /*keepdim*/) -> Tensor {
+    const int64_t numel = input.numel();
+
+    // Empty tensor has no inf/nan
+    if (numel == 0) {
+        Tensor result({}, DType::Bool, input.device());
+        result.data<bool>()[0] = false;
+        return result;
+    }
+
+    bool found = false;
+
+    // Handle BFloat16/Float16 by converting to Float32 first
+    Tensor scan = input;
+    if (scan.dtype() == DType::BFloat16 || scan.dtype() == DType::Float16) {
+        scan = scan.to(DType::Float32);
+    }
+
+    switch (scan.dtype()) {
+        case DType::Float32: {
+            const auto* data = scan.data<float>();
+            #pragma omp parallel for reduction(||:found) if(numel > REDUCTION_OMP_THRESHOLD)
+            for (int64_t i = 0; i < numel; ++i) {
+                if (std::isinf(data[i]) || std::isnan(data[i])) {
+                    found = true;
+                }
+            }
+            break;
+        }
+        case DType::Float64: {
+            const auto* data = scan.data<double>();
+            #pragma omp parallel for reduction(||:found) if(numel > REDUCTION_OMP_THRESHOLD)
+            for (int64_t i = 0; i < numel; ++i) {
+                if (std::isinf(data[i]) || std::isnan(data[i])) {
+                    found = true;
+                }
+            }
+            break;
+        }
+        default:
+            // Integer types don't have inf/nan
+            break;
+    }
+
+    Tensor result({}, DType::Bool, input.device());
+    result.data<bool>()[0] = found;
+    return result;
+}
+
 } // namespace cpu
 } // namespace tenzor

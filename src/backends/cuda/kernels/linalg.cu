@@ -17,6 +17,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/device.hpp"
+#include "tenzor/backend/caching_allocator.hpp"
 #include "../cusolver_handle_pool.hpp"
 
 // Forward-declare zeros to avoid including creation.hpp (which pulls in
@@ -68,21 +69,25 @@ void check_cusolver_info(int* d_info, const std::string& op_name) {
 }
 
 /// Simple RAII wrapper for a device-side int (for cuSOLVER info output).
+/// Routes through the caching allocator to avoid cudaMalloc/cudaFree overhead.
 struct DeviceInt {
     int* ptr = nullptr;
-    DeviceInt() { CUDA_CHECK_LINALG(cudaMalloc(&ptr, sizeof(int))); }
-    ~DeviceInt() { if (ptr) cudaFree(ptr); }
+    DeviceInt() {
+        ptr = static_cast<int*>(backend::CachingAllocator::get().allocate(sizeof(int)));
+    }
+    ~DeviceInt() { if (ptr) backend::CachingAllocator::get().free(ptr); }
     DeviceInt(const DeviceInt&) = delete;
     DeviceInt& operator=(const DeviceInt&) = delete;
 };
 
 /// RAII wrapper for device workspace.
+/// Routes through the caching allocator to avoid cudaMalloc/cudaFree overhead.
 struct DeviceWorkspace {
     void* ptr = nullptr;
     DeviceWorkspace(size_t bytes) {
-        if (bytes > 0) CUDA_CHECK_LINALG(cudaMalloc(&ptr, bytes));
+        if (bytes > 0) ptr = backend::CachingAllocator::get().allocate(bytes);
     }
-    ~DeviceWorkspace() { if (ptr) cudaFree(ptr); }
+    ~DeviceWorkspace() { if (ptr) backend::CachingAllocator::get().free(ptr); }
     DeviceWorkspace(const DeviceWorkspace&) = delete;
     DeviceWorkspace& operator=(const DeviceWorkspace&) = delete;
 };
@@ -256,9 +261,9 @@ auto linalg_det_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
     auto result = zeros(out_shape, A.dtype(), A.device());
     auto handle = CuSOLVERHandlePool::get(stream);
 
-    // Allocate pivot array and info on device
-    int* d_ipiv = nullptr;
-    CUDA_CHECK_LINALG(cudaMalloc(&d_ipiv, nbatch * n * sizeof(int)));
+    // Allocate pivot array and info on device (via caching allocator)
+    backend::CachedMemoryGuard ipiv_guard(nbatch * n * sizeof(int));
+    int* d_ipiv = static_cast<int*>(ipiv_guard.get());
     DeviceInt d_info;
 
     if (A.dtype() == DType::Float32) {
@@ -301,7 +306,6 @@ auto linalg_det_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
             data, d_ipiv, result.data<double>(), n, nbatch);
     }
 
-    cudaFree(d_ipiv);
     CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
     return result;
 }
@@ -316,8 +320,8 @@ auto linalg_inv_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
     int64_t nbatch = batch_size(work);
     auto handle = CuSOLVERHandlePool::get(stream);
 
-    int* d_ipiv = nullptr;
-    CUDA_CHECK_LINALG(cudaMalloc(&d_ipiv, n * sizeof(int)));
+    backend::CachedMemoryGuard ipiv_guard(n * sizeof(int));
+    int* d_ipiv = static_cast<int*>(ipiv_guard.get());
     DeviceInt d_info;
 
     // Create identity matrix on device for getrs-based inversion
@@ -386,7 +390,6 @@ auto linalg_inv_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
         }
     }
 
-    cudaFree(d_ipiv);
     CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
     return identity;
 }
@@ -407,8 +410,8 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, cudaStream_t stream) 
 
     auto handle = CuSOLVERHandlePool::get(stream);
 
-    int* d_ipiv = nullptr;
-    CUDA_CHECK_LINALG(cudaMalloc(&d_ipiv, n * sizeof(int)));
+    backend::CachedMemoryGuard ipiv_guard(n * sizeof(int));
+    int* d_ipiv = static_cast<int*>(ipiv_guard.get());
     DeviceInt d_info;
 
     if (A.dtype() == DType::Float32) {
@@ -453,7 +456,6 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, cudaStream_t stream) 
         }
     }
 
-    cudaFree(d_ipiv);
     CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
     return work_b;
 }
@@ -618,9 +620,9 @@ auto linalg_qr_kernel(const Tensor& A, cudaStream_t stream)
         float* q_data = Q.data<float>();
         float* r_data = R.data<float>();
 
-        // Allocate tau on device
-        float* d_tau = nullptr;
-        CUDA_CHECK_LINALG(cudaMalloc(&d_tau, k * sizeof(float)));
+        // Allocate tau on device (via caching allocator)
+        backend::CachedMemoryGuard tau_guard(k * sizeof(float));
+        float* d_tau = static_cast<float*>(tau_guard.get());
 
         for (int64_t b = 0; b < nbatch; b++) {
             float* a_mat = a_data + b * m * n_cols;
@@ -660,15 +662,13 @@ auto linalg_qr_kernel(const Tensor& A, cudaStream_t stream)
             copy_q_columns_f32<<<blocks, threads, 0, stream>>>(
                 a_mat, q_data + b * m * k, m, n_cols, k, 1);
         }
-
-        cudaFree(d_tau);
     } else {
         double* a_data = work.data<double>();
         double* q_data = Q.data<double>();
         double* r_data = R.data<double>();
 
-        double* d_tau = nullptr;
-        CUDA_CHECK_LINALG(cudaMalloc(&d_tau, k * sizeof(double)));
+        backend::CachedMemoryGuard tau_guard(k * sizeof(double));
+        double* d_tau = static_cast<double*>(tau_guard.get());
 
         for (int64_t b = 0; b < nbatch; b++) {
             double* a_mat = a_data + b * m * n_cols;
@@ -703,8 +703,6 @@ auto linalg_qr_kernel(const Tensor& A, cudaStream_t stream)
             copy_q_columns_f64<<<blocks, threads, 0, stream>>>(
                 a_mat, q_data + b * m * k, m, n_cols, k, 1);
         }
-
-        cudaFree(d_tau);
     }
 
     CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));

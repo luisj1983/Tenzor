@@ -17,7 +17,6 @@
 #include <chrono>
 #include <thread>
 #include <atomic>
-#include <mutex>
 #include <random>
 #include <charconv>  // For std::from_chars (dispatch wrappers)
 #include <span>      // For std::span (dispatch wrappers)
@@ -119,56 +118,31 @@ __global__ void check_for_zeros_kernel(const T* data, int64_t n, int* has_zero) 
 
 // Host function to check for zeros in an integer tensor
 // Only enabled in debug builds to avoid the stream sync penalty in release.
-// Uses pinned mapped host memory so the kernel writes directly to host-visible
-// memory, eliminating the explicit D2H memcpy.
+// Uses per-call pinned mapped host memory so the kernel writes directly to
+// host-visible memory, eliminating the explicit D2H memcpy.
 //
-// NOTE: Avoids `static thread_local` for the pinned buffer because this code
-// lives in a dlopen'd shared library.  OMP worker threads created before the
-// library was loaded never run thread_local constructors, causing
-// use-before-init crashes.  Instead we use a process-wide singleton protected
-// by std::once_flag (safe across OMP workers and dlopen boundaries).
-namespace {
-struct PinnedFlagState {
-    int* h_flag = nullptr;
-    int* d_flag = nullptr;
-    std::once_flag init_flag;
-    std::mutex mtx;  // Serialise concurrent zero-checks (pinned buffer is shared)
-
-    void ensure_init() {
-        std::call_once(init_flag, [this]() {
-            CUDA_CHECK(cudaHostAlloc(&h_flag, sizeof(int), cudaHostAllocMapped));
-            CUDA_CHECK(cudaHostGetDevicePointer(&d_flag, h_flag, 0));
-        });
-    }
-
-    // Intentionally leak the pinned allocation — freeing CUDA memory during
-    // static destruction of a dlopen'd library triggers crashes.
-};
-
-PinnedFlagState& get_pinned_flag_state() {
-    static PinnedFlagState state;
-    return state;
-}
-} // anonymous namespace
-
+// Each call allocates its own pinned flag — no mutex needed, independent calls
+// can run concurrently on different streams without serialization.
 template<typename T>
 inline void check_integer_divisor_for_zeros(const T* data, int64_t n, cudaStream_t stream) {
 #ifndef TENZOR_SKIP_INTEGER_DIV_CHECK
-    auto& state = get_pinned_flag_state();
-    state.ensure_init();
-
-    // Serialise: the single pinned buffer is shared across threads
-    std::lock_guard<std::mutex> lock(state.mtx);
-    *state.h_flag = 0;
+    // Allocate per-call pinned flag (no mutex needed — independent flag per call)
+    int* h_flag = nullptr;
+    int* d_flag = nullptr;
+    CUDA_CHECK(cudaHostAlloc(&h_flag, sizeof(int), cudaHostAllocMapped));
+    CUDA_CHECK(cudaHostGetDevicePointer(&d_flag, h_flag, 0));
+    *h_flag = 0;
 
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
-    check_for_zeros_kernel<<<grid, block, 0, stream>>>(data, n, state.d_flag);
+    check_for_zeros_kernel<<<grid, block, 0, stream>>>(data, n, d_flag);
     CUDA_CHECK(cudaGetLastError());
 
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
-    if (*state.h_flag != 0) {
+    bool has_zero = (*h_flag != 0);
+    cudaFreeHost(h_flag);
+    if (has_zero) {
         throw std::runtime_error("Integer division by zero");
     }
 #else

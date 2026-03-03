@@ -7,6 +7,7 @@
 #include "tenzor/nn/utils/clip_grad.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/reduction.hpp"
 #include <cmath>
 #include <limits>
 #include <algorithm>
@@ -79,15 +80,6 @@ auto GradScaler::unscale_(optim::Optimizer& optimizer) -> void {
 }
 
 auto GradScaler::check_inf_nan_(const optim::Optimizer& optimizer) const -> bool {
-    // TODO(perf): This implementation transfers every parameter's gradient to CPU
-    // individually via .cpu(), which is extremely slow for models with many parameters
-    // on GPU (e.g., hundreds of small tensors each triggering a synchronous D2H copy).
-    // This should be replaced with a fused GPU kernel that:
-    //   1. Launches a single kernel per parameter to check for inf/nan (isinf || isnan),
-    //      writing a boolean flag to a device-side scalar.
-    //   2. Uses a single cudaMemcpy to transfer the combined result back to host.
-    // PyTorch uses _amp_foreach_non_finite_check_and_unscale_ which fuses the unscale
-    // and inf/nan check into a single pass over all gradients.
     for (const auto& param : optimizer.parameters()) {
         if (!param->has_grad()) {
             continue;
@@ -98,35 +90,11 @@ auto GradScaler::check_inf_nan_(const optim::Optimizer& optimizer) const -> bool
             continue;
         }
 
-        // Copy gradient to CPU for inspection (handles CUDA tensors)
-        const auto& grad_tensor = *grad;
-        auto cpu_grad = grad_tensor.cpu();
-        const int64_t numel = cpu_grad.numel();
-
-        // Check each element for inf or nan based on dtype
-        // BFloat16/Float16: convert to Float32 before scanning
-        Tensor scan_grad = cpu_grad;
-        if (scan_grad.dtype() == DType::BFloat16 || scan_grad.dtype() == DType::Float16) {
-            scan_grad = scan_grad.to(DType::Float32);
-        }
-
-        if (scan_grad.dtype() == DType::Float64) {
-            const double* data_ptr = scan_grad.data<double>();
-            for (int64_t i = 0; i < numel; ++i) {
-                const double val = data_ptr[i];
-                if (std::isinf(val) || std::isnan(val)) {
-                    return true;
-                }
-            }
-        } else {
-            // Default to Float32 (Float16/BFloat16 already converted above)
-            const float* data_ptr = scan_grad.data<float>();
-            for (int64_t i = 0; i < numel; ++i) {
-                const float val = data_ptr[i];
-                if (std::isinf(val) || std::isnan(val)) {
-                    return true;
-                }
-            }
+        // Use fused kernel — stays on device, no per-param D2H transfer
+        auto result = has_inf_nan(*grad);
+        // Single D2H transfer of 1 bool
+        if (result.cpu().data<bool>()[0]) {
+            return true;
         }
     }
 

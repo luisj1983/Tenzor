@@ -224,6 +224,9 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
             // Reload offloaded saved tensors back to GPU before backward
             function->reload_saved_tensors();
 
+            // Validate saved tensors haven't been modified in-place since forward
+            function->validate_saved_tensors();
+
             // Compute gradients for inputs
             std::vector<Tensor> input_grads;
 
@@ -546,6 +549,7 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
             grad_outputs.push_back(total_grad);
 
             function->reload_saved_tensors();
+            function->validate_saved_tensors();
             auto input_grads = function->backward(grad_outputs);
 
             // Check for NaN/Inf in computed gradients when anomaly detection is on

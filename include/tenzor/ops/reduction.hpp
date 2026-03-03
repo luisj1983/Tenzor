@@ -137,6 +137,9 @@ auto all(const Tensor& input,
         std::optional<int64_t> dim = std::nullopt,
         bool keepdim = false) -> Tensor;
 
+/** @brief Check if tensor contains any inf or nan values. Returns Bool scalar tensor. */
+auto has_inf_nan(const Tensor& input) -> Tensor;
+
 /** @} */ // end of tensor_reduction group
 
 } // namespace tenzor

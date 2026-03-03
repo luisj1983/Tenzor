@@ -118,6 +118,13 @@ inline void add_f16(const uint16_t* a, const uint16_t* b, uint16_t* out, size_t 
         float fb = _cvtsh_ss(b[i]);
         out[i] = _cvtss_sh(fa + fb, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
     }
+#else
+    // Scalar F16C (no AVX2/AVX512)
+    for (size_t i = 0; i < n; ++i) {
+        float fa = _cvtsh_ss(a[i]);
+        float fb = _cvtsh_ss(b[i]);
+        out[i] = _cvtss_sh(fa + fb, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    }
 #endif
 
 #else
@@ -161,6 +168,13 @@ inline void sub_f16(const uint16_t* a, const uint16_t* b, uint16_t* out, size_t 
         cvt_f32_to_f16_avx2(vout, out + i);
     }
     for (; i < n; ++i) {
+        float fa = _cvtsh_ss(a[i]);
+        float fb = _cvtsh_ss(b[i]);
+        out[i] = _cvtss_sh(fa - fb, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    }
+#else
+    // Scalar F16C (no AVX2/AVX512)
+    for (size_t i = 0; i < n; ++i) {
         float fa = _cvtsh_ss(a[i]);
         float fb = _cvtsh_ss(b[i]);
         out[i] = _cvtss_sh(fa - fb, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
@@ -211,6 +225,13 @@ inline void mul_f16(const uint16_t* a, const uint16_t* b, uint16_t* out, size_t 
         float fb = _cvtsh_ss(b[i]);
         out[i] = _cvtss_sh(fa * fb, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
     }
+#else
+    // Scalar F16C (no AVX2/AVX512)
+    for (size_t i = 0; i < n; ++i) {
+        float fa = _cvtsh_ss(a[i]);
+        float fb = _cvtsh_ss(b[i]);
+        out[i] = _cvtss_sh(fa * fb, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    }
 #endif
 
 #else
@@ -253,6 +274,13 @@ inline void div_f16(const uint16_t* a, const uint16_t* b, uint16_t* out, size_t 
         cvt_f32_to_f16_avx2(vout, out + i);
     }
     for (; i < n; ++i) {
+        float fa = _cvtsh_ss(a[i]);
+        float fb = _cvtsh_ss(b[i]);
+        out[i] = _cvtss_sh(fa / fb, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    }
+#else
+    // Scalar F16C (no AVX2/AVX512)
+    for (size_t i = 0; i < n; ++i) {
         float fa = _cvtsh_ss(a[i]);
         float fb = _cvtsh_ss(b[i]);
         out[i] = _cvtss_sh(fa / fb, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
@@ -308,6 +336,14 @@ inline void fma_f16(const uint16_t* a, const uint16_t* b, const uint16_t* c,
         float fc = _cvtsh_ss(c[i]);
         out[i] = _cvtss_sh(fa * fb + fc, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
     }
+#else
+    // Scalar F16C (no AVX2/AVX512)
+    for (size_t i = 0; i < n; ++i) {
+        float fa = _cvtsh_ss(a[i]);
+        float fb = _cvtsh_ss(b[i]);
+        float fc = _cvtsh_ss(c[i]);
+        out[i] = _cvtss_sh(fa * fb + fc, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    }
 #endif
 
 #else
@@ -355,6 +391,12 @@ inline void sqrt_f16(const uint16_t* a, uint16_t* out, size_t n) {
         float fa = _cvtsh_ss(a[i]);
         out[i] = _cvtss_sh(std::sqrt(fa), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
     }
+#else
+    // Scalar F16C (no AVX2/AVX512)
+    for (size_t i = 0; i < n; ++i) {
+        float fa = _cvtsh_ss(a[i]);
+        out[i] = _cvtss_sh(std::sqrt(fa), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    }
 #endif
 
 #else
@@ -398,6 +440,12 @@ inline void relu_f16(const uint16_t* a, uint16_t* out, size_t n) {
         float fa = _cvtsh_ss(a[i]);
         out[i] = _cvtss_sh(std::max(0.0f, fa), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
     }
+#else
+    // Scalar F16C (no AVX2/AVX512)
+    for (size_t i = 0; i < n; ++i) {
+        float fa = _cvtsh_ss(a[i]);
+        out[i] = _cvtss_sh(std::max(0.0f, fa), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    }
 #endif
 
 #else
@@ -438,6 +486,12 @@ inline void scale_f16(const uint16_t* a, float scalar, uint16_t* out, size_t n) 
         cvt_f32_to_f16_avx2(vout, out + i);
     }
     for (; i < n; ++i) {
+        float fa = _cvtsh_ss(a[i]);
+        out[i] = _cvtss_sh(fa * scalar, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    }
+#else
+    // Scalar F16C (no AVX2/AVX512)
+    for (size_t i = 0; i < n; ++i) {
         float fa = _cvtsh_ss(a[i]);
         out[i] = _cvtss_sh(fa * scalar, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
     }
@@ -496,6 +550,11 @@ inline float sum_f16(const uint16_t* a, size_t n) {
     for (; i < n; ++i) {
         sum += _cvtsh_ss(a[i]);
     }
+#else
+    // Scalar F16C (no AVX2/AVX512)
+    for (size_t i = 0; i < n; ++i) {
+        sum += _cvtsh_ss(a[i]);
+    }
 #endif
 
     return sum;
@@ -548,6 +607,11 @@ inline float dot_f16(const uint16_t* a, const uint16_t* b, size_t n) {
     sum += _mm_cvtss_f32(sum128);
 
     for (; i < n; ++i) {
+        sum += _cvtsh_ss(a[i]) * _cvtsh_ss(b[i]);
+    }
+#else
+    // Scalar F16C (no AVX2/AVX512)
+    for (size_t i = 0; i < n; ++i) {
         sum += _cvtsh_ss(a[i]) * _cvtsh_ss(b[i]);
     }
 #endif

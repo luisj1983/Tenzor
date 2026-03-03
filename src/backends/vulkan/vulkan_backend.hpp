@@ -84,6 +84,9 @@ private:
         bool hasAtomicInt64 = false;          // Whether GPU supports VK_EXT_shader_atomic_int64
         VkPipelineCache pipelineCache = VK_NULL_HANDLE;  // Persistent pipeline cache
 
+        // Configurable fence timeout (default 30s, override with TENZOR_VULKAN_FENCE_TIMEOUT_S)
+        uint64_t fence_timeout_ns = 30'000'000'000ULL;
+
         // Fence-based async synchronization
         VkFence pendingFence = VK_NULL_HANDLE;  // Fence for last submitted work
         bool hasPendingWork = false;            // Whether fence needs to be waited on

@@ -433,6 +433,7 @@ enum class OpId : uint16_t {
     EmbeddingWithBoundsCheck,  // 430
     WinogradConv2d,            // 431
     LogSumExp,                 // 432
+    HasInfNan,                 // 433
 
     // =========================================================================
     // Sentinel (MUST BE LAST)

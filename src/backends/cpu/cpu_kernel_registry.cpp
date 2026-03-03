@@ -91,6 +91,7 @@ namespace cpu {
     auto argsort_kernel(const Tensor& input, int64_t dim, bool descending) -> Tensor;
     auto any_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto all_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
+    auto has_inf_nan_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
 
     // Comparison
     auto eq_kernel(const Tensor& a, const Tensor& b) -> Tensor;
@@ -455,6 +456,7 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     TENZOR_REGISTER_REDUCTION_KERNEL(table, Prod, cpu::prod_kernel);
     TENZOR_REGISTER_REDUCTION_KERNEL(table, Any, cpu::any_kernel);
     TENZOR_REGISTER_REDUCTION_KERNEL(table, All, cpu::all_kernel);
+    TENZOR_REGISTER_REDUCTION_KERNEL(table, HasInfNan, cpu::has_inf_nan_kernel);
 
     // Use INT64_MIN as sentinel for "reduce all dimensions" (no dim specified)
     table.register_single_output_kernel(OpId::Var, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {

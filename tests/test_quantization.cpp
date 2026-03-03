@@ -1208,6 +1208,56 @@ TEST_F(QuantizationTest, Integration_AccuracyComparison) {
     std::cout << "FP32 vs INT8 - SNR: " << snr_db << " dB, MAE: " << mae << std::endl;
 }
 
+// ============================================================================
+// Quantized Conv2d Groups Validation
+// ============================================================================
+
+TEST(QuantizedConv2dValidation, NonDivisibleGroupsThrows) {
+    // in_channels=7, groups=3 → 7 % 3 != 0, should throw
+    // This test validates the Phase 1C fix
+    auto scale = Tensor({1}, DType::Float32, Device::cpu());
+    scale.fill_(0.1f);
+    auto zp = Tensor({1}, DType::Int8, Device::cpu());
+    zp.zero_();
+    QuantizationParams qparams(scale, zp, QuantDType::INT8, QuantizationScheme::PerTensorSymmetric);
+
+    auto conv = nn::quantization::QuantizedConv2d(
+        /*in_channels=*/7, /*out_channels=*/6,
+        /*kernel_size=*/3, /*stride=*/1, /*padding=*/0,
+        /*dilation=*/1, /*groups=*/3, qparams);
+
+    QuantizationParams input_qparams(scale.clone(), zp.clone(), QuantDType::INT8,
+                                     QuantizationScheme::PerTensorSymmetric);
+    QuantizedTensor qinput(
+        Tensor({1, 7, 8, 8}, DType::Int8, Device::cpu()), input_qparams);
+
+    // Forward should throw due to non-divisible in_channels/groups
+    EXPECT_THROW(conv.forward_quantized(qinput), std::invalid_argument)
+        << "quantized_conv2d with in_channels=7, groups=3 should throw";
+}
+
+TEST(QuantizedConv2dValidation, DivisibleGroupsSucceeds) {
+    // in_channels=6, out_channels=6, groups=3 → valid (6%3 == 0)
+    auto scale = Tensor({1}, DType::Float32, Device::cpu());
+    scale.fill_(0.1f);
+    auto zp = Tensor({1}, DType::Int8, Device::cpu());
+    zp.zero_();
+    QuantizationParams qparams(scale, zp, QuantDType::INT8, QuantizationScheme::PerTensorSymmetric);
+
+    auto conv = nn::quantization::QuantizedConv2d(
+        /*in_channels=*/6, /*out_channels=*/6,
+        /*kernel_size=*/3, /*stride=*/1, /*padding=*/1,
+        /*dilation=*/1, /*groups=*/3, qparams);
+
+    QuantizationParams input_qparams(scale.clone(), zp.clone(), QuantDType::INT8,
+                                     QuantizationScheme::PerTensorSymmetric);
+    QuantizedTensor qinput(
+        Tensor({1, 6, 4, 4}, DType::Int8, Device::cpu()), input_qparams);
+
+    // Forward should succeed
+    EXPECT_NO_THROW(conv.forward_quantized(qinput));
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

@@ -35,6 +35,7 @@ set(CUDA_BACKEND_SOURCES
     kernels/rnn_sequence.cu
     kernels/advanced.cu
     kernels/linalg.cu
+    kernels/amp.cu
     cublas_ops.cu
     cudnn_ops.cu
     cudnn_batchnorm.cu

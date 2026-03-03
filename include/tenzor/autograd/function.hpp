@@ -101,6 +101,13 @@ public:
      * higher-order gradient support (e.g., MulBackward, MatMulBackward) should
      * override this method.
      *
+     * **create_graph coverage:** Currently only the following ops have full
+     * higher-order gradient support via backward_with_variables():
+     *   - AddBackward, SubBackward, MulBackward, DivBackward, MatMulBackward
+     * All other backward functions (~60) use the default fallback which
+     * disconnects the gradient graph. This produces correct first-order
+     * gradients but a warning is emitted when create_graph=true.
+     *
      * @param grad_outputs Gradient Variables with respect to outputs
      * @return Gradient Variables with respect to inputs (with grad_fn set)
      */
@@ -164,6 +171,15 @@ public:
      * Called after backward() to release GPU memory held by saved tensors.
      */
     void release_saved_tensors() { saved_tensors_.clear(); }
+
+    /**
+     * @brief Validate that saved tensors have not been modified in-place.
+     *
+     * Checks version counters recorded by save_for_backward() against
+     * current tensor versions. Throws if any tensor was modified in-place
+     * after the forward pass.
+     */
+    void validate_saved_tensors() const;
 
     /**
      * @brief Get number of saved tensors.

@@ -112,15 +112,14 @@ void VulkanBackend::ensurePendingWorkComplete(int32_t device_id) {
         }
 
         if (!fencesToWait.empty()) {
-            // Use 30 second timeout to detect GPU hangs (often caused by memory pressure)
-            constexpr uint64_t FENCE_TIMEOUT_NS = 30'000'000'000ULL;  // 30 seconds
             VkResult result = vkWaitForFences(ctx.device,
                                               static_cast<uint32_t>(fencesToWait.size()),
-                                              fencesToWait.data(), VK_TRUE, FENCE_TIMEOUT_NS);
+                                              fencesToWait.data(), VK_TRUE, ctx.fence_timeout_ns);
             if (result == VK_TIMEOUT) {
-                throw std::runtime_error("GPU fence wait timed out after 30 seconds. "
+                throw std::runtime_error("GPU fence wait timed out after " +
+                    std::to_string(ctx.fence_timeout_ns / 1'000'000'000ULL) + " seconds. "
                     "This often indicates memory pressure or a shader hang. "
-                    "Try reducing batch size or model size, or use a smaller dtype.");
+                    "Try reducing batch size or model size, or set TENZOR_VULKAN_FENCE_TIMEOUT_S.");
             }
             if (result != VK_SUCCESS) {
                 std::string error_msg = "Failed to wait for fences: " + std::to_string(result);
@@ -155,12 +154,11 @@ void VulkanBackend::endSingleTimeCommandsAsync(VkCommandBuffer commandBuffer, in
     // We only need to wait if we've submitted MAX_FRAMES_IN_FLIGHT work already
     if (ctx.submittedFrames >= DeviceContext::MAX_FRAMES_IN_FLIGHT) {
         // Wait for the oldest frame to complete before reusing its fence
-        // Use 30 second timeout to detect GPU hangs
-        constexpr uint64_t FENCE_TIMEOUT_NS = 30'000'000'000ULL;  // 30 seconds
         VkFence fenceToWait = ctx.frameFences[targetFrame];
-        VkResult waitResult = vkWaitForFences(ctx.device, 1, &fenceToWait, VK_TRUE, FENCE_TIMEOUT_NS);
+        VkResult waitResult = vkWaitForFences(ctx.device, 1, &fenceToWait, VK_TRUE, ctx.fence_timeout_ns);
         if (waitResult == VK_TIMEOUT) {
-            throw std::runtime_error("GPU fence wait timed out after 30 seconds. "
+            throw std::runtime_error("GPU fence wait timed out after " +
+                std::to_string(ctx.fence_timeout_ns / 1'000'000'000ULL) + " seconds. "
                 "This often indicates memory pressure or a shader hang.");
         }
         if (waitResult != VK_SUCCESS) {
@@ -353,10 +351,10 @@ void VulkanBackend::waitForFrame(int32_t device_id, size_t frameIndex) {
     auto& ctx = devices_[device_id];
     VkFence fence = ctx.frameFences[frameIndex];
 
-    constexpr uint64_t FENCE_TIMEOUT_NS = 30'000'000'000ULL;  // 30 seconds
-    VkResult result = vkWaitForFences(ctx.device, 1, &fence, VK_TRUE, FENCE_TIMEOUT_NS);
+    VkResult result = vkWaitForFences(ctx.device, 1, &fence, VK_TRUE, ctx.fence_timeout_ns);
     if (result == VK_TIMEOUT) {
-        throw std::runtime_error("GPU frame fence wait timed out after 30 seconds. "
+        throw std::runtime_error("GPU frame fence wait timed out after " +
+            std::to_string(ctx.fence_timeout_ns / 1'000'000'000ULL) + " seconds. "
             "This often indicates memory pressure or a shader hang.");
     }
     if (result != VK_SUCCESS) {

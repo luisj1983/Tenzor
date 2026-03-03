@@ -1,6 +1,7 @@
 #ifdef TENZOR_HAS_CUDNN
 
 #include "tenzor/backend/cudnn_wrapper.hpp"
+#include "tenzor/backend/caching_allocator.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/shape.hpp"
 #include "cuda_error.hpp"
@@ -9,6 +10,7 @@
 #include <cuda_bf16.h>
 #include <algorithm>
 #include <limits>
+#include <optional>
 #include <vector>
 
 namespace tenzor {
@@ -2147,14 +2149,16 @@ auto cudnn_lstm_forward(
             throw std::runtime_error("cuDNN LSTM: unsupported dtype");
     }
 
-    // Create dropout descriptor
+    // Create dropout descriptor (allocate states via caching allocator)
     DropoutDescriptor dropout_desc;
     size_t dropout_state_size;
     CUDNN_CHECK(cudnnDropoutGetStatesSize(handle.get(), &dropout_state_size));
 
+    std::optional<backend::CachedMemoryGuard> dropout_guard;
     void* dropout_states = nullptr;
     if (dropout > 0.0f && dropout_state_size > 0) {
-        cudaMalloc(&dropout_states, dropout_state_size);
+        dropout_guard.emplace(dropout_state_size);
+        dropout_states = dropout_guard->get();
         dropout_desc.set(handle.get(), dropout, dropout_states, dropout_state_size, 0);
     } else {
         dropout_desc.set(handle.get(), 0.0f, nullptr, 0, 0);
@@ -2206,15 +2210,19 @@ auto cudnn_lstm_forward(
         &reserve_size
     ));
 
-    // Allocate workspace and reserve space
+    // Allocate workspace and reserve space (via caching allocator)
+    std::optional<backend::CachedMemoryGuard> workspace_guard;
+    std::optional<backend::CachedMemoryGuard> reserve_guard;
     void* workspace = nullptr;
     void* reserve_space = nullptr;
 
     if (workspace_size > 0) {
-        cudaMalloc(&workspace, workspace_size);
+        workspace_guard.emplace(workspace_size);
+        workspace = workspace_guard->get();
     }
     if (reserve_size > 0) {
-        cudaMalloc(&reserve_space, reserve_size);
+        reserve_guard.emplace(reserve_size);
+        reserve_space = reserve_guard->get();
     }
 
     // Forward pass
@@ -2292,11 +2300,7 @@ auto cudnn_lstm_forward(
         ));
     }
 
-    // Cleanup
-    if (workspace) cudaFree(workspace);
-    if (reserve_space) cudaFree(reserve_space);
-    if (dropout_states) cudaFree(dropout_states);
-
+    // Cleanup handled by CachedMemoryGuard RAII destructors
     return std::make_tuple(output, hy, cy);
 }
 
@@ -2340,9 +2344,11 @@ auto cudnn_lstm_backward(
     DropoutDescriptor dropout_desc;
     size_t dropout_state_size = 0;
     cudnnDropoutGetStatesSize(handle.get(), &dropout_state_size);
+    std::optional<backend::CachedMemoryGuard> bwd_dropout_guard;
     void* dropout_states = nullptr;
     if (dropout > 0.0f && dropout_state_size > 0) {
-        cudaMalloc(&dropout_states, dropout_state_size);
+        bwd_dropout_guard.emplace(dropout_state_size);
+        dropout_states = bwd_dropout_guard->get();
         dropout_desc.set(handle.get(), dropout, dropout_states, dropout_state_size, 0);
     } else {
         dropout_desc.set(handle.get(), 0.0f, nullptr, 0, 0);
@@ -2390,8 +2396,12 @@ auto cudnn_lstm_backward(
     Tensor grad_cx({num_layers * num_directions, batch, hidden_size}, input.dtype(), input.device());
     Tensor grad_weights = Tensor::zeros_like(weights);
 
+    std::optional<backend::CachedMemoryGuard> bwd_workspace_guard;
     void* workspace = nullptr;
-    if (workspace_size > 0) cudaMalloc(&workspace, workspace_size);
+    if (workspace_size > 0) {
+        bwd_workspace_guard.emplace(workspace_size);
+        workspace = bwd_workspace_guard->get();
+    }
 
     // FilterDescriptor for weights
     FilterDescriptor w_desc, dw_desc;
@@ -2429,10 +2439,7 @@ auto cudnn_lstm_backward(
         reserve_space, reserve_size
     ));
 
-    // Cleanup
-    if (workspace) cudaFree(workspace);
-    if (dropout_states) cudaFree(dropout_states);
-
+    // Cleanup handled by CachedMemoryGuard RAII destructors
     return std::make_tuple(grad_input, grad_hx, grad_cx, grad_weights);
 }
 #endif // Disabled cuDNN LSTM - using custom CUDA kernels

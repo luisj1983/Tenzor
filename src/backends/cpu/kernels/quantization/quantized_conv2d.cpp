@@ -130,6 +130,11 @@ auto quantized_conv2d_kernel(
     int64_t dilation,
     int64_t groups
 ) -> void {
+    if (in_channels % groups != 0)
+        throw std::invalid_argument("quantized_conv2d: in_channels must be divisible by groups");
+    if (out_channels % groups != 0)
+        throw std::invalid_argument("quantized_conv2d: out_channels must be divisible by groups");
+
     float combined_scale = input_scale * weight_scale;
     const int64_t in_channels_per_group = in_channels / groups;
     const int64_t out_channels_per_group = out_channels / groups;

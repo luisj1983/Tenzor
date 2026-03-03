@@ -1343,10 +1343,28 @@ void matmul_i32(
     CUDA_CHECK(cudaGetLastError());
 }
 
+// Helper: round up to next multiple of 16
+inline int64_t round_up_16(int64_t x) {
+    return (x + 15) & ~int64_t(15);
+}
+
+// Helper: check whether padding overhead is acceptable (< 50% extra compute)
+inline bool padding_overhead_ok(int64_t M, int64_t N, int64_t K) {
+    int64_t Mp = round_up_16(M);
+    int64_t Np = round_up_16(N);
+    int64_t Kp = round_up_16(K);
+    // Padded FLOPs vs original FLOPs
+    double original = static_cast<double>(M) * N * K;
+    double padded   = static_cast<double>(Mp) * Np * Kp;
+    return (padded < original * 1.5);
+}
+
 /**
  * FP16 matrix multiplication with cuBLAS and Tensor Core acceleration
  * Uses cuBLAS with FP32 accumulation for large matrices, falls back to
- * WMMA Tensor Core or tiled kernels for smaller/unaligned dimensions
+ * WMMA Tensor Core or tiled kernels for smaller/unaligned dimensions.
+ * When dimensions are >= 16 but not aligned, pads to multiples of 16 to
+ * enable Tensor Core acceleration (if padding overhead < 50%).
  */
 void matmul_f16(
     const __half* A, const __half* B, __half* C,
@@ -1377,9 +1395,65 @@ void matmul_f16(
 
         matmul_tensor_core_f16_kernel<<<grid, block, 0, stream>>>(A, B, C, M, N, K);
         CUDA_CHECK(cudaGetLastError());
+    } else if (M >= WMMA_M && N >= WMMA_N && K >= WMMA_K && padding_overhead_ok(M, N, K)) {
+        // Dimensions are large enough for Tensor Cores but not aligned.
+        // Pad to multiples of 16 to enable TC acceleration when overhead is acceptable.
+        int64_t Mp = round_up_16(M);
+        int64_t Np = round_up_16(N);
+        int64_t Kp = round_up_16(K);
+
+        // Allocate zero-initialized padded buffers
+        __half* A_pad = nullptr;
+        __half* B_pad = nullptr;
+        __half* C_pad = nullptr;
+        CUDA_CHECK(cudaMallocAsync(&A_pad, Mp * Kp * sizeof(__half), stream));
+        CUDA_CHECK(cudaMallocAsync(&B_pad, Kp * Np * sizeof(__half), stream));
+        CUDA_CHECK(cudaMallocAsync(&C_pad, Mp * Np * sizeof(__half), stream));
+        CUDA_CHECK(cudaMemsetAsync(A_pad, 0, Mp * Kp * sizeof(__half), stream));
+        CUDA_CHECK(cudaMemsetAsync(B_pad, 0, Kp * Np * sizeof(__half), stream));
+
+        // Copy A (M x K) into A_pad (Mp x Kp) with proper stride
+        CUDA_CHECK(cudaMemcpy2DAsync(
+            A_pad, Kp * sizeof(__half),        // dst, dst pitch
+            A,     K  * sizeof(__half),         // src, src pitch
+            K  * sizeof(__half),                // width in bytes to copy per row
+            M,                                  // number of rows
+            cudaMemcpyDeviceToDevice, stream));
+
+        // Copy B (K x N) into B_pad (Kp x Np) with proper stride
+        CUDA_CHECK(cudaMemcpy2DAsync(
+            B_pad, Np * sizeof(__half),         // dst, dst pitch
+            B,     N  * sizeof(__half),          // src, src pitch
+            N  * sizeof(__half),                 // width in bytes to copy per row
+            K,                                   // number of rows
+            cudaMemcpyDeviceToDevice, stream));
+
+        // Run Tensor Core kernel on padded matrices
+        constexpr int WARPS_PER_BLOCK = 4;
+        constexpr int BLOCK_TILES_M = 2;
+        constexpr int BLOCK_TILES_N = 2;
+        dim3 block(32, WARPS_PER_BLOCK);
+        dim3 grid((Np + WMMA_N * BLOCK_TILES_N - 1) / (WMMA_N * BLOCK_TILES_N),
+                  (Mp + WMMA_M * BLOCK_TILES_M - 1) / (WMMA_M * BLOCK_TILES_M));
+
+        matmul_tensor_core_f16_kernel<<<grid, block, 0, stream>>>(
+            A_pad, B_pad, C_pad, Mp, Np, Kp);
+        CUDA_CHECK(cudaGetLastError());
+
+        // Copy result C_pad (Mp x Np) back to C (M x N) — extract top-left M x N
+        CUDA_CHECK(cudaMemcpy2DAsync(
+            C,     N  * sizeof(__half),          // dst, dst pitch
+            C_pad, Np * sizeof(__half),          // src, src pitch
+            N  * sizeof(__half),                 // width in bytes to copy per row
+            M,                                   // number of rows
+            cudaMemcpyDeviceToDevice, stream));
+
+        CUDA_CHECK(cudaFreeAsync(A_pad, stream));
+        CUDA_CHECK(cudaFreeAsync(B_pad, stream));
+        CUDA_CHECK(cudaFreeAsync(C_pad, stream));
     } else {
         // Fall back to standard tiled kernel for non-aligned dimensions
-        // Use smaller tile size (16x16 block) to reduce resource usage
+        // (either too small for TC or padding overhead too high)
         dim3 block(TILE_SIZE_F16, TILE_SIZE_F16);
         dim3 grid((N + TILE_SIZE_F16 - 1) / TILE_SIZE_F16,
                   (M + TILE_SIZE_F16 - 1) / TILE_SIZE_F16);
@@ -1488,7 +1562,9 @@ void batched_matmul_f64(
 /**
  * Batched FP16 matrix multiplication with cuBLAS and Tensor Core acceleration
  * Uses cuBLAS with FP32 accumulation for large matrices, falls back to
- * WMMA Tensor Core or tiled kernels for smaller/unaligned dimensions
+ * WMMA Tensor Core or tiled kernels for smaller/unaligned dimensions.
+ * When dimensions are >= 16 but not aligned, pads to multiples of 16 to
+ * enable Tensor Core acceleration (if padding overhead < 50%).
  */
 void batched_matmul_f16(
     const __half* A, const __half* B, __half* C,
@@ -1523,8 +1599,73 @@ void batched_matmul_f16(
             A, B, C, batch_size, M, N, K,
             stride_a, stride_b, stride_c);
             CUDA_CHECK(cudaGetLastError());
+    } else if (M >= WMMA_M && N >= WMMA_N && K >= WMMA_K && padding_overhead_ok(M, N, K)) {
+        // Dimensions are large enough for Tensor Cores but not aligned.
+        // Pad to multiples of 16 to enable TC acceleration when overhead is acceptable.
+        int64_t Mp = round_up_16(M);
+        int64_t Np = round_up_16(N);
+        int64_t Kp = round_up_16(K);
+
+        int64_t stride_a_pad = Mp * Kp;
+        int64_t stride_b_pad = Kp * Np;
+        int64_t stride_c_pad = Mp * Np;
+
+        // Allocate zero-initialized padded buffers for the entire batch
+        __half* A_pad = nullptr;
+        __half* B_pad = nullptr;
+        __half* C_pad = nullptr;
+        CUDA_CHECK(cudaMallocAsync(&A_pad, batch_size * stride_a_pad * sizeof(__half), stream));
+        CUDA_CHECK(cudaMallocAsync(&B_pad, batch_size * stride_b_pad * sizeof(__half), stream));
+        CUDA_CHECK(cudaMallocAsync(&C_pad, batch_size * stride_c_pad * sizeof(__half), stream));
+        CUDA_CHECK(cudaMemsetAsync(A_pad, 0, batch_size * stride_a_pad * sizeof(__half), stream));
+        CUDA_CHECK(cudaMemsetAsync(B_pad, 0, batch_size * stride_b_pad * sizeof(__half), stream));
+
+        // Copy each batch element into the padded buffers with proper stride
+        for (int64_t b = 0; b < batch_size; ++b) {
+            // Copy A[b] (M x K) into A_pad[b] (Mp x Kp)
+            CUDA_CHECK(cudaMemcpy2DAsync(
+                A_pad + b * stride_a_pad, Kp * sizeof(__half),  // dst, dst pitch
+                A     + b * stride_a,     K  * sizeof(__half),   // src, src pitch
+                K  * sizeof(__half),                              // width in bytes
+                M,                                                // number of rows
+                cudaMemcpyDeviceToDevice, stream));
+
+            // Copy B[b] (K x N) into B_pad[b] (Kp x Np)
+            CUDA_CHECK(cudaMemcpy2DAsync(
+                B_pad + b * stride_b_pad, Np * sizeof(__half),  // dst, dst pitch
+                B     + b * stride_b,     N  * sizeof(__half),   // src, src pitch
+                N  * sizeof(__half),                              // width in bytes
+                K,                                                // number of rows
+                cudaMemcpyDeviceToDevice, stream));
+        }
+
+        // Run batched Tensor Core kernel on padded matrices
+        dim3 block(32, 1);
+        dim3 grid((Np + WMMA_N - 1) / WMMA_N,
+                  (Mp + WMMA_M - 1) / WMMA_M,
+                  batch_size);
+
+        batched_matmul_tensor_core_f16_kernel<<<grid, block, 0, stream>>>(
+            A_pad, B_pad, C_pad, batch_size, Mp, Np, Kp,
+            stride_a_pad, stride_b_pad, stride_c_pad);
+        CUDA_CHECK(cudaGetLastError());
+
+        // Copy results back: extract top-left M x N from each batch element
+        for (int64_t b = 0; b < batch_size; ++b) {
+            CUDA_CHECK(cudaMemcpy2DAsync(
+                C     + b * stride_c,     N  * sizeof(__half),   // dst, dst pitch
+                C_pad + b * stride_c_pad, Np * sizeof(__half),   // src, src pitch
+                N  * sizeof(__half),                              // width in bytes
+                M,                                                // number of rows
+                cudaMemcpyDeviceToDevice, stream));
+        }
+
+        CUDA_CHECK(cudaFreeAsync(A_pad, stream));
+        CUDA_CHECK(cudaFreeAsync(B_pad, stream));
+        CUDA_CHECK(cudaFreeAsync(C_pad, stream));
     } else {
         // Batched tiled F16 kernel using blockIdx.z for batch indexing
+        // (either too small for TC or padding overhead too high)
         dim3 block(TILE_SIZE_F16, TILE_SIZE_F16);
         dim3 grid((N + TILE_SIZE_F16 - 1) / TILE_SIZE_F16,
                   (M + TILE_SIZE_F16 - 1) / TILE_SIZE_F16,

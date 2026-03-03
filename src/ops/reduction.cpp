@@ -139,6 +139,12 @@ auto all(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tenso
     return dispatch(OpId::All, inputs, attrs)[0];
 }
 
+auto has_inf_nan(const Tensor& input) -> Tensor {
+    NewOpAttributes attrs;
+    std::vector<Tensor> inputs = {input};
+    return dispatch(OpId::HasInfNan, inputs, attrs)[0];
+}
+
 auto logsumexp(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
     // Numerically stable logsumexp: log(sum(exp(x))) = max(x) + log(sum(exp(x - max(x))))
     // Subtracting the max prevents overflow in exp() for large values.

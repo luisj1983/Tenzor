@@ -309,7 +309,7 @@ auto Variable::operator*(const Variable& other) const -> Variable {
         grad_fn->set_next_functions(next_funcs);
         grad_fn->set_input_variables({*this, other});
 
-        grad_fn->saved_tensors_ = {impl_->data_.clone(), other.impl_->data_.clone()};
+        grad_fn->save_for_backward({impl_->data_, other.impl_->data_});
         grad_fn->input_shape_a_ = std::vector<int64_t>(impl_->data_.shape().begin(), impl_->data_.shape().end());
         grad_fn->input_shape_b_ = std::vector<int64_t>(other.impl_->data_.shape().begin(), other.impl_->data_.shape().end());
 
@@ -344,7 +344,7 @@ auto Variable::operator/(const Variable& other) const -> Variable {
         grad_fn->set_next_functions(next_funcs);
         grad_fn->set_input_variables({*this, other});
 
-        grad_fn->saved_tensors_ = {impl_->data_.clone(), other.impl_->data_.clone()};
+        grad_fn->save_for_backward({impl_->data_, other.impl_->data_});
         grad_fn->input_shape_a_ = std::vector<int64_t>(impl_->data_.shape().begin(), impl_->data_.shape().end());
         grad_fn->input_shape_b_ = std::vector<int64_t>(other.impl_->data_.shape().begin(), other.impl_->data_.shape().end());
 

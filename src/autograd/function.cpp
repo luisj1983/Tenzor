@@ -87,6 +87,17 @@ auto Function::saved_tensors() const -> const std::vector<Tensor>& {
     return saved_tensors_;
 }
 
+void Function::validate_saved_tensors() const {
+    for (size_t i = 0; i < saved_tensors_.size() && i < saved_versions_.size(); ++i) {
+        if (saved_tensors_[i].version() != saved_versions_[i]) {
+            throw std::runtime_error(
+                "one of the variables needed for gradient computation has been modified by an "
+                "in-place operation after the forward pass. Use .clone() before in-place ops "
+                "on tensors used in autograd computation.");
+        }
+    }
+}
+
 void Function::reload_saved_tensors() const {
     if (!tensors_offloaded_) return;
     for (auto& t : saved_tensors_) {
@@ -113,12 +124,29 @@ auto Function::backward_with_variables(std::vector<Variable> grad_outputs) -> st
         if (var.requires_grad()) { any_requires_grad = true; break; }
     }
     if (any_requires_grad) {
-        auto op_name = std::string(typeid(*this).name());
-        if (warned_ops.find(op_name) == warned_ops.end()) {
-            warned_ops.insert(op_name);
-            std::cerr << "[tenzor::autograd] Warning: " << op_name
-                      << " does not support higher-order gradients. "
-                      << "Gradient graph will be disconnected at this operation.\n";
+        // Warn about missing create_graph support. Controlled by env:
+        //   TENZOR_WARN_HIGHER_ORDER_GRAD=0  → silent
+        //   TENZOR_WARN_HIGHER_ORDER_GRAD=1  → once per op type (default)
+        //   TENZOR_WARN_HIGHER_ORDER_GRAD=2  → every call
+        static int warn_level = []() {
+            if (const char* env = std::getenv("TENZOR_WARN_HIGHER_ORDER_GRAD"))
+                return std::atoi(env);
+            return 1;
+        }();
+        if (warn_level > 0) {
+            auto op_name = name();
+            bool should_warn = (warn_level >= 2);
+            if (!should_warn) {
+                if (warned_ops.find(op_name) == warned_ops.end()) {
+                    warned_ops.insert(op_name);
+                    should_warn = true;
+                }
+            }
+            if (should_warn) {
+                std::cerr << "[tenzor::autograd] Warning: " << op_name
+                          << " does not support higher-order gradients. "
+                          << "Gradient graph will be disconnected at this operation.\n";
+            }
         }
     }
 
@@ -323,7 +351,7 @@ auto SubBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
 
 // MulBackward implementation
 auto MulBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
-    saved_tensors_ = {inputs[0].tensor(), inputs[1].tensor()};
+    save_for_backward({inputs[0].tensor(), inputs[1].tensor()});
     // Save input shapes for broadcasting-aware backward pass
     input_shape_a_ = std::vector<int64_t>(inputs[0].shape().begin(), inputs[0].shape().end());
     input_shape_b_ = std::vector<int64_t>(inputs[1].shape().begin(), inputs[1].shape().end());
@@ -369,7 +397,7 @@ auto MulBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
 
 // DivBackward implementation
 auto DivBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
-    saved_tensors_ = {inputs[0].tensor(), inputs[1].tensor()};
+    save_for_backward({inputs[0].tensor(), inputs[1].tensor()});
     // Save input shapes for broadcasting-aware backward pass
     input_shape_a_ = std::vector<int64_t>(inputs[0].shape().begin(), inputs[0].shape().end());
     input_shape_b_ = std::vector<int64_t>(inputs[1].shape().begin(), inputs[1].shape().end());
@@ -415,7 +443,7 @@ auto DivBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
 
 // MatMulBackward implementation
 auto MatMulBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
-    saved_tensors_ = {inputs[0].tensor(), inputs[1].tensor()};
+    save_for_backward({inputs[0].tensor(), inputs[1].tensor()});
     auto result = matmul(inputs[0].tensor(), inputs[1].tensor());
     return {Variable(result, true)};
 }
@@ -477,7 +505,7 @@ auto LinearBackward::forward(std::vector<Variable> inputs) -> std::vector<Variab
     // inputs[0] = x (batch_size, in_features)
     // inputs[1] = W (out_features, in_features)
     // inputs[2] = b (out_features)
-    saved_tensors_ = {inputs[0].tensor(), inputs[1].tensor(), inputs[2].tensor()};
+    save_for_backward({inputs[0].tensor(), inputs[1].tensor(), inputs[2].tensor()});
 
     // Compute: y = x @ W.T + b
     auto x = inputs[0].tensor();
@@ -551,7 +579,7 @@ auto LinearBackward::backward_with_variables(std::vector<Variable> grad_outputs)
 
 // SumBackward implementation
 auto SumBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
-    saved_tensors_ = {inputs[0].tensor()};
+    save_for_backward({inputs[0].tensor()});
     auto result = sum(inputs[0].tensor(), dim_, keepdim_);
     return {Variable(result, true)};
 }
@@ -629,7 +657,7 @@ auto SumBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
 
 // MeanBackward implementation
 auto MeanBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
-    saved_tensors_ = {inputs[0].tensor()};
+    save_for_backward({inputs[0].tensor()});
     auto result = mean(inputs[0].tensor(), dim_, keepdim_);
     return {Variable(result, true)};
 }
@@ -743,7 +771,7 @@ auto MeanBackward::backward_with_variables(std::vector<Variable> grad_outputs) -
 
 // LogBackward implementation
 auto LogBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
-    saved_tensors_ = {inputs[0].tensor()};
+    save_for_backward({inputs[0].tensor()});
     auto result = log(inputs[0].tensor());
     return {Variable(result, true)};
 }
@@ -765,7 +793,7 @@ auto LogBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
 // ExpBackward implementation
 auto ExpBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     auto result = exp(inputs[0].tensor());
-    saved_tensors_ = {result};  // Save output for backward
+    save_for_backward({result});  // Save output for backward
     return {Variable(result, true)};
 }
 
@@ -808,7 +836,7 @@ auto LogSoftmaxBackward::forward(std::vector<Variable> inputs) -> std::vector<Va
     auto result = dispatch(OpId::LogSoftmax, input_tensors, attrs)[0];
 
     // Save output for backward
-    saved_tensors_ = {result};
+    save_for_backward({result});
 
     return {Variable(result, true)};
 }
@@ -844,7 +872,7 @@ auto SoftmaxBackward::forward(std::vector<Variable> inputs) -> std::vector<Varia
     auto result = dispatch(OpId::Softmax, input_tensors, attrs)[0];
 
     // Save output for backward
-    saved_tensors_ = {result};
+    save_for_backward({result});
 
     return {Variable(result, true)};
 }
@@ -873,7 +901,7 @@ auto SoftmaxBackward::backward_with_variables(std::vector<Variable> grad_outputs
 
 // AbsBackward implementation
 auto AbsBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
-    saved_tensors_ = {inputs[0].tensor()};
+    save_for_backward({inputs[0].tensor()});
     auto result = abs(inputs[0].tensor());
     return {Variable(result, true)};
 }
@@ -920,7 +948,7 @@ auto AbsBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
 
 // ClampBackward implementation
 auto ClampBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
-    saved_tensors_ = {inputs[0].tensor()};
+    save_for_backward({inputs[0].tensor()});
     auto result = clamp(inputs[0].tensor(), min_, max_);
     return {Variable(result, true)};
 }
@@ -970,7 +998,7 @@ auto ClampBackward::backward_with_variables(std::vector<Variable> grad_outputs) 
 auto MaxBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     auto result = max(inputs[0].tensor(), dim_, keepdim_);
     // Save both input and output for backward
-    saved_tensors_ = {inputs[0].tensor(), result};
+    save_for_backward({inputs[0].tensor(), result});
     return {Variable(result, true)};
 }
 
@@ -1165,7 +1193,7 @@ auto SqueezeBackward::backward_with_variables(std::vector<Variable> grad_outputs
 
 // BmmBackward implementation
 auto BmmBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
-    saved_tensors_ = {inputs[0].tensor(), inputs[1].tensor()};
+    save_for_backward({inputs[0].tensor(), inputs[1].tensor()});
     auto result = bmm(inputs[0].tensor(), inputs[1].tensor());
     return {Variable(result, true)};
 }
@@ -1320,7 +1348,7 @@ auto SliceBackward::backward_with_variables(std::vector<Variable> grad_outputs) 
 // UpsampleBilinearBackward implementation
 auto UpsampleBilinearBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     // Save input tensor for backward pass
-    saved_tensors_ = {inputs[0].tensor()};
+    save_for_backward({inputs[0].tensor()});
 
     // Forward computation is done externally in the wrapper function
     // This method is not typically called directly
