@@ -419,9 +419,14 @@ endif()
 # Optimization flags
 if(CMAKE_BUILD_TYPE MATCHES "Release")
     target_compile_options(tenzor_backend_vulkan PRIVATE
-        $<$<CXX_COMPILER_ID:GNU,Clang>:-O3 -march=native>
+        $<$<CXX_COMPILER_ID:GNU,Clang>:-O3>
         $<$<CXX_COMPILER_ID:MSVC>:/O2>
     )
+    if(TENZOR_NATIVE_ARCH)
+        target_compile_options(tenzor_backend_vulkan PRIVATE
+            $<$<CXX_COMPILER_ID:GNU,Clang>:-march=native>
+        )
+    endif()
 endif()
 
 # Warning flags
@@ -439,7 +444,7 @@ endif()
 
 # Installation
 install(TARGETS tenzor_backend_vulkan
-    LIBRARY DESTINATION lib
+    LIBRARY DESTINATION lib/tenzor/backends
     RUNTIME DESTINATION bin
 )
 

@@ -298,8 +298,33 @@ auto VulkanBackend::memset(void* ptr, int value, size_t bytes, int32_t device_id
                      static_cast<uint32_t>(byte_val);
     }
 
+    // vkCmdFillBuffer requires offset to be a multiple of 4
+    if (offset % 4 != 0) {
+        throw std::invalid_argument("vkCmdFillBuffer: offset (" + std::to_string(offset) +
+                                    ") is not 4-byte aligned");
+    }
+
     // Round size up to 4-byte alignment for vkCmdFillBuffer
     size_t aligned_bytes = (bytes + 3) & ~size_t(3);
+
+    // Verify aligned fill does not exceed the allocation size
+    {
+        std::lock_guard<std::mutex> alloc_lock(allocations_mutex_);
+        auto it = allocations_.find(ptr);
+        if (it != allocations_.end()) {
+            size_t alloc_size = it->second.first;
+            if (offset + aligned_bytes > alloc_size) {
+                // Clamp to allocation boundary — the caller only needs 'bytes'
+                // filled, but rounding up could overrun the buffer by up to 3 bytes.
+                aligned_bytes = alloc_size - offset;
+                // Re-align down to 4-byte boundary (vkCmdFillBuffer requirement)
+                aligned_bytes &= ~size_t(3);
+                if (aligned_bytes == 0) {
+                    return;  // Nothing left to fill within alignment constraints
+                }
+            }
+        }
+    }
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdFillBuffer(cmdBuffer, buffer, offset, aligned_bytes, fill_value);

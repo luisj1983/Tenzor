@@ -356,12 +356,22 @@ auto to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* str
     bool input_is_nhwc = (input_strides.size() == 4 &&
                           input_strides[1] == 1 &&
                           input_strides[3] == C);
+    bool input_is_nchw = !input_is_nhwc && input.is_contiguous();
+
+    // Early return if already in target format — just copy data
+    if ((format == MemoryFormat::ChannelsLast && input_is_nhwc) ||
+        (format != MemoryFormat::ChannelsLast && input_is_nchw)) {
+        const size_t size_bytes = static_cast<size_t>(N * C * H * W) * dtype_size(input.dtype());
+        CUDA_CHECK(cudaMemcpyAsync(output.data_ptr(), input.data_ptr(),
+                                    size_bytes, cudaMemcpyDeviceToDevice, stream));
+        return output;
+    }
 
     const int64_t total = N * C * H * W;
     const int block_size = 256;
     const int grid_size = std::min(static_cast<int>((total + block_size - 1) / block_size), 2147483647);
 
-    // Choose conversion direction
+    // Choose conversion direction based on actual input layout
     if (format == MemoryFormat::ChannelsLast) {
         // NCHW -> NHWC (but keeping logical shape [N,C,H,W])
         if (input.dtype() == DType::Float32) {
@@ -753,6 +763,16 @@ auto cudnn_conv2d_forward(
                 &beta_bias,
                 output_desc.get(),
                 output.data<Float16>()
+            ));
+        } else if (input.dtype() == DType::BFloat16) {
+            CUDNN_CHECK(cudnnAddTensor(
+                handle,
+                &alpha_bias,
+                bias_desc.get(),
+                bias->data<BFloat16>(),
+                &beta_bias,
+                output_desc.get(),
+                output.data<BFloat16>()
             ));
         }
     }
@@ -1163,6 +1183,22 @@ auto cudnn_conv2d_backward(
                 input_desc.get(),
                 grad_input.data<Float16>()
             ));
+        } else if (input.dtype() == DType::BFloat16) {
+            CUDNN_CHECK(cudnnConvolutionBackwardData(
+                handle,
+                &alpha,
+                filter_desc.get(),
+                weight.data<BFloat16>(),
+                grad_output_desc.get(),
+                grad_output.data<BFloat16>(),
+                conv_desc.get(),
+                algo,
+                workspace,
+                workspace_size,
+                &beta,
+                input_desc.get(),
+                grad_input.data<BFloat16>()
+            ));
         }
     }
 
@@ -1284,6 +1320,22 @@ auto cudnn_conv2d_backward(
                 filter_desc.get(),
                 grad_weight.data<Float16>()
             ));
+        } else if (input.dtype() == DType::BFloat16) {
+            CUDNN_CHECK(cudnnConvolutionBackwardFilter(
+                handle,
+                &alpha,
+                input_desc.get(),
+                input.data<BFloat16>(),
+                grad_output_desc.get(),
+                grad_output.data<BFloat16>(),
+                conv_desc.get(),
+                algo,
+                workspace,
+                workspace_size,
+                &beta,
+                filter_desc.get(),
+                grad_weight.data<BFloat16>()
+            ));
         }
     }
 
@@ -1324,6 +1376,16 @@ auto cudnn_conv2d_backward(
                 bias_desc.get(),
                 grad_bias.data<Float16>()
             ));
+        } else if (input.dtype() == DType::BFloat16) {
+            CUDNN_CHECK(cudnnConvolutionBackwardBias(
+                handle,
+                &alpha,
+                grad_output_desc.get(),
+                grad_output.data<BFloat16>(),
+                &beta,
+                bias_desc.get(),
+                grad_bias.data<BFloat16>()
+            ));
         }
     }
 
@@ -1345,11 +1407,12 @@ namespace {
 struct WeightCacheEntry {
     const void* original_data_ptr = nullptr;  // Pointer to original NCHW weight data
     std::vector<int64_t> shape;               // Shape of the weight
+    uint64_t version = 0;                     // Version counter to detect ABA reuse
     Tensor nhwc_weight;                       // Cached NHWC-converted weight
 
     WeightCacheEntry() = default;
-    WeightCacheEntry(const void* ptr, const std::vector<int64_t>& s, const Tensor& t)
-        : original_data_ptr(ptr), shape(s), nhwc_weight(t) {}
+    WeightCacheEntry(const void* ptr, const std::vector<int64_t>& s, uint64_t ver, const Tensor& t)
+        : original_data_ptr(ptr), shape(s), version(ver), nhwc_weight(t) {}
 };
 
 class NHWCWeightCache {
@@ -1364,10 +1427,11 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = cache_.find(weight.data_ptr());
         if (it != cache_.end()) {
-            // Verify shape matches (data pointer could be reused after dealloc)
+            // Verify shape AND version match to prevent ABA reuse after dealloc
             auto weight_shape = weight.shape();
             std::vector<int64_t> weight_shape_vec(weight_shape.begin(), weight_shape.end());
-            if (it->second.shape == weight_shape_vec) {
+            if (it->second.shape == weight_shape_vec &&
+                it->second.version == weight.version()) {
                 nhwc_out = it->second.nhwc_weight;
                 return true;
             }
@@ -1387,6 +1451,7 @@ public:
         cache_[weight.data_ptr()] = WeightCacheEntry(
             weight.data_ptr(),
             weight_shape_vec,
+            weight.version(),
             nhwc_weight
         );
     }
@@ -1644,6 +1709,22 @@ auto cudnn_conv2d_forward_nhwc(
             output_desc.get(),
             output_nhwc.data<Float16>()
         ));
+    } else if (input.dtype() == DType::BFloat16) {
+        CUDNN_CHECK(cudnnConvolutionForward(
+            handle,
+            &alpha,
+            input_desc.get(),
+            input_nhwc.data<BFloat16>(),
+            filter_desc.get(),
+            weight_nhwc.data<BFloat16>(),
+            conv_desc.get(),
+            algo,
+            workspace,
+            workspace_size,
+            &beta,
+            output_desc.get(),
+            output_nhwc.data<BFloat16>()
+        ));
     }
 
     // Add bias if present (in NHWC format, bias is added to channel dimension)
@@ -1686,7 +1767,22 @@ auto cudnn_conv2d_forward_nhwc(
                 output_desc.get(),
                 output_nhwc.data<Float16>()
             ));
+        } else if (input.dtype() == DType::BFloat16) {
+            CUDNN_CHECK(cudnnAddTensor(
+                handle,
+                &alpha_bias,
+                bias_desc.get(),
+                bias->data<BFloat16>(),
+                &beta_bias,
+                output_desc.get(),
+                output_nhwc.data<BFloat16>()
+            ));
         }
+    }
+
+    // Saturate FP16 output: clamp any ±Inf to ±65504 (max finite Float16 value)
+    if (input.dtype() == DType::Float16) {
+        fp16_saturate(output_nhwc.data<Float16>(), output_nhwc.numel(), stream);
     }
 
     // If input was already NHWC, return output directly (it already has NHWC strides)

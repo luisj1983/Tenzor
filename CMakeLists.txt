@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.25)
 
+# Default to Release build if no build type specified (single-config generators only)
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 # Pre-project configuration for ROCm/HIP
 # Must happen before project() because HIP language must be enabled at project() time
 # Check if ROCm is available on the system first
@@ -84,25 +89,26 @@ option(TENZOR_ENABLE_CLANG_TIDY "Enable clang-tidy static analysis" OFF)
 # Export compile_commands.json for IDE integration and clang-tidy
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Global compiler flags
+# Tenzor-specific compiler flags (stored in variables, applied per-target to avoid
+# polluting consumers via add_subdirectory or FetchContent)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    add_compile_options(-Wall -Wextra -pedantic)
+    set(TENZOR_WARNING_FLAGS -Wall -Wextra -pedantic)
 
     # Use -march=native for maximum performance on the build machine.
     # Disable for distribution (cross-compilation or portable binaries).
     option(TENZOR_NATIVE_ARCH "Use -march=native for host-specific optimizations" ON)
     if(TENZOR_NATIVE_ARCH)
-        add_compile_options(-march=native)
+        list(APPEND TENZOR_WARNING_FLAGS -march=native)
     endif()
 
-    # Enable coverage if requested
+    # Enable coverage if requested (must be global — applies to all compiled code)
     if(TENZOR_ENABLE_COVERAGE)
         message(STATUS "Coverage reporting enabled")
         add_compile_options(--coverage -fprofile-arcs -ftest-coverage)
         add_link_options(--coverage)
     endif()
 
-    # Sanitizers
+    # Sanitizers (must be global — applies to all compiled code)
     if(TENZOR_ENABLE_ASAN)
         message(STATUS "AddressSanitizer enabled")
         add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
@@ -121,7 +127,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         add_link_options(-fsanitize=undefined)
     endif()
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
-    add_compile_options(/W4 /arch:AVX2)
+    set(TENZOR_WARNING_FLAGS /W4 /arch:AVX2)
 endif()
 
 # clang-tidy integration
@@ -179,6 +185,7 @@ if(TENZOR_BUILD_PYTHON)
         )
 
         target_link_libraries(tenzor_python PRIVATE tenzor_core tenzor_backend_cpu)
+        target_compile_options(tenzor_python PRIVATE ${TENZOR_WARNING_FLAGS})
 
         if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
             target_compile_options(tenzor_python PRIVATE -Wno-unused-parameter)
@@ -241,7 +248,7 @@ install(TARGETS tenzor_core
 install(DIRECTORY include/tenzor DESTINATION include)
 
 # Install backend shared libraries (only non-imported targets that were built)
-foreach(backend cpu cuda rocm vulkan metal webgpu)
+foreach(backend cpu cuda rocm oneapi vulkan metal webgpu)
     if(TARGET tenzor_backend_${backend})
         get_target_property(_imported tenzor_backend_${backend} IMPORTED)
         if(NOT _imported)

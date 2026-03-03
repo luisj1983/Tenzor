@@ -4,6 +4,14 @@
  *
  * Provides helper functions and macros for comprehensive backend parity tests
  * to ensure all backends (CPU, CUDA, OneAPI, Vulkan) produce identical results.
+ *
+ * This header also provides consolidated backend availability checking functions.
+ * These are the canonical implementations — other test files that previously
+ * duplicated this logic should migrate to using these functions instead:
+ *   - tests/backend_test_fixture.hpp (BackendTest::isBackendAvailable)
+ *   - tests/multi_backend_dtype_fixture.hpp (isBackendAvailable, isBackendNameAvailable)
+ *   - tests/test_phase11_backends.cpp (BackendTestBase::isBackendAvailable)
+ *   - tests/test_slice_backend_parity.cpp (standalone isBackendAvailable)
  */
 
 #pragma once
@@ -17,52 +25,181 @@
 #include <iostream>
 #include <ranges>
 #include <iomanip>
+#include <random>
 
 namespace tenzor {
 namespace testing {
 
+// ============================================================================
+// Consolidated Backend Availability Checking
+// ============================================================================
+
 /**
- * @brief Get list of available backends for testing.
- * Excludes ROCm to prevent system crashes.
+ * @brief Check if a specific backend device type is available.
+ *
+ * Attempts to create a small tensor on the device to verify the backend
+ * is loaded and functional. Results are cached for the lifetime of the process.
+ *
+ * @param backend_type The device type to check (e.g., Device::Type::CUDA)
+ * @param index Device index (default: 0)
+ * @return true if the backend is available and functional
+ */
+inline bool is_backend_available(Device::Type backend_type, int32_t index = 0) {
+    try {
+        Device test_device{backend_type, index};
+        auto t = zeros({2, 2}, DType::Float32, test_device);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+/**
+ * @brief Check if CUDA backend is available.
+ */
+inline bool has_cuda(int32_t index = 0) {
+    return is_backend_available(Device::Type::CUDA, index);
+}
+
+/**
+ * @brief Check if Vulkan backend is available.
+ */
+inline bool has_vulkan(int32_t index = 0) {
+    return is_backend_available(Device::Type::Vulkan, index);
+}
+
+/**
+ * @brief Check if OneAPI backend is available.
+ */
+inline bool has_oneapi(int32_t index = 0) {
+    return is_backend_available(Device::Type::OneAPI, index);
+}
+
+/**
+ * @brief Check if ROCm backend is available.
+ */
+inline bool has_rocm(int32_t index = 0) {
+    return is_backend_available(Device::Type::ROCm, index);
+}
+
+/**
+ * @brief Check if Metal backend is available.
+ */
+inline bool has_metal(int32_t index = 0) {
+    return is_backend_available(Device::Type::Metal, index);
+}
+
+/**
+ * @brief Check if a backend is available by name string.
+ *
+ * Accepts: "cpu", "cuda", "vulkan", "oneapi", "rocm", "metal"
+ *
+ * @param name Backend name (case-sensitive, lowercase)
+ * @return true if available
+ */
+inline bool is_backend_name_available(const std::string& name) {
+    if (name == "cpu") return true;
+    if (name == "cuda") return has_cuda();
+    if (name == "vulkan") return has_vulkan();
+    if (name == "oneapi") return has_oneapi();
+    if (name == "rocm") return has_rocm();
+    if (name == "metal") return has_metal();
+    return false;
+}
+
+/**
+ * @brief Get Device object from a backend name string.
+ *
+ * @param name Backend name ("cpu", "cuda", "vulkan", "oneapi", "rocm", "metal")
+ * @return Corresponding Device object
+ * @throws std::runtime_error if name is unknown
+ */
+inline Device device_from_name(const std::string& name) {
+    if (name == "cpu") return Device::cpu();
+    if (name == "cuda") return Device::cuda(0);
+    if (name == "vulkan") return Device::vulkan(0);
+    if (name == "oneapi") return Device::oneapi(0);
+    if (name == "rocm") return Device::rocm(0);
+    if (name == "metal") return Device::metal(0);
+    throw std::runtime_error("Unknown backend name: " + name);
+}
+
+/**
+ * @brief Get list of all available backend Devices.
+ *
+ * Always includes CPU. Checks CUDA, OneAPI, Vulkan, and ROCm.
+ *
+ * @return Vector of available Device objects
  */
 inline std::vector<Device> get_available_backends() {
     std::vector<Device> backends;
     backends.push_back(Device::cpu());
 
-    // Check CUDA availability
-    try {
-        auto t = zeros({2, 2}, DType::Float32, Device::cuda(0));
-        backends.push_back(Device::cuda(0));
-    } catch (...) {
-        std::cout << "CUDA backend not available, skipping CUDA tests" << std::endl;
-    }
-
-    // Check OneAPI availability
-    try {
-        auto t = zeros({2, 2}, DType::Float32, Device::oneapi(0));
-        backends.push_back(Device::oneapi(0));
-    } catch (...) {
-        std::cout << "OneAPI backend not available, skipping OneAPI tests" << std::endl;
-    }
-
-    // Check Vulkan availability
-    try {
-        auto t = zeros({2, 2}, DType::Float32, Device::vulkan(0));
-        backends.push_back(Device::vulkan(0));
-    } catch (...) {
-        std::cout << "Vulkan backend not available, skipping Vulkan tests" << std::endl;
-    }
-
-    // Check ROCm availability
-    try {
-        auto t = zeros({2, 2}, DType::Float32, Device::rocm(0));
-        backends.push_back(Device::rocm(0));
-    } catch (...) {
-        std::cout << "ROCm backend not available, skipping ROCm tests" << std::endl;
-    }
+    if (has_cuda()) backends.push_back(Device::cuda(0));
+    if (has_oneapi()) backends.push_back(Device::oneapi(0));
+    if (has_vulkan()) backends.push_back(Device::vulkan(0));
+    if (has_rocm()) backends.push_back(Device::rocm(0));
 
     return backends;
 }
+
+/**
+ * @brief Get list of available backend names as strings.
+ *
+ * @return Vector of backend name strings (e.g., {"cpu", "cuda", "vulkan"})
+ */
+inline std::vector<std::string> get_available_backend_names() {
+    std::vector<std::string> names = {"cpu"};
+    if (has_cuda()) names.push_back("cuda");
+    if (has_oneapi()) names.push_back("oneapi");
+    if (has_vulkan()) names.push_back("vulkan");
+    if (has_rocm()) names.push_back("rocm");
+    if (has_metal()) names.push_back("metal");
+    return names;
+}
+
+// ============================================================================
+// Skip Macros for Backend Availability
+// ============================================================================
+
+/**
+ * @brief Skip test if the specified backend is not available.
+ *
+ * Usage:
+ *   TEST(MyTest, CudaOp) {
+ *       SKIP_IF_NO_CUDA;
+ *       auto t = zeros({4, 4}, DType::Float32, Device::cuda(0));
+ *       // ...
+ *   }
+ */
+#define SKIP_IF_NO_CUDA \
+    if (!tenzor::testing::has_cuda()) GTEST_SKIP() << "CUDA backend not available"
+
+#define SKIP_IF_NO_VULKAN \
+    if (!tenzor::testing::has_vulkan()) GTEST_SKIP() << "Vulkan backend not available"
+
+#define SKIP_IF_NO_ONEAPI \
+    if (!tenzor::testing::has_oneapi()) GTEST_SKIP() << "OneAPI backend not available"
+
+#define SKIP_IF_NO_ROCM \
+    if (!tenzor::testing::has_rocm()) GTEST_SKIP() << "ROCm backend not available"
+
+#define SKIP_IF_NO_METAL \
+    if (!tenzor::testing::has_metal()) GTEST_SKIP() << "Metal backend not available"
+
+/**
+ * @brief Skip test if the named backend is not available.
+ *
+ * Usage:
+ *   SKIP_IF_NO_BACKEND("cuda");
+ */
+#define SKIP_IF_NO_BACKEND(name) \
+    if (!tenzor::testing::is_backend_name_available(name)) \
+        GTEST_SKIP() << name << " backend not available"
+
+// ============================================================================
+// Tensor Comparison Utilities
+// ============================================================================
 
 /**
  * @brief Get backend name for reporting.
@@ -158,14 +295,56 @@ inline float max_abs_diff(const Tensor& a, const Tensor& b) {
 }
 
 /**
- * @brief Generate random test tensor with seed for reproducibility.
+ * @brief Generate random test tensor with seed for deterministic reproducibility.
+ *
+ * Uses std::mt19937 seeded with the given seed to generate deterministic
+ * values. The same seed + shape + dtype always produces identical results,
+ * regardless of the global random state.
+ *
+ * Values are drawn from a standard normal distribution (mean=0, stddev=1).
+ *
+ * @param shape Tensor shape
+ * @param dtype Data type for the output tensor
+ * @param device Target device (tensor is created on CPU then moved)
+ * @param seed Random seed for reproducibility (default: 12345)
+ * @return Deterministically-generated tensor
  */
 inline Tensor generate_test_tensor(const std::vector<int64_t>& shape,
                                    DType dtype,
                                    Device device,
                                    uint64_t seed = 12345) {
-    // TODO: Use seed for reproducibility when available
-    auto t = randn(shape, dtype, Device::cpu());
+    // Compute total elements
+    int64_t numel = 1;
+    for (auto dim : shape) {
+        numel *= dim;
+    }
+
+    // Handle empty tensors
+    if (numel == 0) {
+        auto t = zeros(shape, dtype, Device::cpu());
+        if (device.type != Device::Type::CPU) {
+            return t.to(device);
+        }
+        return t;
+    }
+
+    // Generate deterministic values using mt19937
+    std::mt19937 gen(static_cast<unsigned>(seed));
+    std::normal_distribution<float> dist(0.0f, 1.0f);
+
+    // Create Float32 tensor on CPU, fill with deterministic values
+    auto t = zeros(shape, DType::Float32, Device::cpu());
+    float* data = t.data<float>();
+    for (int64_t i = 0; i < numel; ++i) {
+        data[i] = dist(gen);
+    }
+
+    // Convert dtype if needed
+    if (dtype != DType::Float32) {
+        t = t.to(dtype);
+    }
+
+    // Move to target device if needed
     if (device.type != Device::Type::CPU) {
         return t.to(device);
     }
@@ -174,18 +353,52 @@ inline Tensor generate_test_tensor(const std::vector<int64_t>& shape,
 
 /**
  * @brief Generate random tensor with uniform distribution [low, high).
+ *
+ * Uses std::mt19937 seeded with the given seed for deterministic output.
+ *
+ * @param shape Tensor shape
+ * @param low Lower bound (inclusive)
+ * @param high Upper bound (exclusive)
+ * @param dtype Data type for the output tensor
+ * @param device Target device
+ * @param seed Random seed for reproducibility (default: 54321)
+ * @return Deterministically-generated tensor with values in [low, high)
  */
 inline Tensor generate_uniform_tensor(const std::vector<int64_t>& shape,
                                       float low, float high,
                                       DType dtype,
-                                      Device device) {
-    auto t = rand(shape, dtype, Device::cpu());
-    // Scale to [low, high)
-    auto scaled = t * (high - low) + low;
-    if (device.type != Device::Type::CPU) {
-        return scaled.to(device);
+                                      Device device,
+                                      uint64_t seed = 54321) {
+    int64_t numel = 1;
+    for (auto dim : shape) {
+        numel *= dim;
     }
-    return scaled;
+
+    if (numel == 0) {
+        auto t = zeros(shape, dtype, Device::cpu());
+        if (device.type != Device::Type::CPU) {
+            return t.to(device);
+        }
+        return t;
+    }
+
+    std::mt19937 gen(static_cast<unsigned>(seed));
+    std::uniform_real_distribution<float> dist(low, high);
+
+    auto t = zeros(shape, DType::Float32, Device::cpu());
+    float* data = t.data<float>();
+    for (int64_t i = 0; i < numel; ++i) {
+        data[i] = dist(gen);
+    }
+
+    if (dtype != DType::Float32) {
+        t = t.to(dtype);
+    }
+
+    if (device.type != Device::Type::CPU) {
+        return t.to(device);
+    }
+    return t;
 }
 
 /**

@@ -24,6 +24,11 @@
 namespace tenzor {
 namespace cpu {
 
+// Anonymous namespace to prevent ODR violations — these operator overloads are
+// local to this translation unit and must not leak into other TUs that may
+// define their own overloads for Float16/BFloat16.
+namespace {
+
 // ============================================================================
 // Float16 Arithmetic Helper Functions
 // ============================================================================
@@ -120,6 +125,8 @@ template<>
 inline BFloat16 safe_sqrt<BFloat16>(const BFloat16& x) {
     return BFloat16(std::sqrt(static_cast<float>(x)));
 }
+
+} // anonymous namespace
 
 // ============================================================================
 // BatchNorm2d Mean/Variance Computation
@@ -983,6 +990,11 @@ auto batchnorm2d_update_running_stats_kernel(Tensor& running_mean,
 // BatchNorm2d Backward Kernels
 // ============================================================================
 
+// Accumulation type trait: Float16/BFloat16 accumulate in float for precision.
+template<typename T> struct bn_acc { using type = T; };
+template<> struct bn_acc<Float16> { using type = float; };
+template<> struct bn_acc<BFloat16> { using type = float; };
+
 // Compute gradients w.r.t input, gamma, and beta
 template<typename T>
 void batchnorm_backward_impl(const T* grad_output,
@@ -998,6 +1010,8 @@ void batchnorm_backward_impl(const T* grad_output,
                             int64_t C,
                             int64_t H,
                             int64_t W) {
+    using Acc = typename bn_acc<T>::type;
+
     int64_t spatial_size = H * W;
     int64_t total_elements = N * spatial_size;
 
@@ -1020,21 +1034,22 @@ void batchnorm_backward_impl(const T* grad_output,
     // Compute grad_gamma and grad_beta for each channel
     #pragma omp parallel for num_threads(final_threads) if(C > 1)
     for (int64_t c = 0; c < C; c++) {
-        T channel_mean = mean[c];
-        T channel_var = variance[c];
-        T invstd = T(1.0f) / safe_sqrt(channel_var + epsilon);
+        Acc channel_mean = static_cast<Acc>(mean[c]);
+        Acc channel_var = static_cast<Acc>(variance[c]);
+        Acc invstd = Acc(1.0) / std::sqrt(channel_var + static_cast<Acc>(epsilon));
 
         // Compute grad_gamma = sum(grad_output * normalized)
         // Compute grad_beta = sum(grad_output)
-        T sum_grad_gamma = T(0.0f);
-        T sum_grad_beta = T(0.0f);
+        // Accumulate in Acc (float for FP16/BF16) to avoid precision loss
+        Acc sum_grad_gamma = Acc(0);
+        Acc sum_grad_beta = Acc(0);
 
         for (int64_t n = 0; n < N; n++) {
             for (int64_t h = 0; h < H; h++) {
                 for (int64_t w = 0; w < W; w++) {
                     int64_t idx = ((n * C + c) * H + h) * W + w;
-                    T grad_out = grad_output[idx];
-                    T normalized = (input[idx] - channel_mean) * invstd;
+                    Acc grad_out = static_cast<Acc>(grad_output[idx]);
+                    Acc normalized = (static_cast<Acc>(input[idx]) - channel_mean) * invstd;
 
                     sum_grad_gamma += grad_out * normalized;
                     sum_grad_beta += grad_out;
@@ -1042,29 +1057,29 @@ void batchnorm_backward_impl(const T* grad_output,
             }
         }
 
-        grad_gamma[c] = sum_grad_gamma;
-        grad_beta[c] = sum_grad_beta;
+        grad_gamma[c] = static_cast<T>(sum_grad_gamma);
+        grad_beta[c] = static_cast<T>(sum_grad_beta);
     }
 
     // Compute grad_input
     // Efficient formulation: grad_input = gamma * invstd * (grad_output - mean(grad_output) - normalized * mean(grad_output * normalized))
     #pragma omp parallel for num_threads(final_threads) if(C > 1)
     for (int64_t c = 0; c < C; c++) {
-        T channel_mean = mean[c];
-        T channel_var = variance[c];
-        T invstd = T(1.0f) / safe_sqrt(channel_var + epsilon);
-        T channel_gamma = gamma[c];
+        Acc channel_mean = static_cast<Acc>(mean[c]);
+        Acc channel_var = static_cast<Acc>(variance[c]);
+        Acc invstd = Acc(1.0) / std::sqrt(channel_var + static_cast<Acc>(epsilon));
+        Acc channel_gamma = static_cast<Acc>(gamma[c]);
 
-        // Compute auxiliary statistics
-        T sum_grad = T(0.0f);
-        T sum_grad_norm = T(0.0f);
+        // Compute auxiliary statistics in Acc precision
+        Acc sum_grad = Acc(0);
+        Acc sum_grad_norm = Acc(0);
 
         for (int64_t n = 0; n < N; n++) {
             for (int64_t h = 0; h < H; h++) {
                 for (int64_t w = 0; w < W; w++) {
                     int64_t idx = ((n * C + c) * H + h) * W + w;
-                    T grad_out = grad_output[idx];
-                    T normalized = (input[idx] - channel_mean) * invstd;
+                    Acc grad_out = static_cast<Acc>(grad_output[idx]);
+                    Acc normalized = (static_cast<Acc>(input[idx]) - channel_mean) * invstd;
 
                     sum_grad += grad_out;
                     sum_grad_norm += grad_out * normalized;
@@ -1072,20 +1087,20 @@ void batchnorm_backward_impl(const T* grad_output,
             }
         }
 
-        T mean_grad = sum_grad / T(static_cast<float>(total_elements));
-        T mean_grad_norm = sum_grad_norm / T(static_cast<float>(total_elements));
+        Acc mean_grad = sum_grad / static_cast<Acc>(total_elements);
+        Acc mean_grad_norm = sum_grad_norm / static_cast<Acc>(total_elements);
 
         // Compute gradient w.r.t input
         for (int64_t n = 0; n < N; n++) {
             for (int64_t h = 0; h < H; h++) {
                 for (int64_t w = 0; w < W; w++) {
                     int64_t idx = ((n * C + c) * H + h) * W + w;
-                    T grad_out = grad_output[idx];
-                    T normalized = (input[idx] - channel_mean) * invstd;
+                    Acc grad_out = static_cast<Acc>(grad_output[idx]);
+                    Acc normalized = (static_cast<Acc>(input[idx]) - channel_mean) * invstd;
 
                     // Efficient backward formulation
-                    T grad_normalized = grad_out - mean_grad - normalized * mean_grad_norm;
-                    grad_input[idx] = channel_gamma * invstd * grad_normalized;
+                    Acc grad_normalized = grad_out - mean_grad - normalized * mean_grad_norm;
+                    grad_input[idx] = static_cast<T>(channel_gamma * invstd * grad_normalized);
                 }
             }
         }

@@ -348,18 +348,17 @@ auto checkpoint_with_original(
 // CheckpointContext Implementation
 // ============================================================================
 
-thread_local bool CheckpointContext::enabled_tls_ = true;
 
 CheckpointContext::CheckpointContext(bool enabled)
     : enabled_(enabled),
-      prev_enabled_(enabled_tls_),
+      prev_enabled_(is_checkpoint_enabled()),
       initial_stats_(get_checkpoint_stats()) {
-    enabled_tls_ = enabled;
+    set_checkpoint_enabled(enabled);
 }
 
 CheckpointContext::~CheckpointContext() {
     // Restore previous state
-    enabled_tls_ = prev_enabled_;
+    set_checkpoint_enabled(prev_enabled_);
 }
 
 auto CheckpointContext::get_stats() const -> CheckpointStats {

@@ -72,6 +72,9 @@ public:
      */
     auto forward_impl(const Variable& input) -> Variable override;
 
+    /// @brief Get the epsilon value used for numerical stability.
+    [[nodiscard]] auto eps() const -> double { return eps_; }
+
 private:
     std::vector<int64_t> normalized_shape_;  ///< Dimensions to normalize over
     double eps_;                             ///< Numerical stability constant

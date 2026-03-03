@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cstring>
 #include <memory>
+#include <vector>
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
     #include <immintrin.h>
@@ -110,7 +111,8 @@ inline void microkernel_6x16_avx2(
     const float* __restrict__ B,
     float* __restrict__ C,
     int64_t K,
-    int64_t ldc
+    int64_t ldc,
+    float alpha = 1.0f
 ) {
     // 12 accumulators for 6x16 C tile (2 YMM per row)
     __m256 c00 = _mm256_setzero_ps();
@@ -166,7 +168,17 @@ inline void microkernel_6x16_avx2(
         c51 = _mm256_fmadd_ps(a5, b1, c51);
     }
 
-    // Store results back to C (accumulate)
+    // Store results back to C (accumulate with alpha scaling fused)
+    // Fusing alpha here eliminates a separate O(M*N) scaling pass over C.
+    if (alpha != 1.0f) {
+        __m256 valpha = _mm256_set1_ps(alpha);
+        c00 = _mm256_mul_ps(c00, valpha); c01 = _mm256_mul_ps(c01, valpha);
+        c10 = _mm256_mul_ps(c10, valpha); c11 = _mm256_mul_ps(c11, valpha);
+        c20 = _mm256_mul_ps(c20, valpha); c21 = _mm256_mul_ps(c21, valpha);
+        c30 = _mm256_mul_ps(c30, valpha); c31 = _mm256_mul_ps(c31, valpha);
+        c40 = _mm256_mul_ps(c40, valpha); c41 = _mm256_mul_ps(c41, valpha);
+        c50 = _mm256_mul_ps(c50, valpha); c51 = _mm256_mul_ps(c51, valpha);
+    }
     _mm256_storeu_ps(C + 0 * ldc + 0, _mm256_add_ps(_mm256_loadu_ps(C + 0 * ldc + 0), c00));
     _mm256_storeu_ps(C + 0 * ldc + 8, _mm256_add_ps(_mm256_loadu_ps(C + 0 * ldc + 8), c01));
     _mm256_storeu_ps(C + 1 * ldc + 0, _mm256_add_ps(_mm256_loadu_ps(C + 1 * ldc + 0), c10));
@@ -244,7 +256,8 @@ inline void microkernel_6x32_avx512(
     const float* __restrict__ B,
     float* __restrict__ C,
     int64_t K,
-    int64_t ldc
+    int64_t ldc,
+    float alpha = 1.0f
 ) {
     // 12 accumulators for 6x32 C tile (2 ZMM per row)
     __m512 c00 = _mm512_setzero_ps();
@@ -299,7 +312,16 @@ inline void microkernel_6x32_avx512(
         c51 = _mm512_fmadd_ps(a5, b1, c51);
     }
 
-    // Store results back to C
+    // Store results back to C (accumulate with alpha scaling fused)
+    if (alpha != 1.0f) {
+        __m512 valpha = _mm512_set1_ps(alpha);
+        c00 = _mm512_mul_ps(c00, valpha); c01 = _mm512_mul_ps(c01, valpha);
+        c10 = _mm512_mul_ps(c10, valpha); c11 = _mm512_mul_ps(c11, valpha);
+        c20 = _mm512_mul_ps(c20, valpha); c21 = _mm512_mul_ps(c21, valpha);
+        c30 = _mm512_mul_ps(c30, valpha); c31 = _mm512_mul_ps(c31, valpha);
+        c40 = _mm512_mul_ps(c40, valpha); c41 = _mm512_mul_ps(c41, valpha);
+        c50 = _mm512_mul_ps(c50, valpha); c51 = _mm512_mul_ps(c51, valpha);
+    }
     _mm512_storeu_ps(C + 0 * ldc + 0,  _mm512_add_ps(_mm512_loadu_ps(C + 0 * ldc + 0),  c00));
     _mm512_storeu_ps(C + 0 * ldc + 16, _mm512_add_ps(_mm512_loadu_ps(C + 0 * ldc + 16), c01));
     _mm512_storeu_ps(C + 1 * ldc + 0,  _mm512_add_ps(_mm512_loadu_ps(C + 1 * ldc + 0),  c10));
@@ -372,7 +394,8 @@ inline void microkernel_scalar(
     const float* __restrict__ B,
     float* __restrict__ C,
     int64_t M, int64_t N, int64_t K,
-    int64_t ldc
+    int64_t ldc,
+    float alpha = 1.0f
 ) {
     for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
@@ -380,7 +403,7 @@ inline void microkernel_scalar(
             for (int64_t k = 0; k < K; ++k) {
                 sum += A[i * K + k] * B[k * N + j];
             }
-            C[i * ldc + j] += sum;
+            C[i * ldc + j] += alpha * sum;
         }
     }
 }
@@ -477,7 +500,7 @@ inline void gemm_optimized(
                                     A_packed + (ir / MR) * kc * MR,
                                     B_packed + (jr / NR) * kc * NR,
                                     C + (ic + ir) * N + jc + jr,
-                                    kc, N
+                                    kc, N, alpha
                                 );
                             } else {
                                 // Edge case: use scalar
@@ -485,20 +508,13 @@ inline void gemm_optimized(
                                     A + (ic + ir) * K + pc,
                                     B + pc * N + jc + jr,
                                     C + (ic + ir) * N + jc + jr,
-                                    mr, nr, kc, N
+                                    mr, nr, kc, N, alpha
                                 );
                             }
                         }
                     }
                 }
             }
-        }
-    }
-
-    // Apply alpha if needed
-    if (alpha != 1.0f) {
-        for (int64_t i = 0; i < M * N; ++i) {
-            C[i] *= alpha;
         }
     }
 
@@ -544,7 +560,7 @@ inline void gemm_optimized(
                                     A_packed + (ir / MR) * kc * MR,
                                     B_packed + (jr / NR) * kc * NR,
                                     C + (ic + ir) * N + jc + jr,
-                                    kc, N
+                                    kc, N, alpha
                                 );
                             } else {
                                 // Edge case: use scalar
@@ -552,19 +568,13 @@ inline void gemm_optimized(
                                     A + (ic + ir) * K + pc,
                                     B + pc * N + jc + jr,
                                     C + (ic + ir) * N + jc + jr,
-                                    mr, nr, kc, N
+                                    mr, nr, kc, N, alpha
                                 );
                             }
                         }
                     }
                 }
             }
-        }
-    }
-
-    if (alpha != 1.0f) {
-        for (int64_t i = 0; i < M * N; ++i) {
-            C[i] *= alpha;
         }
     }
 

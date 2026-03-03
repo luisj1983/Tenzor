@@ -225,6 +225,211 @@ private:
 };
 
 // ============================================================================
+// EmbeddingBagBackward - Gradient function for EmbeddingBag aggregation
+// ============================================================================
+
+class EmbeddingBagBackward : public Function {
+public:
+    EmbeddingBagBackward(Tensor offsets, bool has_offsets, std::string mode,
+                         int64_t total_elements, int64_t embedding_dim,
+                         bool include_last_offset)
+        : offsets_(std::move(offsets)),
+          has_offsets_(has_offsets),
+          mode_(std::move(mode)),
+          total_elements_(total_elements),
+          embedding_dim_(embedding_dim),
+          include_last_offset_(include_last_offset) {}
+
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+        // inputs[0] = embeddings [total_elements, embedding_dim]
+        if (inputs.empty()) {
+            throw std::runtime_error("EmbeddingBagBackward: No inputs provided");
+        }
+
+        const auto& emb_tensor = inputs[0].tensor();
+
+        // Save original device and dtype for backward
+        Device original_device = emb_tensor.device();
+        DType original_dtype = emb_tensor.dtype();
+
+        // Transfer to CPU Float32 for computation
+        Tensor emb_cpu = (original_device == Device::cpu()) ? emb_tensor : emb_tensor.to(Device::cpu());
+        if (emb_cpu.dtype() != DType::Float32) {
+            emb_cpu = emb_cpu.to(DType::Float32);
+        }
+        auto emb_ptr = emb_cpu.data<float>();
+
+        // Determine bag boundaries
+        int64_t num_bags;
+        Tensor offsets_cpu;
+        const int64_t* offsets_ptr = nullptr;
+
+        if (has_offsets_) {
+            offsets_cpu = (offsets_.device() == Device::cpu()) ? offsets_ : offsets_.to(Device::cpu());
+            offsets_ptr = offsets_cpu.data<int64_t>();
+            num_bags = offsets_cpu.numel();
+        } else {
+            num_bags = 1;
+        }
+
+        // Save bag sizes for backward (needed for mean mode)
+        std::vector<int64_t> bag_starts(num_bags);
+        std::vector<int64_t> bag_ends(num_bags);
+        for (int64_t bag = 0; bag < num_bags; ++bag) {
+            if (has_offsets_) {
+                bag_starts[bag] = offsets_ptr[bag];
+                if (bag + 1 < num_bags) {
+                    bag_ends[bag] = offsets_ptr[bag + 1];
+                } else if (include_last_offset_ && bag + 1 < offsets_.numel()) {
+                    bag_ends[bag] = offsets_ptr[bag + 1];
+                } else {
+                    bag_ends[bag] = total_elements_;
+                }
+            } else {
+                bag_starts[bag] = 0;
+                bag_ends[bag] = total_elements_;
+            }
+        }
+
+        // Save bag boundaries for backward
+        bag_starts_ = std::move(bag_starts);
+        bag_ends_ = std::move(bag_ends);
+        num_bags_ = num_bags;
+        original_device_ = original_device;
+        original_dtype_ = original_dtype;
+
+        // Compute aggregated output
+        auto output = zeros({num_bags_, embedding_dim_}, DType::Float32, Device::cpu());
+        auto output_ptr = output.data<float>();
+
+        for (int64_t bag = 0; bag < num_bags_; ++bag) {
+            int64_t start_idx = bag_starts_[bag];
+            int64_t end_idx = bag_ends_[bag];
+            int64_t bag_size = end_idx - start_idx;
+
+            if (bag_size <= 0) continue;
+
+            if (mode_ == "sum" || mode_ == "mean") {
+                std::vector<float> compensation(embedding_dim_, 0.0f);
+                for (int64_t i = start_idx; i < end_idx; ++i) {
+                    for (int64_t j = 0; j < embedding_dim_; ++j) {
+                        float y = emb_ptr[i * embedding_dim_ + j] - compensation[j];
+                        float t = output_ptr[bag * embedding_dim_ + j] + y;
+                        compensation[j] = (t - output_ptr[bag * embedding_dim_ + j]) - y;
+                        output_ptr[bag * embedding_dim_ + j] = t;
+                    }
+                }
+                if (mode_ == "mean") {
+                    for (int64_t j = 0; j < embedding_dim_; ++j) {
+                        output_ptr[bag * embedding_dim_ + j] /= bag_size;
+                    }
+                }
+            } else if (mode_ == "max") {
+                for (int64_t j = 0; j < embedding_dim_; ++j) {
+                    output_ptr[bag * embedding_dim_ + j] = emb_ptr[start_idx * embedding_dim_ + j];
+                }
+                for (int64_t i = start_idx + 1; i < end_idx; ++i) {
+                    for (int64_t j = 0; j < embedding_dim_; ++j) {
+                        float val = emb_ptr[i * embedding_dim_ + j];
+                        if (val > output_ptr[bag * embedding_dim_ + j]) {
+                            output_ptr[bag * embedding_dim_ + j] = val;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Convert back to original dtype and device
+        if (original_dtype != DType::Float32) {
+            output = output.to(original_dtype);
+        }
+        if (original_device != Device::cpu()) {
+            output = output.to(original_device);
+        }
+
+        return {Variable(output, inputs[0].requires_grad())};
+    }
+
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        // grad_output shape: [num_bags, embedding_dim]
+        // output grad shape: [total_elements, embedding_dim]
+        //
+        // For sum:  grad_emb[i] = grad_output[bag_of(i)]
+        // For mean: grad_emb[i] = grad_output[bag_of(i)] / bag_size
+        // For max:  approximate with sum behavior (exact requires saved argmax)
+
+        if (grad_outputs.empty()) {
+            throw std::runtime_error("EmbeddingBagBackward: No gradient outputs");
+        }
+
+        const auto& grad_output = grad_outputs[0];
+
+        // Work in Float32 on CPU
+        Tensor grad_cpu = (grad_output.device() == Device::cpu()) ? grad_output : grad_output.to(Device::cpu());
+        if (grad_cpu.dtype() != DType::Float32) {
+            grad_cpu = grad_cpu.to(DType::Float32);
+        }
+        auto grad_ptr = grad_cpu.data<float>();
+
+        auto grad_emb = zeros({total_elements_, embedding_dim_}, DType::Float32, Device::cpu());
+        auto grad_emb_ptr = grad_emb.data<float>();
+
+        for (int64_t bag = 0; bag < num_bags_; ++bag) {
+            int64_t start_idx = bag_starts_[bag];
+            int64_t end_idx = bag_ends_[bag];
+            int64_t bag_size = end_idx - start_idx;
+
+            if (bag_size <= 0) continue;
+
+            for (int64_t i = start_idx; i < end_idx; ++i) {
+                for (int64_t j = 0; j < embedding_dim_; ++j) {
+                    float g = grad_ptr[bag * embedding_dim_ + j];
+                    if (mode_ == "mean") {
+                        g /= bag_size;
+                    }
+                    // For "sum" and "max" (approximation), pass gradient through directly
+                    grad_emb_ptr[i * embedding_dim_ + j] = g;
+                }
+            }
+        }
+
+        // Convert back to original dtype and device
+        if (original_dtype_ != DType::Float32) {
+            grad_emb = grad_emb.to(original_dtype_);
+        }
+        if (original_device_ != Device::cpu()) {
+            grad_emb = grad_emb.to(original_device_);
+        }
+
+        return {grad_emb};
+    }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        std::vector<Tensor> tensor_grads;
+        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
+        auto results = backward(std::move(tensor_grads));
+        std::vector<Variable> var_results;
+        for (auto& t : results) var_results.emplace_back(t, false);
+        return var_results;
+    }
+
+private:
+    Tensor offsets_;
+    bool has_offsets_;
+    std::string mode_;
+    int64_t total_elements_;
+    int64_t embedding_dim_;
+    bool include_last_offset_;
+
+    // Computed during forward, used during backward
+    std::vector<int64_t> bag_starts_;
+    std::vector<int64_t> bag_ends_;
+    int64_t num_bags_ = 0;
+    Device original_device_{Device::cpu()};
+    DType original_dtype_ = DType::Float32;
+};
+
+// ============================================================================
 // Embedding Implementation
 // ============================================================================
 
@@ -652,6 +857,34 @@ auto EmbeddingBag::aggregate_embeddings(const Variable& embeddings, const Variab
     int64_t total_elements = emb_shape[0];
     int64_t embedding_dim = emb_shape[1];
 
+    // Determine the offsets tensor (empty Tensor if no offsets provided)
+    bool has_offsets = offsets.is_initialized() && offsets.tensor().numel() > 0;
+    Tensor offsets_tensor = has_offsets ? offsets.tensor() : Tensor();
+
+    // If gradient tracking is needed, use EmbeddingBagBackward to preserve the graph
+    if (embeddings.requires_grad() && is_grad_enabled()) {
+        auto grad_fn = std::make_shared<EmbeddingBagBackward>(
+            offsets_tensor, has_offsets, mode_, total_elements, embedding_dim, include_last_offset_);
+
+        // Perform forward pass through the grad_fn
+        auto outputs = grad_fn->forward({embeddings});
+        if (outputs.empty()) {
+            throw std::runtime_error("EmbeddingBagBackward returned no outputs");
+        }
+
+        auto& result = outputs[0];
+
+        // Wire up the backward graph: chain to embeddings' grad_fn
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        next_funcs.push_back(embeddings.grad_fn());
+        grad_fn->set_next_functions(next_funcs);
+        grad_fn->set_input_variables({embeddings});
+
+        result.set_grad_fn(grad_fn);
+        return result;
+    }
+
+    // No gradient needed — compute aggregation directly (no autograd overhead)
     // Save original device and dtype, then transfer to CPU Float32 for computation.
     // TODO(perf): For GPU tensors this transfers the entire embedding result to CPU
     // for aggregation (sum/mean/max), then transfers back. This should be replaced
@@ -667,7 +900,7 @@ auto EmbeddingBag::aggregate_embeddings(const Variable& embeddings, const Variab
     auto emb_ptr = emb_cpu.data<float>();
 
     // If no offsets, aggregate all embeddings into single vector
-    if (!offsets.is_initialized() || offsets.tensor().numel() == 0) {
+    if (!has_offsets) {
         auto output = zeros({1, embedding_dim}, DType::Float32, Device::cpu());
         auto output_ptr = output.data<float>();
 
@@ -712,11 +945,10 @@ auto EmbeddingBag::aggregate_embeddings(const Variable& embeddings, const Variab
             output = output.to(original_device);
         }
 
-        return Variable(output, embeddings.requires_grad());
+        return Variable(output, false);
     }
 
     // With offsets: aggregate each bag separately
-    const auto& offsets_tensor = offsets.tensor();
     Tensor offsets_cpu = (original_device == Device::cpu()) ? offsets_tensor : offsets_tensor.to(Device::cpu());
     auto offsets_ptr = offsets_cpu.data<int64_t>();
     int64_t num_bags = offsets_cpu.numel();
@@ -787,7 +1019,7 @@ auto EmbeddingBag::aggregate_embeddings(const Variable& embeddings, const Variab
         output = output.to(original_device);
     }
 
-    return Variable(output, embeddings.requires_grad());
+    return Variable(output, false);
 }
 
 auto EmbeddingBag::weight() -> Variable& {

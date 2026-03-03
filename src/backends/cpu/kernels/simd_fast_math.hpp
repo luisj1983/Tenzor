@@ -257,11 +257,19 @@ inline __m256 sigmoid_avx2(__m256 x) {
 }
 
 /**
- * @brief AVX2 vectorized pow: x^y = exp(y * log(x))
- * For positive x only (handles x <= 0 as 0)
+ * @brief AVX2 vectorized pow for positive bases: x^y = exp(y * log(x))
+ *
+ * WARNING: This function only produces correct results for x > 0.
+ * Negative bases are clamped to 1e-30 (treated as ~0), which silently
+ * returns ~0 instead of the mathematically correct result.  For integer
+ * exponents with negative bases (e.g. (-2)^3 = -8), use std::pow or a
+ * dedicated signed-pow implementation instead.
+ *
+ * Accuracy: ~1-2 ULP for positive x in normal float range.
  */
 inline __m256 pow_avx2(__m256 x, __m256 y) {
-    // Handle x <= 0 by clamping to small positive
+    // Clamp x to small positive — negative/zero bases would produce NaN
+    // from log, so we clamp to avoid undefined behavior in the log-exp path.
     __m256 min_val = _mm256_set1_ps(1e-30f);
     x = _mm256_max_ps(x, min_val);
 
@@ -272,7 +280,8 @@ inline __m256 pow_avx2(__m256 x, __m256 y) {
 }
 
 /**
- * @brief AVX2 vectorized pow with scalar exponent
+ * @brief AVX2 vectorized pow with scalar exponent (positive bases only)
+ * @see pow_avx2(__m256, __m256) for limitations on negative bases.
  */
 inline __m256 pow_avx2(__m256 x, float y) {
     return pow_avx2(x, _mm256_set1_ps(y));

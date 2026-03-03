@@ -49,6 +49,12 @@ VkCommandBuffer VulkanBackend::acquireCommandBuffer(int32_t device_id) {
 
     // If we've used all buffers in the pool, wait for pending GPU work and reset
     if (ctx.nextCommandBufferIndex >= ctx.commandBufferPool.size()) {
+        // If a batch command buffer is active, submit it first so the
+        // pending work is tracked by a fence before we wait.
+        if (ctx.activeCommandBuffer != VK_NULL_HANDLE) {
+            submitBatchIfNeeded(device_id, true);
+        }
+
         // Wait for all submitted frame fences instead of vkDeviceWaitIdle.
         // This is more targeted — only waits for our own submissions, not
         // all device work (which would serialize unrelated queues).
@@ -58,6 +64,10 @@ VkCommandBuffer VulkanBackend::acquireCommandBuffer(int32_t device_id) {
         ctx.submittedFrames = 0;
         ctx.currentFrame = 0;
         ctx.hasPendingWork = false;
+
+        // Invalidate batch state — command pool reset makes all buffers invalid
+        ctx.activeCommandBuffer = VK_NULL_HANDLE;
+        ctx.operationsInBatch = 0;
 
         // Safe to reset descriptor pool now — all submitted work is complete
         if (ctx.descriptorPool) {
@@ -71,7 +81,8 @@ VkCommandBuffer VulkanBackend::acquireCommandBuffer(int32_t device_id) {
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
-    vkBeginCommandBuffer(cmdBuffer, &beginInfo);
+    vulkan::checkVk(vkBeginCommandBuffer(cmdBuffer, &beginInfo),
+                    "Failed to begin command buffer");
     return cmdBuffer;
 }
 
@@ -279,7 +290,8 @@ VkCommandBuffer VulkanBackend::getOrCreateBatchCommandBuffer(int32_t device_id) 
         VkCommandBufferBeginInfo beginInfo{};
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vkBeginCommandBuffer(ctx.activeCommandBuffer, &beginInfo);
+        vulkan::checkVk(vkBeginCommandBuffer(ctx.activeCommandBuffer, &beginInfo),
+                        "Failed to begin batch command buffer");
 
         ctx.operationsInBatch = 0;
     }
@@ -309,7 +321,8 @@ void VulkanBackend::submitBatchIfNeeded(int32_t device_id, bool force) {
     }
 
     // End and submit the command buffer
-    vkEndCommandBuffer(ctx.activeCommandBuffer);
+    vulkan::checkVk(vkEndCommandBuffer(ctx.activeCommandBuffer),
+                    "Failed to end batch command buffer");
 
     VkFence fence = ctx.frameFences[ctx.currentFrame];
 

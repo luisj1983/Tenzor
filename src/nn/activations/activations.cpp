@@ -925,8 +925,8 @@ auto glu(const Variable& input, int64_t dim) -> Variable {
     }
     int64_t half = shape[dim] / 2;
     // Split input into two halves along dim
-    auto a = Variable(input.tensor().slice(dim, 0, half), input.requires_grad());
-    auto b = Variable(input.tensor().slice(dim, half, shape[dim]), input.requires_grad());
+    auto a = tenzor::slice(input, dim, 0, half);
+    auto b = tenzor::slice(input, dim, half, shape[dim]);
     // GLU(a, b) = a * sigmoid(b)
     return a * nn::sigmoid(b);
 }

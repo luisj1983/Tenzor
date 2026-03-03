@@ -4,6 +4,7 @@
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/indexing.hpp"
 
 namespace tenzor {
 
@@ -149,7 +150,12 @@ auto logsumexp(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
     if (!keepdim) {
         max_val = tenzor::squeeze(max_val, dim);
     }
-    return max_val + log_sum;
+    auto result = max_val + log_sum;
+    // Where max_val was -inf (all elements in a slice were -inf), the subtraction
+    // -inf - (-inf) produces NaN, propagating through exp/sum/log.
+    // The correct result is -inf (and +inf for +inf max_val).
+    auto inf_mask = tenzor::isinf(max_val);
+    return tenzor::where(inf_mask, max_val, result);
 }
 
 } // namespace tenzor

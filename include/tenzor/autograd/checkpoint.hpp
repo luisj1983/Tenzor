@@ -15,7 +15,6 @@
 #include <functional>
 #include <memory>
 #include <vector>
-#include <atomic>
 #include "../core/tensor.hpp"
 #include "variable.hpp"
 #include "function.hpp"
@@ -400,8 +399,6 @@ private:
     bool enabled_;
     bool prev_enabled_;
     CheckpointStats initial_stats_;
-
-    static thread_local bool enabled_tls_;
 };
 
 /**

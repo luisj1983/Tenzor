@@ -71,7 +71,8 @@ static void im2col_int8(
     int64_t h_out, int64_t w_out,
     int64_t kernel_size,
     int64_t stride,
-    int64_t padding
+    int64_t padding,
+    int64_t dilation
 ) {
     const int64_t col_width = in_channels * kernel_size * kernel_size;
 
@@ -85,8 +86,8 @@ static void im2col_int8(
         for (int64_t ic = 0; ic < in_channels; ++ic) {
             for (int64_t kh = 0; kh < kernel_size; ++kh) {
                 for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                    int64_t ih = oh * stride + kh - padding;
-                    int64_t iw = ow * stride + kw - padding;
+                    int64_t ih = oh * stride + kh * dilation - padding;
+                    int64_t iw = ow * stride + kw * dilation - padding;
 
                     if (ih >= 0 && ih < h_in && iw >= 0 && iw < w_in) {
                         col_row[col_pos] = input[(ic * h_in + ih) * w_in + iw];
@@ -125,13 +126,17 @@ auto quantized_conv2d_kernel(
     float input_scale,
     float weight_scale,
     int32_t input_zp,
-    int32_t weight_zp
+    int32_t weight_zp,
+    int64_t dilation,
+    int64_t groups
 ) -> void {
     float combined_scale = input_scale * weight_scale;
-    const int64_t col_width = in_channels * kernel_size * kernel_size;
+    const int64_t in_channels_per_group = in_channels / groups;
+    const int64_t out_channels_per_group = out_channels / groups;
+    const int64_t col_width = in_channels_per_group * kernel_size * kernel_size;
     const int64_t spatial_out = h_out * w_out;
 
-    // im2col + GEMM approach
+    // im2col + GEMM approach with grouped convolution support
     #pragma omp parallel
     {
         // Per-thread column buffer to avoid allocation contention
@@ -139,35 +144,39 @@ auto quantized_conv2d_kernel(
 
         #pragma omp for
         for (int64_t b = 0; b < batch; ++b) {
-            const int8_t* batch_input = input + b * in_channels * h_in * w_in;
+            for (int64_t g = 0; g < groups; ++g) {
+                // Input slice for this group
+                const int8_t* group_input = input + b * in_channels * h_in * w_in
+                                           + g * in_channels_per_group * h_in * w_in;
 
-            // Step 1: im2col - extract patches into column buffer
-            im2col_int8(batch_input, col_buffer.data(),
-                        in_channels, h_in, w_in, h_out, w_out,
-                        kernel_size, stride, padding);
+                // Step 1: im2col for this group's input channels
+                im2col_int8(group_input, col_buffer.data(),
+                            in_channels_per_group, h_in, w_in, h_out, w_out,
+                            kernel_size, stride, padding, dilation);
 
-            // Step 2: GEMM - weight[oc, col_width] @ col_buffer^T[col_width, spatial_out]
-            // For each output channel, dot product with each column
-            for (int64_t oc = 0; oc < out_channels; ++oc) {
-                const int8_t* weight_row = weight + oc * col_width;
+                // Step 2: GEMM for this group's output channels
+                for (int64_t oc_local = 0; oc_local < out_channels_per_group; ++oc_local) {
+                    int64_t oc = g * out_channels_per_group + oc_local;
+                    const int8_t* weight_row = weight + oc * col_width;
 
-                for (int64_t s = 0; s < spatial_out; ++s) {
-                    const int8_t* col_row = col_buffer.data() + s * col_width;
+                    for (int64_t s = 0; s < spatial_out; ++s) {
+                        const int8_t* col_row = col_buffer.data() + s * col_width;
 
-                    // SIMD-accelerated INT8 dot product
-                    int32_t acc = dot_int8(weight_row, col_row, col_width);
+                        // SIMD-accelerated INT8 dot product
+                        int32_t acc = dot_int8(weight_row, col_row, col_width);
 
-                    // Zero point correction
-                    acc -= input_zp * weight_zp * col_width;
+                        // Zero point correction
+                        acc -= input_zp * weight_zp * col_width;
 
-                    // Dequantize and add bias
-                    float result = static_cast<float>(acc) * combined_scale;
-                    if (bias != nullptr) {
-                        result += bias[oc];
+                        // Dequantize and add bias
+                        float result = static_cast<float>(acc) * combined_scale;
+                        if (bias != nullptr) {
+                            result += bias[oc];
+                        }
+
+                        int64_t output_idx = ((b * out_channels + oc) * h_out + s / w_out) * w_out + s % w_out;
+                        output[output_idx] = result;
                     }
-
-                    int64_t output_idx = ((b * out_channels + oc) * h_out + s / w_out) * w_out + s % w_out;
-                    output[output_idx] = result;
                 }
             }
         }

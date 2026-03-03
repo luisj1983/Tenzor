@@ -4,6 +4,7 @@
 #include <limits>
 #include <stdexcept>
 #include <cmath>
+#include <vector>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -568,10 +569,18 @@ static float parallel_simd_sum_f32(const float* data, int64_t n) {
 #endif
     }
 
-    // For large arrays, use parallel reduction with thread-local SIMD
-    float total_sum = 0.0f;
+    // For large arrays, use parallel reduction with per-thread partial sums.
+    // Each thread uses Kahan-compensated SIMD summation on its chunk.
+    // We collect partial sums into an array and combine with Kahan summation
+    // to preserve compensation across threads (plain OMP reduction(+:) would
+    // lose the Kahan compensation at the inter-thread combination step).
+    int max_threads = 1;
+#ifdef _OPENMP
+    max_threads = omp_get_max_threads();
+#endif
+    std::vector<float> partial_sums(max_threads, 0.0f);
 
-    #pragma omp parallel reduction(+:total_sum)
+    #pragma omp parallel
     {
         int tid = omp_get_thread_num();
         int nthreads = omp_get_num_threads();
@@ -583,15 +592,31 @@ static float parallel_simd_sum_f32(const float* data, int64_t n) {
 
         if (start < end) {
 #ifdef TENZOR_REDUCTION_AVX512
-            total_sum += simd_sum_f32_avx512(data + start, end - start);
+            partial_sums[tid] = simd_sum_f32_avx512(data + start, end - start);
 #elif defined(TENZOR_REDUCTION_AVX2)
-            total_sum += simd_sum_f32_avx2(data + start, end - start);
+            partial_sums[tid] = simd_sum_f32_avx2(data + start, end - start);
 #else
+            float local_sum = 0.0f;
+            float local_comp = 0.0f;
             for (int64_t i = start; i < end; i++) {
-                total_sum += data[i];
+                float y = data[i] - local_comp;
+                float t = local_sum + y;
+                local_comp = (t - local_sum) - y;
+                local_sum = t;
             }
+            partial_sums[tid] = local_sum;
 #endif
         }
+    }
+
+    // Combine partial sums with Kahan summation
+    float total_sum = 0.0f;
+    float comp = 0.0f;
+    for (int i = 0; i < max_threads; ++i) {
+        float y = partial_sums[i] - comp;
+        float t = total_sum + y;
+        comp = (t - total_sum) - y;
+        total_sum = t;
     }
 
     return total_sum;
@@ -787,8 +812,10 @@ void sum_along_dim(const T* input_data,
     const int64_t total_work = output_size * dim_size;
     #pragma omp parallel for if(total_work > REDUCTION_OMP_THRESHOLD)
     for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
-        // Fixed-size array avoids heap allocation per iteration (max 16 dims)
-        std::array<int64_t, 16> indices{};
+        // Use stack allocation for common case (<=16 dims), heap for rare large dims
+        std::vector<int64_t> indices_vec;
+        int64_t indices_stack[16] = {};
+        int64_t* indices = (ndim <= 16) ? indices_stack : (indices_vec.resize(ndim, 0), indices_vec.data());
         int64_t tmp = out_idx;
 
         for (int64_t d = ndim - 1; d >= 0; --d) {
@@ -1296,6 +1323,59 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             }
             break;
         }
+        case DType::BFloat16: {
+            auto* input_data = input.data<BFloat16>();
+            auto* output_data = output.data<BFloat16>();
+
+            if (dim == REDUCE_ALL) {
+                // Compute max in Float32
+                float max_val = std::numeric_limits<float>::lowest();
+                const int64_t n = input.numel();
+                #pragma omp parallel for reduction(max:max_val) if(n > REDUCTION_OMP_THRESHOLD)
+                for (int64_t i = 0; i < n; i++) {
+                    float val = static_cast<float>(input_data[i]);
+                    if (val > max_val) {
+                        max_val = val;
+                    }
+                }
+                output_data[0] = BFloat16(max_val);
+            } else {
+                // Dimensional reduction - compute in Float32
+                const int64_t dim_size = input_shape[dim];
+
+                int64_t output_size = 1;
+                for (int64_t d = 0; d < ndim; d++) {
+                    if (d != dim) output_size *= input_shape[d];
+                }
+
+                const int64_t total_work = output_size * dim_size;
+                #pragma omp parallel for if(total_work > REDUCTION_OMP_THRESHOLD)
+                for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
+                    std::vector<int64_t> indices(ndim, 0);
+                    int64_t tmp = out_idx;
+                    for (int64_t d = ndim - 1; d >= 0; --d) {
+                        if (d == dim) continue;
+                        indices[d] = tmp % input_shape[d];
+                        tmp /= input_shape[d];
+                    }
+
+                    float max_val = std::numeric_limits<float>::lowest();
+                    for (int64_t i = 0; i < dim_size; i++) {
+                        indices[dim] = i;
+                        int64_t in_idx = 0;
+                        for (int64_t d = 0; d < ndim; d++) {
+                            in_idx += indices[d] * input_strides[d];
+                        }
+                        float val = static_cast<float>(input_data[in_idx]);
+                        if (val > max_val) {
+                            max_val = val;
+                        }
+                    }
+                    output_data[out_idx] = BFloat16(max_val);
+                }
+            }
+            break;
+        }
         default:
             throw std::runtime_error("max: unsupported dtype");
     }
@@ -1511,6 +1591,59 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                             std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                             std::vector<int64_t>(input_strides.begin(), input_strides.end()),
                             dim);
+            }
+            break;
+        }
+        case DType::BFloat16: {
+            auto* input_data = input.data<BFloat16>();
+            auto* output_data = output.data<BFloat16>();
+
+            if (dim == REDUCE_ALL) {
+                // Compute min in Float32
+                float min_val = std::numeric_limits<float>::max();
+                const int64_t n = input.numel();
+                #pragma omp parallel for reduction(min:min_val) if(n > REDUCTION_OMP_THRESHOLD)
+                for (int64_t i = 0; i < n; i++) {
+                    float val = static_cast<float>(input_data[i]);
+                    if (val < min_val) {
+                        min_val = val;
+                    }
+                }
+                output_data[0] = BFloat16(min_val);
+            } else {
+                // Dimensional reduction - compute in Float32
+                const int64_t dim_size = input_shape[dim];
+
+                int64_t output_size = 1;
+                for (int64_t d = 0; d < ndim; d++) {
+                    if (d != dim) output_size *= input_shape[d];
+                }
+
+                const int64_t total_work = output_size * dim_size;
+                #pragma omp parallel for if(total_work > REDUCTION_OMP_THRESHOLD)
+                for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
+                    std::vector<int64_t> indices(ndim, 0);
+                    int64_t tmp = out_idx;
+                    for (int64_t d = ndim - 1; d >= 0; --d) {
+                        if (d == dim) continue;
+                        indices[d] = tmp % input_shape[d];
+                        tmp /= input_shape[d];
+                    }
+
+                    float min_val = std::numeric_limits<float>::max();
+                    for (int64_t i = 0; i < dim_size; i++) {
+                        indices[dim] = i;
+                        int64_t in_idx = 0;
+                        for (int64_t d = 0; d < ndim; d++) {
+                            in_idx += indices[d] * input_strides[d];
+                        }
+                        float val = static_cast<float>(input_data[in_idx]);
+                        if (val < min_val) {
+                            min_val = val;
+                        }
+                    }
+                    output_data[out_idx] = BFloat16(min_val);
+                }
             }
             break;
         }
@@ -2457,7 +2590,13 @@ void var_along_dim(const T* input_data,
     }
 
     int64_t divisor = dim_size - correction;
-    if (divisor <= 0) divisor = 1;
+    if (divisor <= 0) {
+        // Unbiased variance with n <= correction is undefined — fill with NaN
+        for (int64_t i = 0; i < output_size; i++) {
+            output_data[i] = std::numeric_limits<T>::quiet_NaN();
+        }
+        return;
+    }
 
     const int64_t total_work = output_size * dim_size;
     #pragma omp parallel for if(total_work > REDUCTION_OMP_THRESHOLD)
@@ -2518,6 +2657,12 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
             case DType::Float32: {
                 auto* input_data = input.data<float>();
                 auto* output_data = output.data<float>();
+                int64_t divisor = n - correction;
+                if (divisor <= 0) {
+                    // Unbiased variance with n <= correction is undefined — return NaN
+                    output_data[0] = std::numeric_limits<float>::quiet_NaN();
+                    break;
+                }
                 float mean = sum_impl(input_data, n) / static_cast<float>(n);
                 float var_sum = 0.0f;
                 #pragma omp parallel for reduction(+:var_sum) if(n > 10000)
@@ -2525,14 +2670,18 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
                     float diff = input_data[i] - mean;
                     var_sum += diff * diff;
                 }
-                int64_t divisor = n - correction;
-                if (divisor <= 0) divisor = 1;
                 output_data[0] = var_sum / static_cast<float>(divisor);
                 break;
             }
             case DType::Float64: {
                 auto* input_data = input.data<double>();
                 auto* output_data = output.data<double>();
+                int64_t divisor = n - correction;
+                if (divisor <= 0) {
+                    // Unbiased variance with n <= correction is undefined — return NaN
+                    output_data[0] = std::numeric_limits<double>::quiet_NaN();
+                    break;
+                }
                 double mean = sum_impl(input_data, n) / static_cast<double>(n);
                 double var_sum = 0.0;
                 #pragma omp parallel for reduction(+:var_sum) if(n > 10000)
@@ -2540,8 +2689,6 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
                     double diff = input_data[i] - mean;
                     var_sum += diff * diff;
                 }
-                int64_t divisor = n - correction;
-                if (divisor <= 0) divisor = 1;
                 output_data[0] = var_sum / static_cast<double>(divisor);
                 break;
             }
@@ -2550,6 +2697,12 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
                 // Float16 has limited precision; Welford avoids catastrophic cancellation
                 auto* input_data = input.data<Float16>();
                 auto* output_data = output.data<float>();
+                int64_t divisor = n - correction;
+                if (divisor <= 0) {
+                    // Unbiased variance with n <= correction is undefined — return NaN
+                    output_data[0] = std::numeric_limits<float>::quiet_NaN();
+                    break;
+                }
                 float mean = 0.0f;
                 float M2 = 0.0f;
                 for (int64_t i = 0; i < n; i++) {
@@ -2559,8 +2712,6 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
                     float delta2 = x - mean;
                     M2 += delta * delta2;
                 }
-                int64_t divisor = n - correction;
-                if (divisor <= 0) divisor = 1;
                 output_data[0] = M2 / static_cast<float>(divisor);
                 break;
             }
@@ -2569,6 +2720,12 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
                 // BFloat16 has only 8 mantissa bits; Welford avoids catastrophic cancellation
                 auto* input_data = input.data<BFloat16>();
                 auto* output_data = output.data<float>();
+                int64_t divisor = n - correction;
+                if (divisor <= 0) {
+                    // Unbiased variance with n <= correction is undefined — return NaN
+                    output_data[0] = std::numeric_limits<float>::quiet_NaN();
+                    break;
+                }
                 float mean = 0.0f;
                 float M2 = 0.0f;
                 for (int64_t i = 0; i < n; i++) {
@@ -2578,8 +2735,6 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
                     float delta2 = x - mean;
                     M2 += delta * delta2;
                 }
-                int64_t divisor = n - correction;
-                if (divisor <= 0) divisor = 1;
                 output_data[0] = M2 / static_cast<float>(divisor);
                 break;
             }
@@ -2615,7 +2770,13 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
                 }
 
                 int64_t divisor = dim_size - correction;
-                if (divisor <= 0) divisor = 1;
+                if (divisor <= 0) {
+                    // Unbiased variance with n <= correction is undefined — fill with NaN
+                    for (int64_t i = 0; i < out_size; i++) {
+                        output_data[i] = std::numeric_limits<float>::quiet_NaN();
+                    }
+                    break;
+                }
 
                 #pragma omp parallel for if(out_size * dim_size > REDUCTION_OMP_THRESHOLD)
                 for (int64_t out_idx = 0; out_idx < out_size; out_idx++) {
@@ -2657,7 +2818,13 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
                 }
 
                 int64_t divisor = dim_size - correction;
-                if (divisor <= 0) divisor = 1;
+                if (divisor <= 0) {
+                    // Unbiased variance with n <= correction is undefined — fill with NaN
+                    for (int64_t i = 0; i < out_size; i++) {
+                        output_data[i] = std::numeric_limits<float>::quiet_NaN();
+                    }
+                    break;
+                }
 
                 #pragma omp parallel for if(out_size * dim_size > REDUCTION_OMP_THRESHOLD)
                 for (int64_t out_idx = 0; out_idx < out_size; out_idx++) {
@@ -2976,7 +3143,10 @@ auto any_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
 
         #pragma omp parallel for if(output_size > 1000)
         for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
-            std::array<int64_t, 16> indices{};
+            // Use stack allocation for common case (<=16 dims), heap for rare large dims
+            std::vector<int64_t> indices_vec;
+            int64_t indices_stack[16] = {};
+            int64_t* indices = (shape_ndim <= 16) ? indices_stack : (indices_vec.resize(shape_ndim, 0), indices_vec.data());
             int64_t tmp = out_idx;
             for (int64_t d = shape_ndim - 1; d >= 0; --d) {
                 if (d == dim) continue;
@@ -3064,7 +3234,10 @@ auto all_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
 
         #pragma omp parallel for if(output_size > 1000)
         for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
-            std::array<int64_t, 16> indices{};
+            // Use stack allocation for common case (<=16 dims), heap for rare large dims
+            std::vector<int64_t> indices_vec;
+            int64_t indices_stack[16] = {};
+            int64_t* indices = (shape_ndim <= 16) ? indices_stack : (indices_vec.resize(shape_ndim, 0), indices_vec.data());
             int64_t tmp = out_idx;
             for (int64_t d = shape_ndim - 1; d >= 0; --d) {
                 if (d == dim) continue;

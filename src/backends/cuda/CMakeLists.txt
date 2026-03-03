@@ -9,10 +9,6 @@ enable_language(CUDA)
 # Find CUDA Toolkit
 find_package(CUDAToolkit REQUIRED)
 
-if(NOT CUDAToolkit_FOUND)
-    message(FATAL_ERROR "CUDA Toolkit not found. Please install CUDA 12.0 or higher.")
-endif()
-
 message(STATUS "CUDA Backend: Found CUDA ${CUDAToolkit_VERSION}")
 
 set(CUDA_BACKEND_SOURCES
@@ -208,17 +204,17 @@ else()
     message(STATUS "CUDA Backend: Using user-specified architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 endif()
 
-# --use_fast_math trades precision for speed: enables __fdividef, __expf etc.
-# and flushes denormals to zero. Disable for stricter IEEE-754 compliance
-# in inference workloads where bit-exact results matter.
-option(TENZOR_CUDA_FAST_MATH "Enable --use_fast_math for CUDA kernels (faster but less precise)" ON)
+# Fast-math trades precision for speed: enables __fdividef, __expf etc.
+# We use individual flags instead of --use_fast_math so we can keep
+# --ftz=false (preserve denormals) while still getting the speed benefits.
+option(TENZOR_CUDA_FAST_MATH "Enable fast-math optimizations for CUDA kernels (faster but less precise)" ON)
 
 # CUDA compiler options
 target_compile_options(tenzor_backend_cuda PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:
         --expt-relaxed-constexpr
         --expt-extended-lambda
-        $<$<BOOL:${TENZOR_CUDA_FAST_MATH}>:--use_fast_math>
+        $<$<BOOL:${TENZOR_CUDA_FAST_MATH}>:--fmad=true --prec-div=false --prec-sqrt=false>
         --ftz=false
         --generate-line-info
     >

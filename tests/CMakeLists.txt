@@ -2936,3 +2936,31 @@ target_link_libraries(test_fft PRIVATE
 )
 
 tenzor_discover_tests(test_fft DISCOVERY_TIMEOUT 60)
+
+# ============================================================================
+# Empty Tensor Operations Tests (systematic coverage)
+# ============================================================================
+add_executable(test_empty_tensor_ops
+    unit/test_empty_tensor_ops.cpp
+)
+
+target_link_libraries(test_empty_tensor_ops PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+tenzor_discover_tests(test_empty_tensor_ops DISCOVERY_TIMEOUT 30)
+
+# ============================================================================
+# In-Place + Autograd Version Counter Tests
+# ============================================================================
+add_executable(test_inplace_autograd
+    autograd/test_inplace_autograd.cpp
+)
+
+target_link_libraries(test_inplace_autograd PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+tenzor_discover_tests(test_inplace_autograd DISCOVERY_TIMEOUT 60)

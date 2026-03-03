@@ -52,9 +52,9 @@ find_library(MKL_CORE_LIBRARY
     PATH_SUFFIXES ${MKL_LIB_DIR_SUFFIX}
 )
 
-# Find interface library (LP64 for 64-bit integers or ILP64)
+# Find interface library (ILP64 for 64-bit integers)
 find_library(MKL_INTERFACE_LIBRARY
-    NAMES mkl_intel_lp64
+    NAMES mkl_intel_ilp64
     PATHS ${MKL_SEARCH_PATHS}
     PATH_SUFFIXES ${MKL_LIB_DIR_SUFFIX}
 )

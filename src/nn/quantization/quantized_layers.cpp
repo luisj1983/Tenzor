@@ -6,6 +6,8 @@
 #include "tenzor/nn/quantization/quantized_layers.hpp"
 #include "tenzor/nn/layers/linear.hpp"
 #include "tenzor/nn/layers/conv.hpp"
+#include "tenzor/nn/layers/batchnorm.hpp"
+#include "tenzor/nn/layers/normalization.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/creation.hpp"
@@ -29,7 +31,8 @@ namespace kernels {
         float* output, int64_t batch, int64_t in_channels, int64_t out_channels,
         int64_t h_in, int64_t w_in, int64_t h_out, int64_t w_out,
         int64_t kernel_size, int64_t stride, int64_t padding,
-        float input_scale, float weight_scale, int32_t input_zp, int32_t weight_zp
+        float input_scale, float weight_scale, int32_t input_zp, int32_t weight_zp,
+        int64_t dilation = 1, int64_t groups = 1
     ) -> void;
 }
 
@@ -287,7 +290,8 @@ auto QuantizedConv2d::forward_quantized(const QuantizedTensor& input) -> Tensor 
         batch, in_channels_, out_channels_,
         h_in, w_in, h_out, w_out,
         kernel_size_, stride_, padding_,
-        input_scale, weight_scale, input_zp, weight_zp
+        input_scale, weight_scale, input_zp, weight_zp,
+        dilation_, groups_
     );
 
     // Move output back to original device
@@ -335,6 +339,11 @@ auto QuantizedConv2d::from_float(const Conv2d& fp_conv, const QConfig& qconfig)
     int64_t in_channels = weight_shape[1];
     int64_t kernel_h = weight_shape[2];
     int64_t kernel_w = weight_shape[3];
+    if (kernel_h != kernel_w) {
+        throw std::runtime_error(
+            "QuantizedConv2d::from_float: non-square kernels not supported (got " +
+            std::to_string(kernel_h) + "x" + std::to_string(kernel_w) + ")");
+    }
 
     // Create quantized Conv2d with actual parameters from source Conv2d
     auto q_conv = std::make_shared<QuantizedConv2d>(
@@ -405,7 +414,13 @@ auto QuantizedBatchNorm2d::from_float(const Module& fp_bn, const QConfig& qconfi
     //   bias = beta - scale * running_mean
     // This allows BN to be applied as: y = scale * x + bias
 
-    constexpr float eps = 1e-5f;  // Standard BatchNorm epsilon
+    // Read epsilon from the source module if possible, otherwise use default
+    double eps = 1e-5;
+    if (auto* bn2d = dynamic_cast<const BatchNorm2d*>(&fp_bn)) {
+        eps = bn2d->eps();
+    } else if (auto* bn1d = dynamic_cast<const BatchNorm1d*>(&fp_bn)) {
+        eps = bn1d->eps();
+    }
 
     // Compute scale = gamma / sqrt(var + eps)
     Tensor sqrt_var = sqrt(running_var + eps);
@@ -490,8 +505,14 @@ auto QuantizedLayerNorm::from_float(const Module& fp_ln, const QConfig& /*qconfi
     auto wshape = weight.shape();
     std::vector<int64_t> normalized_shape(wshape.begin(), wshape.end());
 
+    // Read epsilon from the source module if possible, otherwise use default
+    double eps = 1e-5;
+    if (auto* ln = dynamic_cast<const LayerNorm*>(&fp_ln)) {
+        eps = ln->eps();
+    }
+
     return std::make_shared<QuantizedLayerNorm>(
-        normalized_shape, weight, bias, 1e-5);
+        normalized_shape, weight, bias, eps);
 }
 
 // ============================================================================

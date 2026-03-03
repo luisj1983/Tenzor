@@ -17,6 +17,7 @@
 #include <chrono>
 #include <thread>
 #include <atomic>
+#include <mutex>
 #include <random>
 #include <charconv>  // For std::from_chars (dispatch wrappers)
 #include <span>      // For std::span (dispatch wrappers)
@@ -120,29 +121,44 @@ __global__ void check_for_zeros_kernel(const T* data, int64_t n, int* has_zero) 
 // Only enabled in debug builds to avoid the stream sync penalty in release.
 // Uses pinned mapped host memory so the kernel writes directly to host-visible
 // memory, eliminating the explicit D2H memcpy.
+//
+// NOTE: Avoids `static thread_local` for the pinned buffer because this code
+// lives in a dlopen'd shared library.  OMP worker threads created before the
+// library was loaded never run thread_local constructors, causing
+// use-before-init crashes.  Instead we use a process-wide singleton protected
+// by std::once_flag (safe across OMP workers and dlopen boundaries).
+namespace {
+struct PinnedFlagState {
+    int* h_flag = nullptr;
+    int* d_flag = nullptr;
+    std::once_flag init_flag;
+    std::mutex mtx;  // Serialise concurrent zero-checks (pinned buffer is shared)
+
+    void ensure_init() {
+        std::call_once(init_flag, [this]() {
+            CUDA_CHECK(cudaHostAlloc(&h_flag, sizeof(int), cudaHostAllocMapped));
+            CUDA_CHECK(cudaHostGetDevicePointer(&d_flag, h_flag, 0));
+        });
+    }
+
+    // Intentionally leak the pinned allocation — freeing CUDA memory during
+    // static destruction of a dlopen'd library triggers crashes.
+};
+
+PinnedFlagState& get_pinned_flag_state() {
+    static PinnedFlagState state;
+    return state;
+}
+} // anonymous namespace
+
 template<typename T>
 inline void check_integer_divisor_for_zeros(const T* data, int64_t n, cudaStream_t stream) {
 #ifndef TENZOR_SKIP_INTEGER_DIV_CHECK
-    // Use persistent pinned flag buffer to avoid per-call cudaHostAlloc overhead.
-    // The buffer is allocated once per thread and reused across division operations.
-    static thread_local struct PinnedFlagState {
-        int* h_flag = nullptr;
-        int* d_flag = nullptr;
-        bool initialized = false;
-        ~PinnedFlagState() {
-            if (h_flag) {
-                cudaFreeHost(h_flag);
-                h_flag = nullptr;
-                d_flag = nullptr;
-            }
-        }
-    } state;
+    auto& state = get_pinned_flag_state();
+    state.ensure_init();
 
-    if (!state.initialized) {
-        CUDA_CHECK(cudaHostAlloc(&state.h_flag, sizeof(int), cudaHostAllocMapped));
-        CUDA_CHECK(cudaHostGetDevicePointer(&state.d_flag, state.h_flag, 0));
-        state.initialized = true;
-    }
+    // Serialise: the single pinned buffer is shared across threads
+    std::lock_guard<std::mutex> lock(state.mtx);
     *state.h_flag = 0;
 
     dim3 grid, block;
@@ -391,11 +407,24 @@ struct DivOp {
     template<typename T>
     __device__ T operator()(T a, T b) const {
         if (b == T(0)) {
+            // For floating-point types, return INFINITY (IEEE 754 semantics).
+            // Integer specializations below return 0 to avoid UB from T(INFINITY).
             return T(INFINITY);
         }
         return a / b;
     }
 };
+// Integer specializations: return 0 on division by zero (host-side pre-check
+// normally throws before we get here, but when TENZOR_SKIP_INTEGER_DIV_CHECK
+// is defined the kernel must still produce a defined value, not UB).
+template<> __device__ inline int32_t DivOp::operator()(int32_t a, int32_t b) const {
+    if (b == 0) return 0;
+    return a / b;
+}
+template<> __device__ inline int64_t DivOp::operator()(int64_t a, int64_t b) const {
+    if (b == 0) return 0;
+    return a / b;
+}
 template<> __device__ inline __half DivOp::operator()(const __half a, const __half b) const {
     float fb = __half2float(b);
     if (fb == 0.0f) return __float2half(INFINITY);
@@ -447,15 +476,13 @@ __global__ void mul_kernel_device(const T* a, const T* b, T* c, int64_t n) {
 }
 
 // Divide kernel - element-wise division
+// Uses DivOp for consistent div-by-zero handling across all code paths
+// (floating-point returns INFINITY, integer returns 0 — no UB).
 template<typename T>
 __global__ void div_kernel_device(const T* a, const T* b, T* c, int64_t n) {
+    DivOp op;
     CUDA_KERNEL_LOOP(idx, n) {
-        T divisor = b[idx];
-        if (divisor == T(0)) {
-            c[idx] = INFINITY;  // Handle division by zero
-        } else {
-            c[idx] = a[idx] / divisor;
-        }
+        c[idx] = op(a[idx], b[idx]);
     }
 }
 
@@ -1225,7 +1252,7 @@ auto mul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
                 reinterpret_cast<__half*>(result.data<Float16>()), n);
             CUDA_CHECK(cudaGetLastError());
         } else if (a.dtype() == DType::BFloat16) {
-            mul_kernel_device<<<grid, block, 0, stream>>>(
+            mul_kernel_bf16<<<grid, block, 0, stream>>>(
                 reinterpret_cast<const __nv_bfloat16*>(a.data<BFloat16>()),
                 reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
                 reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);

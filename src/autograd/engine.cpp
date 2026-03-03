@@ -436,6 +436,12 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
             ") must match number of gradients (" + std::to_string(gradients.size()) + ")");
     }
 
+    // Save and clear grad_accumulators_ for re-entrancy safety.
+    // Nested backward calls (from checkpointing) must use independent
+    // accumulator maps to avoid corrupting the outer call's state.
+    auto saved_accumulators = std::move(grad_accumulators_);
+    grad_accumulators_.clear();
+
     // Initialize gradients for each root
     for (size_t i = 0; i < roots.size(); ++i) {
         if (!roots[i] || !roots[i]->requires_grad()) {
@@ -599,11 +605,14 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
     } catch (...) {
         clear_gradients();
         cleanup_graph();
+        grad_accumulators_ = std::move(saved_accumulators);
         throw;
     }
 
     clear_gradients();
     cleanup_graph();
+    // Restore outer accumulators for re-entrancy safety
+    grad_accumulators_ = std::move(saved_accumulators);
 }
 
 // Thread-local engine -- each thread gets its own instance so concurrent

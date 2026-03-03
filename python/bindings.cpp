@@ -530,6 +530,48 @@ PYBIND11_MODULE(tenzor_core, m) {
              "Fill tensor with scalar value in-place")
         .def("zero_", &tenzor::Tensor::zero_,
              "Fill tensor with zeros in-place")
+        // Buffer protocol support (enables memoryview, numpy.asarray, etc.)
+        .def_buffer([](tenzor::Tensor& t) -> py::buffer_info {
+            if (t.device().type != tenzor::Device::Type::CPU) {
+                throw std::runtime_error("Buffer protocol only supported for CPU tensors");
+            }
+            if (!t.is_contiguous()) {
+                throw std::runtime_error("Buffer protocol only supported for contiguous tensors");
+            }
+
+            // Map DType to Python struct format string
+            std::string format;
+            switch (t.dtype()) {
+                case tenzor::DType::Float32: format = py::format_descriptor<float>::format(); break;
+                case tenzor::DType::Float64: format = py::format_descriptor<double>::format(); break;
+                case tenzor::DType::Int32: format = py::format_descriptor<int32_t>::format(); break;
+                case tenzor::DType::Int64: format = py::format_descriptor<int64_t>::format(); break;
+                case tenzor::DType::Int16: format = py::format_descriptor<int16_t>::format(); break;
+                case tenzor::DType::Int8: format = py::format_descriptor<int8_t>::format(); break;
+                case tenzor::DType::UInt8: format = py::format_descriptor<uint8_t>::format(); break;
+                case tenzor::DType::Bool: format = py::format_descriptor<bool>::format(); break;
+                default: throw std::runtime_error("Buffer protocol not supported for dtype");
+            }
+
+            auto shape = t.shape();
+            auto strides = t.strides();
+            auto elem_size = static_cast<ssize_t>(t.dtype_size());
+
+            std::vector<ssize_t> shape_vec(shape.begin(), shape.end());
+            std::vector<ssize_t> stride_bytes;
+            for (auto s : strides) {
+                stride_bytes.push_back(static_cast<ssize_t>(s) * elem_size);
+            }
+
+            return py::buffer_info(
+                t.data_ptr(),
+                elem_size,
+                format,
+                static_cast<ssize_t>(t.ndim()),
+                shape_vec,
+                stride_bytes
+            );
+        })
         // NumPy interoperability
         .def("numpy", [](const tenzor::Tensor& t) {
              // Release GIL during CPU transfer (pure C++ work)
@@ -709,8 +751,20 @@ PYBIND11_MODULE(tenzor_core, m) {
              return static_cast<int64_t>(t.item<float>());
              })
         .def("__index__", [](const tenzor::Tensor& t) -> int64_t {
-             if (t.numel() != 1) throw py::value_error("only one element tensors can be converted to Python scalars");
-             return t.item<int64_t>();
+             if (t.numel() != 1) {
+                 throw py::value_error("only single-element tensors can be converted to Python scalars");
+             }
+             switch (t.dtype()) {
+                 case tenzor::DType::Float64: return static_cast<int64_t>(t.item<double>());
+                 case tenzor::DType::Float32: return static_cast<int64_t>(t.item<float>());
+                 case tenzor::DType::Int64: return t.item<int64_t>();
+                 case tenzor::DType::Int32: return static_cast<int64_t>(t.item<int32_t>());
+                 case tenzor::DType::Int16: return static_cast<int64_t>(t.item<int16_t>());
+                 case tenzor::DType::Int8: return static_cast<int64_t>(t.item<int8_t>());
+                 case tenzor::DType::UInt8: return static_cast<int64_t>(t.item<uint8_t>());
+                 case tenzor::DType::Bool: return static_cast<int64_t>(t.item<bool>());
+                 default: return static_cast<int64_t>(t.item<float>());
+             }
              })
         // Iteration: yields t[0], t[1], ..., t[n-1]
         .def("__iter__", [](const tenzor::Tensor& t) {
@@ -724,17 +778,36 @@ PYBIND11_MODULE(tenzor_core, m) {
              })
         // Comparison operators
         .def("__eq__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::eq(a, b); },
-             py::is_operator())
+             py::is_operator(), py::call_guard<py::gil_scoped_release>())
         .def("__ne__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::ne(a, b); },
-             py::is_operator())
+             py::is_operator(), py::call_guard<py::gil_scoped_release>())
         .def("__lt__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::lt(a, b); },
-             py::is_operator())
+             py::is_operator(), py::call_guard<py::gil_scoped_release>())
         .def("__le__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::le(a, b); },
-             py::is_operator())
+             py::is_operator(), py::call_guard<py::gil_scoped_release>())
         .def("__gt__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::gt(a, b); },
-             py::is_operator())
+             py::is_operator(), py::call_guard<py::gil_scoped_release>())
         .def("__ge__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::ge(a, b); },
-             py::is_operator())
+             py::is_operator(), py::call_guard<py::gil_scoped_release>())
+        // Scalar comparison operators
+        .def("__eq__", [](const tenzor::Tensor& a, double b) {
+            return tenzor::eq(a, tenzor::full(std::vector<int64_t>{}, b, a.dtype(), a.device()));
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
+        .def("__ne__", [](const tenzor::Tensor& a, double b) {
+            return tenzor::ne(a, tenzor::full(std::vector<int64_t>{}, b, a.dtype(), a.device()));
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
+        .def("__lt__", [](const tenzor::Tensor& a, double b) {
+            return tenzor::lt(a, tenzor::full(std::vector<int64_t>{}, b, a.dtype(), a.device()));
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
+        .def("__le__", [](const tenzor::Tensor& a, double b) {
+            return tenzor::le(a, tenzor::full(std::vector<int64_t>{}, b, a.dtype(), a.device()));
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
+        .def("__gt__", [](const tenzor::Tensor& a, double b) {
+            return tenzor::gt(a, tenzor::full(std::vector<int64_t>{}, b, a.dtype(), a.device()));
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
+        .def("__ge__", [](const tenzor::Tensor& a, double b) {
+            return tenzor::ge(a, tenzor::full(std::vector<int64_t>{}, b, a.dtype(), a.device()));
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
         // Container protocol
         .def("__len__", [](const tenzor::Tensor& t) -> int64_t {
              if (t.ndim() == 0) throw py::value_error("len() of a 0-d tensor");
@@ -1314,22 +1387,22 @@ PYBIND11_MODULE(tenzor_core, m) {
                 if (src.numel() == 1) {
                     // Get scalar value from source
                     auto src_cpu = (src.device().type == tenzor::Device::Type::CPU) ? src : src.cpu();
-                    float scalar_value;
+                    double scalar_value;
                     switch (src.dtype()) {
                         case tenzor::DType::Float32:
-                            scalar_value = *src_cpu.data<float>();
+                            scalar_value = static_cast<double>(*src_cpu.data<float>());
                             break;
                         case tenzor::DType::Float64:
-                            scalar_value = static_cast<float>(*src_cpu.data<double>());
+                            scalar_value = *src_cpu.data<double>();
                             break;
                         case tenzor::DType::Int32:
-                            scalar_value = static_cast<float>(*src_cpu.data<int32_t>());
+                            scalar_value = static_cast<double>(*src_cpu.data<int32_t>());
                             break;
                         case tenzor::DType::Int64:
-                            scalar_value = static_cast<float>(*src_cpu.data<int64_t>());
+                            scalar_value = static_cast<double>(*src_cpu.data<int64_t>());
                             break;
                         default:
-                            throw py::type_error("Unsupported dtype for scalar broadcast in __setitem__");
+                            throw std::runtime_error("Unsupported dtype for scalar broadcast in __setitem__");
                     }
                     dst.fill_(scalar_value);
                     return;
@@ -2120,11 +2193,6 @@ PYBIND11_MODULE(tenzor_core, m) {
     }, "Cumulative product",
          py::arg("input"), py::arg("dim"));
 
-    // argmax and argmin (already declared in reduction.hpp)
-    m.def("argmax", &tenzor::argmax, "Indices of maximum values",
-         py::arg("input"), py::arg("dim") = py::none(), py::arg("keepdim") = false);
-    m.def("argmin", &tenzor::argmin, "Indices of minimum values",
-         py::arg("input"), py::arg("dim") = py::none(), py::arg("keepdim") = false);
 
     // Autograd
     py::class_<tenzor::Variable, std::shared_ptr<tenzor::Variable>>(m, "Variable")
@@ -2246,105 +2314,142 @@ PYBIND11_MODULE(tenzor_core, m) {
         // Power (uses tensor-level pow, wraps back in Variable)
         .def("__pow__", [](const tenzor::Variable& a, float exp) {
             auto result = tenzor::pow(a.tensor(), exp);
-            return tenzor::Variable(result, a.requires_grad());
+            return tenzor::Variable(result, false);
         }, py::is_operator())
         // Modulo and floor division (operate on underlying tensors)
         .def("__mod__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
             auto result = tenzor::fmod(a.tensor(), b.tensor());
-            return tenzor::Variable(result, a.requires_grad() || b.requires_grad());
+            return tenzor::Variable(result, false);
         }, py::is_operator())
         .def("__mod__", [](const tenzor::Variable& a, float b) {
             auto b_tensor = tenzor::full(std::vector<int64_t>{}, static_cast<double>(b),
                                          a.dtype(), a.device());
             auto result = tenzor::fmod(a.tensor(), b_tensor);
-            return tenzor::Variable(result, a.requires_grad());
+            return tenzor::Variable(result, false);
         }, py::is_operator())
         .def("__rmod__", [](const tenzor::Variable& a, float b) {
             auto b_tensor = tenzor::full(std::vector<int64_t>{}, static_cast<double>(b),
                                          a.dtype(), a.device());
             auto result = tenzor::fmod(b_tensor, a.tensor());
-            return tenzor::Variable(result, a.requires_grad());
+            return tenzor::Variable(result, false);
         }, py::is_operator())
         .def("__floordiv__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
             auto result = tenzor::floor(a.tensor() / b.tensor());
-            return tenzor::Variable(result, a.requires_grad() || b.requires_grad());
+            return tenzor::Variable(result, false);
         }, py::is_operator())
         .def("__floordiv__", [](const tenzor::Variable& a, float b) {
             auto result = tenzor::floor(a.tensor() / static_cast<double>(b));
-            return tenzor::Variable(result, a.requires_grad());
+            return tenzor::Variable(result, false);
         }, py::is_operator())
         .def("__rfloordiv__", [](const tenzor::Variable& a, float b) {
             auto b_tensor = tenzor::full(std::vector<int64_t>{}, static_cast<double>(b),
                                          a.dtype(), a.device());
             auto result = tenzor::floor(b_tensor / a.tensor());
-            return tenzor::Variable(result, a.requires_grad());
+            return tenzor::Variable(result, false);
         }, py::is_operator())
         // Comparison operators (return Tensors, not Variables — no grad needed)
         .def("__eq__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
             return tenzor::eq(a.tensor(), b.tensor());
-        }, py::is_operator())
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
         .def("__ne__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
             return tenzor::ne(a.tensor(), b.tensor());
-        }, py::is_operator())
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
         .def("__lt__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
             return tenzor::lt(a.tensor(), b.tensor());
-        }, py::is_operator())
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
         .def("__le__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
             return tenzor::le(a.tensor(), b.tensor());
-        }, py::is_operator())
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
         .def("__gt__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
             return tenzor::gt(a.tensor(), b.tensor());
-        }, py::is_operator())
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
         .def("__ge__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
             return tenzor::ge(a.tensor(), b.tensor());
-        }, py::is_operator())
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
+        // Scalar comparison operators
+        .def("__eq__", [](const tenzor::Variable& a, double b) {
+            return tenzor::eq(a.tensor(), tenzor::full(std::vector<int64_t>{}, b, a.dtype(), a.device()));
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
+        .def("__ne__", [](const tenzor::Variable& a, double b) {
+            return tenzor::ne(a.tensor(), tenzor::full(std::vector<int64_t>{}, b, a.dtype(), a.device()));
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
+        .def("__lt__", [](const tenzor::Variable& a, double b) {
+            return tenzor::lt(a.tensor(), tenzor::full(std::vector<int64_t>{}, b, a.dtype(), a.device()));
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
+        .def("__le__", [](const tenzor::Variable& a, double b) {
+            return tenzor::le(a.tensor(), tenzor::full(std::vector<int64_t>{}, b, a.dtype(), a.device()));
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
+        .def("__gt__", [](const tenzor::Variable& a, double b) {
+            return tenzor::gt(a.tensor(), tenzor::full(std::vector<int64_t>{}, b, a.dtype(), a.device()));
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
+        .def("__ge__", [](const tenzor::Variable& a, double b) {
+            return tenzor::ge(a.tensor(), tenzor::full(std::vector<int64_t>{}, b, a.dtype(), a.device()));
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
         // In-place operators
         .def("__iadd__", [](tenzor::Variable& a, const tenzor::Variable& b) -> tenzor::Variable& {
             tenzor::add_(a.tensor(), b.tensor());
+            a.tensor().bump_version();
             return a;
         }, py::is_operator())
         .def("__isub__", [](tenzor::Variable& a, const tenzor::Variable& b) -> tenzor::Variable& {
             tenzor::sub_(a.tensor(), b.tensor());
+            a.tensor().bump_version();
             return a;
         }, py::is_operator())
         .def("__imul__", [](tenzor::Variable& a, const tenzor::Variable& b) -> tenzor::Variable& {
             tenzor::mul_(a.tensor(), b.tensor());
+            a.tensor().bump_version();
             return a;
         }, py::is_operator())
         .def("__itruediv__", [](tenzor::Variable& a, const tenzor::Variable& b) -> tenzor::Variable& {
             tenzor::div_(a.tensor(), b.tensor());
+            a.tensor().bump_version();
             return a;
         }, py::is_operator())
         // Scalar in-place
         .def("__iadd__", [](tenzor::Variable& a, float b) -> tenzor::Variable& {
             auto scalar_t = tenzor::full({1}, static_cast<double>(b), a.dtype(), a.device());
             tenzor::add_(a.tensor(), scalar_t);
+            a.tensor().bump_version();
             return a;
         }, py::is_operator())
         .def("__isub__", [](tenzor::Variable& a, float b) -> tenzor::Variable& {
             auto scalar_t = tenzor::full({1}, static_cast<double>(b), a.dtype(), a.device());
             tenzor::sub_(a.tensor(), scalar_t);
+            a.tensor().bump_version();
             return a;
         }, py::is_operator())
         .def("__imul__", [](tenzor::Variable& a, float b) -> tenzor::Variable& {
             auto scalar_t = tenzor::full({1}, static_cast<double>(b), a.dtype(), a.device());
             tenzor::mul_(a.tensor(), scalar_t);
+            a.tensor().bump_version();
             return a;
         }, py::is_operator())
         .def("__itruediv__", [](tenzor::Variable& a, float b) -> tenzor::Variable& {
             auto scalar_t = tenzor::full({1}, static_cast<double>(b), a.dtype(), a.device());
             tenzor::div_(a.tensor(), scalar_t);
+            a.tensor().bump_version();
             return a;
         }, py::is_operator())
         // Numeric protocol
         .def("__float__", [](const tenzor::Variable& v) {
             auto t = v.tensor();
+            if (t.numel() != 1) {
+                throw py::value_error(
+                    "only single-element tensors can be converted to Python scalars (got " +
+                    std::to_string(t.numel()) + " elements)");
+            }
             if (t.dtype() == tenzor::DType::Float64)
                 return t.item<double>();
             return static_cast<double>(t.item<float>());
         })
         .def("__int__", [](const tenzor::Variable& v) {
             auto t = v.tensor();
+            if (t.numel() != 1) {
+                throw py::value_error(
+                    "only single-element tensors can be converted to Python scalars (got " +
+                    std::to_string(t.numel()) + " elements)");
+            }
             if (t.dtype() == tenzor::DType::Int64)
                 return t.item<int64_t>();
             if (t.dtype() == tenzor::DType::Int32)

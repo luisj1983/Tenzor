@@ -36,7 +36,7 @@ public:
     /// Each thread owns its own handle, so no data race on cublasSetStream.
     static cublasHandle_t get(cudaStream_t stream = nullptr) {
         static thread_local CuBLASHandlePool instance;
-        if (stream && stream != instance.last_stream_) {
+        if (stream != instance.last_stream_) {
             CUBLAS_CHECK(cublasSetStream(instance.handle_, stream));
             instance.last_stream_ = stream;
         }

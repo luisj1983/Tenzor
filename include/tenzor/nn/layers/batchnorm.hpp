@@ -73,6 +73,9 @@ public:
      */
     auto forward_impl(const Variable& input) -> Variable override;
 
+    /// @brief Get the epsilon value used for numerical stability.
+    [[nodiscard]] auto eps() const -> double { return eps_; }
+
 private:
     int64_t num_features_;          ///< Number of feature channels
     double eps_;                    ///< Numerical stability constant
@@ -139,6 +142,9 @@ public:
      * @return Normalized output (same shape as input)
      */
     auto forward_impl(const Variable& input) -> Variable override;
+
+    /// @brief Get the epsilon value used for numerical stability.
+    [[nodiscard]] auto eps() const -> double { return eps_; }
 
 private:
     int64_t num_features_;          ///< Number of feature channels

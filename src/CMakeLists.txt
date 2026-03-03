@@ -161,6 +161,9 @@ set(TENZOR_CORE_SOURCES
 # Create core library
 add_library(tenzor_core SHARED ${TENZOR_CORE_SOURCES})
 
+# Apply Tenzor-specific warning and optimization flags
+target_compile_options(tenzor_core PRIVATE ${TENZOR_WARNING_FLAGS})
+
 # Set target properties
 set_target_properties(tenzor_core PROPERTIES
     VERSION ${PROJECT_VERSION}

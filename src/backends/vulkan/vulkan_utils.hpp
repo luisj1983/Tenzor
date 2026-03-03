@@ -616,10 +616,20 @@ private:
  * maxComputeWorkGroupSize[0] and maxComputeWorkGroupInvocations, capped at 1024.
  * Power-of-2 sizes are preferred for efficient GPU occupancy.
  *
+ * Device properties are queried once per physical device and cached to avoid
+ * repeated Vulkan API calls on every dispatch.
+ *
  * @param physicalDevice The Vulkan physical device to query
  * @return Optimal workgroup size (always a power of 2, at most 1024)
  */
 inline uint32_t optimalWorkgroupSize(VkPhysicalDevice physicalDevice) {
+    static VkPhysicalDevice cachedDevice = VK_NULL_HANDLE;
+    static uint32_t cachedResult = 0;
+
+    if (cachedDevice == physicalDevice && cachedResult != 0) {
+        return cachedResult;
+    }
+
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(physicalDevice, &props);
     // Use the minimum of maxComputeWorkGroupSize[0] and maxComputeWorkGroupInvocations
@@ -629,6 +639,9 @@ inline uint32_t optimalWorkgroupSize(VkPhysicalDevice physicalDevice) {
     // Clamp to powers of 2 for efficiency
     uint32_t result = 1;
     while (result * 2 <= optimal && result * 2 <= 1024) result *= 2;
+
+    cachedDevice = physicalDevice;
+    cachedResult = result;
     return result;
 }
 

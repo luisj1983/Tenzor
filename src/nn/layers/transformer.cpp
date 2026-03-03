@@ -113,6 +113,12 @@ auto PositionalEncoding::forward_impl(const Variable& x) -> Variable {
         for (int64_t i = 0; i < seq_len * d_model_; ++i) {
             pe_dst[i] = pe_src[i];
         }
+    } else if (pe_dtype == DType::BFloat16) {
+        auto* pe_src = pe_.data<uint16_t>();
+        auto* pe_dst = pe_for_seq.data<uint16_t>();
+        for (int64_t i = 0; i < seq_len * d_model_; ++i) {
+            pe_dst[i] = pe_src[i];
+        }
     }
 
     // Now move to target device if needed
@@ -528,6 +534,10 @@ auto TransformerDecoder::forward(const Variable& tgt,
                                 const Tensor& memory_mask,
                                 const Tensor& tgt_key_padding_mask,
                                 const Tensor& memory_key_padding_mask) -> Variable {
+    // Call forward pre-hooks (enables CPU-start offloading)
+    // NOTE: This is necessary because this multi-argument forward bypasses Module::forward()
+    call_forward_pre_hooks();
+
     // Pass through first decoder layer using original tgt (no copy)
     Variable output = layers_[0]->forward(tgt, memory, tgt_mask, memory_mask,
                                          tgt_key_padding_mask, memory_key_padding_mask);
@@ -542,6 +552,9 @@ auto TransformerDecoder::forward(const Variable& tgt,
     if (norm_) {
         output = norm_->forward(output);
     }
+
+    // Call forward post-hooks (enables CPU-start offloading)
+    call_forward_post_hooks();
 
     return output;
 }

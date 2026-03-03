@@ -593,6 +593,12 @@ public:
      */
     auto operator/(double scalar) const -> Tensor;
 
+    // Reverse scalar operators (scalar op tensor)
+    friend auto operator+(double s, const Tensor& t) -> Tensor;
+    friend auto operator-(double s, const Tensor& t) -> Tensor;
+    friend auto operator*(double s, const Tensor& t) -> Tensor;
+    friend auto operator/(double s, const Tensor& t) -> Tensor;
+
     // ============================================================================
     // In-place Operations
     // ============================================================================
@@ -839,6 +845,9 @@ public:
      */
     auto size(int64_t dim) const -> int64_t {
         if (dim < 0) dim += ndim();
+        if (dim < 0 || dim >= ndim())
+            throw std::out_of_range("Dimension out of range (got " + std::to_string(dim) +
+                                    " for tensor with " + std::to_string(ndim()) + " dimensions)");
         return shape()[dim];
     }
 
@@ -857,6 +866,9 @@ public:
      */
     auto stride(int64_t dim) const -> int64_t {
         if (dim < 0) dim += ndim();
+        if (dim < 0 || dim >= ndim())
+            throw std::out_of_range("Dimension out of range (got " + std::to_string(dim) +
+                                    " for tensor with " + std::to_string(ndim()) + " dimensions)");
         return strides()[dim];
     }
 

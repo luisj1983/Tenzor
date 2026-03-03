@@ -104,8 +104,14 @@ auto GradScaler::check_inf_nan_(const optim::Optimizer& optimizer) const -> bool
         const int64_t numel = cpu_grad.numel();
 
         // Check each element for inf or nan based on dtype
-        if (cpu_grad.dtype() == DType::Float64) {
-            const double* data_ptr = cpu_grad.data<double>();
+        // BFloat16/Float16: convert to Float32 before scanning
+        Tensor scan_grad = cpu_grad;
+        if (scan_grad.dtype() == DType::BFloat16 || scan_grad.dtype() == DType::Float16) {
+            scan_grad = scan_grad.to(DType::Float32);
+        }
+
+        if (scan_grad.dtype() == DType::Float64) {
+            const double* data_ptr = scan_grad.data<double>();
             for (int64_t i = 0; i < numel; ++i) {
                 const double val = data_ptr[i];
                 if (std::isinf(val) || std::isnan(val)) {
@@ -113,8 +119,8 @@ auto GradScaler::check_inf_nan_(const optim::Optimizer& optimizer) const -> bool
                 }
             }
         } else {
-            // Default to Float32 (also covers Float16 which is converted to Float32)
-            const float* data_ptr = cpu_grad.data<float>();
+            // Default to Float32 (Float16/BFloat16 already converted above)
+            const float* data_ptr = scan_grad.data<float>();
             for (int64_t i = 0; i < numel; ++i) {
                 const float val = data_ptr[i];
                 if (std::isinf(val) || std::isnan(val)) {

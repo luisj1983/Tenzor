@@ -638,6 +638,9 @@ auto Tensor::clone() const -> Tensor {
 }
 
 auto Tensor::detach() const -> Tensor {
+    if (!impl_) {
+        throw std::runtime_error("Cannot detach an uninitialized tensor");
+    }
     // Share storage (zero-copy) like view() — no need to copy data
     Tensor result;
     result.impl_ = std::make_shared<TensorImpl>(*impl_);
@@ -692,6 +695,26 @@ auto Tensor::operator*(double scalar) const -> Tensor {
 
 auto Tensor::operator/(double scalar) const -> Tensor {
     return tenzor::div(*this, scalar);
+}
+
+// Reverse scalar operators (scalar op tensor)
+auto operator+(double s, const Tensor& t) -> Tensor {
+    return t + s;  // addition is commutative
+}
+
+auto operator-(double s, const Tensor& t) -> Tensor {
+    return tenzor::neg(t) + s;
+}
+
+auto operator*(double s, const Tensor& t) -> Tensor {
+    return t * s;  // multiplication is commutative
+}
+
+auto operator/(double s, const Tensor& t) -> Tensor {
+    auto numerator = tenzor::full(
+        std::vector<int64_t>(t.shape().begin(), t.shape().end()),
+        s, t.dtype(), t.device());
+    return tenzor::div(numerator, t);
 }
 
 // In-place operations — dispatch through in-place kernels so views/aliases see updates
@@ -798,6 +821,7 @@ auto Tensor::fill_(double value) -> Tensor& {
             // Copy modified storage back to device
             backend->copy(impl_->storage->data(), host_buf.data(), storage_bytes,
                          CopyKind::HostToDevice);
+            bump_version();
             return *this;
         }
         auto ndims = this->ndim();
@@ -835,6 +859,7 @@ auto Tensor::fill_(double value) -> Tensor& {
                 indices[d] = 0;
             }
         }
+        bump_version();
         return *this;
     }
 
@@ -856,12 +881,14 @@ auto Tensor::fill_(double value) -> Tensor& {
             backend->copy(data_ptr(), cpu_tensor.data_ptr(),
                          size_bytes, CopyKind::HostToDevice);
         }
+        bump_version();
         return *this;
     }
 
     // Fast path: zero fill with memset (all IEEE/integer zero representations are 0x00)
     if (value == 0.0f) {
         std::memset(data_ptr(), 0, static_cast<size_t>(n) * dtype_size());
+        bump_version();
         return *this;
     }
 

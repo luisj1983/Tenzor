@@ -66,10 +66,10 @@ jobs:
         run: ninja -C build tenzor_core
 
       - name: Build CPU backend
-        run: ninja -C build tenzor_core_backend_cpu
+        run: ninja -C build tenzor_backend_cpu
 
       - name: Build Python module
-        run: ninja -C build tenzor_core_python
+        run: ninja -C build tenzor_python
 
       - name: Build tests
         run: ninja -C build
@@ -412,7 +412,7 @@ jobs:
       - name: Configure and build
         run: |
           cmake -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} \
+            -DCMAKE_BUILD_TYPE=Debug \
             -DTENZOR_BUILD_CUDA=OFF \
             -DTENZOR_BUILD_ROCM=OFF \
             -DTENZOR_BUILD_ONEAPI=OFF \

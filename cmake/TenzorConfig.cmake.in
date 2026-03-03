@@ -13,6 +13,13 @@ set(Tenzor_WEBGPU_FOUND @TENZOR_BUILD_WEBGPU@)
 # Find required dependencies
 include(CMakeFindDependencyMacro)
 find_dependency(Threads)
+find_dependency(OpenMP)
+
+# Model Hub dependencies (CURL + OpenSSL are linked PUBLIC when enabled)
+if(@TENZOR_BUILD_MODEL_HUB@)
+    find_dependency(CURL)
+    find_dependency(OpenSSL)
+endif()
 
 # Component checking: allow find_package(Tenzor COMPONENTS CUDA Vulkan ...)
 foreach(_comp ${Tenzor_FIND_COMPONENTS})

@@ -787,6 +787,41 @@ __global__ void batched_matmul_tensor_core_f16_kernel(
 
             // Perform matrix multiply-accumulate using Tensor Cores
             mma_sync(acc_frag, a_frag, b_frag, acc_frag);
+        } else {
+            // Handle edge case where K is not a multiple of WMMA_K
+            __shared__ __half As_residual[WMMA_M][WMMA_K + 1];
+            __shared__ __half Bs_residual[WMMA_K][WMMA_N + 1];
+
+            const int64_t aRow = warpM * WMMA_M;
+            const int64_t aCol = k;
+            const int64_t bRow = k;
+            const int64_t bCol = warpN * WMMA_N;
+
+            // Load with bounds checking
+            for (int i = 0; i < WMMA_M; ++i) {
+                for (int j = threadIdx.x; j < WMMA_K; j += 32) {
+                    const int64_t row = aRow + i;
+                    const int64_t col = aCol + j;
+                    As_residual[i][j] = (row < M && col < K) ? A_batch[row * K + col] : __float2half(0.0f);
+                }
+            }
+
+            for (int i = 0; i < WMMA_K; ++i) {
+                for (int j = threadIdx.x; j < WMMA_N; j += 32) {
+                    const int64_t row = bRow + i;
+                    const int64_t col = bCol + j;
+                    Bs_residual[i][j] = (row < K && col < N) ? B_batch[row * N + col] : __float2half(0.0f);
+                }
+            }
+
+            __syncthreads();
+
+            // Load from shared memory
+            load_matrix_sync(a_frag, &As_residual[0][0], WMMA_K + 1);
+            load_matrix_sync(b_frag, &Bs_residual[0][0], WMMA_N + 1);
+
+            // Perform matrix multiply-accumulate
+            mma_sync(acc_frag, a_frag, b_frag, acc_frag);
         }
     }
 
@@ -798,7 +833,7 @@ __global__ void batched_matmul_tensor_core_f16_kernel(
     if (cRow < M && cCol < N && cRow + WMMA_M <= M && cCol + WMMA_N <= N) {
         // Store float accumulator to shared memory first
         __shared__ float Cs_float[WMMA_M][WMMA_N + 1];
-        store_matrix_sync(&Cs_float[0][0], acc_frag, WMMA_N, mem_row_major);
+        store_matrix_sync(&Cs_float[0][0], acc_frag, WMMA_N + 1, mem_row_major);
 
         __syncthreads();
 
