@@ -350,6 +350,7 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::LinalgSVD)] = "linalg_svd";
     names[static_cast<size_t>(OpId::LinalgQR)] = "linalg_qr";
     names[static_cast<size_t>(OpId::LinalgEigh)] = "linalg_eigh";
+    names[static_cast<size_t>(OpId::LinalgEig)] = "linalg_eig";
     names[static_cast<size_t>(OpId::LinalgCholesky)] = "linalg_cholesky";
     names[static_cast<size_t>(OpId::StridedFill)] = "strided_fill";
     names[static_cast<size_t>(OpId::QuantizedLinear)] = "quantized_linear";

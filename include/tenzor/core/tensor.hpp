@@ -80,6 +80,15 @@ class VulkanBackend;
  *
  * Tensors use shared storage with reference counting for efficient memory usage.
  *
+ * @threadsafety Read operations (shape(), strides(), ndim(), numel(), dtype(),
+ * device(), is_contiguous(), data<T>() const, item<T>()) are thread-safe and
+ * may be called concurrently from multiple threads on the same Tensor instance.
+ * Write operations (including in-place ops such as fill_(), zero_(), operator+=,
+ * and view-creating mutations like reshape() and transpose()) require external
+ * synchronization. The version_counter_ and is_contiguous_cache_ members use
+ * std::atomic for safe concurrent reads, but concurrent read+write still
+ * requires a fence or external lock on the mutable operation side.
+ *
  * @code
  * // Create tensors
  * Tensor a({3, 4}, DType::Float32, Device::cpu());

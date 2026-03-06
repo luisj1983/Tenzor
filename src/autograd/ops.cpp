@@ -5,10 +5,13 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/indexing.hpp"
+#include "tenzor/ops/linalg.hpp"
+#include "tenzor/sparse/sparse_ops.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include <optional>
+#include <tuple>
 
 namespace tenzor {
 
@@ -1180,6 +1183,241 @@ auto repeat(const Variable& input, const std::vector<int64_t>& repeats) -> Varia
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
     Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// ============================================================================
+// Linear Algebra Operations
+// ============================================================================
+
+auto det(const Variable& input) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::linalg::det(input.tensor()), false);
+    }
+
+    auto result_tensor = tenzor::linalg::det(input.tensor());
+    auto inv_tensor = tenzor::linalg::inv(input.tensor());
+
+    auto grad_fn = std::make_shared<DetBackward>();
+    grad_fn->save_for_backward({result_tensor, inv_tensor});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto inv(const Variable& input) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::linalg::inv(input.tensor()), false);
+    }
+
+    auto result_tensor = tenzor::linalg::inv(input.tensor());
+
+    auto grad_fn = std::make_shared<InvBackward>();
+    grad_fn->save_for_backward({result_tensor});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto solve(const Variable& A, const Variable& B) -> Variable {
+    if ((!A.requires_grad() && !B.requires_grad()) || !is_grad_enabled()) {
+        return Variable(tenzor::linalg::solve(A.tensor(), B.tensor()), false);
+    }
+
+    auto result_tensor = tenzor::linalg::solve(A.tensor(), B.tensor());
+
+    auto grad_fn = std::make_shared<SolveBackward>();
+    grad_fn->save_for_backward({A.tensor(), result_tensor});
+
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    next_funcs.push_back(A.grad_fn());
+    next_funcs.push_back(B.grad_fn());
+    grad_fn->set_next_functions(next_funcs);
+
+    std::vector<Variable> input_vars;
+    if (A.requires_grad()) input_vars.push_back(A);
+    if (B.requires_grad()) input_vars.push_back(B);
+    grad_fn->set_input_variables(input_vars);
+
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto cholesky(const Variable& input, bool upper) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::linalg::cholesky(input.tensor(), upper), false);
+    }
+
+    auto result_tensor = tenzor::linalg::cholesky(input.tensor(), upper);
+
+    auto grad_fn = std::make_shared<CholeskyBackward>(upper);
+    grad_fn->save_for_backward({result_tensor});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto svd(const Variable& input, bool full_matrices) -> std::tuple<Variable, Variable, Variable> {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        auto [U, S, Vh] = tenzor::linalg::svd(input.tensor(), full_matrices);
+        return {Variable(U, false), Variable(S, false), Variable(Vh, false)};
+    }
+
+    auto [U_tensor, S_tensor, Vh_tensor] = tenzor::linalg::svd(input.tensor(), full_matrices);
+
+    auto grad_fn = std::make_shared<SvdBackward>(full_matrices);
+    grad_fn->save_for_backward({U_tensor, S_tensor, Vh_tensor});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+
+    Variable U_var(U_tensor, true);
+    Variable S_var(S_tensor, true);
+    Variable Vh_var(Vh_tensor, true);
+
+    U_var.set_grad_fn(grad_fn);
+    S_var.set_grad_fn(grad_fn);
+    Vh_var.set_grad_fn(grad_fn);
+
+    return {U_var, S_var, Vh_var};
+}
+
+auto qr(const Variable& input) -> std::tuple<Variable, Variable> {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        auto [Q, R] = tenzor::linalg::qr(input.tensor());
+        return {Variable(Q, false), Variable(R, false)};
+    }
+
+    auto [Q_tensor, R_tensor] = tenzor::linalg::qr(input.tensor());
+
+    auto grad_fn = std::make_shared<QrBackward>();
+    grad_fn->save_for_backward({Q_tensor, R_tensor});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+
+    Variable Q_var(Q_tensor, true);
+    Variable R_var(R_tensor, true);
+
+    Q_var.set_grad_fn(grad_fn);
+    R_var.set_grad_fn(grad_fn);
+
+    return {Q_var, R_var};
+}
+
+auto eigh(const Variable& input) -> std::tuple<Variable, Variable> {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        auto [W, V] = tenzor::linalg::eigh(input.tensor());
+        return {Variable(W, false), Variable(V, false)};
+    }
+
+    auto [W_tensor, V_tensor] = tenzor::linalg::eigh(input.tensor());
+
+    auto grad_fn = std::make_shared<EighBackward>();
+    grad_fn->save_for_backward({W_tensor, V_tensor});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+
+    Variable W_var(W_tensor, true);
+    Variable V_var(V_tensor, true);
+
+    W_var.set_grad_fn(grad_fn);
+    V_var.set_grad_fn(grad_fn);
+
+    return {W_var, V_var};
+}
+
+auto eigvalsh(const Variable& input) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::linalg::eigvalsh(input.tensor()), false);
+    }
+
+    // We need eigenvectors for backward, so compute full eigh
+    auto [W_tensor, V_tensor] = tenzor::linalg::eigh(input.tensor());
+
+    auto grad_fn = std::make_shared<EigvalshBackward>();
+    grad_fn->save_for_backward({V_tensor});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+
+    Variable output(W_tensor, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto linalg_norm(const Variable& input, const std::string& ord) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::linalg::norm(input.tensor(), ord), false);
+    }
+
+    auto result_tensor = tenzor::linalg::norm(input.tensor(), ord);
+
+    auto grad_fn = std::make_shared<NormBackward_Linalg>(ord);
+    grad_fn->save_for_backward({input.tensor(), result_tensor});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto slogdet(const Variable& input) -> std::tuple<Variable, Variable> {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        auto [sign, logabsdet] = tenzor::linalg::slogdet(input.tensor());
+        return {Variable(sign, false), Variable(logabsdet, false)};
+    }
+
+    auto [sign_tensor, logabsdet_tensor] = tenzor::linalg::slogdet(input.tensor());
+    auto inv_tensor = tenzor::linalg::inv(input.tensor());
+
+    auto grad_fn = std::make_shared<SlogdetBackward>();
+    grad_fn->save_for_backward({inv_tensor});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+
+    // sign has no gradient (discrete), but we still wrap it as Variable
+    Variable sign_var(sign_tensor, false);
+    Variable logabsdet_var(logabsdet_tensor, true);
+    logabsdet_var.set_grad_fn(grad_fn);
+
+    return {sign_var, logabsdet_var};
+}
+
+// ============================================================================
+// Sparse Autograd Operations
+// ============================================================================
+
+auto spmm(const SparseTensor& sparse, const Variable& dense) -> Variable {
+    if (!dense.requires_grad() || !is_grad_enabled()) {
+        // No gradient needed, just compute the forward pass
+        return Variable(sparse::spmm(sparse, dense.tensor()), false);
+    }
+
+    // Compute forward: Y = S @ D
+    auto result_tensor = sparse::spmm(sparse, dense.tensor());
+
+    // For backward: grad_D = S^T @ grad_Y
+    // Save S^T as a dense tensor (transposed sparse matrix).
+    // We convert to dense and transpose so backward can use tenzor::matmul.
+    auto sparse_dense = sparse.to_dense();  // shape (M, K)
+    auto sparse_transposed = tenzor::transpose(sparse_dense, 0, 1);  // shape (K, M)
+
+    auto grad_fn = std::make_shared<SpMMBackward>();
+    grad_fn->save_for_backward({sparse_transposed});
+    grad_fn->set_next_functions({dense.grad_fn()});
+    grad_fn->set_input_variables({dense});
+
+    Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);
     return output;
 }

@@ -181,6 +181,30 @@ namespace cuda {
     auto linalg_cholesky_kernel(const Tensor& A, bool upper, cudaStream_t stream) -> Tensor;
 #endif
 
+    // FFT operations (cuFFT)
+#ifdef TENZOR_HAS_CUFFT
+    auto cuda_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
+                         const std::string& norm, cudaStream_t stream) -> Tensor;
+    auto cuda_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
+                          const std::string& norm, cudaStream_t stream) -> Tensor;
+    auto cuda_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
+                          const std::string& norm, cudaStream_t stream) -> Tensor;
+    auto cuda_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
+                           const std::string& norm, cudaStream_t stream) -> Tensor;
+    auto cuda_fft2_kernel(const Tensor& input, const std::vector<int64_t>& dims,
+                          const std::vector<int64_t>& n_vec,
+                          const std::string& norm, cudaStream_t stream) -> Tensor;
+    auto cuda_ifft2_kernel(const Tensor& input, const std::vector<int64_t>& dims,
+                           const std::vector<int64_t>& n_vec,
+                           const std::string& norm, cudaStream_t stream) -> Tensor;
+    auto cuda_fftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
+                          const std::vector<int64_t>& n_vec,
+                          const std::string& norm, cudaStream_t stream) -> Tensor;
+    auto cuda_ifftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
+                           const std::vector<int64_t>& n_vec,
+                           const std::string& norm, cudaStream_t stream) -> Tensor;
+#endif
+
     // Fused operations
     auto fused_conv2d_bn_relu_cuda(const Tensor& input, const Tensor& weight, const Tensor* bias, const Tensor& bn_mean, const Tensor& bn_var, const Tensor& bn_gamma, const Tensor& bn_beta, int64_t stride, int64_t padding, float eps) -> Tensor;
     auto fused_linear_relu_cuda(const Tensor& input, const Tensor& weight, const Tensor* bias) -> Tensor;
@@ -496,6 +520,25 @@ namespace cuda {
     Tensor cast_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
 
 } // namespace cuda
+
+// Forward declarations for quantized CUDA kernels (in nn::quantization::kernels namespace)
+namespace nn::quantization::kernels {
+    auto quantized_linear_cuda(
+        const int8_t* input, const int8_t* weight, const float* bias,
+        float* output, int64_t batch_size, int64_t in_features, int64_t out_features,
+        float input_scale, float weight_scale, float output_scale,
+        int32_t input_zp, int32_t weight_zp, cudaStream_t stream
+    ) -> void;
+
+    auto quantized_conv2d_cuda(
+        const int8_t* input, const int8_t* weight, const float* bias,
+        float* output, int64_t batch, int64_t in_channels, int64_t out_channels,
+        int64_t h_in, int64_t w_in, int64_t h_out, int64_t w_out,
+        int64_t kernel_size, int64_t stride, int64_t padding,
+        float input_scale, float weight_scale,
+        int32_t input_zp, int32_t weight_zp, cudaStream_t stream
+    ) -> void;
+} // namespace nn::quantization::kernels
 
 /**
  * @brief Register all CUDA kernels with the dispatch table.
@@ -1988,6 +2031,198 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return cuda::linalg_cholesky_kernel(inputs[0], upper, get_cuda_stream(attrs));
     });
 #endif // TENZOR_HAS_CUSOLVER
+
+    // =========================================================================
+    // FFT Operations (cuFFT)
+    // =========================================================================
+#ifdef TENZOR_HAS_CUFFT
+    table.register_single_output_kernel(OpId::FFT, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        int64_t n = attrs.get_int(AttrKey::N, inputs[0].shape()[dim >= 0 ? dim : inputs[0].ndim() + dim]);
+        std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
+        return cuda::cuda_fft_kernel(inputs[0], dim, n, norm, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::IFFT, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        int64_t n = attrs.get_int(AttrKey::N, inputs[0].shape()[dim >= 0 ? dim : inputs[0].ndim() + dim]);
+        std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
+        return cuda::cuda_ifft_kernel(inputs[0], dim, n, norm, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::RFFT, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        int64_t n = attrs.get_int(AttrKey::N, inputs[0].shape()[dim >= 0 ? dim : inputs[0].ndim() + dim]);
+        std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
+        return cuda::cuda_rfft_kernel(inputs[0], dim, n, norm, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::IRFFT, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        int64_t n = attrs.get_int(AttrKey::N, 2 * (inputs[0].shape()[dim >= 0 ? dim : inputs[0].ndim() + dim] - 1));
+        std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
+        return cuda::cuda_irfft_kernel(inputs[0], dim, n, norm, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::FFT2, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // FFT2 operates on last 2 dims by default
+        int64_t ndim = inputs[0].ndim();
+        std::vector<int64_t> dims = {ndim - 2, ndim - 1};
+        std::vector<int64_t> n_vec = {
+            inputs[0].shape()[dims[0]],
+            inputs[0].shape()[dims[1]]
+        };
+        // Override with attrs if provided
+        auto attr_n = attrs.get_int_list(AttrKey::Shape);
+        if (!attr_n.empty() && attr_n.size() >= 2) {
+            n_vec[0] = attr_n[0];
+            n_vec[1] = attr_n[1];
+        }
+        std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
+        return cuda::cuda_fft2_kernel(inputs[0], dims, n_vec, norm, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::IFFT2, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t ndim = inputs[0].ndim();
+        std::vector<int64_t> dims = {ndim - 2, ndim - 1};
+        std::vector<int64_t> n_vec = {
+            inputs[0].shape()[dims[0]],
+            inputs[0].shape()[dims[1]]
+        };
+        auto attr_n = attrs.get_int_list(AttrKey::Shape);
+        if (!attr_n.empty() && attr_n.size() >= 2) {
+            n_vec[0] = attr_n[0];
+            n_vec[1] = attr_n[1];
+        }
+        std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
+        return cuda::cuda_ifft2_kernel(inputs[0], dims, n_vec, norm, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::FFTN, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t ndim = inputs[0].ndim();
+        // Default: all dimensions
+        std::vector<int64_t> dims(ndim);
+        for (int64_t i = 0; i < ndim; ++i) dims[i] = i;
+        std::vector<int64_t> n_vec(ndim);
+        for (int64_t i = 0; i < ndim; ++i) n_vec[i] = inputs[0].shape()[i];
+        auto attr_n = attrs.get_int_list(AttrKey::Shape);
+        if (!attr_n.empty()) {
+            for (size_t i = 0; i < attr_n.size() && i < n_vec.size(); ++i) {
+                n_vec[i] = attr_n[i];
+            }
+        }
+        std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
+        return cuda::cuda_fftn_kernel(inputs[0], dims, n_vec, norm, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::IFFTN, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t ndim = inputs[0].ndim();
+        std::vector<int64_t> dims(ndim);
+        for (int64_t i = 0; i < ndim; ++i) dims[i] = i;
+        std::vector<int64_t> n_vec(ndim);
+        for (int64_t i = 0; i < ndim; ++i) n_vec[i] = inputs[0].shape()[i];
+        auto attr_n = attrs.get_int_list(AttrKey::Shape);
+        if (!attr_n.empty()) {
+            for (size_t i = 0; i < attr_n.size() && i < n_vec.size(); ++i) {
+                n_vec[i] = attr_n[i];
+            }
+        }
+        std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
+        return cuda::cuda_ifftn_kernel(inputs[0], dims, n_vec, norm, get_cuda_stream(attrs));
+    });
+#endif // TENZOR_HAS_CUFFT
+
+    // =========================================================================
+    // Quantized Operations
+    // =========================================================================
+    table.register_single_output_kernel(OpId::QuantizedLinear, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // inputs: [input_int8, weight_int8] or [input_int8, weight_int8, bias_f32]
+        const auto& input = inputs[0];
+        const auto& weight = inputs[1];
+
+        auto input_shape = input.shape();
+        auto weight_shape = weight.shape();
+        int64_t batch_size = input_shape[0];
+        int64_t in_features = input_shape[1];
+        int64_t out_features = weight_shape[0];
+
+        float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale, 1.0));
+        float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ, 1.0));
+        float output_scale = static_cast<float>(attrs.get_float(AttrKey::OutputScale, 1.0));
+        int32_t input_zp = static_cast<int32_t>(attrs.get_int(AttrKey::InputZeroPoint, 0));
+        int32_t weight_zp = static_cast<int32_t>(attrs.get_int(AttrKey::WeightZeroPoint, 0));
+        auto stream = get_cuda_stream(attrs);
+
+        Tensor output({batch_size, out_features}, DType::Float32, input.device());
+
+        const int8_t* input_data = input.data<int8_t>();
+        const int8_t* weight_data = weight.data<int8_t>();
+        const float* bias_data = nullptr;
+        if (inputs.size() > 2 && inputs[2].numel() > 0) {
+            bias_data = inputs[2].data<const float>();
+        }
+        float* output_data = output.data<float>();
+
+        nn::quantization::kernels::quantized_linear_cuda(
+            input_data, weight_data, bias_data, output_data,
+            batch_size, in_features, out_features,
+            input_scale, weight_scale, output_scale,
+            input_zp, weight_zp, stream
+        );
+
+        return output;
+    });
+
+    table.register_single_output_kernel(OpId::QuantizedConv2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // inputs: [input_int8, weight_int8] or [input_int8, weight_int8, bias_f32]
+        const auto& input = inputs[0];
+        const auto& weight = inputs[1];
+
+        auto input_shape = input.shape();
+        int64_t batch = input_shape[0];
+        int64_t in_channels = input_shape[1];
+        int64_t h_in = input_shape[2];
+        int64_t w_in = input_shape[3];
+
+        auto weight_shape = weight.shape();
+        int64_t out_channels = weight_shape[0];
+        int64_t kernel_size = weight_shape[2];
+
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+
+        float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale, 1.0));
+        float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ, 1.0));
+        int32_t input_zp = static_cast<int32_t>(attrs.get_int(AttrKey::InputZeroPoint, 0));
+        int32_t weight_zp = static_cast<int32_t>(attrs.get_int(AttrKey::WeightZeroPoint, 0));
+        auto stream = get_cuda_stream(attrs);
+
+        int64_t h_out = (h_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+        int64_t w_out = (w_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+
+        Tensor output({batch, out_channels, h_out, w_out}, DType::Float32, input.device());
+
+        const int8_t* input_data = input.data<int8_t>();
+        const int8_t* weight_data = weight.data<int8_t>();
+        const float* bias_data = nullptr;
+        if (inputs.size() > 2 && inputs[2].numel() > 0) {
+            bias_data = inputs[2].data<const float>();
+        }
+        float* output_data = output.data<float>();
+
+        nn::quantization::kernels::quantized_conv2d_cuda(
+            input_data, weight_data, bias_data, output_data,
+            batch, in_channels, out_channels,
+            h_in, w_in, h_out, w_out,
+            kernel_size, stride, padding,
+            input_scale, weight_scale,
+            input_zp, weight_zp, stream
+        );
+
+        return output;
+    });
 }
 
 } // namespace tenzor

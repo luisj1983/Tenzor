@@ -386,7 +386,48 @@ namespace cpu {
                                     Tensor& sum_sq, float lr, float lr_decay,
                                     float eps, float weight_decay,
                                     int64_t step) -> void;
+
+    // FFT operations (MKL DFTI)
+    auto fft_kernel(const Tensor& input, int64_t dim, int64_t signal_len,
+                    std::string_view norm) -> Tensor;
+    auto ifft_kernel(const Tensor& input, int64_t dim, int64_t signal_len,
+                     std::string_view norm) -> Tensor;
+    auto rfft_kernel(const Tensor& input, int64_t dim, int64_t signal_len,
+                     std::string_view norm) -> Tensor;
+    auto irfft_kernel(const Tensor& input, int64_t dim, int64_t signal_len,
+                      std::string_view norm) -> Tensor;
+    auto fft2_kernel(const Tensor& input, const std::vector<int64_t>& dims,
+                      const std::vector<int64_t>& signal_lengths,
+                      std::string_view norm) -> Tensor;
+    auto ifft2_kernel(const Tensor& input, const std::vector<int64_t>& dims,
+                       const std::vector<int64_t>& signal_lengths,
+                       std::string_view norm) -> Tensor;
+    auto fftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
+                      const std::vector<int64_t>& signal_lengths,
+                      std::string_view norm) -> Tensor;
+    auto ifftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
+                       const std::vector<int64_t>& signal_lengths,
+                       std::string_view norm) -> Tensor;
 } // namespace cpu
+
+// Forward declarations for quantized kernels (in nn::quantization::kernels namespace)
+namespace nn::quantization::kernels {
+    auto quantized_linear_kernel(
+        const int8_t* input, const int8_t* weight, const float* bias,
+        float* output, int64_t batch_size, int64_t in_features, int64_t out_features,
+        float input_scale, float weight_scale, float output_scale,
+        int32_t input_zp, int32_t weight_zp
+    ) -> void;
+
+    auto quantized_conv2d_kernel(
+        const int8_t* input, const int8_t* weight, const float* bias,
+        float* output, int64_t batch, int64_t in_channels, int64_t out_channels,
+        int64_t h_in, int64_t w_in, int64_t h_out, int64_t w_out,
+        int64_t kernel_size, int64_t stride, int64_t padding,
+        float input_scale, float weight_scale, int32_t input_zp, int32_t weight_zp,
+        int64_t dilation, int64_t groups
+    ) -> void;
+} // namespace nn::quantization::kernels
 
 /**
  * @brief Register all CPU kernels with the dispatch table.
@@ -1688,6 +1729,189 @@ void register_cpu_kernels(BackendDispatchTable& table) {
             }
         }
         return self;
+    });
+
+    // =========================================================================
+    // FFT Operations (MKL DFTI)
+    // =========================================================================
+    table.register_single_output_kernel(OpId::FFT, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        int64_t n = attrs.get_int(AttrKey::N, inputs[0].shape()[dim < 0 ? dim + inputs[0].ndim() : dim]);
+        auto norm = attrs.get_string(AttrKey::Norm, "backward");
+        return cpu::fft_kernel(inputs[0], dim, n, norm);
+    });
+
+    table.register_single_output_kernel(OpId::IFFT, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        int64_t n = attrs.get_int(AttrKey::N, inputs[0].shape()[dim < 0 ? dim + inputs[0].ndim() : dim]);
+        auto norm = attrs.get_string(AttrKey::Norm, "backward");
+        return cpu::ifft_kernel(inputs[0], dim, n, norm);
+    });
+
+    table.register_single_output_kernel(OpId::RFFT, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        int64_t n = attrs.get_int(AttrKey::N, inputs[0].shape()[dim < 0 ? dim + inputs[0].ndim() : dim]);
+        auto norm = attrs.get_string(AttrKey::Norm, "backward");
+        return cpu::rfft_kernel(inputs[0], dim, n, norm);
+    });
+
+    table.register_single_output_kernel(OpId::IRFFT, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        int64_t n = attrs.get_int(AttrKey::N, 2 * (inputs[0].shape()[dim < 0 ? dim + inputs[0].ndim() : dim] - 1));
+        auto norm = attrs.get_string(AttrKey::Norm, "backward");
+        return cpu::irfft_kernel(inputs[0], dim, n, norm);
+    });
+
+    table.register_single_output_kernel(OpId::FFT2, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto dims = attrs.get_int_list(AttrKey::Dims);
+        if (dims.empty()) {
+            int64_t ndim = inputs[0].ndim();
+            dims = {ndim - 2, ndim - 1};
+        }
+        // Build signal lengths from input shape if not provided via N
+        std::vector<int64_t> signal_lengths(dims.size());
+        for (size_t i = 0; i < dims.size(); ++i) {
+            int64_t d = dims[i] < 0 ? dims[i] + inputs[0].ndim() : dims[i];
+            signal_lengths[i] = inputs[0].shape()[d];
+        }
+        auto norm = attrs.get_string(AttrKey::Norm, "backward");
+        return cpu::fft2_kernel(inputs[0], dims, signal_lengths, norm);
+    });
+
+    table.register_single_output_kernel(OpId::IFFT2, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto dims = attrs.get_int_list(AttrKey::Dims);
+        if (dims.empty()) {
+            int64_t ndim = inputs[0].ndim();
+            dims = {ndim - 2, ndim - 1};
+        }
+        std::vector<int64_t> signal_lengths(dims.size());
+        for (size_t i = 0; i < dims.size(); ++i) {
+            int64_t d = dims[i] < 0 ? dims[i] + inputs[0].ndim() : dims[i];
+            signal_lengths[i] = inputs[0].shape()[d];
+        }
+        auto norm = attrs.get_string(AttrKey::Norm, "backward");
+        return cpu::ifft2_kernel(inputs[0], dims, signal_lengths, norm);
+    });
+
+    table.register_single_output_kernel(OpId::FFTN, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto dims = attrs.get_int_list(AttrKey::Dims);
+        if (dims.empty()) {
+            // Default: all dimensions
+            dims.resize(inputs[0].ndim());
+            for (int64_t i = 0; i < inputs[0].ndim(); ++i) dims[i] = i;
+        }
+        std::vector<int64_t> signal_lengths(dims.size());
+        for (size_t i = 0; i < dims.size(); ++i) {
+            int64_t d = dims[i] < 0 ? dims[i] + inputs[0].ndim() : dims[i];
+            signal_lengths[i] = inputs[0].shape()[d];
+        }
+        auto norm = attrs.get_string(AttrKey::Norm, "backward");
+        return cpu::fftn_kernel(inputs[0], dims, signal_lengths, norm);
+    });
+
+    table.register_single_output_kernel(OpId::IFFTN, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto dims = attrs.get_int_list(AttrKey::Dims);
+        if (dims.empty()) {
+            dims.resize(inputs[0].ndim());
+            for (int64_t i = 0; i < inputs[0].ndim(); ++i) dims[i] = i;
+        }
+        std::vector<int64_t> signal_lengths(dims.size());
+        for (size_t i = 0; i < dims.size(); ++i) {
+            int64_t d = dims[i] < 0 ? dims[i] + inputs[0].ndim() : dims[i];
+            signal_lengths[i] = inputs[0].shape()[d];
+        }
+        auto norm = attrs.get_string(AttrKey::Norm, "backward");
+        return cpu::ifftn_kernel(inputs[0], dims, signal_lengths, norm);
+    });
+
+    // =========================================================================
+    // Quantized Operations
+    // =========================================================================
+    table.register_single_output_kernel(OpId::QuantizedLinear, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // inputs: [input_int8, weight_int8] or [input_int8, weight_int8, bias_f32]
+        const auto& input = inputs[0];
+        const auto& weight = inputs[1];
+
+        auto input_shape = input.shape();
+        auto weight_shape = weight.shape();
+        int64_t batch_size = input_shape[0];
+        int64_t in_features = input_shape[1];
+        int64_t out_features = weight_shape[0];
+
+        float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale, 1.0));
+        float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ, 1.0));
+        float output_scale = static_cast<float>(attrs.get_float(AttrKey::OutputScale, 1.0));
+        int32_t input_zp = static_cast<int32_t>(attrs.get_int(AttrKey::InputZeroPoint, 0));
+        int32_t weight_zp = static_cast<int32_t>(attrs.get_int(AttrKey::WeightZeroPoint, 0));
+
+        Tensor output({batch_size, out_features}, DType::Float32, Device::cpu());
+
+        const int8_t* input_data = input.data<int8_t>();
+        const int8_t* weight_data = weight.data<int8_t>();
+        const float* bias_data = nullptr;
+        if (inputs.size() > 2 && inputs[2].numel() > 0) {
+            bias_data = inputs[2].data<const float>();
+        }
+        float* output_data = output.data<float>();
+
+        nn::quantization::kernels::quantized_linear_kernel(
+            input_data, weight_data, bias_data, output_data,
+            batch_size, in_features, out_features,
+            input_scale, weight_scale, output_scale,
+            input_zp, weight_zp
+        );
+
+        return output;
+    });
+
+    table.register_single_output_kernel(OpId::QuantizedConv2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // inputs: [input_int8, weight_int8] or [input_int8, weight_int8, bias_f32]
+        const auto& input = inputs[0];
+        const auto& weight = inputs[1];
+
+        auto input_shape = input.shape();
+        int64_t batch = input_shape[0];
+        int64_t in_channels = input_shape[1];
+        int64_t h_in = input_shape[2];
+        int64_t w_in = input_shape[3];
+
+        auto weight_shape = weight.shape();
+        int64_t out_channels = weight_shape[0];
+        int64_t kernel_size = weight_shape[2];
+
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+
+        float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale, 1.0));
+        float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ, 1.0));
+        int32_t input_zp = static_cast<int32_t>(attrs.get_int(AttrKey::InputZeroPoint, 0));
+        int32_t weight_zp = static_cast<int32_t>(attrs.get_int(AttrKey::WeightZeroPoint, 0));
+
+        int64_t h_out = (h_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+        int64_t w_out = (w_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+
+        Tensor output({batch, out_channels, h_out, w_out}, DType::Float32, Device::cpu());
+
+        const int8_t* input_data = input.data<int8_t>();
+        const int8_t* weight_data = weight.data<int8_t>();
+        const float* bias_data = nullptr;
+        if (inputs.size() > 2 && inputs[2].numel() > 0) {
+            bias_data = inputs[2].data<const float>();
+        }
+        float* output_data = output.data<float>();
+
+        nn::quantization::kernels::quantized_conv2d_kernel(
+            input_data, weight_data, bias_data, output_data,
+            batch, in_channels, out_channels,
+            h_in, w_in, h_out, w_out,
+            kernel_size, stride, padding,
+            input_scale, weight_scale, input_zp, weight_zp,
+            dilation, groups
+        );
+
+        return output;
     });
 }
 

@@ -90,6 +90,21 @@ enum class OpType {
     Linear,
     Embedding,
 
+    // Activations (extended)
+    GELU,
+
+    // Linear algebra
+    Det,
+    Inv,
+    Solve,
+    Cholesky,
+    Svd,
+    Qr,
+    Eigh,
+    Eigvalsh,
+    Norm,
+    Slogdet,
+
     // Constants
     Constant,
     Input,

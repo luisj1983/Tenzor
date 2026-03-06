@@ -35,6 +35,13 @@ namespace tenzor {
  * The engine is typically accessed through Variable::backward() rather
  * than directly.
  *
+ * @threadsafety The engine is a thread-local singleton (one instance per
+ * thread), so concurrent backward() calls from different threads do not
+ * interfere with each other. A single backward() call per thread is
+ * supported at a time. Re-entrant calls within the same thread (e.g.,
+ * from gradient checkpointing) are safe because execute() saves and
+ * restores grad_accumulators_ around each invocation.
+ *
  * @code
  * // Indirect usage through Variable
  * Variable x(Tensor({3, 4}, DType::Float32, Device::cpu()), true);

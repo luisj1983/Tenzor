@@ -1,0 +1,349 @@
+/**
+ * @file sparse.cu
+ * @brief CUDA kernels for sparse tensor operations using cuSPARSE.
+ *
+ * Provides GPU-accelerated implementations of:
+ * - spmm (sparse-dense matrix multiplication) via cusparseSpMM()
+ * - spmv (sparse-dense matrix-vector multiplication) via cusparseSpMV()
+ *
+ * Uses CSR format descriptors for cuSPARSE API compatibility.
+ * Both COO and CSR inputs are supported; COO is converted to CSR internally.
+ */
+
+#ifdef TENZOR_HAS_CUSPARSE
+
+#include "tenzor/core/tensor.hpp"
+#include "tenzor/core/dtype.hpp"
+#include "tenzor/core/device.hpp"
+#include "tenzor/sparse/sparse_tensor.hpp"
+#include "../cusparse_handle_pool.hpp"
+
+#include <cusparse.h>
+#include <cuda_runtime.h>
+#include <cstdint>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+// Forward-declare zeros to avoid including creation.hpp (which pulls in
+// loader.hpp using std::expected, unsupported by nvcc)
+namespace tenzor {
+auto zeros(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor;
+}
+
+namespace tenzor {
+namespace cuda {
+
+namespace {
+
+#ifndef CUDA_CHECK_SPARSE
+#define CUDA_CHECK_SPARSE(call)                                                 \
+    do {                                                                          \
+        cudaError_t err = (call);                                                \
+        if (err != cudaSuccess) {                                                \
+            throw std::runtime_error(                                            \
+                std::string("CUDA error in sparse at ") + __FILE__ + ":" +      \
+                std::to_string(__LINE__) + " - " + cudaGetErrorString(err));     \
+        }                                                                        \
+    } while (0)
+#endif
+
+/// Convert span to vector (nvcc doesn't support implicit span->vector conversion).
+std::vector<int64_t> to_vec(std::span<const int64_t> s) {
+    return {s.begin(), s.end()};
+}
+
+/// Get cuSPARSE data type from DType.
+cudaDataType get_cuda_data_type(DType dtype) {
+    switch (dtype) {
+        case DType::Float32: return CUDA_R_32F;
+        case DType::Float64: return CUDA_R_64F;
+        default:
+            throw std::runtime_error("cuda_sparse: unsupported dtype " +
+                                     std::string(dtype_name(dtype)));
+    }
+}
+
+/// Helper to build a CSR SparseTensor on GPU from a COO SparseTensor.
+/// If already CSR, returns the input. Otherwise converts COO -> CSR.
+SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse) {
+    // Move to GPU if on CPU
+    auto sp = (sparse.device().type != Device::Type::CUDA)
+              ? sparse.to(Device::cuda())
+              : sparse;
+
+    // Convert to CSR if in COO format
+    if (sp.layout() == SparseLayout::COO) {
+        // Coalesce first, then convert to CSR
+        // Note: coalesce and to_csr are CPU operations on the index data,
+        // so we do them on CPU then move the result to GPU
+        auto cpu_sp = sparse.to(Device::cpu());
+        auto csr = cpu_sp.to_csr();
+        return csr.to(Device::cuda());
+    }
+    return sp;
+}
+
+} // anonymous namespace
+
+Tensor cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
+    auto sp_shape = sparse.shape();
+    if (sp_shape.size() != 2 || dense.ndim() != 2) {
+        throw std::runtime_error("cuda_spmm: both inputs must be 2D");
+    }
+
+    int64_t M = sp_shape[0];
+    int64_t K = sp_shape[1];
+    int64_t N = dense.shape()[1];
+    if (K != dense.shape()[0]) {
+        throw std::runtime_error("cuda_spmm: inner dimensions must match ("
+            + std::to_string(K) + " vs " + std::to_string(dense.shape()[0]) + ")");
+    }
+
+    DType dtype = dense.dtype();
+    if (dtype != DType::Float32 && dtype != DType::Float64) {
+        throw std::runtime_error("cuda_spmm: only Float32 and Float64 supported, got "
+            + std::string(dtype_name(dtype)));
+    }
+
+    // Ensure sparse is in CSR format on GPU
+    auto csr = ensure_csr_on_gpu(sparse);
+    int64_t nnz = csr.nnz();
+
+    // Ensure dense is contiguous and on GPU
+    auto dense_gpu = (dense.device().type != Device::Type::CUDA)
+                     ? dense.to(Device::cuda()).contiguous()
+                     : dense.contiguous();
+
+    // Create output tensor
+    auto result = zeros({M, N}, dtype, Device::cuda());
+
+    // Get cuSPARSE handle
+    cusparseHandle_t handle = CuSPARSEHandlePool::get();
+    cudaDataType cuda_dtype = get_cuda_data_type(dtype);
+
+    // Get raw pointers
+    auto crow = csr.crow_indices().contiguous();
+    auto col = csr.col_indices().contiguous();
+    auto vals = csr.values().contiguous();
+
+    // cuSPARSE uses int32 for indices in many APIs; we use int64 (CUSPARSE_INDEX_64I)
+    cusparseSpMatDescr_t mat_sparse;
+    CUSPARSE_CHECK(cusparseCreateCsr(
+        &mat_sparse,
+        M, K, nnz,
+        const_cast<void*>(static_cast<const void*>(crow.data<int64_t>())),
+        const_cast<void*>(static_cast<const void*>(col.data<int64_t>())),
+        const_cast<void*>(static_cast<const void*>(vals.data_ptr())),
+        CUSPARSE_INDEX_64I,
+        CUSPARSE_INDEX_64I,
+        CUSPARSE_INDEX_BASE_ZERO,
+        cuda_dtype
+    ));
+
+    // Dense matrix descriptor (column-major for cuSPARSE, but we use row-major)
+    // cuSPARSE expects column-major dense matrices by default.
+    // For row-major: we use CUSPARSE_ORDER_ROW
+    cusparseDnMatDescr_t mat_dense;
+    CUSPARSE_CHECK(cusparseCreateDnMat(
+        &mat_dense,
+        K, N, N,  // rows, cols, leading dimension (row-major: ld = N)
+        const_cast<void*>(dense_gpu.data_ptr()),
+        cuda_dtype,
+        CUSPARSE_ORDER_ROW
+    ));
+
+    cusparseDnMatDescr_t mat_result;
+    CUSPARSE_CHECK(cusparseCreateDnMat(
+        &mat_result,
+        M, N, N,  // rows, cols, leading dimension
+        result.data_ptr(),
+        cuda_dtype,
+        CUSPARSE_ORDER_ROW
+    ));
+
+    // Determine buffer size
+    size_t buffer_size = 0;
+    float alpha_f = 1.0f, beta_f = 0.0f;
+    double alpha_d = 1.0, beta_d = 0.0;
+    void* alpha_ptr = (dtype == DType::Float32) ? static_cast<void*>(&alpha_f) : static_cast<void*>(&alpha_d);
+    void* beta_ptr = (dtype == DType::Float32) ? static_cast<void*>(&beta_f) : static_cast<void*>(&beta_d);
+
+    CUSPARSE_CHECK(cusparseSpMM_bufferSize(
+        handle,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        alpha_ptr,
+        mat_sparse,
+        mat_dense,
+        beta_ptr,
+        mat_result,
+        cuda_dtype,
+        CUSPARSE_SPMM_ALG_DEFAULT,
+        &buffer_size
+    ));
+
+    // Allocate workspace buffer
+    void* buffer = nullptr;
+    if (buffer_size > 0) {
+        CUDA_CHECK_SPARSE(cudaMalloc(&buffer, buffer_size));
+    }
+
+    // Execute SpMM
+    CUSPARSE_CHECK(cusparseSpMM(
+        handle,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        alpha_ptr,
+        mat_sparse,
+        mat_dense,
+        beta_ptr,
+        mat_result,
+        cuda_dtype,
+        CUSPARSE_SPMM_ALG_DEFAULT,
+        buffer
+    ));
+
+    // Synchronize to ensure computation is complete
+    CUDA_CHECK_SPARSE(cudaDeviceSynchronize());
+
+    // Cleanup
+    if (buffer) {
+        CUDA_CHECK_SPARSE(cudaFree(buffer));
+    }
+    CUSPARSE_CHECK(cusparseDestroySpMat(mat_sparse));
+    CUSPARSE_CHECK(cusparseDestroyDnMat(mat_dense));
+    CUSPARSE_CHECK(cusparseDestroyDnMat(mat_result));
+
+    return result;
+}
+
+Tensor cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
+    auto sp_shape = sparse.shape();
+    if (sp_shape.size() != 2 || vec.ndim() != 1) {
+        throw std::runtime_error("cuda_spmv: sparse must be 2D, vec must be 1D");
+    }
+
+    int64_t M = sp_shape[0];
+    int64_t K = sp_shape[1];
+    if (K != vec.shape()[0]) {
+        throw std::runtime_error("cuda_spmv: dimensions must match ("
+            + std::to_string(K) + " vs " + std::to_string(vec.shape()[0]) + ")");
+    }
+
+    DType dtype = vec.dtype();
+    if (dtype != DType::Float32 && dtype != DType::Float64) {
+        throw std::runtime_error("cuda_spmv: only Float32 and Float64 supported, got "
+            + std::string(dtype_name(dtype)));
+    }
+
+    // Ensure sparse is in CSR format on GPU
+    auto csr = ensure_csr_on_gpu(sparse);
+    int64_t nnz = csr.nnz();
+
+    // Ensure vec is contiguous and on GPU
+    auto vec_gpu = (vec.device().type != Device::Type::CUDA)
+                   ? vec.to(Device::cuda()).contiguous()
+                   : vec.contiguous();
+
+    // Create output tensor
+    auto result = zeros({M}, dtype, Device::cuda());
+
+    // Get cuSPARSE handle
+    cusparseHandle_t handle = CuSPARSEHandlePool::get();
+    cudaDataType cuda_dtype = get_cuda_data_type(dtype);
+
+    // Get raw pointers
+    auto crow = csr.crow_indices().contiguous();
+    auto col = csr.col_indices().contiguous();
+    auto vals = csr.values().contiguous();
+
+    // Create sparse matrix descriptor
+    cusparseSpMatDescr_t mat_sparse;
+    CUSPARSE_CHECK(cusparseCreateCsr(
+        &mat_sparse,
+        M, K, nnz,
+        const_cast<void*>(static_cast<const void*>(crow.data<int64_t>())),
+        const_cast<void*>(static_cast<const void*>(col.data<int64_t>())),
+        const_cast<void*>(static_cast<const void*>(vals.data_ptr())),
+        CUSPARSE_INDEX_64I,
+        CUSPARSE_INDEX_64I,
+        CUSPARSE_INDEX_BASE_ZERO,
+        cuda_dtype
+    ));
+
+    // Create dense vector descriptors
+    cusparseDnVecDescr_t vec_x;
+    CUSPARSE_CHECK(cusparseCreateDnVec(
+        &vec_x,
+        K,
+        const_cast<void*>(vec_gpu.data_ptr()),
+        cuda_dtype
+    ));
+
+    cusparseDnVecDescr_t vec_y;
+    CUSPARSE_CHECK(cusparseCreateDnVec(
+        &vec_y,
+        M,
+        result.data_ptr(),
+        cuda_dtype
+    ));
+
+    // Determine buffer size
+    size_t buffer_size = 0;
+    float alpha_f = 1.0f, beta_f = 0.0f;
+    double alpha_d = 1.0, beta_d = 0.0;
+    void* alpha_ptr = (dtype == DType::Float32) ? static_cast<void*>(&alpha_f) : static_cast<void*>(&alpha_d);
+    void* beta_ptr = (dtype == DType::Float32) ? static_cast<void*>(&beta_f) : static_cast<void*>(&beta_d);
+
+    CUSPARSE_CHECK(cusparseSpMV_bufferSize(
+        handle,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        alpha_ptr,
+        mat_sparse,
+        vec_x,
+        beta_ptr,
+        vec_y,
+        cuda_dtype,
+        CUSPARSE_SPMV_ALG_DEFAULT,
+        &buffer_size
+    ));
+
+    // Allocate workspace buffer
+    void* buffer = nullptr;
+    if (buffer_size > 0) {
+        CUDA_CHECK_SPARSE(cudaMalloc(&buffer, buffer_size));
+    }
+
+    // Execute SpMV
+    CUSPARSE_CHECK(cusparseSpMV(
+        handle,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        alpha_ptr,
+        mat_sparse,
+        vec_x,
+        beta_ptr,
+        vec_y,
+        cuda_dtype,
+        CUSPARSE_SPMV_ALG_DEFAULT,
+        buffer
+    ));
+
+    // Synchronize
+    CUDA_CHECK_SPARSE(cudaDeviceSynchronize());
+
+    // Cleanup
+    if (buffer) {
+        CUDA_CHECK_SPARSE(cudaFree(buffer));
+    }
+    CUSPARSE_CHECK(cusparseDestroySpMat(mat_sparse));
+    CUSPARSE_CHECK(cusparseDestroyDnVec(vec_x));
+    CUSPARSE_CHECK(cusparseDestroyDnVec(vec_y));
+
+    return result;
+}
+
+} // namespace cuda
+} // namespace tenzor
+
+#endif // TENZOR_HAS_CUSPARSE

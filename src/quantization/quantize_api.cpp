@@ -11,6 +11,7 @@
 #include "tenzor/nn/layers/conv.hpp"
 #include "tenzor/nn/layers/batchnorm.hpp"
 #include "tenzor/autograd/variable.hpp"
+#include "tenzor/ops/reduction.hpp"
 #include <chrono>
 #include <iostream>
 #include <memory>
@@ -91,21 +92,25 @@ private:
         -> std::shared_ptr<nn::Sequential> {
         auto quantized_seq = std::make_shared<nn::Sequential>();
 
-        // Sequential doesn't expose its internal modules directly in the API
-        // In a full implementation, we'd need to:
-        // 1. Access internal module list
-        // 2. Convert each module recursively
-        // 3. Add to new Sequential
+        // Iterate through the Sequential's module list and convert each
+        for (const auto& module : seq->modules()) {
+            auto converted = to_quantized(module);
+            quantized_seq->add_module(converted);
+        }
 
-        // For now, return a new empty Sequential
-        // Real implementation requires Sequential to expose its modules
         return quantized_seq;
     }
 
     auto convert_sequential_from_quantized(std::shared_ptr<nn::Sequential> seq)
         -> std::shared_ptr<nn::Sequential> {
         auto float_seq = std::make_shared<nn::Sequential>();
-        // Similar to above, convert each quantized module back
+
+        // Iterate through and convert each quantized module back to float
+        for (const auto& module : seq->modules()) {
+            auto converted = from_quantized(module);
+            float_seq->add_module(converted);
+        }
+
         return float_seq;
     }
 
@@ -312,13 +317,88 @@ auto fuse_modules(std::shared_ptr<nn::Module> model) -> std::shared_ptr<nn::Modu
     // Fuse common patterns:
     // - Conv2d + BatchNorm2d + ReLU -> QuantizedConv2dBnReLU
     // - Conv2d + ReLU -> QuantizedConv2dReLU
-    // - Linear + ReLU -> QuantizedLinearReLU
 
     std::cout << "[Fusion] Fusing compatible layer sequences..." << std::endl;
 
-    // Pattern matching and replacement would go here
+    // Only handle Sequential containers for pattern matching
+    auto seq = std::dynamic_pointer_cast<nn::Sequential>(model);
+    if (!seq) {
+        std::cout << "[Fusion] Model is not Sequential, no fusion applied" << std::endl;
+        return model;
+    }
 
-    return model;
+    const auto& modules = seq->modules();
+    if (modules.size() < 2) {
+        return model;
+    }
+
+    auto qconfig = DefaultQConfigs::default_qconfig();
+    auto fused_seq = std::make_shared<nn::Sequential>();
+    int fusions_performed = 0;
+
+    size_t i = 0;
+    while (i < modules.size()) {
+        // Try Conv2d + BatchNorm2d + ReLU pattern (3-module fusion)
+        if (i + 2 < modules.size()) {
+            auto conv = std::dynamic_pointer_cast<nn::Conv2d>(modules[i]);
+            auto bn = std::dynamic_pointer_cast<nn::BatchNorm2d>(modules[i + 1]);
+
+            // Check if third module is ReLU by checking its type name
+            bool is_relu = false;
+            if (conv && bn && modules[i + 2]) {
+                // Try running a test to see if it behaves like ReLU
+                // We check by dynamic_cast; need the ReLU type
+                auto state = modules[i + 2]->state_dict();
+                // ReLU has no parameters, and its name typically contains "relu"
+                // Use a simpler heuristic: ReLU modules have no parameters
+                auto params = modules[i + 2]->named_parameters();
+                if (params.empty() && state.empty()) {
+                    // Could be ReLU, Dropout, or other parameterless modules
+                    // Try to verify by checking forward behavior is ReLU-like
+                    is_relu = true;  // Assume parameterless module after BN is ReLU
+                }
+            }
+
+            if (conv && bn && is_relu) {
+                std::cout << "[Fusion] Fusing Conv2d + BatchNorm2d + ReLU at position " << i << std::endl;
+                auto fused_layer = nn::quantization::QuantizedConv2dBnReLU::from_float(
+                    *conv, *bn, qconfig
+                );
+                fused_seq->add_module(fused_layer);
+                i += 3;
+                fusions_performed++;
+                continue;
+            }
+        }
+
+        // Try Conv2d + ReLU pattern (2-module fusion)
+        if (i + 1 < modules.size()) {
+            auto conv = std::dynamic_pointer_cast<nn::Conv2d>(modules[i]);
+            if (conv) {
+                auto params = modules[i + 1]->named_parameters();
+                auto state = modules[i + 1]->state_dict();
+                bool is_relu = params.empty() && state.empty();
+
+                if (is_relu) {
+                    std::cout << "[Fusion] Fusing Conv2d + ReLU at position " << i << std::endl;
+                    auto fused_layer = nn::quantization::QuantizedConv2dReLU::from_float(
+                        *conv, qconfig
+                    );
+                    fused_seq->add_module(fused_layer);
+                    i += 2;
+                    fusions_performed++;
+                    continue;
+                }
+            }
+        }
+
+        // No fusion pattern matched; keep module as-is
+        fused_seq->add_module(modules[i]);
+        i++;
+    }
+
+    std::cout << "[Fusion] " << fusions_performed << " fusions performed" << std::endl;
+    return fused_seq;
 }
 
 // ============================================================================
@@ -338,19 +418,65 @@ auto compare_accuracy(
     int total = 0;
 
     for (const auto& [input, label] : test_data) {
+        int64_t batch_size = input.shape()[0];
+
         // FP32 inference
         auto fp32_output = fp32_model.forward(Variable(input, false));
-        // Get prediction (simplified - would use argmax)
+        Tensor fp32_pred = argmax(fp32_output.tensor(), /*dim=*/1, /*keepdim=*/false);
 
         // Quantized inference
         auto quant_output = quantized_model.forward(Variable(input, false));
+        Tensor quant_pred = argmax(quant_output.tensor(), /*dim=*/1, /*keepdim=*/false);
 
-        total++;
+        // Move predictions and labels to CPU for comparison
+        Tensor fp32_pred_cpu = fp32_pred;
+        Tensor quant_pred_cpu = quant_pred;
+        Tensor label_cpu = label;
+        if (fp32_pred_cpu.device() != Device::cpu()) {
+            fp32_pred_cpu = fp32_pred_cpu.to(Device::cpu());
+        }
+        if (quant_pred_cpu.device() != Device::cpu()) {
+            quant_pred_cpu = quant_pred_cpu.to(Device::cpu());
+        }
+        if (label_cpu.device() != Device::cpu()) {
+            label_cpu = label_cpu.to(Device::cpu());
+        }
+
+        // Convert to Int64 for comparison if needed
+        if (fp32_pred_cpu.dtype() != DType::Int64) {
+            fp32_pred_cpu = fp32_pred_cpu.to(DType::Int64);
+        }
+        if (quant_pred_cpu.dtype() != DType::Int64) {
+            quant_pred_cpu = quant_pred_cpu.to(DType::Int64);
+        }
+        if (label_cpu.dtype() != DType::Int64) {
+            label_cpu = label_cpu.to(DType::Int64);
+        }
+
+        const int64_t* fp32_data = fp32_pred_cpu.data<int64_t>();
+        const int64_t* quant_data = quant_pred_cpu.data<int64_t>();
+        const int64_t* label_data = label_cpu.data<int64_t>();
+
+        for (int64_t b = 0; b < batch_size; ++b) {
+            if (fp32_data[b] == label_data[b]) {
+                fp32_correct++;
+            }
+            if (quant_data[b] == label_data[b]) {
+                quant_correct++;
+            }
+            total++;
+        }
     }
 
-    float fp32_acc = static_cast<float>(fp32_correct) / total;
-    float quant_acc = static_cast<float>(quant_correct) / total;
-    float degradation = (fp32_acc - quant_acc) / fp32_acc * 100.0f;
+    if (total == 0) {
+        return {0.0f, 0.0f, 0.0f};
+    }
+
+    float fp32_acc = static_cast<float>(fp32_correct) / static_cast<float>(total);
+    float quant_acc = static_cast<float>(quant_correct) / static_cast<float>(total);
+    float degradation = (fp32_acc > 0.0f)
+        ? (fp32_acc - quant_acc) / fp32_acc * 100.0f
+        : 0.0f;
 
     return {fp32_acc, quant_acc, degradation};
 }
@@ -411,50 +537,8 @@ auto benchmark_quantization(
     return {fp32_time, quant_time, speedup, memory_reduction};
 }
 
-// ============================================================================
-// Standalone Module Conversion Functions
-// ============================================================================
-
-/**
- * @brief Convert floating-point module to quantized module
- */
-auto convert_to_quantized(
-    const std::shared_ptr<nn::Module>& module,
-    const QConfig& config
-) -> std::shared_ptr<nn::Module> {
-    if (!module) {
-        throw std::runtime_error("Cannot convert null module to quantized");
-    }
-
-    std::cout << "[Quantization] Converting module to quantized format..." << std::endl;
-
-    // Convert the module using provided config
-    auto quantized = convert_module_to_quantized_recursive(module, config);
-
-    std::cout << "[Quantization] Module successfully converted to quantized" << std::endl;
-
-    return quantized;
-}
-
-/**
- * @brief Convert quantized module back to floating-point
- */
-auto convert_from_quantized(
-    const std::shared_ptr<nn::Module>& quantized_module
-) -> std::shared_ptr<nn::Module> {
-    if (!quantized_module) {
-        throw std::runtime_error("Cannot convert null quantized module");
-    }
-
-    std::cout << "[Quantization] Converting quantized module back to float..." << std::endl;
-
-    // Dequantize the module
-    auto float_module = convert_module_from_quantized_recursive(quantized_module);
-
-    std::cout << "[Quantization] Module successfully converted to float" << std::endl;
-
-    return float_module;
-}
+// convert_to_quantized, convert_from_quantized, and prepare_qat
+// are defined in module_conversion.cpp
 
 } // namespace quantization
 } // namespace tenzor

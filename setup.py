@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """
 Tenzor: High-performance tensor computation and neural network library
+
+This setup.py is a legacy fallback for environments that do not support
+PEP 517 / pyproject.toml builds.  The preferred build backend is
+scikit-build-core (configured in pyproject.toml).
 """
 
 import os
 import sys
+import platform
 import subprocess
 from pathlib import Path
 from setuptools import setup, Extension
 from setuptools.command.build_ext import build_ext
+from wheel.bdist_wheel import bdist_wheel
 
 
 class CMakeExtension(Extension):
@@ -46,8 +52,10 @@ class CMakeBuild(build_ext):
             f'-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={extdir}',
             f'-DPYTHON_EXECUTABLE={sys.executable}',
             '-DTENZOR_BUILD_PYTHON=ON',
-            '-DTENZOR_BUILD_TESTS=OFF',  # Don't build tests during pip install
+            '-DTENZOR_BUILD_TESTS=OFF',
             '-DTENZOR_BUILD_EXAMPLES=OFF',
+            '-DTENZOR_BUILD_BENCHMARKS=OFF',
+            '-DTENZOR_BUILD_MODEL_HUB=OFF',
         ]
 
         # Build type
@@ -66,12 +74,6 @@ class CMakeBuild(build_ext):
             import multiprocessing
             build_args += ['--', f'-j{multiprocessing.cpu_count()}']
 
-        # Add optimization flags
-        if cfg == 'Release':
-            cmake_args += [
-                '-DCMAKE_CXX_FLAGS_RELEASE=-O3 -DNDEBUG',
-            ]
-
         # Run CMake configuration
         subprocess.check_call(
             ['cmake', ext.sourcedir] + cmake_args,
@@ -83,6 +85,23 @@ class CMakeBuild(build_ext):
             ['cmake', '--build', '.'] + build_args,
             cwd=self.build_temp
         )
+
+
+class PlatformBdistWheel(bdist_wheel):
+    """Ensure wheels are tagged as platform-specific (not pure-Python)."""
+
+    def finalize_options(self):
+        super().finalize_options()
+        # Mark the wheel as platform-specific since it contains C++ extensions
+        self.root_is_pure = False
+
+    def get_tag(self):
+        python, abi, plat = super().get_tag()
+        # On Linux, replace generic 'linux' with the manylinux tag if applicable
+        if plat.startswith('linux'):
+            arch = platform.machine()
+            plat = f'linux_{arch}'
+        return python, abi, plat
 
 
 # Read long description from README
@@ -97,9 +116,12 @@ setup(
     long_description=long_description,
     long_description_content_type='text/markdown',
     ext_modules=[CMakeExtension('tenzor.tenzor_core')],
-    cmdclass={'build_ext': CMakeBuild},
+    cmdclass={
+        'build_ext': CMakeBuild,
+        'bdist_wheel': PlatformBdistWheel,
+    },
     zip_safe=False,
-    python_requires='>=3.8',
+    python_requires='>=3.9',
     install_requires=[
         'numpy>=1.19.0',
     ],
@@ -127,11 +149,14 @@ setup(
         'License :: OSI Approved :: MIT License',
         'Programming Language :: C++',
         'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.8',
         'Programming Language :: Python :: 3.9',
         'Programming Language :: Python :: 3.10',
         'Programming Language :: Python :: 3.11',
         'Programming Language :: Python :: 3.12',
+        'Programming Language :: Python :: 3.13',
+        'Operating System :: POSIX :: Linux',
+        'Operating System :: MacOS',
+        'Operating System :: Microsoft :: Windows',
         'Topic :: Scientific/Engineering :: Artificial Intelligence',
     ],
 )

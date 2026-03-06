@@ -42,14 +42,34 @@ bool try_gpu_dispatch_multi(OpId op, std::span<const Tensor> inputs,
     }
 }
 
-// Ensure tensor is contiguous Float32 or Float64 on CPU, return a working copy
+// Check if dtype is a low-precision float that needs upcasting for LAPACK
+bool needs_upcast(DType dt) {
+    return dt == DType::Float16 || dt == DType::BFloat16;
+}
+
+// Ensure tensor is contiguous Float32 or Float64 on CPU, return a working copy.
+// Float16 and BFloat16 inputs are upcast to Float32.
 auto prepare_matrix(const Tensor& A) -> Tensor {
-    if (A.dtype() != DType::Float32 && A.dtype() != DType::Float64) {
-        throw std::runtime_error("linalg: only Float32 and Float64 supported");
+    auto dt = A.dtype();
+    if (dt != DType::Float32 && dt != DType::Float64 &&
+        dt != DType::Float16 && dt != DType::BFloat16) {
+        throw std::runtime_error("linalg: only Float32, Float64, Float16, and BFloat16 supported");
     }
     // If not on CPU, move to CPU for LAPACK fallback
     auto cpu_tensor = (A.device().type != Device::Type::CPU) ? A.to(Device::cpu()) : A;
+    // Upcast low-precision floats to Float32 for LAPACK compatibility
+    if (needs_upcast(cpu_tensor.dtype())) {
+        cpu_tensor = cpu_tensor.to(DType::Float32);
+    }
     return cpu_tensor.contiguous().clone();
+}
+
+// Downcast result tensor back to original dtype if it was upcast
+auto maybe_downcast(const Tensor& result, DType original_dtype) -> Tensor {
+    if (needs_upcast(original_dtype) && result.dtype() != original_dtype) {
+        return result.to(original_dtype);
+    }
+    return result;
 }
 
 auto check_square(const Tensor& A) -> std::pair<int64_t, int64_t> {
@@ -87,6 +107,7 @@ auto det(const Tensor& A) -> Tensor {
         if (try_gpu_dispatch(OpId::LinalgDet, inputs, {}, result)) return result;
     }
 
+    auto original_dtype = A.dtype();
     auto work = prepare_matrix(A);
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);
@@ -99,11 +120,11 @@ auto det(const Tensor& A) -> Tensor {
     }
     if (out_shape.empty()) out_shape.push_back(1);
 
-    auto result = zeros(out_shape, A.dtype(), Device::cpu());
+    auto result = zeros(out_shape, work.dtype(), Device::cpu());
 
     std::vector<lapack_int> ipiv(n);
 
-    if (A.dtype() == DType::Float32) {
+    if (work.dtype() == DType::Float32) {
         float* data = work.data<float>();
         float* res_data = result.data<float>();
 
@@ -143,7 +164,7 @@ auto det(const Tensor& A) -> Tensor {
         }
     }
 
-    return result;
+    return maybe_downcast(result, original_dtype);
 }
 
 auto inv(const Tensor& A) -> Tensor {
@@ -154,13 +175,14 @@ auto inv(const Tensor& A) -> Tensor {
         if (try_gpu_dispatch(OpId::LinalgInv, inputs, {}, result)) return result;
     }
 
+    auto original_dtype = A.dtype();
     auto work = prepare_matrix(A);
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);
 
     std::vector<lapack_int> ipiv(n);
 
-    if (A.dtype() == DType::Float32) {
+    if (work.dtype() == DType::Float32) {
         float* data = work.data<float>();
 
         for (int64_t b = 0; b < nbatch; ++b) {
@@ -188,7 +210,7 @@ auto inv(const Tensor& A) -> Tensor {
         }
     }
 
-    return work;
+    return maybe_downcast(work, original_dtype);
 }
 
 auto solve(const Tensor& A, const Tensor& B) -> Tensor {
@@ -199,6 +221,7 @@ auto solve(const Tensor& A, const Tensor& B) -> Tensor {
         if (try_gpu_dispatch(OpId::LinalgSolve, inputs, {}, result)) return result;
     }
 
+    auto original_dtype = A.dtype();
     auto work_a = prepare_matrix(A);
     auto work_b = prepare_matrix(B);
     auto [n, ndim_a] = check_square(work_a);
@@ -212,7 +235,7 @@ auto solve(const Tensor& A, const Tensor& B) -> Tensor {
 
     std::vector<lapack_int> ipiv(n);
 
-    if (A.dtype() == DType::Float32) {
+    if (work_a.dtype() == DType::Float32) {
         float* a_data = work_a.data<float>();
         float* b_data = work_b.data<float>();
 
@@ -242,7 +265,7 @@ auto solve(const Tensor& A, const Tensor& B) -> Tensor {
         }
     }
 
-    return work_b;
+    return maybe_downcast(work_b, original_dtype);
 }
 
 auto cholesky(const Tensor& A, bool upper) -> Tensor {
@@ -255,13 +278,14 @@ auto cholesky(const Tensor& A, bool upper) -> Tensor {
         if (try_gpu_dispatch(OpId::LinalgCholesky, inputs, attrs, result)) return result;
     }
 
+    auto original_dtype = A.dtype();
     auto work = prepare_matrix(A);
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);
 
     char uplo = upper ? 'U' : 'L';
 
-    if (A.dtype() == DType::Float32) {
+    if (work.dtype() == DType::Float32) {
         float* data = work.data<float>();
 
         for (int64_t b = 0; b < nbatch; ++b) {
@@ -300,7 +324,7 @@ auto cholesky(const Tensor& A, bool upper) -> Tensor {
         }
     }
 
-    return work;
+    return maybe_downcast(work, original_dtype);
 }
 
 auto norm(const Tensor& A, const std::string& ord) -> Tensor {
@@ -320,6 +344,7 @@ auto norm(const Tensor& A, const std::string& ord) -> Tensor {
 }
 
 auto slogdet(const Tensor& A) -> std::tuple<Tensor, Tensor> {
+    auto original_dtype = A.dtype();
     auto work = prepare_matrix(A);
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);
@@ -331,12 +356,12 @@ auto slogdet(const Tensor& A) -> std::tuple<Tensor, Tensor> {
     }
     if (out_shape.empty()) out_shape.push_back(1);
 
-    auto sign_result = zeros(out_shape, A.dtype(), Device::cpu());
-    auto logabsdet_result = zeros(out_shape, A.dtype(), Device::cpu());
+    auto sign_result = zeros(out_shape, work.dtype(), Device::cpu());
+    auto logabsdet_result = zeros(out_shape, work.dtype(), Device::cpu());
 
     std::vector<lapack_int> ipiv(n);
 
-    if (A.dtype() == DType::Float32) {
+    if (work.dtype() == DType::Float32) {
         float* data = work.data<float>();
         float* sign_data = sign_result.data<float>();
         float* logabs_data = logabsdet_result.data<float>();
@@ -400,7 +425,8 @@ auto slogdet(const Tensor& A) -> std::tuple<Tensor, Tensor> {
         }
     }
 
-    return {sign_result, logabsdet_result};
+    return {maybe_downcast(sign_result, original_dtype),
+            maybe_downcast(logabsdet_result, original_dtype)};
 }
 
 auto svd(const Tensor& A, bool full_matrices) -> std::tuple<Tensor, Tensor, Tensor> {
@@ -415,6 +441,7 @@ auto svd(const Tensor& A, bool full_matrices) -> std::tuple<Tensor, Tensor, Tens
         }
     }
 
+    auto original_dtype = A.dtype();
     auto work = prepare_matrix(A);
     auto shape = A.shape();
     auto a_ndim = static_cast<int64_t>(shape.size());
@@ -443,9 +470,9 @@ auto svd(const Tensor& A, bool full_matrices) -> std::tuple<Tensor, Tensor, Tens
         vt_shape.push_back(k); vt_shape.push_back(n_cols);
     }
 
-    auto U = zeros(u_shape, A.dtype(), Device::cpu());
-    auto S = zeros(s_shape, A.dtype(), Device::cpu());
-    auto Vt = zeros(vt_shape, A.dtype(), Device::cpu());
+    auto U = zeros(u_shape, work.dtype(), Device::cpu());
+    auto S = zeros(s_shape, work.dtype(), Device::cpu());
+    auto Vt = zeros(vt_shape, work.dtype(), Device::cpu());
 
     char jobz = full_matrices ? 'A' : 'S';
 
@@ -453,7 +480,7 @@ auto svd(const Tensor& A, bool full_matrices) -> std::tuple<Tensor, Tensor, Tens
     int64_t superb_size = k - 1;
     if (superb_size < 1) superb_size = 1;
 
-    if (A.dtype() == DType::Float32) {
+    if (work.dtype() == DType::Float32) {
         float* a_data = work.data<float>();
         float* u_data = U.data<float>();
         float* s_data = S.data<float>();
@@ -504,7 +531,9 @@ auto svd(const Tensor& A, bool full_matrices) -> std::tuple<Tensor, Tensor, Tens
         }
     }
 
-    return {U, S, Vt};
+    return {maybe_downcast(U, original_dtype),
+            maybe_downcast(S, original_dtype),
+            maybe_downcast(Vt, original_dtype)};
 }
 
 auto qr(const Tensor& A) -> std::tuple<Tensor, Tensor> {
@@ -517,6 +546,7 @@ auto qr(const Tensor& A) -> std::tuple<Tensor, Tensor> {
         }
     }
 
+    auto original_dtype = A.dtype();
     auto work = prepare_matrix(A);
     auto shape = A.shape();
     auto a_ndim = static_cast<int64_t>(shape.size());
@@ -536,10 +566,10 @@ auto qr(const Tensor& A) -> std::tuple<Tensor, Tensor> {
     std::vector<int64_t> r_shape = batch_dims;
     r_shape.push_back(k); r_shape.push_back(n_cols);
 
-    auto Q = zeros(q_shape, A.dtype(), Device::cpu());
-    auto R = zeros(r_shape, A.dtype(), Device::cpu());
+    auto Q = zeros(q_shape, work.dtype(), Device::cpu());
+    auto R = zeros(r_shape, work.dtype(), Device::cpu());
 
-    if (A.dtype() == DType::Float32) {
+    if (work.dtype() == DType::Float32) {
         float* a_data = work.data<float>();
         float* q_data = Q.data<float>();
         float* r_data = R.data<float>();
@@ -611,7 +641,7 @@ auto qr(const Tensor& A) -> std::tuple<Tensor, Tensor> {
         }
     }
 
-    return {Q, R};
+    return {maybe_downcast(Q, original_dtype), maybe_downcast(R, original_dtype)};
 }
 
 auto eigh(const Tensor& A) -> std::tuple<Tensor, Tensor> {
@@ -624,6 +654,7 @@ auto eigh(const Tensor& A) -> std::tuple<Tensor, Tensor> {
         }
     }
 
+    auto original_dtype = A.dtype();
     auto work = prepare_matrix(A);
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);
@@ -635,11 +666,11 @@ auto eigh(const Tensor& A) -> std::tuple<Tensor, Tensor> {
     // Eigenvalues shape: (..., N)
     std::vector<int64_t> w_shape = batch_dims;
     w_shape.push_back(n);
-    auto W = zeros(w_shape, A.dtype(), Device::cpu());
+    auto W = zeros(w_shape, work.dtype(), Device::cpu());
 
     // Eigenvectors are stored in work (overwritten by dsyev/ssyev)
 
-    if (A.dtype() == DType::Float32) {
+    if (work.dtype() == DType::Float32) {
         float* a_data = work.data<float>();
         float* w_data = W.data<float>();
 
@@ -666,7 +697,7 @@ auto eigh(const Tensor& A) -> std::tuple<Tensor, Tensor> {
     }
 
     // work now contains eigenvectors (columns of orthogonal matrix)
-    return {W, work};
+    return {maybe_downcast(W, original_dtype), maybe_downcast(work, original_dtype)};
 }
 
 auto eigvalsh(const Tensor& A) -> Tensor {
@@ -679,6 +710,7 @@ auto eigvalsh(const Tensor& A) -> Tensor {
         }
     }
 
+    auto original_dtype = A.dtype();
     auto work = prepare_matrix(A);
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);
@@ -689,9 +721,9 @@ auto eigvalsh(const Tensor& A) -> Tensor {
 
     std::vector<int64_t> w_shape = batch_dims;
     w_shape.push_back(n);
-    auto W = zeros(w_shape, A.dtype(), Device::cpu());
+    auto W = zeros(w_shape, work.dtype(), Device::cpu());
 
-    if (A.dtype() == DType::Float32) {
+    if (work.dtype() == DType::Float32) {
         float* a_data = work.data<float>();
         float* w_data = W.data<float>();
 
@@ -717,7 +749,89 @@ auto eigvalsh(const Tensor& A) -> Tensor {
         }
     }
 
-    return W;
+    return maybe_downcast(W, original_dtype);
+}
+
+auto eig(const Tensor& A) -> std::tuple<Tensor, Tensor, Tensor> {
+    // Try GPU dispatch first
+    {
+        std::vector<Tensor> results;
+        std::array<Tensor, 1> inputs = {A};
+        if (try_gpu_dispatch_multi(OpId::LinalgEig, inputs, {}, results)) {
+            return {results[0], results[1], results[2]};
+        }
+    }
+
+    auto original_dtype = A.dtype();
+    auto work = prepare_matrix(A);
+    auto [n, ndim] = check_square(work);
+    int64_t nbatch = batch_size(work);
+
+    std::vector<int64_t> batch_dims;
+    auto shape = A.shape();
+    for (size_t i = 0; i + 2 < shape.size(); ++i) batch_dims.push_back(shape[i]);
+
+    // Eigenvalues shape: (..., N) — real and imaginary parts separately
+    std::vector<int64_t> w_shape = batch_dims;
+    w_shape.push_back(n);
+
+    // Eigenvectors shape: (..., N, N)
+    std::vector<int64_t> v_shape = batch_dims;
+    v_shape.push_back(n);
+    v_shape.push_back(n);
+
+    auto Wr = zeros(w_shape, work.dtype(), Device::cpu());  // real part of eigenvalues
+    auto Wi = zeros(w_shape, work.dtype(), Device::cpu());  // imaginary part of eigenvalues
+    auto Vr = zeros(v_shape, work.dtype(), Device::cpu());  // right eigenvectors
+
+    if (work.dtype() == DType::Float32) {
+        float* a_data = work.data<float>();
+        float* wr_data = Wr.data<float>();
+        float* wi_data = Wi.data<float>();
+        float* vr_data = Vr.data<float>();
+
+        for (int64_t b = 0; b < nbatch; ++b) {
+            float* mat = a_data + b * n * n;
+            float* wr_vec = wr_data + b * n;
+            float* wi_vec = wi_data + b * n;
+            float* vr_mat = vr_data + b * n * n;
+            auto ln = static_cast<lapack_int>(n);
+
+            // Compute eigenvalues and right eigenvectors (no left eigenvectors)
+            lapack_int info = LAPACKE_sgeev(LAPACK_ROW_MAJOR, 'N', 'V',
+                ln, mat, ln, wr_vec, wi_vec,
+                nullptr, ln, vr_mat, ln);
+            if (info != 0) {
+                throw std::runtime_error("linalg::eig: computation failed (info=" +
+                    std::to_string(info) + ")");
+            }
+        }
+    } else {
+        double* a_data = work.data<double>();
+        double* wr_data = Wr.data<double>();
+        double* wi_data = Wi.data<double>();
+        double* vr_data = Vr.data<double>();
+
+        for (int64_t b = 0; b < nbatch; ++b) {
+            double* mat = a_data + b * n * n;
+            double* wr_vec = wr_data + b * n;
+            double* wi_vec = wi_data + b * n;
+            double* vr_mat = vr_data + b * n * n;
+            auto ln = static_cast<lapack_int>(n);
+
+            lapack_int info = LAPACKE_dgeev(LAPACK_ROW_MAJOR, 'N', 'V',
+                ln, mat, ln, wr_vec, wi_vec,
+                nullptr, ln, vr_mat, ln);
+            if (info != 0) {
+                throw std::runtime_error("linalg::eig: computation failed (info=" +
+                    std::to_string(info) + ")");
+            }
+        }
+    }
+
+    return {maybe_downcast(Wr, original_dtype),
+            maybe_downcast(Wi, original_dtype),
+            maybe_downcast(Vr, original_dtype)};
 }
 
 } // namespace tenzor::linalg

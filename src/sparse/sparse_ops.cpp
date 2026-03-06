@@ -3,8 +3,73 @@
 #include <cstring>
 #include <stdexcept>
 
+// Forward declarations for CUDA sparse kernels (defined in kernels/sparse.cu)
+#ifdef TENZOR_HAS_CUSPARSE
+namespace tenzor {
+namespace cuda {
+Tensor cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense);
+Tensor cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec);
+} // namespace cuda
+} // namespace tenzor
+#endif
+
 namespace tenzor {
 namespace sparse {
+
+// ============================================================================
+// Helper: cast unsupported dtypes to a compute dtype for spmm/spmv
+// ============================================================================
+
+namespace {
+
+/// Determine the compute dtype for a given input dtype.
+/// Float16/BFloat16/Int32 -> Float32, Int64 -> Float64.
+/// Float32/Float64 are returned as-is.
+DType compute_dtype_for(DType dtype) {
+    switch (dtype) {
+        case DType::Float32:
+        case DType::Float64:
+            return dtype;
+        case DType::Float16:
+        case DType::BFloat16:
+        case DType::Int32:
+            return DType::Float32;
+        case DType::Int64:
+            return DType::Float64;
+        default:
+            throw std::runtime_error("sparse ops: unsupported dtype " +
+                                     std::string(dtype_name(dtype)));
+    }
+}
+
+/// Return true if sparse/dense are on CUDA and cuSPARSE is available.
+[[maybe_unused]] bool should_use_cuda(const SparseTensor& sparse, const Tensor& dense) {
+#ifdef TENZOR_HAS_CUSPARSE
+    return (dense.device().type == Device::Type::CUDA ||
+            sparse.device().type == Device::Type::CUDA);
+#else
+    (void)sparse;
+    (void)dense;
+    return false;
+#endif
+}
+
+[[maybe_unused]] bool should_use_cuda_vec(const SparseTensor& sparse, const Tensor& vec) {
+#ifdef TENZOR_HAS_CUSPARSE
+    return (vec.device().type == Device::Type::CUDA ||
+            sparse.device().type == Device::Type::CUDA);
+#else
+    (void)sparse;
+    (void)vec;
+    return false;
+#endif
+}
+
+} // anonymous namespace
+
+// ============================================================================
+// spmm: Sparse-Dense Matrix Multiplication
+// ============================================================================
 
 auto spmm(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
     auto sp_shape = sparse.shape();
@@ -18,17 +83,42 @@ auto spmm(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
         throw std::runtime_error("spmm: inner dimensions must match");
     }
 
-    auto result = zeros({M, N}, dense.dtype(), dense.device());
-    auto dense_c = dense.contiguous();
+    DType orig_dtype = dense.dtype();
+    DType comp_dtype = compute_dtype_for(orig_dtype);
 
-    if (sparse.layout() == SparseLayout::COO) {
-        auto coo = sparse.is_coalesced() ? sparse : sparse.coalesce();
+    // Cast dense and sparse values to compute dtype if needed
+    Tensor dense_compute = (orig_dtype != comp_dtype) ? dense.to(comp_dtype) : dense;
+    SparseTensor sparse_compute = sparse;
+    if (sparse.dtype() != comp_dtype) {
+        // Rebuild the sparse tensor with cast values
+        auto new_vals = sparse.values().to(comp_dtype);
+        auto shape_vec = std::vector<int64_t>(sp_shape.begin(), sp_shape.end());
+        if (sparse.layout() == SparseLayout::COO) {
+            sparse_compute = SparseTensor::sparse_coo(sparse.indices(), new_vals, shape_vec);
+        } else {
+            sparse_compute = SparseTensor::sparse_csr(sparse.crow_indices(), sparse.col_indices(), new_vals, shape_vec);
+        }
+    }
+
+#ifdef TENZOR_HAS_CUSPARSE
+    if (should_use_cuda(sparse_compute, dense_compute)) {
+        auto result = cuda::cuda_spmm_kernel(sparse_compute, dense_compute);
+        return (orig_dtype != comp_dtype) ? result.to(orig_dtype) : result;
+    }
+#endif
+
+    // CPU path
+    auto result = zeros({M, N}, comp_dtype, dense_compute.device());
+    auto dense_c = dense_compute.contiguous();
+
+    if (sparse_compute.layout() == SparseLayout::COO) {
+        auto coo = sparse_compute.is_coalesced() ? sparse_compute : sparse_compute.coalesce();
         auto idx = coo.indices().contiguous();
         auto vals = coo.values().contiguous();
         auto* idx_ptr = idx.data<int64_t>();
         int64_t nnz = coo.nnz();
 
-        if (vals.dtype() == DType::Float32) {
+        if (comp_dtype == DType::Float32) {
             auto* v = vals.data<float>();
             auto* d = dense_c.data<float>();
             auto* r = result.data<float>();
@@ -40,7 +130,7 @@ auto spmm(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
                     r[row * N + j] += val * d[col * N + j];
                 }
             }
-        } else if (vals.dtype() == DType::Float64) {
+        } else if (comp_dtype == DType::Float64) {
             auto* v = vals.data<double>();
             auto* d = dense_c.data<double>();
             auto* r = result.data<double>();
@@ -55,13 +145,13 @@ auto spmm(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
         }
     } else {
         // CSR format
-        auto crow = sparse.crow_indices().contiguous();
-        auto col = sparse.col_indices().contiguous();
-        auto vals = sparse.values().contiguous();
+        auto crow = sparse_compute.crow_indices().contiguous();
+        auto col = sparse_compute.col_indices().contiguous();
+        auto vals = sparse_compute.values().contiguous();
         auto* crow_ptr = crow.data<int64_t>();
         auto* col_ptr = col.data<int64_t>();
 
-        if (vals.dtype() == DType::Float32) {
+        if (comp_dtype == DType::Float32) {
             auto* v = vals.data<float>();
             auto* d = dense_c.data<float>();
             auto* r = result.data<float>();
@@ -74,7 +164,7 @@ auto spmm(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
                     }
                 }
             }
-        } else if (vals.dtype() == DType::Float64) {
+        } else if (comp_dtype == DType::Float64) {
             auto* v = vals.data<double>();
             auto* d = dense_c.data<double>();
             auto* r = result.data<double>();
@@ -90,8 +180,13 @@ auto spmm(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
         }
     }
 
-    return result;
+    // Cast result back to original dtype if needed
+    return (orig_dtype != comp_dtype) ? result.to(orig_dtype) : result;
 }
+
+// ============================================================================
+// spmv: Sparse-Dense Matrix-Vector Multiplication
+// ============================================================================
 
 auto spmv(const SparseTensor& sparse, const Tensor& vec) -> Tensor {
     auto sp_shape = sparse.shape();
@@ -104,24 +199,48 @@ auto spmv(const SparseTensor& sparse, const Tensor& vec) -> Tensor {
         throw std::runtime_error("spmv: dimensions must match");
     }
 
-    auto result = zeros({M}, vec.dtype(), vec.device());
-    auto vec_c = vec.contiguous();
+    DType orig_dtype = vec.dtype();
+    DType comp_dtype = compute_dtype_for(orig_dtype);
 
-    if (sparse.layout() == SparseLayout::COO) {
-        auto coo = sparse.is_coalesced() ? sparse : sparse.coalesce();
+    // Cast to compute dtype if needed
+    Tensor vec_compute = (orig_dtype != comp_dtype) ? vec.to(comp_dtype) : vec;
+    SparseTensor sparse_compute = sparse;
+    if (sparse.dtype() != comp_dtype) {
+        auto new_vals = sparse.values().to(comp_dtype);
+        auto shape_vec = std::vector<int64_t>(sp_shape.begin(), sp_shape.end());
+        if (sparse.layout() == SparseLayout::COO) {
+            sparse_compute = SparseTensor::sparse_coo(sparse.indices(), new_vals, shape_vec);
+        } else {
+            sparse_compute = SparseTensor::sparse_csr(sparse.crow_indices(), sparse.col_indices(), new_vals, shape_vec);
+        }
+    }
+
+#ifdef TENZOR_HAS_CUSPARSE
+    if (should_use_cuda_vec(sparse_compute, vec_compute)) {
+        auto result = cuda::cuda_spmv_kernel(sparse_compute, vec_compute);
+        return (orig_dtype != comp_dtype) ? result.to(orig_dtype) : result;
+    }
+#endif
+
+    // CPU path
+    auto result = zeros({M}, comp_dtype, vec_compute.device());
+    auto vec_c = vec_compute.contiguous();
+
+    if (sparse_compute.layout() == SparseLayout::COO) {
+        auto coo = sparse_compute.is_coalesced() ? sparse_compute : sparse_compute.coalesce();
         auto idx = coo.indices().contiguous();
         auto vals = coo.values().contiguous();
         auto* idx_ptr = idx.data<int64_t>();
         int64_t nnz = coo.nnz();
 
-        if (vals.dtype() == DType::Float32) {
+        if (comp_dtype == DType::Float32) {
             auto* v = vals.data<float>();
             auto* x = vec_c.data<float>();
             auto* r = result.data<float>();
             for (int64_t i = 0; i < nnz; ++i) {
                 r[idx_ptr[i]] += v[i] * x[idx_ptr[nnz + i]];
             }
-        } else if (vals.dtype() == DType::Float64) {
+        } else if (comp_dtype == DType::Float64) {
             auto* v = vals.data<double>();
             auto* x = vec_c.data<double>();
             auto* r = result.data<double>();
@@ -130,13 +249,13 @@ auto spmv(const SparseTensor& sparse, const Tensor& vec) -> Tensor {
             }
         }
     } else {
-        auto crow = sparse.crow_indices().contiguous();
-        auto col = sparse.col_indices().contiguous();
-        auto vals = sparse.values().contiguous();
+        auto crow = sparse_compute.crow_indices().contiguous();
+        auto col = sparse_compute.col_indices().contiguous();
+        auto vals = sparse_compute.values().contiguous();
         auto* crow_ptr = crow.data<int64_t>();
         auto* col_ptr = col.data<int64_t>();
 
-        if (vals.dtype() == DType::Float32) {
+        if (comp_dtype == DType::Float32) {
             auto* v = vals.data<float>();
             auto* x = vec_c.data<float>();
             auto* r = result.data<float>();
@@ -147,7 +266,7 @@ auto spmv(const SparseTensor& sparse, const Tensor& vec) -> Tensor {
                 }
                 r[row] = sum;
             }
-        } else if (vals.dtype() == DType::Float64) {
+        } else if (comp_dtype == DType::Float64) {
             auto* v = vals.data<double>();
             auto* x = vec_c.data<double>();
             auto* r = result.data<double>();
@@ -161,8 +280,12 @@ auto spmv(const SparseTensor& sparse, const Tensor& vec) -> Tensor {
         }
     }
 
-    return result;
+    return (orig_dtype != comp_dtype) ? result.to(orig_dtype) : result;
 }
+
+// ============================================================================
+// add: Sparse + Dense
+// ============================================================================
 
 auto add(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
     auto result = sparse.to_dense();
@@ -190,6 +313,10 @@ auto add(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
 
     return result_c;
 }
+
+// ============================================================================
+// add: Sparse + Sparse
+// ============================================================================
 
 auto add(const SparseTensor& a, const SparseTensor& b) -> SparseTensor {
     if (a.shape() != b.shape()) {
@@ -262,6 +389,10 @@ auto add(const SparseTensor& a, const SparseTensor& b) -> SparseTensor {
     auto shape_vec = std::vector<int64_t>(a.shape().begin(), a.shape().end());
     return SparseTensor::sparse_coo(new_indices, new_values, shape_vec).coalesce();
 }
+
+// ============================================================================
+// mul: Sparse * Scalar
+// ============================================================================
 
 auto mul(const SparseTensor& sparse, double scalar) -> SparseTensor {
     if (sparse.layout() == SparseLayout::COO) {

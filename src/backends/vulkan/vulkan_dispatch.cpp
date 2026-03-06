@@ -6,6 +6,7 @@
 #include "vulkan_helpers.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
+#include "tenzor/utils/logging.hpp"
 
 #include <limits>
 #include <sstream>
@@ -149,6 +150,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
 
                 auto it = op_name_to_id.find(op_name);
                 if (it != op_name_to_id.end()) {
+                    TENZOR_LOG_WARNING(std::format("Vulkan: No shader for {} with dtype Float16; falling back to CPU", op_name));
                     std::vector<Tensor> cpu_inputs;
                     cpu_inputs.reserve(inputs.size());
                     for (const auto& t : inputs) {
@@ -1088,6 +1090,8 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         }
         // CPU fallback for unsupported dtypes (Int32, etc.)
         if (inputs[0].dtype() != DType::Float32 && inputs[0].dtype() != DType::Float64 && inputs[0].dtype() != DType::Float16) {
+            TENZOR_LOG_WARNING(std::format("Vulkan: No shader for conv_transpose2d_forward with dtype {}; falling back to CPU",
+                                           dtype_name(inputs[0].dtype())));
             Device original_device = inputs[0].device();
             std::vector<Tensor> cpu_inputs;
             cpu_inputs.reserve(inputs.size());

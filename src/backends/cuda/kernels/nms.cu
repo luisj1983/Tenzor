@@ -7,19 +7,13 @@
 #include <device_launch_parameters.h>
 #include "tenzor/backend/caching_allocator.hpp"
 #include "../cuda_stream_pool.hpp"
+#include "cuda_common.cuh"
 #include <cub/cub.cuh>
 #include <algorithm>
 #include <vector>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
-
-#define CUDA_CHECK(call) do { \
-    cudaError_t err = call; \
-    if (err != cudaSuccess) { \
-        throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(err)); \
-    } \
-} while(0)
 
 namespace tenzor {
 namespace cuda {
@@ -215,7 +209,7 @@ extern "C" void nms_cuda(const float* boxes, const float* scores,
         int iota_block = 256;
         int iota_grid = (num_boxes + iota_block - 1) / iota_block;
         nms_iota_kernel<<<iota_grid, iota_block, 0, stream>>>(d_indices_in, num_boxes);
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     }
 
     // Sort descending (highest score first) using CUB DeviceRadixSort
@@ -233,19 +227,19 @@ extern "C" void nms_cuda(const float* boxes, const float* scores,
         scores, d_scores_sorted,
         d_indices_in, d_sorted_indices,
         static_cast<int>(num_boxes), 0, sizeof(float) * 8, stream);
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 
     // Allocate suppression mask
     const int64_t num_chunks = (num_boxes + 63) / 64;
     tenzor::backend::CachedMemoryGuard d_suppression_mask_guard(num_boxes * num_chunks * sizeof(uint64_t));
     uint64_t* d_suppression_mask = static_cast<uint64_t*>(d_suppression_mask_guard.get());
-    CUDA_CHECK(cudaMemsetAsync(d_suppression_mask, 0, num_boxes * num_chunks * sizeof(uint64_t), stream));
+    TENZOR_CUDA_CHECK(cudaMemsetAsync(d_suppression_mask, 0, num_boxes * num_chunks * sizeof(uint64_t), stream));
 
     // Launch NMS IoU kernel — one block per reference box
     const int threads_per_block = 256;
     nms_kernel<<<num_boxes, threads_per_block, 0, stream>>>(
         boxes, d_sorted_indices, d_suppression_mask, num_boxes, iou_threshold);
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 
     // Allocate device-side num_keep scalar
     tenzor::backend::CachedMemoryGuard d_num_keep_guard(sizeof(int64_t));
@@ -256,11 +250,11 @@ extern "C" void nms_cuda(const float* boxes, const float* scores,
     nms_greedy_suppression_kernel<<<1, 256, shared_bytes, stream>>>(
         d_suppression_mask, d_sorted_indices, keep_indices, d_num_keep,
         num_boxes, num_chunks);
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 
     // D2H transfer on explicit stream — does not serialize with other streams
-    CUDA_CHECK(cudaMemcpyAsync(num_keep, d_num_keep, sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    TENZOR_CUDA_CHECK(cudaMemcpyAsync(num_keep, d_num_keep, sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
+    TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
 
     // Stream automatically returned to pool by StreamGuard destructor
     // Memory automatically freed by CachedMemoryGuard destructors

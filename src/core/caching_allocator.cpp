@@ -1,9 +1,27 @@
 #include "tenzor/core/caching_allocator.hpp"
 #include "tenzor/backend/backend.hpp"
-#include <algorithm>
+#include "tenzor/utils/logging.hpp"
+#include <cstdlib>
+#include <cstdio>
 #include <sstream>
 
 namespace tenzor {
+
+namespace {
+
+/// Check TENZOR_ALLOCATOR_DEBUG environment variable (cached after first call)
+bool is_allocator_debug_enabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("TENZOR_ALLOCATOR_DEBUG");
+        return env && std::string_view(env) == "1";
+    }();
+    return enabled;
+}
+
+/// Interval between diagnostic log messages (in allocation count)
+constexpr size_t kDebugLogInterval = 1000;
+
+} // anonymous namespace
 
 CachingAllocator::CachingAllocator(Backend* backend, Device device)
     : backend_(backend), device_(device) {
@@ -90,31 +108,51 @@ auto CachingAllocator::allocate(size_t bytes) -> void* {
     ++total_allocations_;
 
     // Try to reuse cached block
-    if (void* cached_ptr = find_free_block(bytes)) {
+    void* result_ptr = find_free_block(bytes);
+    if (result_ptr) {
         ++cache_hits_;
-        return cached_ptr;
-    }
-
-    // No suitable cached block, allocate from backend
-    void* ptr = nullptr;
-    try {
-        ptr = backend_->allocate(bytes, device_.index);
-        if (!ptr) {
-            throw std::runtime_error("Backend returned null pointer");
+    } else {
+        // No suitable cached block, allocate from backend
+        try {
+            result_ptr = backend_->allocate(bytes, device_.index);
+            if (!result_ptr) {
+                throw std::runtime_error("Backend returned null pointer");
+            }
+        } catch (const std::exception& e) {
+            std::ostringstream oss;
+            oss << "CachingAllocator::allocate: Failed to allocate " << bytes
+                << " bytes on device " << device_.to_string() << ": " << e.what();
+            throw std::runtime_error(oss.str());
         }
-    } catch (const std::exception& e) {
-        std::ostringstream oss;
-        oss << "CachingAllocator::allocate: Failed to allocate " << bytes
-            << " bytes on device " << device_.to_string() << ": " << e.what();
-        throw std::runtime_error(oss.str());
+
+        // Track allocation
+        allocated_blocks_[result_ptr] = bytes;
+        total_allocated_bytes_ += bytes;
+        ++backend_allocations_;
     }
 
-    // Track allocation
-    allocated_blocks_[ptr] = bytes;
-    total_allocated_bytes_ += bytes;
-    ++backend_allocations_;
+    // Periodic diagnostics when TENZOR_ALLOCATOR_DEBUG=1
+    if (is_allocator_debug_enabled() && (total_allocations_ % kDebugLogInterval) == 0) {
+        double hit_rate = (total_allocations_ > 0)
+            ? (static_cast<double>(cache_hits_) / static_cast<double>(total_allocations_)) * 100.0
+            : 0.0;
+        double frag_ratio = (total_allocated_bytes_ > 0)
+            ? (static_cast<double>(total_cached_bytes_) / static_cast<double>(total_allocated_bytes_)) * 100.0
+            : 0.0;
+        char buf[256];
+        std::snprintf(buf, sizeof(buf),
+            "CachingAllocator[%s] allocs=%zu hit_rate=%.1f%% peak=%zuMB "
+            "cached=%zuMB fragmentation=%.1f%% blocks(alloc=%zu free=%zu)",
+            device_.to_string().c_str(),
+            total_allocations_, hit_rate,
+            total_allocated_bytes_ / (1024 * 1024),
+            total_cached_bytes_ / (1024 * 1024),
+            frag_ratio,
+            allocated_blocks_.size(), free_blocks_.size());
+        TENZOR_LOG_INFO(std::string(buf));
+    }
 
-    return ptr;
+    return result_ptr;
 }
 
 auto CachingAllocator::deallocate(void* ptr) -> void {

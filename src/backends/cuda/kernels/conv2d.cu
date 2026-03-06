@@ -1,6 +1,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/backend/caching_allocator.hpp"
+#include "cuda_common.cuh"
 #include "cuda_launch_utils.cuh"
 #include "launch_config.cuh"
 #include <cuda_runtime.h>
@@ -11,29 +12,10 @@
 #include <vector>
 #include <iostream>
 
-// Define CUBLAS_CHECK before pool header so the header's #ifndef guard uses our version
-#define CUBLAS_CHECK(call) do { \
-    cublasStatus_t status = call; \
-    if (status != CUBLAS_STATUS_SUCCESS) { \
-        throw std::runtime_error(std::string("cuBLAS error: ") + std::to_string(status)); \
-    } \
-} while(0)
-
 #include "../cublas_handle_pool.hpp"
 
 namespace tenzor {
 namespace cuda {
-
-// ============================================================================
-// CUDA Error Checking
-// ============================================================================
-
-#define CUDA_CHECK(call) do { \
-    cudaError_t err = call; \
-    if (err != cudaSuccess) { \
-        throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(err)); \
-    } \
-} while(0)
 
 // ============================================================================
 // Kernel Launch Helpers
@@ -702,7 +684,7 @@ auto conv2d_forward_f16(
     Tensor output(output_shape, DType::Float16, input.device());
 
     // Initialize output to zeros
-    CUDA_CHECK(cudaMemsetAsync(output.data<Float16>(), 0,
+    TENZOR_CUDA_CHECK(cudaMemsetAsync(output.data<Float16>(), 0,
                                output.numel() * sizeof(Float16), stream));
 
     // Process each group
@@ -743,7 +725,7 @@ auto conv2d_forward_f16(
             out_h,
             out_w
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
 
         // Matrix multiplication using FP16 Tensor Cores
         // weight_group: (out_channels_per_group, in_channels_per_group * kernel_h * kernel_w)
@@ -787,7 +769,7 @@ auto conv2d_forward_f16(
         add_bias_kernel_f16<<<grid, block, 0, stream>>>(
             output_data, bias_data, batch, out_channels, spatial_size, total
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     }
 
     return output;
@@ -843,7 +825,7 @@ auto conv2d_forward_kernel(
         // Mixed-precision path: FP16 I/O with FP32 accumulation via cuBLAS GemmEx.
         // This eliminates the 3x memory overhead of promoting entire tensors to Float32
         // while maintaining numerical stability through FP32 accumulation (matching cuDNN).
-        CUDA_CHECK(cudaMemsetAsync(output.data_ptr(), 0, output.numel() * sizeof(Float16), stream));
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(output.data_ptr(), 0, output.numel() * sizeof(Float16), stream));
 
         cublasHandle_t cublas_handle = CuBLASHandlePool::get(stream);
 
@@ -871,7 +853,7 @@ auto conv2d_forward_kernel(
                 input_ptr, col_buffer, batch, in_channels_per_group,
                 height, width, kernel_h, kernel_w, stride, padding, dilation, out_h, out_w
             );
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
 
             // cuBLAS GemmEx: FP16 I/O with FP32 accumulation (Tensor Core accelerated)
             int64_t M = col_rows;
@@ -888,7 +870,7 @@ auto conv2d_forward_kernel(
             backend::CachedMemoryGuard temp_output_guard(M * N * sizeof(__half));
             auto* temp_output = static_cast<__half*>(temp_output_guard.get());
 
-            CUBLAS_CHECK(cublasGemmEx(
+            TENZOR_CUBLAS_CHECK(cublasGemmEx(
                 cublas_handle,
                 CUBLAS_OP_T,    // transpose weight
                 CUBLAS_OP_N,    // don't transpose col_buffer
@@ -911,7 +893,7 @@ auto conv2d_forward_kernel(
                 reinterpret_cast<__half*>(output.data<Float16>()),
                 batch, out_h, out_w, out_channels, N, out_start
             );
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         }
 
         // Add bias if present
@@ -927,14 +909,14 @@ auto conv2d_forward_kernel(
             add_bias_kernel_f16<<<grid, block, 0, stream>>>(
                 output_data, bias_data, batch, out_channels, spatial_size, total
             );
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         }
 
         return output;
     }
 
     // Initialize output to zeros (Float32 path)
-    CUDA_CHECK(cudaMemsetAsync(output.data<float>(), 0, output.numel() * sizeof(float), stream));
+    TENZOR_CUDA_CHECK(cudaMemsetAsync(output.data<float>(), 0, output.numel() * sizeof(float), stream));
 
     // Get cached cuBLAS handle (avoids per-call create/destroy overhead)
     cublasHandle_t cublas_handle = CuBLASHandlePool::get(stream);
@@ -976,7 +958,7 @@ auto conv2d_forward_kernel(
             out_h,
             out_w
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
 
         // Matrix multiplication using cuBLAS
         // weight_group: (out_channels_per_group, in_channels_per_group * kernel_h * kernel_w)
@@ -1006,7 +988,7 @@ auto conv2d_forward_kernel(
         // We want: C = A @ B^T where A is row-major (M, K), B is row-major (N, K)
         // In column-major view: C^T = B @ A^T
         // So we compute: C^T = B @ A^T, which means C = (B @ A^T)^T = A @ B^T
-        CUBLAS_CHECK(cublasSgemm(
+        TENZOR_CUBLAS_CHECK(cublasSgemm(
             cublas_handle,
             CUBLAS_OP_T,    // transpose B (weight)
             CUBLAS_OP_N,    // don't transpose A (col_buffer)
@@ -1038,7 +1020,7 @@ auto conv2d_forward_kernel(
             N,
             out_start
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
 
     }
 
@@ -1057,7 +1039,7 @@ auto conv2d_forward_kernel(
         add_bias_kernel<<<grid, block, 0, stream>>>(
             output_data, bias_data, batch, out_channels, spatial_size, total
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     }
 
     return output;
@@ -1110,15 +1092,15 @@ auto conv2d_backward_f16(
     Tensor grad_bias({out_channels}, DType::Float16, weight.device());
 
     if (compute_grad_input) {
-        CUDA_CHECK(cudaMemsetAsync(grad_input.data<Float16>(), 0,
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(grad_input.data<Float16>(), 0,
                                    grad_input.numel() * sizeof(Float16), stream));
     }
     if (compute_grad_weight) {
-        CUDA_CHECK(cudaMemsetAsync(grad_weight.data<Float16>(), 0,
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(grad_weight.data<Float16>(), 0,
                                    grad_weight.numel() * sizeof(Float16), stream));
     }
     if (compute_grad_bias) {
-        CUDA_CHECK(cudaMemsetAsync(grad_bias.data<Float16>(), 0,
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(grad_bias.data<Float16>(), 0,
                                    grad_bias.numel() * sizeof(Float16), stream));
     }
 
@@ -1183,7 +1165,7 @@ auto conv2d_backward_f16(
                 out_h,
                 out_w
             );
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         }
 
         // Gradient w.r.t weight
@@ -1215,7 +1197,7 @@ auto conv2d_backward_f16(
                 out_h,
                 out_w
             );
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
 
             // Compute grad_weight = grad_output^T @ input_col
             // grad_output: (batch * out_h * out_w, out_channels_per_group)
@@ -1250,7 +1232,7 @@ auto conv2d_backward_f16(
         sum_bias_grad_kernel_f16<<<grid, block, 0, stream>>>(
             grad_out_data, grad_bias_data, batch, out_channels, spatial_size
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     }
 
     return std::make_tuple(grad_input, grad_weight, grad_bias);
@@ -1320,13 +1302,13 @@ auto conv2d_backward_kernel(
     Tensor grad_bias({out_channels}, weight.dtype(), weight.device());
 
     if (compute_grad_input) {
-        CUDA_CHECK(cudaMemsetAsync(grad_input.data<float>(), 0, grad_input.numel() * sizeof(float), stream));
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(grad_input.data<float>(), 0, grad_input.numel() * sizeof(float), stream));
     }
     if (compute_grad_weight) {
-        CUDA_CHECK(cudaMemsetAsync(grad_weight.data<float>(), 0, grad_weight.numel() * sizeof(float), stream));
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(grad_weight.data<float>(), 0, grad_weight.numel() * sizeof(float), stream));
     }
     if (compute_grad_bias) {
-        CUDA_CHECK(cudaMemsetAsync(grad_bias.data<float>(), 0, grad_bias.numel() * sizeof(float), stream));
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(grad_bias.data<float>(), 0, grad_bias.numel() * sizeof(float), stream));
     }
 
     // Get cached cuBLAS handle (avoids per-call create/destroy overhead)
@@ -1361,7 +1343,7 @@ auto conv2d_backward_kernel(
             const float* grad_out_ptr = grad_output.data<float>() + out_start * out_h * out_w;
             const float* weight_ptr = weight.data<float>() + out_start * in_channels_per_group * kernel_h * kernel_w;
 
-            CUBLAS_CHECK(cublasSgemm(
+            TENZOR_CUBLAS_CHECK(cublasSgemm(
                 cublas_handle,
                 CUBLAS_OP_N,    // don't transpose weight
                 CUBLAS_OP_N,    // don't transpose grad_output
@@ -1399,7 +1381,7 @@ auto conv2d_backward_kernel(
                 out_h,
                 out_w
             );
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         }
 
         // Gradient w.r.t weight
@@ -1428,7 +1410,7 @@ auto conv2d_backward_kernel(
                 out_h,
                 out_w
             );
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
 
             // Compute grad_weight = grad_output^T @ input_col
             // grad_output: (batch * out_h * out_w, out_channels_per_group)
@@ -1445,7 +1427,7 @@ auto conv2d_backward_kernel(
             const float* grad_out_ptr = grad_output.data<float>() + out_start * out_h * out_w;
             float* grad_weight_ptr = grad_weight.data<float>() + out_start * in_channels_per_group * kernel_h * kernel_w;
 
-            CUBLAS_CHECK(cublasSgemm(
+            TENZOR_CUBLAS_CHECK(cublasSgemm(
                 cublas_handle,
                 CUBLAS_OP_N,    // don't transpose input_col
                 CUBLAS_OP_T,    // transpose grad_output
@@ -1477,7 +1459,7 @@ auto conv2d_backward_kernel(
         sum_bias_grad_kernel<<<grid, block, 0, stream>>>(
             grad_out_data, grad_bias_data, batch, out_channels, spatial_size
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     }
 
     return std::make_tuple(grad_input, grad_weight, grad_bias);
@@ -1732,7 +1714,7 @@ auto conv_transpose2d_forward_kernel(
             in_channels_per_group, out_channels_per_group,
             has_bias
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         // Float64 path
         const double* input_ptr = input.data<double>();
@@ -1749,7 +1731,7 @@ auto conv_transpose2d_forward_kernel(
             in_channels_per_group, out_channels_per_group,
             has_bias
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
         // Float32 path (default)
         const float* input_ptr = input.data<float>();
@@ -1766,10 +1748,10 @@ auto conv_transpose2d_forward_kernel(
             in_channels_per_group, out_channels_per_group,
             has_bias
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     }
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
     return output;
 }
 
@@ -1905,7 +1887,7 @@ auto depthwise_conv2d_forward_kernel(
             batch, channels, in_h, in_w, out_h, out_w,
             kernel_h, kernel_w, stride, stride, padding, padding,
             dilation, dilation, has_bias);
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         depthwise_conv2d_forward_kernel_impl<double><<<num_blocks, block_size, 0, stream>>>(
             input.data<double>(), weight.data<double>(),
@@ -1914,7 +1896,7 @@ auto depthwise_conv2d_forward_kernel(
             batch, channels, in_h, in_w, out_h, out_w,
             kernel_h, kernel_w, stride, stride, padding, padding,
             dilation, dilation, has_bias);
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         depthwise_conv2d_forward_kernel_f16<<<num_blocks, block_size, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data_ptr()),
@@ -1924,12 +1906,12 @@ auto depthwise_conv2d_forward_kernel(
             batch, channels, in_h, in_w, out_h, out_w,
             kernel_h, kernel_w, stride, stride, padding, padding,
             dilation, dilation, has_bias);
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("depthwise_conv2d_forward: unsupported dtype");
     }
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
     return output;
 }
 } // namespace cuda

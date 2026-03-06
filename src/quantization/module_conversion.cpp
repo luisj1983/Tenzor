@@ -74,9 +74,9 @@ public:
             for (const auto& [name, param] : weight_params) {
                 if (name.find("weight") != std::string::npos) {
                     // Dequantize weight: scale from int8 to float
-                    weight_dequant = param.to(DType::Float32);
+                    weight_dequant = param->tensor().to(DType::Float32);
                 } else if (name.find("bias") != std::string::npos) {
-                    bias_dequant = param.to(DType::Float32);
+                    bias_dequant = param->tensor().to(DType::Float32);
                 }
             }
 
@@ -91,7 +91,7 @@ public:
                 // Load dequantized state
                 std::unordered_map<std::string, Tensor> state;
                 state["weight"] = weight_dequant;
-                if (bias_dequant.defined()) {
+                if (bias_dequant.numel() > 0) {
                     state["bias"] = bias_dequant;
                 }
                 linear->load_state_dict(state);
@@ -112,9 +112,9 @@ public:
 
             for (const auto& [name, param] : params) {
                 if (name.find("weight") != std::string::npos) {
-                    weight_dequant = param.to(DType::Float32);
+                    weight_dequant = param->tensor().to(DType::Float32);
                 } else if (name.find("bias") != std::string::npos) {
-                    bias_dequant = param.to(DType::Float32);
+                    bias_dequant = param->tensor().to(DType::Float32);
                 }
             }
 
@@ -128,16 +128,22 @@ public:
                 int64_t kernel_w = shape[3];
 
                 // Create Conv2d (using default stride=1, padding=0)
-                auto conv = std::make_shared<Conv2d>(
-                    in_channels,
-                    out_channels,
-                    std::vector<int64_t>{kernel_h, kernel_w}
-                );
+                std::shared_ptr<Conv2d> conv;
+                if (kernel_h == kernel_w) {
+                    conv = std::make_shared<Conv2d>(
+                        in_channels, out_channels, kernel_h
+                    );
+                } else {
+                    conv = std::make_shared<Conv2d>(
+                        in_channels, out_channels,
+                        std::pair<int64_t, int64_t>{kernel_h, kernel_w}
+                    );
+                }
 
                 // Load dequantized state
                 std::unordered_map<std::string, Tensor> state;
                 state["weight"] = weight_dequant;
-                if (bias_dequant.defined()) {
+                if (bias_dequant.numel() > 0) {
                     state["bias"] = bias_dequant;
                 }
                 conv->load_state_dict(state);
@@ -168,7 +174,25 @@ public:
             auto qat_seq = std::make_shared<Sequential>();
 
             // Insert FakeQuantize after each quantizable layer
-            // Implementation would iterate through seq's layers
+            for (const auto& child : seq->modules()) {
+                qat_seq->add_module(child);
+
+                // Insert FakeQuantize after quantizable layers (Linear, Conv2d)
+                bool is_quantizable =
+                    std::dynamic_pointer_cast<Linear>(child) != nullptr ||
+                    std::dynamic_pointer_cast<Conv2d>(child) != nullptr;
+
+                if (is_quantizable) {
+                    auto fake_quant = std::make_shared<FakeQuantize>(
+                        qconfig_.weight_dtype(),
+                        qconfig_.activation_scheme(),
+                        false,   // not learnable
+                        true,    // observer enabled
+                        -1       // per-tensor
+                    );
+                    qat_seq->add_module(fake_quant);
+                }
+            }
 
             return qat_seq;
         }
@@ -180,11 +204,10 @@ private:
     auto convert_sequential(std::shared_ptr<Sequential> seq) -> std::shared_ptr<Sequential> {
         auto quantized_seq = std::make_shared<Sequential>();
 
-        // Get parameters from Sequential to iterate modules
-        // This is simplified - real implementation would access internal module list
-        for (auto& [name, param] : seq->named_parameters()) {
-            // Convert each submodule recursively
-            // Actual implementation needs access to Sequential's module list
+        // Iterate through the Sequential's module list and convert each
+        for (const auto& module : seq->modules()) {
+            auto converted = convert_to_quantized(module);
+            quantized_seq->add_module(converted);
         }
 
         return quantized_seq;
@@ -192,7 +215,13 @@ private:
 
     auto dequantize_sequential(std::shared_ptr<Sequential> seq) -> std::shared_ptr<Sequential> {
         auto float_seq = std::make_shared<Sequential>();
-        // Convert quantized modules back to float
+
+        // Iterate through the Sequential's module list and convert each back
+        for (const auto& module : seq->modules()) {
+            auto converted = convert_from_quantized(module);
+            float_seq->add_module(converted);
+        }
+
         return float_seq;
     }
 
@@ -245,26 +274,7 @@ auto convert_from_quantized(
     return float_module;
 }
 
-/**
- * @brief Prepare module for quantization-aware training
- */
-auto prepare_qat(
-    const std::shared_ptr<Module>& module,
-    const QConfig& qconfig
-) -> std::shared_ptr<Module> {
-    if (!module) {
-        throw std::runtime_error("Cannot prepare null module for QAT");
-    }
-
-    std::cout << "[QAT] Preparing module for quantization-aware training..." << std::endl;
-
-    ModuleQuantizer quantizer(qconfig);
-    auto qat_module = quantizer.prepare_qat(module);
-
-    std::cout << "[QAT] Module prepared with fake quantization" << std::endl;
-
-    return qat_module;
-}
+// prepare_qat is defined in quantize_api.cpp
 
 } // namespace quantization
 } // namespace tenzor

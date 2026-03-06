@@ -20,57 +20,11 @@
 #include <mutex>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "kernels/cuda_common.cuh"
 #include "cublas_handle_pool.hpp"
 
 namespace tenzor {
 namespace cuda {
-
-// ============================================================================
-// Error Checking Macros
-// ============================================================================
-
-// Use the cuBLAS built-in error string function (available in CUDA 11.4+)
-// For older versions, we provide a fallback
-#if CUDA_VERSION < 11040
-inline const char* cublas_status_to_string(cublasStatus_t status) {
-    switch (status) {
-        case CUBLAS_STATUS_SUCCESS: return "CUBLAS_STATUS_SUCCESS";
-        case CUBLAS_STATUS_NOT_INITIALIZED: return "CUBLAS_STATUS_NOT_INITIALIZED";
-        case CUBLAS_STATUS_ALLOC_FAILED: return "CUBLAS_STATUS_ALLOC_FAILED";
-        case CUBLAS_STATUS_INVALID_VALUE: return "CUBLAS_STATUS_INVALID_VALUE";
-        case CUBLAS_STATUS_ARCH_MISMATCH: return "CUBLAS_STATUS_ARCH_MISMATCH";
-        case CUBLAS_STATUS_MAPPING_ERROR: return "CUBLAS_STATUS_MAPPING_ERROR";
-        case CUBLAS_STATUS_EXECUTION_FAILED: return "CUBLAS_STATUS_EXECUTION_FAILED";
-        case CUBLAS_STATUS_INTERNAL_ERROR: return "CUBLAS_STATUS_INTERNAL_ERROR";
-        case CUBLAS_STATUS_NOT_SUPPORTED: return "CUBLAS_STATUS_NOT_SUPPORTED";
-        case CUBLAS_STATUS_LICENSE_ERROR: return "CUBLAS_STATUS_LICENSE_ERROR";
-        default: return "CUBLAS_STATUS_UNKNOWN";
-    }
-}
-#define CUBLAS_STATUS_STRING(status) cublas_status_to_string(status)
-#else
-#define CUBLAS_STATUS_STRING(status) cublasGetStatusString(status)
-#endif
-
-#define CUBLAS_CHECK(call) do { \
-    cublasStatus_t status = call; \
-    if (status != CUBLAS_STATUS_SUCCESS) { \
-        throw std::runtime_error( \
-            std::string("cuBLAS error: ") + CUBLAS_STATUS_STRING(status) + \
-            " at " + __FILE__ + ":" + std::to_string(__LINE__) \
-        ); \
-    } \
-} while(0)
-
-#define CUDA_CHECK(call) do { \
-    cudaError_t err = (call); \
-    if (err != cudaSuccess) { \
-        throw std::runtime_error( \
-            std::string("CUDA error: ") + cudaGetErrorString(err) + \
-            " at " + __FILE__ + ":" + std::to_string(__LINE__) \
-        ); \
-    } \
-} while(0)
 
 // cuBLAS handle management via centralized CuBLASHandlePool (cublas_handle_pool.hpp)
 
@@ -193,7 +147,7 @@ void cublas_gemm_ex(
     int64_t ldc = N;
 
     // Use cublasGemmEx for Tensor Core acceleration
-    CUBLAS_CHECK(cublasGemmEx(
+    TENZOR_CUBLAS_CHECK(cublasGemmEx(
         handle,
         transpose_b ? CUBLAS_OP_N : CUBLAS_OP_T,  // Swap and adjust for row-major
         transpose_a ? CUBLAS_OP_N : CUBLAS_OP_T,
@@ -291,7 +245,7 @@ void cublas_batched_gemm_ex(
     int64_t ldc = N;
 
     // Use cublasGemmStridedBatchedEx for batched Tensor Core operations
-    CUBLAS_CHECK(cublasGemmStridedBatchedEx(
+    TENZOR_CUBLAS_CHECK(cublasGemmStridedBatchedEx(
         handle,
         CUBLAS_OP_N,    // Don't transpose B
         CUBLAS_OP_N,    // Don't transpose A
@@ -377,7 +331,7 @@ void cublas_batched_gemm_scaled(
     int64_t ldb = N;
     int64_t ldc = N;
 
-    CUBLAS_CHECK(cublasGemmStridedBatchedEx(
+    TENZOR_CUBLAS_CHECK(cublasGemmStridedBatchedEx(
         handle,
         CUBLAS_OP_N,
         CUBLAS_OP_N,
@@ -746,7 +700,7 @@ auto linear_kernel(
         // C^T = alpha * B^T @ A + beta * C^T  (cuBLAS column-major)
         // Which gives us: C = alpha * A @ B.T
 
-        CUBLAS_CHECK(cublasGemmEx(
+        TENZOR_CUBLAS_CHECK(cublasGemmEx(
             handle,
             CUBLAS_OP_T,    // Transpose weight (B in cuBLAS)
             CUBLAS_OP_N,    // Don't transpose input (A in cuBLAS)
@@ -807,7 +761,7 @@ auto linear_kernel(
         const double alpha = 1.0;
         const double beta = 0.0;
 
-        CUBLAS_CHECK(cublasDgemm(
+        TENZOR_CUBLAS_CHECK(cublasDgemm(
             handle,
             CUBLAS_OP_T,    // Transpose weight
             CUBLAS_OP_N,    // Don't transpose input
@@ -847,7 +801,7 @@ auto linear_kernel(
         const float beta = 0.0f;
 
         // Use FP16 Tensor Cores with FP32 accumulation for accuracy
-        CUBLAS_CHECK(cublasGemmEx(
+        TENZOR_CUBLAS_CHECK(cublasGemmEx(
             handle,
             CUBLAS_OP_T,
             CUBLAS_OP_N,
@@ -892,7 +846,7 @@ auto linear_kernel(
         const float beta = 0.0f;
 
         // Use BF16 Tensor Cores with FP32 accumulation for accuracy
-        CUBLAS_CHECK(cublasGemmEx(
+        TENZOR_CUBLAS_CHECK(cublasGemmEx(
             handle,
             CUBLAS_OP_T,
             CUBLAS_OP_N,
@@ -937,7 +891,7 @@ auto linear_kernel(
     }
 
     // Check for errors from bias_add kernel launches
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 
     return output;
 }
@@ -998,7 +952,7 @@ auto linear_backward_kernel(
 
         // grad_input = grad_output @ weight
         // [batch, in_features] = [batch, out_features] @ [out_features, in_features]
-        CUBLAS_CHECK(cublasGemmEx(
+        TENZOR_CUBLAS_CHECK(cublasGemmEx(
             handle,
             CUBLAS_OP_N,    // Don't transpose weight
             CUBLAS_OP_N,    // Don't transpose grad_output
@@ -1022,7 +976,7 @@ auto linear_backward_kernel(
 
         // grad_weight = grad_output.T @ input
         // [out_features, in_features] = [out_features, batch] @ [batch, in_features]
-        CUBLAS_CHECK(cublasGemmEx(
+        TENZOR_CUBLAS_CHECK(cublasGemmEx(
             handle,
             CUBLAS_OP_N,    // Don't transpose input
             CUBLAS_OP_T,    // Transpose grad_output
@@ -1061,7 +1015,7 @@ auto linear_backward_kernel(
         const double beta = 0.0;
 
         // grad_input = grad_output @ weight
-        CUBLAS_CHECK(cublasDgemm(
+        TENZOR_CUBLAS_CHECK(cublasDgemm(
             handle,
             CUBLAS_OP_N,
             CUBLAS_OP_N,
@@ -1079,7 +1033,7 @@ auto linear_backward_kernel(
         ));
 
         // grad_weight = grad_output.T @ input
-        CUBLAS_CHECK(cublasDgemm(
+        TENZOR_CUBLAS_CHECK(cublasDgemm(
             handle,
             CUBLAS_OP_N,
             CUBLAS_OP_T,
@@ -1112,7 +1066,7 @@ auto linear_backward_kernel(
         const float beta = 0.0f;
 
         // grad_input = grad_output @ weight
-        CUBLAS_CHECK(cublasGemmEx(
+        TENZOR_CUBLAS_CHECK(cublasGemmEx(
             handle,
             CUBLAS_OP_N,
             CUBLAS_OP_N,
@@ -1135,7 +1089,7 @@ auto linear_backward_kernel(
         ));
 
         // grad_weight = grad_output.T @ input
-        CUBLAS_CHECK(cublasGemmEx(
+        TENZOR_CUBLAS_CHECK(cublasGemmEx(
             handle,
             CUBLAS_OP_N,
             CUBLAS_OP_T,
@@ -1173,7 +1127,7 @@ auto linear_backward_kernel(
         const float beta = 0.0f;
 
         // grad_input = grad_output @ weight
-        CUBLAS_CHECK(cublasGemmEx(
+        TENZOR_CUBLAS_CHECK(cublasGemmEx(
             handle,
             CUBLAS_OP_N,
             CUBLAS_OP_N,
@@ -1196,7 +1150,7 @@ auto linear_backward_kernel(
         ));
 
         // grad_weight = grad_output.T @ input
-        CUBLAS_CHECK(cublasGemmEx(
+        TENZOR_CUBLAS_CHECK(cublasGemmEx(
             handle,
             CUBLAS_OP_N,
             CUBLAS_OP_T,
@@ -1234,7 +1188,7 @@ auto linear_backward_kernel(
     }
 
     // Check for errors from bias_grad_reduce kernel launches
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 
     return {grad_input, grad_weight, grad_bias};
 }

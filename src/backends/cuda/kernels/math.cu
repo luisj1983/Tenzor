@@ -118,31 +118,32 @@ __global__ void check_for_zeros_kernel(const T* data, int64_t n, int* has_zero) 
 
 // Host function to check for zeros in an integer tensor
 // Only enabled in debug builds to avoid the stream sync penalty in release.
-// Uses per-call pinned mapped host memory so the kernel writes directly to
-// host-visible memory, eliminating the explicit D2H memcpy.
-//
-// Each call allocates its own pinned flag — no mutex needed, independent calls
-// can run concurrently on different streams without serialization.
+// Uses a persistent thread-local device flag to avoid per-call cudaHostAlloc
+// and cudaFreeHost overhead.  The flag is reset via cudaMemsetAsync before each
+// check and only copied back (D2H) when we actually need to inspect the result.
 template<typename T>
 inline void check_integer_divisor_for_zeros(const T* data, int64_t n, cudaStream_t stream) {
 #ifndef TENZOR_SKIP_INTEGER_DIV_CHECK
-    // Allocate per-call pinned flag (no mutex needed — independent flag per call)
-    int* h_flag = nullptr;
-    int* d_flag = nullptr;
-    CUDA_CHECK(cudaHostAlloc(&h_flag, sizeof(int), cudaHostAllocMapped));
-    CUDA_CHECK(cudaHostGetDevicePointer(&d_flag, h_flag, 0));
-    *h_flag = 0;
+    // Persistent thread-local device flag — allocated once, reused across calls.
+    static thread_local int* d_flag = nullptr;
+    if (!d_flag) {
+        CUDA_CHECK(cudaMalloc(&d_flag, sizeof(int)));
+    }
+
+    // Reset flag to 0 asynchronously on the current stream
+    CUDA_CHECK(cudaMemsetAsync(d_flag, 0, sizeof(int), stream));
 
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
     check_for_zeros_kernel<<<grid, block, 0, stream>>>(data, n, d_flag);
     CUDA_CHECK(cudaGetLastError());
 
+    // Synchronize and read back the flag
+    int h_flag = 0;
+    CUDA_CHECK(cudaMemcpyAsync(&h_flag, d_flag, sizeof(int), cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
-    bool has_zero = (*h_flag != 0);
-    cudaFreeHost(h_flag);
-    if (has_zero) {
+    if (h_flag != 0) {
         throw std::runtime_error("Integer division by zero");
     }
 #else

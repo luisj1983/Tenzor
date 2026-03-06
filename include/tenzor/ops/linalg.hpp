@@ -106,5 +106,30 @@ auto eigh(const Tensor& A) -> std::tuple<Tensor, Tensor>;
  */
 auto eigvalsh(const Tensor& A) -> Tensor;
 
+/**
+ * @brief Compute eigenvalues and eigenvectors of a general (non-symmetric) matrix.
+ *
+ * Uses LAPACKE ?geev to compute the eigendecomposition of a general real matrix.
+ * Eigenvalues may be complex even for real input matrices (complex conjugate pairs).
+ * The eigenvalues are returned as two separate tensors (real and imaginary parts)
+ * rather than complex tensors, matching the LAPACK output convention.
+ *
+ * @param A Input square matrix (..., N, N). Supports Float32, Float64, Float16,
+ *          and BFloat16 (the latter two are upcast to Float32 internally).
+ * @return Tuple of (eigenvalues_real, eigenvalues_imag, eigenvectors) where:
+ *         - eigenvalues_real: Real parts of eigenvalues (..., N)
+ *         - eigenvalues_imag: Imaginary parts of eigenvalues (..., N)
+ *         - eigenvectors: Right eigenvectors (..., N, N)
+ *
+ * @note For real eigenvalues, the corresponding imaginary part is zero.
+ *       Complex eigenvalues always appear in conjugate pairs.
+ * @note Float16 and BFloat16 inputs are upcast to Float32 for computation,
+ *       then results are downcast back to the original dtype.
+ *
+ * @throws std::invalid_argument if matrix is not at least 2D or not square
+ * @throws std::runtime_error if eigendecomposition fails
+ */
+auto eig(const Tensor& A) -> std::tuple<Tensor, Tensor, Tensor>;
+
 } // namespace linalg
 } // namespace tenzor

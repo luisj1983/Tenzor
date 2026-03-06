@@ -890,6 +890,13 @@ public:
      */
     auto load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void override;
 
+    /**
+     * @brief Get read-only access to the ordered list of modules.
+     *
+     * @return Const reference to the internal module list
+     */
+    auto modules() const -> const std::vector<std::shared_ptr<Module>>& { return modules_; }
+
 private:
     std::vector<std::shared_ptr<Module>> modules_;  ///< Ordered list of modules
 };

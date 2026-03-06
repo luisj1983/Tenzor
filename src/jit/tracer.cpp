@@ -57,6 +57,17 @@ auto op_type_to_string(OpType type) -> std::string {
         case OpType::Dropout: return "Dropout";
         case OpType::Linear: return "Linear";
         case OpType::Embedding: return "Embedding";
+        case OpType::GELU: return "GELU";
+        case OpType::Det: return "Det";
+        case OpType::Inv: return "Inv";
+        case OpType::Solve: return "Solve";
+        case OpType::Cholesky: return "Cholesky";
+        case OpType::Svd: return "Svd";
+        case OpType::Qr: return "Qr";
+        case OpType::Eigh: return "Eigh";
+        case OpType::Eigvalsh: return "Eigvalsh";
+        case OpType::Norm: return "Norm";
+        case OpType::Slogdet: return "Slogdet";
         case OpType::Constant: return "Constant";
         case OpType::Input: return "Input";
         case OpType::Output: return "Output";
@@ -105,6 +116,17 @@ auto string_to_op_type(const std::string& str) -> OpType {
         {"Dropout", OpType::Dropout},
         {"Linear", OpType::Linear},
         {"Embedding", OpType::Embedding},
+        {"GELU", OpType::GELU},
+        {"Det", OpType::Det},
+        {"Inv", OpType::Inv},
+        {"Solve", OpType::Solve},
+        {"Cholesky", OpType::Cholesky},
+        {"Svd", OpType::Svd},
+        {"Qr", OpType::Qr},
+        {"Eigh", OpType::Eigh},
+        {"Eigvalsh", OpType::Eigvalsh},
+        {"Norm", OpType::Norm},
+        {"Slogdet", OpType::Slogdet},
         {"Constant", OpType::Constant},
         {"Input", OpType::Input},
         {"Output", OpType::Output}

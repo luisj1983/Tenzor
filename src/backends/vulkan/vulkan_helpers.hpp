@@ -26,17 +26,14 @@ namespace tenzor {
 // Helper function to insert transfer-to-compute barrier
 // Required when a compute shader reads from a buffer that was just written by a transfer op
 inline void insertTransferToComputeBarrier(VkCommandBuffer cmdBuffer) {
-    if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
-        VkMemoryBarrier memoryBarrier{};
-        memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        memoryBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        memoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(cmdBuffer,
-                            VK_PIPELINE_STAGE_TRANSFER_BIT,
-                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                            0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
-    }
-    // When batching is disabled, each operation is submitted separately so no barrier needed
+    VkMemoryBarrier memoryBarrier{};
+    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    memoryBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    memoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmdBuffer,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
 }
 
 // Helper function to insert a pre-read barrier.

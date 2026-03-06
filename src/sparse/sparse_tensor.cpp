@@ -266,61 +266,69 @@ auto SparseTensor::coalesce() const -> SparseTensor {
     auto vals = values_.contiguous();
     auto* idx_ptr = idx.data<int64_t>();
 
-    // Create sort permutation by row-major order of indices
+    // Compute compound (linearized row-major) key for each element.
+    // key[i] = idx[0,i] * stride[0] + idx[1,i] * stride[1] + ...
+    // This converts the per-element multi-dim comparison in the sort into
+    // a single int64_t comparison, turning O(sparse_dim) per compare into O(1).
+    //
+    // Compute dimension strides (row-major): stride[d] = product of shape[d+1..end]
+    std::vector<int64_t> strides(sparse_dim_);
+    if (sparse_dim_ > 0) {
+        strides[sparse_dim_ - 1] = 1;
+        for (int64_t d = sparse_dim_ - 2; d >= 0; --d) {
+            strides[d] = strides[d + 1] * shape_[d + 1];
+        }
+    }
+
+    // Build compound keys
+    std::vector<int64_t> keys(nnz_);
+    for (int64_t i = 0; i < nnz_; ++i) {
+        int64_t key = 0;
+        for (int64_t d = 0; d < sparse_dim_; ++d) {
+            key += idx_ptr[d * nnz_ + i] * strides[d];
+        }
+        keys[i] = key;
+    }
+
+    // Create sort permutation by compound key (O(1) comparison per pair)
     std::vector<int64_t> perm(nnz_);
     std::iota(perm.begin(), perm.end(), 0);
     std::sort(perm.begin(), perm.end(), [&](int64_t a, int64_t b) {
-        for (int64_t d = 0; d < sparse_dim_; ++d) {
-            int64_t ia = idx_ptr[d * nnz_ + a];
-            int64_t ib = idx_ptr[d * nnz_ + b];
-            if (ia != ib) return ia < ib;
-        }
-        return false;
+        return keys[a] < keys[b];
     });
 
-    // Merge duplicates
-    std::vector<int64_t> new_indices_data;
-    new_indices_data.reserve(sparse_dim_ * nnz_);
-
-    // Track unique positions
-    std::vector<std::vector<int64_t>> unique_idx_cols(sparse_dim_);
-    std::vector<int64_t> merge_groups;
-
-    auto get_idx = [&](int64_t elem, int64_t d) -> int64_t {
-        return idx_ptr[d * nnz_ + elem];
-    };
+    // Single-pass merge: walk sorted permutation, detect duplicates via key equality.
+    // Pre-allocate output vectors sized to nnz_ (worst case = no duplicates).
+    std::vector<int64_t> out_indices(sparse_dim_ * nnz_);
+    std::vector<int64_t> group_starts;
+    std::vector<int64_t> group_ends;
+    group_starts.reserve(nnz_);
+    group_ends.reserve(nnz_);
 
     int64_t new_nnz = 0;
     for (int64_t i = 0; i < nnz_;) {
+        int64_t key_i = keys[perm[i]];
         int64_t j = i + 1;
-        while (j < nnz_) {
-            bool same = true;
-            for (int64_t d = 0; d < sparse_dim_; ++d) {
-                if (get_idx(perm[j], d) != get_idx(perm[i], d)) {
-                    same = false;
-                    break;
-                }
-            }
-            if (!same) break;
+        while (j < nnz_ && keys[perm[j]] == key_i) {
             ++j;
         }
-        // perm[i..j) are duplicates
+        // perm[i..j) are duplicates — store the index tuple from perm[i]
         for (int64_t d = 0; d < sparse_dim_; ++d) {
-            unique_idx_cols[d].push_back(get_idx(perm[i], d));
+            out_indices[d * nnz_ + new_nnz] = idx_ptr[d * nnz_ + perm[i]];
         }
-        merge_groups.push_back(i);
-        merge_groups.push_back(j);
+        group_starts.push_back(i);
+        group_ends.push_back(j);
         ++new_nnz;
         i = j;
     }
 
-    // Build new indices
+    // Build new indices tensor (compact from pre-allocated buffer)
     auto new_indices = Tensor({sparse_dim_, new_nnz}, DType::Int64, values_.device());
     auto* ni_ptr = new_indices.data<int64_t>();
     for (int64_t d = 0; d < sparse_dim_; ++d) {
-        for (int64_t i = 0; i < new_nnz; ++i) {
-            ni_ptr[d * new_nnz + i] = unique_idx_cols[d][i];
-        }
+        std::memcpy(ni_ptr + d * new_nnz,
+                    out_indices.data() + d * nnz_,
+                    new_nnz * sizeof(int64_t));
     }
 
     // Build new values (sum duplicates)
@@ -329,10 +337,8 @@ auto SparseTensor::coalesce() const -> SparseTensor {
         auto* vp = vals.data<float>();
         auto* nvp = new_values.data<float>();
         for (int64_t g = 0; g < new_nnz; ++g) {
-            int64_t start = merge_groups[g * 2];
-            int64_t end = merge_groups[g * 2 + 1];
             float sum = 0;
-            for (int64_t k = start; k < end; ++k) {
+            for (int64_t k = group_starts[g]; k < group_ends[g]; ++k) {
                 sum += vp[perm[k]];
             }
             nvp[g] = sum;
@@ -341,10 +347,8 @@ auto SparseTensor::coalesce() const -> SparseTensor {
         auto* vp = vals.data<double>();
         auto* nvp = new_values.data<double>();
         for (int64_t g = 0; g < new_nnz; ++g) {
-            int64_t start = merge_groups[g * 2];
-            int64_t end = merge_groups[g * 2 + 1];
             double sum = 0;
-            for (int64_t k = start; k < end; ++k) {
+            for (int64_t k = group_starts[g]; k < group_ends[g]; ++k) {
                 sum += vp[perm[k]];
             }
             nvp[g] = sum;

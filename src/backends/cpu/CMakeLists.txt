@@ -42,6 +42,7 @@ set(CPU_BACKEND_SOURCES
     kernels/vision.cpp
     kernels/advanced.cpp
     kernels/flash_attention.cpp
+    kernels/fft.cpp
 )
 
 # Create CPU backend shared library

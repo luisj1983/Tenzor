@@ -1157,4 +1157,197 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 };
 
+// =========================================================================
+// Linear Algebra Backward Functions
+// =========================================================================
+
+/**
+ * @brief Determinant gradient function.
+ *
+ * Forward: y = det(A)
+ * Backward: dL/dA = dL/dy * det(A) * A^{-T}
+ *
+ * @note Saves det result and inverse for backward computation.
+ */
+class DetBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "DetBackward"; }
+};
+
+/**
+ * @brief Matrix inverse gradient function.
+ *
+ * Forward: Y = A^{-1}
+ * Backward: dL/dA = -Y^T @ dL/dY @ Y^T
+ *
+ * @note Saves inverse result for backward computation.
+ */
+class InvBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "InvBackward"; }
+};
+
+/**
+ * @brief Linear solve gradient function.
+ *
+ * Forward: X = solve(A, B) where AX = B
+ * Backward:
+ *   dL/dB = solve(A^T, dL/dX)
+ *   dL/dA = -dL/dB @ X^T
+ *
+ * @note Saves A and solution X for backward computation.
+ */
+class SolveBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "SolveBackward"; }
+};
+
+/**
+ * @brief Cholesky decomposition gradient function.
+ *
+ * Forward: L = cholesky(A) where A = L @ L^T
+ * Backward: dL/dA = L^{-T} @ phi(L^T @ dL/dL) @ L^{-1}
+ *           where phi(X) = tril(X) with diagonal halved
+ *
+ * @note Saves L for backward computation.
+ */
+class CholeskyBackward : public Function {
+public:
+    CholeskyBackward(bool upper = false) : upper_(upper) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "CholeskyBackward"; }
+private:
+    bool upper_;
+};
+
+/**
+ * @brief SVD gradient function.
+ *
+ * Forward: (U, S, Vh) = svd(A)
+ * Backward: Uses the SVD backward formula involving F matrix
+ *
+ * @note Saves U, S, Vh for backward computation. Full backward is complex.
+ */
+class SvdBackward : public Function {
+public:
+    SvdBackward(bool full_matrices = true) : full_matrices_(full_matrices) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "SvdBackward"; }
+private:
+    bool full_matrices_;
+};
+
+/**
+ * @brief QR decomposition gradient function.
+ *
+ * Forward: (Q, R) = qr(A)
+ * Backward: Uses the QR backward formula
+ *   dL/dA = (dL/dQ + Q @ copyltu(Q^T @ dL/dQ - dL/dR^T @ R^{-T})) @ R^{-T}
+ *
+ * @note Saves Q and R for backward computation.
+ */
+class QrBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "QrBackward"; }
+};
+
+/**
+ * @brief Symmetric eigendecomposition gradient function.
+ *
+ * Forward: (W, V) = eigh(A) where A = V @ diag(W) @ V^T
+ * Backward:
+ *   F_{ij} = 1/(w_j - w_i) for i != j, 0 on diagonal
+ *   dL/dA = V @ (F * (V^T @ dL/dV) + diag(dL/dW)) @ V^T
+ *
+ * @note Saves eigenvalues W and eigenvectors V for backward computation.
+ */
+class EighBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "EighBackward"; }
+};
+
+/**
+ * @brief Eigenvalues-only gradient function for symmetric matrices.
+ *
+ * Forward: W = eigvalsh(A)
+ * Backward: dL/dA = V @ diag(dL/dW) @ V^T
+ *           where V is computed via eigh during forward
+ *
+ * @note Saves eigenvectors V for backward computation (computed during forward).
+ */
+class EigvalshBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "EigvalshBackward"; }
+};
+
+/**
+ * @brief Matrix norm gradient function.
+ *
+ * Forward: y = norm(A, ord)
+ * Backward (Frobenius): dL/dA = dL/dy * A / norm(A)
+ *
+ * @note Saves input and norm result for backward computation.
+ *       Currently only supports Frobenius norm backward.
+ */
+class NormBackward_Linalg : public Function {
+public:
+    NormBackward_Linalg(const std::string& ord = "fro") : ord_(ord) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "NormBackward_Linalg"; }
+private:
+    std::string ord_;
+};
+
+/**
+ * @brief Slogdet gradient function.
+ *
+ * Forward: (sign, logabsdet) = slogdet(A)
+ * Backward: dL/dA = dL/d(logabsdet) * A^{-T}
+ *           (sign gradient is zero since sign is discrete)
+ *
+ * @note Saves inverse for backward computation.
+ */
+class SlogdetBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "SlogdetBackward"; }
+};
+
+// =========================================================================
+// Sparse Backward Functions
+// =========================================================================
+
+/**
+ * @brief Backward function for sparse-dense matrix multiplication (spmm).
+ *
+ * For Y = S @ D where S is sparse (M,K) and D is dense (K,N):
+ * - grad_D = S^T @ grad_Y  (only the dense input receives a gradient)
+ * - The sparse matrix S is not differentiated.
+ *
+ * saved_tensors_[0]: the sparse matrix converted to dense (M,K), transposed to (K,M).
+ * The backward computes matmul(S^T, grad_output) = matmul(saved, grad_output).
+ */
+class SpMMBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "SpMMBackward"; }
+};
+
 } // namespace tenzor

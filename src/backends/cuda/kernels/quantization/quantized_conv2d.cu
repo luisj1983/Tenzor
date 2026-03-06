@@ -7,8 +7,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
-
-#define CUDA_CHECK(call) do { cudaError_t err = (call); if (err != cudaSuccess) { throw std::runtime_error(std::string("CUDA error at ") + __FILE__ + ":" + std::to_string(__LINE__) + " - " + cudaGetErrorString(err)); } } while(0)
+#include "../cuda_common.cuh"
 
 namespace tenzor {
 namespace nn {
@@ -125,7 +124,7 @@ auto quantized_conv2d_cuda(
         kernel_size, stride, padding,
         combined_scale, input_zp, weight_zp
     );
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 }
 
 /**

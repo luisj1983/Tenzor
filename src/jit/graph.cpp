@@ -9,6 +9,7 @@
 #include "../../include/tenzor/ops/math.hpp"
 #include "../../include/tenzor/ops/reduction.hpp"
 #include "../../include/tenzor/ops/transform.hpp"
+#include "../../include/tenzor/ops/linalg.hpp"
 #include "../../include/tenzor/autograd/ops.hpp"
 #include "../../include/tenzor/nn/functional.hpp"
 #include "../../include/tenzor/backend/fast_dispatch.hpp"
@@ -506,6 +507,125 @@ auto Graph::infer_types() -> void {
                 break;
 
             // ================================================================
+            // GELU: preserve shape (element-wise activation)
+            // ================================================================
+            case OpType::GELU:
+                if (!input_shapes.empty()) {
+                    output_shapes.push_back(input_shapes[0]);
+                }
+                break;
+
+            // ================================================================
+            // Linear algebra operations
+            // ================================================================
+            case OpType::Det:
+                // (..., N, N) -> (...)
+                if (!input_shapes.empty() && input_shapes[0].size() >= 2) {
+                    auto shape = input_shapes[0];
+                    shape.pop_back();
+                    shape.pop_back();
+                    output_shapes.push_back(shape);
+                }
+                break;
+
+            case OpType::Inv:
+            case OpType::Cholesky:
+                // (..., N, N) -> (..., N, N)
+                if (!input_shapes.empty()) {
+                    output_shapes.push_back(input_shapes[0]);
+                }
+                break;
+
+            case OpType::Solve:
+                // A: (..., N, N), B: (..., N, K) -> (..., N, K)
+                if (input_shapes.size() >= 2) {
+                    output_shapes.push_back(input_shapes[1]);
+                }
+                break;
+
+            case OpType::Svd:
+                // (..., M, N) -> U: (..., M, M), S: (..., min(M,N)), Vt: (..., N, N)
+                // (or reduced forms if full_matrices=false)
+                if (!input_shapes.empty() && input_shapes[0].size() >= 2) {
+                    auto& s = input_shapes[0];
+                    int64_t M = s[s.size() - 2];
+                    int64_t N = s[s.size() - 1];
+                    int64_t K = std::min(M, N);
+                    bool full = node->has_attr("full_matrices") ?
+                        node->get_bool_attr("full_matrices") : true;
+                    auto batch = std::vector<int64_t>(s.begin(), s.end() - 2);
+                    auto u_shape = batch;
+                    u_shape.push_back(M);
+                    u_shape.push_back(full ? M : K);
+                    auto s_shape = batch;
+                    s_shape.push_back(K);
+                    auto vt_shape = batch;
+                    vt_shape.push_back(full ? N : K);
+                    vt_shape.push_back(N);
+                    output_shapes.push_back(u_shape);
+                    output_shapes.push_back(s_shape);
+                    output_shapes.push_back(vt_shape);
+                }
+                break;
+
+            case OpType::Qr:
+                // (..., M, N) -> Q: (..., M, K), R: (..., K, N) where K=min(M,N)
+                if (!input_shapes.empty() && input_shapes[0].size() >= 2) {
+                    auto& s = input_shapes[0];
+                    int64_t M = s[s.size() - 2];
+                    int64_t N = s[s.size() - 1];
+                    int64_t K = std::min(M, N);
+                    auto batch = std::vector<int64_t>(s.begin(), s.end() - 2);
+                    auto q_shape = batch;
+                    q_shape.push_back(M);
+                    q_shape.push_back(K);
+                    auto r_shape = batch;
+                    r_shape.push_back(K);
+                    r_shape.push_back(N);
+                    output_shapes.push_back(q_shape);
+                    output_shapes.push_back(r_shape);
+                }
+                break;
+
+            case OpType::Eigh:
+                // (..., N, N) -> eigenvalues: (..., N), eigenvectors: (..., N, N)
+                if (!input_shapes.empty() && input_shapes[0].size() >= 2) {
+                    auto& s = input_shapes[0];
+                    int64_t N = s[s.size() - 1];
+                    auto batch = std::vector<int64_t>(s.begin(), s.end() - 2);
+                    auto w_shape = batch;
+                    w_shape.push_back(N);
+                    output_shapes.push_back(w_shape);
+                    output_shapes.push_back(input_shapes[0]);  // eigenvectors same shape
+                }
+                break;
+
+            case OpType::Eigvalsh:
+                // (..., N, N) -> (..., N)
+                if (!input_shapes.empty() && input_shapes[0].size() >= 2) {
+                    auto shape = input_shapes[0];
+                    shape.pop_back();  // remove last dim
+                    output_shapes.push_back(shape);
+                }
+                break;
+
+            case OpType::Norm:
+                // Produces scalar output
+                output_shapes.push_back({});
+                break;
+
+            case OpType::Slogdet:
+                // (..., N, N) -> sign: (...), logabsdet: (...)
+                if (!input_shapes.empty() && input_shapes[0].size() >= 2) {
+                    auto shape = input_shapes[0];
+                    shape.pop_back();
+                    shape.pop_back();
+                    output_shapes.push_back(shape);  // sign
+                    output_shapes.push_back(shape);  // logabsdet
+                }
+                break;
+
+            // ================================================================
             // Constants and I/O markers
             // ================================================================
             case OpType::Constant:
@@ -906,6 +1026,136 @@ auto Graph::infer_symbolic_types() -> void {
                         out_shape[static_cast<size_t>(dim)] = total;
                     }
                     output_sym_shapes.push_back(std::move(out_shape));
+                }
+                break;
+
+            // ================================================================
+            // GELU: preserve shape (element-wise activation)
+            // ================================================================
+            case OpType::GELU:
+                if (!input_sym_shapes.empty()) {
+                    output_sym_shapes.push_back(input_sym_shapes[0]);
+                }
+                break;
+
+            // ================================================================
+            // Linear algebra operations
+            // ================================================================
+            case OpType::Det:
+                // (..., N, N) -> (...)
+                if (!input_sym_shapes.empty() && input_sym_shapes[0].rank() >= 2) {
+                    auto sym_shape = input_sym_shapes[0];
+                    sym_shape.erase(sym_shape.rank() - 1);
+                    sym_shape.erase(sym_shape.rank() - 1);
+                    output_sym_shapes.push_back(std::move(sym_shape));
+                }
+                break;
+
+            case OpType::Inv:
+            case OpType::Cholesky:
+                // (..., N, N) -> (..., N, N)
+                if (!input_sym_shapes.empty()) {
+                    output_sym_shapes.push_back(input_sym_shapes[0]);
+                }
+                break;
+
+            case OpType::Solve:
+                // A: (..., N, N), B: (..., N, K) -> (..., N, K)
+                if (input_sym_shapes.size() >= 2) {
+                    output_sym_shapes.push_back(input_sym_shapes[1]);
+                }
+                break;
+
+            case OpType::Svd:
+                // (..., M, N) -> U, S, Vt (3 outputs)
+                if (!input_sym_shapes.empty() && input_sym_shapes[0].rank() >= 2) {
+                    auto& s = input_sym_shapes[0];
+                    auto M = s[s.rank() - 2];
+                    auto N_dim = s[s.rank() - 1];
+                    // For symbolic shapes, use the input dims directly
+                    // Batch dims
+                    std::vector<SymbolicDim> batch_dims;
+                    for (size_t d = 0; d + 2 < s.rank(); ++d) {
+                        batch_dims.push_back(s[d]);
+                    }
+                    // U shape: batch + [M, M] (full) or [M, min(M,N)]
+                    auto u_dims = batch_dims;
+                    u_dims.push_back(M);
+                    u_dims.push_back(M);  // Assume full matrices for symbolic
+                    output_sym_shapes.push_back(SymbolicShape(std::move(u_dims)));
+                    // S shape: batch + [min(M,N)] - use M as approximation for symbolic
+                    auto s_dims = batch_dims;
+                    s_dims.push_back(M);  // Approximation
+                    output_sym_shapes.push_back(SymbolicShape(std::move(s_dims)));
+                    // Vt shape: batch + [N, N]
+                    auto vt_dims = batch_dims;
+                    vt_dims.push_back(N_dim);
+                    vt_dims.push_back(N_dim);
+                    output_sym_shapes.push_back(SymbolicShape(std::move(vt_dims)));
+                }
+                break;
+
+            case OpType::Qr:
+                // (..., M, N) -> Q: (..., M, K), R: (..., K, N)
+                if (!input_sym_shapes.empty() && input_sym_shapes[0].rank() >= 2) {
+                    auto& s = input_sym_shapes[0];
+                    auto M = s[s.rank() - 2];
+                    auto N_dim = s[s.rank() - 1];
+                    std::vector<SymbolicDim> batch_dims;
+                    for (size_t d = 0; d + 2 < s.rank(); ++d) {
+                        batch_dims.push_back(s[d]);
+                    }
+                    // Q: batch + [M, K] where K=min(M,N) - use M as approx
+                    auto q_dims = batch_dims;
+                    q_dims.push_back(M);
+                    q_dims.push_back(M);
+                    output_sym_shapes.push_back(SymbolicShape(std::move(q_dims)));
+                    // R: batch + [K, N]
+                    auto r_dims = batch_dims;
+                    r_dims.push_back(M);
+                    r_dims.push_back(N_dim);
+                    output_sym_shapes.push_back(SymbolicShape(std::move(r_dims)));
+                }
+                break;
+
+            case OpType::Eigh:
+                // (..., N, N) -> eigenvalues: (..., N), eigenvectors: (..., N, N)
+                if (!input_sym_shapes.empty() && input_sym_shapes[0].rank() >= 2) {
+                    auto& s = input_sym_shapes[0];
+                    auto N_dim = s[s.rank() - 1];
+                    std::vector<SymbolicDim> batch_dims;
+                    for (size_t d = 0; d + 2 < s.rank(); ++d) {
+                        batch_dims.push_back(s[d]);
+                    }
+                    auto w_dims = batch_dims;
+                    w_dims.push_back(N_dim);
+                    output_sym_shapes.push_back(SymbolicShape(std::move(w_dims)));
+                    output_sym_shapes.push_back(input_sym_shapes[0]);
+                }
+                break;
+
+            case OpType::Eigvalsh:
+                // (..., N, N) -> (..., N)
+                if (!input_sym_shapes.empty() && input_sym_shapes[0].rank() >= 2) {
+                    auto sym_shape = input_sym_shapes[0];
+                    sym_shape.erase(sym_shape.rank() - 1);
+                    output_sym_shapes.push_back(std::move(sym_shape));
+                }
+                break;
+
+            case OpType::Norm:
+                // Scalar output
+                output_sym_shapes.push_back(SymbolicShape());
+                break;
+
+            case OpType::Slogdet:
+                // (..., N, N) -> sign: (...), logabsdet: (...)
+                if (!input_sym_shapes.empty() && input_sym_shapes[0].rank() >= 2) {
+                    auto sym_shape = input_sym_shapes[0];
+                    sym_shape.erase(sym_shape.rank() - 1);
+                    sym_shape.erase(sym_shape.rank() - 1);
+                    output_sym_shapes.push_back(sym_shape);  // sign
+                    output_sym_shapes.push_back(sym_shape);  // logabsdet
                 }
                 break;
 
@@ -1384,6 +1634,110 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 if (!result.empty()) {
                     outputs.push_back(Variable(result[0], false));
                 }
+            }
+            break;
+
+        case OpType::GELU:
+            if (!input_vars.empty()) {
+                outputs.push_back(nn::gelu(input_vars[0]));
+            }
+            break;
+
+        // ====================================================================
+        // Linear algebra operations
+        // ====================================================================
+        case OpType::Det:
+            if (!input_vars.empty()) {
+                auto result = tenzor::linalg::det(input_vars[0].tensor());
+                outputs.push_back(Variable(result, false));
+            }
+            break;
+
+        case OpType::Inv:
+            if (!input_vars.empty()) {
+                auto result = tenzor::linalg::inv(input_vars[0].tensor());
+                outputs.push_back(Variable(result, false));
+            }
+            break;
+
+        case OpType::Solve:
+            if (input_vars.size() >= 2) {
+                auto result = tenzor::linalg::solve(input_vars[0].tensor(),
+                                                     input_vars[1].tensor());
+                outputs.push_back(Variable(result, false));
+            }
+            break;
+
+        case OpType::Cholesky:
+            if (!input_vars.empty()) {
+                bool upper = node->get_bool_attr("upper");
+                auto result = tenzor::linalg::cholesky(input_vars[0].tensor(), upper);
+                outputs.push_back(Variable(result, false));
+            }
+            break;
+
+        case OpType::Svd:
+            if (!input_vars.empty()) {
+                bool full_matrices = node->has_attr("full_matrices") ?
+                    node->get_bool_attr("full_matrices") : true;
+                auto [U, S, Vt] = tenzor::linalg::svd(input_vars[0].tensor(), full_matrices);
+                outputs.push_back(Variable(U, false));
+                outputs.push_back(Variable(S, false));
+                outputs.push_back(Variable(Vt, false));
+            }
+            break;
+
+        case OpType::Qr:
+            if (!input_vars.empty()) {
+                auto [Q, R] = tenzor::linalg::qr(input_vars[0].tensor());
+                outputs.push_back(Variable(Q, false));
+                outputs.push_back(Variable(R, false));
+            }
+            break;
+
+        case OpType::Eigh:
+            if (!input_vars.empty()) {
+                auto [W, V] = tenzor::linalg::eigh(input_vars[0].tensor());
+                outputs.push_back(Variable(W, false));
+                outputs.push_back(Variable(V, false));
+            }
+            break;
+
+        case OpType::Eigvalsh:
+            if (!input_vars.empty()) {
+                auto result = tenzor::linalg::eigvalsh(input_vars[0].tensor());
+                outputs.push_back(Variable(result, false));
+            }
+            break;
+
+        case OpType::Norm:
+            if (!input_vars.empty()) {
+                std::string ord = "fro";
+                // Node stores norm order as a string attribute — check int_attrs and bool_attrs
+                // for backward compatibility, but the primary storage is a float attr named "ord"
+                // with special values, or we use a string convention in the node name.
+                // Use a simple mapping: ord_type int attr (0=fro, 1=1-norm, 2=2-norm, 3=inf, 4=nuc)
+                if (node->has_attr("ord_type")) {
+                    int64_t ord_type = node->get_int_attr("ord_type");
+                    switch (ord_type) {
+                        case 0: ord = "fro"; break;
+                        case 1: ord = "1"; break;
+                        case 2: ord = "2"; break;
+                        case 3: ord = "inf"; break;
+                        case 4: ord = "nuc"; break;
+                        default: ord = "fro"; break;
+                    }
+                }
+                auto result = tenzor::linalg::norm(input_vars[0].tensor(), ord);
+                outputs.push_back(Variable(result, false));
+            }
+            break;
+
+        case OpType::Slogdet:
+            if (!input_vars.empty()) {
+                auto [sign, logabsdet] = tenzor::linalg::slogdet(input_vars[0].tensor());
+                outputs.push_back(Variable(sign, false));
+                outputs.push_back(Variable(logabsdet, false));
             }
             break;
 

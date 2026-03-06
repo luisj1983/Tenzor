@@ -12,6 +12,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <iostream>
+#include <omp.h>
 
 namespace tenzor::nn {
 
@@ -62,13 +63,20 @@ auto im2col_cpu(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
     // Use typed lambda to handle both float and double paths
     auto do_im2col = [&](auto* input_data, auto* col_data) {
         using T = std::remove_pointer_t<decltype(input_data)>;
-        for (int64_t b = 0; b < batch; ++b) {
-            for (int64_t c = 0; c < channels; ++c) {
-                for (int64_t kh = 0; kh < kernel_h; ++kh) {
-                    for (int64_t kw = 0; kw < kernel_w; ++kw) {
-                        int64_t col_c = c * kernel_h * kernel_w + kh * kernel_w + kw;
+        const bool parallelize = batch * out_h * out_w > 4096;
 
-                        for (int64_t oh = 0; oh < out_h; ++oh) {
+        // Restructured loop order: batch x out_h are the two outermost loops
+        // so they can be parallelized with collapse(2).  The inner loops over
+        // channels/kernel elements write to non-overlapping col_idx positions
+        // for each (b, oh) pair, so no synchronization is needed.
+        #pragma omp parallel for collapse(2) if(parallelize) schedule(static)
+        for (int64_t b = 0; b < batch; ++b) {
+            for (int64_t oh = 0; oh < out_h; ++oh) {
+                for (int64_t c = 0; c < channels; ++c) {
+                    for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                        for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                            int64_t col_c = c * kernel_h * kernel_w + kh * kernel_w + kw;
+
                             for (int64_t ow = 0; ow < out_w; ++ow) {
                                 int64_t ih = oh * stride_h - padding_h + kh * dilation;
                                 int64_t iw = ow * stride_w - padding_w + kw * dilation;

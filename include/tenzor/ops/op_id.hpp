@@ -422,6 +422,7 @@ enum class OpId : uint16_t {
     LinalgSVD,
     LinalgQR,
     LinalgEigh,
+    LinalgEig,
     LinalgCholesky,
 
     // =========================================================================

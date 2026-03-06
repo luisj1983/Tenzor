@@ -661,6 +661,210 @@ auto QuantizedConv2dReLU::from_float(const Conv2d& fp_conv, const QConfig& qconf
     return q_conv_relu;
 }
 
+// ============================================================================
+// QuantizedConv2dBnReLU
+// ============================================================================
+
+QuantizedConv2dBnReLU::QuantizedConv2dBnReLU(
+    int64_t in_channels,
+    int64_t out_channels,
+    int64_t kernel_size,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t groups,
+    QuantizationParams weight_qparams,
+    Tensor bn_scale,
+    Tensor bn_bias
+) : bn_scale_(std::move(bn_scale)),
+    bn_bias_(std::move(bn_bias)) {
+    // Create internal quantized conv with the folded weights
+    conv_ = std::make_shared<QuantizedConv2d>(
+        in_channels, out_channels, kernel_size,
+        stride, padding, dilation, groups,
+        weight_qparams
+    );
+}
+
+auto QuantizedConv2dBnReLU::forward_impl(const Variable& input) -> Variable {
+    // Quantize input, run fused conv+BN+ReLU, return float output
+    auto q_input = quantize_per_tensor_symmetric(input.tensor());
+    Tensor output = forward_quantized(q_input);
+    return Variable(output, input.requires_grad());
+}
+
+auto QuantizedConv2dBnReLU::forward_quantized(const QuantizedTensor& input) -> Tensor {
+    // Run quantized convolution (with BN folded into weights)
+    Tensor output = conv_->forward_quantized(input);
+
+    auto original_device = output.device();
+
+    // Move to CPU for element-wise operations
+    Tensor output_cpu = output;
+    if (output_cpu.device() != Device::cpu()) {
+        output_cpu = output_cpu.to(Device::cpu());
+    }
+
+    // Apply BN scale and bias (already folded from running stats)
+    // output shape: [N, C, H, W]
+    // bn_scale_ and bn_bias_ shape: [C]
+    auto output_shape = output_cpu.shape();
+    int64_t batch = output_shape[0];
+    int64_t channels = output_shape[1];
+    int64_t h_out = output_shape[2];
+    int64_t w_out = output_shape[3];
+
+    Tensor bn_scale_cpu = bn_scale_;
+    Tensor bn_bias_cpu = bn_bias_;
+    if (bn_scale_cpu.device() != Device::cpu()) {
+        bn_scale_cpu = bn_scale_cpu.to(Device::cpu());
+    }
+    if (bn_bias_cpu.device() != Device::cpu()) {
+        bn_bias_cpu = bn_bias_cpu.to(Device::cpu());
+    }
+
+    float* out_data = output_cpu.data<float>();
+    const float* scale_data = bn_scale_cpu.data<const float>();
+    const float* bias_data = bn_bias_cpu.data<const float>();
+
+    // Apply BN: y = scale * x + bias, then ReLU: y = max(0, y)
+    int64_t spatial = h_out * w_out;
+    for (int64_t b = 0; b < batch; ++b) {
+        for (int64_t c = 0; c < channels; ++c) {
+            float s = scale_data[c];
+            float bi = bias_data[c];
+            float* channel_data = out_data + (b * channels + c) * spatial;
+            for (int64_t i = 0; i < spatial; ++i) {
+                float val = channel_data[i] * s + bi;
+                channel_data[i] = std::max(0.0f, val);  // Fused ReLU
+            }
+        }
+    }
+
+    return output_cpu.to(original_device);
+}
+
+auto QuantizedConv2dBnReLU::from_float(
+    const Conv2d& fp_conv,
+    const Module& fp_bn,
+    const QConfig& qconfig
+) -> std::shared_ptr<QuantizedConv2dBnReLU> {
+    // Extract BatchNorm parameters from state_dict
+    auto bn_state = fp_bn.state_dict();
+
+    Tensor gamma = bn_state.at("weight");
+    Tensor beta = bn_state.at("bias");
+    Tensor running_mean = bn_state.at("running_mean");
+    Tensor running_var = bn_state.at("running_var");
+
+    // Read epsilon from the source module
+    double eps = 1e-5;
+    if (auto* bn2d = dynamic_cast<const BatchNorm2d*>(&fp_bn)) {
+        eps = bn2d->eps();
+    }
+
+    // Fold BN into conv weights:
+    // w_folded = gamma / sqrt(var + eps) * w_conv
+    // b_folded = gamma / sqrt(var + eps) * (b_conv - mean) + beta
+    Tensor sqrt_var = sqrt(running_var + eps);
+    Tensor bn_scale = gamma / sqrt_var;  // [C]
+
+    // Get conv weights and bias
+    auto conv_state = fp_conv.state_dict();
+    Tensor fp_weight = conv_state.at("weight");  // [out_channels, in_channels/groups, kH, kW]
+    std::optional<Tensor> fp_bias;
+    if (conv_state.find("bias") != conv_state.end()) {
+        fp_bias = conv_state.at("bias");
+    }
+
+    // Fold BN scale into conv weights
+    // weight shape: [out_channels, in_channels/groups, kH, kW]
+    auto weight_shape = fp_weight.shape();
+    int64_t out_channels = weight_shape[0];
+
+    // Scale each output channel's weights by bn_scale[c]
+    Tensor folded_weight = fp_weight.clone();
+    Tensor folded_weight_cpu = folded_weight;
+    if (folded_weight_cpu.device() != Device::cpu()) {
+        folded_weight_cpu = folded_weight_cpu.to(Device::cpu());
+    }
+    Tensor bn_scale_cpu = bn_scale;
+    if (bn_scale_cpu.device() != Device::cpu()) {
+        bn_scale_cpu = bn_scale_cpu.to(Device::cpu());
+    }
+
+    float* w_data = folded_weight_cpu.data<float>();
+    const float* s_data = bn_scale_cpu.data<const float>();
+    int64_t channel_size = folded_weight_cpu.numel() / out_channels;
+    for (int64_t c = 0; c < out_channels; ++c) {
+        float s = s_data[c];
+        for (int64_t i = 0; i < channel_size; ++i) {
+            w_data[c * channel_size + i] *= s;
+        }
+    }
+
+    // Fold BN into bias
+    // b_folded = bn_scale * (b_conv - running_mean) + beta
+    Tensor folded_bias({out_channels}, DType::Float32, Device::cpu());
+    float* fb_data = folded_bias.data<float>();
+    Tensor running_mean_cpu = running_mean;
+    Tensor beta_cpu = beta;
+    if (running_mean_cpu.device() != Device::cpu()) {
+        running_mean_cpu = running_mean_cpu.to(Device::cpu());
+    }
+    if (beta_cpu.device() != Device::cpu()) {
+        beta_cpu = beta_cpu.to(Device::cpu());
+    }
+    const float* mean_data = running_mean_cpu.data<const float>();
+    const float* beta_data = beta_cpu.data<const float>();
+
+    for (int64_t c = 0; c < out_channels; ++c) {
+        float conv_bias = 0.0f;
+        if (fp_bias.has_value()) {
+            Tensor bias_cpu = *fp_bias;
+            if (bias_cpu.device() != Device::cpu()) {
+                bias_cpu = bias_cpu.to(Device::cpu());
+            }
+            conv_bias = bias_cpu.data<const float>()[c];
+        }
+        fb_data[c] = s_data[c] * (conv_bias - mean_data[c]) + beta_data[c];
+    }
+
+    // Quantize folded weights
+    auto weight_observer = qconfig.create_weight_observer();
+    weight_observer->observe(folded_weight_cpu);
+    auto weight_qparams = weight_observer->calculate_qparams(
+        qconfig.weight_dtype(),
+        qconfig.weight_scheme()
+    );
+
+    // Extract Conv2d parameters
+    int64_t in_channels = weight_shape[1] * fp_conv.groups();
+    int64_t kernel_h = weight_shape[2];
+
+    // Create the fused layer - BN scale/bias are identity since folded into weights
+    Tensor ones_scale({out_channels}, DType::Float32, Device::cpu());
+    Tensor zeros_bias({out_channels}, DType::Float32, Device::cpu());
+    ones_scale.fill_(1.0f);
+    zeros_bias.fill_(0.0f);
+
+    auto fused = std::make_shared<QuantizedConv2dBnReLU>(
+        in_channels, out_channels, kernel_h,
+        fp_conv.stride_h(), fp_conv.padding_h(),
+        fp_conv.dilation_h(), fp_conv.groups(),
+        weight_qparams,
+        ones_scale,   // BN already folded into weights, so scale = 1
+        zeros_bias    // BN already folded into bias, so bias = 0
+    );
+
+    // Set quantized weights with folded BN
+    QuantizedTensor q_weight = quantize_tensor(folded_weight_cpu, weight_qparams);
+    fused->conv_->set_weight(q_weight);
+    fused->conv_->set_bias(folded_bias);
+
+    return fused;
+}
+
 } // namespace quantization
 } // namespace nn
 } // namespace tenzor

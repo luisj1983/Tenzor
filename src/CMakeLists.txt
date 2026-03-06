@@ -108,6 +108,7 @@ set(TENZOR_CORE_SOURCES
     nn/quantization/qconfig.cpp
     nn/quantization/quantized_layers.cpp
     quantization/quantize_api.cpp
+    quantization/module_conversion.cpp
     parallel/threadpool.cpp
     data/dataloader.cpp
     models/resnet.cpp

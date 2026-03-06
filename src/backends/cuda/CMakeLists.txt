@@ -35,6 +35,8 @@ set(CUDA_BACKEND_SOURCES
     kernels/rnn_sequence.cu
     kernels/advanced.cu
     kernels/linalg.cu
+    kernels/fft.cu
+    kernels/sparse.cu
     kernels/amp.cu
     cublas_ops.cu
     cudnn_ops.cu
@@ -86,6 +88,20 @@ if(TARGET CUDA::cusolver)
     target_link_libraries(tenzor_backend_cuda PRIVATE CUDA::cusolver)
     target_compile_definitions(tenzor_backend_cuda PRIVATE TENZOR_HAS_CUSOLVER)
     message(STATUS "CUDA Backend: cuSOLVER support enabled")
+endif()
+
+# Link cuSPARSE if available
+if(TARGET CUDA::cusparse)
+    target_link_libraries(tenzor_backend_cuda PRIVATE CUDA::cusparse)
+    target_compile_definitions(tenzor_backend_cuda PRIVATE TENZOR_HAS_CUSPARSE)
+    message(STATUS "CUDA Backend: cuSPARSE support enabled")
+endif()
+
+# Link cuFFT if available
+if(TARGET CUDA::cufft)
+    target_link_libraries(tenzor_backend_cuda PRIVATE CUDA::cufft)
+    target_compile_definitions(tenzor_backend_cuda PRIVATE TENZOR_HAS_CUFFT)
+    message(STATUS "CUDA Backend: cuFFT support enabled")
 endif()
 
 # Link cuDNN if available
@@ -274,8 +290,16 @@ if(TARGET CUDA::cublas)
 else()
     message(STATUS "  cuBLAS: Not found")
 endif()
+if(TARGET CUDA::cusparse)
+    message(STATUS "  cuSPARSE: Enabled")
+else()
+    message(STATUS "  cuSPARSE: Not found")
+endif()
 if(TARGET CUDA::curand)
     message(STATUS "  cuRAND: Enabled")
+endif()
+if(TARGET CUDA::cufft)
+    message(STATUS "  cuFFT: Enabled")
 endif()
 if(CUDNN_FOUND)
     message(STATUS "  cuDNN: ${CUDNN_VERSION}")

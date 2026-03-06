@@ -1,5 +1,6 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "cuda_common.cuh"
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include <cuda_fp16.h>        // For __half
@@ -17,19 +18,6 @@
 
 namespace tenzor {
 namespace cuda {
-
-// ============================================================================
-// CUDA Error Checking
-// ============================================================================
-
-#define CUDA_CHECK(call)                                                       \
-    do {                                                                       \
-        cudaError_t error = call;                                              \
-        if (error != cudaSuccess) {                                            \
-            throw std::runtime_error(                                          \
-                std::string("CUDA error: ") + cudaGetErrorString(error));      \
-        }                                                                      \
-    } while (0)
 
 // ============================================================================
 // FP16/BF16 Conversion Utilities
@@ -1300,7 +1288,7 @@ void matmul_f32(
     matmul_tiled_f32_kernel<TILE_SIZE, TILE_SIZE, TILE_SIZE_K>
         <<<grid, block, 0, stream>>>(A, B, C, M, N, K, K, N, N);
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 }
 
 void matmul_f64(
@@ -1324,7 +1312,7 @@ void matmul_f64(
     matmul_tiled_f64_kernel<TILE_SIZE, TILE_SIZE, TILE_SIZE_K>
         <<<grid, block, 0, stream>>>(A, B, C, M, N, K, K, N, N);
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 }
 
 void matmul_i32(
@@ -1340,7 +1328,7 @@ void matmul_i32(
     matmul_tiled_i32_kernel<TILE_SIZE, TILE_SIZE, TILE_SIZE_K>
         <<<grid, block, 0, stream>>>(A, B, C, M, N, K, K, N, N);
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 }
 
 // Helper: round up to next multiple of 16
@@ -1394,7 +1382,7 @@ void matmul_f16(
                   (M + WMMA_M * BLOCK_TILES_M - 1) / (WMMA_M * BLOCK_TILES_M));
 
         matmul_tensor_core_f16_kernel<<<grid, block, 0, stream>>>(A, B, C, M, N, K);
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (M >= WMMA_M && N >= WMMA_N && K >= WMMA_K && padding_overhead_ok(M, N, K)) {
         // Dimensions are large enough for Tensor Cores but not aligned.
         // Pad to multiples of 16 to enable TC acceleration when overhead is acceptable.
@@ -1406,14 +1394,14 @@ void matmul_f16(
         __half* A_pad = nullptr;
         __half* B_pad = nullptr;
         __half* C_pad = nullptr;
-        CUDA_CHECK(cudaMallocAsync(&A_pad, Mp * Kp * sizeof(__half), stream));
-        CUDA_CHECK(cudaMallocAsync(&B_pad, Kp * Np * sizeof(__half), stream));
-        CUDA_CHECK(cudaMallocAsync(&C_pad, Mp * Np * sizeof(__half), stream));
-        CUDA_CHECK(cudaMemsetAsync(A_pad, 0, Mp * Kp * sizeof(__half), stream));
-        CUDA_CHECK(cudaMemsetAsync(B_pad, 0, Kp * Np * sizeof(__half), stream));
+        TENZOR_CUDA_CHECK(cudaMallocAsync(&A_pad, Mp * Kp * sizeof(__half), stream));
+        TENZOR_CUDA_CHECK(cudaMallocAsync(&B_pad, Kp * Np * sizeof(__half), stream));
+        TENZOR_CUDA_CHECK(cudaMallocAsync(&C_pad, Mp * Np * sizeof(__half), stream));
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(A_pad, 0, Mp * Kp * sizeof(__half), stream));
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(B_pad, 0, Kp * Np * sizeof(__half), stream));
 
         // Copy A (M x K) into A_pad (Mp x Kp) with proper stride
-        CUDA_CHECK(cudaMemcpy2DAsync(
+        TENZOR_CUDA_CHECK(cudaMemcpy2DAsync(
             A_pad, Kp * sizeof(__half),        // dst, dst pitch
             A,     K  * sizeof(__half),         // src, src pitch
             K  * sizeof(__half),                // width in bytes to copy per row
@@ -1421,7 +1409,7 @@ void matmul_f16(
             cudaMemcpyDeviceToDevice, stream));
 
         // Copy B (K x N) into B_pad (Kp x Np) with proper stride
-        CUDA_CHECK(cudaMemcpy2DAsync(
+        TENZOR_CUDA_CHECK(cudaMemcpy2DAsync(
             B_pad, Np * sizeof(__half),         // dst, dst pitch
             B,     N  * sizeof(__half),          // src, src pitch
             N  * sizeof(__half),                 // width in bytes to copy per row
@@ -1438,19 +1426,19 @@ void matmul_f16(
 
         matmul_tensor_core_f16_kernel<<<grid, block, 0, stream>>>(
             A_pad, B_pad, C_pad, Mp, Np, Kp);
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
 
         // Copy result C_pad (Mp x Np) back to C (M x N) — extract top-left M x N
-        CUDA_CHECK(cudaMemcpy2DAsync(
+        TENZOR_CUDA_CHECK(cudaMemcpy2DAsync(
             C,     N  * sizeof(__half),          // dst, dst pitch
             C_pad, Np * sizeof(__half),          // src, src pitch
             N  * sizeof(__half),                 // width in bytes to copy per row
             M,                                   // number of rows
             cudaMemcpyDeviceToDevice, stream));
 
-        CUDA_CHECK(cudaFreeAsync(A_pad, stream));
-        CUDA_CHECK(cudaFreeAsync(B_pad, stream));
-        CUDA_CHECK(cudaFreeAsync(C_pad, stream));
+        TENZOR_CUDA_CHECK(cudaFreeAsync(A_pad, stream));
+        TENZOR_CUDA_CHECK(cudaFreeAsync(B_pad, stream));
+        TENZOR_CUDA_CHECK(cudaFreeAsync(C_pad, stream));
     } else {
         // Fall back to standard tiled kernel for non-aligned dimensions
         // (either too small for TC or padding overhead too high)
@@ -1460,10 +1448,10 @@ void matmul_f16(
 
         matmul_tiled_f16_kernel<TILE_SIZE_F16, TILE_SIZE_F16, TILE_SIZE_K>
             <<<grid, block, 0, stream>>>(A, B, C, M, N, K, K, N, N);
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
     }
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 }
 
 /**
@@ -1492,7 +1480,7 @@ void matmul_bf16(
     matmul_tiled_bf16_kernel<TILE_SIZE_F16, TILE_SIZE_F16, TILE_SIZE_K>
         <<<grid, block, 0, stream>>>(A, B, C, M, N, K, K, N, N);
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 }
 
 // ============================================================================
@@ -1525,7 +1513,7 @@ void batched_matmul_f32(
             A, B, C, batch_size, M, N, K,
             stride_a, stride_b, stride_c);
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 #endif
 }
 
@@ -1555,7 +1543,7 @@ void batched_matmul_f64(
             A, B, C, batch_size, M, N, K,
             stride_a, stride_b, stride_c);
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 #endif
 }
 
@@ -1598,7 +1586,7 @@ void batched_matmul_f16(
         batched_matmul_tensor_core_f16_kernel<<<grid, block, 0, stream>>>(
             A, B, C, batch_size, M, N, K,
             stride_a, stride_b, stride_c);
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (M >= WMMA_M && N >= WMMA_N && K >= WMMA_K && padding_overhead_ok(M, N, K)) {
         // Dimensions are large enough for Tensor Cores but not aligned.
         // Pad to multiples of 16 to enable TC acceleration when overhead is acceptable.
@@ -1614,16 +1602,16 @@ void batched_matmul_f16(
         __half* A_pad = nullptr;
         __half* B_pad = nullptr;
         __half* C_pad = nullptr;
-        CUDA_CHECK(cudaMallocAsync(&A_pad, batch_size * stride_a_pad * sizeof(__half), stream));
-        CUDA_CHECK(cudaMallocAsync(&B_pad, batch_size * stride_b_pad * sizeof(__half), stream));
-        CUDA_CHECK(cudaMallocAsync(&C_pad, batch_size * stride_c_pad * sizeof(__half), stream));
-        CUDA_CHECK(cudaMemsetAsync(A_pad, 0, batch_size * stride_a_pad * sizeof(__half), stream));
-        CUDA_CHECK(cudaMemsetAsync(B_pad, 0, batch_size * stride_b_pad * sizeof(__half), stream));
+        TENZOR_CUDA_CHECK(cudaMallocAsync(&A_pad, batch_size * stride_a_pad * sizeof(__half), stream));
+        TENZOR_CUDA_CHECK(cudaMallocAsync(&B_pad, batch_size * stride_b_pad * sizeof(__half), stream));
+        TENZOR_CUDA_CHECK(cudaMallocAsync(&C_pad, batch_size * stride_c_pad * sizeof(__half), stream));
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(A_pad, 0, batch_size * stride_a_pad * sizeof(__half), stream));
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(B_pad, 0, batch_size * stride_b_pad * sizeof(__half), stream));
 
         // Copy each batch element into the padded buffers with proper stride
         for (int64_t b = 0; b < batch_size; ++b) {
             // Copy A[b] (M x K) into A_pad[b] (Mp x Kp)
-            CUDA_CHECK(cudaMemcpy2DAsync(
+            TENZOR_CUDA_CHECK(cudaMemcpy2DAsync(
                 A_pad + b * stride_a_pad, Kp * sizeof(__half),  // dst, dst pitch
                 A     + b * stride_a,     K  * sizeof(__half),   // src, src pitch
                 K  * sizeof(__half),                              // width in bytes
@@ -1631,7 +1619,7 @@ void batched_matmul_f16(
                 cudaMemcpyDeviceToDevice, stream));
 
             // Copy B[b] (K x N) into B_pad[b] (Kp x Np)
-            CUDA_CHECK(cudaMemcpy2DAsync(
+            TENZOR_CUDA_CHECK(cudaMemcpy2DAsync(
                 B_pad + b * stride_b_pad, Np * sizeof(__half),  // dst, dst pitch
                 B     + b * stride_b,     N  * sizeof(__half),   // src, src pitch
                 N  * sizeof(__half),                              // width in bytes
@@ -1648,11 +1636,11 @@ void batched_matmul_f16(
         batched_matmul_tensor_core_f16_kernel<<<grid, block, 0, stream>>>(
             A_pad, B_pad, C_pad, batch_size, Mp, Np, Kp,
             stride_a_pad, stride_b_pad, stride_c_pad);
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
 
         // Copy results back: extract top-left M x N from each batch element
         for (int64_t b = 0; b < batch_size; ++b) {
-            CUDA_CHECK(cudaMemcpy2DAsync(
+            TENZOR_CUDA_CHECK(cudaMemcpy2DAsync(
                 C     + b * stride_c,     N  * sizeof(__half),   // dst, dst pitch
                 C_pad + b * stride_c_pad, Np * sizeof(__half),   // src, src pitch
                 N  * sizeof(__half),                              // width in bytes
@@ -1660,9 +1648,9 @@ void batched_matmul_f16(
                 cudaMemcpyDeviceToDevice, stream));
         }
 
-        CUDA_CHECK(cudaFreeAsync(A_pad, stream));
-        CUDA_CHECK(cudaFreeAsync(B_pad, stream));
-        CUDA_CHECK(cudaFreeAsync(C_pad, stream));
+        TENZOR_CUDA_CHECK(cudaFreeAsync(A_pad, stream));
+        TENZOR_CUDA_CHECK(cudaFreeAsync(B_pad, stream));
+        TENZOR_CUDA_CHECK(cudaFreeAsync(C_pad, stream));
     } else {
         // Batched tiled F16 kernel using blockIdx.z for batch indexing
         // (either too small for TC or padding overhead too high)
@@ -1677,10 +1665,10 @@ void batched_matmul_f16(
                 M, N, K,
                 K, N, N,  // lda, ldb, ldc for row-major
                 stride_a, stride_b, stride_c);
-                CUDA_CHECK(cudaGetLastError());
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
     }
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 }
 
 /**
@@ -1714,7 +1702,7 @@ void batched_matmul_bf16(
             K, N, N,  // lda, ldb, ldc for row-major
             stride_a, stride_b, stride_c);
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 #endif
 }
 

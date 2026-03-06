@@ -248,6 +248,92 @@ private:
 };
 
 /**
+ * @brief Operator fusion pass - MatMul + Add (bias pattern).
+ *
+ * Detects sequential MatMul(A, B) followed by Add(result, bias) where
+ * bias is a 1D tensor, and fuses them into a single MatMul with a
+ * fused_bias attribute. This avoids a separate element-wise kernel launch.
+ *
+ * Example:
+ * @code
+ * y = matmul(x, w)
+ * z = y + bias       // bias is 1D
+ * # Becomes:
+ * z = matmul(x, w)   // with fused_bias = bias tensor
+ * @endcode
+ *
+ * Speedup: ~5-10% for inference (eliminates separate Add kernel)
+ */
+class FuseMatMulAddPass : public Pass {
+public:
+    auto run(Graph& graph) -> bool override;
+    auto name() const -> std::string override { return "FuseMatMulAdd"; }
+
+private:
+    auto fuse_pair(std::shared_ptr<Node> matmul_node,
+                   std::shared_ptr<Node> add_node,
+                   Graph& graph) -> bool;
+};
+
+/**
+ * @brief Operator fusion pass - Conv2d + BatchNorm2d + ReLU (triple fusion).
+ *
+ * Extends Conv+BN and Conv+ReLU patterns into a single triple fusion.
+ * Detects Conv2d -> BatchNorm2d -> ReLU sequences and folds BN parameters
+ * into convolution weights while also marking the fused ReLU activation.
+ *
+ * Example:
+ * @code
+ * y = conv2d(x, w, b)
+ * z = batchnorm(y, gamma, beta, mean, var)
+ * out = relu(z)
+ * # Becomes:
+ * out = conv2d(x, w', b')  // with fused_bn=true, fused_relu=true
+ * @endcode
+ *
+ * Speedup: ~15-25% for inference (single kernel instead of three)
+ */
+class FuseConvBatchNormReluPass : public Pass {
+public:
+    auto run(Graph& graph) -> bool override;
+    auto name() const -> std::string override { return "FuseConvBatchNormReLU"; }
+
+private:
+    auto fuse_triple(std::shared_ptr<Node> conv_node,
+                     std::shared_ptr<Node> bn_node,
+                     std::shared_ptr<Node> relu_node,
+                     Graph& graph) -> bool;
+};
+
+/**
+ * @brief Operator fusion pass - LayerNorm + Activation.
+ *
+ * Fuses LayerNorm followed by ReLU or GELU into a single operation.
+ * Many backends can apply the activation within the normalization kernel,
+ * avoiding a separate memory pass.
+ *
+ * Example:
+ * @code
+ * y = layer_norm(x, ...)
+ * z = gelu(y)
+ * # Becomes:
+ * z = layer_norm(x, ...)  // with fused_activation="gelu"
+ * @endcode
+ *
+ * Speedup: ~5-15% for transformer inference
+ */
+class FuseLayerNormActivationPass : public Pass {
+public:
+    auto run(Graph& graph) -> bool override;
+    auto name() const -> std::string override { return "FuseLayerNormActivation"; }
+
+private:
+    auto fuse_pair(std::shared_ptr<Node> ln_node,
+                   std::shared_ptr<Node> act_node,
+                   Graph& graph) -> bool;
+};
+
+/**
  * @brief Algebraic simplification pass.
  *
  * Applies algebraic identities to simplify expressions:
@@ -442,17 +528,37 @@ public:
      * @brief Enable or disable memory planning during optimize().
      *
      * When enabled, memory planning runs automatically as the final
-     * step of optimize(). Enabled by default.
+     * step of optimize(). By default, memory planning uses "auto" mode:
+     * it is enabled when the graph exceeds a size threshold (50 nodes),
+     * and disabled for smaller graphs where the planning overhead is
+     * not worthwhile.
      *
-     * @param enable If true, run memory planning after optimization
+     * @param enable If true, always run memory planning; if false, never run
      */
-    auto set_memory_planning(bool enable) -> void { enable_memory_planning_ = enable; }
+    auto set_memory_planning(bool enable) -> void {
+        memory_planning_explicit_ = true;
+        enable_memory_planning_ = enable;
+    }
+
+    /**
+     * @brief Set the node count threshold for automatic memory planning.
+     *
+     * When memory planning is in auto mode (default), graphs with at
+     * least this many nodes will have memory planning enabled.
+     *
+     * @param threshold Minimum number of nodes (default: 50)
+     */
+    auto set_memory_planning_threshold(size_t threshold) -> void {
+        memory_planning_threshold_ = threshold;
+    }
 
 private:
     std::vector<std::unique_ptr<Pass>> passes_;               ///< Optimization passes
     std::unordered_map<std::string, int> pass_stats_;         ///< Pass execution stats
     bool verbose_{false};                                     ///< Verbose logging flag
-    bool enable_memory_planning_{true};                       ///< Memory planning flag
+    bool enable_memory_planning_{false};                      ///< Memory planning flag
+    bool memory_planning_explicit_{false};                    ///< True if user explicitly set memory planning
+    size_t memory_planning_threshold_{50};                    ///< Auto-enable threshold (node count)
     MemoryPlan memory_plan_;                                  ///< Cached memory plan
 
     /**

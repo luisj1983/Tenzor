@@ -7,6 +7,7 @@
 #include <cub/cub.cuh>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/backend/caching_allocator.hpp"
+#include "cuda_common.cuh"
 #include "../cublas_handle_pool.hpp"
 #include <stdexcept>
 #include <cmath>
@@ -38,29 +39,17 @@ inline std::vector<int64_t> to_vector(const std::span<const int64_t>& s) {
     return std::vector<int64_t>(s.begin(), s.end());
 }
 
-// Error checking macro
-#define CUDA_CHECK(call) \
-    do { \
-        cudaError_t error = call; \
-        if (error != cudaSuccess) { \
-            throw std::runtime_error( \
-                std::string("CUDA error at ") + __FILE__ + ":" + \
-                std::to_string(__LINE__) + " - " + cudaGetErrorString(error) \
-            ); \
-        } \
-    } while(0)
-
 // Scale a scalar value in device memory using host round-trip (eliminates 1-thread kernel launch)
 inline void scale_scalar_host(float* d_val, float scale) {
     float host_val;
-    CUDA_CHECK(cudaMemcpy(&host_val, d_val, sizeof(float), cudaMemcpyDeviceToHost));
+    TENZOR_CUDA_CHECK(cudaMemcpy(&host_val, d_val, sizeof(float), cudaMemcpyDeviceToHost));
     host_val *= scale;
-    CUDA_CHECK(cudaMemcpy(d_val, &host_val, sizeof(float), cudaMemcpyHostToDevice));
+    TENZOR_CUDA_CHECK(cudaMemcpy(d_val, &host_val, sizeof(float), cudaMemcpyHostToDevice));
 }
 
 // Set a scalar value in device memory using cudaMemcpy (eliminates 1-thread kernel launch)
 inline void set_scalar_host(float* d_dst, float value) {
-    CUDA_CHECK(cudaMemcpy(d_dst, &value, sizeof(float), cudaMemcpyHostToDevice));
+    TENZOR_CUDA_CHECK(cudaMemcpy(d_dst, &value, sizeof(float), cudaMemcpyHostToDevice));
 }
 
 // Helper for computing (optionally scaled) sum of a 1D tensor on GPU
@@ -223,21 +212,21 @@ auto fused_linear_relu_cuda(
         if (bias) {
             bias_relu_kernel<<<blocks, block_size>>>(
                 output.data<float>(), bias->data<float>(), total_elements, out_features);
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else {
             relu_inplace_kernel<<<blocks, block_size>>>(
                 output.data<float>(), total_elements);
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         }
     } else if (input.dtype() == DType::Float64) {
         if (bias) {
             bias_relu_kernel<<<blocks, block_size>>>(
                 output.data<double>(), bias->data<double>(), total_elements, out_features);
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else {
             relu_inplace_kernel<<<blocks, block_size>>>(
                 output.data<double>(), total_elements);
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         }
     } else if (input.dtype() == DType::Float16) {
         if (bias) {
@@ -245,11 +234,11 @@ auto fused_linear_relu_cuda(
                 reinterpret_cast<__half*>(output.data_ptr()),
                 reinterpret_cast<const __half*>(bias->data_ptr()),
                 total_elements, out_features);
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else {
             relu_inplace_kernel<<<blocks, block_size>>>(
                 reinterpret_cast<__half*>(output.data_ptr()), total_elements);
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         }
     } else if (input.dtype() == DType::BFloat16) {
         if (bias) {
@@ -257,15 +246,15 @@ auto fused_linear_relu_cuda(
                 reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
                 reinterpret_cast<const __nv_bfloat16*>(bias->data_ptr()),
                 total_elements, out_features);
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else {
             relu_inplace_kernel<<<blocks, block_size>>>(
                 reinterpret_cast<__nv_bfloat16*>(output.data_ptr()), total_elements);
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         }
     }
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 
     return output;
 }
@@ -366,7 +355,7 @@ auto fused_batchnorm_relu_cuda(
             spatial_size,
             eps
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_batchnorm_relu_kernel<double>, 0, 0);
@@ -383,7 +372,7 @@ auto fused_batchnorm_relu_cuda(
             spatial_size,
             static_cast<double>(eps)
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_batchnorm_relu_kernel<__half>, 0, 0);
@@ -400,7 +389,7 @@ auto fused_batchnorm_relu_cuda(
             spatial_size,
             __float2half(eps)
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::BFloat16) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_batchnorm_relu_kernel<__nv_bfloat16>, 0, 0);
@@ -417,12 +406,12 @@ auto fused_batchnorm_relu_cuda(
             spatial_size,
             __float2bfloat16(eps)
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("fused_batchnorm_relu_cuda: Unsupported dtype");
     }
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 
     return output;
 }
@@ -512,12 +501,12 @@ auto fused_softmax_cross_entropy_cuda(
             batch_size,
             num_classes
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("fused_softmax_cross_entropy_cuda: Only Float32 supported");
     }
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 
     // Apply reduction — stays on device, no D2H transfer
     if (reduction == "mean") {
@@ -565,7 +554,7 @@ auto fused_add_relu_cuda(const Tensor& a, const Tensor& b) -> Tensor {
             result.data<float>(),
             n
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (a.dtype() == DType::Float64) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_add_relu_kernel<double>, 0, 0);
@@ -576,7 +565,7 @@ auto fused_add_relu_cuda(const Tensor& a, const Tensor& b) -> Tensor {
             result.data<double>(),
             n
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (a.dtype() == DType::Float16) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_add_relu_kernel<__half>, 0, 0);
@@ -587,7 +576,7 @@ auto fused_add_relu_cuda(const Tensor& a, const Tensor& b) -> Tensor {
             reinterpret_cast<__half*>(result.data_ptr()),
             n
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (a.dtype() == DType::BFloat16) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_add_relu_kernel<__nv_bfloat16>, 0, 0);
@@ -598,12 +587,12 @@ auto fused_add_relu_cuda(const Tensor& a, const Tensor& b) -> Tensor {
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()),
             n
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("fused_add_relu_cuda: Unsupported dtype");
     }
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 
     return result;
 }
@@ -721,7 +710,7 @@ auto fused_gelu_cuda(const Tensor& input) -> Tensor {
             output.data<float>(),
             n
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_gelu_kernel<double>, 0, 0);
@@ -731,7 +720,7 @@ auto fused_gelu_cuda(const Tensor& input) -> Tensor {
             output.data<double>(),
             n
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_gelu_kernel<__half>, 0, 0);
@@ -741,7 +730,7 @@ auto fused_gelu_cuda(const Tensor& input) -> Tensor {
             reinterpret_cast<__half*>(output.data_ptr()),
             n
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::BFloat16) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_gelu_kernel<__nv_bfloat16>, 0, 0);
@@ -751,12 +740,12 @@ auto fused_gelu_cuda(const Tensor& input) -> Tensor {
             reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
             n
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("fused_gelu_cuda: Unsupported dtype");
     }
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 
     return output;
 }
@@ -880,7 +869,7 @@ auto fused_layer_norm_cuda(
             norm_size,
             eps
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         fused_layer_norm_kernel<double, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
             input.data<double>(),
@@ -893,7 +882,7 @@ auto fused_layer_norm_cuda(
             norm_size,
             static_cast<double>(eps)
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         fused_layer_norm_kernel<__half, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
             reinterpret_cast<const __half*>(input.data_ptr()),
@@ -906,7 +895,7 @@ auto fused_layer_norm_cuda(
             norm_size,
             __float2half(eps)
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::BFloat16) {
         fused_layer_norm_kernel<__nv_bfloat16, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
@@ -919,12 +908,12 @@ auto fused_layer_norm_cuda(
             norm_size,
             __float2bfloat16(eps)
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("fused_layer_norm_cuda: Unsupported dtype");
     }
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
     // NOTE: Removed cudaDeviceSynchronize() - async execution is critical for performance
 
     return std::make_tuple(output, mean, inv_std);
@@ -1055,7 +1044,7 @@ auto fused_layer_norm_backward_cuda(
             batch_size,
             norm_size
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         fused_layer_norm_backward_kernel<double, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
             grad_output.data<double>(),
@@ -1069,7 +1058,7 @@ auto fused_layer_norm_backward_cuda(
             batch_size,
             norm_size
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         fused_layer_norm_backward_kernel<__half, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
             reinterpret_cast<const __half*>(grad_output.data_ptr()),
@@ -1083,7 +1072,7 @@ auto fused_layer_norm_backward_cuda(
             batch_size,
             norm_size
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::BFloat16) {
         fused_layer_norm_backward_kernel<__nv_bfloat16, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
             reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
@@ -1097,12 +1086,12 @@ auto fused_layer_norm_backward_cuda(
             batch_size,
             norm_size
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("fused_layer_norm_backward_cuda: Unsupported dtype");
     }
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
     // NOTE: Removed cudaDeviceSynchronize() - async execution is critical for performance
 
     return std::make_tuple(grad_input, grad_weight, grad_bias);
@@ -1249,12 +1238,12 @@ auto fused_rms_norm_cuda(
             norm_size,
             eps
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("fused_rms_norm_cuda: Only Float32 supported");
     }
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 
     return std::make_tuple(output, rrms);
 }
@@ -1353,12 +1342,12 @@ auto fused_rms_norm_backward_cuda(
             batch_size,
             norm_size
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("fused_rms_norm_backward_cuda: Only Float32 supported");
     }
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 
     return std::make_tuple(grad_input, grad_weight);
 }
@@ -1496,12 +1485,12 @@ auto fused_conv2d_bn_relu_cuda(
             eps,
             bias != nullptr
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("fused_conv2d_bn_relu_cuda: Only Float32 supported");
     }
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 
     return output;
 }
@@ -1598,12 +1587,12 @@ auto fused_matmul_add_cuda(
             K,
             bias != nullptr
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("fused_matmul_add_cuda: Only Float32 supported");
     }
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 
     return C;
 }
@@ -1671,12 +1660,12 @@ auto fused_elementwise_chain_cuda(
             n,
             op_type
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("fused_elementwise_chain_cuda: Only Float32 supported");
     }
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 
     return output;
 }
@@ -2211,31 +2200,31 @@ auto fused_attention_cuda(
         flash_attention_v2_kernel<64, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
             Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(),
             static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (head_dim == 128) {
         size_t smem_size = compute_smem_size(128);
         flash_attention_v2_kernel<128, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
             Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(),
             static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (head_dim == 32) {
         size_t smem_size = compute_smem_size(32);
         flash_attention_v2_kernel<32, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
             Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(),
             static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (head_dim == 80) {
         size_t smem_size = compute_smem_size(80);
         flash_attention_v2_kernel<80, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
             Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(),
             static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (head_dim == 96) {
         size_t smem_size = compute_smem_size(96);
         flash_attention_v2_kernel<96, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
             Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(),
             static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
         // Fallback to naive kernel for non-standard head_dim
         constexpr int NAIVE_BLOCK_SIZE = 256;
@@ -2252,10 +2241,10 @@ auto fused_attention_cuda(
             head_dim,
             scale
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     }
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 
     return output;
 }
@@ -2540,7 +2529,7 @@ auto fused_adam_step_cuda(
                 bias_correction1, bias_correction2,
                 amsgrad, decoupled_weight_decay
             );
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else {
             int blocks = (numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
             blocks = clamp_blocks(blocks);
@@ -2555,7 +2544,7 @@ auto fused_adam_step_cuda(
                 bias_correction1, bias_correction2,
                 amsgrad, decoupled_weight_decay
             );
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         }
     } else if (param.dtype() == DType::Float64) {
         double* max_sq_ptr = (amsgrad && max_exp_avg_sq) ? max_exp_avg_sq->data<double>() : nullptr;
@@ -2584,7 +2573,7 @@ auto fused_adam_step_cuda(
                 bias_correction1, bias_correction2,
                 amsgrad, decoupled_weight_decay
             );
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else {
             int blocks = (numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
             blocks = clamp_blocks(blocks);
@@ -2599,13 +2588,13 @@ auto fused_adam_step_cuda(
                 bias_correction1, bias_correction2,
                 amsgrad, decoupled_weight_decay
             );
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         }
     } else {
         throw std::runtime_error("fused_adam_step_cuda: Only Float32 and Float64 supported");
     }
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 }
 
 // ==============================================================================
@@ -2686,7 +2675,7 @@ auto fused_sgd_step_cuda(
             numel, lr, momentum, weight_decay, dampening,
             nesterov, momentum_buffer != nullptr
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (param.dtype() == DType::Float64) {
         double* momentum_ptr = momentum_buffer ? momentum_buffer->data<double>() : nullptr;
 
@@ -2697,12 +2686,12 @@ auto fused_sgd_step_cuda(
             numel, lr, momentum, weight_decay, dampening,
             nesterov, momentum_buffer != nullptr
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("fused_sgd_step_cuda: Only Float32 and Float64 supported");
     }
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 }
 
 
@@ -2811,19 +2800,19 @@ auto fused_softmax_cross_entropy_cuda(
             loss.data<float>(),
             compute_grad ? grad_logits.data<float>() : nullptr,
             batch_size, num_classes, compute_grad);
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (logits.dtype() == DType::Float64) {
         fused_softmax_cross_entropy_kernel<double><<<batch_size, block_size, shared_mem>>>(
             logits.data<double>(), targets.data<int64_t>(),
             loss.data<double>(),
             compute_grad ? grad_logits.data<double>() : nullptr,
             batch_size, num_classes, compute_grad);
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("fused_softmax_cross_entropy: unsupported dtype");
     }
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
     return {loss, grad_logits};
 }
 
@@ -2900,18 +2889,18 @@ auto fused_rmsprop_step_cuda(
             (centered && grad_avg) ? grad_avg->data<float>() : nullptr,
             (momentum > 0.0f && momentum_buffer) ? momentum_buffer->data<float>() : nullptr,
             lr, alpha, eps, weight_decay, momentum, centered, n);
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (param.dtype() == DType::Float64) {
         fused_rmsprop_step_kernel<double><<<num_blocks, block_size, 0, stream>>>(
             param.data<double>(), grad.data<double>(), square_avg.data<double>(),
             (centered && grad_avg) ? grad_avg->data<double>() : nullptr,
             (momentum > 0.0f && momentum_buffer) ? momentum_buffer->data<double>() : nullptr,
             lr, alpha, eps, weight_decay, momentum, centered, n);
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("fused_rmsprop_step: unsupported dtype");
     }
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 }
 
 // ============================================================================
@@ -2966,16 +2955,16 @@ auto fused_adadelta_step_cuda(
         fused_adadelta_step_kernel<float><<<num_blocks, block_size, 0, stream>>>(
             param.data<float>(), grad.data<float>(), square_avg.data<float>(), acc_delta.data<float>(),
             rho, eps, lr, weight_decay, n);
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (param.dtype() == DType::Float64) {
         fused_adadelta_step_kernel<double><<<num_blocks, block_size, 0, stream>>>(
             param.data<double>(), grad.data<double>(), square_avg.data<double>(), acc_delta.data<double>(),
             rho, eps, lr, weight_decay, n);
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("fused_adadelta_step: unsupported dtype");
     }
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 }
 
 // ============================================================================
@@ -3024,16 +3013,16 @@ auto fused_adagrad_step_cuda(
         fused_adagrad_step_kernel<float><<<num_blocks, block_size, 0, stream>>>(
             param.data<float>(), grad.data<float>(), sum_sq.data<float>(),
             lr, lr_decay, eps, weight_decay, step, n);
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (param.dtype() == DType::Float64) {
         fused_adagrad_step_kernel<double><<<num_blocks, block_size, 0, stream>>>(
             param.data<double>(), grad.data<double>(), sum_sq.data<double>(),
             lr, lr_decay, eps, weight_decay, step, n);
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("fused_adagrad_step: unsupported dtype");
     }
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 }
 // ============================================================================
 // Fused Adam-Atan2 Optimizer Step
@@ -3133,7 +3122,7 @@ auto fused_adam_atan2_step_cuda(
             lr, beta1, beta2, eps, weight_decay,
             bias_correction1, bias_correction2, amsgrad
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (param.dtype() == DType::Float64) {
         double* max_sq_ptr = (amsgrad && max_exp_avg_sq) ? max_exp_avg_sq->data<double>() : nullptr;
 
@@ -3144,12 +3133,12 @@ auto fused_adam_atan2_step_cuda(
             lr, beta1, beta2, eps, weight_decay,
             bias_correction1, bias_correction2, amsgrad
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("fused_adam_atan2_step_cuda: Only Float32 and Float64 supported");
     }
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 }
 
 } // namespace cuda

@@ -1,11 +1,19 @@
 # Include C++ headers and sources
 recursive-include include *.hpp *.h
 recursive-include src *.cpp *.cu *.hip.cpp *.hpp *.h
-recursive-include cmake *.cmake *.cmake.in
+
+# Include Vulkan/compute shaders
+recursive-include src *.comp *.glsl *.spv
 
 # Include CMake build files
 include CMakeLists.txt
-recursive-include . CMakeLists.txt
+recursive-include cmake *.cmake *.cmake.in *.pc.in
+recursive-include src CMakeLists.txt
+
+# Include project metadata and build config
+include pyproject.toml
+include setup.py
+include MANIFEST.in
 
 # Include documentation
 include README.md
@@ -13,7 +21,7 @@ include LICENSE
 include CONTRIBUTING.md
 recursive-include docs *.md *.rst
 
-# Include Python files
+# Include Python files and type stubs
 recursive-include python *.py *.pyi
 include python/tenzor/py.typed
 
@@ -27,6 +35,12 @@ global-exclude __pycache__
 global-exclude .git*
 global-exclude *.so
 global-exclude *.o
+global-exclude *.obj
+global-exclude *.a
+global-exclude *.lib
 prune build
 prune dist
 prune .eggs
+prune .tox
+prune .mypy_cache
+prune .pytest_cache

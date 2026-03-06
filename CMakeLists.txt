@@ -53,6 +53,15 @@ endif()
 
 project(tenzor VERSION 1.0.0 LANGUAGES ${TENZOR_LANGUAGES})
 
+# Use ccache if available for faster rebuilds
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+    message(STATUS "ccache found: ${CCACHE_PROGRAM}")
+    set(CMAKE_C_COMPILER_LAUNCHER ${CCACHE_PROGRAM})
+    set(CMAKE_CXX_COMPILER_LAUNCHER ${CCACHE_PROGRAM})
+    set(CMAKE_CUDA_COMPILER_LAUNCHER ${CCACHE_PROGRAM})
+endif()
+
 # C++ standard
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -70,6 +79,19 @@ option(TENZOR_BUILD_TESTS "Build tests" ON)
 option(TENZOR_BUILD_BENCHMARKS "Build benchmarks" OFF)
 option(TENZOR_BUILD_EXAMPLES "Build examples" ON)
 option(TENZOR_BUILD_MODEL_HUB "Build model hub (requires CURL and OpenSSL)" ON)
+
+# Link-Time Optimization
+option(TENZOR_ENABLE_LTO "Enable Link-Time Optimization" OFF)
+if(TENZOR_ENABLE_LTO)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT lto_supported OUTPUT lto_error)
+    if(lto_supported)
+        message(STATUS "LTO enabled")
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+    else()
+        message(WARNING "LTO requested but not supported: ${lto_error}")
+    endif()
+endif()
 
 # Coverage build type
 option(TENZOR_ENABLE_COVERAGE "Enable coverage reporting" OFF)
@@ -196,11 +218,17 @@ if(TENZOR_BUILD_PYTHON)
             LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/python/tenzor"
         )
 
-        # Copy Python package files
-        file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/__init__.py
-                  ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/nn.py
-                  ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/functional.py
-             DESTINATION ${CMAKE_BINARY_DIR}/python/tenzor)
+        # Copy Python package files at build time (not just configure time)
+        # so that edits to .py files are picked up by subsequent builds.
+        add_custom_target(copy_python_files ALL
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/__init__.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/nn.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/functional.py
+                ${CMAKE_BINARY_DIR}/python/tenzor/
+            COMMENT "Copying Python files to build directory"
+        )
+        add_dependencies(tenzor_python copy_python_files)
     else()
         message(WARNING "pybind11 or Python not found, Python bindings will not be built")
     endif()
@@ -320,5 +348,15 @@ if(OpenMP_CXX_FOUND)
     message(STATUS "  OpenMP:               Enabled")
 else()
     message(STATUS "  OpenMP:               Disabled")
+endif()
+if(CCACHE_PROGRAM)
+    message(STATUS "  ccache:               ${CCACHE_PROGRAM}")
+else()
+    message(STATUS "  ccache:               Not found")
+endif()
+if(TENZOR_ENABLE_LTO AND lto_supported)
+    message(STATUS "  LTO:                  Enabled")
+else()
+    message(STATUS "  LTO:                  Disabled")
 endif()
 message(STATUS "")

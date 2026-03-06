@@ -15,6 +15,9 @@
 
 namespace tenzor {
 
+// Forward declaration for sparse autograd ops
+class SparseTensor;
+
 // ============================================================================
 // Reduction Operations
 // ============================================================================
@@ -579,6 +582,165 @@ auto flip(const Variable& input, const std::vector<int64_t>& dims) -> Variable;
 
 /// Repeat tensor along dimensions. Grad: sum over repeated dims
 auto repeat(const Variable& input, const std::vector<int64_t>& repeats) -> Variable;
+
+// ============================================================================
+// Linear Algebra Operations
+// ============================================================================
+
+/**
+ * @brief Matrix determinant with gradient tracking.
+ *
+ * Computes the determinant of a square matrix.
+ * Gradient: dL/dA = dL/dy * det(A) * A^{-T}
+ *
+ * @param input Input variable containing square matrix (..., N, N)
+ * @return Variable containing determinant with gradient function
+ *
+ * @see DetBackward for gradient implementation
+ */
+auto det(const Variable& input) -> Variable;
+
+/**
+ * @brief Matrix inverse with gradient tracking.
+ *
+ * Computes the inverse of a square matrix.
+ * Gradient: dL/dA = -Y^T @ dL/dY @ Y^T where Y = A^{-1}
+ *
+ * @param input Input variable containing square matrix (..., N, N)
+ * @return Variable containing inverse with gradient function
+ *
+ * @see InvBackward for gradient implementation
+ */
+auto inv(const Variable& input) -> Variable;
+
+/**
+ * @brief Linear system solve with gradient tracking.
+ *
+ * Solves AX = B for X.
+ * Gradient for B: solve(A^T, dL/dX)
+ * Gradient for A: -grad_B @ X^T
+ *
+ * @param A Coefficient matrix variable (..., N, N)
+ * @param B Right-hand side variable (..., N, K)
+ * @return Variable containing solution X with gradient function
+ *
+ * @see SolveBackward for gradient implementation
+ */
+auto solve(const Variable& A, const Variable& B) -> Variable;
+
+/**
+ * @brief Cholesky decomposition with gradient tracking.
+ *
+ * Computes lower-triangular L such that A = L @ L^T.
+ *
+ * @param input Input variable containing symmetric positive-definite matrix (..., N, N)
+ * @param upper If true, return upper-triangular factor (default: false)
+ * @return Variable containing Cholesky factor with gradient function
+ *
+ * @see CholeskyBackward for gradient implementation
+ */
+auto cholesky(const Variable& input, bool upper = false) -> Variable;
+
+/**
+ * @brief Singular Value Decomposition with gradient tracking.
+ *
+ * Factorizes A = U @ diag(S) @ Vh.
+ * Returns tuple of three Variables (U, S, Vh).
+ *
+ * @param input Input variable (..., M, N)
+ * @param full_matrices If true, compute full U and Vh
+ * @return Tuple of (U, S, Vh) Variables with gradient function
+ *
+ * @see SvdBackward for gradient implementation
+ */
+auto svd(const Variable& input, bool full_matrices = true) -> std::tuple<Variable, Variable, Variable>;
+
+/**
+ * @brief QR decomposition with gradient tracking.
+ *
+ * Factorizes A = Q @ R.
+ * Returns tuple of two Variables (Q, R).
+ *
+ * @param input Input variable (..., M, N)
+ * @return Tuple of (Q, R) Variables with gradient function
+ *
+ * @see QrBackward for gradient implementation
+ */
+auto qr(const Variable& input) -> std::tuple<Variable, Variable>;
+
+/**
+ * @brief Symmetric eigendecomposition with gradient tracking.
+ *
+ * Computes eigenvalues and eigenvectors of a symmetric matrix.
+ * Returns tuple of (eigenvalues, eigenvectors).
+ *
+ * @param input Input variable containing symmetric matrix (..., N, N)
+ * @return Tuple of (W, V) Variables with gradient function
+ *
+ * @see EighBackward for gradient implementation
+ */
+auto eigh(const Variable& input) -> std::tuple<Variable, Variable>;
+
+/**
+ * @brief Symmetric eigenvalues with gradient tracking.
+ *
+ * Computes eigenvalues of a symmetric matrix.
+ * Gradient: dL/dA = V @ diag(dL/dW) @ V^T
+ *
+ * @param input Input variable containing symmetric matrix (..., N, N)
+ * @return Variable containing eigenvalues with gradient function
+ *
+ * @see EigvalshBackward for gradient implementation
+ */
+auto eigvalsh(const Variable& input) -> Variable;
+
+/**
+ * @brief Matrix norm with gradient tracking.
+ *
+ * Computes the Frobenius (or other) norm of a matrix.
+ * Gradient (Frobenius): dL/dA = dL/dy * A / norm(A)
+ *
+ * @param input Input variable
+ * @param ord Norm order (default: "fro" for Frobenius)
+ * @return Variable containing norm value with gradient function
+ *
+ * @see NormBackward_Linalg for gradient implementation
+ */
+auto linalg_norm(const Variable& input, const std::string& ord = "fro") -> Variable;
+
+/**
+ * @brief Sign and log-absolute-determinant with gradient tracking.
+ *
+ * More numerically stable than det for large matrices.
+ * Gradient flows only through logabsdet: dL/dA = dL/d(logabsdet) * A^{-T}
+ *
+ * @param input Input variable containing square matrix (..., N, N)
+ * @return Tuple of (sign, logabsdet) Variables with gradient function
+ *
+ * @see SlogdetBackward for gradient implementation
+ */
+auto slogdet(const Variable& input) -> std::tuple<Variable, Variable>;
+
+// ============================================================================
+// Sparse Operations
+// ============================================================================
+
+/**
+ * @brief Sparse-dense matrix multiplication with gradient tracking.
+ *
+ * Computes Y = S @ D where S is a sparse matrix and D is a dense matrix.
+ * Only the dense input D receives a gradient during backpropagation:
+ *   grad_D = S^T @ grad_Y
+ *
+ * The sparse matrix S is treated as a constant (no gradient computed).
+ *
+ * @param sparse Sparse matrix (M, K) -- not differentiated
+ * @param dense Dense matrix variable (K, N) -- receives gradient
+ * @return Variable containing the dense result (M, N) with gradient function
+ *
+ * @see SpMMBackward for gradient implementation
+ */
+auto spmm(const SparseTensor& sparse, const Variable& dense) -> Variable;
 
 } // namespace tenzor
 

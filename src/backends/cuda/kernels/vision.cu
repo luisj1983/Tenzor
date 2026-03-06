@@ -1,6 +1,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/backend/dtype_dispatch.hpp"
+#include "cuda_common.cuh"
 #include "cuda_launch_utils.cuh"
 #include "launch_config.cuh"
 #include <cuda_runtime.h>
@@ -10,17 +11,6 @@
 
 namespace tenzor {
 namespace cuda {
-
-// ============================================================================
-// CUDA Error Checking
-// ============================================================================
-
-#define CUDA_CHECK(call) do { \
-    cudaError_t err = call; \
-    if (err != cudaSuccess) { \
-        throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(err)); \
-    } \
-} while(0)
 
 // ============================================================================
 // Kernel Launch Helpers
@@ -391,10 +381,10 @@ auto unfold_cuda(const Tensor& input,
             kernel_size, stride, padding, dilation,
             out_h, out_w
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     });
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 
     return output;
 }
@@ -424,7 +414,7 @@ auto fold_cuda(const Tensor& input,
     Tensor output(output_shape, input.dtype(), input.device());
 
     // Initialize to zero
-    CUDA_CHECK(cudaMemset(output.data_ptr(), 0, output.numel() * output.dtype_size()));
+    TENZOR_CUDA_CHECK(cudaMemset(output.data_ptr(), 0, output.numel() * output.dtype_size()));
 
     // Launch kernel
     int64_t total_elements = batch * col_channels * num_blocks;
@@ -439,10 +429,10 @@ auto fold_cuda(const Tensor& input,
             kernel_size, stride, padding, dilation,
             out_h, out_w
         );
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     });
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 
     return output;
 }
@@ -476,21 +466,21 @@ auto interpolate_cuda(const Tensor& input,
                 output.data<float>(),
                 batch, channels, in_h, in_w, out_h, out_w
             );
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else if (input.dtype() == DType::Float64) {
             interpolate_nearest_kernel<double><<<grid, block>>>(
                 input.data<double>(),
                 output.data<double>(),
                 batch, channels, in_h, in_w, out_h, out_w
             );
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else if (input.dtype() == DType::Float16) {
             interpolate_nearest_kernel<__half><<<grid, block>>>(
                 reinterpret_cast<const __half*>(input.data_ptr()),
                 reinterpret_cast<__half*>(output.data_ptr()),
                 batch, channels, in_h, in_w, out_h, out_w
             );
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else {
             throw std::runtime_error("interpolate_cuda: Unsupported dtype");
         }
@@ -502,7 +492,7 @@ auto interpolate_cuda(const Tensor& input,
                 batch, channels, in_h, in_w, out_h, out_w,
                 align_corners
             );
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else if (input.dtype() == DType::Float64) {
             interpolate_bilinear_kernel<double><<<grid, block>>>(
                 input.data<double>(),
@@ -510,7 +500,7 @@ auto interpolate_cuda(const Tensor& input,
                 batch, channels, in_h, in_w, out_h, out_w,
                 align_corners
             );
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else if (input.dtype() == DType::Float16) {
             interpolate_bilinear_kernel<__half><<<grid, block>>>(
                 reinterpret_cast<const __half*>(input.data_ptr()),
@@ -518,7 +508,7 @@ auto interpolate_cuda(const Tensor& input,
                 batch, channels, in_h, in_w, out_h, out_w,
                 align_corners
             );
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else {
             throw std::runtime_error("interpolate_cuda: Unsupported dtype");
         }
@@ -530,7 +520,7 @@ auto interpolate_cuda(const Tensor& input,
                 batch, channels, in_h, in_w, out_h, out_w,
                 align_corners
             );
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else if (input.dtype() == DType::Float64) {
             interpolate_bicubic_kernel<double><<<grid, block>>>(
                 input.data<double>(),
@@ -538,7 +528,7 @@ auto interpolate_cuda(const Tensor& input,
                 batch, channels, in_h, in_w, out_h, out_w,
                 align_corners
             );
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else if (input.dtype() == DType::Float16) {
             interpolate_bicubic_kernel<__half><<<grid, block>>>(
                 reinterpret_cast<const __half*>(input.data_ptr()),
@@ -546,7 +536,7 @@ auto interpolate_cuda(const Tensor& input,
                 batch, channels, in_h, in_w, out_h, out_w,
                 align_corners
             );
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else {
             throw std::runtime_error("interpolate_cuda: Unsupported dtype");
         }
@@ -554,7 +544,7 @@ auto interpolate_cuda(const Tensor& input,
         throw std::runtime_error("interpolate_cuda: Unsupported mode: " + mode);
     }
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
 
     return output;
 }
@@ -636,17 +626,17 @@ auto box_iou_cuda(const Tensor& boxes1, const Tensor& boxes2, int iou_type) -> T
         box_iou_kernel<float><<<grid, block>>>(
             boxes1.data<float>(), boxes2.data<float>(), output.data<float>(),
             N, M, iou_type);
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (boxes1.dtype() == DType::Float64) {
         box_iou_kernel<double><<<grid, block>>>(
             boxes1.data<double>(), boxes2.data<double>(), output.data<double>(),
             N, M, iou_type);
-            CUDA_CHECK(cudaGetLastError());
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("box_iou_cuda: unsupported dtype");
     }
 
-    CUDA_CHECK(cudaGetLastError());
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
     return output;
 }
 

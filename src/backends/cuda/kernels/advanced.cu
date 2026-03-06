@@ -7,12 +7,11 @@
 
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/backend/caching_allocator.hpp"
+#include "cuda_common.cuh"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <device_launch_parameters.h>
 #include <cub/cub.cuh>
-
-#define CUDA_CHECK(call) do { cudaError_t err = (call); if (err != cudaSuccess) { throw std::runtime_error(std::string("CUDA error at ") + __FILE__ + ":" + std::to_string(__LINE__) + " - " + cudaGetErrorString(err)); } } while(0)
 #include <thrust/device_ptr.h>
 #include <thrust/sort.h>
 #include <thrust/unique.h>
@@ -224,7 +223,7 @@ auto topk_kernel(const Tensor& input, int64_t k, int64_t dim, bool largest,
         topk_slice_kernel<T><<<num_slices, block_size, smem_size, stream>>>(
             input_cont.data<T>(), values.data<T>(), indices.data<int64_t>(),
             dim_size, k, inner_size, outer_stride, k_stride, largest);
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     };
 
     switch (dtype) {
@@ -329,7 +328,7 @@ auto sort_kernel(const Tensor& input, int64_t dim, bool descending,
                 // Extract slice
                 extract_slice_kernel<T><<<grid, block, 0, stream>>>(
                     input_cont.data<T>(), d_slice, dim_size, inner_size, outer, inner);
-                CUDA_CHECK(cudaGetLastError());
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
 
                 // Sort slice
                 sort_1d_thrust<T>(d_slice, d_slice, d_idx, dim_size, descending, stream);
@@ -338,7 +337,7 @@ auto sort_kernel(const Tensor& input, int64_t dim, bool descending,
                 scatter_slice_kernel<T><<<grid, block, 0, stream>>>(
                     d_slice, d_idx, values.data<T>(), indices.data<int64_t>(),
                     dim_size, inner_size, outer, inner);
-                CUDA_CHECK(cudaGetLastError());
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
             }
         }
     };
@@ -433,11 +432,11 @@ auto cumsum_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Ten
                 for (int64_t inner = 0; inner < inner_size; ++inner) {
                     extract_strided_slice<T><<<grid, block, 0, stream>>>(
                         input_cont.data<T>(), d_slice_in, dim_size, inner_size, outer, inner);
-                    CUDA_CHECK(cudaGetLastError());
+                    TENZOR_CUDA_POST_LAUNCH_CHECK();
                     cumsum_slice_cub<T>(d_slice_in, d_slice_out, dim_size, stream);
                     scatter_strided_slice<T><<<grid, block, 0, stream>>>(
                         d_slice_out, output.data<T>(), dim_size, inner_size, outer, inner);
-                    CUDA_CHECK(cudaGetLastError());
+                    TENZOR_CUDA_POST_LAUNCH_CHECK();
                 }
             }
         }
@@ -507,11 +506,11 @@ auto cumprod_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Te
                 for (int64_t inner = 0; inner < inner_size; ++inner) {
                     extract_strided_slice<T><<<grid, block, 0, stream>>>(
                         input_cont.data<T>(), d_slice_in, dim_size, inner_size, outer, inner);
-                    CUDA_CHECK(cudaGetLastError());
+                    TENZOR_CUDA_POST_LAUNCH_CHECK();
                     cumprod_slice_cub<T>(d_slice_in, d_slice_out, dim_size, stream);
                     scatter_strided_slice<T><<<grid, block, 0, stream>>>(
                         d_slice_out, output.data<T>(), dim_size, inner_size, outer, inner);
-                    CUDA_CHECK(cudaGetLastError());
+                    TENZOR_CUDA_POST_LAUNCH_CHECK();
                 }
             }
         }
@@ -644,7 +643,7 @@ static auto unique_thrust(const Tensor& input, bool sorted_output,
         fill_inverse_kernel<<<grid, block, 0, stream>>>(
             d_orig_idx, d_offsets, inverse_tensor.data<int64_t>(),
             num_unique, numel);
-        CUDA_CHECK(cudaGetLastError());
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     }
 
     cudaStreamSynchronize(stream);

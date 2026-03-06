@@ -9,9 +9,8 @@
  * across all CUDA kernel files. Each macro includes __FILE__:__LINE__
  * context for easier debugging.
  *
- * NOTE: This header is provided for NEW code.  Existing kernel files
- * still define their own macros locally; migrating them to this
- * header will happen in a follow-up PR to minimize churn.
+ * All CUDA kernel files include this header instead of defining
+ * local error-checking macros.
  */
 
 #include <cuda_runtime.h>

@@ -1,13 +1,17 @@
 [build-system]
-requires = ["setuptools>=45", "wheel", "pybind11>=2.6.0"]
-build-backend = "setuptools.build_meta"
+requires = [
+    "scikit-build-core>=0.5.0",
+    "pybind11>=2.11.0",
+    "numpy>=1.19.0",
+]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "tenzor"
 version = "1.0.0"
 description = "High-performance tensor computation and neural network library with multi-backend support"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 license = {text = "MIT"}
 authors = [
     {name = "Tenzor Contributors"}
@@ -20,11 +24,14 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: C++",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
@@ -56,16 +63,44 @@ Documentation = "https://tenzor.readthedocs.io"
 Repository = "https://github.com/tenzor/tenzor"
 "Bug Tracker" = "https://github.com/tenzor/tenzor/issues"
 
-[tool.setuptools]
-packages = ["tenzor"]
-package-dir = {"" = "python"}
+[tool.scikit-build]
+# CMake configuration
+cmake.build-type = "Release"
+cmake.args = [
+    "-DTENZOR_BUILD_PYTHON=ON",
+    "-DTENZOR_BUILD_TESTS=OFF",
+    "-DTENZOR_BUILD_EXAMPLES=OFF",
+    "-DTENZOR_BUILD_BENCHMARKS=OFF",
+    "-DTENZOR_BUILD_MODEL_HUB=OFF",
+]
+
+# Wheel settings
+wheel.packages = ["python/tenzor"]
+wheel.install-dir = "tenzor"
+
+# Platform-specific wheel tags: do not set py-api tag so the wheel is
+# tagged with the correct CPython ABI (e.g. cp312-cp312-linux_x86_64).
+wheel.py-api = ""
+
+# Build directory
+build-dir = "build/{wheel_tag}"
+
+# Minimum CMake version
+cmake.minimum-version = "3.25"
+
+[tool.scikit-build.cmake.define]
+TENZOR_BUILD_PYTHON = "ON"
+TENZOR_BUILD_TESTS = "OFF"
+TENZOR_BUILD_EXAMPLES = "OFF"
+TENZOR_BUILD_BENCHMARKS = "OFF"
+TENZOR_BUILD_MODEL_HUB = "OFF"
 
 [tool.black]
 line-length = 100
-target-version = ['py38', 'py39', 'py310', 'py311']
+target-version = ['py39', 'py310', 'py311', 'py312']
 
 [tool.mypy]
-python_version = "3.8"
+python_version = "3.9"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
