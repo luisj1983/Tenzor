@@ -77,6 +77,13 @@ namespace cpu {
     auto minimum_kernel(const Tensor& a, const Tensor& b) -> Tensor;
     auto maximum_kernel(const Tensor& a, const Tensor& b) -> Tensor;
 
+    // Complex operations
+    auto conj_kernel(const Tensor& input) -> Tensor;
+    auto real_kernel(const Tensor& input) -> Tensor;
+    auto imag_kernel(const Tensor& input) -> Tensor;
+    auto angle_kernel(const Tensor& input) -> Tensor;
+    auto polar_kernel(const Tensor& abs, const Tensor& angle) -> Tensor;
+
     // Reductions
     auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
@@ -1913,6 +1920,15 @@ void register_cpu_kernels(BackendDispatchTable& table) {
 
         return output;
     });
+
+    // =========================================================================
+    // Complex Number Operations
+    // =========================================================================
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Conj, cpu::conj_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Real, cpu::real_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Imag, cpu::imag_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Angle, cpu::angle_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Polar, cpu::polar_kernel);
 }
 
 } // namespace tenzor

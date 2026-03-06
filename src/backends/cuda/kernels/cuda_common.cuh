@@ -95,6 +95,15 @@ namespace cuda {
 #endif
 
 // ============================================================================
+// Type Safety Guards
+// ============================================================================
+
+// Ensure int and int32_t are the same size — atomicAdd(int*, int) must be
+// compatible with int32_t scatter_add operations.
+static_assert(sizeof(int) == sizeof(int32_t),
+              "atomicAdd requires int == int32_t on this platform");
+
+// ============================================================================
 // Grid-Stride Loop Macro
 // ============================================================================
 

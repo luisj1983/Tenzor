@@ -79,6 +79,7 @@ option(TENZOR_BUILD_TESTS "Build tests" ON)
 option(TENZOR_BUILD_BENCHMARKS "Build benchmarks" OFF)
 option(TENZOR_BUILD_EXAMPLES "Build examples" ON)
 option(TENZOR_BUILD_MODEL_HUB "Build model hub (requires CURL and OpenSSL)" ON)
+option(TENZOR_REQUIRE_MKL "Require Intel MKL (FATAL_ERROR if not found)" OFF)
 
 # Link-Time Optimization
 option(TENZOR_ENABLE_LTO "Enable Link-Time Optimization" OFF)
@@ -226,7 +227,15 @@ if(TENZOR_BUILD_PYTHON)
                 ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/nn.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/functional.py
                 ${CMAKE_BINARY_DIR}/python/tenzor/
-            COMMENT "Copying Python files to build directory"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/py.typed
+                ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/__init__.pyi
+                ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/nn.pyi
+                ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/functional.pyi
+                ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/optim.pyi
+                ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/torch_interop.pyi
+                ${CMAKE_BINARY_DIR}/python/tenzor/
+            COMMENT "Copying Python files and type stubs to build directory"
         )
         add_dependencies(tenzor_python copy_python_files)
     else()

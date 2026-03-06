@@ -71,6 +71,8 @@ auto op_type_to_string(OpType type) -> std::string {
         case OpType::Constant: return "Constant";
         case OpType::Input: return "Input";
         case OpType::Output: return "Output";
+        case OpType::If: return "If";
+        case OpType::Loop: return "Loop";
         default: return "Unknown";
     }
 }
@@ -129,7 +131,9 @@ auto string_to_op_type(const std::string& str) -> OpType {
         {"Slogdet", OpType::Slogdet},
         {"Constant", OpType::Constant},
         {"Input", OpType::Input},
-        {"Output", OpType::Output}
+        {"Output", OpType::Output},
+        {"If", OpType::If},
+        {"Loop", OpType::Loop}
     };
 
     auto it = string_to_type.find(str);

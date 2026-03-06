@@ -641,6 +641,27 @@ auto Graph::infer_types() -> void {
                     output_shapes.push_back(input_shapes[0]);
                 }
                 break;
+
+            // ================================================================
+            // Control flow: use subgraph output shapes
+            // ================================================================
+            case OpType::If:
+                // Output shapes come from then_branch outputs
+                if (node->then_branch()) {
+                    for (const auto& out : node->then_branch()->outputs()) {
+                        output_shapes.push_back(out->shape());
+                    }
+                }
+                break;
+
+            case OpType::Loop:
+                // Loop outputs are the final loop-carried values (same shape as inputs)
+                // Inputs: [max_iter, condition, carried_0, carried_1, ...]
+                // Outputs: [carried_0, carried_1, ...]
+                for (size_t i = 2; i < input_shapes.size(); ++i) {
+                    output_shapes.push_back(input_shapes[i]);
+                }
+                break;
         }
 
         // Update output shapes
@@ -1175,6 +1196,24 @@ auto Graph::infer_symbolic_types() -> void {
             case OpType::Output:
                 if (!input_sym_shapes.empty()) {
                     output_sym_shapes.push_back(input_sym_shapes[0]);
+                }
+                break;
+
+            // ================================================================
+            // Control flow: propagate from subgraph outputs
+            // ================================================================
+            case OpType::If:
+                if (node->then_branch()) {
+                    for (const auto& out : node->then_branch()->outputs()) {
+                        output_sym_shapes.push_back(out->symbolic_shape());
+                    }
+                }
+                break;
+
+            case OpType::Loop:
+                // Loop-carried values preserve shapes
+                for (size_t i = 2; i < input_sym_shapes.size(); ++i) {
+                    output_sym_shapes.push_back(input_sym_shapes[i]);
                 }
                 break;
         }
@@ -1759,6 +1798,80 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 outputs.push_back(input_vars[0]);
             }
             break;
+
+        // ====================================================================
+        // Control flow
+        // ====================================================================
+        case OpType::If: {
+            // Inputs: [condition, then_inputs...]
+            // condition is a scalar bool tensor
+            if (!input_vars.empty() && node->then_branch()) {
+                bool cond = input_vars[0].tensor().template item<float>() != 0.0f;
+                auto& branch = cond ? node->then_branch() : node->else_branch();
+                if (branch) {
+                    // Pass remaining inputs to the chosen branch
+                    std::vector<Variable> branch_inputs(input_vars.begin() + 1, input_vars.end());
+                    auto branch_outputs = branch->forward(branch_inputs);
+                    for (auto& out : branch_outputs) {
+                        outputs.push_back(std::move(out));
+                    }
+                } else if (cond) {
+                    // then_branch must exist (checked above), else_branch optional
+                    auto branch_inputs = std::vector<Variable>(input_vars.begin() + 1, input_vars.end());
+                    auto branch_outputs = node->then_branch()->forward(branch_inputs);
+                    for (auto& out : branch_outputs) {
+                        outputs.push_back(std::move(out));
+                    }
+                }
+            }
+            break;
+        }
+
+        case OpType::Loop: {
+            // ONNX-style loop semantics:
+            // Inputs: [max_iterations, condition, carried_0, carried_1, ...]
+            // Body graph inputs: [iteration_num, condition, carried_0, carried_1, ...]
+            // Body graph outputs: [condition, carried_0, carried_1, ...]
+            // Loop outputs: [final_carried_0, final_carried_1, ...]
+            if (input_vars.size() >= 2 && node->body()) {
+                int64_t max_iter = static_cast<int64_t>(input_vars[0].tensor().template item<float>());
+                bool cond = input_vars[1].tensor().template item<float>() != 0.0f;
+
+                // Initialize loop-carried values
+                std::vector<Variable> carried(input_vars.begin() + 2, input_vars.end());
+
+                for (int64_t i = 0; i < max_iter && cond; ++i) {
+                    // Build body inputs: [iter, cond, carried...]
+                    std::vector<Variable> body_inputs;
+                    body_inputs.push_back(Variable(
+                        tenzor::full({1}, static_cast<float>(i), DType::Float32), false));
+                    body_inputs.push_back(Variable(
+                        tenzor::full({1}, cond ? 1.0f : 0.0f, DType::Float32), false));
+                    for (auto& c : carried) {
+                        body_inputs.push_back(c);
+                    }
+
+                    auto body_outputs = node->body()->forward(body_inputs);
+
+                    // body_outputs[0] = new condition, rest = updated carried values
+                    if (!body_outputs.empty()) {
+                        cond = body_outputs[0].tensor().template item<float>() != 0.0f;
+                        carried.clear();
+                        for (size_t j = 1; j < body_outputs.size(); ++j) {
+                            carried.push_back(std::move(body_outputs[j]));
+                        }
+                    } else {
+                        break;
+                    }
+                }
+
+                // Loop outputs are the final carried values
+                for (auto& c : carried) {
+                    outputs.push_back(std::move(c));
+                }
+            }
+            break;
+        }
     }
 
     // Store outputs in value map

@@ -7,6 +7,7 @@ set(TENZOR_CORE_SOURCES
     core/shape.cpp
     core/init.cpp
     core/caching_allocator.cpp
+    core/numa.cpp
     core/memory_manager.cpp
     core/transfer_engine.cpp
     core/pinned_allocator.cpp
@@ -45,6 +46,7 @@ set(TENZOR_CORE_SOURCES
     autograd/graph_viz.cpp
     nn/module.cpp
     nn/serialize.cpp
+    nn/pytorch_loader.cpp
     nn/checkpoint.cpp
     nn/layers/linear.cpp
     nn/layers/lazy_linear.cpp
@@ -234,6 +236,14 @@ if(_MKL_MODULE_FOUND AND MKL_FOUND)
     target_link_libraries(tenzor_core PRIVATE ${MKL_LIBRARIES})
     target_include_directories(tenzor_core PRIVATE ${MKL_INCLUDE_DIRS})
     target_compile_definitions(tenzor_core PRIVATE TENZOR_USE_MKL MKL_ILP64)
+else()
+    if(TENZOR_REQUIRE_MKL)
+        message(FATAL_ERROR "MKL required (TENZOR_REQUIRE_MKL=ON) but not found. "
+                "Set MKLROOT or install Intel oneAPI MKL.")
+    else()
+        message(WARNING "MKL not found — linalg operations (det, inv, solve, svd, etc.) "
+                "will be unavailable. Set MKLROOT or install Intel oneAPI MKL.")
+    endif()
 endif()
 
 # Add CUDA definition and includes if CUDA backend is enabled

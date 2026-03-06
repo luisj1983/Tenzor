@@ -108,7 +108,11 @@ enum class OpType {
     // Constants
     Constant,
     Input,
-    Output
+    Output,
+
+    // Control flow
+    If,     ///< Conditional branch: cond → then_branch / else_branch subgraphs
+    Loop    ///< Loop: (max_iter, cond, carried...) → body subgraph → (carried...)
 };
 
 /**

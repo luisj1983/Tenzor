@@ -23,6 +23,10 @@ auto get_quant_range(QuantDType dtype) -> std::pair<int32_t, int32_t> {
             return {-128, 127};
         case QuantDType::UINT8:
             return {0, 255};
+        case QuantDType::INT4:
+            return {-8, 7};
+        case QuantDType::UINT4:
+            return {0, 15};
         default:
             throw std::runtime_error("Unsupported quantization dtype");
     }
@@ -32,8 +36,14 @@ auto get_quant_range(QuantDType dtype) -> std::pair<int32_t, int32_t> {
 auto compute_symmetric_scale(float abs_max, QuantDType dtype) -> float {
     auto [quant_min, quant_max] = get_quant_range(dtype);
     // For INT8 symmetric quantization, use [-127, 127] to avoid asymmetry at -128
-    float quant_range = (dtype == QuantDType::INT8) ? 127.0f :
-                        static_cast<float>(std::max(std::abs(quant_min), std::abs(quant_max)));
+    float quant_range;
+    if (dtype == QuantDType::INT8) {
+        quant_range = 127.0f;
+    } else if (dtype == QuantDType::INT4) {
+        quant_range = 7.0f;
+    } else {
+        quant_range = static_cast<float>(std::max(std::abs(quant_min), std::abs(quant_max)));
+    }
 
     // Add epsilon to handle zero-range edge case (all values identical)
     constexpr float EPSILON = 1e-8f;
@@ -153,16 +163,28 @@ auto quantize_tensor(const Tensor& input, const QuantizationParams& params)
     -> QuantizedTensor {
     auto [quant_min, quant_max] = get_quant_range(params.dtype);
 
-    // For symmetric INT8 quantization, use [-127, 127] range to maintain true symmetry
-    if (params.dtype == QuantDType::INT8 &&
+    // For symmetric INT8/INT4 quantization, use symmetric range to maintain true symmetry
+    if ((params.dtype == QuantDType::INT8 || params.dtype == QuantDType::INT4) &&
         (params.scheme == QuantizationScheme::PerTensorSymmetric ||
          params.scheme == QuantizationScheme::PerChannelSymmetric)) {
-        quant_min = -127;
-        quant_max = 127;
+        if (params.dtype == QuantDType::INT8) {
+            quant_min = -127;
+            quant_max = 127;
+        } else {
+            quant_min = -7;
+            quant_max = 7;
+        }
     }
 
     // Create output tensor with appropriate dtype
-    DType out_dtype = (params.dtype == QuantDType::INT8) ? DType::Int8 : DType::UInt8;
+    // INT4/UINT4 pack 2 elements per byte, stored in Int8/UInt8
+    DType out_dtype;
+    bool is_int4 = (params.dtype == QuantDType::INT4 || params.dtype == QuantDType::UINT4);
+    if (params.dtype == QuantDType::INT8 || params.dtype == QuantDType::INT4) {
+        out_dtype = DType::Int8;
+    } else {
+        out_dtype = DType::UInt8;
+    }
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
 
     // Remember original device
@@ -188,7 +210,14 @@ auto quantize_tensor(const Tensor& input, const QuantizationParams& params)
     }
 
     // Create output on CPU
-    Tensor quantized_cpu(shape_vec, out_dtype, Device::cpu());
+    // For INT4/UINT4: pack 2 nibbles per byte, so storage size is ceil(n/2)
+    std::vector<int64_t> storage_shape = shape_vec;
+    if (is_int4 && !storage_shape.empty()) {
+        // Modify the last dimension to hold packed bytes
+        int64_t last = storage_shape.back();
+        storage_shape.back() = (last + 1) / 2;
+    }
+    Tensor quantized_cpu(is_int4 ? storage_shape : shape_vec, out_dtype, Device::cpu());
 
     const float* input_data = input_f32.data<const float>();
     const float* scale_data = scale_cpu.data<const float>();
@@ -196,8 +225,49 @@ auto quantize_tensor(const Tensor& input, const QuantizationParams& params)
 
     int64_t n = input.numel();
 
-    if (params.axis == -1) {
-        // Per-tensor quantization
+    // Helper lambda: quantize a single float value
+    auto quantize_val = [&](float val, float inv_scale, int32_t zero_point) -> int32_t {
+        int32_t qval = static_cast<int32_t>(std::round(val * inv_scale)) + zero_point;
+        return std::clamp(qval, quant_min, quant_max);
+    };
+
+    if (is_int4) {
+        // INT4/UINT4 packing: low nibble = even index, high nibble = odd index
+        int8_t* out_data = quantized_cpu.data<int8_t>();
+
+        if (params.axis == -1) {
+            float scale = scale_data[0];
+            int32_t zero_point = zp_data[0];
+            float inv_scale = 1.0f / scale;
+
+            for (int64_t i = 0; i < n; i += 2) {
+                int8_t lo = static_cast<int8_t>(quantize_val(input_data[i], inv_scale, zero_point));
+                int8_t hi = (i + 1 < n) ?
+                    static_cast<int8_t>(quantize_val(input_data[i + 1], inv_scale, zero_point)) : 0;
+                out_data[i / 2] = static_cast<int8_t>((lo & 0x0F) | ((hi & 0x0F) << 4));
+            }
+        } else {
+            auto shape = input.shape();
+            int64_t num_channels = shape[params.axis];
+            int64_t channel_size = n / num_channels;
+
+            for (int64_t c = 0; c < num_channels; ++c) {
+                float scale = scale_data[c];
+                int32_t zero_point = zp_data[c];
+                float inv_scale = 1.0f / scale;
+
+                int64_t base = c * channel_size;
+                for (int64_t i = 0; i < channel_size; i += 2) {
+                    int64_t idx = base + i;
+                    int8_t lo = static_cast<int8_t>(quantize_val(input_data[idx], inv_scale, zero_point));
+                    int8_t hi = (i + 1 < channel_size) ?
+                        static_cast<int8_t>(quantize_val(input_data[idx + 1], inv_scale, zero_point)) : 0;
+                    out_data[idx / 2] = static_cast<int8_t>((lo & 0x0F) | ((hi & 0x0F) << 4));
+                }
+            }
+        }
+    } else if (params.axis == -1) {
+        // Per-tensor quantization (INT8/UINT8)
         float scale = scale_data[0];
         int32_t zero_point = zp_data[0];
         float inv_scale = 1.0f / scale;
@@ -205,18 +275,16 @@ auto quantize_tensor(const Tensor& input, const QuantizationParams& params)
         if (params.dtype == QuantDType::INT8) {
             int8_t* out_data = quantized_cpu.data<int8_t>();
             for (int64_t i = 0; i < n; ++i) {
-                int32_t quantized_val = static_cast<int32_t>(std::round(input_data[i] * inv_scale)) + zero_point;
-                out_data[i] = static_cast<int8_t>(std::clamp(quantized_val, quant_min, quant_max));
+                out_data[i] = static_cast<int8_t>(quantize_val(input_data[i], inv_scale, zero_point));
             }
         } else {
             uint8_t* out_data = quantized_cpu.data<uint8_t>();
             for (int64_t i = 0; i < n; ++i) {
-                int32_t quantized_val = static_cast<int32_t>(std::round(input_data[i] * inv_scale)) + zero_point;
-                out_data[i] = static_cast<uint8_t>(std::clamp(quantized_val, quant_min, quant_max));
+                out_data[i] = static_cast<uint8_t>(quantize_val(input_data[i], inv_scale, zero_point));
             }
         }
     } else {
-        // Per-channel quantization
+        // Per-channel quantization (INT8/UINT8)
         auto shape = input.shape();
         int64_t num_channels = shape[params.axis];
         int64_t channel_size = n / num_channels;
@@ -230,8 +298,7 @@ auto quantize_tensor(const Tensor& input, const QuantizationParams& params)
                 int8_t* out_data = quantized_cpu.data<int8_t>();
                 for (int64_t i = 0; i < channel_size; ++i) {
                     int64_t idx = c * channel_size + i;
-                    int32_t quantized_val = static_cast<int32_t>(std::round(input_data[idx] * inv_scale)) + zero_point;
-                    out_data[idx] = static_cast<int8_t>(std::clamp(quantized_val, quant_min, quant_max));
+                    out_data[idx] = static_cast<int8_t>(quantize_val(input_data[idx], inv_scale, zero_point));
                 }
             } else {
                 uint8_t* out_data = quantized_cpu.data<uint8_t>();
@@ -370,17 +437,77 @@ auto dequantize_tensor(const QuantizedTensor& quantized) -> Tensor {
         zp_cpu = zp_cpu.to(Device::cpu());
     }
 
+    bool is_int4 = (params.dtype == QuantDType::INT4 || params.dtype == QuantDType::UINT4);
+
+    // For INT4, the stored tensor has packed shape; reconstruct original shape
     auto shape_vec = std::vector<int64_t>(q_data.shape().begin(), q_data.shape().end());
+    int64_t n;
+    if (is_int4 && !shape_vec.empty()) {
+        // Original numel = packed_bytes * 2 (may have 1 padding element)
+        n = q_data.numel() * 2;
+        shape_vec.back() *= 2;  // Restore unpacked last dimension
+    } else {
+        n = q_data.numel();
+    }
+
     Tensor output(shape_vec, DType::Float32, Device::cpu());
     float* out_data = output.data<float>();
 
     const float* scale_data = scale_cpu.data<const float>();
     const int32_t* zp_data = zp_cpu.data<int32_t>();
 
-    int64_t n = q_data.numel();
+    if (is_int4) {
+        // INT4/UINT4 unpacking: low nibble = even index, high nibble = odd index
+        const int8_t* q_ptr = q_data_cpu.data<int8_t>();
+        int64_t packed_n = q_data.numel();
+        bool is_signed = (params.dtype == QuantDType::INT4);
 
-    if (params.axis == -1) {
-        // Per-tensor dequantization
+        if (params.axis == -1) {
+            float scale = scale_data[0];
+            int32_t zero_point = zp_data[0];
+
+            for (int64_t i = 0; i < packed_n; ++i) {
+                int8_t packed = q_ptr[i];
+                int8_t lo = packed & 0x0F;
+                int8_t hi = (packed >> 4) & 0x0F;
+                // Sign-extend for INT4
+                if (is_signed) {
+                    if (lo & 0x08) lo |= static_cast<int8_t>(0xF0);
+                    if (hi & 0x08) hi |= static_cast<int8_t>(0xF0);
+                }
+                out_data[i * 2] = (static_cast<float>(lo) - zero_point) * scale;
+                if (i * 2 + 1 < n) {
+                    out_data[i * 2 + 1] = (static_cast<float>(hi) - zero_point) * scale;
+                }
+            }
+        } else {
+            auto shape = q_data.shape();
+            int64_t num_channels = shape[params.axis];
+            int64_t packed_channel_size = packed_n / num_channels;
+
+            for (int64_t c = 0; c < num_channels; ++c) {
+                float scale = scale_data[c];
+                int32_t zero_point = zp_data[c];
+
+                for (int64_t i = 0; i < packed_channel_size; ++i) {
+                    int64_t packed_idx = c * packed_channel_size + i;
+                    int64_t out_idx = c * packed_channel_size * 2 + i * 2;
+                    int8_t packed = q_ptr[packed_idx];
+                    int8_t lo = packed & 0x0F;
+                    int8_t hi = (packed >> 4) & 0x0F;
+                    if (is_signed) {
+                        if (lo & 0x08) lo |= static_cast<int8_t>(0xF0);
+                        if (hi & 0x08) hi |= static_cast<int8_t>(0xF0);
+                    }
+                    out_data[out_idx] = (static_cast<float>(lo) - zero_point) * scale;
+                    if (out_idx + 1 < n) {
+                        out_data[out_idx + 1] = (static_cast<float>(hi) - zero_point) * scale;
+                    }
+                }
+            }
+        }
+    } else if (params.axis == -1) {
+        // Per-tensor dequantization (INT8/UINT8)
         float scale = scale_data[0];
         int32_t zero_point = zp_data[0];
 
@@ -396,7 +523,7 @@ auto dequantize_tensor(const QuantizedTensor& quantized) -> Tensor {
             }
         }
     } else {
-        // Per-channel dequantization
+        // Per-channel dequantization (INT8/UINT8)
         auto shape = q_data.shape();
         int64_t num_channels = shape[params.axis];
         int64_t channel_size = n / num_channels;

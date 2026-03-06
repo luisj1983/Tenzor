@@ -437,6 +437,15 @@ enum class OpId : uint16_t {
     HasInfNan,                 // 433
 
     // =========================================================================
+    // Complex Number Operations (440-449)
+    // =========================================================================
+    Conj = 440,                // Complex conjugate
+    Real,                      // Extract real part
+    Imag,                      // Extract imaginary part
+    Angle,                     // Argument (phase angle)
+    Polar,                     // Construct complex from magnitude and phase
+
+    // =========================================================================
     // Sentinel (MUST BE LAST)
     // =========================================================================
     OP_COUNT

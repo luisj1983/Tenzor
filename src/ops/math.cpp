@@ -803,4 +803,33 @@ auto gumbel_softmax(const Tensor& logits, double tau, bool hard, int64_t dim) ->
     return add(sub(y_hard, y_soft.detach()), y_soft);
 }
 
+// =========================================================================
+// Complex Number Operations
+// =========================================================================
+
+auto conj(const Tensor& input) -> Tensor {
+    std::vector<Tensor> inputs = {input};
+    return dispatch<OpId::Conj>(inputs)[0];
+}
+
+auto real(const Tensor& input) -> Tensor {
+    std::vector<Tensor> inputs = {input};
+    return dispatch<OpId::Real>(inputs)[0];
+}
+
+auto imag(const Tensor& input) -> Tensor {
+    std::vector<Tensor> inputs = {input};
+    return dispatch<OpId::Imag>(inputs)[0];
+}
+
+auto angle(const Tensor& input) -> Tensor {
+    std::vector<Tensor> inputs = {input};
+    return dispatch<OpId::Angle>(inputs)[0];
+}
+
+auto polar(const Tensor& abs, const Tensor& angle) -> Tensor {
+    std::vector<Tensor> inputs = {abs, angle};
+    return dispatch<OpId::Polar>(inputs)[0];
+}
+
 } // namespace tenzor

@@ -1,5 +1,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/backends/cpu/simd.hpp"
+#include "half_operators.hpp"
 #include <cmath>
 #include <vector>
 #include <stdexcept>
@@ -21,112 +23,18 @@
 #include <unordered_map>
 #endif
 
+// Import shared Float16/BFloat16 operator overloads and safe_sqrt helpers
+#include "half_operators.hpp"
+
 namespace tenzor {
 namespace cpu {
 
-// Anonymous namespace to prevent ODR violations — these operator overloads are
-// local to this translation unit and must not leak into other TUs that may
-// define their own overloads for Float16/BFloat16.
-namespace {
-
-// ============================================================================
-// Float16 Arithmetic Helper Functions
-// ============================================================================
-// These inline helpers allow Float16 to work with template code that uses
-// arithmetic operators. Operations are performed in Float32 precision.
-
-inline Float16 operator+(const Float16& a, const Float16& b) {
-    return Float16(static_cast<float>(a) + static_cast<float>(b));
-}
-
-inline Float16 operator-(const Float16& a, const Float16& b) {
-    return Float16(static_cast<float>(a) - static_cast<float>(b));
-}
-
-inline Float16 operator*(const Float16& a, const Float16& b) {
-    return Float16(static_cast<float>(a) * static_cast<float>(b));
-}
-
-inline Float16 operator/(const Float16& a, const Float16& b) {
-    return Float16(static_cast<float>(a) / static_cast<float>(b));
-}
-
-inline Float16& operator+=(Float16& a, const Float16& b) {
-    a = Float16(static_cast<float>(a) + static_cast<float>(b));
-    return a;
-}
-
-inline Float16& operator-=(Float16& a, const Float16& b) {
-    a = Float16(static_cast<float>(a) - static_cast<float>(b));
-    return a;
-}
-
-inline Float16& operator*=(Float16& a, const Float16& b) {
-    a = Float16(static_cast<float>(a) * static_cast<float>(b));
-    return a;
-}
-
-inline Float16& operator/=(Float16& a, const Float16& b) {
-    a = Float16(static_cast<float>(a) / static_cast<float>(b));
-    return a;
-}
-
-// ============================================================================
-// BFloat16 Arithmetic Helper Functions
-// ============================================================================
-inline BFloat16 operator+(const BFloat16& a, const BFloat16& b) {
-    return BFloat16(static_cast<float>(a) + static_cast<float>(b));
-}
-
-inline BFloat16 operator-(const BFloat16& a, const BFloat16& b) {
-    return BFloat16(static_cast<float>(a) - static_cast<float>(b));
-}
-
-inline BFloat16 operator*(const BFloat16& a, const BFloat16& b) {
-    return BFloat16(static_cast<float>(a) * static_cast<float>(b));
-}
-
-inline BFloat16 operator/(const BFloat16& a, const BFloat16& b) {
-    return BFloat16(static_cast<float>(a) / static_cast<float>(b));
-}
-
-inline BFloat16& operator+=(BFloat16& a, const BFloat16& b) {
-    a = BFloat16(static_cast<float>(a) + static_cast<float>(b));
-    return a;
-}
-
-inline BFloat16& operator-=(BFloat16& a, const BFloat16& b) {
-    a = BFloat16(static_cast<float>(a) - static_cast<float>(b));
-    return a;
-}
-
-inline BFloat16& operator*=(BFloat16& a, const BFloat16& b) {
-    a = BFloat16(static_cast<float>(a) * static_cast<float>(b));
-    return a;
-}
-
-inline BFloat16& operator/=(BFloat16& a, const BFloat16& b) {
-    a = BFloat16(static_cast<float>(a) / static_cast<float>(b));
-    return a;
-}
-
-// Math helper templates for Float16/BFloat16 support
-template<typename T>
-inline T safe_sqrt(const T& x) {
-    return std::sqrt(x);
-}
-
-template<>
-inline Float16 safe_sqrt<Float16>(const Float16& x) {
-    return Float16(safe_sqrt(static_cast<float>(x)));
-}
-
-template<>
-inline BFloat16 safe_sqrt<BFloat16>(const BFloat16& x) {
-    return BFloat16(std::sqrt(static_cast<float>(x)));
-}
-
-} // anonymous namespace
+// AVX-512 forward declarations (defined in batchnorm_avx512.cpp)
+namespace avx512 {
+void batchnorm_mean_var_f32(const float*, float*, float*, int64_t, int64_t, int64_t, int64_t);
+void batchnorm_forward_affine_f32(const float*, float*, const float*, const float*, const float*, const float*, float, int64_t, int64_t, int64_t, int64_t);
+void batchnorm_normalize_f32(const float*, float*, const float*, const float*, float, int64_t, int64_t, int64_t, int64_t);
+} // namespace avx512
 
 // ============================================================================
 // BatchNorm2d Mean/Variance Computation
@@ -413,22 +321,21 @@ auto batchnorm2d_mean_var_kernel(const Tensor& input) -> std::vector<Tensor> {
     Tensor variance({C}, input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
+        if (CPUInfo::get().has_avx512()) {
+            avx512::batchnorm_mean_var_f32(
+                input.data<float>(), mean.data<float>(), variance.data<float>(),
+                N, C, H, W);
+        } else {
 #ifdef __AVX2__
-        // Use SIMD-optimized version for Float32
-        batchnorm_mean_var_simd_f32(
-            input.data<float>(),
-            mean.data<float>(),
-            variance.data<float>(),
-            N, C, H, W
-        );
+            batchnorm_mean_var_simd_f32(
+                input.data<float>(), mean.data<float>(), variance.data<float>(),
+                N, C, H, W);
 #else
-        batchnorm_mean_var_impl<float>(
-            input.data<float>(),
-            mean.data<float>(),
-            variance.data<float>(),
-            N, C, H, W
-        );
+            batchnorm_mean_var_impl<float>(
+                input.data<float>(), mean.data<float>(), variance.data<float>(),
+                N, C, H, W);
 #endif
+        }
     } else if (input.dtype() == DType::Float64) {
         batchnorm_mean_var_impl<double>(
             input.data<double>(),
@@ -854,30 +761,27 @@ auto batchnorm2d_forward_affine_kernel(const Tensor& input,
 #endif
 
     if (input.dtype() == DType::Float32) {
+        if (CPUInfo::get().has_avx512()) {
+            avx512::batchnorm_forward_affine_f32(
+                input.data<float>(), output.data<float>(),
+                mean.data<float>(), variance.data<float>(),
+                gamma.data<float>(), beta.data<float>(),
+                epsilon, N, C, H, W);
+        } else {
 #ifdef __AVX2__
-        // Use SIMD-optimized version for Float32
-        batchnorm_forward_affine_simd_f32(
-            input.data<float>(),
-            output.data<float>(),
-            mean.data<float>(),
-            variance.data<float>(),
-            gamma.data<float>(),
-            beta.data<float>(),
-            epsilon,
-            N, C, H, W
-        );
+            batchnorm_forward_affine_simd_f32(
+                input.data<float>(), output.data<float>(),
+                mean.data<float>(), variance.data<float>(),
+                gamma.data<float>(), beta.data<float>(),
+                epsilon, N, C, H, W);
 #else
-        batchnorm_forward_affine_impl<float>(
-            input.data<float>(),
-            output.data<float>(),
-            mean.data<float>(),
-            variance.data<float>(),
-            gamma.data<float>(),
-            beta.data<float>(),
-            epsilon,
-            N, C, H, W
-        );
+            batchnorm_forward_affine_impl<float>(
+                input.data<float>(), output.data<float>(),
+                mean.data<float>(), variance.data<float>(),
+                gamma.data<float>(), beta.data<float>(),
+                epsilon, N, C, H, W);
 #endif
+        }
     } else if (input.dtype() == DType::Float64) {
         batchnorm_forward_affine_impl<double>(
             input.data<double>(),

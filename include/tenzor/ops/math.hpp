@@ -362,6 +362,26 @@ auto searchsorted(const Tensor& sorted_sequence, const Tensor& values, bool righ
 auto gumbel_softmax(const Tensor& logits, double tau = 1.0, bool hard = false, int64_t dim = -1) -> Tensor;
 /// @}
 
+/// @name Complex Number Operations
+/// @{
+
+/** @brief Complex conjugate. For real tensors, returns a copy. */
+auto conj(const Tensor& input) -> Tensor;
+
+/** @brief Extract real part. Returns a Float32/Float64 tensor. */
+auto real(const Tensor& input) -> Tensor;
+
+/** @brief Extract imaginary part. Returns a Float32/Float64 tensor (zeros for real inputs). */
+auto imag(const Tensor& input) -> Tensor;
+
+/** @brief Phase angle (argument) of complex numbers. Returns Float32/Float64 tensor. */
+auto angle(const Tensor& input) -> Tensor;
+
+/** @brief Construct complex tensor from magnitude and phase angle tensors. */
+auto polar(const Tensor& abs, const Tensor& angle) -> Tensor;
+
+/// @}
+
 /** @} */ // end of tensor_math group
 
 } // namespace tenzor

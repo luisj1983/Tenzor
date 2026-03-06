@@ -9,6 +9,9 @@
 #include "tenzor/nn/layers/linear.hpp"
 #include "tenzor/nn/layers/conv.hpp"
 #include "tenzor/nn/module.hpp"
+#include "tenzor/ops/math.hpp"
+#include "tenzor/ops/indexing.hpp"
+#include "tenzor/ops/creation.hpp"
 #include <stdexcept>
 
 namespace tenzor {
@@ -303,35 +306,8 @@ auto QATHelper::convert_to_quantized(Module& model) -> std::shared_ptr<Module> {
 
 auto StraightThroughEstimator::forward(const Tensor& input, float quant_min, float quant_max)
     -> Tensor {
-    // Clamp values to quantization range
-    // Remember original device
-    auto original_device = input.device();
-
-    // Work in Float32 on CPU for processing
-    Tensor input_f32 = input;
-    if (input.dtype() != DType::Float32) {
-        input_f32 = input.to(DType::Float32);
-    }
-    if (input_f32.device() != Device::cpu()) {
-        input_f32 = input_f32.to(Device::cpu());
-    }
-    Tensor output = input_f32.clone();
-    float* data = output.data<float>();
-    int64_t n = output.numel();
-
-    for (int64_t i = 0; i < n; ++i) {
-        data[i] = std::clamp(data[i], quant_min, quant_max);
-    }
-
-    // Move back to original device
-    output = output.to(original_device);
-
-    // Convert back to original dtype if needed
-    if (input.dtype() != DType::Float32) {
-        output = output.to(input.dtype());
-    }
-
-    return output;
+    // Clamp values to quantization range using device-resident operations
+    return tenzor::clamp(input, quant_min, quant_max);
 }
 
 auto StraightThroughEstimator::backward(
@@ -341,44 +317,17 @@ auto StraightThroughEstimator::backward(
     float quant_max
 ) -> Tensor {
     // Pass gradients through for values within range, zero otherwise
-    // Remember original device
-    auto original_device = grad_output.device();
+    // Create scalar tensors on the same device as input
+    Tensor min_t = full({1}, quant_min, input.dtype(), input.device());
+    Tensor max_t = full({1}, quant_max, input.dtype(), input.device());
 
-    // Work in Float32 on CPU for processing
-    Tensor input_f32 = input;
-    if (input.dtype() != DType::Float32) {
-        input_f32 = input.to(DType::Float32);
-    }
-    if (input_f32.device() != Device::cpu()) {
-        input_f32 = input_f32.to(Device::cpu());
-    }
-    Tensor grad_f32 = grad_output;
-    if (grad_output.dtype() != DType::Float32) {
-        grad_f32 = grad_output.to(DType::Float32);
-    }
-    if (grad_f32.device() != Device::cpu()) {
-        grad_f32 = grad_f32.to(Device::cpu());
-    }
-    Tensor grad_input = grad_f32.clone();
-    const float* input_data = input_f32.data<const float>();
-    float* grad_data = grad_input.data<float>();
-    int64_t n = grad_input.numel();
+    // Create mask: true where input is within [quant_min, quant_max]
+    Tensor mask = ge(input, min_t) * le(input, max_t);
 
-    for (int64_t i = 0; i < n; ++i) {
-        if (input_data[i] < quant_min || input_data[i] > quant_max) {
-            grad_data[i] = 0.0f;  // Zero gradient for out-of-range values
-        }
-    }
-
-    // Move back to original device
-    grad_input = grad_input.to(original_device);
-
-    // Convert back to original dtype if needed
-    if (grad_output.dtype() != DType::Float32) {
-        grad_input = grad_input.to(grad_output.dtype());
-    }
-
-    return grad_input;
+    // Zero out gradients for out-of-range values
+    auto shape = grad_output.shape();
+    Tensor zero_grad = zeros(std::vector<int64_t>(shape.begin(), shape.end()), grad_output.dtype(), grad_output.device());
+    return tenzor::where(mask, grad_output, zero_grad);
 }
 
 } // namespace quantization

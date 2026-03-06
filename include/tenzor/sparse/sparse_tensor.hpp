@@ -21,7 +21,9 @@ namespace tenzor {
  */
 enum class SparseLayout {
     COO,    ///< Coordinate format: indices (sparse_dim, nnz) + values (nnz, *dense_dims)
-    CSR     ///< Compressed Sparse Row: crow_indices (nrows+1) + col_indices (nnz) + values (nnz, *dense_dims)
+    CSR,    ///< Compressed Sparse Row: crow_indices (nrows+1) + col_indices (nnz) + values (nnz, *dense_dims)
+    CSC,    ///< Compressed Sparse Column: ccol_indices (ncols+1) + row_indices (nnz) + values (nnz, *dense_dims)
+    BSR     ///< Block Sparse Row: bsr_row_ptr (nblockrows+1) + bsr_col_ind (nnzb) + values (nnzb, block_h, block_w)
 };
 
 /**
@@ -64,6 +66,32 @@ public:
     static auto sparse_csr(const Tensor& crow_indices, const Tensor& col_indices,
                            const Tensor& values, std::vector<int64_t> shape) -> SparseTensor;
 
+    /**
+     * @brief Create a CSC sparse tensor (2D only).
+     *
+     * @param ccol_indices Compressed column indices of shape (ncols + 1)
+     * @param row_indices Row indices of shape (nnz)
+     * @param values Value tensor of shape (nnz,)
+     * @param shape Dense shape {nrows, ncols}
+     * @return CSC sparse tensor
+     */
+    static auto sparse_csc(const Tensor& ccol_indices, const Tensor& row_indices,
+                           const Tensor& values, std::vector<int64_t> shape) -> SparseTensor;
+
+    /**
+     * @brief Create a BSR sparse tensor (2D only).
+     *
+     * @param bsr_row_ptr Block row pointers of shape (nblockrows + 1)
+     * @param bsr_col_ind Block column indices of shape (nnzb)
+     * @param values Block values of shape (nnzb, block_h, block_w)
+     * @param shape Dense shape {nrows, ncols}
+     * @param block_size Block dimensions {block_h, block_w}
+     * @return BSR sparse tensor
+     */
+    static auto sparse_bsr(const Tensor& bsr_row_ptr, const Tensor& bsr_col_ind,
+                           const Tensor& values, std::vector<int64_t> shape,
+                           std::pair<int64_t, int64_t> block_size) -> SparseTensor;
+
     // Accessors
     auto layout() const -> SparseLayout { return layout_; }
     auto shape() const -> const std::vector<int64_t>& { return shape_; }
@@ -82,6 +110,15 @@ public:
     auto crow_indices() const -> const Tensor& { return crow_indices_; }
     auto col_indices() const -> const Tensor& { return col_indices_; }
 
+    // CSC accessors
+    auto ccol_indices() const -> const Tensor& { return ccol_indices_; }
+    auto row_indices() const -> const Tensor& { return row_indices_; }
+
+    // BSR accessors
+    auto bsr_row_ptr() const -> const Tensor& { return bsr_row_ptr_; }
+    auto bsr_col_ind() const -> const Tensor& { return bsr_col_ind_; }
+    auto block_size() const -> std::pair<int64_t, int64_t> { return block_size_; }
+
     /**
      * @brief Convert to dense tensor.
      */
@@ -96,6 +133,17 @@ public:
      * @brief Convert to CSR format (2D only).
      */
     auto to_csr() const -> SparseTensor;
+
+    /**
+     * @brief Convert to CSC format (2D only).
+     */
+    auto to_csc() const -> SparseTensor;
+
+    /**
+     * @brief Convert to BSR format (2D only).
+     * @param block_size Block dimensions {block_h, block_w}
+     */
+    auto to_bsr(std::pair<int64_t, int64_t> block_size) const -> SparseTensor;
 
     /**
      * @brief Coalesce COO tensor: sort indices and merge duplicate entries.
@@ -124,10 +172,20 @@ private:
     // CSR storage (in addition to values_)
     Tensor crow_indices_;   // shape: (nrows + 1)
     Tensor col_indices_;    // shape: (nnz)
+
+    // CSC storage (in addition to values_)
+    Tensor ccol_indices_;   // shape: (ncols + 1)
+    Tensor row_indices_;    // shape: (nnz)
+
+    // BSR storage (in addition to values_)
+    Tensor bsr_row_ptr_;    // shape: (nblockrows + 1)
+    Tensor bsr_col_ind_;    // shape: (nnzb)
+    std::pair<int64_t, int64_t> block_size_{0, 0};
 };
 
 // Free functions
 auto to_sparse(const Tensor& dense) -> SparseTensor;
 auto to_sparse_csr(const Tensor& dense) -> SparseTensor;
+auto to_sparse_csc(const Tensor& dense) -> SparseTensor;
 
 } // namespace tenzor

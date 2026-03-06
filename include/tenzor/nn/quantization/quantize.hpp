@@ -33,7 +33,9 @@ enum class QuantizationScheme {
  */
 enum class QuantDType {
     INT8,   ///< Signed 8-bit integer [-128, 127]
-    UINT8   ///< Unsigned 8-bit integer [0, 255]
+    UINT8,  ///< Unsigned 8-bit integer [0, 255]
+    INT4,   ///< Signed 4-bit integer [-8, 7], packed 2 per byte in Int8 storage
+    UINT4   ///< Unsigned 4-bit integer [0, 15], packed 2 per byte in UInt8 storage
 };
 
 /**

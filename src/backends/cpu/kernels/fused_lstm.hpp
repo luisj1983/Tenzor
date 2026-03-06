@@ -64,7 +64,9 @@ using gemm_int = MKL_INT;
 #include <dnnl.hpp>
 #define TENZOR_LSTM_USE_ONEDNN_GEMM 1
 
-// Thread-local oneDNN engine and stream for LSTM GEMM operations
+// Thread-local oneDNN engine and stream for LSTM GEMM operations.
+// Safe: LSTM sequence processing is single-threaded (OMP parallelism is at batch
+// dimension in the caller, not inside these GEMM calls).
 namespace {
 static thread_local dnnl::engine* g_lstm_engine = nullptr;
 static thread_local dnnl::stream* g_lstm_stream = nullptr;

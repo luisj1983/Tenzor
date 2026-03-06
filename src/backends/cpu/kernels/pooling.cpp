@@ -5,6 +5,7 @@
 
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/backends/cpu/simd.hpp"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -20,6 +21,14 @@
 
 namespace tenzor {
 namespace cpu {
+
+// AVX-512 forward declarations (defined in pooling_avx512.cpp)
+namespace avx512 {
+void avgpool2d_forward_f32(const float*, float*, int64_t, int64_t, int64_t, int64_t,
+                           int64_t, int64_t, int64_t, int64_t, int64_t);
+void adaptive_avgpool2d_forward_f32(const float*, float*, int64_t, int64_t, int64_t, int64_t,
+                                     int64_t, int64_t);
+} // namespace avx512
 
 // ============================================================================
 // oneDNN Pooling Helpers with Primitive Caching
@@ -436,8 +445,13 @@ auto avgpool2d_forward_kernel(const Tensor& input, int64_t kernel_size,
 #endif
 
     if (input.dtype() == DType::Float32) {
-        avgpool2d_forward_impl<float>(input.data<float>(), output.data<float>(),
-                                      N, C, H, W, H_out, W_out, kernel_size, stride, padding);
+        if (CPUInfo::get().has_avx512()) {
+            avx512::avgpool2d_forward_f32(input.data<float>(), output.data<float>(),
+                                          N, C, H, W, H_out, W_out, kernel_size, stride, padding);
+        } else {
+            avgpool2d_forward_impl<float>(input.data<float>(), output.data<float>(),
+                                          N, C, H, W, H_out, W_out, kernel_size, stride, padding);
+        }
     } else if (input.dtype() == DType::Float64) {
         avgpool2d_forward_impl<double>(input.data<double>(), output.data<double>(),
                                        N, C, H, W, H_out, W_out, kernel_size, stride, padding);
@@ -571,7 +585,13 @@ auto adaptive_avgpool2d_kernel(const Tensor& input, int64_t output_h,
     auto output = Tensor::empty_uninitialized({N, C, output_h, output_w}, input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
-        adaptive_avgpool2d_impl<float>(input.data<float>(), output.data<float>(), N, C, H, W, output_h, output_w);
+        if (CPUInfo::get().has_avx512()) {
+            avx512::adaptive_avgpool2d_forward_f32(input.data<float>(), output.data<float>(),
+                                                    N, C, H, W, output_h, output_w);
+        } else {
+            adaptive_avgpool2d_impl<float>(input.data<float>(), output.data<float>(),
+                                           N, C, H, W, output_h, output_w);
+        }
     } else if (input.dtype() == DType::Float64) {
         adaptive_avgpool2d_impl<double>(input.data<double>(), output.data<double>(), N, C, H, W, output_h, output_w);
     } else if (input.dtype() == DType::Float16) {

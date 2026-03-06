@@ -23,68 +23,78 @@
 
 namespace tenzor {
 
-// Helper function to insert transfer-to-compute barrier
-// Required when a compute shader reads from a buffer that was just written by a transfer op
-inline void insertTransferToComputeBarrier(VkCommandBuffer cmdBuffer) {
-    VkMemoryBarrier memoryBarrier{};
-    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    memoryBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    memoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmdBuffer,
-                        VK_PIPELINE_STAGE_TRANSFER_BIT,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
-}
+// ============================================================================
+// Typed barrier API
+// ============================================================================
 
-// Helper function to insert a pre-read barrier.
-// This provides a compute-to-compute read barrier for cases where a shader reads
-// from a buffer written by a PRIOR dispatch within the same command buffer.
-//
-// BARRIER STRATEGY NOTE: insertComputeBarrier() is called AFTER every dispatch and
-// already provides SHADER_WRITE -> SHADER_READ|SHADER_WRITE barriers. This means
-// insertPreReadBarrier() is largely redundant in normal operation — the post-dispatch
-// barrier from the previous operation already ensures visibility. This function exists
-// for edge cases where an operation needs to read a buffer that was written by a
-// non-immediately-preceding dispatch (e.g., multi-step algorithms where step N reads
-// output from step N-2). In practice, the linear dispatch pattern makes this rare.
-inline void insertPreReadBarrier(VkCommandBuffer cmdBuffer) {
-    if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
-        VkMemoryBarrier memoryBarrier{};
-        memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        memoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+/// Barrier types for common Vulkan synchronization patterns.
+enum class BarrierType {
+    TransferToCompute,  ///< Transfer write → compute read (e.g., after vkCmdCopyBuffer)
+    ComputeToCompute,   ///< Compute write → compute read (RAW between dispatches)
+    ComputeToHost       ///< Compute write → transfer/host read (for readback)
+};
+
+/// Insert a typed pipeline barrier.
+inline void insertBarrier(VkCommandBuffer cmdBuffer, BarrierType type) {
+    VkMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+
+    switch (type) {
+    case BarrierType::TransferToCompute:
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmdBuffer,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            0, 1, &barrier, 0, nullptr, 0, nullptr);
+        break;
+
+    case BarrierType::ComputeToCompute:
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
         vkCmdPipelineBarrier(cmdBuffer,
                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                            0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
-    }
-}
+                            0, 1, &barrier, 0, nullptr, 0, nullptr);
+        break;
 
-// Helper function to insert compute shader memory barrier.
-// Always inserts a compute-to-compute barrier (RAW hazard between consecutive
-// compute dispatches). When batching is disabled, also inserts a transfer/host
-// barrier for immediate readback.
-inline void insertComputeBarrier(VkCommandBuffer cmdBuffer) {
-    // Compute-to-compute barrier (needed in both modes for RAW hazard safety)
-    VkMemoryBarrier computeBarrier{};
-    computeBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    computeBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    computeBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmdBuffer,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        0, 1, &computeBarrier, 0, nullptr, 0, nullptr);
-
-    if constexpr (!vulkan_config::USE_COMMAND_BATCHING) {
-        // Non-batching mode: also add transfer/host barrier for immediate readback
-        VkMemoryBarrier transferBarrier{};
-        transferBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        transferBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        transferBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
+    case BarrierType::ComputeToHost:
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
         vkCmdPipelineBarrier(cmdBuffer,
                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                             VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-                            0, 1, &transferBarrier, 0, nullptr, 0, nullptr);
+                            0, 1, &barrier, 0, nullptr, 0, nullptr);
+        break;
+    }
+}
+
+// ============================================================================
+// Legacy barrier API (delegates to typed API)
+// ============================================================================
+
+/// Transfer → compute barrier (after buffer copy/fill).
+inline void insertTransferToComputeBarrier(VkCommandBuffer cmdBuffer) {
+    insertBarrier(cmdBuffer, BarrierType::TransferToCompute);
+}
+
+/// Pre-read compute barrier (only in batching mode; redundant otherwise).
+inline void insertPreReadBarrier(VkCommandBuffer cmdBuffer) {
+    if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
+        insertBarrier(cmdBuffer, BarrierType::ComputeToCompute);
+    }
+}
+
+/// Post-dispatch compute barrier. Ensures SHADER_WRITE → SHADER_READ visibility.
+/// In non-batching mode, also adds a host-readback barrier.
+inline void insertComputeBarrier(VkCommandBuffer cmdBuffer) {
+    // Compute-to-compute barrier (SHADER_WRITE → SHADER_READ only — no WRITE on dst
+    // since the next dispatch hasn't written yet)
+    insertBarrier(cmdBuffer, BarrierType::ComputeToCompute);
+
+    if constexpr (!vulkan_config::USE_COMMAND_BATCHING) {
+        // Non-batching mode: also add transfer/host barrier for immediate readback
+        insertBarrier(cmdBuffer, BarrierType::ComputeToHost);
     }
 }
 

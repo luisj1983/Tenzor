@@ -43,6 +43,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=6.0",
+    "hypothesis>=6.0",
     "black>=21.0",
     "flake8>=3.9",
     "mypy>=0.900",

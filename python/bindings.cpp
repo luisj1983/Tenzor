@@ -6858,7 +6858,9 @@ void bind_compression(py::module& m) {
 
     py::enum_<QuantDType>(quant, "QuantDType")
         .value("INT8", QuantDType::INT8, "Signed 8-bit integer [-128, 127]")
-        .value("UINT8", QuantDType::UINT8, "Unsigned 8-bit integer [0, 255]");
+        .value("UINT8", QuantDType::UINT8, "Unsigned 8-bit integer [0, 255]")
+        .value("INT4", QuantDType::INT4, "Signed 4-bit integer [-8, 7], packed 2 per byte")
+        .value("UINT4", QuantDType::UINT4, "Unsigned 4-bit integer [0, 15], packed 2 per byte");
 
     py::class_<QuantizationParams>(quant, "QuantizationParams")
         .def(py::init<Tensor, Tensor, QuantDType, QuantizationScheme, int64_t>(),

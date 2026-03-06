@@ -601,11 +601,8 @@ auto lstm_forward_kernel(
     Tensor c0_contig = c0.contiguous();
 
     // Combine bias_ih + bias_hh for oneDNN
-    // Use thread-local cache with bias pointer fingerprint to avoid re-combining
-    static thread_local std::vector<float> combined_bias_buffer;
-    static thread_local const float* cached_bias_ih_ptr = nullptr;
-    static thread_local const float* cached_bias_hh_ptr = nullptr;
-    static thread_local int64_t cached_bias_hidden = 0;
+    // Use local allocation (not thread_local) to be safe with OpenMP workers
+    std::vector<float> combined_bias_buffer;
     const float* bias_ptr = nullptr;
 
     bool has_bias_ih = bias_ih.numel() > 0;
@@ -613,34 +610,20 @@ auto lstm_forward_kernel(
 
     if (has_bias_ih || has_bias_hh) {
         int64_t bias_size = 4 * hidden;
+        combined_bias_buffer.resize(bias_size);
         const float* bih_ptr = has_bias_ih ? bias_ih.data<float>() : nullptr;
         const float* bhh_ptr = has_bias_hh ? bias_hh.data<float>() : nullptr;
 
-        // Check if we can reuse cached combined bias
-        bool need_recombine = (cached_bias_ih_ptr != bih_ptr) ||
-                              (cached_bias_hh_ptr != bhh_ptr) ||
-                              (cached_bias_hidden != hidden);
-
-        if (need_recombine) {
-            if (combined_bias_buffer.size() < static_cast<size_t>(bias_size)) {
-                combined_bias_buffer.resize(bias_size);
+        // Combine biases: combined = bias_ih + bias_hh
+        if (has_bias_ih && has_bias_hh) {
+            #pragma omp simd
+            for (int64_t i = 0; i < bias_size; ++i) {
+                combined_bias_buffer[i] = bih_ptr[i] + bhh_ptr[i];
             }
-
-            // Combine biases: combined = bias_ih + bias_hh
-            if (has_bias_ih && has_bias_hh) {
-                #pragma omp simd
-                for (int64_t i = 0; i < bias_size; ++i) {
-                    combined_bias_buffer[i] = bih_ptr[i] + bhh_ptr[i];
-                }
-            } else if (has_bias_ih) {
-                std::memcpy(combined_bias_buffer.data(), bih_ptr, bias_size * sizeof(float));
-            } else {
-                std::memcpy(combined_bias_buffer.data(), bhh_ptr, bias_size * sizeof(float));
-            }
-
-            cached_bias_ih_ptr = bih_ptr;
-            cached_bias_hh_ptr = bhh_ptr;
-            cached_bias_hidden = hidden;
+        } else if (has_bias_ih) {
+            std::memcpy(combined_bias_buffer.data(), bih_ptr, bias_size * sizeof(float));
+        } else {
+            std::memcpy(combined_bias_buffer.data(), bhh_ptr, bias_size * sizeof(float));
         }
         bias_ptr = combined_bias_buffer.data();
     }
@@ -745,15 +728,13 @@ auto bilstm_forward_kernel(
     Tensor h0_contig = h0.contiguous();
     Tensor c0_contig = c0.contiguous();
 
-    // Combine biases for forward direction
-    static thread_local std::vector<float> bias_fwd_buffer;
+    // Combine biases for forward direction (local allocation, not thread_local)
+    std::vector<float> bias_fwd_buffer;
     const float* bias_fwd_ptr = nullptr;
     bool has_bias_fwd = bias_ih_fwd.numel() > 0 || bias_hh_fwd.numel() > 0;
     if (has_bias_fwd) {
         int64_t bias_size = 4 * hidden;
-        if (bias_fwd_buffer.size() < static_cast<size_t>(bias_size)) {
-            bias_fwd_buffer.resize(bias_size);
-        }
+        bias_fwd_buffer.resize(bias_size);
         if (bias_ih_fwd.numel() > 0 && bias_hh_fwd.numel() > 0) {
             const float* bih = bias_ih_fwd.contiguous().data<float>();
             const float* bhh = bias_hh_fwd.contiguous().data<float>();
@@ -768,15 +749,13 @@ auto bilstm_forward_kernel(
         bias_fwd_ptr = bias_fwd_buffer.data();
     }
 
-    // Combine biases for backward direction
-    static thread_local std::vector<float> bias_bwd_buffer;
+    // Combine biases for backward direction (local allocation, not thread_local)
+    std::vector<float> bias_bwd_buffer;
     const float* bias_bwd_ptr = nullptr;
     bool has_bias_bwd = bias_ih_bwd.numel() > 0 || bias_hh_bwd.numel() > 0;
     if (has_bias_bwd) {
         int64_t bias_size = 4 * hidden;
-        if (bias_bwd_buffer.size() < static_cast<size_t>(bias_size)) {
-            bias_bwd_buffer.resize(bias_size);
-        }
+        bias_bwd_buffer.resize(bias_size);
         if (bias_ih_bwd.numel() > 0 && bias_hh_bwd.numel() > 0) {
             const float* bih = bias_ih_bwd.contiguous().data<float>();
             const float* bhh = bias_hh_bwd.contiguous().data<float>();

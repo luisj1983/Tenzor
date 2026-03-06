@@ -31,12 +31,14 @@ set(CPU_BACKEND_SOURCES
     kernels/activations_simd.cpp
     kernels/activations_simd_avx512.cpp
     kernels/batchnorm.cpp
+    kernels/batchnorm_avx512.cpp
     kernels/creation.cpp
     kernels/conv2d.cpp
     kernels/conv3d.cpp
     kernels/fused_ops.cpp
     kernels/simd_dispatch.cpp
     kernels/pooling.cpp
+    kernels/pooling_avx512.cpp
     kernels/nn_kernels.cpp
     kernels/rnn_kernels.cpp
     kernels/vision.cpp
@@ -117,6 +119,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         set_source_files_properties(
             kernels/math_simd_avx512.cpp
             kernels/activations_simd_avx512.cpp
+            kernels/batchnorm_avx512.cpp
+            kernels/pooling_avx512.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx2;-mfma;-mf16c"
         )
 
@@ -155,6 +159,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         set_source_files_properties(
             kernels/math_simd_avx512.cpp
             kernels/activations_simd_avx512.cpp
+            kernels/batchnorm_avx512.cpp
+            kernels/pooling_avx512.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx512f"
         )
 

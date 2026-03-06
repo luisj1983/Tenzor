@@ -5566,5 +5566,135 @@ auto maximum_kernel(const Tensor& a, const Tensor& b) -> Tensor {
     return result;
 }
 
+// =========================================================================
+// Complex Number Operations
+// =========================================================================
+
+auto conj_kernel(const Tensor& input) -> Tensor {
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    int64_t n = input.numel();
+
+    if (input.dtype() == DType::Complex64) {
+        Tensor result(shape_vec, DType::Complex64, input.device());
+        const auto* in = input.data<std::complex<float>>();
+        auto* out = result.data<std::complex<float>>();
+        for (int64_t i = 0; i < n; ++i) out[i] = std::conj(in[i]);
+        return result;
+    } else if (input.dtype() == DType::Complex128) {
+        Tensor result(shape_vec, DType::Complex128, input.device());
+        const auto* in = input.data<std::complex<double>>();
+        auto* out = result.data<std::complex<double>>();
+        for (int64_t i = 0; i < n; ++i) out[i] = std::conj(in[i]);
+        return result;
+    }
+    // For real dtypes, conjugate is identity
+    return input.clone();
+}
+
+auto real_kernel(const Tensor& input) -> Tensor {
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    int64_t n = input.numel();
+
+    if (input.dtype() == DType::Complex64) {
+        Tensor result(shape_vec, DType::Float32, input.device());
+        const auto* in = input.data<std::complex<float>>();
+        auto* out = result.data<float>();
+        for (int64_t i = 0; i < n; ++i) out[i] = in[i].real();
+        return result;
+    } else if (input.dtype() == DType::Complex128) {
+        Tensor result(shape_vec, DType::Float64, input.device());
+        const auto* in = input.data<std::complex<double>>();
+        auto* out = result.data<double>();
+        for (int64_t i = 0; i < n; ++i) out[i] = in[i].real();
+        return result;
+    }
+    // For real dtypes, real() is identity (but possibly with dtype change)
+    return input.clone();
+}
+
+auto imag_kernel(const Tensor& input) -> Tensor {
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    int64_t n = input.numel();
+
+    if (input.dtype() == DType::Complex64) {
+        Tensor result(shape_vec, DType::Float32, input.device());
+        const auto* in = input.data<std::complex<float>>();
+        auto* out = result.data<float>();
+        for (int64_t i = 0; i < n; ++i) out[i] = in[i].imag();
+        return result;
+    } else if (input.dtype() == DType::Complex128) {
+        Tensor result(shape_vec, DType::Float64, input.device());
+        const auto* in = input.data<std::complex<double>>();
+        auto* out = result.data<double>();
+        for (int64_t i = 0; i < n; ++i) out[i] = in[i].imag();
+        return result;
+    }
+    // For real dtypes, imaginary part is zero
+    Tensor result(shape_vec, input.dtype(), input.device());
+    result.fill_(0.0f);
+    return result;
+}
+
+auto angle_kernel(const Tensor& input) -> Tensor {
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    int64_t n = input.numel();
+
+    if (input.dtype() == DType::Complex64) {
+        Tensor result(shape_vec, DType::Float32, input.device());
+        const auto* in = input.data<std::complex<float>>();
+        auto* out = result.data<float>();
+        for (int64_t i = 0; i < n; ++i) out[i] = std::arg(in[i]);
+        return result;
+    } else if (input.dtype() == DType::Complex128) {
+        Tensor result(shape_vec, DType::Float64, input.device());
+        const auto* in = input.data<std::complex<double>>();
+        auto* out = result.data<double>();
+        for (int64_t i = 0; i < n; ++i) out[i] = std::arg(in[i]);
+        return result;
+    }
+    // For real dtypes, angle is 0 for positive, pi for negative
+    if (input.dtype() == DType::Float32) {
+        Tensor result(shape_vec, DType::Float32, input.device());
+        const auto* in = input.data<float>();
+        auto* out = result.data<float>();
+        for (int64_t i = 0; i < n; ++i) out[i] = std::atan2(0.0f, in[i]);
+        return result;
+    } else if (input.dtype() == DType::Float64) {
+        Tensor result(shape_vec, DType::Float64, input.device());
+        const auto* in = input.data<double>();
+        auto* out = result.data<double>();
+        for (int64_t i = 0; i < n; ++i) out[i] = std::atan2(0.0, in[i]);
+        return result;
+    }
+    throw std::runtime_error("angle: unsupported dtype " + std::string(dtype_name(input.dtype())));
+}
+
+auto polar_kernel(const Tensor& abs_t, const Tensor& angle_t) -> Tensor {
+    auto shape_a = abs_t.shape();
+    auto shape_b = angle_t.shape();
+    if (!std::equal(shape_a.begin(), shape_a.end(), shape_b.begin(), shape_b.end())) {
+        throw std::runtime_error("polar: abs and angle must have the same shape");
+    }
+    auto shape_vec = std::vector<int64_t>(abs_t.shape().begin(), abs_t.shape().end());
+    int64_t n = abs_t.numel();
+
+    if (abs_t.dtype() == DType::Float32) {
+        Tensor result(shape_vec, DType::Complex64, abs_t.device());
+        const auto* r = abs_t.data<float>();
+        const auto* theta = angle_t.data<float>();
+        auto* out = result.data<std::complex<float>>();
+        for (int64_t i = 0; i < n; ++i) out[i] = std::polar(r[i], theta[i]);
+        return result;
+    } else if (abs_t.dtype() == DType::Float64) {
+        Tensor result(shape_vec, DType::Complex128, abs_t.device());
+        const auto* r = abs_t.data<double>();
+        const auto* theta = angle_t.data<double>();
+        auto* out = result.data<std::complex<double>>();
+        for (int64_t i = 0; i < n; ++i) out[i] = std::polar(r[i], theta[i]);
+        return result;
+    }
+    throw std::runtime_error("polar: requires Float32 or Float64 inputs");
+}
+
 } // namespace cpu
 } // namespace tenzor

@@ -64,22 +64,80 @@ cudaDataType get_cuda_data_type(DType dtype) {
     }
 }
 
+/// CUDA kernel: convert Int64 row indices to Int32.
+__global__ void cast_i64_to_i32(const int64_t* __restrict__ src,
+                                 int32_t* __restrict__ dst, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dst[i] = static_cast<int32_t>(src[i]);
+}
+
+/// CUDA kernel: convert Int32 crow_indices to Int64.
+__global__ void cast_i32_to_i64(const int32_t* __restrict__ src,
+                                 int64_t* __restrict__ dst, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dst[i] = static_cast<int64_t>(src[i]);
+}
+
 /// Helper to build a CSR SparseTensor on GPU from a COO SparseTensor.
-/// If already CSR, returns the input. Otherwise converts COO -> CSR.
+/// If already CSR, returns the input. Otherwise converts COO -> CSR on GPU
+/// using cusparseXcoo2csr() — avoids CPU round-trips.
 SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse) {
     // Move to GPU if on CPU
     auto sp = (sparse.device().type != Device::Type::CUDA)
               ? sparse.to(Device::cuda())
               : sparse;
 
-    // Convert to CSR if in COO format
+    // Convert to CSR if in COO format — directly on GPU
     if (sp.layout() == SparseLayout::COO) {
-        // Coalesce first, then convert to CSR
-        // Note: coalesce and to_csr are CPU operations on the index data,
-        // so we do them on CPU then move the result to GPU
-        auto cpu_sp = sparse.to(Device::cpu());
-        auto csr = cpu_sp.to_csr();
-        return csr.to(Device::cuda());
+        auto sp_shape = sp.shape();
+        int64_t nrows = sp_shape[0];
+        int64_t ncols = sp_shape[1];
+        int64_t nnz = sp.nnz();
+
+        // COO indices: [2, nnz] — row 0 = row indices, row 1 = col indices
+        Tensor indices = sp.indices().contiguous();
+        Tensor values = sp.values().contiguous();
+
+        // indices is [2, nnz], laid out as [row0..rowN, col0..colN]
+        const int64_t* indices_ptr = indices.data<int64_t>();
+        const int64_t* row_indices_ptr = indices_ptr;
+        const int64_t* col_indices_ptr = indices_ptr + nnz;
+
+        // cusparseXcoo2csr requires Int32 — convert row indices on GPU
+        int32_t* row_i32 = nullptr;
+        int32_t* crow_i32 = nullptr;
+        CUDA_CHECK_SPARSE(cudaMalloc(&row_i32, nnz * sizeof(int32_t)));
+        CUDA_CHECK_SPARSE(cudaMalloc(&crow_i32, (nrows + 1) * sizeof(int32_t)));
+
+        int threads = 256;
+        int blocks_nnz = static_cast<int>((nnz + threads - 1) / threads);
+        cast_i64_to_i32<<<blocks_nnz, threads>>>(row_indices_ptr, row_i32, nnz);
+        CUDA_CHECK_SPARSE(cudaGetLastError());
+
+        // Convert COO row indices to CSR row pointers on GPU
+        cusparseHandle_t handle = CuSPARSEHandlePool::get();
+        CUSPARSE_CHECK(cusparseXcoo2csr(
+            handle, row_i32, static_cast<int>(nnz), static_cast<int>(nrows),
+            crow_i32, CUSPARSE_INDEX_BASE_ZERO));
+
+        // Convert Int32 crow_indices back to Int64 on GPU
+        Tensor crow_indices = zeros(std::vector<int64_t>{nrows + 1}, DType::Int64, Device::cuda());
+        int blocks_crow = static_cast<int>((nrows + 1 + threads - 1) / threads);
+        cast_i32_to_i64<<<blocks_crow, threads>>>(crow_i32, crow_indices.data<int64_t>(), nrows + 1);
+        CUDA_CHECK_SPARSE(cudaGetLastError());
+
+        // Copy col indices (already on GPU, just need a separate tensor)
+        Tensor col_idx = zeros(std::vector<int64_t>{nnz}, DType::Int64, Device::cuda());
+        CUDA_CHECK_SPARSE(cudaMemcpyAsync(col_idx.data<int64_t>(), col_indices_ptr,
+                                          nnz * sizeof(int64_t), cudaMemcpyDeviceToDevice));
+
+        // Cleanup temporary Int32 buffers
+        CUDA_CHECK_SPARSE(cudaFree(row_i32));
+        CUDA_CHECK_SPARSE(cudaFree(crow_i32));
+
+        return SparseTensor::sparse_csr(
+            crow_indices, col_idx, values,
+            std::vector<int64_t>{nrows, ncols});
     }
     return sp;
 }
@@ -204,8 +262,8 @@ Tensor cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
         buffer
     ));
 
-    // Synchronize to ensure computation is complete
-    CUDA_CHECK_SPARSE(cudaDeviceSynchronize());
+    // Stream-synchronize to ensure computation is complete (avoids blocking other streams)
+    CUDA_CHECK_SPARSE(cudaStreamSynchronize(nullptr));
 
     // Cleanup
     if (buffer) {

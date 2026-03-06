@@ -415,6 +415,40 @@ public:
                tensor_attrs_.count(name) > 0;
     }
 
+    // ========================================================================
+    // Subgraph support (for control flow: If, Loop)
+    // ========================================================================
+
+    /**
+     * @brief Set the "then" branch subgraph (for If nodes).
+     */
+    auto set_then_branch(std::shared_ptr<Graph> g) -> void { then_branch_ = std::move(g); }
+
+    /**
+     * @brief Set the "else" branch subgraph (for If nodes).
+     */
+    auto set_else_branch(std::shared_ptr<Graph> g) -> void { else_branch_ = std::move(g); }
+
+    /**
+     * @brief Set the loop body subgraph (for Loop nodes).
+     */
+    auto set_body(std::shared_ptr<Graph> g) -> void { body_ = std::move(g); }
+
+    /**
+     * @brief Get the "then" branch subgraph.
+     */
+    auto then_branch() const -> const std::shared_ptr<Graph>& { return then_branch_; }
+
+    /**
+     * @brief Get the "else" branch subgraph.
+     */
+    auto else_branch() const -> const std::shared_ptr<Graph>& { return else_branch_; }
+
+    /**
+     * @brief Get the loop body subgraph.
+     */
+    auto body() const -> const std::shared_ptr<Graph>& { return body_; }
+
     /**
      * @brief Get all attribute maps (for optimization passes).
      *
@@ -439,6 +473,9 @@ private:
     std::unordered_map<std::string, std::vector<int64_t>> vec_attrs_;  ///< Vector attributes
     std::unordered_map<std::string, bool> bool_attrs_;      ///< Boolean attributes
     std::unordered_map<std::string, Tensor> tensor_attrs_;  ///< Tensor constants
+    std::shared_ptr<Graph> then_branch_;                    ///< If: then branch
+    std::shared_ptr<Graph> else_branch_;                    ///< If: else branch
+    std::shared_ptr<Graph> body_;                           ///< Loop: body graph
 };
 
 /**

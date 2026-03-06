@@ -184,6 +184,77 @@ auto SparseTensor::to_dense() const -> Tensor {
                 }
             }
         }
+    } else if (layout_ == SparseLayout::CSC) {
+        auto ccol = ccol_indices_.contiguous();
+        auto row = row_indices_.contiguous();
+        auto vals = values_.contiguous();
+        auto* ccol_ptr = ccol.data<int64_t>();
+        auto* row_ptr = row.data<int64_t>();
+        int64_t ncols = shape_[1];
+
+        if (vals.dtype() == DType::Float32) {
+            auto* v = vals.data<float>();
+            auto* r = result.data<float>();
+            for (int64_t col = 0; col < ncols; ++col) {
+                for (int64_t j = ccol_ptr[col]; j < ccol_ptr[col + 1]; ++j) {
+                    r[row_ptr[j] * ncols + col] += v[j];
+                }
+            }
+        } else if (vals.dtype() == DType::Float64) {
+            auto* v = vals.data<double>();
+            auto* r = result.data<double>();
+            for (int64_t col = 0; col < ncols; ++col) {
+                for (int64_t j = ccol_ptr[col]; j < ccol_ptr[col + 1]; ++j) {
+                    r[row_ptr[j] * ncols + col] += v[j];
+                }
+            }
+        }
+    } else if (layout_ == SparseLayout::BSR) {
+        auto rp = bsr_row_ptr_.contiguous();
+        auto ci = bsr_col_ind_.contiguous();
+        auto vals = values_.contiguous();
+        auto* rp_ptr = rp.data<int64_t>();
+        auto* ci_ptr = ci.data<int64_t>();
+        auto [bh, bw] = block_size_;
+        int64_t nrows = shape_[0];
+        int64_t ncols = shape_[1];
+        int64_t nblockrows = (nrows + bh - 1) / bh;
+
+        if (vals.dtype() == DType::Float32) {
+            auto* v = vals.data<float>();
+            auto* r = result.data<float>();
+            for (int64_t br = 0; br < nblockrows; ++br) {
+                for (int64_t j = rp_ptr[br]; j < rp_ptr[br + 1]; ++j) {
+                    int64_t bc = ci_ptr[j];
+                    for (int64_t bi = 0; bi < bh; ++bi) {
+                        for (int64_t bj = 0; bj < bw; ++bj) {
+                            int64_t row = br * bh + bi;
+                            int64_t col = bc * bw + bj;
+                            if (row < nrows && col < ncols) {
+                                r[row * ncols + col] += v[j * bh * bw + bi * bw + bj];
+                            }
+                        }
+                    }
+                }
+            }
+        } else if (vals.dtype() == DType::Float64) {
+            auto* v = vals.data<double>();
+            auto* r = result.data<double>();
+            for (int64_t br = 0; br < nblockrows; ++br) {
+                for (int64_t j = rp_ptr[br]; j < rp_ptr[br + 1]; ++j) {
+                    int64_t bc = ci_ptr[j];
+                    for (int64_t bi = 0; bi < bh; ++bi) {
+                        for (int64_t bj = 0; bj < bw; ++bj) {
+                            int64_t row = br * bh + bi;
+                            int64_t col = bc * bw + bj;
+                            if (row < nrows && col < ncols) {
+                                r[row * ncols + col] += v[j * bh * bw + bi * bw + bj];
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     return result;
@@ -192,29 +263,57 @@ auto SparseTensor::to_dense() const -> Tensor {
 auto SparseTensor::to_coo() const -> SparseTensor {
     if (layout_ == SparseLayout::COO) return *this;
 
-    // CSR -> COO
-    auto crow = crow_indices_.contiguous();
-    auto col = col_indices_.contiguous();
-    auto* crow_ptr = crow.data<int64_t>();
-    auto* col_ptr = col.data<int64_t>();
-    int64_t nrows = shape_[0];
+    if (layout_ == SparseLayout::CSR) {
+        // CSR -> COO
+        auto crow = crow_indices_.contiguous();
+        auto col = col_indices_.contiguous();
+        auto* crow_ptr = crow.data<int64_t>();
+        auto* col_ptr = col.data<int64_t>();
+        int64_t nrows = shape_[0];
 
-    // Build row indices from crow
-    auto row_indices = Tensor({nnz_}, DType::Int64, values_.device());
-    auto* row_ptr = row_indices.data<int64_t>();
-    for (int64_t row = 0; row < nrows; ++row) {
-        for (int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
-            row_ptr[j] = row;
+        auto row_indices = Tensor({nnz_}, DType::Int64, values_.device());
+        auto* row_ptr = row_indices.data<int64_t>();
+        for (int64_t row = 0; row < nrows; ++row) {
+            for (int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
+                row_ptr[j] = row;
+            }
         }
+
+        auto indices = Tensor({2, nnz_}, DType::Int64, values_.device());
+        auto* idx_ptr = indices.data<int64_t>();
+        std::memcpy(idx_ptr, row_ptr, nnz_ * sizeof(int64_t));
+        std::memcpy(idx_ptr + nnz_, col_ptr, nnz_ * sizeof(int64_t));
+
+        return sparse_coo(indices, values_, shape_);
+    } else if (layout_ == SparseLayout::CSC) {
+        // CSC -> COO
+        auto ccol = ccol_indices_.contiguous();
+        auto row = row_indices_.contiguous();
+        auto* ccol_ptr = ccol.data<int64_t>();
+        auto* row_ptr = row.data<int64_t>();
+        int64_t ncols = shape_[1];
+
+        auto col_indices = Tensor({nnz_}, DType::Int64, values_.device());
+        auto* col_ptr = col_indices.data<int64_t>();
+        for (int64_t col = 0; col < ncols; ++col) {
+            for (int64_t j = ccol_ptr[col]; j < ccol_ptr[col + 1]; ++j) {
+                col_ptr[j] = col;
+            }
+        }
+
+        auto indices = Tensor({2, nnz_}, DType::Int64, values_.device());
+        auto* idx_ptr = indices.data<int64_t>();
+        std::memcpy(idx_ptr, row_ptr, nnz_ * sizeof(int64_t));
+        std::memcpy(idx_ptr + nnz_, col_ptr, nnz_ * sizeof(int64_t));
+
+        return sparse_coo(indices, values_, shape_);
+    } else if (layout_ == SparseLayout::BSR) {
+        // BSR -> COO: expand blocks into individual elements
+        // Easier to go via dense for correctness
+        return to_sparse(to_dense());
     }
 
-    // Combine into indices tensor (2, nnz)
-    auto indices = Tensor({2, nnz_}, DType::Int64, values_.device());
-    auto* idx_ptr = indices.data<int64_t>();
-    std::memcpy(idx_ptr, row_ptr, nnz_ * sizeof(int64_t));
-    std::memcpy(idx_ptr + nnz_, col_ptr, nnz_ * sizeof(int64_t));
-
-    return sparse_coo(indices, values_, shape_);
+    throw std::runtime_error("to_coo: unsupported layout");
 }
 
 auto SparseTensor::to_csr() const -> SparseTensor {
@@ -363,13 +462,316 @@ auto SparseTensor::coalesce() const -> SparseTensor {
 auto SparseTensor::to(Device device) const -> SparseTensor {
     SparseTensor result = *this;
     result.values_ = values_.to(device);
-    if (layout_ == SparseLayout::COO) {
-        result.indices_ = indices_.to(device);
-    } else {
-        result.crow_indices_ = crow_indices_.to(device);
-        result.col_indices_ = col_indices_.to(device);
+    switch (layout_) {
+        case SparseLayout::COO:
+            result.indices_ = indices_.to(device);
+            break;
+        case SparseLayout::CSR:
+            result.crow_indices_ = crow_indices_.to(device);
+            result.col_indices_ = col_indices_.to(device);
+            break;
+        case SparseLayout::CSC:
+            result.ccol_indices_ = ccol_indices_.to(device);
+            result.row_indices_ = row_indices_.to(device);
+            break;
+        case SparseLayout::BSR:
+            result.bsr_row_ptr_ = bsr_row_ptr_.to(device);
+            result.bsr_col_ind_ = bsr_col_ind_.to(device);
+            break;
     }
     return result;
+}
+
+auto SparseTensor::sparse_csc(const Tensor& ccol_indices, const Tensor& row_indices,
+                               const Tensor& values, std::vector<int64_t> shape) -> SparseTensor {
+    if (shape.size() != 2) {
+        throw std::runtime_error("sparse_csc: only 2D tensors supported");
+    }
+    if (ccol_indices.dtype() != DType::Int64 || row_indices.dtype() != DType::Int64) {
+        throw std::runtime_error("sparse_csc: indices must be Int64");
+    }
+
+    int64_t nrows = shape[0];
+    int64_t ncols = shape[1];
+    int64_t nnz = values.numel();
+
+    if (ccol_indices.shape()[0] != ncols + 1) {
+        throw std::runtime_error("sparse_csc: ccol_indices length (" +
+            std::to_string(ccol_indices.shape()[0]) + ") must be ncols+1 (" +
+            std::to_string(ncols + 1) + ")");
+    }
+    if (row_indices.shape()[0] != nnz) {
+        throw std::runtime_error("sparse_csc: row_indices length must match values length");
+    }
+
+    // Bounds-check on CPU
+    if (ccol_indices.device().type == Device::Type::CPU && nnz > 0) {
+        auto* ccol_ptr = ccol_indices.data<int64_t>();
+        auto* row_ptr = row_indices.data<int64_t>();
+
+        for (int64_t i = 0; i < ncols; ++i) {
+            if (ccol_ptr[i] > ccol_ptr[i + 1]) {
+                throw std::runtime_error("sparse_csc: ccol_indices must be monotonically non-decreasing");
+            }
+        }
+        if (ccol_ptr[0] != 0 || ccol_ptr[ncols] != nnz) {
+            throw std::runtime_error("sparse_csc: ccol_indices[0] must be 0 and ccol_indices[-1] must equal nnz");
+        }
+
+        for (int64_t i = 0; i < nnz; ++i) {
+            if (row_ptr[i] < 0 || row_ptr[i] >= nrows) {
+                throw std::runtime_error("sparse_csc: row_index out of bounds");
+            }
+        }
+    }
+
+    SparseTensor s;
+    s.layout_ = SparseLayout::CSC;
+    s.shape_ = std::move(shape);
+    s.ccol_indices_ = ccol_indices;
+    s.row_indices_ = row_indices;
+    s.values_ = values;
+    s.nnz_ = nnz;
+    s.sparse_dim_ = 2;
+    s.dense_dim_ = 0;
+    s.coalesced_ = true;
+    return s;
+}
+
+auto SparseTensor::sparse_bsr(const Tensor& bsr_row_ptr, const Tensor& bsr_col_ind,
+                               const Tensor& values, std::vector<int64_t> shape,
+                               std::pair<int64_t, int64_t> block_size) -> SparseTensor {
+    if (shape.size() != 2) {
+        throw std::runtime_error("sparse_bsr: only 2D tensors supported");
+    }
+    if (bsr_row_ptr.dtype() != DType::Int64 || bsr_col_ind.dtype() != DType::Int64) {
+        throw std::runtime_error("sparse_bsr: indices must be Int64");
+    }
+
+    auto [bh, bw] = block_size;
+    if (bh <= 0 || bw <= 0) {
+        throw std::runtime_error("sparse_bsr: block_size must be positive");
+    }
+
+    int64_t nrows = shape[0];
+    int64_t ncols = shape[1];
+    int64_t nblockrows = (nrows + bh - 1) / bh;
+    int64_t nblockcols = (ncols + bw - 1) / bw;
+    int64_t nnzb = bsr_col_ind.shape()[0];
+
+    if (bsr_row_ptr.shape()[0] != nblockrows + 1) {
+        throw std::runtime_error("sparse_bsr: bsr_row_ptr length must be nblockrows+1");
+    }
+    if (values.ndim() != 3 || values.shape()[1] != bh || values.shape()[2] != bw) {
+        throw std::runtime_error("sparse_bsr: values must have shape (nnzb, block_h, block_w)");
+    }
+    if (values.shape()[0] != nnzb) {
+        throw std::runtime_error("sparse_bsr: values.shape()[0] must match bsr_col_ind length");
+    }
+
+    // Bounds-check on CPU
+    if (bsr_row_ptr.device().type == Device::Type::CPU && nnzb > 0) {
+        auto* rp = bsr_row_ptr.data<int64_t>();
+        auto* ci = bsr_col_ind.data<int64_t>();
+
+        if (rp[0] != 0 || rp[nblockrows] != nnzb) {
+            throw std::runtime_error("sparse_bsr: bsr_row_ptr[0] must be 0, bsr_row_ptr[-1] must equal nnzb");
+        }
+        for (int64_t i = 0; i < nblockrows; ++i) {
+            if (rp[i] > rp[i + 1]) {
+                throw std::runtime_error("sparse_bsr: bsr_row_ptr must be monotonically non-decreasing");
+            }
+        }
+        for (int64_t i = 0; i < nnzb; ++i) {
+            if (ci[i] < 0 || ci[i] >= nblockcols) {
+                throw std::runtime_error("sparse_bsr: block column index out of bounds");
+            }
+        }
+    }
+
+    SparseTensor s;
+    s.layout_ = SparseLayout::BSR;
+    s.shape_ = std::move(shape);
+    s.bsr_row_ptr_ = bsr_row_ptr;
+    s.bsr_col_ind_ = bsr_col_ind;
+    s.values_ = values;
+    s.nnz_ = nnzb * bh * bw;  // Total non-zero elements (including block fill)
+    s.sparse_dim_ = 2;
+    s.dense_dim_ = 0;
+    s.coalesced_ = true;
+    s.block_size_ = block_size;
+    return s;
+}
+
+auto SparseTensor::to_csc() const -> SparseTensor {
+    if (layout_ == SparseLayout::CSC) return *this;
+    if (shape_.size() != 2) {
+        throw std::runtime_error("to_csc: only 2D sparse tensors supported");
+    }
+
+    // Convert to COO first, then build CSC
+    auto coo = to_coo();
+    auto idx = coo.indices_.contiguous();
+    auto vals = coo.values_.contiguous();
+    auto* idx_ptr = idx.data<int64_t>();
+    int64_t ncols = shape_[1];
+    int64_t coo_nnz = coo.nnz();
+
+    // Sort by column (then by row within each column)
+    std::vector<int64_t> perm(coo_nnz);
+    std::iota(perm.begin(), perm.end(), 0);
+    std::sort(perm.begin(), perm.end(), [&](int64_t a, int64_t b) {
+        int64_t col_a = idx_ptr[coo_nnz + a];
+        int64_t col_b = idx_ptr[coo_nnz + b];
+        if (col_a != col_b) return col_a < col_b;
+        return idx_ptr[a] < idx_ptr[b];
+    });
+
+    // Build ccol_indices
+    auto ccol = Tensor({ncols + 1}, DType::Int64, values_.device());
+    auto row = Tensor({coo_nnz}, DType::Int64, values_.device());
+    auto* ccol_ptr = ccol.data<int64_t>();
+    auto* row_ptr = row.data<int64_t>();
+
+    std::memset(ccol_ptr, 0, (ncols + 1) * sizeof(int64_t));
+
+    // Count per-column
+    for (int64_t i = 0; i < coo_nnz; ++i) {
+        ccol_ptr[idx_ptr[coo_nnz + perm[i]] + 1]++;
+    }
+    // Prefix sum
+    for (int64_t c = 0; c < ncols; ++c) {
+        ccol_ptr[c + 1] += ccol_ptr[c];
+    }
+    // Fill row_indices in sorted order
+    for (int64_t i = 0; i < coo_nnz; ++i) {
+        row_ptr[i] = idx_ptr[perm[i]];
+    }
+
+    // Reorder values
+    auto new_vals = zeros({coo_nnz}, vals.dtype(), vals.device());
+    if (vals.dtype() == DType::Float32) {
+        auto* vp = vals.data<float>();
+        auto* nvp = new_vals.data<float>();
+        for (int64_t i = 0; i < coo_nnz; ++i) nvp[i] = vp[perm[i]];
+    } else if (vals.dtype() == DType::Float64) {
+        auto* vp = vals.data<double>();
+        auto* nvp = new_vals.data<double>();
+        for (int64_t i = 0; i < coo_nnz; ++i) nvp[i] = vp[perm[i]];
+    }
+
+    return sparse_csc(ccol, row, new_vals, shape_);
+}
+
+auto SparseTensor::to_bsr(std::pair<int64_t, int64_t> block_size) const -> SparseTensor {
+    if (layout_ == SparseLayout::BSR && block_size_ == block_size) return *this;
+    if (shape_.size() != 2) {
+        throw std::runtime_error("to_bsr: only 2D sparse tensors supported");
+    }
+
+    auto [bh, bw] = block_size;
+    int64_t nrows = shape_[0];
+    int64_t ncols = shape_[1];
+    int64_t nblockrows = (nrows + bh - 1) / bh;
+    int64_t nblockcols = (ncols + bw - 1) / bw;
+
+    // Convert to dense first, then extract blocks
+    auto dense = to_dense();
+    auto cont = dense.contiguous();
+
+    // Find non-zero blocks
+    std::vector<int64_t> block_rows, block_cols;
+    std::vector<std::vector<float>> block_vals_f32;
+    std::vector<std::vector<double>> block_vals_f64;
+
+    bool is_f32 = (cont.dtype() == DType::Float32);
+
+    for (int64_t br = 0; br < nblockrows; ++br) {
+        for (int64_t bc = 0; bc < nblockcols; ++bc) {
+            // Check if block is non-zero
+            bool has_nonzero = false;
+            for (int64_t i = 0; i < bh && !has_nonzero; ++i) {
+                for (int64_t j = 0; j < bw && !has_nonzero; ++j) {
+                    int64_t r = br * bh + i;
+                    int64_t c = bc * bw + j;
+                    if (r < nrows && c < ncols) {
+                        if (is_f32) {
+                            if (cont.data<float>()[r * ncols + c] != 0.0f) has_nonzero = true;
+                        } else {
+                            if (cont.data<double>()[r * ncols + c] != 0.0) has_nonzero = true;
+                        }
+                    }
+                }
+            }
+
+            if (has_nonzero) {
+                block_rows.push_back(br);
+                block_cols.push_back(bc);
+
+                if (is_f32) {
+                    std::vector<float> blk(bh * bw, 0.0f);
+                    for (int64_t i = 0; i < bh; ++i) {
+                        for (int64_t j = 0; j < bw; ++j) {
+                            int64_t r = br * bh + i;
+                            int64_t c = bc * bw + j;
+                            if (r < nrows && c < ncols) {
+                                blk[i * bw + j] = cont.data<float>()[r * ncols + c];
+                            }
+                        }
+                    }
+                    block_vals_f32.push_back(std::move(blk));
+                } else {
+                    std::vector<double> blk(bh * bw, 0.0);
+                    for (int64_t i = 0; i < bh; ++i) {
+                        for (int64_t j = 0; j < bw; ++j) {
+                            int64_t r = br * bh + i;
+                            int64_t c = bc * bw + j;
+                            if (r < nrows && c < ncols) {
+                                blk[i * bw + j] = cont.data<double>()[r * ncols + c];
+                            }
+                        }
+                    }
+                    block_vals_f64.push_back(std::move(blk));
+                }
+            }
+        }
+    }
+
+    int64_t nnzb = static_cast<int64_t>(block_cols.size());
+
+    // Build bsr_row_ptr
+    auto row_ptr = Tensor({nblockrows + 1}, DType::Int64, cont.device());
+    auto col_ind = Tensor({nnzb}, DType::Int64, cont.device());
+    auto* rp = row_ptr.data<int64_t>();
+    auto* ci = col_ind.data<int64_t>();
+
+    std::memset(rp, 0, (nblockrows + 1) * sizeof(int64_t));
+    for (int64_t i = 0; i < nnzb; ++i) {
+        rp[block_rows[i] + 1]++;
+    }
+    for (int64_t i = 0; i < nblockrows; ++i) {
+        rp[i + 1] += rp[i];
+    }
+    for (int64_t i = 0; i < nnzb; ++i) {
+        ci[i] = block_cols[i];
+    }
+
+    // Build values tensor
+    DType vdt = cont.dtype();
+    auto values = Tensor({nnzb, bh, bw}, vdt, cont.device());
+    if (is_f32) {
+        auto* vp = values.data<float>();
+        for (int64_t i = 0; i < nnzb; ++i) {
+            std::memcpy(vp + i * bh * bw, block_vals_f32[i].data(), bh * bw * sizeof(float));
+        }
+    } else {
+        auto* vp = values.data<double>();
+        for (int64_t i = 0; i < nnzb; ++i) {
+            std::memcpy(vp + i * bh * bw, block_vals_f64[i].data(), bh * bw * sizeof(double));
+        }
+    }
+
+    return sparse_bsr(row_ptr, col_ind, values, shape_, block_size);
 }
 
 // Free functions
@@ -436,6 +838,10 @@ auto to_sparse(const Tensor& dense) -> SparseTensor {
 
 auto to_sparse_csr(const Tensor& dense) -> SparseTensor {
     return to_sparse(dense).to_csr();
+}
+
+auto to_sparse_csc(const Tensor& dense) -> SparseTensor {
+    return to_sparse(dense).to_csc();
 }
 
 } // namespace tenzor

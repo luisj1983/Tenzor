@@ -118,8 +118,7 @@ public:
                 }
             }
 
-            // Reconstruct Conv2d with dequantized weights
-            // Extract dimensions from weight shape: [out_channels, in_channels, kH, kW]
+            // Reconstruct Conv2d with dequantized weights, preserving all metadata
             auto shape = weight_dequant.shape();
             if (shape.size() >= 4) {
                 int64_t out_channels = shape[0];
@@ -127,16 +126,26 @@ public:
                 int64_t kernel_h = shape[2];
                 int64_t kernel_w = shape[3];
 
-                // Create Conv2d (using default stride=1, padding=0)
+                // Preserve stride, padding, dilation, groups from quantized module
+                int64_t stride = q_conv->stride();
+                int64_t padding = q_conv->padding();
+                int64_t dilation = q_conv->dilation();
+                int64_t groups = q_conv->groups();
+
                 std::shared_ptr<Conv2d> conv;
                 if (kernel_h == kernel_w) {
                     conv = std::make_shared<Conv2d>(
-                        in_channels, out_channels, kernel_h
+                        in_channels * groups, out_channels, kernel_h,
+                        stride, padding, dilation, groups
                     );
                 } else {
                     conv = std::make_shared<Conv2d>(
-                        in_channels, out_channels,
-                        std::pair<int64_t, int64_t>{kernel_h, kernel_w}
+                        in_channels * groups, out_channels,
+                        std::pair<int64_t, int64_t>{kernel_h, kernel_w},
+                        std::pair<int64_t, int64_t>{stride, stride},
+                        std::pair<int64_t, int64_t>{padding, padding},
+                        std::pair<int64_t, int64_t>{dilation, dilation},
+                        groups
                     );
                 }
 

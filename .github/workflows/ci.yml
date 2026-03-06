@@ -442,6 +442,16 @@ jobs:
           lcov --remove coverage.info '/usr/*' '*/tests/*' '*/build/*' --output-file coverage.info
           lcov --list coverage.info
 
+      - name: Check coverage threshold
+        run: |
+          COVERAGE=$(lcov --summary build/coverage.info 2>&1 | grep 'lines' | grep -oP '[\d.]+(?=%)')
+          echo "Line coverage: ${COVERAGE}%"
+          THRESHOLD=70
+          if [ "$(echo "$COVERAGE < $THRESHOLD" | bc -l)" -eq 1 ]; then
+            echo "::error::Coverage ${COVERAGE}% is below threshold ${THRESHOLD}%"
+            exit 1
+          fi
+
       - name: Upload coverage
         if: success() || failure()
         uses: actions/upload-artifact@v4

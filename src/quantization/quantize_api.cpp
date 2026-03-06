@@ -10,6 +10,7 @@
 #include "tenzor/nn/layers/linear.hpp"
 #include "tenzor/nn/layers/conv.hpp"
 #include "tenzor/nn/layers/batchnorm.hpp"
+#include "tenzor/nn/activations/activations.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include <chrono>
@@ -77,13 +78,37 @@ public:
         return module;
     }
 
-    // Prepare module for QAT
+    // Prepare module for QAT by inserting FakeQuantize modules after quantizable layers
     auto prepare_for_qat(std::shared_ptr<nn::Module> module) -> std::shared_ptr<nn::Module> {
         if (!module) return nullptr;
 
-        // For QAT, we insert FakeQuantize modules
-        // This is done through QATHelper class
-        // For now, return module wrapped with fake quantization capability
+        // Handle Sequential containers by inserting FakeQuantize after quantizable layers
+        if (auto seq = std::dynamic_pointer_cast<nn::Sequential>(module)) {
+            auto qat_seq = std::make_shared<nn::Sequential>();
+
+            for (const auto& child : seq->modules()) {
+                qat_seq->add_module(child);
+
+                // Insert FakeQuantize after quantizable layers (Linear, Conv2d)
+                bool is_quantizable =
+                    std::dynamic_pointer_cast<nn::Linear>(child) != nullptr ||
+                    std::dynamic_pointer_cast<nn::Conv2d>(child) != nullptr;
+
+                if (is_quantizable) {
+                    auto fake_quant = std::make_shared<nn::quantization::FakeQuantize>(
+                        qconfig_.weight_dtype(),
+                        qconfig_.activation_scheme(),
+                        false,   // not learnable
+                        true,    // observer enabled
+                        -1       // per-tensor
+                    );
+                    qat_seq->add_module(fake_quant);
+                }
+            }
+
+            return qat_seq;
+        }
+
         return module;
     }
 
@@ -205,23 +230,25 @@ auto quantize_static(
     // Set model to eval mode for calibration
     model->eval();
 
-    // Create observers for each quantizable layer
-    // In full implementation, would traverse model and attach observers
+    // Attach observers by preparing the model with FakeQuantize modules
+    auto prepared_model = prepare_module_for_qat_recursive(model, qconfig);
+
     std::cout << "[Quantization] Observers attached to quantizable layers" << std::endl;
 
     std::cout << "[Quantization] Running calibration..." << std::endl;
     try {
-        calibration_fn(*model);
+        // Run forward passes — FakeQuantize observers collect min/max stats
+        calibration_fn(*prepared_model);
     } catch (const std::exception& e) {
         throw std::runtime_error(std::string("Calibration failed: ") + e.what());
     }
 
     std::cout << "[Quantization] Calculating quantization parameters from observers..." << std::endl;
-    // Observers have collected min/max statistics
-    // Calculate optimal scale and zero_point for each layer
+    // FakeQuantize modules have collected statistics during calibration
+    // Now freeze their qparams and convert to real quantized model
 
     std::cout << "[Quantization] Converting to quantized model..." << std::endl;
-    auto quantized_model = convert_module_to_quantized_recursive(model, qconfig);
+    auto quantized_model = convert_module_to_quantized_recursive(prepared_model, qconfig);
 
     std::cout << "[Quantization] Static quantization complete!" << std::endl;
 
@@ -247,9 +274,14 @@ auto prepare_qat(
 
     // Use QATHelper to prepare model with fake quantization
     auto qat_helper = std::make_unique<nn::quantization::QATHelper>();
+    qat_helper->prepare_qat(
+        *model,
+        qconfig.weight_dtype(),
+        qconfig.activation_scheme(),
+        false  // not learnable by default
+    );
 
-    // Prepare model by inserting FakeQuantize modules
-    // These simulate quantization effects during training
+    // Insert FakeQuantize modules into the model structure
     auto qat_module = prepare_module_for_qat_recursive(model, qconfig);
 
     std::cout << "[QAT] Model prepared. Train normally to learn quantization-robust weights." << std::endl;
@@ -304,7 +336,57 @@ auto calibrate(
         auto output = model.forward(Variable(calibration_data[i], false));
     }
 
-    std::cout << "[Calibration] Complete!" << std::endl;
+    // Extract quantization parameters from FakeQuantize observer modules
+    // Traverse submodules to find FakeQuantize instances
+    auto submodules = model.get_submodules();
+    for (const auto& [name, submodule] : submodules) {
+        if (auto fq = std::dynamic_pointer_cast<nn::quantization::FakeQuantize>(submodule)) {
+            if (fq->observer() && fq->observer()->has_data()) {
+                auto qparams = fq->observer()->calculate_qparams(
+                    nn::quantization::QuantDType::INT8,
+                    nn::quantization::QuantizationScheme::PerTensorSymmetric
+                );
+                params_map.insert_or_assign(name, std::move(qparams));
+            }
+        }
+        // Recurse into Sequential containers
+        if (auto seq = std::dynamic_pointer_cast<nn::Sequential>(submodule)) {
+            int idx = 0;
+            for (const auto& child : seq->modules()) {
+                if (auto fq = std::dynamic_pointer_cast<nn::quantization::FakeQuantize>(child)) {
+                    if (fq->observer() && fq->observer()->has_data()) {
+                        auto qparams = fq->observer()->calculate_qparams(
+                            nn::quantization::QuantDType::INT8,
+                            nn::quantization::QuantizationScheme::PerTensorSymmetric
+                        );
+                        std::string key = name + "." + std::to_string(idx);
+                        params_map.insert_or_assign(key, std::move(qparams));
+                    }
+                }
+                ++idx;
+            }
+        }
+    }
+
+    // Also check if model itself is Sequential
+    if (auto* seq = dynamic_cast<nn::Sequential*>(&model)) {
+        int idx = 0;
+        for (const auto& child : seq->modules()) {
+            if (auto fq = std::dynamic_pointer_cast<nn::quantization::FakeQuantize>(child)) {
+                if (fq->observer() && fq->observer()->has_data()) {
+                    auto qparams = fq->observer()->calculate_qparams(
+                        nn::quantization::QuantDType::INT8,
+                        nn::quantization::QuantizationScheme::PerTensorSymmetric
+                    );
+                    params_map.insert_or_assign(std::to_string(idx), std::move(qparams));
+                }
+            }
+            ++idx;
+        }
+    }
+
+    std::cout << "[Calibration] Complete! Extracted " << params_map.size()
+              << " quantization parameter sets" << std::endl;
 
     return params_map;
 }
@@ -343,20 +425,13 @@ auto fuse_modules(std::shared_ptr<nn::Module> model) -> std::shared_ptr<nn::Modu
             auto conv = std::dynamic_pointer_cast<nn::Conv2d>(modules[i]);
             auto bn = std::dynamic_pointer_cast<nn::BatchNorm2d>(modules[i + 1]);
 
-            // Check if third module is ReLU by checking its type name
+            // Check if third module is a ReLU variant
             bool is_relu = false;
             if (conv && bn && modules[i + 2]) {
-                // Try running a test to see if it behaves like ReLU
-                // We check by dynamic_cast; need the ReLU type
-                auto state = modules[i + 2]->state_dict();
-                // ReLU has no parameters, and its name typically contains "relu"
-                // Use a simpler heuristic: ReLU modules have no parameters
-                auto params = modules[i + 2]->named_parameters();
-                if (params.empty() && state.empty()) {
-                    // Could be ReLU, Dropout, or other parameterless modules
-                    // Try to verify by checking forward behavior is ReLU-like
-                    is_relu = true;  // Assume parameterless module after BN is ReLU
-                }
+                is_relu =
+                    std::dynamic_pointer_cast<nn::ReLU>(modules[i + 2]) != nullptr ||
+                    std::dynamic_pointer_cast<nn::ReLU6>(modules[i + 2]) != nullptr ||
+                    std::dynamic_pointer_cast<nn::LeakyReLU>(modules[i + 2]) != nullptr;
             }
 
             if (conv && bn && is_relu) {
@@ -375,9 +450,10 @@ auto fuse_modules(std::shared_ptr<nn::Module> model) -> std::shared_ptr<nn::Modu
         if (i + 1 < modules.size()) {
             auto conv = std::dynamic_pointer_cast<nn::Conv2d>(modules[i]);
             if (conv) {
-                auto params = modules[i + 1]->named_parameters();
-                auto state = modules[i + 1]->state_dict();
-                bool is_relu = params.empty() && state.empty();
+                bool is_relu =
+                    std::dynamic_pointer_cast<nn::ReLU>(modules[i + 1]) != nullptr ||
+                    std::dynamic_pointer_cast<nn::ReLU6>(modules[i + 1]) != nullptr ||
+                    std::dynamic_pointer_cast<nn::LeakyReLU>(modules[i + 1]) != nullptr;
 
                 if (is_relu) {
                     std::cout << "[Fusion] Fusing Conv2d + ReLU at position " << i << std::endl;

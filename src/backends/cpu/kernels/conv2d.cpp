@@ -35,91 +35,11 @@
     #endif
 #endif
 
+// Import shared Float16/BFloat16 operator overloads
+#include "half_operators.hpp"
+
 namespace tenzor {
 namespace cpu {
-
-// ============================================================================
-// Float16 Arithmetic Helper Functions
-// ============================================================================
-// These inline helpers allow Float16 to work with template code that uses
-// arithmetic operators. Operations are performed in Float32 precision.
-
-inline Float16 operator+(const Float16& a, const Float16& b) {
-    return Float16(static_cast<float>(a) + static_cast<float>(b));
-}
-
-inline Float16 operator-(const Float16& a, const Float16& b) {
-    return Float16(static_cast<float>(a) - static_cast<float>(b));
-}
-
-inline Float16 operator*(const Float16& a, const Float16& b) {
-    return Float16(static_cast<float>(a) * static_cast<float>(b));
-}
-
-inline Float16 operator/(const Float16& a, const Float16& b) {
-    return Float16(static_cast<float>(a) / static_cast<float>(b));
-}
-
-inline Float16& operator+=(Float16& a, const Float16& b) {
-    a = Float16(static_cast<float>(a) + static_cast<float>(b));
-    return a;
-}
-
-inline Float16& operator-=(Float16& a, const Float16& b) {
-    a = Float16(static_cast<float>(a) - static_cast<float>(b));
-    return a;
-}
-
-inline Float16& operator*=(Float16& a, const Float16& b) {
-    a = Float16(static_cast<float>(a) * static_cast<float>(b));
-    return a;
-}
-
-inline Float16& operator/=(Float16& a, const Float16& b) {
-    a = Float16(static_cast<float>(a) / static_cast<float>(b));
-    return a;
-}
-
-// ============================================================================
-// BFloat16 Arithmetic Helper Functions
-// ============================================================================
-// Same pattern as Float16 - operations in Float32 precision.
-
-inline BFloat16 operator+(const BFloat16& a, const BFloat16& b) {
-    return BFloat16(static_cast<float>(a) + static_cast<float>(b));
-}
-
-inline BFloat16 operator-(const BFloat16& a, const BFloat16& b) {
-    return BFloat16(static_cast<float>(a) - static_cast<float>(b));
-}
-
-inline BFloat16 operator*(const BFloat16& a, const BFloat16& b) {
-    return BFloat16(static_cast<float>(a) * static_cast<float>(b));
-}
-
-inline BFloat16 operator/(const BFloat16& a, const BFloat16& b) {
-    return BFloat16(static_cast<float>(a) / static_cast<float>(b));
-}
-
-inline BFloat16& operator+=(BFloat16& a, const BFloat16& b) {
-    a = BFloat16(static_cast<float>(a) + static_cast<float>(b));
-    return a;
-}
-
-inline BFloat16& operator-=(BFloat16& a, const BFloat16& b) {
-    a = BFloat16(static_cast<float>(a) - static_cast<float>(b));
-    return a;
-}
-
-inline BFloat16& operator*=(BFloat16& a, const BFloat16& b) {
-    a = BFloat16(static_cast<float>(a) * static_cast<float>(b));
-    return a;
-}
-
-inline BFloat16& operator/=(BFloat16& a, const BFloat16& b) {
-    a = BFloat16(static_cast<float>(a) / static_cast<float>(b));
-    return a;
-}
 
 // ============================================================================
 // Helper Functions

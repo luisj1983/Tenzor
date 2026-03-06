@@ -171,6 +171,11 @@ public:
     auto set_weight(const QuantizedTensor& weights) -> void;
     auto set_bias(const Tensor& bias) -> void;
 
+    auto stride() const -> int64_t { return stride_; }
+    auto padding() const -> int64_t { return padding_; }
+    auto dilation() const -> int64_t { return dilation_; }
+    auto groups() const -> int64_t { return groups_; }
+
     static auto from_float(const Conv2d& fp_conv, const QConfig& qconfig)
         -> std::shared_ptr<QuantizedConv2d>;
 

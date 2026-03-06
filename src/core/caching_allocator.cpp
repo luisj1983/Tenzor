@@ -212,6 +212,10 @@ auto CachingAllocator::cache_hit_rate() const -> double {
 }
 
 auto CachingAllocator::find_free_block(size_t bytes) -> void* {
+    // Minimum remainder size to justify splitting a block.
+    // Smaller remainders waste more on bookkeeping than they save.
+    constexpr size_t MIN_SPLIT_SIZE = 512;
+
     // Use lower_bound to find first block with size >= bytes
     // This implements a best-fit strategy for efficient memory reuse
     auto it = free_blocks_.lower_bound(bytes);
@@ -228,8 +232,20 @@ auto CachingAllocator::find_free_block(size_t bytes) -> void* {
     free_blocks_.erase(it);
     total_cached_bytes_ -= block_size;
 
-    // Add back to allocated_blocks_ since we're reusing it
-    allocated_blocks_[ptr] = block_size;
+    // Split the block if the remainder is large enough to be useful
+    size_t remainder = block_size - bytes;
+    if (remainder >= MIN_SPLIT_SIZE) {
+        // Return the requested portion, put remainder back in free pool
+        void* remainder_ptr = static_cast<char*>(ptr) + bytes;
+        free_blocks_.insert({remainder, remainder_ptr});
+        total_cached_bytes_ += remainder;
+
+        // Track the allocated portion with its actual size
+        allocated_blocks_[ptr] = bytes;
+    } else {
+        // Return the full block (accept small internal waste)
+        allocated_blocks_[ptr] = block_size;
+    }
 
     return ptr;
 }

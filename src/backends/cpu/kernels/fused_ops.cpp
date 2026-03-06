@@ -25,49 +25,15 @@
 #include <omp.h>
 #endif
 
+// Import shared Float16/BFloat16 operator overloads
+#include "half_operators.hpp"
+
 namespace tenzor {
 namespace cpu {
 
 // Forward declaration for conv2d_forward_kernel (used by fused conv+activation kernels)
 auto conv2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
                            int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
-
-// Float16 Arithmetic Helper Functions for LayerNorm
-inline Float16 operator+(const Float16& a, const Float16& b) {
-    return Float16(static_cast<float>(a) + static_cast<float>(b));
-}
-
-inline Float16 operator-(const Float16& a, const Float16& b) {
-    return Float16(static_cast<float>(a) - static_cast<float>(b));
-}
-
-inline Float16 operator*(const Float16& a, const Float16& b) {
-    return Float16(static_cast<float>(a) * static_cast<float>(b));
-}
-
-inline Float16 operator/(const Float16& a, const Float16& b) {
-    return Float16(static_cast<float>(a) / static_cast<float>(b));
-}
-
-inline Float16& operator+=(Float16& a, const Float16& b) {
-    a = Float16(static_cast<float>(a) + static_cast<float>(b));
-    return a;
-}
-
-inline Float16& operator-=(Float16& a, const Float16& b) {
-    a = Float16(static_cast<float>(a) - static_cast<float>(b));
-    return a;
-}
-
-inline Float16& operator*=(Float16& a, const Float16& b) {
-    a = Float16(static_cast<float>(a) * static_cast<float>(b));
-    return a;
-}
-
-inline Float16& operator/=(Float16& a, const Float16& b) {
-    a = Float16(static_cast<float>(a) / static_cast<float>(b));
-    return a;
-}
 
 /**
  * @brief Fused linear + ReLU kernel (CPU implementation)
