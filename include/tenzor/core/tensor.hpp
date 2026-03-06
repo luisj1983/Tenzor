@@ -5,6 +5,16 @@
  * Provides the main Tensor class with support for multi-dimensional arrays,
  * automatic differentiation, device management, and various mathematical operations.
  * Uses PImpl pattern for efficient memory management and copy semantics.
+ *
+ * @par Thread Safety
+ * - **Read operations** (shape, dtype, data access, const methods) are thread-safe.
+ *   Multiple threads may read the same tensor concurrently.
+ * - **Concurrent read + write** to the same tensor requires external synchronization.
+ *   This includes in-place operations (+=, fill_), reshape, and any mutation.
+ * - **Independent tensors** can be operated on concurrently without synchronization.
+ * - **Autograd forward pass** is NOT thread-safe on shared Variables. Each thread
+ *   should use its own Variable or synchronize access.
+ * - **Autograd backward pass** is thread-safe with per-Variable `make_thread_safe()`.
  */
 
 #pragma once
