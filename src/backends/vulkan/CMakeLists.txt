@@ -304,6 +304,11 @@ set(SHADERS
     fused_adagrad_step
 )
 
+# Shaders requiring SPIR-V 1.3 (subgroup operations, Vulkan 1.1+)
+set(SHADERS_SPIRV13
+    reduction_subgroup
+)
+
 # Compile each shader
 if(GLSLC)
     foreach(SHADER ${SHADERS})
@@ -315,6 +320,21 @@ if(GLSLC)
             COMMAND ${GLSLC} -fshader-stage=compute ${SHADER_SOURCE} -o ${SHADER_OUTPUT}
             DEPENDS ${SHADER_SOURCE}
             COMMENT "Compiling shader ${SHADER}.comp to SPIR-V"
+        )
+
+        list(APPEND SHADER_OUTPUTS ${SHADER_OUTPUT})
+    endforeach()
+
+    # Compile SPIR-V 1.3 shaders (needed for subgroup operations)
+    foreach(SHADER ${SHADERS_SPIRV13})
+        set(SHADER_SOURCE ${SHADER_DIR}/${SHADER}.comp)
+        set(SHADER_OUTPUT ${SHADER_OUTPUT_DIR}/${SHADER}.spv)
+
+        add_custom_command(
+            OUTPUT ${SHADER_OUTPUT}
+            COMMAND ${GLSLC} -fshader-stage=compute --target-env=vulkan1.1 ${SHADER_SOURCE} -o ${SHADER_OUTPUT}
+            DEPENDS ${SHADER_SOURCE}
+            COMMENT "Compiling shader ${SHADER}.comp to SPIR-V 1.3"
         )
 
         list(APPEND SHADER_OUTPUTS ${SHADER_OUTPUT})
@@ -397,6 +417,7 @@ target_compile_features(tenzor_backend_vulkan PRIVATE cxx_std_20)
 # Set shader path for runtime
 target_compile_definitions(tenzor_backend_vulkan PRIVATE
     TENZOR_VULKAN_SHADER_PATH="${SHADER_OUTPUT_DIR}/"
+    TENZOR_INTERNAL
 )
 
 # Platform-specific settings

@@ -1264,6 +1264,10 @@ auto Tensor::flatten(int64_t start_dim, int64_t end_dim) const -> Tensor {
     return reshape(std::move(new_shape));
 }
 
+auto Tensor::expand(std::vector<int64_t> target_shape) const -> Tensor {
+    return tenzor::expand(*this, std::move(target_shape));
+}
+
 auto Tensor::nonzero() const -> Tensor {
     // Forward to the ops function
     return tenzor::nonzero(*this);

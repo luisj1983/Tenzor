@@ -498,7 +498,8 @@ public:
     ComputePipeline(VkDevice device, const std::vector<uint32_t>& shaderCode,
                    const std::vector<VkDescriptorSetLayoutBinding>& bindings,
                    const std::vector<VkPushConstantRange>& pushConstants = {},
-                   VkPipelineCache pipelineCache = VK_NULL_HANDLE)
+                   VkPipelineCache pipelineCache = VK_NULL_HANDLE,
+                   const VkSpecializationInfo* specializationInfo = nullptr)
         : device_(device) {
 
         // Create shader module
@@ -537,6 +538,7 @@ public:
         shaderStageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
         shaderStageInfo.module = shaderModule;
         shaderStageInfo.pName = "main";
+        shaderStageInfo.pSpecializationInfo = specializationInfo;
 
         VkComputePipelineCreateInfo pipelineInfo{};
         pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;

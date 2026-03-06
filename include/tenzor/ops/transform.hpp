@@ -83,6 +83,11 @@ auto tile(const Tensor& input, std::vector<int64_t> reps) -> Tensor;
 /** @brief Broadcast tensor to new shape. */
 auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor;
 
+/** @brief Broadcast tensor to target shape (alias for expand). */
+inline auto broadcast_to(const Tensor& input, std::vector<int64_t> shape) -> Tensor {
+    return expand(input, std::move(shape));
+}
+
 /** @brief Return contiguous copy if needed. */
 auto contiguous(const Tensor& input) -> Tensor;
 

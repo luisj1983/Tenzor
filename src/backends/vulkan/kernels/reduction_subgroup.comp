@@ -1,0 +1,112 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+
+// Reduction operations with subgroup optimization: sum, mean, max, min
+// Uses subgroup (warp-level) operations for the final reduction steps,
+// eliminating shared memory barriers for threads within the same subgroup.
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;              // Total number of elements in input
+    uint reduce_size;    // Size of dimension to reduce
+    uint outer_size;     // Number of output elements
+    uint inner_size;     // Product of dimensions after reduction dim
+    uint op;             // 0=sum, 1=mean, 2=max, 3=min
+} params;
+
+// Specialization constant: subgroup size (set at pipeline creation time)
+layout(constant_id = 0) const uint SUBGROUP_SIZE = 32;
+
+shared float shared_data[256];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint output_idx = gl_WorkGroupID.x;
+
+    if (output_idx >= params.outer_size) {
+        return;
+    }
+
+    // Initialize accumulator based on operation
+    float accum;
+    if (params.op == 2) { // max
+        accum = -1.0 / 0.0; // -infinity
+    } else if (params.op == 3) { // min
+        accum = 1.0 / 0.0; // +infinity
+    } else {
+        accum = 0.0;
+    }
+
+    uint outer_idx = output_idx / params.inner_size;
+    uint inner_idx = output_idx % params.inner_size;
+    uint base_idx = outer_idx * params.reduce_size * params.inner_size + inner_idx;
+
+    // Each thread processes multiple elements along the reduction dimension
+    for (uint i = tid; i < params.reduce_size; i += 256) {
+        uint idx = base_idx + i * params.inner_size;
+        if (idx < params.n) {
+            float val = input_data[idx];
+            switch (params.op) {
+                case 0: // sum
+                case 1: // mean
+                    accum += val;
+                    break;
+                case 2: // max
+                    accum = max(accum, val);
+                    break;
+                case 3: // min
+                    accum = min(accum, val);
+                    break;
+            }
+        }
+    }
+
+    shared_data[tid] = accum;
+    barrier();
+
+    // Parallel reduction in shared memory — stop before subgroup size
+    for (uint s = 128; s >= SUBGROUP_SIZE; s >>= 1) {
+        if (tid < s) {
+            switch (params.op) {
+                case 0:
+                case 1:
+                    shared_data[tid] += shared_data[tid + s];
+                    break;
+                case 2:
+                    shared_data[tid] = max(shared_data[tid], shared_data[tid + s]);
+                    break;
+                case 3:
+                    shared_data[tid] = min(shared_data[tid], shared_data[tid + s]);
+                    break;
+            }
+        }
+        barrier();
+    }
+
+    // Final reduction within a single subgroup — no barriers needed
+    if (tid < SUBGROUP_SIZE) {
+        float val = shared_data[tid];
+        switch (params.op) {
+            case 0:
+            case 1:
+                val = subgroupAdd(val);
+                break;
+            case 2:
+                val = subgroupMax(val);
+                break;
+            case 3:
+                val = subgroupMin(val);
+                break;
+        }
+
+        if (tid == 0) {
+            if (params.op == 1) { // mean
+                val /= float(params.reduce_size);
+            }
+            output_data[output_idx] = val;
+        }
+    }
+}

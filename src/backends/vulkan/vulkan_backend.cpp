@@ -47,9 +47,9 @@ VulkanBackend::VulkanBackend() {
 }
 
 VulkanBackend::~VulkanBackend() {
-    // Wait for all devices to finish
+    // Wait for all devices to finish (skip lost devices — resources are invalid)
     for (auto& ctx : devices_) {
-        if (ctx.device != VK_NULL_HANDLE) {
+        if (ctx.device != VK_NULL_HANDLE && !ctx.device_lost) {
             vkDeviceWaitIdle(ctx.device);
         }
     }
@@ -448,6 +448,19 @@ void VulkanBackend::createLogicalDevices() {
         // Store capability flags for later use
         ctx.canPreserveDenormsF32 = canPreserveDenormsF32;
         ctx.hasAtomicInt64 = hasAtomicInt64;
+
+        // Query subgroup properties for subgroup arithmetic support
+        {
+            VkPhysicalDeviceSubgroupProperties subgroupProps{};
+            subgroupProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+            VkPhysicalDeviceProperties2 props2{};
+            props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+            props2.pNext = &subgroupProps;
+            vkGetPhysicalDeviceProperties2(ctx.physicalDevice, &props2);
+            ctx.subgroupSize = subgroupProps.subgroupSize;
+            ctx.hasSubgroupArithmetic =
+                (subgroupProps.supportedOperations & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) != 0;
+        }
 
         // Create pipeline cache (try loading from disk)
         {
@@ -850,6 +863,11 @@ VkDescriptorSet VulkanBackend::allocateAndWriteDescriptorSet(
     const std::vector<size_t>& bufferSizes) {
 
     auto& ctx = devices_[device_id];
+
+    // Protect descriptor pool allocation and potential reset from concurrent access.
+    // The pool reset path modifies submittedFrames, currentFrame, and hasPendingWork
+    // which must not race with endSingleTimeCommandsAsync or other allocations.
+    std::lock_guard<std::recursive_mutex> lock(ctx.mutex);
 
     // Allocate descriptor set
     VkDescriptorSetAllocateInfo allocInfo{};

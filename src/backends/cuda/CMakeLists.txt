@@ -49,7 +49,7 @@ set(CUDA_BACKEND_SOURCES
 add_library(tenzor_backend_cuda SHARED ${CUDA_BACKEND_SOURCES})
 
 # Define CUDA availability macro for fused ops
-target_compile_definitions(tenzor_backend_cuda PRIVATE TENZOR_CUDA_AVAILABLE)
+target_compile_definitions(tenzor_backend_cuda PRIVATE TENZOR_CUDA_AVAILABLE TENZOR_INTERNAL)
 
 # Set CUDA properties
 set_target_properties(tenzor_backend_cuda PROPERTIES

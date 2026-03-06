@@ -52,6 +52,7 @@ add_library(tenzor_backend_cpu SHARED ${CPU_BACKEND_SOURCES})
 
 # Apply Tenzor-specific warning and optimization flags
 target_compile_options(tenzor_backend_cpu PRIVATE ${TENZOR_WARNING_FLAGS})
+target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_INTERNAL)
 
 # Set target properties
 set_target_properties(tenzor_backend_cpu PROPERTIES

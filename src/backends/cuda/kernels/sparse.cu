@@ -53,6 +53,45 @@ std::vector<int64_t> to_vec(std::span<const int64_t> s) {
     return {s.begin(), s.end()};
 }
 
+/// RAII wrapper for CUDA device memory (exception-safe cudaMalloc/cudaFree).
+struct CudaBuffer {
+    void* ptr = nullptr;
+    explicit CudaBuffer(size_t bytes) {
+        if (bytes > 0) CUDA_CHECK_SPARSE(cudaMalloc(&ptr, bytes));
+    }
+    ~CudaBuffer() { if (ptr) cudaFree(ptr); }
+    CudaBuffer(const CudaBuffer&) = delete;
+    CudaBuffer& operator=(const CudaBuffer&) = delete;
+    template<typename T> T* as() { return static_cast<T*>(ptr); }
+};
+
+/// RAII guard for cuSPARSE sparse matrix descriptor.
+struct SpMatGuard {
+    cusparseSpMatDescr_t desc = nullptr;
+    explicit SpMatGuard(cusparseSpMatDescr_t d) : desc(d) {}
+    ~SpMatGuard() { if (desc) cusparseDestroySpMat(desc); }
+    SpMatGuard(const SpMatGuard&) = delete;
+    SpMatGuard& operator=(const SpMatGuard&) = delete;
+};
+
+/// RAII guard for cuSPARSE dense matrix descriptor.
+struct DnMatGuard {
+    cusparseDnMatDescr_t desc = nullptr;
+    explicit DnMatGuard(cusparseDnMatDescr_t d) : desc(d) {}
+    ~DnMatGuard() { if (desc) cusparseDestroyDnMat(desc); }
+    DnMatGuard(const DnMatGuard&) = delete;
+    DnMatGuard& operator=(const DnMatGuard&) = delete;
+};
+
+/// RAII guard for cuSPARSE dense vector descriptor.
+struct DnVecGuard {
+    cusparseDnVecDescr_t desc = nullptr;
+    explicit DnVecGuard(cusparseDnVecDescr_t d) : desc(d) {}
+    ~DnVecGuard() { if (desc) cusparseDestroyDnVec(desc); }
+    DnVecGuard(const DnVecGuard&) = delete;
+    DnVecGuard& operator=(const DnVecGuard&) = delete;
+};
+
 /// Get cuSPARSE data type from DType.
 cudaDataType get_cuda_data_type(DType dtype) {
     switch (dtype) {
@@ -104,36 +143,30 @@ SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse) {
         const int64_t* col_indices_ptr = indices_ptr + nnz;
 
         // cusparseXcoo2csr requires Int32 — convert row indices on GPU
-        int32_t* row_i32 = nullptr;
-        int32_t* crow_i32 = nullptr;
-        CUDA_CHECK_SPARSE(cudaMalloc(&row_i32, nnz * sizeof(int32_t)));
-        CUDA_CHECK_SPARSE(cudaMalloc(&crow_i32, (nrows + 1) * sizeof(int32_t)));
+        CudaBuffer row_i32_buf(nnz * sizeof(int32_t));
+        CudaBuffer crow_i32_buf((nrows + 1) * sizeof(int32_t));
 
         int threads = 256;
         int blocks_nnz = static_cast<int>((nnz + threads - 1) / threads);
-        cast_i64_to_i32<<<blocks_nnz, threads>>>(row_indices_ptr, row_i32, nnz);
+        cast_i64_to_i32<<<blocks_nnz, threads>>>(row_indices_ptr, row_i32_buf.as<int32_t>(), nnz);
         CUDA_CHECK_SPARSE(cudaGetLastError());
 
         // Convert COO row indices to CSR row pointers on GPU
         cusparseHandle_t handle = CuSPARSEHandlePool::get();
         CUSPARSE_CHECK(cusparseXcoo2csr(
-            handle, row_i32, static_cast<int>(nnz), static_cast<int>(nrows),
-            crow_i32, CUSPARSE_INDEX_BASE_ZERO));
+            handle, row_i32_buf.as<int32_t>(), static_cast<int>(nnz), static_cast<int>(nrows),
+            crow_i32_buf.as<int32_t>(), CUSPARSE_INDEX_BASE_ZERO));
 
         // Convert Int32 crow_indices back to Int64 on GPU
         Tensor crow_indices = zeros(std::vector<int64_t>{nrows + 1}, DType::Int64, Device::cuda());
         int blocks_crow = static_cast<int>((nrows + 1 + threads - 1) / threads);
-        cast_i32_to_i64<<<blocks_crow, threads>>>(crow_i32, crow_indices.data<int64_t>(), nrows + 1);
+        cast_i32_to_i64<<<blocks_crow, threads>>>(crow_i32_buf.as<int32_t>(), crow_indices.data<int64_t>(), nrows + 1);
         CUDA_CHECK_SPARSE(cudaGetLastError());
 
         // Copy col indices (already on GPU, just need a separate tensor)
         Tensor col_idx = zeros(std::vector<int64_t>{nnz}, DType::Int64, Device::cuda());
         CUDA_CHECK_SPARSE(cudaMemcpyAsync(col_idx.data<int64_t>(), col_indices_ptr,
                                           nnz * sizeof(int64_t), cudaMemcpyDeviceToDevice));
-
-        // Cleanup temporary Int32 buffers
-        CUDA_CHECK_SPARSE(cudaFree(row_i32));
-        CUDA_CHECK_SPARSE(cudaFree(crow_i32));
 
         return SparseTensor::sparse_csr(
             crow_indices, col_idx, values,
@@ -198,6 +231,7 @@ Tensor cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
         CUSPARSE_INDEX_BASE_ZERO,
         cuda_dtype
     ));
+    SpMatGuard sparse_guard(mat_sparse);
 
     // Dense matrix descriptor (column-major for cuSPARSE, but we use row-major)
     // cuSPARSE expects column-major dense matrices by default.
@@ -210,6 +244,7 @@ Tensor cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
         cuda_dtype,
         CUSPARSE_ORDER_ROW
     ));
+    DnMatGuard dense_guard(mat_dense);
 
     cusparseDnMatDescr_t mat_result;
     CUSPARSE_CHECK(cusparseCreateDnMat(
@@ -219,6 +254,7 @@ Tensor cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
         cuda_dtype,
         CUSPARSE_ORDER_ROW
     ));
+    DnMatGuard result_guard(mat_result);
 
     // Determine buffer size
     size_t buffer_size = 0;
@@ -241,11 +277,8 @@ Tensor cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
         &buffer_size
     ));
 
-    // Allocate workspace buffer
-    void* buffer = nullptr;
-    if (buffer_size > 0) {
-        CUDA_CHECK_SPARSE(cudaMalloc(&buffer, buffer_size));
-    }
+    // Allocate workspace buffer (RAII — freed on scope exit or exception)
+    CudaBuffer workspace(buffer_size);
 
     // Execute SpMM
     CUSPARSE_CHECK(cusparseSpMM(
@@ -259,19 +292,11 @@ Tensor cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
         mat_result,
         cuda_dtype,
         CUSPARSE_SPMM_ALG_DEFAULT,
-        buffer
+        workspace.ptr
     ));
 
     // Stream-synchronize to ensure computation is complete (avoids blocking other streams)
     CUDA_CHECK_SPARSE(cudaStreamSynchronize(nullptr));
-
-    // Cleanup
-    if (buffer) {
-        CUDA_CHECK_SPARSE(cudaFree(buffer));
-    }
-    CUSPARSE_CHECK(cusparseDestroySpMat(mat_sparse));
-    CUSPARSE_CHECK(cusparseDestroyDnMat(mat_dense));
-    CUSPARSE_CHECK(cusparseDestroyDnMat(mat_result));
 
     return result;
 }
@@ -329,6 +354,7 @@ Tensor cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
         CUSPARSE_INDEX_BASE_ZERO,
         cuda_dtype
     ));
+    SpMatGuard sparse_guard(mat_sparse);
 
     // Create dense vector descriptors
     cusparseDnVecDescr_t vec_x;
@@ -338,6 +364,7 @@ Tensor cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
         const_cast<void*>(vec_gpu.data_ptr()),
         cuda_dtype
     ));
+    DnVecGuard vec_x_guard(vec_x);
 
     cusparseDnVecDescr_t vec_y;
     CUSPARSE_CHECK(cusparseCreateDnVec(
@@ -346,6 +373,7 @@ Tensor cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
         result.data_ptr(),
         cuda_dtype
     ));
+    DnVecGuard vec_y_guard(vec_y);
 
     // Determine buffer size
     size_t buffer_size = 0;
@@ -367,11 +395,8 @@ Tensor cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
         &buffer_size
     ));
 
-    // Allocate workspace buffer
-    void* buffer = nullptr;
-    if (buffer_size > 0) {
-        CUDA_CHECK_SPARSE(cudaMalloc(&buffer, buffer_size));
-    }
+    // Allocate workspace buffer (RAII — freed on scope exit or exception)
+    CudaBuffer workspace(buffer_size);
 
     // Execute SpMV
     CUSPARSE_CHECK(cusparseSpMV(
@@ -384,19 +409,11 @@ Tensor cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
         vec_y,
         cuda_dtype,
         CUSPARSE_SPMV_ALG_DEFAULT,
-        buffer
+        workspace.ptr
     ));
 
     // Synchronize
     CUDA_CHECK_SPARSE(cudaDeviceSynchronize());
-
-    // Cleanup
-    if (buffer) {
-        CUDA_CHECK_SPARSE(cudaFree(buffer));
-    }
-    CUSPARSE_CHECK(cusparseDestroySpMat(mat_sparse));
-    CUSPARSE_CHECK(cusparseDestroyDnVec(vec_x));
-    CUSPARSE_CHECK(cusparseDestroyDnVec(vec_y));
 
     return result;
 }

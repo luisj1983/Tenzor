@@ -476,6 +476,17 @@ public:
     auto flatten(int64_t start_dim = 0, int64_t end_dim = -1) const -> Tensor;
 
     /**
+     * @brief Expand tensor to a larger size by broadcasting.
+     *
+     * Uses -1 in shape to keep existing dimension size.
+     * No data is copied — returns a view with broadcast strides.
+     *
+     * @param shape Target shape (must be compatible with broadcasting rules)
+     * @return Expanded tensor view
+     */
+    auto expand(std::vector<int64_t> shape) const -> Tensor;
+
+    /**
      * @brief Return indices of non-zero elements.
      *
      * Returns a 2D tensor where each row contains the indices of a non-zero element.
@@ -1035,6 +1046,7 @@ public:
     /// view tensors (reshape, transpose, slice). Do NOT use in user-facing code.
     /// Misuse can corrupt tensor metadata and invalidate storage bounds checks.
     /// @{
+#ifdef TENZOR_INTERNAL
 
     /// @brief Get mutable reference to shape vector (for view-creating kernels).
     auto mutable_shape() -> std::vector<int64_t>&;
@@ -1048,6 +1060,7 @@ public:
     /// @brief Invalidate the cached contiguity flag (call after modifying strides).
     auto invalidate_contiguity_cache() -> void;
 
+#endif // TENZOR_INTERNAL
     /// @}
 
 private:

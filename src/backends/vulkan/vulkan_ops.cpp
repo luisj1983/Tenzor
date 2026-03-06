@@ -970,7 +970,13 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
     } else if (is_int32) {
         shader_name = "reduction_i32";
     } else {
-        shader_name = "reduction";
+        // Use subgroup-optimized shader when device supports subgroup arithmetic
+        auto& ctx = devices_[device_id];
+        if (ctx.hasSubgroupArithmetic) {
+            shader_name = "reduction_subgroup";
+        } else {
+            shader_name = "reduction";
+        }
     }
     auto* pipeline = getPipeline(shader_name, device_id);
 

@@ -82,6 +82,8 @@ private:
         std::unique_ptr<vulkan::DescriptorPool> descriptorPool;
         bool canPreserveDenormsF32 = false;  // Whether GPU supports denormal preservation for float32
         bool hasAtomicInt64 = false;          // Whether GPU supports VK_EXT_shader_atomic_int64
+        bool hasSubgroupArithmetic = false;   // Whether GPU supports subgroup arithmetic ops
+        uint32_t subgroupSize = 0;            // Subgroup (warp) size for this device
         VkPipelineCache pipelineCache = VK_NULL_HANDLE;  // Persistent pipeline cache
 
         // Configurable fence timeout (default 30s, override with TENZOR_VULKAN_FENCE_TIMEOUT_S)
@@ -110,6 +112,9 @@ private:
 
         // Per-device mutex for independent multi-GPU operation.
         mutable std::recursive_mutex mutex;
+
+        // Set on VK_ERROR_DEVICE_LOST — prevents further submissions to lost device.
+        bool device_lost = false;
 
         DeviceContext() = default;
         DeviceContext(DeviceContext&& other) noexcept

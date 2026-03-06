@@ -457,7 +457,7 @@ PYBIND11_MODULE(tenzor_core, m) {
     m.attr("preserve_format") = tenzor::MemoryFormat::Preserve;
 
     // Tensor class
-    py::class_<tenzor::Tensor>(m, "Tensor")
+    py::class_<tenzor::Tensor>(m, "Tensor", py::buffer_protocol())
         .def(py::init<std::vector<int64_t>, tenzor::DType, tenzor::Device>(),
              py::arg("shape"),
              py::arg("dtype") = tenzor::DType::Float32,
@@ -496,20 +496,38 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("memory_format"),
              "Convert tensor to specified memory format (e.g., channels_last for NHWC)",
              py::call_guard<py::gil_scoped_release>())
-        .def("reshape", &tenzor::Tensor::reshape)
+        .def("reshape", &tenzor::Tensor::reshape,
+             py::arg("shape"),
+             "Return a tensor with the same data but a new shape")
         // Shape manipulation
         .def("transpose", &tenzor::Tensor::transpose,
-             py::arg("dim0"), py::arg("dim1"))
+             py::arg("dim0"), py::arg("dim1"),
+             "Swap two dimensions of the tensor")
         .def("permute", &tenzor::Tensor::permute,
-             py::arg("dims"))
+             py::arg("dims"),
+             "Permute the dimensions of the tensor")
         .def("squeeze", &tenzor::Tensor::squeeze,
-             py::arg("dim") = py::none())
+             py::arg("dim") = py::none(),
+             "Remove size-1 dimensions")
         .def("unsqueeze", &tenzor::Tensor::unsqueeze,
-             py::arg("dim"))
+             py::arg("dim"),
+             "Insert a size-1 dimension at the given position")
         .def("flatten", &tenzor::Tensor::flatten,
-             py::arg("start_dim") = 0, py::arg("end_dim") = -1)
+             py::arg("start_dim") = 0, py::arg("end_dim") = -1,
+             "Flatten consecutive dimensions into one")
         .def("view", &tenzor::Tensor::view,
-             py::arg("shape"))
+             py::arg("shape"),
+             "Return a view with a new shape (tensor must be contiguous)")
+        .def("expand", [](const tenzor::Tensor& self, std::vector<int64_t> shape) {
+             return tenzor::expand(self, std::move(shape));
+             }, py::arg("shape"),
+             "Expand tensor to a larger size (broadcast without copying)",
+             py::call_guard<py::gil_scoped_release>())
+        .def("repeat", [](const tenzor::Tensor& self, std::vector<int64_t> repeats) {
+             return tenzor::repeat(self, std::move(repeats));
+             }, py::arg("repeats"),
+             "Repeat tensor along each dimension",
+             py::call_guard<py::gil_scoped_release>())
         .def("narrow", &tenzor::Tensor::narrow,
              py::arg("dim"), py::arg("start"), py::arg("length"),
              "Narrow (slice) tensor along a dimension",
@@ -523,9 +541,12 @@ PYBIND11_MODULE(tenzor_core, m) {
              "Split tensor into chunks along a dimension",
              py::call_guard<py::gil_scoped_release>())
         // Memory operations
-        .def("clone", &tenzor::Tensor::clone)
-        .def("detach", &tenzor::Tensor::detach)
-        .def("contiguous", &tenzor::Tensor::contiguous)
+        .def("clone", &tenzor::Tensor::clone,
+             "Return a copy of the tensor with new storage")
+        .def("detach", &tenzor::Tensor::detach,
+             "Return a tensor detached from the computation graph")
+        .def("contiguous", &tenzor::Tensor::contiguous,
+             "Return a contiguous tensor (copy if needed)")
         .def("fill_", &tenzor::Tensor::fill_, py::arg("value"),
              "Fill tensor with scalar value in-place")
         .def("zero_", &tenzor::Tensor::zero_,
@@ -637,41 +658,41 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("__truediv__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return a / b; },
              py::is_operator(), "Element-wise division",
              py::call_guard<py::gil_scoped_release>())
-        // Arithmetic operators - Tensor-Scalar (use Tensor scalar operators directly)
-        .def("__add__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
-             return a + static_cast<double>(b);
+        // Arithmetic operators - Tensor-Scalar (double to match Python float precision)
+        .def("__add__", [](const tenzor::Tensor& a, double b) -> tenzor::Tensor {
+             return a + b;
              }, py::is_operator(),
              py::call_guard<py::gil_scoped_release>())
-        .def("__radd__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
-             return a + static_cast<double>(b);  // addition is commutative
+        .def("__radd__", [](const tenzor::Tensor& a, double b) -> tenzor::Tensor {
+             return a + b;  // addition is commutative
              }, py::is_operator(),
              py::call_guard<py::gil_scoped_release>())
-        .def("__sub__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
-             return a - static_cast<double>(b);
+        .def("__sub__", [](const tenzor::Tensor& a, double b) -> tenzor::Tensor {
+             return a - b;
              }, py::is_operator(),
              py::call_guard<py::gil_scoped_release>())
-        .def("__rsub__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
-             return tenzor::neg(a - static_cast<double>(b));  // b - a = -(a - b)
+        .def("__rsub__", [](const tenzor::Tensor& a, double b) -> tenzor::Tensor {
+             return tenzor::neg(a - b);  // b - a = -(a - b)
              }, py::is_operator(),
              py::call_guard<py::gil_scoped_release>())
-        .def("__mul__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
-             return a * static_cast<double>(b);
+        .def("__mul__", [](const tenzor::Tensor& a, double b) -> tenzor::Tensor {
+             return a * b;
              }, py::is_operator(),
              py::call_guard<py::gil_scoped_release>())
-        .def("__rmul__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
-             return a * static_cast<double>(b);  // multiplication is commutative
+        .def("__rmul__", [](const tenzor::Tensor& a, double b) -> tenzor::Tensor {
+             return a * b;  // multiplication is commutative
              }, py::is_operator(),
              py::call_guard<py::gil_scoped_release>())
-        .def("__truediv__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
-             return a / static_cast<double>(b);
+        .def("__truediv__", [](const tenzor::Tensor& a, double b) -> tenzor::Tensor {
+             return a / b;
              }, py::is_operator(),
              py::call_guard<py::gil_scoped_release>())
-        .def("__rtruediv__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
+        .def("__rtruediv__", [](const tenzor::Tensor& a, double b) -> tenzor::Tensor {
              // b / a = b * reciprocal(a)
-             return tenzor::reciprocal(a) * static_cast<double>(b);
+             return tenzor::reciprocal(a) * b;
              }, py::is_operator(),
              py::call_guard<py::gil_scoped_release>())
-        .def("__pow__", [](const tenzor::Tensor& a, float exponent) -> tenzor::Tensor {
+        .def("__pow__", [](const tenzor::Tensor& a, double exponent) -> tenzor::Tensor {
              return tenzor::pow(a, exponent);
              }, py::is_operator(), "Element-wise power",
              py::call_guard<py::gil_scoped_release>())
@@ -692,14 +713,14 @@ PYBIND11_MODULE(tenzor_core, m) {
              return tenzor::fmod(a, b);
              }, py::is_operator(), "Element-wise modulo",
              py::call_guard<py::gil_scoped_release>())
-        .def("__mod__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
-             auto b_tensor = tenzor::full(std::vector<int64_t>{}, static_cast<double>(b),
+        .def("__mod__", [](const tenzor::Tensor& a, double b) -> tenzor::Tensor {
+             auto b_tensor = tenzor::full(std::vector<int64_t>{}, b,
                                           a.dtype(), a.device());
              return tenzor::fmod(a, b_tensor);
              }, py::is_operator(),
              py::call_guard<py::gil_scoped_release>())
-        .def("__rmod__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
-             auto b_tensor = tenzor::full(std::vector<int64_t>{}, static_cast<double>(b),
+        .def("__rmod__", [](const tenzor::Tensor& a, double b) -> tenzor::Tensor {
+             auto b_tensor = tenzor::full(std::vector<int64_t>{}, b,
                                           a.dtype(), a.device());
              return tenzor::fmod(b_tensor, a);
              }, py::is_operator(),
@@ -708,8 +729,8 @@ PYBIND11_MODULE(tenzor_core, m) {
              return tenzor::floor(a / b);
              }, py::is_operator(), "Element-wise floor division",
              py::call_guard<py::gil_scoped_release>())
-        .def("__floordiv__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
-             return tenzor::floor(a / static_cast<double>(b));
+        .def("__floordiv__", [](const tenzor::Tensor& a, double b) -> tenzor::Tensor {
+             return tenzor::floor(a / b);
              }, py::is_operator(),
              py::call_guard<py::gil_scoped_release>())
         .def("__rfloordiv__", [](const tenzor::Tensor& a, float b) -> tenzor::Tensor {
@@ -1089,7 +1110,12 @@ PYBIND11_MODULE(tenzor_core, m) {
                 if (state.size() != 4) throw std::runtime_error("Invalid pickle state");
 
                 auto shape = state[0].cast<std::vector<int64_t>>();
-                auto dtype = static_cast<tenzor::DType>(state[1].cast<int>());
+                auto dtype_int = state[1].cast<int>();
+                if (dtype_int < 0 || dtype_int > static_cast<int>(tenzor::DType::Complex128))
+                    throw std::runtime_error("Invalid dtype in pickle state: " + std::to_string(dtype_int));
+                for (auto d : shape)
+                    if (d < 0) throw std::runtime_error("Negative dimension in pickle state");
+                auto dtype = static_cast<tenzor::DType>(dtype_int);
                 auto device_str = state[2].cast<std::string>();
                 auto data = state[3].cast<std::string>();
 
@@ -2168,8 +2194,29 @@ PYBIND11_MODULE(tenzor_core, m) {
     m.def("put", &tenzor::put, "Put elements into flattened tensor",
          py::arg("input"), py::arg("index"), py::arg("source"));
 
-    // Advanced operations (Phase 6)
-    // expand is already in transform operations
+    // Broadcast/expansion operations
+    m.def("expand", [](const tenzor::Tensor& input, std::vector<int64_t> shape) {
+        return tenzor::expand(input, std::move(shape));
+    }, "Expand tensor to a larger size (broadcast without copying)",
+         py::arg("input"), py::arg("shape"),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("repeat", [](const tenzor::Tensor& input, std::vector<int64_t> repeats) {
+        return tenzor::repeat(input, std::move(repeats));
+    }, "Repeat tensor along each dimension",
+         py::arg("input"), py::arg("repeats"),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("tile", [](const tenzor::Tensor& input, std::vector<int64_t> reps) {
+        return tenzor::tile(input, std::move(reps));
+    }, "Tile tensor by repeating along each dimension",
+         py::arg("input"), py::arg("reps"),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("broadcast_to", [](const tenzor::Tensor& input, std::vector<int64_t> shape) {
+        return tenzor::expand(input, std::move(shape));
+    }, "Broadcast tensor to a target shape",
+         py::arg("input"), py::arg("shape"),
+         py::call_guard<py::gil_scoped_release>());
+
+    // Advanced operations
     m.def("topk", [](const tenzor::Tensor& input, int64_t k, int64_t dim, bool largest, bool sorted) {
         return tenzor::topk(input, k, dim, largest, sorted);
     }, "Find top k elements",
@@ -2272,37 +2319,37 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("__truediv__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
             return a / b;
         }, py::is_operator())
-        // Arithmetic operators - Variable-Scalar
-        .def("__add__", [](const tenzor::Variable& a, float b) {
+        // Arithmetic operators - Variable-Scalar (double to match Python float precision)
+        .def("__add__", [](const tenzor::Variable& a, double b) {
             return a + b;
         }, py::is_operator())
-        .def("__radd__", [](const tenzor::Variable& a, float b) {
+        .def("__radd__", [](const tenzor::Variable& a, double b) {
             return a + b;
         }, py::is_operator())
-        .def("__mul__", [](const tenzor::Variable& a, float b) {
+        .def("__mul__", [](const tenzor::Variable& a, double b) {
             return a * b;
         }, py::is_operator())
-        .def("__rmul__", [](const tenzor::Variable& a, float b) {
+        .def("__rmul__", [](const tenzor::Variable& a, double b) {
             return a * b;
         }, py::is_operator())
-        .def("__sub__", [](const tenzor::Variable& a, float b) {
+        .def("__sub__", [](const tenzor::Variable& a, double b) {
             return a - b;
         }, py::is_operator())
-        .def("__rsub__", [](const tenzor::Variable& a, float b) {
+        .def("__rsub__", [](const tenzor::Variable& a, double b) {
             // b - a = -(a - b)
-            return (a - b) * -1.0f;
+            return (a - b) * -1.0;
         }, py::is_operator())
-        .def("__truediv__", [](const tenzor::Variable& a, float b) {
+        .def("__truediv__", [](const tenzor::Variable& a, double b) {
             return a / b;
         }, py::is_operator())
-        .def("__rtruediv__", [](const tenzor::Variable& a, float b) {
+        .def("__rtruediv__", [](const tenzor::Variable& a, double b) {
             // b / a: create scalar variable with value b, divide by a
             auto b_var = tenzor::Variable(
-                tenzor::full({}, static_cast<double>(b), a.dtype(), a.device()), false);
+                tenzor::full({}, b, a.dtype(), a.device()), false);
             return b_var / a;
         }, py::is_operator())
         .def("__neg__", [](const tenzor::Variable& a) {
-            return a * -1.0f;
+            return a * -1.0;
         }, py::is_operator())
         // Matrix multiplication
         .def("__matmul__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
@@ -2476,7 +2523,8 @@ PYBIND11_MODULE(tenzor_core, m) {
             }
             return result;
         })
-        .def("dim", [](const tenzor::Variable& v) { return v.tensor().ndim(); })
+        .def("dim", [](const tenzor::Variable& v) { return v.tensor().ndim(); },
+             "Number of dimensions")
         .def("__index__", [](const tenzor::Variable& v) {
             return v.tensor().item<int64_t>();
         })
@@ -2525,7 +2573,12 @@ PYBIND11_MODULE(tenzor_core, m) {
                 if (state.size() != 5) throw std::runtime_error("Invalid pickle state");
 
                 auto shape = state[0].cast<std::vector<int64_t>>();
-                auto dtype = static_cast<tenzor::DType>(state[1].cast<int>());
+                auto dtype_int = state[1].cast<int>();
+                if (dtype_int < 0 || dtype_int > static_cast<int>(tenzor::DType::Complex128))
+                    throw std::runtime_error("Invalid dtype in pickle state: " + std::to_string(dtype_int));
+                for (auto d : shape)
+                    if (d < 0) throw std::runtime_error("Negative dimension in pickle state");
+                auto dtype = static_cast<tenzor::DType>(dtype_int);
                 auto device_str = state[2].cast<std::string>();
                 bool requires_grad = state[3].cast<bool>();
                 auto data = state[4].cast<std::string>();
@@ -3597,6 +3650,11 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def(py::init<int64_t, int64_t>(),
              py::arg("start_dim") = 1,
              py::arg("end_dim") = -1);
+
+    py::class_<tenzor::nn::Identity, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::Identity>>(nn, "Identity",
+               "Identity layer — passes input through unchanged")
+        .def(py::init<>());
 
     // Sequential container
     // NOTE: To support Python-defined modules, we can't use constructor with variadic

@@ -92,6 +92,7 @@ target_compile_definitions(tenzor_rocm_kernels PRIVATE
     __HIP_PLATFORM_AMD__
     __HIP_PLATFORM_HCC__
     TENZOR_ROCM_BACKEND
+    TENZOR_INTERNAL
 )
 
 # Add hipRAND support to kernels library if available
@@ -217,6 +218,7 @@ endif()
 # C++ backend definitions (HIP definitions are on the kernels library)
 target_compile_definitions(tenzor_backend_rocm PRIVATE
     TENZOR_ROCM_BACKEND
+    TENZOR_INTERNAL
 )
 
 # Override compile options to force C++ compilation (override any -x hip flags)

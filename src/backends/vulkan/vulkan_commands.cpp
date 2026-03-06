@@ -95,6 +95,10 @@ void VulkanBackend::releaseCommandBuffer(VkCommandBuffer cmdBuffer, int32_t devi
 void VulkanBackend::ensurePendingWorkComplete(int32_t device_id) {
     auto& ctx = devices_[device_id];
 
+    if (ctx.device_lost) {
+        throw std::runtime_error("Vulkan device lost — cannot wait for work on a lost device");
+    }
+
     // Wait on all frame fences that have been submitted
     if (ctx.submittedFrames > 0) {
         // Collect all fences that might have pending work
@@ -106,7 +110,8 @@ void VulkanBackend::ensurePendingWorkComplete(int32_t device_id) {
                 if (status == VK_NOT_READY) {
                     fencesToWait.push_back(ctx.frameFences[i]);
                 } else if (status == VK_ERROR_DEVICE_LOST) {
-                    throw std::runtime_error("Device lost before fence wait (fence status check)");
+                    ctx.device_lost = true;
+                    throw std::runtime_error("Vulkan device lost (fence status check)");
                 }
             }
         }
@@ -121,12 +126,12 @@ void VulkanBackend::ensurePendingWorkComplete(int32_t device_id) {
                     "This often indicates memory pressure or a shader hang. "
                     "Try reducing batch size or model size, or set TENZOR_VULKAN_FENCE_TIMEOUT_S.");
             }
+            if (result == VK_ERROR_DEVICE_LOST) {
+                ctx.device_lost = true;
+                throw std::runtime_error("Vulkan device lost (fence wait) — GPU crash or timeout");
+            }
             if (result != VK_SUCCESS) {
-                std::string error_msg = "Failed to wait for fences: " + std::to_string(result);
-                if (result == VK_ERROR_DEVICE_LOST) {
-                    error_msg += " (VK_ERROR_DEVICE_LOST - GPU crash or timeout)";
-                }
-                throw std::runtime_error(error_msg);
+                throw std::runtime_error("Failed to wait for fences: " + std::to_string(result));
             }
         }
 
@@ -140,6 +145,10 @@ void VulkanBackend::ensurePendingWorkComplete(int32_t device_id) {
 
 void VulkanBackend::endSingleTimeCommandsAsync(VkCommandBuffer commandBuffer, int32_t device_id) {
     auto& ctx = devices_[device_id];
+
+    if (ctx.device_lost) {
+        throw std::runtime_error("Vulkan device lost — cannot submit work to a lost device");
+    }
 
     VkResult result = vkEndCommandBuffer(commandBuffer);
     if (result != VK_SUCCESS) {
@@ -160,6 +169,10 @@ void VulkanBackend::endSingleTimeCommandsAsync(VkCommandBuffer commandBuffer, in
             throw std::runtime_error("GPU fence wait timed out after " +
                 std::to_string(ctx.fence_timeout_ns / 1'000'000'000ULL) + " seconds. "
                 "This often indicates memory pressure or a shader hang.");
+        }
+        if (waitResult == VK_ERROR_DEVICE_LOST) {
+            ctx.device_lost = true;
+            throw std::runtime_error("Vulkan device lost during frame fence wait");
         }
         if (waitResult != VK_SUCCESS) {
             throw std::runtime_error("Failed to wait for frame fence: " + std::to_string(waitResult));
@@ -183,11 +196,11 @@ void VulkanBackend::endSingleTimeCommandsAsync(VkCommandBuffer commandBuffer, in
 
     result = vkQueueSubmit(ctx.computeQueue, 1, &submitInfo, fence);
     if (result != VK_SUCCESS) {
-        std::string error_msg = "Failed to submit queue with fence: " + std::to_string(result);
         if (result == VK_ERROR_DEVICE_LOST) {
-            error_msg += " (VK_ERROR_DEVICE_LOST)";
+            ctx.device_lost = true;
+            throw std::runtime_error("Vulkan device lost during queue submit — GPU crash or timeout");
         }
-        throw std::runtime_error(error_msg);
+        throw std::runtime_error("Failed to submit queue with fence: " + std::to_string(result));
     }
 
     // Move to next frame slot (ring buffer)

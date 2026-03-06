@@ -174,6 +174,9 @@ set_target_properties(tenzor_core PROPERTIES
     PUBLIC_HEADER "${CMAKE_SOURCE_DIR}/include/tenzor/tenzor.hpp"
 )
 
+# Internal methods visible only to core + backends
+target_compile_definitions(tenzor_core PRIVATE TENZOR_INTERNAL)
+
 # Pre-compiled headers for faster compilation
 target_precompile_headers(tenzor_core PRIVATE
     <vector>
