@@ -450,6 +450,21 @@ auto Tensor::to(Device device) const -> Tensor {
     return result;
 }
 
+auto Tensor::to(Device device, DType dtype) const -> Tensor {
+    if (!impl_) return *this;
+
+    bool same_device = (impl_->device == device);
+    bool same_dtype = (impl_->dtype == dtype);
+
+    if (same_device && same_dtype && is_contiguous()) return *this;
+
+    // Transfer to device first (preserving current dtype), then cast on-device.
+    // This avoids: (1) casting on source device then transferring, or
+    // (2) transferring then casting on CPU if target is GPU.
+    Tensor on_device = same_device ? *this : to(device);
+    return same_dtype ? on_device : on_device.to(dtype);
+}
+
 auto Tensor::to(DType dtype) const -> Tensor {
     if (!impl_) {
         return *this;
@@ -773,55 +788,21 @@ auto Tensor::fill_(double value) -> Tensor& {
     // Non-contiguous tensors: iterate using strides to fill each element in-place
     if (!is_contiguous()) {
         if (device().type != Device::Type::CPU) {
-            // For non-contiguous GPU tensors: transfer to CPU, fill with strides, copy back.
-            // The underlying storage is shared, so we copy the full storage to CPU,
-            // fill the strided elements, then copy the storage back.
-            auto* backend = backend_registry().get_backend(device().type);
-            const size_t storage_bytes = impl_->storage->size_bytes();
-            std::vector<uint8_t> host_buf(storage_bytes);
-            backend->copy(host_buf.data(), impl_->storage->data(), storage_bytes,
-                         CopyKind::DeviceToHost);
-            backend->synchronize(device().index);
-
-            // Fill strided elements in host buffer
-            auto ndims = this->ndim();
-            auto shp = this->shape();
-            auto str = this->strides();
-            auto elem_size = tenzor::dtype_size(dtype());
-            auto* base = host_buf.data() + impl_->offset * elem_size;
-            std::vector<int64_t> indices(ndims, 0);
-            for (int64_t i = 0; i < numel(); ++i) {
-                int64_t byte_offset = 0;
-                for (int64_t d = 0; d < ndims; ++d)
-                    byte_offset += indices[d] * str[d] * elem_size;
-                switch (dtype()) {
-                    case DType::Float32: *reinterpret_cast<float*>(base + byte_offset) = static_cast<float>(value); break;
-                    case DType::Float64: *reinterpret_cast<double*>(base + byte_offset) = value; break;
-                    case DType::Int32: *reinterpret_cast<int32_t*>(base + byte_offset) = static_cast<int32_t>(value); break;
-                    case DType::Int64: *reinterpret_cast<int64_t*>(base + byte_offset) = static_cast<int64_t>(value); break;
-                    case DType::Int16: *reinterpret_cast<int16_t*>(base + byte_offset) = static_cast<int16_t>(value); break;
-                    case DType::Int8: *reinterpret_cast<int8_t*>(base + byte_offset) = static_cast<int8_t>(value); break;
-                    case DType::UInt8: *reinterpret_cast<uint8_t*>(base + byte_offset) = static_cast<uint8_t>(value); break;
-                    case DType::UInt16: *reinterpret_cast<uint16_t*>(base + byte_offset) = static_cast<uint16_t>(value); break;
-                    case DType::UInt32: *reinterpret_cast<uint32_t*>(base + byte_offset) = static_cast<uint32_t>(value); break;
-                    case DType::UInt64: *reinterpret_cast<uint64_t*>(base + byte_offset) = static_cast<uint64_t>(value); break;
-                    case DType::Float16: *reinterpret_cast<Float16*>(base + byte_offset) = Float16(static_cast<float>(value)); break;
-                    case DType::BFloat16: *reinterpret_cast<BFloat16*>(base + byte_offset) = BFloat16(static_cast<float>(value)); break;
-                    case DType::Bool: *reinterpret_cast<bool*>(base + byte_offset) = (value != 0.0f); break;
-                    case DType::Complex64: *reinterpret_cast<std::complex<float>*>(base + byte_offset) = std::complex<float>(value, 0.0f); break;
-                    case DType::Complex128: *reinterpret_cast<std::complex<double>*>(base + byte_offset) = std::complex<double>(static_cast<double>(value), 0.0); break;
-                    default: throw std::runtime_error("fill_ not supported for this dtype");
-                }
-                for (int64_t d = ndims - 1; d >= 0; --d) {
-                    if (++indices[d] < shp[d]) break;
-                    indices[d] = 0;
-                }
+            // Dispatch to backend's StridedFill kernel — avoids expensive GPU→CPU→GPU round-trip
+            auto& table = DispatchTableRegistry::get_table(impl_->device.type);
+            if (table.has_inplace_kernel(OpId::StridedFill)) {
+                OpAttributes attrs;
+                attrs.set(AttrKey::Value, value);
+                table.dispatch_inplace(OpId::StridedFill, *this, {}, attrs);
+                bump_version();
+                return *this;
             }
-
-            // Copy modified storage back to device
-            backend->copy(impl_->storage->data(), host_buf.data(), storage_bytes,
-                         CopyKind::HostToDevice);
-            bump_version();
+            // Fallback for backends without StridedFill: contiguous copy + fill
+            auto contig = contiguous();
+            contig.fill_(value);
+            auto shp = shape();
+            auto result = contig.reshape({shp.begin(), shp.end()});
+            impl_ = result.impl_;
             return *this;
         }
         auto ndims = this->ndim();

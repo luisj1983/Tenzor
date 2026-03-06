@@ -122,6 +122,27 @@ private:
     auto convert_concat(const ONNXImportNode& node) -> void;
     auto convert_split(const ONNXImportNode& node) -> void;
     auto convert_flatten(const ONNXImportNode& node) -> void;
+    auto convert_squeeze(const ONNXImportNode& node) -> void;
+    auto convert_unsqueeze(const ONNXImportNode& node) -> void;
+    auto convert_slice(const ONNXImportNode& node) -> void;
+    auto convert_pad(const ONNXImportNode& node) -> void;
+    auto convert_gather(const ONNXImportNode& node) -> void;
+    auto convert_clip(const ONNXImportNode& node) -> void;
+    auto convert_cast(const ONNXImportNode& node) -> void;
+    auto convert_dropout(const ONNXImportNode& node) -> void;
+    auto convert_resize(const ONNXImportNode& node) -> void;
+    auto convert_reduce_sum(const ONNXImportNode& node) -> void;
+    auto convert_reduce_mean(const ONNXImportNode& node) -> void;
+    auto convert_reduce_max(const ONNXImportNode& node) -> void;
+    auto convert_shape(const ONNXImportNode& node) -> void;
+    auto convert_constant_of_shape(const ONNXImportNode& node) -> void;
+    auto convert_where(const ONNXImportNode& node) -> void;
+    auto convert_expand(const ONNXImportNode& node) -> void;
+    auto convert_pow(const ONNXImportNode& node) -> void;
+    auto convert_sqrt(const ONNXImportNode& node) -> void;
+    auto convert_neg(const ONNXImportNode& node) -> void;
+    auto convert_exp(const ONNXImportNode& node) -> void;
+    auto convert_log(const ONNXImportNode& node) -> void;
 
     // Layer conversion
     auto convert_conv(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;

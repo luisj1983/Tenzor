@@ -2429,6 +2429,82 @@ auto fill_kernel(const Tensor& tensor, float value, cudaStream_t stream) -> Tens
     return result;
 }
 
+// Strided fill kernel — fills non-contiguous tensor elements in-place on GPU
+// Each thread computes its own multi-dimensional index from a flat index,
+// then writes the fill value at the strided offset.
+template<typename T>
+__global__ void strided_fill_kernel_device(
+    T* base, T value, int64_t n,
+    const int64_t* shape, const int64_t* strides, int32_t ndims) {
+    CUDA_KERNEL_LOOP(flat_idx, n) {
+        int64_t remaining = flat_idx;
+        int64_t offset = 0;
+        for (int32_t d = ndims - 1; d >= 0; --d) {
+            int64_t coord = remaining % shape[d];
+            remaining /= shape[d];
+            offset += coord * strides[d];
+        }
+        base[offset] = value;
+    }
+}
+
+auto strided_fill_kernel(Tensor& self, float value, cudaStream_t stream) -> void {
+    int64_t n = self.numel();
+    if (n == 0) return;
+
+    auto ndims = self.ndim();
+    auto shp = self.shape();
+    auto str = self.strides();
+
+    // Copy shape and strides to device
+    std::vector<int64_t> meta(ndims * 2);
+    for (int64_t d = 0; d < ndims; ++d) {
+        meta[d] = shp[d];
+        meta[ndims + d] = str[d];
+    }
+    int64_t* d_meta = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&d_meta, meta.size() * sizeof(int64_t), stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_meta, meta.data(), meta.size() * sizeof(int64_t),
+                               cudaMemcpyHostToDevice, stream));
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    auto launch = [&](auto* ptr, auto typed_value) {
+        using T = std::remove_pointer_t<decltype(ptr)>;
+        strided_fill_kernel_device<<<grid, block, 0, stream>>>(
+            ptr, typed_value, n, d_meta, d_meta + ndims, static_cast<int32_t>(ndims));
+        CUDA_CHECK(cudaGetLastError());
+    };
+
+    if (self.dtype() == DType::Float32) {
+        launch(self.data<float>(), static_cast<float>(value));
+    } else if (self.dtype() == DType::Float64) {
+        launch(self.data<double>(), static_cast<double>(value));
+    } else if (self.dtype() == DType::Int32) {
+        launch(self.data<int32_t>(), static_cast<int32_t>(value));
+    } else if (self.dtype() == DType::Int64) {
+        launch(self.data<int64_t>(), static_cast<int64_t>(value));
+    } else if (self.dtype() == DType::Float16) {
+        __half h_value = __float2half(value);
+        launch(reinterpret_cast<__half*>(self.data<Float16>()), h_value);
+    } else if (self.dtype() == DType::BFloat16) {
+        __nv_bfloat16 bf_value = __float2bfloat16(value);
+        launch(reinterpret_cast<__nv_bfloat16*>(self.data<BFloat16>()), bf_value);
+    } else if (self.dtype() == DType::Int8) {
+        launch(self.data<int8_t>(), static_cast<int8_t>(value));
+    } else if (self.dtype() == DType::UInt8) {
+        launch(self.data<uint8_t>(), static_cast<uint8_t>(value));
+    } else if (self.dtype() == DType::Bool) {
+        launch(self.data<bool>(), value != 0.0f);
+    } else {
+        CUDA_CHECK(cudaFreeAsync(d_meta, stream));
+        throw std::runtime_error("strided_fill: unsupported dtype");
+    }
+
+    CUDA_CHECK(cudaFreeAsync(d_meta, stream));
+}
+
 // Zeros kernel launcher - creates tensor filled with zeros
 auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor {
     Tensor result(shape, dtype, device);

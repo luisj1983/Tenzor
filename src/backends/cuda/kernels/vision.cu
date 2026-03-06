@@ -344,6 +344,122 @@ __global__ void interpolate_bicubic_kernel(
 }
 
 // ============================================================================
+// 5D Interpolation Kernels (trilinear, nearest-5d)
+// ============================================================================
+
+template<typename T>
+__global__ void interpolate_trilinear_kernel(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    int64_t batch,
+    int64_t channels,
+    int64_t in_d,
+    int64_t in_h,
+    int64_t in_w,
+    int64_t out_d,
+    int64_t out_h,
+    int64_t out_w,
+    bool align_corners
+) {
+    int64_t total = batch * channels * out_d * out_h * out_w;
+    CUDA_KERNEL_LOOP(idx, total) {
+        int64_t temp = idx;
+        int64_t ow = temp % out_w; temp /= out_w;
+        int64_t oh = temp % out_h; temp /= out_h;
+        int64_t od = temp % out_d; temp /= out_d;
+        int64_t c  = temp % channels; temp /= channels;
+        int64_t b  = temp;
+
+        float z, y, x;
+        if (align_corners) {
+            z = (out_d > 1) ? static_cast<float>(od) * (in_d - 1) / (out_d - 1) : 0.0f;
+            y = (out_h > 1) ? static_cast<float>(oh) * (in_h - 1) / (out_h - 1) : 0.0f;
+            x = (out_w > 1) ? static_cast<float>(ow) * (in_w - 1) / (out_w - 1) : 0.0f;
+        } else {
+            float scale_d = static_cast<float>(in_d) / out_d;
+            float scale_h = static_cast<float>(in_h) / out_h;
+            float scale_w = static_cast<float>(in_w) / out_w;
+            z = (od + 0.5f) * scale_d - 0.5f;
+            y = (oh + 0.5f) * scale_h - 0.5f;
+            x = (ow + 0.5f) * scale_w - 0.5f;
+        }
+
+        z = fmaxf(0.0f, fminf(z, static_cast<float>(in_d - 1)));
+        y = fmaxf(0.0f, fminf(y, static_cast<float>(in_h - 1)));
+        x = fmaxf(0.0f, fminf(x, static_cast<float>(in_w - 1)));
+
+        int64_t z0 = static_cast<int64_t>(z);
+        int64_t y0 = static_cast<int64_t>(y);
+        int64_t x0 = static_cast<int64_t>(x);
+        int64_t z1 = min(z0 + 1, in_d - 1);
+        int64_t y1 = min(y0 + 1, in_h - 1);
+        int64_t x1 = min(x0 + 1, in_w - 1);
+
+        float fz = z - z0;
+        float fy = y - y0;
+        float fx = x - x0;
+
+        int64_t base = (b * channels + c) * in_d * in_h * in_w;
+
+        float v000 = static_cast<float>(input[base + z0 * in_h * in_w + y0 * in_w + x0]);
+        float v001 = static_cast<float>(input[base + z0 * in_h * in_w + y0 * in_w + x1]);
+        float v010 = static_cast<float>(input[base + z0 * in_h * in_w + y1 * in_w + x0]);
+        float v011 = static_cast<float>(input[base + z0 * in_h * in_w + y1 * in_w + x1]);
+        float v100 = static_cast<float>(input[base + z1 * in_h * in_w + y0 * in_w + x0]);
+        float v101 = static_cast<float>(input[base + z1 * in_h * in_w + y0 * in_w + x1]);
+        float v110 = static_cast<float>(input[base + z1 * in_h * in_w + y1 * in_w + x0]);
+        float v111 = static_cast<float>(input[base + z1 * in_h * in_w + y1 * in_w + x1]);
+
+        float result =
+            v000 * (1 - fz) * (1 - fy) * (1 - fx) +
+            v001 * (1 - fz) * (1 - fy) * fx +
+            v010 * (1 - fz) * fy * (1 - fx) +
+            v011 * (1 - fz) * fy * fx +
+            v100 * fz * (1 - fy) * (1 - fx) +
+            v101 * fz * (1 - fy) * fx +
+            v110 * fz * fy * (1 - fx) +
+            v111 * fz * fy * fx;
+
+        output[idx] = static_cast<T>(result);
+    }
+}
+
+template<typename T>
+__global__ void interpolate_nearest_5d_kernel(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    int64_t batch,
+    int64_t channels,
+    int64_t in_d,
+    int64_t in_h,
+    int64_t in_w,
+    int64_t out_d,
+    int64_t out_h,
+    int64_t out_w
+) {
+    float scale_d = static_cast<float>(in_d) / out_d;
+    float scale_h = static_cast<float>(in_h) / out_h;
+    float scale_w = static_cast<float>(in_w) / out_w;
+    int64_t total = batch * channels * out_d * out_h * out_w;
+
+    CUDA_KERNEL_LOOP(idx, total) {
+        int64_t temp = idx;
+        int64_t ow = temp % out_w; temp /= out_w;
+        int64_t oh = temp % out_h; temp /= out_h;
+        int64_t od = temp % out_d; temp /= out_d;
+        int64_t c  = temp % channels; temp /= channels;
+        int64_t b  = temp;
+
+        int64_t id = min(static_cast<int64_t>(od * scale_d), in_d - 1);
+        int64_t ih = min(static_cast<int64_t>(oh * scale_h), in_h - 1);
+        int64_t iw = min(static_cast<int64_t>(ow * scale_w), in_w - 1);
+
+        int64_t in_idx = ((b * channels + c) * in_d + id) * in_h * in_w + ih * in_w + iw;
+        output[idx] = input[in_idx];
+    }
+}
+
+// ============================================================================
 // Host Functions
 // ============================================================================
 
@@ -443,6 +559,37 @@ auto interpolate_cuda(const Tensor& input,
                       const std::string& mode,
                       bool align_corners) -> Tensor {
     auto shape = input.shape();
+
+    // Handle 5D input (trilinear / nearest-5d)
+    if (shape.size() == 5) {
+        int64_t batch = shape[0], channels = shape[1];
+        int64_t in_d = shape[2], in_h = shape[3], in_w = shape[4];
+        int64_t out_d = size[0], out_h = size[1], out_w = size[2];
+
+        Tensor output({batch, channels, out_d, out_h, out_w}, input.dtype(), input.device());
+        int64_t total = batch * channels * out_d * out_h * out_w;
+        dim3 grid, block;
+        compute_launch_config_1d(total, grid, block);
+
+        if (mode == "trilinear") {
+            TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "interpolate_trilinear", [&]() {
+                interpolate_trilinear_kernel<scalar_t><<<grid, block>>>(
+                    input.data<scalar_t>(), output.data<scalar_t>(),
+                    batch, channels, in_d, in_h, in_w, out_d, out_h, out_w, align_corners);
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
+            });
+        } else {
+            TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "interpolate_nearest_5d", [&]() {
+                interpolate_nearest_5d_kernel<scalar_t><<<grid, block>>>(
+                    input.data<scalar_t>(), output.data<scalar_t>(),
+                    batch, channels, in_d, in_h, in_w, out_d, out_h, out_w);
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
+            });
+        }
+        return output;
+    }
+
+    // 4D path
     int64_t batch = shape[0];
     int64_t channels = shape[1];
     int64_t in_h = shape[2];

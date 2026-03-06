@@ -525,7 +525,15 @@ void VulkanBackend::createLogicalDevices() {
                 }
             }
 
-            vkCreatePipelineCache(ctx.device, &cacheCreateInfo, nullptr, &ctx.pipelineCache);
+            VkResult cacheResult = vkCreatePipelineCache(ctx.device, &cacheCreateInfo, nullptr, &ctx.pipelineCache);
+            if (cacheResult != VK_SUCCESS) {
+                // Non-fatal: pipelines work without cache, just slower startup
+                ctx.pipelineCache = VK_NULL_HANDLE;
+                // Retry with empty cache (corrupt data from disk is the usual cause)
+                cacheCreateInfo.initialDataSize = 0;
+                cacheCreateInfo.pInitialData = nullptr;
+                vkCreatePipelineCache(ctx.device, &cacheCreateInfo, nullptr, &ctx.pipelineCache);
+            }
         }
 
         // Get compute queue
@@ -905,7 +913,8 @@ VkDescriptorSet VulkanBackend::allocateAndWriteDescriptorSet(
         ensurePendingWorkComplete(device_id);
 
         // Reset command pool and descriptor pool
-        vkResetCommandPool(ctx.device, ctx.commandPool, 0);
+        vulkan::checkVk(vkResetCommandPool(ctx.device, ctx.commandPool, 0),
+                        "Failed to reset command pool during descriptor pool recovery");
         ctx.nextCommandBufferIndex = 0;
         ctx.submittedFrames = 0;
         ctx.currentFrame = 0;

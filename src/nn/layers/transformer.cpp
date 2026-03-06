@@ -77,66 +77,27 @@ auto PositionalEncoding::forward_impl(const Variable& x) -> Variable {
             " exceeds maximum length " + std::to_string(max_len_));
     }
 
-    // Extract positional encodings for this sequence length
-    // pe_shape for batch_first=true: (1, seq_len, d_model)
-    std::vector<int64_t> pe_shape = {1, seq_len, d_model_};
-
     // Get input device and dtype
     Device input_device = x.tensor().device();
     DType input_dtype = x.tensor().dtype();
 
-    // Slice and reshape positional encoding on CPU first
-    // Use pe_'s current dtype (may have been converted via to(dtype))
-    DType pe_dtype = pe_.dtype();
-    Tensor pe_slice = reshape(pe_, {max_len_, d_model_});
-
-    // Take first seq_len rows with proper dtype handling
-    std::vector<int64_t> slice_shape = {seq_len, d_model_};
-    Tensor pe_for_seq = zeros({seq_len, d_model_}, pe_dtype, Device::cpu());
-
-    // Copy data using appropriate dtype
-    if (pe_dtype == DType::Float32) {
-        auto* pe_src = pe_.data<float>();
-        auto* pe_dst = pe_for_seq.data<float>();
-        for (int64_t i = 0; i < seq_len * d_model_; ++i) {
-            pe_dst[i] = pe_src[i];
-        }
-    } else if (pe_dtype == DType::Float64) {
-        auto* pe_src = pe_.data<double>();
-        auto* pe_dst = pe_for_seq.data<double>();
-        for (int64_t i = 0; i < seq_len * d_model_; ++i) {
-            pe_dst[i] = pe_src[i];
-        }
-    } else if (pe_dtype == DType::Float16) {
-        auto* pe_src = pe_.data<uint16_t>();
-        auto* pe_dst = pe_for_seq.data<uint16_t>();
-        for (int64_t i = 0; i < seq_len * d_model_; ++i) {
-            pe_dst[i] = pe_src[i];
-        }
-    } else if (pe_dtype == DType::BFloat16) {
-        auto* pe_src = pe_.data<uint16_t>();
-        auto* pe_dst = pe_for_seq.data<uint16_t>();
-        for (int64_t i = 0; i < seq_len * d_model_; ++i) {
-            pe_dst[i] = pe_src[i];
-        }
+    // Cache PE on the input's device and dtype to avoid repeated CPU→GPU transfers.
+    // Invalidate cache if device or dtype changed since last forward.
+    if (!pe_cached_.is_valid() ||
+        pe_cached_.device() != input_device ||
+        pe_cached_.dtype() != input_dtype) {
+        // Transfer full PE to target device and dtype once
+        pe_cached_ = pe_.to(input_device, input_dtype);
     }
 
-    // Now move to target device if needed
-    if (input_device != Device::cpu()) {
-        pe_for_seq = pe_for_seq.to(input_device);
-    }
-
-    // Reshape to match input
-    pe_for_seq = reshape(pe_for_seq, pe_shape);
+    // Slice first seq_len rows: pe_cached_ shape is (max_len_, d_model_)
+    // Use slice view (zero-copy) then reshape to (1, seq_len, d_model)
+    Tensor pe_slice = pe_cached_.slice(0, 0, seq_len);
+    Tensor pe_for_seq = reshape(pe_slice, {1, seq_len, d_model_});
 
     // Broadcast positional encoding to match batch size
     std::vector<int64_t> broadcast_shape(shape.begin(), shape.end());
     Tensor pe_broadcast = expand(pe_for_seq, broadcast_shape);
-
-    // Convert to input dtype if pe_ dtype differs from input dtype
-    if (pe_dtype != input_dtype) {
-        pe_broadcast = pe_broadcast.to(input_dtype);
-    }
 
     // Add to input
     Variable pe_var(pe_broadcast, false);

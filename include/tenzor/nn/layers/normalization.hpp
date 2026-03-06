@@ -285,6 +285,32 @@ private:
 };
 
 /**
+ * @brief Instance Normalization for 3D inputs (5D tensors).
+ *
+ * Normalizes each channel independently across spatial dimensions (D, H, W)
+ * for each sample in the batch. Internally reshapes to 4D and delegates
+ * to InstanceNorm2d.
+ *
+ * Shape:
+ * - Input: (N, C, D, H, W)
+ * - Output: Same as input
+ *
+ * @see InstanceNorm2d for 2D instance normalization
+ */
+class InstanceNorm3d : public Module {
+public:
+    InstanceNorm3d(int64_t num_features,
+                   double eps = 1e-5,
+                   bool affine = true);
+
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    int64_t num_features_;
+    InstanceNorm2d in2d_; ///< Delegate to InstanceNorm2d after reshaping
+};
+
+/**
  * @brief Root Mean Square Layer Normalization.
  *
  * Simplified variant of LayerNorm that only uses root mean square for

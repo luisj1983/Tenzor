@@ -226,6 +226,129 @@ void interpolate_bicubic_impl(
     }
 }
 
+// Template for trilinear interpolation (5D: N, C, D, H, W)
+template<typename T>
+void interpolate_trilinear_impl(
+    const T* input,
+    T* output,
+    int64_t batch,
+    int64_t channels,
+    int64_t in_d,
+    int64_t in_h,
+    int64_t in_w,
+    int64_t out_d,
+    int64_t out_h,
+    int64_t out_w,
+    bool align_corners
+) {
+    int64_t total = batch * channels * out_d * out_h * out_w;
+
+#ifdef _OPENMP
+    #pragma omp parallel for if(total > 65536)
+#endif
+    for (int64_t idx = 0; idx < total; ++idx) {
+        int64_t temp = idx;
+        int64_t ow = temp % out_w; temp /= out_w;
+        int64_t oh = temp % out_h; temp /= out_h;
+        int64_t od = temp % out_d; temp /= out_d;
+        int64_t c  = temp % channels; temp /= channels;
+        int64_t b  = temp;
+
+        float z, y, x;
+        if (align_corners) {
+            z = (out_d > 1) ? static_cast<float>(od) * (in_d - 1) / (out_d - 1) : 0.0f;
+            y = (out_h > 1) ? static_cast<float>(oh) * (in_h - 1) / (out_h - 1) : 0.0f;
+            x = (out_w > 1) ? static_cast<float>(ow) * (in_w - 1) / (out_w - 1) : 0.0f;
+        } else {
+            float scale_d = static_cast<float>(in_d) / out_d;
+            float scale_h = static_cast<float>(in_h) / out_h;
+            float scale_w = static_cast<float>(in_w) / out_w;
+            z = (od + 0.5f) * scale_d - 0.5f;
+            y = (oh + 0.5f) * scale_h - 0.5f;
+            x = (ow + 0.5f) * scale_w - 0.5f;
+        }
+
+        z = std::max(0.0f, std::min(z, static_cast<float>(in_d - 1)));
+        y = std::max(0.0f, std::min(y, static_cast<float>(in_h - 1)));
+        x = std::max(0.0f, std::min(x, static_cast<float>(in_w - 1)));
+
+        int64_t z0 = static_cast<int64_t>(z);
+        int64_t y0 = static_cast<int64_t>(y);
+        int64_t x0 = static_cast<int64_t>(x);
+        int64_t z1 = std::min(z0 + 1, in_d - 1);
+        int64_t y1 = std::min(y0 + 1, in_h - 1);
+        int64_t x1 = std::min(x0 + 1, in_w - 1);
+
+        float fz = z - z0;
+        float fy = y - y0;
+        float fx = x - x0;
+
+        // Base offset for this (b, c) slice
+        int64_t base = (b * channels + c) * in_d * in_h * in_w;
+
+        // 8-point trilinear interpolation
+        float v000 = static_cast<float>(input[base + z0 * in_h * in_w + y0 * in_w + x0]);
+        float v001 = static_cast<float>(input[base + z0 * in_h * in_w + y0 * in_w + x1]);
+        float v010 = static_cast<float>(input[base + z0 * in_h * in_w + y1 * in_w + x0]);
+        float v011 = static_cast<float>(input[base + z0 * in_h * in_w + y1 * in_w + x1]);
+        float v100 = static_cast<float>(input[base + z1 * in_h * in_w + y0 * in_w + x0]);
+        float v101 = static_cast<float>(input[base + z1 * in_h * in_w + y0 * in_w + x1]);
+        float v110 = static_cast<float>(input[base + z1 * in_h * in_w + y1 * in_w + x0]);
+        float v111 = static_cast<float>(input[base + z1 * in_h * in_w + y1 * in_w + x1]);
+
+        float result =
+            v000 * (1 - fz) * (1 - fy) * (1 - fx) +
+            v001 * (1 - fz) * (1 - fy) * fx +
+            v010 * (1 - fz) * fy * (1 - fx) +
+            v011 * (1 - fz) * fy * fx +
+            v100 * fz * (1 - fy) * (1 - fx) +
+            v101 * fz * (1 - fy) * fx +
+            v110 * fz * fy * (1 - fx) +
+            v111 * fz * fy * fx;
+
+        output[idx] = static_cast<T>(result);
+    }
+}
+
+// Template for 5D nearest neighbor interpolation
+template<typename T>
+void interpolate_nearest_5d_impl(
+    const T* input,
+    T* output,
+    int64_t batch,
+    int64_t channels,
+    int64_t in_d,
+    int64_t in_h,
+    int64_t in_w,
+    int64_t out_d,
+    int64_t out_h,
+    int64_t out_w
+) {
+    float scale_d = static_cast<float>(in_d) / out_d;
+    float scale_h = static_cast<float>(in_h) / out_h;
+    float scale_w = static_cast<float>(in_w) / out_w;
+    int64_t total = batch * channels * out_d * out_h * out_w;
+
+#ifdef _OPENMP
+    #pragma omp parallel for if(total > 65536)
+#endif
+    for (int64_t idx = 0; idx < total; ++idx) {
+        int64_t temp = idx;
+        int64_t ow = temp % out_w; temp /= out_w;
+        int64_t oh = temp % out_h; temp /= out_h;
+        int64_t od = temp % out_d; temp /= out_d;
+        int64_t c  = temp % channels; temp /= channels;
+        int64_t b  = temp;
+
+        int64_t id = std::min(static_cast<int64_t>(od * scale_d), in_d - 1);
+        int64_t ih = std::min(static_cast<int64_t>(oh * scale_h), in_h - 1);
+        int64_t iw = std::min(static_cast<int64_t>(ow * scale_w), in_w - 1);
+
+        int64_t in_idx = ((b * channels + c) * in_d + id) * in_h * in_w + ih * in_w + iw;
+        output[idx] = input[in_idx];
+    }
+}
+
 } // anonymous namespace
 
 // ============================================================================
@@ -237,6 +360,39 @@ auto interpolate_kernel(const Tensor& input,
                         const std::string& mode,
                         bool align_corners) -> Tensor {
     auto shape = input.shape();
+
+    // Handle 5D input (trilinear / nearest-5d)
+    if (shape.size() == 5) {
+        int64_t batch = shape[0], channels = shape[1];
+        int64_t in_d = shape[2], in_h = shape[3], in_w = shape[4];
+        int64_t out_d = size[0], out_h = size[1], out_w = size[2];
+        Tensor output({batch, channels, out_d, out_h, out_w}, input.dtype(), input.device());
+
+        auto dispatch_5d = [&](auto* dummy) {
+            using T = std::remove_pointer_t<decltype(dummy)>;
+            if (mode == "trilinear") {
+                interpolate_trilinear_impl<T>(
+                    input.data<T>(), output.data<T>(),
+                    batch, channels, in_d, in_h, in_w, out_d, out_h, out_w, align_corners);
+            } else {
+                interpolate_nearest_5d_impl<T>(
+                    input.data<T>(), output.data<T>(),
+                    batch, channels, in_d, in_h, in_w, out_d, out_h, out_w);
+            }
+        };
+
+        switch (input.dtype()) {
+            case DType::Float32:  dispatch_5d(static_cast<float*>(nullptr)); break;
+            case DType::Float64:  dispatch_5d(static_cast<double*>(nullptr)); break;
+            case DType::Float16:  dispatch_5d(static_cast<Float16*>(nullptr)); break;
+            case DType::BFloat16: dispatch_5d(static_cast<BFloat16*>(nullptr)); break;
+            default:
+                throw std::runtime_error("interpolate_kernel: Unsupported dtype for 5D interpolation");
+        }
+        return output;
+    }
+
+    // 4D path (existing)
     int64_t batch = shape[0];
     int64_t channels = shape[1];
     int64_t in_h = shape[2];

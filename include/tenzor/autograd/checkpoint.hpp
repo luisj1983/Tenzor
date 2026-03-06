@@ -84,10 +84,13 @@ public:
      *
      * @param forward_fn Function to checkpoint (must be deterministic)
      * @param allow_caching Enable caching of recomputed activations (default: true)
+     * @param verify If true, recompute forward twice on first backward and warn
+     *              if outputs differ (detects non-deterministic functions)
      */
     explicit CheckpointFunction(
         std::function<std::vector<Variable>(const std::vector<Variable>&)> forward_fn,
-        bool allow_caching = true
+        bool allow_caching = true,
+        bool verify = false
     );
 
     /**
@@ -192,6 +195,8 @@ public:
 private:
     std::function<std::vector<Variable>(const std::vector<Variable>&)> forward_fn_;
     bool allow_caching_;
+    bool verify_;
+    bool verification_done_{false};
     size_t recompute_count_{0};
     size_t estimated_activation_memory_{0};
 

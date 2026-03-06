@@ -76,7 +76,8 @@ public:
 private:
     int64_t d_model_;        ///< Model dimension
     int64_t max_len_;        ///< Maximum sequence length
-    Tensor pe_;              ///< Precomputed positional encodings
+    Tensor pe_;              ///< Precomputed positional encodings (CPU, Float32)
+    mutable Tensor pe_cached_;  ///< PE cached on target device/dtype (lazily populated)
     std::shared_ptr<Dropout> dropout_;  ///< Dropout layer
 
     /**

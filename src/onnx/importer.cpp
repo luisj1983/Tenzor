@@ -13,6 +13,10 @@
 #include "../../include/tenzor/nn/activations/activations.hpp"
 #include "../../include/tenzor/ops/math.hpp"
 #include "../../include/tenzor/ops/transform.hpp"
+#include "../../include/tenzor/ops/creation.hpp"
+#include "../../include/tenzor/ops/reduction.hpp"
+#include "../../include/tenzor/ops/indexing.hpp"
+#include "../../include/tenzor/ops/vision.hpp"
 #include <cstring>
 #include <sstream>
 #include <algorithm>
@@ -835,6 +839,69 @@ auto ONNXImporter::convert_node(const ONNXImportNode& node) -> std::optional<std
     } else if (node.op_type == "Flatten") {
         convert_flatten(node);
         return std::nullopt;
+    } else if (node.op_type == "Squeeze") {
+        convert_squeeze(node);
+        return std::nullopt;
+    } else if (node.op_type == "Unsqueeze") {
+        convert_unsqueeze(node);
+        return std::nullopt;
+    } else if (node.op_type == "Slice") {
+        convert_slice(node);
+        return std::nullopt;
+    } else if (node.op_type == "Pad") {
+        convert_pad(node);
+        return std::nullopt;
+    } else if (node.op_type == "Gather") {
+        convert_gather(node);
+        return std::nullopt;
+    } else if (node.op_type == "Clip") {
+        convert_clip(node);
+        return std::nullopt;
+    } else if (node.op_type == "Cast") {
+        convert_cast(node);
+        return std::nullopt;
+    } else if (node.op_type == "Dropout") {
+        convert_dropout(node);
+        return std::nullopt;
+    } else if (node.op_type == "Resize") {
+        convert_resize(node);
+        return std::nullopt;
+    } else if (node.op_type == "ReduceSum") {
+        convert_reduce_sum(node);
+        return std::nullopt;
+    } else if (node.op_type == "ReduceMean") {
+        convert_reduce_mean(node);
+        return std::nullopt;
+    } else if (node.op_type == "ReduceMax") {
+        convert_reduce_max(node);
+        return std::nullopt;
+    } else if (node.op_type == "Shape") {
+        convert_shape(node);
+        return std::nullopt;
+    } else if (node.op_type == "ConstantOfShape") {
+        convert_constant_of_shape(node);
+        return std::nullopt;
+    } else if (node.op_type == "Where") {
+        convert_where(node);
+        return std::nullopt;
+    } else if (node.op_type == "Expand") {
+        convert_expand(node);
+        return std::nullopt;
+    } else if (node.op_type == "Pow") {
+        convert_pow(node);
+        return std::nullopt;
+    } else if (node.op_type == "Sqrt") {
+        convert_sqrt(node);
+        return std::nullopt;
+    } else if (node.op_type == "Neg") {
+        convert_neg(node);
+        return std::nullopt;
+    } else if (node.op_type == "Exp") {
+        convert_exp(node);
+        return std::nullopt;
+    } else if (node.op_type == "Log") {
+        convert_log(node);
+        return std::nullopt;
     }
 
     // Neural network layers (return module)
@@ -1284,6 +1351,413 @@ auto ONNXImporter::convert_global_avgpool(const ONNXImportNode& node) -> std::sh
     // GlobalAveragePool is AdaptiveAvgPool with output_size=(1, 1)
     auto pool = std::make_shared<nn::AdaptiveAvgPool2d>(1, 1);
     return pool;
+}
+
+// ============================================================================
+// New Shape/Tensor Operations (Phase 6 expansion)
+// ============================================================================
+
+auto ONNXImporter::convert_squeeze(const ONNXImportNode& node) -> void {
+    auto input = get_input(node.inputs[0]);
+    auto axes_attr = node.get_attr("axes");
+
+    if (axes_attr.has_value() && axes_attr->ints.has_value()) {
+        // Squeeze specified axes (reverse order to keep indices valid)
+        auto axes = axes_attr->ints.value();
+        std::sort(axes.begin(), axes.end(), std::greater<>());
+        for (int64_t axis : axes) {
+            input = input.squeeze(axis);
+        }
+    } else if (node.inputs.size() > 1) {
+        // ONNX opset 13+: axes as second input tensor
+        auto axes_tensor = get_input(node.inputs[1]);
+        const int64_t* axes_data = axes_tensor.data<int64_t>();
+        std::vector<int64_t> axes(axes_data, axes_data + axes_tensor.numel());
+        std::sort(axes.begin(), axes.end(), std::greater<>());
+        for (int64_t axis : axes) {
+            input = input.squeeze(axis);
+        }
+    } else {
+        input = input.squeeze();
+    }
+    register_output(node.outputs[0], input);
+}
+
+auto ONNXImporter::convert_unsqueeze(const ONNXImportNode& node) -> void {
+    auto input = get_input(node.inputs[0]);
+
+    std::vector<int64_t> axes;
+    if (node.inputs.size() > 1) {
+        // ONNX opset 13+: axes as second input tensor
+        auto axes_tensor = get_input(node.inputs[1]);
+        const int64_t* axes_data = axes_tensor.data<int64_t>();
+        axes.assign(axes_data, axes_data + axes_tensor.numel());
+    } else {
+        auto axes_attr = node.get_attr("axes");
+        if (axes_attr.has_value() && axes_attr->ints.has_value()) {
+            axes = axes_attr->ints.value();
+        }
+    }
+
+    // Sort ascending so we insert dims in order
+    std::sort(axes.begin(), axes.end());
+    for (int64_t axis : axes) {
+        input = input.unsqueeze(axis);
+    }
+    register_output(node.outputs[0], input);
+}
+
+auto ONNXImporter::convert_slice(const ONNXImportNode& node) -> void {
+    auto input = get_input(node.inputs[0]);
+
+    // ONNX Slice: inputs are [data, starts, ends, axes(optional), steps(optional)]
+    auto starts_t = get_input(node.inputs[1]);
+    auto ends_t = get_input(node.inputs[2]);
+
+    const int64_t* starts = starts_t.data<int64_t>();
+    const int64_t* ends = ends_t.data<int64_t>();
+    int64_t num_slices = starts_t.numel();
+
+    std::vector<int64_t> axes_vec;
+    std::vector<int64_t> steps_vec;
+
+    if (node.inputs.size() > 3) {
+        auto axes_t = get_input(node.inputs[3]);
+        const int64_t* axes_data = axes_t.data<int64_t>();
+        axes_vec.assign(axes_data, axes_data + axes_t.numel());
+    } else {
+        for (int64_t i = 0; i < num_slices; ++i) axes_vec.push_back(i);
+    }
+
+    if (node.inputs.size() > 4) {
+        auto steps_t = get_input(node.inputs[4]);
+        const int64_t* steps_data = steps_t.data<int64_t>();
+        steps_vec.assign(steps_data, steps_data + steps_t.numel());
+    } else {
+        steps_vec.assign(num_slices, 1);
+    }
+
+    auto result = input;
+    for (int64_t i = 0; i < num_slices; ++i) {
+        int64_t dim = axes_vec[i];
+        int64_t start = starts[i];
+        int64_t end = ends[i];
+        int64_t step = steps_vec[i];
+
+        // Handle negative indices
+        int64_t dim_size = result.shape()[dim < 0 ? dim + result.ndim() : dim];
+        if (start < 0) start += dim_size;
+        if (end < 0) end += dim_size;
+        // Clamp
+        start = std::max(int64_t(0), std::min(start, dim_size));
+        end = std::max(int64_t(0), std::min(end, dim_size));
+
+        result = result.slice(dim, start, end, step);
+    }
+    register_output(node.outputs[0], result);
+}
+
+auto ONNXImporter::convert_pad(const ONNXImportNode& node) -> void {
+    // Pad is complex — for now, support constant mode with zero padding
+    // by creating a larger tensor and copying data in
+    auto input = get_input(node.inputs[0]);
+
+    std::vector<int64_t> pads_vec;
+    if (node.inputs.size() > 1) {
+        auto pads_t = get_input(node.inputs[1]);
+        const int64_t* pads_data = pads_t.data<int64_t>();
+        pads_vec.assign(pads_data, pads_data + pads_t.numel());
+    } else {
+        auto pads_attr = node.get_attr("pads");
+        if (pads_attr.has_value() && pads_attr->ints.has_value()) {
+            pads_vec = pads_attr->ints.value();
+        }
+    }
+
+    float value = 0.0f;
+    if (node.inputs.size() > 2) {
+        auto value_t = get_input(node.inputs[2]);
+        if (value_t.numel() > 0) {
+            value = *static_cast<const float*>(value_t.to(DType::Float32).data_ptr());
+        }
+    }
+
+    // ONNX pads format: [begin_d0, begin_d1, ..., end_d0, end_d1, ...]
+    int64_t ndim = input.ndim();
+    std::vector<int64_t> new_shape;
+    for (int64_t d = 0; d < ndim; ++d) {
+        new_shape.push_back(input.shape()[d] + pads_vec[d] + pads_vec[d + ndim]);
+    }
+
+    // For zero-padding, create output and add input at the correct offset
+    // Use scatter-style approach: create zero tensor, then add input at offset
+    auto result = tenzor::full(new_shape, value, input.dtype(), input.device());
+
+    // Build a padded version by adding the input to the right region
+    // For each dimension, compute the start offset from pad_begin
+    // Use index_put or manual approach via contiguous iteration
+    // Simple approach: iterate and use slice to overwrite
+    Tensor view = result;
+    for (int64_t d = 0; d < ndim; ++d) {
+        int64_t begin = pads_vec[d];
+        int64_t end = begin + input.shape()[d];
+        view = view.slice(d, begin, end);
+    }
+    // view and input have the same shape — do element-wise zero + input
+    view.fill_(0.0f);
+    view += input;
+
+    register_output(node.outputs[0], result);
+}
+
+auto ONNXImporter::convert_gather(const ONNXImportNode& node) -> void {
+    auto input = get_input(node.inputs[0]);
+    auto indices = get_input(node.inputs[1]);
+    int64_t axis = node.get_attr("axis").value_or(ONNXAttribute{}).get_int(0);
+
+    auto result = tenzor::gather(input, axis, indices);
+    register_output(node.outputs[0], result);
+}
+
+auto ONNXImporter::convert_clip(const ONNXImportNode& node) -> void {
+    auto input = get_input(node.inputs[0]);
+
+    float min_val = -std::numeric_limits<float>::infinity();
+    float max_val = std::numeric_limits<float>::infinity();
+
+    if (node.inputs.size() > 1 && !node.inputs[1].empty()) {
+        auto min_t = get_input(node.inputs[1]);
+        if (min_t.numel() > 0) {
+            min_val = *static_cast<const float*>(min_t.to(DType::Float32).data_ptr());
+        }
+    }
+    if (node.inputs.size() > 2 && !node.inputs[2].empty()) {
+        auto max_t = get_input(node.inputs[2]);
+        if (max_t.numel() > 0) {
+            max_val = *static_cast<const float*>(max_t.to(DType::Float32).data_ptr());
+        }
+    }
+
+    auto result = tenzor::clamp(input, min_val, max_val);
+    register_output(node.outputs[0], result);
+}
+
+auto ONNXImporter::convert_cast(const ONNXImportNode& node) -> void {
+    auto input = get_input(node.inputs[0]);
+    int64_t to_type = node.get_attr("to").value_or(ONNXAttribute{}).get_int(1);
+
+    // ONNX tensor type enum to DType
+    DType dtype;
+    switch (to_type) {
+        case 1:  dtype = DType::Float32; break;
+        case 2:  dtype = DType::UInt8; break;
+        case 3:  dtype = DType::Int8; break;
+        case 5:  dtype = DType::Int16; break;
+        case 6:  dtype = DType::Int32; break;
+        case 7:  dtype = DType::Int64; break;
+        case 9:  dtype = DType::Bool; break;
+        case 10: dtype = DType::Float16; break;
+        case 11: dtype = DType::Float64; break;
+        case 16: dtype = DType::BFloat16; break;
+        default:
+            throw std::runtime_error("Unsupported ONNX Cast target type: " + std::to_string(to_type));
+    }
+
+    register_output(node.outputs[0], input.to(dtype));
+}
+
+auto ONNXImporter::convert_dropout(const ONNXImportNode& node) -> void {
+    // In inference mode, dropout is identity
+    auto input = get_input(node.inputs[0]);
+    register_output(node.outputs[0], input);
+    // If there's a mask output, register an empty tensor
+    if (node.outputs.size() > 1) {
+        register_output(node.outputs[1], Tensor());
+    }
+}
+
+auto ONNXImporter::convert_resize(const ONNXImportNode& node) -> void {
+    auto input = get_input(node.inputs[0]);
+
+    // ONNX Resize: inputs are [X, roi, scales, sizes]
+    // Try sizes first (input[3]), then scales (input[2])
+    std::vector<int64_t> output_size;
+
+    if (node.inputs.size() > 3 && !node.inputs[3].empty()) {
+        auto sizes_t = get_input(node.inputs[3]);
+        const int64_t* sizes_data = sizes_t.data<int64_t>();
+        // sizes includes batch and channel dims — take only spatial
+        int64_t ndim = sizes_t.numel();
+        for (int64_t i = 2; i < ndim; ++i) {
+            output_size.push_back(sizes_data[i]);
+        }
+    } else if (node.inputs.size() > 2 && !node.inputs[2].empty()) {
+        auto scales_t = get_input(node.inputs[2]);
+        auto scales_f32 = scales_t.to(DType::Float32);
+        const float* scales = scales_f32.data<float>();
+        // scales includes batch and channel dims
+        for (int64_t i = 2; i < scales_t.numel(); ++i) {
+            output_size.push_back(static_cast<int64_t>(input.shape()[i] * scales[i]));
+        }
+    } else {
+        throw std::runtime_error("ONNX Resize: no sizes or scales provided");
+    }
+
+    auto mode_attr = node.get_attr("mode");
+    std::string mode = "nearest";
+    if (mode_attr.has_value() && mode_attr->s.has_value()) {
+        mode = mode_attr->s.value();
+        if (mode == "linear") mode = "bilinear";
+        if (mode == "cubic") mode = "bicubic";
+    }
+
+    auto result = tenzor::ops::interpolate(input, output_size, mode, false);
+    register_output(node.outputs[0], result);
+}
+
+auto ONNXImporter::convert_reduce_sum(const ONNXImportNode& node) -> void {
+    auto input = get_input(node.inputs[0]);
+    bool keepdims = node.get_attr("keepdims").value_or(ONNXAttribute{}).get_int(1) != 0;
+
+    std::optional<int64_t> dim;
+    auto axes_attr = node.get_attr("axes");
+    if (axes_attr.has_value() && axes_attr->ints.has_value() && !axes_attr->ints->empty()) {
+        dim = axes_attr->ints->at(0);
+    } else if (node.inputs.size() > 1) {
+        auto axes_t = get_input(node.inputs[1]);
+        if (axes_t.numel() > 0) {
+            dim = axes_t.data<int64_t>()[0];
+        }
+    }
+
+    auto result = tenzor::sum(input, dim, keepdims);
+    register_output(node.outputs[0], result);
+}
+
+auto ONNXImporter::convert_reduce_mean(const ONNXImportNode& node) -> void {
+    auto input = get_input(node.inputs[0]);
+    bool keepdims = node.get_attr("keepdims").value_or(ONNXAttribute{}).get_int(1) != 0;
+
+    std::optional<int64_t> dim;
+    auto axes_attr = node.get_attr("axes");
+    if (axes_attr.has_value() && axes_attr->ints.has_value() && !axes_attr->ints->empty()) {
+        dim = axes_attr->ints->at(0);
+    } else if (node.inputs.size() > 1) {
+        auto axes_t = get_input(node.inputs[1]);
+        if (axes_t.numel() > 0) {
+            dim = axes_t.data<int64_t>()[0];
+        }
+    }
+
+    auto result = tenzor::mean(input, dim, keepdims);
+    register_output(node.outputs[0], result);
+}
+
+auto ONNXImporter::convert_reduce_max(const ONNXImportNode& node) -> void {
+    auto input = get_input(node.inputs[0]);
+    bool keepdims = node.get_attr("keepdims").value_or(ONNXAttribute{}).get_int(1) != 0;
+
+    std::optional<int64_t> dim;
+    auto axes_attr = node.get_attr("axes");
+    if (axes_attr.has_value() && axes_attr->ints.has_value() && !axes_attr->ints->empty()) {
+        dim = axes_attr->ints->at(0);
+    } else if (node.inputs.size() > 1) {
+        auto axes_t = get_input(node.inputs[1]);
+        if (axes_t.numel() > 0) {
+            dim = axes_t.data<int64_t>()[0];
+        }
+    }
+
+    auto result = tenzor::max(input, dim, keepdims);
+    register_output(node.outputs[0], result);
+}
+
+auto ONNXImporter::convert_shape(const ONNXImportNode& node) -> void {
+    auto input = get_input(node.inputs[0]);
+    auto shape = input.shape();
+
+    // Create a 1D Int64 tensor containing the shape
+    Tensor shape_tensor({static_cast<int64_t>(shape.size())}, DType::Int64, Device::cpu());
+    int64_t* data = shape_tensor.data<int64_t>();
+    for (size_t i = 0; i < shape.size(); ++i) {
+        data[i] = shape[i];
+    }
+
+    register_output(node.outputs[0], shape_tensor);
+}
+
+auto ONNXImporter::convert_constant_of_shape(const ONNXImportNode& node) -> void {
+    auto shape_tensor = get_input(node.inputs[0]);
+    const int64_t* shape_data = shape_tensor.data<int64_t>();
+    std::vector<int64_t> shape(shape_data, shape_data + shape_tensor.numel());
+
+    float value = 0.0f;
+    auto value_attr = node.get_attr("value");
+    if (value_attr.has_value() && value_attr->tensor.has_value()) {
+        // value is a tensor attribute — extract scalar
+        auto val_tensor = value_attr->tensor->to_tensor();
+        if (val_tensor.numel() > 0) {
+            value = *static_cast<const float*>(val_tensor.to(DType::Float32).data_ptr());
+        }
+    }
+
+    auto result = tenzor::full(shape, value, DType::Float32, Device::cpu());
+    register_output(node.outputs[0], result);
+}
+
+auto ONNXImporter::convert_where(const ONNXImportNode& node) -> void {
+    auto condition = get_input(node.inputs[0]);
+    auto x = get_input(node.inputs[1]);
+    auto y = get_input(node.inputs[2]);
+
+    auto result = tenzor::where(condition, x, y);
+    register_output(node.outputs[0], result);
+}
+
+auto ONNXImporter::convert_expand(const ONNXImportNode& node) -> void {
+    auto input = get_input(node.inputs[0]);
+    auto shape_tensor = get_input(node.inputs[1]);
+    const int64_t* shape_data = shape_tensor.data<int64_t>();
+    std::vector<int64_t> shape(shape_data, shape_data + shape_tensor.numel());
+
+    auto result = tenzor::expand(input, shape);
+    register_output(node.outputs[0], result);
+}
+
+auto ONNXImporter::convert_pow(const ONNXImportNode& node) -> void {
+    auto input = get_input(node.inputs[0]);
+    auto exponent = get_input(node.inputs[1]);
+
+    // If exponent is scalar, use the scalar pow
+    if (exponent.numel() == 1) {
+        float exp_val = *static_cast<const float*>(exponent.to(DType::Float32).data_ptr());
+        auto result = tenzor::pow(input, exp_val);
+        register_output(node.outputs[0], result);
+    } else {
+        // Element-wise pow not directly supported — fall back to exp(log(x) * y)
+        auto result = tenzor::exp(tenzor::mul(tenzor::log(input), exponent));
+        register_output(node.outputs[0], result);
+    }
+}
+
+auto ONNXImporter::convert_sqrt(const ONNXImportNode& node) -> void {
+    auto input = get_input(node.inputs[0]);
+    register_output(node.outputs[0], tenzor::sqrt(input));
+}
+
+auto ONNXImporter::convert_neg(const ONNXImportNode& node) -> void {
+    auto input = get_input(node.inputs[0]);
+    register_output(node.outputs[0], tenzor::neg(input));
+}
+
+auto ONNXImporter::convert_exp(const ONNXImportNode& node) -> void {
+    auto input = get_input(node.inputs[0]);
+    register_output(node.outputs[0], tenzor::exp(input));
+}
+
+auto ONNXImporter::convert_log(const ONNXImportNode& node) -> void {
+    auto input = get_input(node.inputs[0]);
+    register_output(node.outputs[0], tenzor::log(input));
 }
 
 // ============================================================================

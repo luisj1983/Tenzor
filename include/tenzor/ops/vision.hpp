@@ -90,16 +90,17 @@ auto fold(const Tensor& input,
  * Resizes input tensor to target size using specified interpolation mode.
  * Commonly used for upsampling in segmentation networks and feature pyramid networks.
  *
- * @param input Input tensor of shape (N, C, H, W)
- * @param size Target output size as {H_out, W_out}
- * @param mode Interpolation mode: "nearest", "bilinear", "bicubic" (default: "bilinear")
+ * @param input Input tensor of shape (N, C, H, W) or (N, C, D, H, W)
+ * @param size Target output size as {H_out, W_out} or {D_out, H_out, W_out}
+ * @param mode Interpolation mode: "nearest", "bilinear", "bicubic", "trilinear" (default: "bilinear")
  * @param align_corners If true, align corner pixels (default: false)
- * @return Interpolated tensor of shape (N, C, H_out, W_out)
+ * @return Interpolated tensor of same dimensionality as input
  *
  * **Modes:**
- * - "nearest": Nearest neighbor interpolation (fastest, blocky)
- * - "bilinear": Bilinear interpolation (smooth, commonly used)
- * - "bicubic": Bicubic interpolation (smoother, slower)
+ * - "nearest": Nearest neighbor interpolation (fastest, blocky) — 4D or 5D
+ * - "bilinear": Bilinear interpolation (smooth, commonly used) — 4D only
+ * - "bicubic": Bicubic interpolation (smoother, slower) — 4D only
+ * - "trilinear": Trilinear interpolation for volumetric data — 5D only
  *
  * **align_corners:**
  * - false (default): Pixels are treated as unit squares (PyTorch default)

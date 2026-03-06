@@ -2016,6 +2016,34 @@ auto InstanceNorm1d::reset_parameters() -> void {
 }
 
 // ============================================================================
+// InstanceNorm3d — reshape 5D to 4D, delegate to InstanceNorm2d
+// ============================================================================
+
+InstanceNorm3d::InstanceNorm3d(int64_t num_features, double eps, bool affine)
+    : num_features_(num_features),
+      in2d_(num_features, eps, affine) {
+    auto in2d_ptr = std::shared_ptr<InstanceNorm2d>(&in2d_, [](InstanceNorm2d*) {});
+    register_module("in2d", in2d_ptr);
+}
+
+auto InstanceNorm3d::forward_impl(const Variable& input) -> Variable {
+    auto shape = input.shape();
+    if (shape.size() != 5) {
+        throw std::runtime_error("InstanceNorm3d expects 5D input (N,C,D,H,W), got " +
+            std::to_string(shape.size()) + "D");
+    }
+
+    int64_t N = shape[0], C = shape[1], D = shape[2], H = shape[3], W = shape[4];
+
+    // Reshape (N, C, D, H, W) -> (N, C, D*H, W) to use InstanceNorm2d
+    Variable reshaped(input.tensor().reshape({N, C, D * H, W}), input.requires_grad());
+    Variable result = in2d_.forward(reshaped);
+
+    // Reshape back to (N, C, D, H, W)
+    return Variable(result.tensor().reshape({N, C, D, H, W}), result.requires_grad());
+}
+
+// ============================================================================
 // RMSNorm Implementation
 // ============================================================================
 

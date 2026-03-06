@@ -109,29 +109,50 @@ auto interpolate(const Tensor& input,
                 const std::string& mode,
                 bool align_corners) -> Tensor {
     auto shape = input.shape();
-    if (shape.size() != 4) {
+    auto ndim = shape.size();
+
+    // Validate input dimensionality
+    if (ndim != 4 && ndim != 5) {
         throw std::invalid_argument(
-            "interpolate expects 4D input (N, C, H, W), got " +
-            std::to_string(shape.size()) + "D");
+            "interpolate expects 4D (N,C,H,W) or 5D (N,C,D,H,W) input, got " +
+            std::to_string(ndim) + "D");
     }
 
-    if (size.size() != 2) {
-        throw std::invalid_argument(
-            "size must have 2 elements (H, W), got " +
-            std::to_string(size.size()));
-    }
-
-    // If output size matches input size, return copy
-    if (shape[2] == size[0] && shape[3] == size[1]) {
-        return input;
-    }
-
-    // Validate mode
-    if (mode != "nearest" && mode != "bilinear" && mode != "bicubic") {
+    // Validate mode vs dimensionality
+    if (mode == "trilinear") {
+        if (ndim != 5) {
+            throw std::invalid_argument(
+                "trilinear interpolation requires 5D input (N,C,D,H,W), got " +
+                std::to_string(ndim) + "D");
+        }
+        if (size.size() != 3) {
+            throw std::invalid_argument(
+                "trilinear size must have 3 elements (D,H,W), got " +
+                std::to_string(size.size()));
+        }
+    } else if (mode == "nearest" || mode == "bilinear" || mode == "bicubic") {
+        if (ndim == 5 && mode != "nearest") {
+            throw std::invalid_argument(
+                "5D input only supports 'nearest' or 'trilinear' mode, got '" + mode + "'");
+        }
+        size_t expected_size_len = (ndim == 4) ? 2 : 3;
+        if (size.size() != expected_size_len) {
+            throw std::invalid_argument(
+                "size must have " + std::to_string(expected_size_len) +
+                " elements, got " + std::to_string(size.size()));
+        }
+    } else {
         throw std::invalid_argument(
             "Unsupported interpolation mode: " + mode +
-            ". Supported modes: 'nearest', 'bilinear', 'bicubic'");
+            ". Supported modes: 'nearest', 'bilinear', 'bicubic', 'trilinear'");
     }
+
+    // Check for no-op (output size matches input spatial dims)
+    bool same_size = true;
+    for (size_t i = 0; i < size.size(); ++i) {
+        if (shape[2 + i] != size[i]) { same_size = false; break; }
+    }
+    if (same_size) return input;
 
     // Serialize size as comma-separated string
     std::string size_str;

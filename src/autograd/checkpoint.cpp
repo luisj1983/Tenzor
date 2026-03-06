@@ -5,6 +5,8 @@
 
 #include "../../include/tenzor/autograd/checkpoint.hpp"
 #include "../../include/tenzor/ops/creation.hpp"
+#include "../../include/tenzor/ops/math.hpp"
+#include "../../include/tenzor/ops/reduction.hpp"
 #include <chrono>
 #include <unordered_set>
 #include <unordered_map>
@@ -43,9 +45,12 @@ auto set_checkpoint_enabled(bool enabled) -> void {
 
 CheckpointFunction::CheckpointFunction(
     std::function<std::vector<Variable>(const std::vector<Variable>&)> forward_fn,
-    bool allow_caching
+    bool allow_caching,
+    bool verify
 ) : forward_fn_(std::move(forward_fn)),
     allow_caching_(allow_caching),
+    verify_(verify),
+    verification_done_(false),
     recompute_count_(0),
     estimated_activation_memory_(0),
     has_cached_outputs_(false) {}
@@ -139,6 +144,36 @@ auto CheckpointFunction::recompute_forward(const std::vector<Variable>& inputs) 
 
     // Recompute forward function with gradient tracking enabled
     auto outputs = forward_fn_(inputs);
+
+    // Verify determinism on first recomputation
+    if (verify_ && !verification_done_) {
+        verification_done_ = true;
+        // Create detached inputs for verification run
+        std::vector<Variable> verify_inputs;
+        verify_inputs.reserve(inputs.size());
+        for (const auto& inp : inputs) {
+            verify_inputs.emplace_back(inp.tensor(), false);
+        }
+        auto verify_outputs = forward_fn_(verify_inputs);
+
+        if (verify_outputs.size() != outputs.size()) {
+            fprintf(stderr, "[WARNING] Checkpoint: non-deterministic function detected "
+                    "(different output count: %zu vs %zu)\n",
+                    outputs.size(), verify_outputs.size());
+        } else {
+            for (size_t i = 0; i < outputs.size(); ++i) {
+                auto diff = tenzor::abs(outputs[i].tensor().to(DType::Float64) -
+                            verify_outputs[i].tensor().to(DType::Float64));
+                auto max_diff_t = tenzor::max(diff);
+                double max_diff = *static_cast<const double*>(max_diff_t.data_ptr());
+                if (max_diff > 1e-6) {
+                    fprintf(stderr, "[WARNING] Checkpoint: non-deterministic function detected "
+                            "(output %zu max diff: %g). Gradients may be incorrect.\n",
+                            i, max_diff);
+                }
+            }
+        }
+    }
 
     // Cache outputs if allowed
     if (allow_caching_) {

@@ -834,4 +834,39 @@ auto eig(const Tensor& A) -> std::tuple<Tensor, Tensor, Tensor> {
             maybe_downcast(Vr, original_dtype)};
 }
 
+auto matrix_power(const Tensor& A, int64_t n) -> Tensor {
+    if (A.ndim() < 2) {
+        throw std::invalid_argument("linalg::matrix_power: expected at least 2D tensor");
+    }
+    auto shape = A.shape();
+    int64_t rows = shape[A.ndim() - 2];
+    int64_t cols = shape[A.ndim() - 1];
+    if (rows != cols) {
+        throw std::invalid_argument("linalg::matrix_power: matrix must be square, got " +
+            std::to_string(rows) + "x" + std::to_string(cols));
+    }
+
+    if (n == 0) {
+        // A^0 = identity matrix (batched if needed)
+        return tenzor::eye(rows, std::nullopt, A.dtype(), A.device());
+    }
+
+    // For negative exponents, invert first then exponentiate
+    Tensor base = (n < 0) ? inv(A) : A;
+    int64_t exp = std::abs(n);
+
+    // Binary exponentiation: O(log n) matmuls
+    Tensor result = base;
+    exp--;
+    while (exp > 0) {
+        if (exp & 1) {
+            result = tenzor::matmul(result, base);
+        }
+        base = tenzor::matmul(base, base);
+        exp >>= 1;
+    }
+
+    return result;
+}
+
 } // namespace tenzor::linalg

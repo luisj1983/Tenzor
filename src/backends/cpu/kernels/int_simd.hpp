@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <algorithm>
 
 #ifdef TENZOR_HAS_AVX2
 #include <immintrin.h>
@@ -144,7 +145,7 @@ inline void sub_i8(const int8_t* a, const int8_t* b, int8_t* c, size_t n) {
 }
 
 inline void mul_i8(const int8_t* a, const int8_t* b, int8_t* c, size_t n) {
-    // Int8 multiply needs widening: unpack to 16-bit, multiply, truncate back
+    // Int8 multiply needs widening: unpack to 16-bit, multiply, saturate back to [-128,127]
 #ifdef TENZOR_HAS_AVX2
     size_t i = 0;
     for (; i + 32 <= n; i += 32) {
@@ -161,19 +162,21 @@ inline void mul_i8(const int8_t* a, const int8_t* b, int8_t* c, size_t n) {
         __m256i prod_lo = _mm256_mullo_epi16(va_lo, vb_lo);
         __m256i prod_hi = _mm256_mullo_epi16(va_hi, vb_hi);
 
-        // Truncate back to 8-bit: keep low byte of each 16-bit result
-        // Pack: _mm256_packs_epi16 saturates, so use shuffle + blend
-        __m256i mask = _mm256_set1_epi16(0x00FF);
-        prod_lo = _mm256_and_si256(prod_lo, mask);
-        prod_hi = _mm256_and_si256(prod_hi, mask);
-        __m256i packed = _mm256_packus_epi16(prod_lo, prod_hi);
-        // Fix lane crossing from packus: {0,2,1,3} -> {0,1,2,3}
+        // Saturate back to signed 8-bit [-128, 127] using packs_epi16
+        __m256i packed = _mm256_packs_epi16(prod_lo, prod_hi);
+        // Fix lane crossing from packs: {0,2,1,3} -> {0,1,2,3}
         packed = _mm256_permute4x64_epi64(packed, 0xD8);
         _mm256_storeu_si256(reinterpret_cast<__m256i*>(c + i), packed);
     }
-    for (; i < n; ++i) c[i] = static_cast<int8_t>(a[i] * b[i]);
+    for (; i < n; ++i) {
+        int result = static_cast<int>(a[i]) * static_cast<int>(b[i]);
+        c[i] = static_cast<int8_t>(std::clamp(result, -128, 127));
+    }
 #else
-    for (size_t i = 0; i < n; ++i) c[i] = static_cast<int8_t>(a[i] * b[i]);
+    for (size_t i = 0; i < n; ++i) {
+        int result = static_cast<int>(a[i]) * static_cast<int>(b[i]);
+        c[i] = static_cast<int8_t>(std::clamp(result, -128, 127));
+    }
 #endif
 }
 

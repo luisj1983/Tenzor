@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include <span>
+#include <string>
 #include <tuple>
 #include <vector>
 #include "../core/tensor.hpp"
@@ -115,6 +117,49 @@ auto cumsum(const Tensor& input, int64_t dim) -> Tensor;
  * @endcode
  */
 auto cumprod(const Tensor& input, int64_t dim) -> Tensor;
+
+/**
+ * @brief Einstein summation convention.
+ *
+ * Performs tensor contractions, permutations, and reductions specified by
+ * a subscript string following NumPy/PyTorch einsum notation.
+ *
+ * @param equation Subscript string (e.g., "ij,jk->ik" for matrix multiply)
+ * @param tensors Input tensors
+ * @return Result tensor
+ *
+ * @code
+ * auto c = einsum("ij,jk->ik", {a, b});     // Matrix multiply
+ * auto tr = einsum("ii->", {a});              // Trace
+ * auto d = einsum("bij,bjk->bik", {a, b});   // Batch matmul
+ * @endcode
+ */
+auto einsum(const std::string& equation,
+            std::span<const Tensor> tensors) -> Tensor;
+
+/**
+ * @brief Median of tensor elements along a dimension.
+ *
+ * @param input Input tensor
+ * @param dim Dimension along which to compute median
+ * @param keepdim Whether to retain reduced dimension
+ * @return Tuple of (values, indices) tensors
+ */
+auto median(const Tensor& input,
+            int64_t dim = -1,
+            bool keepdim = false) -> std::tuple<Tensor, Tensor>;
+
+/**
+ * @brief Mode (most frequent value) along a dimension.
+ *
+ * @param input Input tensor
+ * @param dim Dimension along which to compute mode
+ * @param keepdim Whether to retain reduced dimension
+ * @return Tuple of (values, indices) tensors
+ */
+auto mode(const Tensor& input,
+          int64_t dim = -1,
+          bool keepdim = false) -> std::tuple<Tensor, Tensor>;
 
 /** @} */ // end of tensor_advanced group
 

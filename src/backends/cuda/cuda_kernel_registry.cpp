@@ -372,6 +372,7 @@ namespace cuda {
 
     // Fill operations
     auto fill_kernel(const Tensor& tensor, float value, cudaStream_t stream) -> Tensor;
+    auto strided_fill_kernel(Tensor& self, float value, cudaStream_t stream) -> void;
 
     // Runtime cuDNN availability check
     bool is_cudnn_available() noexcept;
@@ -807,6 +808,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::Fill, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
         return cuda::fill_kernel(inputs[0], value, get_cuda_stream(attrs));
+    });
+    table.register_inplace_kernel(OpId::StridedFill, [](Tensor& self, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
+        float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
+        cuda::strided_fill_kernel(self, value, get_cuda_stream(attrs));
+        return self;
     });
     table.register_single_output_kernel(OpId::Reshape, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         auto shape = attrs.get_int_list(AttrKey::Shape);

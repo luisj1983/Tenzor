@@ -493,6 +493,10 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("device"),
              "Move tensor to specified device",
              py::call_guard<py::gil_scoped_release>())
+        .def("to", py::overload_cast<tenzor::Device, tenzor::DType>(&tenzor::Tensor::to, py::const_),
+             py::arg("device"), py::arg("dtype"),
+             "Move tensor to specified device and convert dtype in one operation",
+             py::call_guard<py::gil_scoped_release>())
         .def("to", py::overload_cast<tenzor::MemoryFormat>(&tenzor::Tensor::to, py::const_),
              py::arg("memory_format"),
              "Convert tensor to specified memory format (e.g., channels_last for NHWC)",
@@ -6029,6 +6033,64 @@ PYBIND11_MODULE(tenzor_core, m) {
     }, "Eigendecomposition of symmetric matrix", py::arg("A"));
     linalg_mod.def("eigvalsh", &tenzor::linalg::eigvalsh,
                    "Eigenvalues of symmetric matrix", py::arg("A"));
+
+    linalg_mod.def("matrix_power", &tenzor::linalg::matrix_power,
+                   "Matrix power via binary exponentiation",
+                   py::arg("A"), py::arg("n"),
+                   py::call_guard<py::gil_scoped_release>());
+
+    // =========================================================================
+    // Advanced Operations
+    // =========================================================================
+    m.def("einsum", [](const std::string& equation, const std::vector<tenzor::Tensor>& tensors) {
+        return tenzor::einsum(equation, tensors);
+    }, "Einstein summation",
+       py::arg("equation"), py::arg("tensors"),
+       py::call_guard<py::gil_scoped_release>());
+
+    m.def("topk", [](const tenzor::Tensor& input, int64_t k, int64_t dim, bool largest, bool sorted) {
+        return tenzor::topk(input, k, dim, largest, sorted);
+    }, "Find top-k elements",
+       py::arg("input"), py::arg("k"), py::arg("dim") = -1,
+       py::arg("largest") = true, py::arg("sorted") = true,
+       py::call_guard<py::gil_scoped_release>());
+
+    m.def("sort", [](const tenzor::Tensor& input, int64_t dim, bool descending) {
+        return tenzor::sort(input, dim, descending);
+    }, "Sort tensor along dimension",
+       py::arg("input"), py::arg("dim") = -1, py::arg("descending") = false,
+       py::call_guard<py::gil_scoped_release>());
+
+    m.def("unique", [](const tenzor::Tensor& input, bool sorted, bool return_inverse, bool return_counts) {
+        return tenzor::unique(input, sorted, return_inverse, return_counts);
+    }, "Find unique elements",
+       py::arg("input"), py::arg("sorted") = true,
+       py::arg("return_inverse") = false, py::arg("return_counts") = false,
+       py::call_guard<py::gil_scoped_release>());
+
+    m.def("cumsum", [](const tenzor::Tensor& input, int64_t dim) {
+        return tenzor::cumsum(input, dim);
+    }, "Cumulative sum along dimension",
+       py::arg("input"), py::arg("dim"),
+       py::call_guard<py::gil_scoped_release>());
+
+    m.def("cumprod", [](const tenzor::Tensor& input, int64_t dim) {
+        return tenzor::cumprod(input, dim);
+    }, "Cumulative product along dimension",
+       py::arg("input"), py::arg("dim"),
+       py::call_guard<py::gil_scoped_release>());
+
+    m.def("median", [](const tenzor::Tensor& input, int64_t dim, bool keepdim) {
+        return tenzor::median(input, dim, keepdim);
+    }, "Median along dimension",
+       py::arg("input"), py::arg("dim") = -1, py::arg("keepdim") = false,
+       py::call_guard<py::gil_scoped_release>());
+
+    m.def("mode", [](const tenzor::Tensor& input, int64_t dim, bool keepdim) {
+        return tenzor::mode(input, dim, keepdim);
+    }, "Mode (most frequent value) along dimension",
+       py::arg("input"), py::arg("dim") = -1, py::arg("keepdim") = false,
+       py::call_guard<py::gil_scoped_release>());
 
     // =========================================================================
     // FFT submodule

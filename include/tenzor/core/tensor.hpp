@@ -352,6 +352,18 @@ public:
     auto to(DType dtype) const -> Tensor;
 
     /**
+     * @brief Move tensor to specified device and convert dtype in one operation.
+     *
+     * More efficient than chaining `.to(device).to(dtype)` — performs device
+     * transfer first, then on-device cast (single intermediate allocation).
+     *
+     * @param device Target device
+     * @param dtype Target data type
+     * @return New tensor on target device with target dtype
+     */
+    auto to(Device device, DType dtype) const -> Tensor;
+
+    /**
      * @brief Move tensor to CUDA device.
      *
      * @param device_id GPU device index (default: 0)

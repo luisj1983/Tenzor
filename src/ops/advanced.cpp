@@ -12,8 +12,10 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/core/shape.hpp"
+#include "tenzor/ops/math.hpp"
 #include <algorithm>
 #include <numeric>
+#include <string>
 #include <unordered_map>
 #include <cstring>
 #include <functional>
@@ -542,6 +544,323 @@ auto cumprod(const Tensor& input, int64_t dim) -> Tensor {
     }
 
     return output;
+}
+
+// ============================================================================
+// einsum — Einstein summation convention
+// ============================================================================
+
+// Parse an einsum equation like "ij,jk->ik" into input subscripts and output subscript
+static auto parse_einsum_equation(const std::string& equation)
+    -> std::pair<std::vector<std::string>, std::string> {
+    // Split on "->"
+    auto arrow = equation.find("->");
+    std::string inputs_str, output_str;
+    if (arrow != std::string::npos) {
+        inputs_str = equation.substr(0, arrow);
+        output_str = equation.substr(arrow + 2);
+    } else {
+        inputs_str = equation;
+        // Implicit output: sorted unique labels not appearing in contractions
+        // (labels that appear exactly once across all inputs)
+        std::unordered_map<char, int> counts;
+        for (char c : inputs_str) {
+            if (c != ',' && c != ' ') counts[c]++;
+        }
+        for (char c = 'a'; c <= 'z'; ++c) {
+            if (counts.count(c) && counts[c] == 1) output_str += c;
+        }
+    }
+
+    // Split inputs on ','
+    std::vector<std::string> input_subs;
+    std::string current;
+    for (char c : inputs_str) {
+        if (c == ',') {
+            input_subs.push_back(current);
+            current.clear();
+        } else if (c != ' ') {
+            current += c;
+        }
+    }
+    if (!current.empty()) input_subs.push_back(current);
+
+    return {input_subs, output_str};
+}
+
+auto einsum(const std::string& equation,
+            std::span<const Tensor> tensors) -> Tensor {
+    auto [input_subs, output_sub] = parse_einsum_equation(equation);
+
+    if (input_subs.size() != tensors.size()) {
+        throw std::invalid_argument("einsum: number of subscripts (" +
+            std::to_string(input_subs.size()) + ") does not match number of tensors (" +
+            std::to_string(tensors.size()) + ")");
+    }
+
+    // Fast paths for common patterns
+    if (tensors.size() == 2) {
+        const auto& a = tensors[0];
+        const auto& b = tensors[1];
+        const auto& sa = input_subs[0];
+        const auto& sb = input_subs[1];
+
+        // Matrix multiply: ij,jk->ik
+        if (sa == "ij" && sb == "jk" && output_sub == "ik") {
+            return matmul(a, b);
+        }
+        // Batch matmul: bij,bjk->bik
+        if (sa == "bij" && sb == "bjk" && output_sub == "bik") {
+            return bmm(a, b);
+        }
+        // Dot product: i,i->
+        if (sa == "i" && sb == "i" && output_sub.empty()) {
+            return dot(a, b);
+        }
+        // Outer product: i,j->ij
+        if (sa == "i" && sb == "j" && output_sub == "ij") {
+            auto a_col = reshape(a, {a.numel(), 1});
+            auto b_row = reshape(b, {1, b.numel()});
+            return matmul(a_col, b_row);
+        }
+    }
+    if (tensors.size() == 1) {
+        const auto& a = tensors[0];
+        const auto& sa = input_subs[0];
+
+        // Trace: ii->
+        if (sa == "ii" && output_sub.empty()) {
+            return trace(a);
+        }
+        // Diagonal: ii->i
+        if (sa == "ii" && output_sub == "i") {
+            return diag(a);
+        }
+    }
+
+    // General path: use the transpose-reshape-contract approach
+    // 1. Build label→dimension size mapping
+    std::unordered_map<char, int64_t> label_sizes;
+    for (size_t t = 0; t < tensors.size(); ++t) {
+        auto shape = tensors[t].shape();
+        if (input_subs[t].size() != static_cast<size_t>(tensors[t].ndim())) {
+            throw std::invalid_argument("einsum: subscript '" + input_subs[t] +
+                "' has " + std::to_string(input_subs[t].size()) +
+                " labels but tensor has " + std::to_string(tensors[t].ndim()) + " dims");
+        }
+        for (size_t d = 0; d < input_subs[t].size(); ++d) {
+            char label = input_subs[t][d];
+            if (label_sizes.count(label)) {
+                if (label_sizes[label] != shape[d]) {
+                    throw std::invalid_argument("einsum: dimension mismatch for label '" +
+                        std::string(1, label) + "'");
+                }
+            } else {
+                label_sizes[label] = shape[d];
+            }
+        }
+    }
+
+    // 2. Identify contraction labels (in inputs but not in output)
+    std::string contract_labels;
+    for (auto& [label, _] : label_sizes) {
+        if (output_sub.find(label) == std::string::npos) {
+            contract_labels += label;
+        }
+    }
+
+    // 3. Build unified label ordering: output labels + contraction labels
+    std::string all_labels = output_sub + contract_labels;
+
+    // 4. For each tensor, permute dims to align with all_labels order,
+    //    unsqueezing missing dims to size 1.
+    auto align_tensor = [&](const Tensor& t, const std::string& sub) -> Tensor {
+        // Build shape with all_labels, inserting size-1 for missing labels
+        std::vector<int64_t> new_shape(all_labels.size(), 1);
+        std::vector<int64_t> perm;
+
+        for (size_t i = 0; i < all_labels.size(); ++i) {
+            auto pos = sub.find(all_labels[i]);
+            if (pos != std::string::npos) {
+                new_shape[i] = t.shape()[static_cast<int64_t>(pos)];
+            }
+        }
+
+        // Build permutation: reorder tensor dims to match their position in all_labels
+        std::vector<int64_t> src_to_target(sub.size());
+        for (size_t i = 0; i < sub.size(); ++i) {
+            src_to_target[i] = static_cast<int64_t>(all_labels.find(sub[i]));
+        }
+
+        // Sort source dims by target position
+        std::vector<int64_t> sorted_src(sub.size());
+        std::iota(sorted_src.begin(), sorted_src.end(), 0);
+        std::sort(sorted_src.begin(), sorted_src.end(),
+                  [&](int64_t a, int64_t b) { return src_to_target[a] < src_to_target[b]; });
+
+        Tensor permuted = permute(t, sorted_src);
+        return reshape(permuted, new_shape);
+    };
+
+    // 5. Align all tensors, multiply element-wise, reduce contraction dims
+    Tensor result = align_tensor(tensors[0], input_subs[0]);
+    for (size_t t = 1; t < tensors.size(); ++t) {
+        Tensor aligned = align_tensor(tensors[t], input_subs[t]);
+        result = mul(result, aligned);
+    }
+
+    // 6. Sum over contraction dimensions (from the end to avoid index shifting)
+    std::vector<int64_t> reduce_dims;
+    for (size_t i = output_sub.size(); i < all_labels.size(); ++i) {
+        reduce_dims.push_back(static_cast<int64_t>(i));
+    }
+    // Sort descending to reduce from back
+    std::sort(reduce_dims.rbegin(), reduce_dims.rend());
+    for (int64_t dim : reduce_dims) {
+        result = sum(result, dim, false);
+    }
+
+    return result;
+}
+
+// ============================================================================
+// median — along a dimension
+// ============================================================================
+
+auto median(const Tensor& input, int64_t dim, bool keepdim)
+    -> std::tuple<Tensor, Tensor> {
+    if (!input.is_valid()) {
+        throw std::runtime_error("median: uninitialized tensor");
+    }
+
+    int64_t ndim = input.ndim();
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::invalid_argument("median: dim " + std::to_string(dim) + " out of range");
+    }
+
+    // Sort along the dimension
+    auto [sorted_vals, sorted_idx] = sort(input, dim, false); // ascending
+
+    // Pick the middle element
+    int64_t dim_size = input.shape()[dim];
+    int64_t mid = (dim_size - 1) / 2; // lower median for even sizes
+
+    Tensor values = sorted_vals.select(dim, mid);
+    Tensor indices = sorted_idx.select(dim, mid);
+
+    if (keepdim) {
+        auto vshape = std::vector<int64_t>(values.shape().begin(), values.shape().end());
+        vshape.insert(vshape.begin() + dim, 1);
+        values = reshape(values, vshape);
+        indices = reshape(indices, vshape);
+    }
+
+    return {values, indices};
+}
+
+// ============================================================================
+// mode — most frequent value along a dimension
+// ============================================================================
+
+auto mode(const Tensor& input, int64_t dim, bool keepdim)
+    -> std::tuple<Tensor, Tensor> {
+    if (!input.is_valid()) {
+        throw std::runtime_error("mode: uninitialized tensor");
+    }
+
+    int64_t ndim = input.ndim();
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::invalid_argument("mode: dim " + std::to_string(dim) + " out of range");
+    }
+
+    // Sort along the dimension, then find longest run of equal values
+    auto [sorted_vals, sorted_idx] = sort(input, dim, false);
+
+    // Move target dim to the end for easier iteration
+    std::vector<int64_t> perm_order;
+    for (int64_t d = 0; d < ndim; ++d) {
+        if (d != dim) perm_order.push_back(d);
+    }
+    perm_order.push_back(dim);
+    Tensor sv = permute(sorted_vals, perm_order).contiguous();
+    Tensor si = permute(sorted_idx, perm_order).contiguous();
+
+    int64_t dim_size = input.shape()[dim];
+    int64_t outer_size = sv.numel() / dim_size;
+
+    // Output shapes (same as input but with target dim removed)
+    std::vector<int64_t> out_shape;
+    for (int64_t d = 0; d < ndim; ++d) {
+        if (d != dim) out_shape.push_back(input.shape()[d]);
+    }
+    if (out_shape.empty()) out_shape.push_back(1);
+
+    Tensor values = zeros(out_shape, input.dtype(), input.device());
+    Tensor indices = zeros(out_shape, DType::Int64, input.device());
+
+    // CPU implementation: iterate over sorted slices to find mode
+    Tensor sv_cpu = sv.device().type != Device::Type::CPU ? sv.cpu() : sv;
+    Tensor si_cpu = si.device().type != Device::Type::CPU ? si.cpu() : si;
+    Tensor val_cpu = values.device().type != Device::Type::CPU ? values.cpu() : values;
+    Tensor idx_cpu = indices.device().type != Device::Type::CPU ? indices.cpu() : indices;
+
+    auto find_mode = [&]<typename T>(T*) {
+        const T* sv_data = sv_cpu.data<T>();
+        const int64_t* si_data = si_cpu.data<int64_t>();
+        T* val_data = val_cpu.data<T>();
+        int64_t* idx_data = idx_cpu.data<int64_t>();
+
+        for (int64_t o = 0; o < outer_size; ++o) {
+            const T* row = sv_data + o * dim_size;
+            const int64_t* irow = si_data + o * dim_size;
+            int64_t best_count = 0, cur_count = 1;
+            T best_val = row[0];
+            int64_t best_idx = irow[0];
+            for (int64_t i = 1; i < dim_size; ++i) {
+                if (row[i] == row[i - 1]) {
+                    cur_count++;
+                } else {
+                    cur_count = 1;
+                }
+                if (cur_count > best_count) {
+                    best_count = cur_count;
+                    best_val = row[i];
+                    best_idx = irow[i];
+                }
+            }
+            if (best_count == 0) { best_val = row[0]; best_idx = irow[0]; }
+            val_data[o] = best_val;
+            idx_data[o] = best_idx;
+        }
+    };
+
+    switch (input.dtype()) {
+        case DType::Float32: find_mode(static_cast<float*>(nullptr)); break;
+        case DType::Float64: find_mode(static_cast<double*>(nullptr)); break;
+        case DType::Int32:   find_mode(static_cast<int32_t*>(nullptr)); break;
+        case DType::Int64:   find_mode(static_cast<int64_t*>(nullptr)); break;
+        default: throw std::runtime_error("mode: unsupported dtype");
+    }
+
+    // Transfer back to original device
+    if (input.device().type != Device::Type::CPU) {
+        values = val_cpu.to(input.device());
+        indices = idx_cpu.to(input.device());
+    } else {
+        values = val_cpu;
+        indices = idx_cpu;
+    }
+
+    if (keepdim) {
+        auto vshape = std::vector<int64_t>(values.shape().begin(), values.shape().end());
+        vshape.insert(vshape.begin() + dim, 1);
+        values = reshape(values, vshape);
+        indices = reshape(indices, vshape);
+    }
+
+    return {values, indices};
 }
 
 } // namespace tenzor

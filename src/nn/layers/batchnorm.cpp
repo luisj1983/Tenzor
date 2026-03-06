@@ -19,8 +19,6 @@
 #include <thread>
 #endif
 
-#include <iostream>
-
 // Get optimal thread count for compute-bound operations
 static inline int get_optimal_threads() {
 #ifdef _OPENMP
@@ -938,6 +936,36 @@ auto BatchNorm1d::reset_parameters() -> void {
         buffers_["running_var"]->tensor().fill_(1.0f);
         buffers_["num_batches_tracked"]->tensor().zero_();
     }
+}
+
+// ============================================================================
+// BatchNorm3d — reshape 5D to 4D, delegate to BatchNorm2d
+// ============================================================================
+
+BatchNorm3d::BatchNorm3d(int64_t num_features, double eps, double momentum,
+                         bool affine, bool track_running_stats)
+    : num_features_(num_features),
+      bn2d_(num_features, eps, momentum, affine, track_running_stats) {
+    // Register bn2d_ sub-module so its parameters are visible
+    auto bn2d_ptr = std::shared_ptr<BatchNorm2d>(&bn2d_, [](BatchNorm2d*) {});
+    register_module("bn2d", bn2d_ptr);
+}
+
+auto BatchNorm3d::forward_impl(const Variable& input) -> Variable {
+    auto shape = input.shape();
+    if (shape.size() != 5) {
+        throw std::runtime_error("BatchNorm3d expects 5D input (N,C,D,H,W), got " +
+            std::to_string(shape.size()) + "D");
+    }
+
+    int64_t N = shape[0], C = shape[1], D = shape[2], H = shape[3], W = shape[4];
+
+    // Reshape (N, C, D, H, W) -> (N, C, D*H, W) to use BatchNorm2d
+    Variable reshaped(input.tensor().reshape({N, C, D * H, W}), input.requires_grad());
+    Variable result = bn2d_.forward(reshaped);
+
+    // Reshape back to (N, C, D, H, W)
+    return Variable(result.tensor().reshape({N, C, D, H, W}), result.requires_grad());
 }
 
 } // namespace tenzor::nn

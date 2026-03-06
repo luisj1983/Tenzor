@@ -131,5 +131,19 @@ auto eigvalsh(const Tensor& A) -> Tensor;
  */
 auto eig(const Tensor& A) -> std::tuple<Tensor, Tensor, Tensor>;
 
+/**
+ * @brief Compute the n-th power of a square matrix.
+ *
+ * Uses binary exponentiation: O(log n) matrix multiplications.
+ * Supports n >= 0. For n < 0, computes inverse then exponentiates.
+ *
+ * @param A Square matrix (or batch of square matrices)
+ * @param n Exponent (integer)
+ * @return A^n
+ *
+ * @throws std::invalid_argument if A is not square
+ */
+auto matrix_power(const Tensor& A, int64_t n) -> Tensor;
+
 } // namespace linalg
 } // namespace tenzor

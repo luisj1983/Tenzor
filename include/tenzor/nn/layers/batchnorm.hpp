@@ -185,5 +185,26 @@ private:
     auto reset_parameters() -> void;
 };
 
+/**
+ * @brief Batch Normalization for 5D inputs (N, C, D, H, W).
+ *
+ * Normalizes over the (N, D, H, W) dimensions for each channel.
+ * Internally reshapes to 4D, delegates to BatchNorm2d, then reshapes back.
+ */
+class BatchNorm3d : public Module {
+public:
+    BatchNorm3d(int64_t num_features,
+                double eps = 1e-5,
+                double momentum = 0.1,
+                bool affine = true,
+                bool track_running_stats = true);
+
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    int64_t num_features_;
+    BatchNorm2d bn2d_; ///< Delegate to BatchNorm2d after reshaping
+};
+
 } // namespace nn
 } // namespace tenzor
