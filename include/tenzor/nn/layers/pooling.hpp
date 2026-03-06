@@ -73,6 +73,12 @@ public:
     /// Whether return_indices is enabled.
     auto get_return_indices() const -> bool { return return_indices_; }
 
+    auto extra_repr() const -> std::string override {
+        return "kernel_size=" + std::to_string(kernel_size_) +
+               ", stride=" + std::to_string(stride_) +
+               ", padding=" + std::to_string(padding_);
+    }
+
 private:
     int64_t kernel_size_;  ///< Pooling window size
     int64_t stride_;       ///< Stride
@@ -120,6 +126,12 @@ public:
      * @return Pooled output of shape (N, C, H_out, W_out)
      */
     auto forward_impl(const Variable& input) -> Variable override;
+
+    auto extra_repr() const -> std::string override {
+        return "kernel_size=" + std::to_string(kernel_size_) +
+               ", stride=" + std::to_string(stride_) +
+               ", padding=" + std::to_string(padding_);
+    }
 
 private:
     int64_t kernel_size_;  ///< Pooling window size

@@ -46,7 +46,7 @@ void main() {
     uint base_idx = outer_idx * params.reduce_size * params.inner_size + inner_idx;
 
     // Each thread processes multiple elements along the reduction dimension
-    for (uint i = tid; i < params.reduce_size; i += 256) {
+    for (uint i = tid; i < params.reduce_size; i += WORKGROUP_SIZE) {
         uint idx = base_idx + i * params.inner_size;
         if (idx < params.n) {
             float val = input_data[idx];
@@ -69,7 +69,7 @@ void main() {
     barrier();
 
     // Parallel reduction in shared memory — stop before subgroup size
-    for (uint s = 128; s >= SUBGROUP_SIZE; s >>= 1) {
+    for (uint s = WORKGROUP_SIZE / 2; s >= SUBGROUP_SIZE; s >>= 1) {
         if (tid < s) {
             switch (params.op) {
                 case 0:

@@ -32,14 +32,14 @@ void main() {
 
     // Step 1: Compute mean
     double local_sum = 0.0;
-    for (uint i = tid; i < params.normalized_shape; i += 256) {
+    for (uint i = tid; i < params.normalized_shape; i += WORKGROUP_SIZE) {
         local_sum += input_data[base_idx + i];
     }
     shared_sum[tid] = local_sum;
     barrier();
 
     // Parallel reduction for sum
-    for (uint s = 128; s > 0; s >>= 1) {
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
         if (tid < s) {
             shared_sum[tid] += shared_sum[tid + s];
         }
@@ -51,7 +51,7 @@ void main() {
 
     // Step 2: Compute variance
     double local_sum_sq = 0.0;
-    for (uint i = tid; i < params.normalized_shape; i += 256) {
+    for (uint i = tid; i < params.normalized_shape; i += WORKGROUP_SIZE) {
         double diff = input_data[base_idx + i] - mean;
         local_sum_sq += diff * diff;
     }
@@ -59,7 +59,7 @@ void main() {
     barrier();
 
     // Parallel reduction for sum of squares
-    for (uint s = 128; s > 0; s >>= 1) {
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
         if (tid < s) {
             shared_sum_sq[tid] += shared_sum_sq[tid + s];
         }
@@ -71,7 +71,7 @@ void main() {
     barrier();
 
     // Step 3: Normalize and apply affine transformation
-    for (uint i = tid; i < params.normalized_shape; i += 256) {
+    for (uint i = tid; i < params.normalized_shape; i += WORKGROUP_SIZE) {
         double normalized = (input_data[base_idx + i] - mean) * inv_std;
 
         if (params.affine > 0) {

@@ -19,8 +19,9 @@
 #include <mutex>
 #endif
 
-// OpenMP parallelization threshold - tuned to balance thread overhead vs parallelism benefit
-constexpr size_t ACTIVATION_OMP_THRESHOLD = 65536;  // 64K elements
+// Use adaptive OpenMP thresholds scaled to thread count
+#include "omp_thresholds.hpp"
+#define ACTIVATION_OMP_THRESHOLD (tenzor::cpu::get_omp_thresholds().simple)
 
 // oneDNN threshold - use oneDNN for tensors larger than this.
 // Lowered from 256K to 64K — primitive caching amortizes setup cost.
@@ -1539,6 +1540,8 @@ static auto compute_max_along_dim(const float* data, const std::vector<int64_t>&
 
 // Forward: exp(x_i - max) / sum(exp(x_j - max))
 auto softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
+    if (input.numel() == 0) return input.clone();
+
     auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
 
     // Handle negative dimension
@@ -1750,6 +1753,7 @@ auto softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
 // Backward: Jacobian-vector product
 // grad_input[i] = softmax[i] * (grad_output[i] - sum(grad_output * softmax))
 auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, int64_t dim) -> Tensor {
+    if (output.numel() == 0) return output.clone();
     auto grad_input = zeros_like(output);
 
     // Handle negative dimension
@@ -1911,6 +1915,8 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
 // Forward: log(softmax(x, dim)) = x - max(x) - log(sum(exp(x - max(x))))
 // More numerically stable than computing softmax then taking log
 auto log_softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
+    if (input.numel() == 0) return input.clone();
+
     auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
 
     // Handle negative dimension

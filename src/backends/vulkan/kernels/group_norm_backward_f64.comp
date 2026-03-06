@@ -61,7 +61,7 @@ void main() {
     double local_sum_dy = 0.0lf;
     double local_sum_dy_xhat = 0.0lf;
 
-    for (uint i = tid; i < group_size; i += 256) {
+    for (uint i = tid; i < group_size; i += WORKGROUP_SIZE) {
         uint idx = group_start + i;
         uint local_channel = i / spatial_size;
         uint global_channel = group_idx * channels_per_group + local_channel;
@@ -84,7 +84,7 @@ void main() {
     barrier();
 
     // Parallel reduction for sum_dy and sum_dy_xhat
-    for (uint s = 128; s > 0; s >>= 1) {
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
         if (tid < s) {
             shared_sum_dy[tid] += shared_sum_dy[tid + s];
             shared_sum_dy_xhat[tid] += shared_sum_dy_xhat[tid + s];
@@ -99,7 +99,7 @@ void main() {
     // Step 2: Compute grad_input and accumulate grad_weight, grad_bias
     double fgroup_size = double(group_size);
 
-    for (uint i = tid; i < group_size; i += 256) {
+    for (uint i = tid; i < group_size; i += WORKGROUP_SIZE) {
         uint idx = group_start + i;
         uint local_channel = i / spatial_size;
         uint global_channel = group_idx * channels_per_group + local_channel;

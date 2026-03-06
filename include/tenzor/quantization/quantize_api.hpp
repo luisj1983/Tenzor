@@ -14,6 +14,8 @@
 #include <memory>
 #include <vector>
 #include <functional>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace tenzor {
 namespace quantization {
@@ -25,6 +27,37 @@ enum class QuantizationMode {
     Dynamic,     ///< Weights quantized, activations computed in FP32
     Static,      ///< Weights and activations quantized (requires calibration)
     QAT          ///< Quantization-aware training
+};
+
+/**
+ * @brief Per-layer quantization configuration.
+ *
+ * Allows specifying different QConfigs for different layers, and
+ * excluding specific layers from quantization entirely.
+ *
+ * @code
+ * QuantizationConfig config;
+ * config.default_config = DefaultQConfigs::default_qconfig();
+ * config.layer_overrides["fc1"] = qconfig_int4;  // INT4 for fc1
+ * config.skip_layers.insert("embedding");         // Keep embedding in FP32
+ *
+ * auto q_model = quantize_dynamic(model, config);
+ * @endcode
+ */
+struct QuantizationConfig {
+    nn::quantization::QConfig default_config = nn::quantization::DefaultQConfigs::default_qconfig();
+    std::unordered_map<std::string, nn::quantization::QConfig> layer_overrides;
+    std::unordered_set<std::string> skip_layers;
+
+    /// Get the QConfig for a named layer (checks overrides, then default).
+    /// Returns nullopt if the layer should be skipped.
+    auto config_for(const std::string& name) const
+        -> std::optional<nn::quantization::QConfig> {
+        if (skip_layers.count(name)) return std::nullopt;
+        auto it = layer_overrides.find(name);
+        if (it != layer_overrides.end()) return it->second;
+        return default_config;
+    }
 };
 
 /**
@@ -51,6 +84,12 @@ auto quantize_dynamic(
     std::shared_ptr<nn::Module> model,
     nn::quantization::QuantDType weight_dtype = nn::quantization::QuantDType::INT8,
     nn::quantization::QuantDType activation_dtype = nn::quantization::QuantDType::INT8
+) -> std::shared_ptr<nn::Module>;
+
+/// Overload with per-layer config — allows skipping layers or using different QConfigs.
+auto quantize_dynamic(
+    std::shared_ptr<nn::Module> model,
+    const QuantizationConfig& config
 ) -> std::shared_ptr<nn::Module>;
 
 /**
@@ -88,6 +127,13 @@ auto quantize_static(
     std::shared_ptr<nn::Module> model,
     std::function<void(nn::Module&)> calibration_fn,
     const nn::quantization::QConfig& qconfig = nn::quantization::DefaultQConfigs::default_qconfig()
+) -> std::shared_ptr<nn::Module>;
+
+/// Overload with per-layer config.
+auto quantize_static(
+    std::shared_ptr<nn::Module> model,
+    std::function<void(nn::Module&)> calibration_fn,
+    const QuantizationConfig& config
 ) -> std::shared_ptr<nn::Module>;
 
 /**

@@ -61,6 +61,11 @@ auto Module::named_parameters() -> std::vector<std::pair<std::string, std::share
         params.emplace_back(name, param);
     }
 
+    // Sort own parameters by name for deterministic ordering
+    // (parameters_ is an unordered_map — iteration order is non-deterministic)
+    std::sort(params.begin(), params.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
     for (auto& [name, module] : submodules_) {
         auto sub_params = module->named_parameters();
         for (auto& [sub_name, sub_param] : sub_params) {
@@ -200,6 +205,9 @@ auto Module::named_buffers() -> std::vector<std::pair<std::string, std::shared_p
     for (auto& [name, buffer] : buffers_) {
         bufs.emplace_back(name, buffer);
     }
+
+    std::sort(bufs.begin(), bufs.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
 
     for (auto& [name, module] : submodules_) {
         auto sub_bufs = module->named_buffers();

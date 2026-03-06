@@ -68,6 +68,10 @@ public:
      */
     auto forward_impl(const Variable& input) -> Variable override;
 
+    auto extra_repr() const -> std::string override {
+        return "p=" + std::to_string(p_);
+    }
+
 private:
     double p_;  ///< Dropout probability
 };

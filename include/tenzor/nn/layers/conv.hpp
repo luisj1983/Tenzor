@@ -124,6 +124,15 @@ public:
     auto dilation_w() const -> int64_t { return dilation_w_; }
     auto groups() const -> int64_t { return groups_; }
 
+    auto extra_repr() const -> std::string override {
+        return "in_channels=" + std::to_string(in_channels_) +
+               ", out_channels=" + std::to_string(out_channels_) +
+               ", kernel_size=(" + std::to_string(kernel_h_) + ", " + std::to_string(kernel_w_) + ")" +
+               ", stride=(" + std::to_string(stride_h_) + ", " + std::to_string(stride_w_) + ")" +
+               ", padding=(" + std::to_string(padding_h_) + ", " + std::to_string(padding_w_) + ")" +
+               ", bias=" + (parameters_.count("bias") ? "True" : "False");
+    }
+
 private:
     int64_t in_channels_;   ///< Number of input channels
     int64_t out_channels_;  ///< Number of output channels
@@ -197,6 +206,15 @@ public:
      * @return Output variable of shape (N, C_out, L_out)
      */
     auto forward_impl(const Variable& input) -> Variable override;
+
+    auto extra_repr() const -> std::string override {
+        return "in_channels=" + std::to_string(in_channels_) +
+               ", out_channels=" + std::to_string(out_channels_) +
+               ", kernel_size=" + std::to_string(kernel_size_) +
+               ", stride=" + std::to_string(stride_) +
+               ", padding=" + std::to_string(padding_) +
+               ", bias=" + (parameters_.count("bias") ? "True" : "False");
+    }
 
 private:
     int64_t in_channels_;   ///< Number of input channels
@@ -281,6 +299,16 @@ public:
      */
     auto forward_impl(const Variable& input) -> Variable override;
 
+    auto extra_repr() const -> std::string override {
+        return "in_channels=" + std::to_string(in_channels_) +
+               ", out_channels=" + std::to_string(out_channels_) +
+               ", kernel_size=" + std::to_string(kernel_size_) +
+               ", stride=" + std::to_string(stride_) +
+               ", padding=" + std::to_string(padding_) +
+               ", output_padding=" + std::to_string(output_padding_) +
+               ", bias=" + (parameters_.count("bias") ? "True" : "False");
+    }
+
 private:
     int64_t in_channels_;       ///< Number of input channels
     int64_t out_channels_;      ///< Number of output channels
@@ -328,6 +356,15 @@ public:
 
     auto forward_impl(const Variable& input) -> Variable override;
 
+    auto extra_repr() const -> std::string override {
+        return "in_channels=" + std::to_string(in_channels_) +
+               ", out_channels=" + std::to_string(out_channels_) +
+               ", kernel_size=" + std::to_string(kernel_size_) +
+               ", stride=" + std::to_string(stride_) +
+               ", padding=" + std::to_string(padding_) +
+               ", bias=" + (parameters_.count("bias") ? "True" : "False");
+    }
+
 private:
     int64_t in_channels_;
     int64_t out_channels_;
@@ -366,6 +403,16 @@ public:
                     bool bias = true);
 
     auto forward_impl(const Variable& input) -> Variable override;
+
+    auto extra_repr() const -> std::string override {
+        return "in_channels=" + std::to_string(in_channels_) +
+               ", out_channels=" + std::to_string(out_channels_) +
+               ", kernel_size=" + std::to_string(kernel_size_) +
+               ", stride=" + std::to_string(stride_) +
+               ", padding=" + std::to_string(padding_) +
+               ", output_padding=" + std::to_string(output_padding_) +
+               ", bias=" + (parameters_.count("bias") ? "True" : "False");
+    }
 
 private:
     int64_t in_channels_;
@@ -409,6 +456,16 @@ public:
                     bool bias = true);
 
     auto forward_impl(const Variable& input) -> Variable override;
+
+    auto extra_repr() const -> std::string override {
+        return "in_channels=" + std::to_string(in_channels_) +
+               ", out_channels=" + std::to_string(out_channels_) +
+               ", kernel_size=" + std::to_string(kernel_size_) +
+               ", stride=" + std::to_string(stride_) +
+               ", padding=" + std::to_string(padding_) +
+               ", output_padding=" + std::to_string(output_padding_) +
+               ", bias=" + (parameters_.count("bias") ? "True" : "False");
+    }
 
 private:
     int64_t in_channels_;

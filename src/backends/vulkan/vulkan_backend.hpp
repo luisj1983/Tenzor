@@ -430,11 +430,13 @@ public:
     VkBuffer getVulkanBuffer(const void* ptr) const;
     std::pair<VkBuffer, VkDeviceSize> getVulkanBufferAndOffset(const void* ptr) const;
 
-    // Helper to allocate and bind descriptor sets
+    // Helper to allocate and bind descriptor sets.
+    // Accepts raw data pointers — resolves VkBuffer + byte offset internally
+    // so tensor views (slices) bind at the correct offset.
     VkDescriptorSet allocateAndWriteDescriptorSet(
         int32_t device_id,
         vulkan::ComputePipeline* pipeline,
-        const std::vector<std::pair<uint32_t, VkBuffer>>& bufferBindings,
+        const std::vector<std::pair<uint32_t, const void*>>& bufferPtrs,
         const std::vector<size_t>& bufferSizes);
 
     // Shader paths

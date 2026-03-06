@@ -34,7 +34,7 @@ void main() {
     barrier();
 
     // Parallel reduction for sum of squared differences
-    for (uint s = 128; s > 0; s >>= 1) {
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
         if (tid < s && (gid + s) < params.n) {
             shared_data[tid] += shared_data[tid + s];
         }

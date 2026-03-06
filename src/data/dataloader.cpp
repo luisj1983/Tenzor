@@ -277,60 +277,70 @@ auto DataLoader::collate_samples(const std::vector<std::pair<Tensor, Tensor>>& s
 
 // Worker thread function
 void DataLoader::worker_thread(size_t worker_id) {
-    while (!stop_workers_) {
-        // Get next batch index to process
-        size_t batch_idx = next_batch_idx_.fetch_add(1);
+    try {
+        while (!stop_workers_) {
+            // Get next batch index to process
+            size_t batch_idx = next_batch_idx_.fetch_add(1);
 
-        if (batch_idx >= num_batches_) {
-            // No more batches to process - decrement active workers
-            size_t remaining = active_workers_.fetch_sub(1) - 1;
-            if (remaining == 0) {
-                // Last worker to finish - signal epoch done
-                std::unique_lock<std::mutex> lock(queue_mutex_);
-                epoch_done_ = true;
-                queue_cv_.notify_all();
-            }
-            break;
-        }
-
-        // Calculate sample indices for this batch
-        size_t start_idx = batch_idx * config_.batch_size;
-        size_t end_idx = std::min(start_idx + config_.batch_size, dataset_->size());
-
-        // Skip if this is an incomplete batch and drop_last is true
-        if (config_.drop_last && (end_idx - start_idx) < config_.batch_size) {
-            continue;
-        }
-
-        // Load samples
-        std::vector<std::pair<Tensor, Tensor>> samples;
-        samples.reserve(end_idx - start_idx);
-
-        for (size_t i = start_idx; i < end_idx; ++i) {
-            size_t sample_idx = indices_[i];
-            samples.push_back(dataset_->get(sample_idx));
-        }
-
-        // Collate into batch
-        Batch batch = collate_samples(samples);
-
-        // Add to queue (with backpressure)
-        {
-            std::unique_lock<std::mutex> lock(queue_mutex_);
-
-            // Wait if queue is full (implement prefetch limit)
-            size_t max_queue_size = config_.num_workers * config_.prefetch_factor;
-            worker_cv_.wait(lock, [this, max_queue_size] {
-                return stop_workers_ || batch_queue_.size() < max_queue_size;
-            });
-
-            if (stop_workers_) {
+            if (batch_idx >= num_batches_) {
+                // No more batches to process - decrement active workers
+                size_t remaining = active_workers_.fetch_sub(1) - 1;
+                if (remaining == 0) {
+                    // Last worker to finish - signal epoch done
+                    std::unique_lock<std::mutex> lock(queue_mutex_);
+                    epoch_done_ = true;
+                    queue_cv_.notify_all();
+                }
                 break;
             }
 
-            batch_queue_.push(std::move(batch));
-            queue_cv_.notify_one();
+            // Calculate sample indices for this batch
+            size_t start_idx = batch_idx * config_.batch_size;
+            size_t end_idx = std::min(start_idx + config_.batch_size, dataset_->size());
+
+            // Skip if this is an incomplete batch and drop_last is true
+            if (config_.drop_last && (end_idx - start_idx) < config_.batch_size) {
+                continue;
+            }
+
+            // Load samples
+            std::vector<std::pair<Tensor, Tensor>> samples;
+            samples.reserve(end_idx - start_idx);
+
+            for (size_t i = start_idx; i < end_idx; ++i) {
+                size_t sample_idx = indices_[i];
+                samples.push_back(dataset_->get(sample_idx));
+            }
+
+            // Collate into batch
+            Batch batch = collate_samples(samples);
+
+            // Add to queue (with backpressure)
+            {
+                std::unique_lock<std::mutex> lock(queue_mutex_);
+
+                // Wait if queue is full (implement prefetch limit)
+                size_t max_queue_size = config_.num_workers * config_.prefetch_factor;
+                worker_cv_.wait(lock, [this, max_queue_size] {
+                    return stop_workers_ || batch_queue_.size() < max_queue_size;
+                });
+
+                if (stop_workers_) {
+                    break;
+                }
+
+                batch_queue_.push(std::move(batch));
+                queue_cv_.notify_one();
+            }
         }
+    } catch (...) {
+        // Store first exception and signal epoch done so consumer unblocks
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        if (!worker_exception_) {
+            worker_exception_ = std::current_exception();
+        }
+        epoch_done_ = true;
+        queue_cv_.notify_all();
     }
 }
 
@@ -412,6 +422,13 @@ auto DataLoader::get_next_batch_multi_threaded() -> Batch {
         return !batch_queue_.empty() || epoch_done_;
     });
 
+    // Rethrow worker exception on the consumer thread
+    if (worker_exception_) {
+        auto ex = worker_exception_;
+        worker_exception_ = nullptr;
+        std::rethrow_exception(ex);
+    }
+
     if (batch_queue_.empty()) {
         return Batch{};  // Empty batch signals end
     }
@@ -453,6 +470,9 @@ void DataLoader::reset() {
     if (config_.num_workers > 0) {
         // Stop and restart workers
         stop_workers();
+
+        // Clear any stored worker exception from previous epoch
+        worker_exception_ = nullptr;
 
         // Clear queue
         std::queue<Batch> empty_queue;

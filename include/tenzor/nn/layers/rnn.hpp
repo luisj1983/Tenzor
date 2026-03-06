@@ -340,6 +340,13 @@ public:
         return forward(input, {Variable{}, Variable{}}).first;
     }
 
+    auto extra_repr() const -> std::string override {
+        return "input_size=" + std::to_string(input_size_) +
+               ", hidden_size=" + std::to_string(hidden_size_) +
+               ", num_layers=" + std::to_string(num_layers_) +
+               ", bidirectional=" + std::string(bidirectional_ ? "True" : "False");
+    }
+
 private:
     int64_t input_size_;
     int64_t hidden_size_;
@@ -498,6 +505,13 @@ public:
      */
     auto forward_impl(const Variable& input) -> Variable override {
         return forward(input, Variable{}).first;
+    }
+
+    auto extra_repr() const -> std::string override {
+        return "input_size=" + std::to_string(input_size_) +
+               ", hidden_size=" + std::to_string(hidden_size_) +
+               ", num_layers=" + std::to_string(num_layers_) +
+               ", bidirectional=" + std::string(bidirectional_ ? "True" : "False");
     }
 
 private:

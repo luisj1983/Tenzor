@@ -106,7 +106,21 @@ static auto promote_dtype(DType a, DType b) -> DType {
             default:              return 0;
         }
     };
-    return prec(a) >= prec(b) ? a : b;
+
+    auto is_float = [](DType dt) -> bool {
+        return dt == DType::Float64 || dt == DType::Float32 ||
+               dt == DType::Float16 || dt == DType::BFloat16;
+    };
+
+    DType result = prec(a) >= prec(b) ? a : b;
+
+    // Gradients are fundamentally floating-point. If either input is float,
+    // the result must be float (e.g. Int64 + Float32 → Float32, not Int64).
+    if (!is_float(result) && (is_float(a) || is_float(b))) {
+        result = is_float(a) ? a : b;
+    }
+
+    return result;
 }
 
 auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,

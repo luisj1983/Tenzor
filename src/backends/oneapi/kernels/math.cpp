@@ -1,4 +1,5 @@
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/core/shape.hpp"
 #include <sycl/sycl.hpp>
 #include <cmath>
 #include <stdexcept>
@@ -165,6 +166,102 @@ inline auto calculate_numel(const std::vector<int64_t>& shape) -> int64_t {
     return numel;
 }
 
+// ============================================================================
+// SYCL Broadcasting Support
+// ============================================================================
+
+// Kernel name structs for broadcast ops
+struct BroadcastAddFloat32 {};
+struct BroadcastAddFloat64 {};
+struct BroadcastSubFloat32 {};
+struct BroadcastSubFloat64 {};
+struct BroadcastMulFloat32 {};
+struct BroadcastMulFloat64 {};
+struct BroadcastDivFloat32 {};
+struct BroadcastDivFloat64 {};
+
+constexpr int MAX_BROADCAST_DIMS = 8;
+
+// Pre-computed broadcast strides for mapping flat output index to input indices.
+// stride=0 for broadcast dimensions (input dim == 1).
+struct BroadcastInfo {
+    int64_t out_strides[MAX_BROADCAST_DIMS];
+    int64_t a_strides[MAX_BROADCAST_DIMS];
+    int64_t b_strides[MAX_BROADCAST_DIMS];
+    int ndim;
+    int64_t out_numel;
+};
+
+static auto compute_broadcast_info(
+    std::span<const int64_t> a_shape,
+    std::span<const int64_t> b_shape,
+    const std::vector<int64_t>& out_shape) -> BroadcastInfo {
+
+    BroadcastInfo info{};
+    info.ndim = static_cast<int>(out_shape.size());
+    info.out_numel = 1;
+    for (auto s : out_shape) info.out_numel *= s;
+
+    // Compute output strides (row-major)
+    for (int i = info.ndim - 1; i >= 0; --i) {
+        info.out_strides[i] = (i == info.ndim - 1) ? 1 : info.out_strides[i + 1] * out_shape[i + 1];
+    }
+
+    // Compute input strides with broadcasting (stride=0 for broadcast dims)
+    auto compute_input_strides = [&](std::span<const int64_t> shape, int64_t* strides) {
+        int offset = info.ndim - static_cast<int>(shape.size());
+        // Leading dimensions not present in input → broadcast (stride=0)
+        for (int i = 0; i < offset; ++i) strides[i] = 0;
+        // Trailing dimensions
+        int64_t stride = 1;
+        for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i) {
+            strides[i + offset] = (shape[i] == 1) ? 0 : stride;
+            stride *= shape[i];
+        }
+    };
+
+    compute_input_strides(a_shape, info.a_strides);
+    compute_input_strides(b_shape, info.b_strides);
+
+    return info;
+}
+
+// Generic SYCL broadcast binary operation
+template<typename T, typename KernelName, typename Op>
+static void sycl_broadcast_binary(
+    const Tensor& a, const Tensor& b, Tensor& output,
+    const BroadcastInfo& info, sycl::queue& queue, Op op) {
+
+    const T* a_ptr = get_data_ptr<const T>(a);
+    const T* b_ptr = get_data_ptr<const T>(b);
+    T* out_ptr = get_data_ptr<T>(output);
+
+    // Copy strides to local arrays for SYCL capture
+    int ndim = info.ndim;
+    int64_t out_numel = info.out_numel;
+
+    // Copy strides to fixed-size arrays for SYCL kernel capture
+    int64_t os[MAX_BROADCAST_DIMS], as_[MAX_BROADCAST_DIMS], bs_[MAX_BROADCAST_DIMS];
+    for (int i = 0; i < ndim; ++i) {
+        os[i] = info.out_strides[i];
+        as_[i] = info.a_strides[i];
+        bs_[i] = info.b_strides[i];
+    }
+
+    queue.parallel_for<KernelName>(sycl::range<1>(out_numel), [=](sycl::id<1> gid) {
+        int64_t flat = gid[0];
+        int64_t a_idx = 0, b_idx = 0;
+        int64_t remaining = flat;
+        for (int d = 0; d < ndim; ++d) {
+            int64_t coord = remaining / os[d];
+            remaining %= os[d];
+            a_idx += coord * as_[d];
+            b_idx += coord * bs_[d];
+        }
+        out_ptr[gid] = op(a_ptr[a_idx], b_ptr[b_idx]);
+    }).wait();
+}
+
 // Element-wise addition kernel
 // IMPORTANT: Must ensure contiguous inputs for direct memory access
 auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
@@ -178,22 +275,30 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
     // Check if shapes match exactly
     bool same_shape = std::equal(a_shape.begin(), a_shape.end(), b_shape.begin(), b_shape.end());
 
-    // If shapes don't match, fall back to CPU for broadcasting
-    // TODO: Implement proper SYCL broadcasting kernels
-    if (!same_shape) {
-        // Copy to CPU, perform operation, copy back
-        auto a_cpu = a_cont.to(Device::cpu());
-        auto b_cpu = b_cont.to(Device::cpu());
-
-        // CPU backend handles broadcasting
-        auto result_cpu = tenzor::add(a_cpu, b_cpu);
-
-        // Copy result back to OneAPI device
-        return result_cpu.to(a_cont.device());
-    }
-
     if (a_cont.dtype() != b_cont.dtype()) {
         throw std::invalid_argument("Tensor dtypes must match for addition");
+    }
+
+    // Handle broadcasting on device via SYCL kernel
+    if (!same_shape) {
+        auto out_shape = broadcast_shapes(a_shape, b_shape);
+        auto info = compute_broadcast_info(a_shape, b_shape, out_shape);
+        Tensor output(out_shape, a_cont.dtype(), a_cont.device());
+        if (a_cont.dtype() == DType::Float32) {
+            sycl_broadcast_binary<float, BroadcastAddFloat32>(
+                a_cont, b_cont, output, info, queue,
+                [](float x, float y) { return x + y; });
+        } else if (a_cont.dtype() == DType::Float64) {
+            sycl_broadcast_binary<double, BroadcastAddFloat64>(
+                a_cont, b_cont, output, info, queue,
+                [](double x, double y) { return x + y; });
+        } else {
+            // Fallback for other dtypes
+            auto a_cpu = a_cont.to(Device::cpu());
+            auto b_cpu = b_cont.to(Device::cpu());
+            return tenzor::add(a_cpu, b_cpu).to(a_cont.device());
+        }
+        return output;
     }
 
     // Create output tensor
@@ -306,12 +411,24 @@ auto sub_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
     // Check if shapes match exactly
     bool same_shape = std::equal(a_shape.begin(), a_shape.end(), b_shape.begin(), b_shape.end());
 
-    // If shapes don't match, fall back to CPU for broadcasting
     if (!same_shape) {
-        auto a_cpu = a_cont.to(Device::cpu());
-        auto b_cpu = b_cont.to(Device::cpu());
-        auto result_cpu = tenzor::sub(a_cpu, b_cpu);
-        return result_cpu.to(a_cont.device());
+        auto out_shape = broadcast_shapes(a_shape, b_shape);
+        auto info = compute_broadcast_info(a_shape, b_shape, out_shape);
+        Tensor output(out_shape, a_cont.dtype(), a_cont.device());
+        if (a_cont.dtype() == DType::Float32) {
+            sycl_broadcast_binary<float, BroadcastSubFloat32>(
+                a_cont, b_cont, output, info, queue,
+                [](float x, float y) { return x - y; });
+        } else if (a_cont.dtype() == DType::Float64) {
+            sycl_broadcast_binary<double, BroadcastSubFloat64>(
+                a_cont, b_cont, output, info, queue,
+                [](double x, double y) { return x - y; });
+        } else {
+            auto a_cpu = a_cont.to(Device::cpu());
+            auto b_cpu = b_cont.to(Device::cpu());
+            return tenzor::sub(a_cpu, b_cpu).to(a_cont.device());
+        }
+        return output;
     }
 
     Tensor output(std::vector<int64_t>(a_cont.shape().begin(), a_cont.shape().end()),
@@ -411,12 +528,24 @@ auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
     // Check if shapes match exactly
     bool same_shape = std::equal(a_shape.begin(), a_shape.end(), b_shape.begin(), b_shape.end());
 
-    // If shapes don't match, fall back to CPU for broadcasting
     if (!same_shape) {
-        auto a_cpu = a_cont.to(Device::cpu());
-        auto b_cpu = b_cont.to(Device::cpu());
-        auto result_cpu = tenzor::mul(a_cpu, b_cpu);
-        return result_cpu.to(a_cont.device());
+        auto out_shape = broadcast_shapes(a_shape, b_shape);
+        auto info = compute_broadcast_info(a_shape, b_shape, out_shape);
+        Tensor output(out_shape, a_cont.dtype(), a_cont.device());
+        if (a_cont.dtype() == DType::Float32) {
+            sycl_broadcast_binary<float, BroadcastMulFloat32>(
+                a_cont, b_cont, output, info, queue,
+                [](float x, float y) { return x * y; });
+        } else if (a_cont.dtype() == DType::Float64) {
+            sycl_broadcast_binary<double, BroadcastMulFloat64>(
+                a_cont, b_cont, output, info, queue,
+                [](double x, double y) { return x * y; });
+        } else {
+            auto a_cpu = a_cont.to(Device::cpu());
+            auto b_cpu = b_cont.to(Device::cpu());
+            return tenzor::mul(a_cpu, b_cpu).to(a_cont.device());
+        }
+        return output;
     }
 
     Tensor output(std::vector<int64_t>(a_cont.shape().begin(), a_cont.shape().end()),
@@ -522,12 +651,24 @@ auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
     // Check if shapes match exactly
     bool same_shape = std::equal(a_shape.begin(), a_shape.end(), b_shape.begin(), b_shape.end());
 
-    // If shapes don't match, fall back to CPU for broadcasting
     if (!same_shape) {
-        auto a_cpu = a_cont.to(Device::cpu());
-        auto b_cpu = b_cont.to(Device::cpu());
-        auto result_cpu = tenzor::div(a_cpu, b_cpu);
-        return result_cpu.to(a_cont.device());
+        auto out_shape = broadcast_shapes(a_shape, b_shape);
+        auto info = compute_broadcast_info(a_shape, b_shape, out_shape);
+        Tensor output(out_shape, a_cont.dtype(), a_cont.device());
+        if (a_cont.dtype() == DType::Float32) {
+            sycl_broadcast_binary<float, BroadcastDivFloat32>(
+                a_cont, b_cont, output, info, queue,
+                [](float x, float y) { return x / y; });
+        } else if (a_cont.dtype() == DType::Float64) {
+            sycl_broadcast_binary<double, BroadcastDivFloat64>(
+                a_cont, b_cont, output, info, queue,
+                [](double x, double y) { return x / y; });
+        } else {
+            auto a_cpu = a_cont.to(Device::cpu());
+            auto b_cpu = b_cont.to(Device::cpu());
+            return tenzor::div(a_cpu, b_cpu).to(a_cont.device());
+        }
+        return output;
     }
 
     Tensor output(std::vector<int64_t>(a_cont.shape().begin(), a_cont.shape().end()),
@@ -2133,8 +2274,7 @@ struct DivInplaceBcastKernelFloat32 {};
 struct DivInplaceBcastKernelFloat64 {};
 struct DivInplaceBcastKernelFloat16 {};
 
-// Maximum number of dimensions supported for broadcasting strides in SYCL kernels
-constexpr int MAX_BROADCAST_DIMS = 8;
+// MAX_BROADCAST_DIMS defined above (line ~170)
 
 // Structure to hold broadcast strides for SYCL kernel capture
 struct BroadcastStrides {

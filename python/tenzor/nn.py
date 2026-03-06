@@ -306,14 +306,28 @@ class Module(_CppModule):
             p.requires_grad_(requires_grad)
         return self
 
+    def extra_repr(self) -> str:
+        """Override in subclasses to show constructor args."""
+        # Try C++ extra_repr first (for wrapped C++ modules like Linear, Conv2d)
+        if hasattr(self._module, 'extra_repr'):
+            return self._module.extra_repr()
+        return ""
+
     def __repr__(self) -> str:
         """Return a string representation of the module."""
+        extra = self.extra_repr()
+        submodules = self.get_submodules()
+        if not submodules:
+            return f"{self.__class__.__name__}({extra})"
         lines = [f"{self.__class__.__name__}("]
-        for name, module in self.get_submodules().items():
+        if extra:
+            lines[0] = f"{self.__class__.__name__}({extra}"
+            lines.append("")
+        for name, module in submodules.items():
             mod_str = repr(module).replace('\n', '\n  ')
             lines.append(f"  ({name}): {mod_str}")
         lines.append(")")
-        return '\n'.join(lines) if len(lines) > 2 else f"{self.__class__.__name__}()"
+        return '\n'.join(lines)
 
 
 # Store reference to original C++ Sequential BEFORE overriding

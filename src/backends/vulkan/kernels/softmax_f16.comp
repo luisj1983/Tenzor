@@ -71,7 +71,7 @@ void main() {
 
         // Step 1: Find maximum for numerical stability (use float for reduction)
         float local_max = -1.0 / 0.0; // -infinity
-        for (uint i = tid; i < params.num_classes; i += 256) {
+        for (uint i = tid; i < params.num_classes; i += WORKGROUP_SIZE) {
             float val = readF16(base_idx + i);
             local_max = max(local_max, val);
         }
@@ -79,7 +79,7 @@ void main() {
         barrier();
 
         // Parallel reduction for max
-        for (uint s = 128; s > 0; s >>= 1) {
+        for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
             if (tid < s) {
                 shared_max[tid] = max(shared_max[tid], shared_max[tid + s]);
             }
@@ -91,7 +91,7 @@ void main() {
 
         // Step 2: Compute exp(x - max) and store in shared memory, accumulate sum
         float local_sum = 0.0;
-        for (uint i = tid; i < params.num_classes; i += 256) {
+        for (uint i = tid; i < params.num_classes; i += WORKGROUP_SIZE) {
             float val = readF16(base_idx + i);
             float exp_val = exp(val - row_max);
             // Store in shared memory for later
@@ -104,7 +104,7 @@ void main() {
         barrier();
 
         // Parallel reduction for sum
-        for (uint s = 128; s > 0; s >>= 1) {
+        for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
             if (tid < s) {
                 shared_sum[tid] += shared_sum[tid + s];
             }
@@ -118,7 +118,7 @@ void main() {
         // Step 3: Write output elements
         // Use per-element writes with atomicCompSwap to handle non-word-aligned
         // batch boundaries (when num_classes is odd)
-        for (uint i = tid; i < params.num_classes; i += 256) {
+        for (uint i = tid; i < params.num_classes; i += WORKGROUP_SIZE) {
             float val;
             if (i < 512) {
                 val = shared_exp[i] * inv_sum;

@@ -35,7 +35,7 @@ void main() {
         barrier();
 
         // Parallel reduction for workgroup count
-        for (uint s = 128; s > 0; s >>= 1) {
+        for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
             if (tid < s) {
                 shared_count[tid] += shared_count[tid + s];
             }
@@ -50,14 +50,14 @@ void main() {
         uint n_workgroups = (params.n_elements + 255) / 256;
 
         uint local_sum = 0;
-        for (uint i = tid; i < n_workgroups; i += 256) {
+        for (uint i = tid; i < n_workgroups; i += WORKGROUP_SIZE) {
             local_sum += count[i];
         }
 
         shared_count[tid] = local_sum;
         barrier();
 
-        for (uint s = 128; s > 0; s >>= 1) {
+        for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
             if (tid < s) {
                 shared_count[tid] += shared_count[tid + s];
             }

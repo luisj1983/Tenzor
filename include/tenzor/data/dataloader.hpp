@@ -177,6 +177,7 @@ private:
     std::atomic<bool> epoch_done_;
     std::atomic<size_t> next_batch_idx_;
     std::atomic<size_t> active_workers_;  ///< Number of workers still processing
+    std::exception_ptr worker_exception_;  ///< First exception from any worker thread
 
     // Batch management
     size_t num_batches_;

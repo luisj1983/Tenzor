@@ -25,9 +25,9 @@
 namespace tenzor {
 namespace cpu {
 
-// OpenMP threshold for reductions - needs enough work to amortize thread overhead
-// Defined early so SIMD functions can use it
-constexpr int64_t REDUCTION_OMP_THRESHOLD = 65536;  // 64K elements
+// Use adaptive OpenMP thresholds scaled to thread count
+#include "omp_thresholds.hpp"
+#define REDUCTION_OMP_THRESHOLD static_cast<int64_t>(tenzor::cpu::get_omp_thresholds().medium)
 
 // ============================================================================
 // SIMD Horizontal Reduction Helpers

@@ -131,6 +131,14 @@ public:
     static auto from_pretrained(const Tensor& embeddings, bool freeze = true,
                                 int64_t padding_idx = -1) -> std::shared_ptr<Embedding>;
 
+    auto extra_repr() const -> std::string override {
+        std::string repr = "num_embeddings=" + std::to_string(num_embeddings_) +
+                           ", embedding_dim=" + std::to_string(embedding_dim_);
+        if (padding_idx_ >= 0)
+            repr += ", padding_idx=" + std::to_string(padding_idx_);
+        return repr;
+    }
+
 private:
     Variable weight_;  ///< Embedding matrix [num_embeddings, embedding_dim]
     int64_t num_embeddings_;

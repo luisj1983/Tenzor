@@ -57,14 +57,14 @@ void main() {
 
     // Step 1: Compute mean (use float for accumulation)
     float local_sum = 0.0;
-    for (uint i = tid; i < params.normalized_shape; i += 256) {
+    for (uint i = tid; i < params.normalized_shape; i += WORKGROUP_SIZE) {
         local_sum += readF16(0, base_idx + i);
     }
     shared_sum[tid] = local_sum;
     barrier();
 
     // Parallel reduction for sum
-    for (uint s = 128; s > 0; s >>= 1) {
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
         if (tid < s) {
             shared_sum[tid] += shared_sum[tid + s];
         }
@@ -76,7 +76,7 @@ void main() {
 
     // Step 2: Compute variance
     float local_sum_sq = 0.0;
-    for (uint i = tid; i < params.normalized_shape; i += 256) {
+    for (uint i = tid; i < params.normalized_shape; i += WORKGROUP_SIZE) {
         float val = readF16(0, base_idx + i);
         float diff = val - mean;
         local_sum_sq += diff * diff;
@@ -85,7 +85,7 @@ void main() {
     barrier();
 
     // Parallel reduction for sum of squares
-    for (uint s = 128; s > 0; s >>= 1) {
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
         if (tid < s) {
             shared_sum_sq[tid] += shared_sum_sq[tid + s];
         }
@@ -99,7 +99,7 @@ void main() {
     // Step 3: Normalize and write output per-element
     // Use atomicCompSwap to handle non-word-aligned batch boundaries
     // (when normalized_shape is odd, base_idx can be odd for some batches)
-    for (uint i = tid; i < params.normalized_shape; i += 256) {
+    for (uint i = tid; i < params.normalized_shape; i += WORKGROUP_SIZE) {
         float input_val = readF16(0, base_idx + i);
         float val = (input_val - mean) * inv_std;
         if (params.affine > 0) {

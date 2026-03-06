@@ -120,6 +120,16 @@ public:
     auto block_size() const -> std::pair<int64_t, int64_t> { return block_size_; }
 
     /**
+     * @brief Create sparse tensor from dense tensor (non-zero elements only).
+     *
+     * @param dense Input dense tensor
+     * @param layout Target sparse layout (default: COO)
+     * @return Sparse tensor containing only non-zero elements
+     */
+    static auto from_dense(const Tensor& dense,
+                           SparseLayout layout = SparseLayout::COO) -> SparseTensor;
+
+    /**
      * @brief Convert to dense tensor.
      */
     auto to_dense() const -> Tensor;

@@ -944,14 +944,14 @@ auto VulkanBackend::dispatch(const std::string& op_name,
 
         auto* pipeline = getPipeline(shader_name, device_id);
 
-        VkBuffer buffer_rm = getVulkanBuffer(running_mean.data_ptr());
-        VkBuffer buffer_rv = getVulkanBuffer(running_var.data_ptr());
-        VkBuffer buffer_bm = getVulkanBuffer(const_cast<void*>(batch_mean.data_ptr()));
-        VkBuffer buffer_bv = getVulkanBuffer(const_cast<void*>(batch_var.data_ptr()));
+        const void* buffer_rm = running_mean.data_ptr();
+        const void* buffer_rv = running_var.data_ptr();
+        const void* buffer_bm = const_cast<void*>(batch_mean.data_ptr());
+        const void* buffer_bv = const_cast<void*>(batch_var.data_ptr());
 
         size_t buffer_size = n_channels * running_mean.dtype_size();
 
-        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, buffer_rm},
             {1, buffer_rv},
             {2, buffer_bm},
@@ -1583,25 +1583,25 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         bool has_momentum = (inputs.size() > 3 && momentum > 0.0f);
         bool has_grad_avg = (inputs.size() > 4 && centered);
 
-        VkBuffer buf_grad = getVulkanBuffer(inputs[0].data_ptr());
-        VkBuffer buf_param = getVulkanBuffer(inputs[1].data_ptr());
-        VkBuffer buf_sq_avg = getVulkanBuffer(inputs[2].data_ptr());
+        const void* buf_grad = inputs[0].data_ptr();
+        const void* buf_param = inputs[1].data_ptr();
+        const void* buf_sq_avg = inputs[2].data_ptr();
 
         size_t buf_size = numel * inputs[0].dtype_size();
-        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, buf_grad}, {1, buf_param}, {2, buf_sq_avg},
         };
         std::vector<size_t> sizes = {buf_size, buf_size, buf_size};
 
         if (has_momentum) {
-            bindings.push_back({3, getVulkanBuffer(inputs[3].data_ptr())});
+            bindings.push_back({3, inputs[3].data_ptr()});
             sizes.push_back(buf_size);
         } else {
             bindings.push_back({3, buf_param}); // dummy
             sizes.push_back(buf_size);
         }
         if (has_grad_avg) {
-            bindings.push_back({4, getVulkanBuffer(inputs[4].data_ptr())});
+            bindings.push_back({4, inputs[4].data_ptr()});
             sizes.push_back(buf_size);
         } else {
             bindings.push_back({4, buf_param}); // dummy
@@ -1658,11 +1658,11 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         auto* pipeline = getPipeline("fused_adadelta_step", device_id);
 
         size_t buf_size = numel * inputs[0].dtype_size();
-        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
-            {0, getVulkanBuffer(inputs[0].data_ptr())},
-            {1, getVulkanBuffer(inputs[1].data_ptr())},
-            {2, getVulkanBuffer(inputs[2].data_ptr())},
-            {3, getVulkanBuffer(inputs[3].data_ptr())},
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, inputs[0].data_ptr()},
+            {1, inputs[1].data_ptr()},
+            {2, inputs[2].data_ptr()},
+            {3, inputs[3].data_ptr()},
         };
         std::vector<size_t> sizes = {buf_size, buf_size, buf_size, buf_size};
 
@@ -1715,10 +1715,10 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         auto* pipeline = getPipeline("fused_adagrad_step", device_id);
 
         size_t buf_size = numel * inputs[0].dtype_size();
-        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
-            {0, getVulkanBuffer(inputs[0].data_ptr())},
-            {1, getVulkanBuffer(inputs[1].data_ptr())},
-            {2, getVulkanBuffer(inputs[2].data_ptr())},
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, inputs[0].data_ptr()},
+            {1, inputs[1].data_ptr()},
+            {2, inputs[2].data_ptr()},
         };
         std::vector<size_t> sizes = {buf_size, buf_size, buf_size};
 

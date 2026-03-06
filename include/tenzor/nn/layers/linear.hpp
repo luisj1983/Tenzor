@@ -79,6 +79,12 @@ public:
      */
     auto forward_impl(const Variable& input) -> Variable override;
 
+    auto extra_repr() const -> std::string override {
+        return "in_features=" + std::to_string(in_features_) +
+               ", out_features=" + std::to_string(out_features_) +
+               ", bias=" + (has_bias_ ? "True" : "False");
+    }
+
     /**
      * @brief Get weight parameter.
      *
@@ -106,11 +112,6 @@ private:
     int64_t in_features_;                   ///< Input feature dimension
     int64_t out_features_;                  ///< Output feature dimension
     bool has_bias_;                         ///< Whether this layer has bias
-
-    /// Cached raw pointers to avoid hash map lookups in forward pass.
-    /// Populated lazily on first forward call.
-    mutable Variable* cached_weight_ = nullptr;
-    mutable Variable* cached_bias_ = nullptr;
 
     /**
      * @brief Initialize parameters using Kaiming uniform.

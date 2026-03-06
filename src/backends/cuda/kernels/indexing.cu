@@ -479,6 +479,59 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
 // scatter_add kernel — uses atomicAdd for overlapping indices
 // ============================================================================
 
+// Warp-level atomic helper: reduces values within a warp that target the same
+// output offset, then one thread per unique target does a single atomicAdd.
+// This reduces atomic contention by up to 32x under high-conflict patterns.
+template<typename T>
+__device__ void warp_reduce_atomic_add(T* output, int64_t output_offset, T value) {
+    constexpr unsigned FULL_MASK = 0xFFFFFFFFu;
+    unsigned lane = threadIdx.x & 31;
+
+    // Find lanes in this warp targeting the same output_offset
+    // Use ballot to group matching lanes
+    for (unsigned peer_offset = 0; peer_offset < 32; ) {
+        // Broadcast the target offset from the lowest active lane
+        int64_t leader_offset = __shfl_sync(FULL_MASK, output_offset, peer_offset);
+        unsigned match_mask = __ballot_sync(FULL_MASK, output_offset == leader_offset);
+
+        if (output_offset == leader_offset) {
+            // Warp-level reduction via shuffle
+            T reduced = value;
+            for (int delta = 16; delta > 0; delta >>= 1) {
+                T shuffled = __shfl_down_sync(match_mask, reduced, delta);
+                if ((lane & (delta * 2 - 1)) < static_cast<unsigned>(delta)) {
+                    reduced += shuffled;
+                }
+            }
+            // Lowest matching lane does the atomic
+            unsigned leader_lane = __ffs(match_mask) - 1;
+            if (lane == leader_lane) {
+                if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
+                    atomicAdd(&output[output_offset], reduced);
+                } else if constexpr (std::is_same_v<T, int32_t>) {
+                    atomicAdd(reinterpret_cast<int*>(&output[output_offset]),
+                              static_cast<int>(reduced));
+                } else if constexpr (std::is_same_v<T, int64_t>) {
+                    unsigned long long* addr = reinterpret_cast<unsigned long long*>(&output[output_offset]);
+                    unsigned long long old_val = *addr;
+                    unsigned long long assumed;
+                    do {
+                        assumed = old_val;
+                        unsigned long long desired = static_cast<unsigned long long>(
+                            static_cast<int64_t>(assumed) + reduced);
+                        old_val = atomicCAS(addr, assumed, desired);
+                    } while (assumed != old_val);
+                } else {
+                    atomicAdd(&output[output_offset], reduced);
+                }
+            }
+            return;
+        }
+        // Advance past all lanes matching this leader
+        peer_offset = 32 - __clz(match_mask);
+    }
+}
+
 template<typename T, typename IndexT>
 __global__ void scatter_add_kernel_impl(
     const IndexT* indices,
@@ -504,27 +557,7 @@ __global__ void scatter_add_kernel_impl(
                                 scatter_idx * inner_size +
                                 inner_idx;
 
-        // atomicAdd is natively supported for float, double, int, unsigned int.
-        // For integer types, cast to int/unsigned long long for atomicAdd/CAS.
-        if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
-            atomicAdd(&output[output_offset], src[idx]);
-        } else if constexpr (std::is_same_v<T, int32_t>) {
-            atomicAdd(reinterpret_cast<int*>(&output[output_offset]),
-                      static_cast<int>(src[idx]));
-        } else if constexpr (std::is_same_v<T, int64_t>) {
-            // CAS loop for int64_t atomicAdd
-            unsigned long long* addr = reinterpret_cast<unsigned long long*>(&output[output_offset]);
-            unsigned long long old_val = *addr;
-            unsigned long long assumed;
-            do {
-                assumed = old_val;
-                unsigned long long desired = static_cast<unsigned long long>(
-                    static_cast<int64_t>(assumed) + src[idx]);
-                old_val = atomicCAS(addr, assumed, desired);
-            } while (assumed != old_val);
-        } else {
-            atomicAdd(&output[output_offset], src[idx]);
-        }
+        warp_reduce_atomic_add(output, output_offset, src[idx]);
     }
 }
 

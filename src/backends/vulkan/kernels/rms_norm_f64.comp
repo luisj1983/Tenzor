@@ -32,7 +32,7 @@ void main() {
 
     // Step 1: Compute sum of squares
     double local_sum_sq = 0.0;
-    for (uint i = tid; i < params.normalized_shape; i += 256) {
+    for (uint i = tid; i < params.normalized_shape; i += WORKGROUP_SIZE) {
         double val = input_data[base_idx + i];
         local_sum_sq += val * val;
     }
@@ -40,7 +40,7 @@ void main() {
     barrier();
 
     // Parallel reduction for sum of squares
-    for (uint s = 128; s > 0; s >>= 1) {
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
         if (tid < s) {
             shared_sum_sq[tid] += shared_sum_sq[tid + s];
         }
@@ -57,7 +57,7 @@ void main() {
     }
 
     // Step 2: Normalize and apply weight
-    for (uint i = tid; i < params.normalized_shape; i += 256) {
+    for (uint i = tid; i < params.normalized_shape; i += WORKGROUP_SIZE) {
         output_data[base_idx + i] = input_data[base_idx + i] * rrms * weight_data[i];
     }
 }

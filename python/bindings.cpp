@@ -788,15 +788,11 @@ PYBIND11_MODULE(tenzor_core, m) {
                  default: return static_cast<int64_t>(t.item<float>());
              }
              })
-        // Iteration: yields t[0], t[1], ..., t[n-1]
-        .def("__iter__", [](const tenzor::Tensor& t) {
-             if (t.ndim() == 0) throw py::type_error("iteration over a 0-d tensor");
-             int64_t n = t.shape()[0];
-             py::list items;
-             for (int64_t i = 0; i < n; ++i) {
-                 items.append(py::cast(t[i]));
-             }
-             return py::iter(items);
+        // Lazy iteration: __len__ + __getitem__ protocol.
+        // Python calls __getitem__(0), (1), ... until IndexError — O(1) memory.
+        .def("__len__", [](const tenzor::Tensor& t) -> int64_t {
+             if (t.ndim() == 0) throw py::type_error("len() of a 0-d tensor");
+             return t.shape()[0];
              })
         // Comparison operators
         .def("__eq__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::eq(a, b); },
@@ -2307,58 +2303,58 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("numel", [](const tenzor::Variable& self) {
             return self.tensor().numel();
         }, "Get the number of elements")
-        // Arithmetic operators - Variable-Variable
+        // Arithmetic operators - Variable-Variable (GIL released for compute)
         .def("__add__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
             return a + b;
-        }, py::is_operator())
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
         .def("__sub__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
             return a - b;
-        }, py::is_operator())
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
         .def("__mul__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
             return a * b;
-        }, py::is_operator())
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
         .def("__truediv__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
             return a / b;
-        }, py::is_operator())
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
         // Arithmetic operators - Variable-Scalar (double to match Python float precision)
         .def("__add__", [](const tenzor::Variable& a, double b) {
             return a + b;
-        }, py::is_operator())
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
         .def("__radd__", [](const tenzor::Variable& a, double b) {
             return a + b;
-        }, py::is_operator())
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
         .def("__mul__", [](const tenzor::Variable& a, double b) {
             return a * b;
-        }, py::is_operator())
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
         .def("__rmul__", [](const tenzor::Variable& a, double b) {
             return a * b;
-        }, py::is_operator())
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
         .def("__sub__", [](const tenzor::Variable& a, double b) {
             return a - b;
-        }, py::is_operator())
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
         .def("__rsub__", [](const tenzor::Variable& a, double b) {
             // b - a = -(a - b)
             return (a - b) * -1.0;
-        }, py::is_operator())
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
         .def("__truediv__", [](const tenzor::Variable& a, double b) {
             return a / b;
-        }, py::is_operator())
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
         .def("__rtruediv__", [](const tenzor::Variable& a, double b) {
             // b / a: create scalar variable with value b, divide by a
             auto b_var = tenzor::Variable(
                 tenzor::full({}, b, a.dtype(), a.device()), false);
             return b_var / a;
-        }, py::is_operator())
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
         .def("__neg__", [](const tenzor::Variable& a) {
             return a * -1.0;
-        }, py::is_operator())
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
         // Matrix multiplication
         .def("__matmul__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
             return a.matmul(b);
-        }, py::is_operator())
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
         .def("__rmatmul__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
             return b.matmul(a);
-        }, py::is_operator())
+        }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
         // Power (uses tensor-level pow, wraps back in Variable)
         .def("__pow__", [](const tenzor::Variable& a, float exp) {
             auto result = tenzor::pow(a.tensor(), exp);
@@ -2529,15 +2525,9 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("__index__", [](const tenzor::Variable& v) {
             return v.tensor().item<int64_t>();
         })
-        .def("__iter__", [](const tenzor::Variable& v) {
-            auto t = v.tensor();
-            if (t.ndim() == 0) throw py::type_error("iteration over a 0-d Variable");
-            int64_t n = t.shape()[0];
-            py::list result;
-            for (int64_t i = 0; i < n; ++i) {
-                result.append(tenzor::Variable(t[i].contiguous().clone(), v.requires_grad()));
-            }
-            return py::iter(result);
+        .def("__len__", [](const tenzor::Variable& v) -> int64_t {
+            if (v.tensor().ndim() == 0) throw py::type_error("len() of a 0-d Variable");
+            return v.tensor().shape()[0];
         })
         .def_property_readonly("strides", [](const tenzor::Variable& v) {
             auto s = v.tensor().strides();
@@ -3052,6 +3042,8 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("forward_impl", &tenzor::nn::Module::forward_impl,
              py::arg("input"),
              "Implementation of forward pass - override this in subclasses")
+        .def("extra_repr", &tenzor::nn::Module::extra_repr,
+             "Extra representation string for __repr__ — override in subclasses")
         .def("__call__", &tenzor::nn::Module::operator(),
              py::arg("input"),
              "Callable interface - equivalent to forward()")

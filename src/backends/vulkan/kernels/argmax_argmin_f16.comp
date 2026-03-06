@@ -51,7 +51,7 @@ void main() {
     uint inner_idx = output_idx % params.inner_size;
     uint base_idx = outer_idx * params.reduce_size * params.inner_size + inner_idx;
 
-    for (uint i = tid; i < params.reduce_size; i += 256) {
+    for (uint i = tid; i < params.reduce_size; i += WORKGROUP_SIZE) {
         uint idx = base_idx + i * params.inner_size;
         if (idx < params.n) {
             float val = readF16Element(idx);
@@ -74,7 +74,7 @@ void main() {
     shared_indices[tid] = best_index;
     barrier();
 
-    for (uint s = 128; s > 0; s >>= 1) {
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
         if (tid < s) {
             if (params.op == 0) {
                 if (shared_vals[tid + s] > shared_vals[tid]) {

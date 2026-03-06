@@ -128,9 +128,9 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         }
 
         // Get VkBuffer handles
-        VkBuffer buffer_a = getVulkanBuffer(a.data_ptr());
-        VkBuffer buffer_b = getVulkanBuffer(b.data_ptr());
-        VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+        const void* buffer_a = a.data_ptr();
+        const void* buffer_b = b.data_ptr();
+        const void* buffer_out = output.data_ptr();
 
         // Calculate buffer sizes
         // For Float16, the shader reads uint32 words (2 elements per word),
@@ -148,7 +148,7 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         }
 
         // Allocate and write descriptor set
-        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, buffer_a}, {1, buffer_b}, {2, buffer_out}
         };
         std::vector<size_t> sizes = {buffer_size_a, buffer_size_b, buffer_size_out};
@@ -260,9 +260,9 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         }
 
         // Get VkBuffer handles
-        VkBuffer buffer_a = getVulkanBuffer(a.data_ptr());
-        VkBuffer buffer_b = getVulkanBuffer(b.data_ptr());
-        VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+        const void* buffer_a = a.data_ptr();
+        const void* buffer_b = b.data_ptr();
+        const void* buffer_out = output.data_ptr();
 
         // Calculate buffer sizes
         // For Float16, the shader works with uint32 (packed pairs), so descriptor size needs
@@ -281,7 +281,7 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         }
 
         // Allocate and write descriptor set
-        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, buffer_a}, {1, buffer_b}, {2, buffer_out}
         };
         std::vector<size_t> sizes = {buffer_size_a, buffer_size_b, buffer_size_out};
@@ -442,8 +442,8 @@ auto VulkanBackend::dispatchUnaryOp(const std::string& op_name,
     }
 
     // Get VkBuffer handles from tensor data pointers
-    VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+    const void* buffer_in = input.data_ptr();
+    const void* buffer_out = output.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_in = input.numel() * input.dtype_size();
@@ -459,7 +459,7 @@ auto VulkanBackend::dispatchUnaryOp(const std::string& op_name,
     // Allocate and write descriptor set
     // For trigonometric/hyperbolic shaders: Binding 0: input, Binding 1: output
     // For math/math_f64 shaders: Binding 0: input, Binding 1: unused (set to input), Binding 2: output
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings;
+    std::vector<std::pair<uint32_t, const void*>> bindings;
     std::vector<size_t> sizes;
 
     if (shader_name == "math" || shader_name == "math_f64" || shader_name == "math_i32" || shader_name == "math_f16") {
@@ -571,8 +571,8 @@ auto VulkanBackend::dispatchUnaryOpWithParam(const std::string& op_name,
     }
 
     // Get VkBuffer handles from tensor data pointers
-    VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+    const void* buffer_in = input.data_ptr();
+    const void* buffer_out = output.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_in = input.numel() * input.dtype_size();
@@ -587,7 +587,7 @@ auto VulkanBackend::dispatchUnaryOpWithParam(const std::string& op_name,
 
     // Allocate and write descriptor set
     // Binding 0: input, Binding 1: unused (set to input), Binding 2: output
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_in},
         {1, buffer_in},  // Unary ops don't use binding 1, but descriptor set expects it
         {2, buffer_out}
@@ -650,8 +650,8 @@ auto VulkanBackend::dispatchTrigonometricOp(const std::string& op_name,
     push_constants.op = opcode;
 
     // Get VkBuffer handles
-    VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+    const void* buffer_in = input.data_ptr();
+    const void* buffer_out = output.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_in = input.numel() * input.dtype_size();
@@ -664,7 +664,7 @@ auto VulkanBackend::dispatchTrigonometricOp(const std::string& op_name,
     }
 
     // Allocate and write descriptor set
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_in}, {1, buffer_out}
     };
     std::vector<size_t> sizes = {buffer_size_in, buffer_size_out};
@@ -724,8 +724,8 @@ auto VulkanBackend::dispatchHyperbolicOp(const std::string& op_name,
     push_constants.op = opcode;
 
     // Get VkBuffer handles
-    VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+    const void* buffer_in = input.data_ptr();
+    const void* buffer_out = output.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_in = input.numel() * input.dtype_size();
@@ -738,7 +738,7 @@ auto VulkanBackend::dispatchHyperbolicOp(const std::string& op_name,
     }
 
     // Allocate and write descriptor set
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_in}, {1, buffer_out}
     };
     std::vector<size_t> sizes = {buffer_size_in, buffer_size_out};
@@ -835,9 +835,9 @@ auto VulkanBackend::dispatchComparisonOp(const std::string& op_name,
     push_constants.op = opcode;
 
     // Get VkBuffer handles from tensor data pointers
-    VkBuffer buffer_a = getVulkanBuffer(a.data_ptr());
-    VkBuffer buffer_b = getVulkanBuffer(b.data_ptr());
-    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+    const void* buffer_a = a.data_ptr();
+    const void* buffer_b = b.data_ptr();
+    const void* buffer_out = output.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_a = a.numel() * a.dtype_size();
@@ -855,7 +855,7 @@ auto VulkanBackend::dispatchComparisonOp(const std::string& op_name,
 
     // Allocate and write descriptor set
     // Binding 0: input A, Binding 1: input B, Binding 2: output
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_a},
         {1, buffer_b},
         {2, buffer_out}
@@ -1013,8 +1013,8 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
     Tensor output(out_shape, input.dtype(), input.device());
 
     // Get VkBuffer handles from tensor data pointers
-    VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+    const void* buffer_in = input.data_ptr();
+    const void* buffer_out = output.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_in = input.numel() * input.dtype_size();
@@ -1029,7 +1029,7 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
 
     // Allocate and write descriptor set
     // Binding 0: input, Binding 1: output (matches reduction.comp shader layout)
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_in},
         {1, buffer_out}
     };
@@ -1178,11 +1178,11 @@ auto VulkanBackend::dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor {
     Tensor output(out_shape, a_contig.dtype(), a_contig.device());
 
     // Get VkBuffer handles - for transposed B, we need to access the underlying storage
-    VkBuffer buffer_a = getVulkanBuffer(a_contig.data_ptr());
+    const void* buffer_a = a_contig.data_ptr();
     void* b_data_ptr = b_is_transposed ? const_cast<void*>(b_for_compute.storage()->data())
                                         : b_for_compute.data_ptr();
-    VkBuffer buffer_b = getVulkanBuffer(b_data_ptr);
-    VkBuffer buffer_c = getVulkanBuffer(output.data_ptr());
+    const void* buffer_b = b_data_ptr;
+    const void* buffer_c = output.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_a = a_contig.numel() * a_contig.dtype_size();
@@ -1190,7 +1190,7 @@ auto VulkanBackend::dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor {
     size_t buffer_size_c = output.numel() * output.dtype_size();
 
     // Allocate and write descriptor set
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_a},
         {1, buffer_b},
         {2, buffer_c}
@@ -1301,9 +1301,9 @@ auto VulkanBackend::dispatchBmm(const Tensor& a, const Tensor& b) -> Tensor {
 
         // Get VkBuffer handles - for non-contiguous tensors, data_ptr() points
         // to the underlying storage which getVulkanBuffer resolves correctly
-        VkBuffer buffer_a = getVulkanBuffer(a.data_ptr());
-        VkBuffer buffer_b = getVulkanBuffer(b.data_ptr());
-        VkBuffer buffer_c = getVulkanBuffer(output.data_ptr());
+        const void* buffer_a = a.data_ptr();
+        const void* buffer_b = b.data_ptr();
+        const void* buffer_c = output.data_ptr();
 
         // Buffer sizes: for non-contiguous tensors, compute the extent
         // (max addressable byte) from strides rather than numel * dtype_size
@@ -1328,7 +1328,7 @@ auto VulkanBackend::dispatchBmm(const Tensor& a, const Tensor& b) -> Tensor {
         size_t buffer_size_b = b_contig ? b.numel() * dtype_sz : compute_extent(b);
         size_t buffer_size_c = output.numel() * dtype_sz;
 
-        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, buffer_a}, {1, buffer_b}, {2, buffer_c}
         };
         std::vector<size_t> sizes = {buffer_size_a, buffer_size_b, buffer_size_c};
@@ -1389,9 +1389,9 @@ auto VulkanBackend::dispatchBmm(const Tensor& a, const Tensor& b) -> Tensor {
     Tensor output(out_shape, a.dtype(), a.device());
 
     // Get VkBuffer handles
-    VkBuffer buffer_a = getVulkanBuffer(a.data_ptr());
-    VkBuffer buffer_b = getVulkanBuffer(b.data_ptr());
-    VkBuffer buffer_c = getVulkanBuffer(output.data_ptr());
+    const void* buffer_a = a.data_ptr();
+    const void* buffer_b = b.data_ptr();
+    const void* buffer_c = output.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_a = a.numel() * a.dtype_size();
@@ -1399,7 +1399,7 @@ auto VulkanBackend::dispatchBmm(const Tensor& a, const Tensor& b) -> Tensor {
     size_t buffer_size_c = output.numel() * output.dtype_size();
 
     // Allocate and write descriptor set
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_a},
         {1, buffer_b},
         {2, buffer_c}
@@ -1532,9 +1532,9 @@ auto VulkanBackend::dispatchConv2dBackwardInput(
     Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
 
     // Get VkBuffer handles
-    VkBuffer buffer_grad_out = getVulkanBuffer(grad_output.data_ptr());
-    VkBuffer buffer_weight = getVulkanBuffer(weight.data_ptr());
-    VkBuffer buffer_grad_in = getVulkanBuffer(grad_input.data_ptr());
+    const void* buffer_grad_out = grad_output.data_ptr();
+    const void* buffer_weight = weight.data_ptr();
+    const void* buffer_grad_in = grad_input.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_grad_out = grad_output.numel() * grad_output.dtype_size();
@@ -1542,7 +1542,7 @@ auto VulkanBackend::dispatchConv2dBackwardInput(
     size_t buffer_size_grad_in = grad_input.numel() * grad_input.dtype_size();
 
     // Allocate and write descriptor set
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_grad_out},  // grad_output
         {1, buffer_weight},    // weight
         {2, buffer_grad_in}    // grad_input (output)
@@ -1660,9 +1660,9 @@ auto VulkanBackend::dispatchConv2dBackwardWeight(
     Tensor grad_weight(weight_shape, grad_output.dtype(), grad_output.device());
 
     // Get VkBuffer handles
-    VkBuffer buffer_grad_out = getVulkanBuffer(grad_output.data_ptr());
-    VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_grad_weight = getVulkanBuffer(grad_weight.data_ptr());
+    const void* buffer_grad_out = grad_output.data_ptr();
+    const void* buffer_input = input.data_ptr();
+    const void* buffer_grad_weight = grad_weight.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_grad_out = grad_output.numel() * grad_output.dtype_size();
@@ -1670,7 +1670,7 @@ auto VulkanBackend::dispatchConv2dBackwardWeight(
     size_t buffer_size_grad_weight = grad_weight.numel() * grad_weight.dtype_size();
 
     // Allocate and write descriptor set
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_grad_out},    // grad_output
         {1, buffer_input},       // input
         {2, buffer_grad_weight}  // grad_weight (output)
@@ -1774,15 +1774,15 @@ auto VulkanBackend::dispatchConv2dBackwardBias(const Tensor& grad_output) -> Ten
     Tensor grad_bias(bias_shape, grad_output.dtype(), grad_output.device());
 
     // Get VkBuffer handles
-    VkBuffer buffer_grad_out = getVulkanBuffer(grad_output.data_ptr());
-    VkBuffer buffer_grad_bias = getVulkanBuffer(grad_bias.data_ptr());
+    const void* buffer_grad_out = grad_output.data_ptr();
+    const void* buffer_grad_bias = grad_bias.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_grad_out = grad_output.numel() * grad_output.dtype_size();
     size_t buffer_size_grad_bias = grad_bias.numel() * grad_bias.dtype_size();
 
     // Allocate and write descriptor set
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_grad_out},   // grad_output
         {1, buffer_grad_bias}   // grad_bias (output)
     };
@@ -1868,13 +1868,13 @@ auto VulkanBackend::dispatchIm2Col(const Tensor& input, const OpAttributes& attr
     int64_t total_elements = batch * channels * kernel_size * kernel_size * num_blocks;
 
     // Prepare buffers
-    VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+    const void* buffer_in = input.data_ptr();
+    const void* buffer_out = output.data_ptr();
 
     size_t buffer_size_in = input.numel() * input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
 
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_in},
         {1, buffer_out}
     };
@@ -1965,12 +1965,12 @@ auto VulkanBackend::dispatchCol2Im(const Tensor& input, const OpAttributes& attr
     int32_t device_id = input.device().index;
     auto* fill_pipeline = getPipeline("fill", device_id);
 
-    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+    const void* buffer_out = output.data_ptr();
     size_t buffer_size_out = output.numel() * output.dtype_size();
 
     // Zero-initialize output buffer
     {
-        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {{0, buffer_out}};
+        std::vector<std::pair<uint32_t, const void*>> bindings = {{0, buffer_out}};
         std::vector<size_t> sizes = {buffer_size_out};
         VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
             device_id, fill_pipeline, bindings, sizes);
@@ -2003,11 +2003,11 @@ auto VulkanBackend::dispatchCol2Im(const Tensor& input, const OpAttributes& attr
     int64_t total_elements = batch * col_channels * num_blocks;
 
     // Prepare buffers
-    VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
+    const void* buffer_in = input.data_ptr();
 
     size_t buffer_size_in = input.numel() * input.dtype_size();
 
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_in},
         {1, buffer_out}
     };
@@ -2114,9 +2114,9 @@ auto VulkanBackend::dispatchMaxPool2d(const Tensor& input, int64_t kernel_h, int
     push_constants.padding_w = static_cast<uint32_t>(padding_w);
 
     // Get VkBuffer handles
-    VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
-    VkBuffer buffer_indices = getVulkanBuffer(indices.data_ptr());
+    const void* buffer_input = input.data_ptr();
+    const void* buffer_output = output.data_ptr();
+    const void* buffer_indices = indices.data_ptr();
 
     // Calculate buffer sizes
     size_t input_size = input.numel() * input.dtype_size();
@@ -2124,7 +2124,7 @@ auto VulkanBackend::dispatchMaxPool2d(const Tensor& input, int64_t kernel_h, int
     size_t indices_size = indices.numel() * indices.dtype_size();
 
     // Allocate and write descriptor set
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_input},
         {1, buffer_output},
         {2, buffer_indices}
@@ -2222,15 +2222,15 @@ auto VulkanBackend::dispatchAvgPool2d(const Tensor& input, int64_t kernel_h, int
     push_constants.count_include_pad = 0;  // Default: don't include padding in average
 
     // Get VkBuffer handles
-    VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
+    const void* buffer_input = input.data_ptr();
+    const void* buffer_output = output.data_ptr();
 
     // Calculate buffer sizes
     size_t input_size = input.numel() * input.dtype_size();
     size_t output_size = output.numel() * output.dtype_size();
 
     // Allocate and write descriptor set
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_input},
         {1, buffer_output}
     };
@@ -2299,9 +2299,9 @@ auto VulkanBackend::dispatchAdaptiveMaxPool2d(const Tensor& input, int64_t out_h
     push_constants.pool_type = 0;  // 0 = max pooling
 
     // Get VkBuffer handles
-    VkBuffer buffer_input = getVulkanBuffer(cont_input.data_ptr());
-    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
-    VkBuffer buffer_indices = getVulkanBuffer(indices.data_ptr());
+    const void* buffer_input = cont_input.data_ptr();
+    const void* buffer_output = output.data_ptr();
+    const void* buffer_indices = indices.data_ptr();
 
     // Calculate buffer sizes
     size_t input_size = cont_input.numel() * cont_input.dtype_size();
@@ -2309,7 +2309,7 @@ auto VulkanBackend::dispatchAdaptiveMaxPool2d(const Tensor& input, int64_t out_h
     size_t indices_size = indices.numel() * indices.dtype_size();
 
     // Allocate and write descriptor set
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_input},
         {1, buffer_output},
         {2, buffer_indices}
@@ -2395,9 +2395,9 @@ auto VulkanBackend::dispatchAdaptiveAvgPool2d(const Tensor& input, int64_t out_h
     push_constants.pool_type = 1;  // 1 = avg pooling
 
     // Get VkBuffer handles
-    VkBuffer buffer_input = getVulkanBuffer(cont_input.data_ptr());
-    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
-    VkBuffer buffer_indices = getVulkanBuffer(dummy_indices.data_ptr());
+    const void* buffer_input = cont_input.data_ptr();
+    const void* buffer_output = output.data_ptr();
+    const void* buffer_indices = dummy_indices.data_ptr();
 
     // Calculate buffer sizes
     size_t input_size = cont_input.numel() * cont_input.dtype_size();
@@ -2405,7 +2405,7 @@ auto VulkanBackend::dispatchAdaptiveAvgPool2d(const Tensor& input, int64_t out_h
     size_t indices_size = dummy_indices.numel() * dummy_indices.dtype_size();
 
     // Allocate and write descriptor set
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_input},
         {1, buffer_output},
         {2, buffer_indices}
@@ -2486,10 +2486,10 @@ auto VulkanBackend::dispatchAdaptiveAvgPool2dBackward(const Tensor& grad_output,
         fill_push_constants.n_elements = static_cast<uint32_t>(grad_input.numel());
         fill_push_constants.value_bits = 0;  // 0.0f in bits
 
-        VkBuffer buffer_fill = getVulkanBuffer(grad_input.data_ptr());
+        const void* buffer_fill = grad_input.data_ptr();
         size_t fill_size = grad_input.numel() * grad_input.dtype_size();
 
-        std::vector<std::pair<uint32_t, VkBuffer>> fill_bindings = {{0, buffer_fill}};
+        std::vector<std::pair<uint32_t, const void*>> fill_bindings = {{0, buffer_fill}};
         std::vector<size_t> fill_sizes = {fill_size};
 
         VkDescriptorSet fillDescSet = allocateAndWriteDescriptorSet(
@@ -2534,15 +2534,15 @@ auto VulkanBackend::dispatchAdaptiveAvgPool2dBackward(const Tensor& grad_output,
     push_constants.W_out = static_cast<uint32_t>(W_out);
 
     // Get VkBuffer handles
-    VkBuffer buffer_grad_output = getVulkanBuffer(cont_grad.data_ptr());
-    VkBuffer buffer_grad_input = getVulkanBuffer(grad_input.data_ptr());
+    const void* buffer_grad_output = cont_grad.data_ptr();
+    const void* buffer_grad_input = grad_input.data_ptr();
 
     // Calculate buffer sizes
     size_t grad_output_size = cont_grad.numel() * cont_grad.dtype_size();
     size_t grad_input_size = grad_input.numel() * grad_input.dtype_size();
 
     // Allocate and write descriptor set
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_grad_output},
         {1, buffer_grad_input}
     };
@@ -2681,13 +2681,13 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
     }
 
     // Get VkBuffer handles
-    VkBuffer buffer_grad_out = getVulkanBuffer(grad_out.data_ptr());
-    VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_mean = getVulkanBuffer(mean.data_ptr());
-    VkBuffer buffer_var = getVulkanBuffer(var.data_ptr());
-    VkBuffer buffer_grad_input = getVulkanBuffer(grad_input.data_ptr());
-    VkBuffer buffer_grad_gamma = getVulkanBuffer(grad_gamma.data_ptr());
-    VkBuffer buffer_grad_beta = getVulkanBuffer(grad_beta.data_ptr());
+    const void* buffer_grad_out = grad_out.data_ptr();
+    const void* buffer_input = input.data_ptr();
+    const void* buffer_mean = mean.data_ptr();
+    const void* buffer_var = var.data_ptr();
+    const void* buffer_grad_input = grad_input.data_ptr();
+    const void* buffer_grad_gamma = grad_gamma.data_ptr();
+    const void* buffer_grad_beta = grad_beta.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_input = n_elements * input.dtype_size();
@@ -2700,7 +2700,7 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
     size_t buffer_size_channel = channels * mean.dtype_size();
 
     // Set up descriptor bindings
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_grad_out},    // grad_output
         {1, buffer_input},       // input
         {2, buffer_mean},        // mean
@@ -2715,7 +2715,7 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
 
     // Handle optional gamma
     if (gamma_effective) {
-        VkBuffer buffer_gamma = getVulkanBuffer(gamma_effective->data_ptr());
+        const void* buffer_gamma = gamma_effective->data_ptr();
         bindings.push_back({4, buffer_gamma});
         sizes.push_back(gamma_effective->numel() * gamma_effective->dtype_size());
     } else {
@@ -2836,10 +2836,10 @@ auto VulkanBackend::dispatchBatchNorm2dForward(const Tensor& input, const Tensor
     }
 
     // Get VkBuffer handles
-    VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_mean = getVulkanBuffer(mean_ptr->data_ptr());
-    VkBuffer buffer_var = getVulkanBuffer(var_ptr->data_ptr());
-    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
+    const void* buffer_input = input.data_ptr();
+    const void* buffer_mean = mean_ptr->data_ptr();
+    const void* buffer_var = var_ptr->data_ptr();
+    const void* buffer_output = output.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_input = input.numel() * input.dtype_size();
@@ -2855,7 +2855,7 @@ auto VulkanBackend::dispatchBatchNorm2dForward(const Tensor& input, const Tensor
     }
 
     // Allocate and write descriptor set
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_input},   // input
         {1, buffer_mean},    // mean
         {2, buffer_var},     // variance
@@ -2877,8 +2877,8 @@ auto VulkanBackend::dispatchBatchNorm2dForward(const Tensor& input, const Tensor
             beta_ptr = &beta_f32;
         }
 
-        VkBuffer buffer_gamma = getVulkanBuffer(gamma_ptr->data_ptr());
-        VkBuffer buffer_beta = getVulkanBuffer(beta_ptr->data_ptr());
+        const void* buffer_gamma = gamma_ptr->data_ptr();
+        const void* buffer_beta = beta_ptr->data_ptr();
         size_t buffer_size_gamma = gamma_ptr->numel() * gamma_ptr->dtype_size();
         size_t buffer_size_beta = beta_ptr->numel() * beta_ptr->dtype_size();
 
@@ -2988,10 +2988,10 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
     temp_sum = dispatchFill(temp_sum, 0.0f);
 
     // Get VkBuffer handles
-    VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_mean = getVulkanBuffer(mean.data_ptr());
-    VkBuffer buffer_var = getVulkanBuffer(variance.data_ptr());
-    VkBuffer buffer_temp = getVulkanBuffer(temp_sum.data_ptr());
+    const void* buffer_input = input.data_ptr();
+    const void* buffer_mean = mean.data_ptr();
+    const void* buffer_var = variance.data_ptr();
+    const void* buffer_temp = temp_sum.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_input = input.numel() * input.dtype_size();
@@ -3004,7 +3004,7 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
 
     // First pass: compute mean
     {
-        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, buffer_input},
             {1, buffer_mean},
             {2, buffer_var},
@@ -3055,12 +3055,12 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
     }
 
     // Update buffer_mean to point to the newly computed mean tensor
-    buffer_mean = getVulkanBuffer(mean.data_ptr());
+    buffer_mean = mean.data_ptr();
     buffer_size_stats = channels * mean.dtype_size();
 
     // Second pass: compute variance
     {
-        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, buffer_input},
             {1, buffer_mean},
             {2, buffer_var},
@@ -3152,8 +3152,8 @@ auto VulkanBackend::dispatchLayerNorm(const Tensor& input, int64_t normalized_sh
     bool has_affine = (gamma != nullptr && beta != nullptr);
 
     // Get VkBuffer handles
-    VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
+    const void* buffer_input = input.data_ptr();
+    const void* buffer_output = output.data_ptr();
 
     size_t elem_size = input.dtype_size();
     size_t input_buffer_size = input.numel() * elem_size;
@@ -3161,15 +3161,15 @@ auto VulkanBackend::dispatchLayerNorm(const Tensor& input, int64_t normalized_sh
     size_t norm_buffer_size = normalized_shape * elem_size;
 
     // Build buffer bindings: input(0), output(1), gamma(2), beta(3)
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_input},
         {1, buffer_output}
     };
     std::vector<size_t> sizes = {input_buffer_size, output_buffer_size};
 
     if (has_affine) {
-        VkBuffer buffer_gamma = getVulkanBuffer(gamma->data_ptr());
-        VkBuffer buffer_beta = getVulkanBuffer(beta->data_ptr());
+        const void* buffer_gamma = gamma->data_ptr();
+        const void* buffer_beta = beta->data_ptr();
         bindings.push_back({2, buffer_gamma});
         bindings.push_back({3, buffer_beta});
         sizes.push_back(norm_buffer_size);
@@ -3269,25 +3269,25 @@ auto VulkanBackend::dispatchGroupNorm(const Tensor& input, int64_t num_groups,
     size_t elem_size = input.dtype_size();
 
     // Get VkBuffer handles
-    VkBuffer buf_input = getVulkanBuffer(input.data_ptr());
-    VkBuffer buf_output = getVulkanBuffer(output.data_ptr());
-    VkBuffer buf_mean = getVulkanBuffer(mean_out.data_ptr());
-    VkBuffer buf_inv_std = getVulkanBuffer(inv_std_out.data_ptr());
+    const void* buf_input = input.data_ptr();
+    const void* buf_output = output.data_ptr();
+    const void* buf_mean = mean_out.data_ptr();
+    const void* buf_inv_std = inv_std_out.data_ptr();
 
     size_t input_buf_size = input.numel() * elem_size;
     size_t output_buf_size = output.numel() * elem_size;
     size_t stats_buf_size = N * num_groups * sizeof(float);
 
     // Bindings: input(0), output(1), gamma(2), beta(3), mean(4), inv_std(5)
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buf_input},
         {1, buf_output},
     };
     std::vector<size_t> sizes = {input_buf_size, output_buf_size};
 
     if (has_affine) {
-        VkBuffer buf_gamma = getVulkanBuffer(gamma->data_ptr());
-        VkBuffer buf_beta = getVulkanBuffer(beta->data_ptr());
+        const void* buf_gamma = gamma->data_ptr();
+        const void* buf_beta = beta->data_ptr();
         bindings.push_back({2, buf_gamma});
         bindings.push_back({3, buf_beta});
         sizes.push_back(C * elem_size);
@@ -3384,20 +3384,20 @@ auto VulkanBackend::dispatchLayerNormBackward(const Tensor& grad_output, const T
     size_t elem_size = input.dtype_size();
 
     // Get VkBuffer handles
-    VkBuffer buf_grad_out = getVulkanBuffer(grad_output.data_ptr());
-    VkBuffer buf_input = getVulkanBuffer(input.data_ptr());
-    VkBuffer buf_mean = getVulkanBuffer(mean.data_ptr());
-    VkBuffer buf_rstd = getVulkanBuffer(rstd.data_ptr());
-    VkBuffer buf_grad_input = getVulkanBuffer(grad_input.data_ptr());
-    VkBuffer buf_grad_weight = getVulkanBuffer(grad_weight.data_ptr());
-    VkBuffer buf_grad_bias = getVulkanBuffer(grad_bias.data_ptr());
+    const void* buf_grad_out = grad_output.data_ptr();
+    const void* buf_input = input.data_ptr();
+    const void* buf_mean = mean.data_ptr();
+    const void* buf_rstd = rstd.data_ptr();
+    const void* buf_grad_input = grad_input.data_ptr();
+    const void* buf_grad_weight = grad_weight.data_ptr();
+    const void* buf_grad_bias = grad_bias.data_ptr();
 
     size_t input_buf_size = input.numel() * elem_size;
     size_t stats_buf_size = batch_size * elem_size;
     size_t norm_buf_size = normalized_shape * elem_size;
 
     // Bindings: grad_output(0), input(1), mean(2), rstd(3), weight(4), grad_input(5), grad_weight(6), grad_bias(7)
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buf_grad_out},
         {1, buf_input},
         {2, buf_mean},
@@ -3406,7 +3406,7 @@ auto VulkanBackend::dispatchLayerNormBackward(const Tensor& grad_output, const T
     std::vector<size_t> sizes = {input_buf_size, input_buf_size, stats_buf_size, stats_buf_size};
 
     if (has_affine) {
-        VkBuffer buf_weight = getVulkanBuffer(weight->data_ptr());
+        const void* buf_weight = weight->data_ptr();
         bindings.push_back({4, buf_weight});
         sizes.push_back(norm_buf_size);
     } else {
@@ -3504,15 +3504,15 @@ auto VulkanBackend::dispatchGroupNormBackward(const Tensor& grad_output, const T
     size_t stats_buf_size = N * num_groups * elem_size;
     size_t channel_buf_size = C * elem_size;
 
-    VkBuffer buf_grad_out = getVulkanBuffer(grad_output.data_ptr());
-    VkBuffer buf_input = getVulkanBuffer(input.data_ptr());
-    VkBuffer buf_mean = getVulkanBuffer(mean.data_ptr());
-    VkBuffer buf_rstd = getVulkanBuffer(rstd.data_ptr());
-    VkBuffer buf_grad_input = getVulkanBuffer(grad_input.data_ptr());
-    VkBuffer buf_grad_weight = getVulkanBuffer(grad_weight.data_ptr());
-    VkBuffer buf_grad_bias = getVulkanBuffer(grad_bias.data_ptr());
+    const void* buf_grad_out = grad_output.data_ptr();
+    const void* buf_input = input.data_ptr();
+    const void* buf_mean = mean.data_ptr();
+    const void* buf_rstd = rstd.data_ptr();
+    const void* buf_grad_input = grad_input.data_ptr();
+    const void* buf_grad_weight = grad_weight.data_ptr();
+    const void* buf_grad_bias = grad_bias.data_ptr();
 
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buf_grad_out},
         {1, buf_input},
         {2, buf_mean},
@@ -3521,7 +3521,7 @@ auto VulkanBackend::dispatchGroupNormBackward(const Tensor& grad_output, const T
     std::vector<size_t> sizes = {input_buf_size, input_buf_size, stats_buf_size, stats_buf_size};
 
     if (has_affine) {
-        VkBuffer buf_weight = getVulkanBuffer(weight->data_ptr());
+        const void* buf_weight = weight->data_ptr();
         bindings.push_back({4, buf_weight});
         sizes.push_back(channel_buf_size);
     } else {
@@ -3622,15 +3622,15 @@ auto VulkanBackend::dispatchEmbeddingBackward(const Tensor& grad_output, const T
 
     size_t elem_size = grad_output.dtype_size();
 
-    VkBuffer buf_grad_out = getVulkanBuffer(grad_output.data_ptr());
-    VkBuffer buf_indices = getVulkanBuffer(indices.data_ptr());
-    VkBuffer buf_grad_weight = getVulkanBuffer(grad_weight.data_ptr());
+    const void* buf_grad_out = grad_output.data_ptr();
+    const void* buf_indices = indices.data_ptr();
+    const void* buf_grad_weight = grad_weight.data_ptr();
 
     size_t grad_out_size = grad_output.numel() * elem_size;
     size_t indices_size = num_indices * sizeof(int32_t);  // shader uses int (32-bit)
     size_t grad_weight_size = num_embeddings * embedding_dim * elem_size;
 
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buf_grad_out},
         {1, buf_indices},
         {2, buf_grad_weight},
@@ -3700,10 +3700,10 @@ auto VulkanBackend::dispatchRMSNorm(const Tensor& input, const Tensor& weight,
     size_t elem_size = input.dtype_size();
     size_t rrms_elem_size = rrms.dtype_size();
 
-    VkBuffer buf_input = getVulkanBuffer(input.data_ptr());
-    VkBuffer buf_output = getVulkanBuffer(output.data_ptr());
-    VkBuffer buf_weight = getVulkanBuffer(weight.data_ptr());
-    VkBuffer buf_rrms = getVulkanBuffer(rrms.data_ptr());
+    const void* buf_input = input.data_ptr();
+    const void* buf_output = output.data_ptr();
+    const void* buf_weight = weight.data_ptr();
+    const void* buf_rrms = rrms.data_ptr();
 
     size_t input_buf_size = input.numel() * elem_size;
     size_t output_buf_size = output.numel() * elem_size;
@@ -3711,7 +3711,7 @@ auto VulkanBackend::dispatchRMSNorm(const Tensor& input, const Tensor& weight,
     size_t rrms_buf_size = batch_size * rrms_elem_size;
 
     // Bindings: input(0), output(1), weight(2), rrms_out(3)
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buf_input},
         {1, buf_output},
         {2, buf_weight},
@@ -3784,19 +3784,19 @@ auto VulkanBackend::dispatchRMSNormBackward(const Tensor& grad_output, const Ten
     size_t elem_size = input.dtype_size();
     size_t rrms_elem_size = rrms.dtype_size();
 
-    VkBuffer buf_grad_out = getVulkanBuffer(grad_output.data_ptr());
-    VkBuffer buf_input = getVulkanBuffer(input.data_ptr());
-    VkBuffer buf_rrms = getVulkanBuffer(rrms.data_ptr());
-    VkBuffer buf_weight = getVulkanBuffer(weight.data_ptr());
-    VkBuffer buf_grad_input = getVulkanBuffer(grad_input.data_ptr());
-    VkBuffer buf_grad_weight = getVulkanBuffer(grad_weight.data_ptr());
+    const void* buf_grad_out = grad_output.data_ptr();
+    const void* buf_input = input.data_ptr();
+    const void* buf_rrms = rrms.data_ptr();
+    const void* buf_weight = weight.data_ptr();
+    const void* buf_grad_input = grad_input.data_ptr();
+    const void* buf_grad_weight = grad_weight.data_ptr();
 
     size_t input_buf_size = input.numel() * elem_size;
     size_t rrms_buf_size = batch_size * rrms_elem_size;
     size_t norm_buf_size = normalized_shape * elem_size;
 
     // Bindings: grad_output(0), input(1), rrms(2), weight(3), grad_input(4), grad_weight(5)
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buf_grad_out},
         {1, buf_input},
         {2, buf_rrms},
@@ -3858,11 +3858,11 @@ auto VulkanBackend::dispatchBoxIoU(const Tensor& boxes1, const Tensor& boxes2, i
     Tensor result({N, M}, DType::Float32, boxes1.device());
 
     size_t elem_size = sizeof(float);
-    VkBuffer buf_boxes1 = getVulkanBuffer(b1.data_ptr());
-    VkBuffer buf_boxes2 = getVulkanBuffer(b2.data_ptr());
-    VkBuffer buf_result = getVulkanBuffer(result.data_ptr());
+    const void* buf_boxes1 = b1.data_ptr();
+    const void* buf_boxes2 = b2.data_ptr();
+    const void* buf_result = result.data_ptr();
 
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buf_boxes1},
         {1, buf_boxes2},
         {2, buf_result},
@@ -3923,10 +3923,10 @@ auto VulkanBackend::dispatchOneHot(const Tensor& indices, int64_t num_classes) -
     int64_t batch_size = indices_i32.numel();
     Tensor output({batch_size, num_classes}, DType::Float32, indices.device());
 
-    VkBuffer buf_indices = getVulkanBuffer(indices_i32.data_ptr());
-    VkBuffer buf_output = getVulkanBuffer(output.data_ptr());
+    const void* buf_indices = indices_i32.data_ptr();
+    const void* buf_output = output.data_ptr();
 
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buf_indices},
         {1, buf_output},
     };
@@ -3988,9 +3988,9 @@ auto VulkanBackend::dispatchNonzero(const Tensor& input) -> Tensor {
     Tensor count_buf({static_cast<int64_t>(n_workgroups + 1)}, DType::Int32, input.device());
     count_buf = dispatchFill(count_buf, 0.0f);
 
-    VkBuffer buf_input = getVulkanBuffer(input_f32.data_ptr());
-    VkBuffer buf_flags = getVulkanBuffer(flags.data_ptr());
-    VkBuffer buf_count = getVulkanBuffer(count_buf.data_ptr());
+    const void* buf_input = input_f32.data_ptr();
+    const void* buf_flags = flags.data_ptr();
+    const void* buf_count = count_buf.data_ptr();
     size_t input_bytes = n * sizeof(float);
     size_t flags_bytes = n * sizeof(uint32_t);
     size_t count_bytes = (n_workgroups + 1) * sizeof(uint32_t);
@@ -3998,7 +3998,7 @@ auto VulkanBackend::dispatchNonzero(const Tensor& input) -> Tensor {
     // ---- Pass 1a: Per-element flags + workgroup counts ----
     {
         auto* pipeline = getPipeline("nonzero_count", device_id);
-        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, buf_input}, {1, buf_flags}, {2, buf_count}
         };
         std::vector<size_t> sizes = {input_bytes, flags_bytes, count_bytes};
@@ -4020,7 +4020,7 @@ auto VulkanBackend::dispatchNonzero(const Tensor& input) -> Tensor {
     // ---- Pass 1b: Reduce workgroup counts to get total ----
     {
         auto* pipeline = getPipeline("nonzero_count", device_id);
-        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, buf_input}, {1, buf_flags}, {2, buf_count}
         };
         std::vector<size_t> sizes = {input_bytes, flags_bytes, count_bytes};
@@ -4055,15 +4055,15 @@ auto VulkanBackend::dispatchNonzero(const Tensor& input) -> Tensor {
     Tensor block_sums({static_cast<int64_t>(n_workgroups)}, DType::Int32, input.device());
     block_sums = dispatchFill(block_sums, 0.0f);
 
-    VkBuffer buf_prefix = getVulkanBuffer(prefix_sums.data_ptr());
-    VkBuffer buf_blocks = getVulkanBuffer(block_sums.data_ptr());
+    const void* buf_prefix = prefix_sums.data_ptr();
+    const void* buf_blocks = block_sums.data_ptr();
     size_t prefix_bytes = n * sizeof(uint32_t);
     size_t blocks_bytes = n_workgroups * sizeof(uint32_t);
 
     // Pass 2a: Local scan
     {
         auto* pipeline = getPipeline("prefix_sum", device_id);
-        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, buf_flags}, {1, buf_prefix}, {2, buf_blocks}
         };
         std::vector<size_t> sizes = {flags_bytes, prefix_bytes, blocks_bytes};
@@ -4085,7 +4085,7 @@ auto VulkanBackend::dispatchNonzero(const Tensor& input) -> Tensor {
     // Pass 2b: Add block offsets
     if (n_workgroups > 1) {
         auto* pipeline = getPipeline("prefix_sum", device_id);
-        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, buf_flags}, {1, buf_prefix}, {2, buf_blocks}
         };
         std::vector<size_t> sizes = {flags_bytes, prefix_bytes, blocks_bytes};
@@ -4119,12 +4119,12 @@ auto VulkanBackend::dispatchNonzero(const Tensor& input) -> Tensor {
 
     {
         auto* pipeline = getPipeline("nonzero_gather", device_id);
-        VkBuffer buf_output = getVulkanBuffer(output_i32.data_ptr());
-        VkBuffer buf_shape = getVulkanBuffer(shape_buf.data_ptr());
+        const void* buf_output = output_i32.data_ptr();
+        const void* buf_shape = shape_buf.data_ptr();
         size_t output_bytes = total_count * ndim * sizeof(int32_t);
         size_t shape_bytes = ndim * sizeof(uint32_t);
 
-        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, buf_flags}, {1, buf_prefix}, {2, buf_output}, {3, buf_shape}
         };
         std::vector<size_t> sizes = {flags_bytes, prefix_bytes, output_bytes, shape_bytes};
@@ -4198,15 +4198,15 @@ auto VulkanBackend::dispatchSoftmax(const Tensor& input, int64_t dim) -> Tensor 
     // No separate device allocations needed - the backward pass computes from output only.
 
     // Get VkBuffer handles
-    VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+    const void* buffer_in = input.data_ptr();
+    const void* buffer_out = output.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_in = input.numel() * input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
 
     // Bind buffers (binding 0: input, 1: output)
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_in},
         {1, buffer_out}
     };
@@ -4282,15 +4282,15 @@ auto VulkanBackend::dispatchLogSoftmax(const Tensor& input, int64_t dim) -> Tens
     uint32_t num_classes = static_cast<uint32_t>(input_shape[dim]);
 
     // Get VkBuffer handles
-    VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+    const void* buffer_in = input.data_ptr();
+    const void* buffer_out = output.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_in = input.numel() * input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
 
     // Bind buffers (binding 0: input, 1: output)
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_in},
         {1, buffer_out}
     };
@@ -4354,9 +4354,9 @@ auto VulkanBackend::dispatchCrossEntropy(const Tensor& log_probs, const Tensor& 
     Tensor output(out_shape, log_probs.dtype(), log_probs.device());
 
     // Get VkBuffer handles
-    VkBuffer buffer_log_probs = getVulkanBuffer(log_probs.data_ptr());
-    VkBuffer buffer_targets = getVulkanBuffer(targets.data_ptr());
-    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
+    const void* buffer_log_probs = log_probs.data_ptr();
+    const void* buffer_targets = targets.data_ptr();
+    const void* buffer_output = output.data_ptr();
 
     // Calculate buffer sizes
     size_t size_log_probs = log_probs.numel() * log_probs.dtype_size();
@@ -4364,7 +4364,7 @@ auto VulkanBackend::dispatchCrossEntropy(const Tensor& log_probs, const Tensor& 
     size_t size_output = output.numel() * output.dtype_size();
 
     // Bind buffers (binding 0: log_probs, 1: targets, 2: output)
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_log_probs},
         {1, buffer_targets},
         {2, buffer_output}
@@ -4443,8 +4443,8 @@ auto VulkanBackend::dispatchArgmax(const Tensor& input, int64_t dim, bool keepdi
     Tensor output(out_shape, DType::Int64, input.device());  // Use Int64 for consistency with other backends
 
     // Get VkBuffer handles from tensor data pointers
-    VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+    const void* buffer_in = input.data_ptr();
+    const void* buffer_out = output.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_in = input.numel() * input.dtype_size();
@@ -4456,7 +4456,7 @@ auto VulkanBackend::dispatchArgmax(const Tensor& input, int64_t dim, bool keepdi
     }
 
     // Allocate and write descriptor set
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_in},
         {1, buffer_out}
     };
@@ -4544,8 +4544,8 @@ auto VulkanBackend::dispatchArgmin(const Tensor& input, int64_t dim, bool keepdi
     Tensor output(out_shape, DType::Int64, input.device());  // Use Int64 for consistency with other backends
 
     // Get VkBuffer handles from tensor data pointers
-    VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+    const void* buffer_in = input.data_ptr();
+    const void* buffer_out = output.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_in = input.numel() * input.dtype_size();
@@ -4557,7 +4557,7 @@ auto VulkanBackend::dispatchArgmin(const Tensor& input, int64_t dim, bool keepdi
     }
 
     // Allocate and write descriptor set
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_in},
         {1, buffer_out}
     };
@@ -4769,15 +4769,15 @@ auto VulkanBackend::dispatchProd(const Tensor& input, int64_t dim, bool keepdim)
     Tensor output(buffer_shape, input.dtype(), input.device());
 
     // Get VkBuffer handles from tensor data pointers
-    VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+    const void* buffer_in = input.data_ptr();
+    const void* buffer_out = output.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_in = input.numel() * input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
 
     // Allocate and write descriptor set
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_in},
         {1, buffer_out}
     };
@@ -4940,12 +4940,12 @@ auto VulkanBackend::dispatchEmbedding(const Tensor& weight, const Tensor& indice
         indices_i32 = Tensor(idx_shape, DType::Int32, indices.device());
 
         auto* cast_pipeline = getPipeline("cast_int64_to_int32", device_id);
-        VkBuffer buf_in = getVulkanBuffer(indices.data_ptr());
-        VkBuffer buf_out = getVulkanBuffer(indices_i32.data_ptr());
+        const void* buf_in = indices.data_ptr();
+        const void* buf_out = indices_i32.data_ptr();
         size_t size_in = indices.numel() * sizeof(int64_t);
         size_t size_out = indices_i32.numel() * sizeof(int32_t);
 
-        std::vector<std::pair<uint32_t, VkBuffer>> cast_bindings = {
+        std::vector<std::pair<uint32_t, const void*>> cast_bindings = {
             {0, buf_in}, {1, buf_out}
         };
         std::vector<size_t> cast_sizes = {size_in, size_out};
@@ -4966,16 +4966,16 @@ auto VulkanBackend::dispatchEmbedding(const Tensor& weight, const Tensor& indice
     }
 
     // Get VkBuffer handles
-    VkBuffer buf_weight = getVulkanBuffer(weight.data_ptr());
-    VkBuffer buf_indices = getVulkanBuffer(indices_i32.data_ptr());
-    VkBuffer buf_output = getVulkanBuffer(output.data_ptr());
+    const void* buf_weight = weight.data_ptr();
+    const void* buf_indices = indices_i32.data_ptr();
+    const void* buf_output = output.data_ptr();
 
     size_t weight_buf_size = weight.numel() * weight.dtype_size();
     size_t indices_buf_size = indices_i32.numel() * sizeof(int32_t);
     size_t output_buf_size = output.numel() * output.dtype_size();
 
     // Bindings: embeddings(0), indices(1), output(2)
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buf_weight},
         {1, buf_indices},
         {2, buf_output}
@@ -5051,12 +5051,12 @@ auto VulkanBackend::dispatchGather(const Tensor& input, int64_t dim, const Tenso
         indices_int32 = Tensor(idx_shape, DType::Int32, indices.device());
 
         auto* cast_pipeline = getPipeline("cast_int64_to_int32", device_id);
-        VkBuffer buf_in = getVulkanBuffer(indices.data_ptr());
-        VkBuffer buf_out = getVulkanBuffer(indices_int32.data_ptr());
+        const void* buf_in = indices.data_ptr();
+        const void* buf_out = indices_int32.data_ptr();
         size_t size_in = indices.numel() * sizeof(int64_t);
         size_t size_out = indices_int32.numel() * sizeof(int32_t);
 
-        std::vector<std::pair<uint32_t, VkBuffer>> cast_bindings = {
+        std::vector<std::pair<uint32_t, const void*>> cast_bindings = {
             {0, buf_in}, {1, buf_out}
         };
         std::vector<size_t> cast_sizes = {size_in, size_out};
@@ -5077,16 +5077,16 @@ auto VulkanBackend::dispatchGather(const Tensor& input, int64_t dim, const Tenso
     }
 
     // Get Vulkan buffers
-    VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_indices = getVulkanBuffer(indices_int32.data_ptr());
-    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
+    const void* buffer_input = input.data_ptr();
+    const void* buffer_indices = indices_int32.data_ptr();
+    const void* buffer_output = output.data_ptr();
 
     size_t buffer_size_input = input.numel() * input.dtype_size();
     size_t buffer_size_indices = indices_int32.numel() * sizeof(int32_t);
     size_t buffer_size_output = output.numel() * output.dtype_size();
 
     // Set up descriptor set with all buffers
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_input},
         {1, buffer_indices},
         {2, buffer_output}
@@ -5194,12 +5194,12 @@ auto VulkanBackend::dispatchScatter(const Tensor& input, int64_t dim, const Tens
         indices_int32 = Tensor(idx_shape, DType::Int32, indices.device());
 
         auto* cast_pipeline = getPipeline("cast_int64_to_int32", device_id);
-        VkBuffer buf_in = getVulkanBuffer(indices.data_ptr());
-        VkBuffer buf_out = getVulkanBuffer(indices_int32.data_ptr());
+        const void* buf_in = indices.data_ptr();
+        const void* buf_out = indices_int32.data_ptr();
         size_t size_in = indices.numel() * sizeof(int64_t);
         size_t size_out = indices_int32.numel() * sizeof(int32_t);
 
-        std::vector<std::pair<uint32_t, VkBuffer>> cast_bindings = {
+        std::vector<std::pair<uint32_t, const void*>> cast_bindings = {
             {0, buf_in}, {1, buf_out}
         };
         std::vector<size_t> cast_sizes = {size_in, size_out};
@@ -5220,10 +5220,10 @@ auto VulkanBackend::dispatchScatter(const Tensor& input, int64_t dim, const Tens
     }
 
     // Get Vulkan buffers
-    VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_indices = getVulkanBuffer(indices_int32.data_ptr());
-    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
-    VkBuffer buffer_values = getVulkanBuffer(values.data_ptr());
+    const void* buffer_input = input.data_ptr();
+    const void* buffer_indices = indices_int32.data_ptr();
+    const void* buffer_output = output.data_ptr();
+    const void* buffer_values = values.data_ptr();
 
     size_t buffer_size_input = input.numel() * input.dtype_size();
     size_t buffer_size_indices = indices_int32.numel() * sizeof(int32_t);
@@ -5231,7 +5231,7 @@ auto VulkanBackend::dispatchScatter(const Tensor& input, int64_t dim, const Tens
     size_t buffer_size_values = values.numel() * values.dtype_size();
 
     // Set up descriptor set with all buffers
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_input},
         {1, buffer_indices},
         {2, buffer_output},
@@ -5354,12 +5354,12 @@ auto VulkanBackend::dispatchIndexSelect(const Tensor& input, int64_t dim, const 
         indices_int32 = Tensor(idx_shape, DType::Int32, indices.device());
 
         auto* cast_pipeline = getPipeline("cast_int64_to_int32", device_id);
-        VkBuffer buf_in = getVulkanBuffer(indices.data_ptr());
-        VkBuffer buf_out = getVulkanBuffer(indices_int32.data_ptr());
+        const void* buf_in = indices.data_ptr();
+        const void* buf_out = indices_int32.data_ptr();
         size_t size_in = indices.numel() * sizeof(int64_t);
         size_t size_out = indices_int32.numel() * sizeof(int32_t);
 
-        std::vector<std::pair<uint32_t, VkBuffer>> cast_bindings = {
+        std::vector<std::pair<uint32_t, const void*>> cast_bindings = {
             {0, buf_in}, {1, buf_out}
         };
         std::vector<size_t> cast_sizes = {size_in, size_out};
@@ -5406,9 +5406,9 @@ auto VulkanBackend::dispatchIndexSelect(const Tensor& input, int64_t dim, const 
     push_constants.outer_size = outer_size;
 
     // Get VkBuffer handles
-    VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_indices = getVulkanBuffer(indices_int32.data_ptr());
-    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
+    const void* buffer_input = input.data_ptr();
+    const void* buffer_indices = indices_int32.data_ptr();
+    const void* buffer_output = output.data_ptr();
 
     // Calculate buffer sizes
     size_t input_size = input.numel() * input.dtype_size();
@@ -5416,7 +5416,7 @@ auto VulkanBackend::dispatchIndexSelect(const Tensor& input, int64_t dim, const 
     size_t output_size = output.numel() * output.dtype_size();
 
     // Allocate and write descriptor set
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_input},
         {1, buffer_indices},
         {2, buffer_output}
@@ -5501,9 +5501,9 @@ auto VulkanBackend::dispatchGatherRelativePositionBias(const Tensor& table, cons
     push_constants.total_elements = total_elements;
 
     // Get VkBuffer handles
-    VkBuffer buffer_table = getVulkanBuffer(table.data_ptr());
-    VkBuffer buffer_indices = getVulkanBuffer(indices.data_ptr());
-    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
+    const void* buffer_table = table.data_ptr();
+    const void* buffer_indices = indices.data_ptr();
+    const void* buffer_output = output.data_ptr();
 
     // Calculate buffer sizes
     size_t table_size = table.numel() * table.dtype_size();
@@ -5511,7 +5511,7 @@ auto VulkanBackend::dispatchGatherRelativePositionBias(const Tensor& table, cons
     size_t output_size = output.numel() * output.dtype_size();
 
     // Allocate and write descriptor set
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_table},
         {1, buffer_indices},
         {2, buffer_output}
@@ -5627,13 +5627,13 @@ auto VulkanBackend::dispatchTranspose(const Tensor& input, int64_t dim0, int64_t
         auto* pipeline = getPipeline("transform", device_id);
         Tensor output(out_shape, input.dtype(), input.device());
 
-        VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
-        VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+        const void* buffer_in = input.data_ptr();
+        const void* buffer_out = output.data_ptr();
 
         size_t buffer_size_in = input.numel() * input.dtype_size();
         size_t buffer_size_out = output.numel() * output.dtype_size();
 
-        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, buffer_in},
             {1, buffer_out}
         };
@@ -5727,8 +5727,8 @@ auto VulkanBackend::dispatchPermute(const Tensor& input, const std::vector<int64
     auto& ctx = devices_[device_id];
 
     // Get Vulkan buffers for input and output
-    VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
+    const void* buffer_input = input.data_ptr();
+    const void* buffer_output = output.data_ptr();
 
     size_t buffer_size_input = input.numel() * input.dtype_size();
     size_t buffer_size_output = output.numel() * output.dtype_size();
@@ -5809,7 +5809,7 @@ auto VulkanBackend::dispatchPermute(const Tensor& input, const std::vector<int64
     releaseStagingBuffer(device_id, staging_idx);
 
     // Set up descriptor set with all buffers
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_input},
         {1, buffer_output},
         {2, buffer_shape->buffer()},
@@ -5990,8 +5990,8 @@ auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
 
     // Get Vulkan buffers - use base storage pointer for input
     const void* base_storage_ptr = input.is_valid() ? input.storage()->data() : input.data_ptr();
-    VkBuffer buffer_in = getVulkanBuffer(const_cast<void*>(base_storage_ptr));
-    VkBuffer buffer_out = getVulkanBuffer(result.data_ptr());
+    const void* buffer_in = const_cast<void*>(base_storage_ptr);
+    const void* buffer_out = result.data_ptr();
 
     // Calculate buffer sizes
     int64_t max_offset = base_offset;
@@ -6005,7 +6005,7 @@ auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
     size_t input_buffer_size = (max_offset + 1) * input.dtype_size();
     size_t output_buffer_size = total_elements * input.dtype_size();
 
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_in},
         {1, buffer_out}
     };
@@ -6105,10 +6105,10 @@ auto VulkanBackend::dispatchZeros(const std::vector<int64_t>& shape, DType dtype
     int32_t device_id = device.index;
     auto* pipeline = getPipeline("fill", device_id);
 
-    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+    const void* buffer_out = output.data_ptr();
     size_t buffer_size_out = output.numel() * output.dtype_size();
 
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_out}
     };
     std::vector<size_t> sizes = {buffer_size_out};
@@ -6166,10 +6166,10 @@ auto VulkanBackend::dispatchArange(float start, float end, float step, DType dty
         int32_t device_id = device.index;
         auto* pipeline = getPipeline("arange_f64", device_id);
 
-        VkBuffer buf_out = getVulkanBuffer(output.data_ptr());
+        const void* buf_out = output.data_ptr();
         size_t buf_size = output.numel() * output.dtype_size();
 
-        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {{0, buf_out}};
+        std::vector<std::pair<uint32_t, const void*>> bindings = {{0, buf_out}};
         std::vector<size_t> sizes = {buf_size};
 
         VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
@@ -6215,10 +6215,10 @@ auto VulkanBackend::dispatchArange(float start, float end, float step, DType dty
     int32_t device_id = device.index;
     auto* pipeline = getPipeline("arange", device_id);
 
-    VkBuffer buf_out = getVulkanBuffer(output.data_ptr());
+    const void* buf_out = output.data_ptr();
     size_t buf_size = output.numel() * output.dtype_size();
 
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {{0, buf_out}};
+    std::vector<std::pair<uint32_t, const void*>> bindings = {{0, buf_out}};
     std::vector<size_t> sizes = {buf_size};
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
@@ -6269,10 +6269,10 @@ auto VulkanBackend::dispatchLinspace(float start, float end, int64_t steps, DTyp
         int32_t device_id = device.index;
         auto* pipeline = getPipeline("linspace_f64", device_id);
 
-        VkBuffer buf_out = getVulkanBuffer(output.data_ptr());
+        const void* buf_out = output.data_ptr();
         size_t buf_size = output.numel() * output.dtype_size();
 
-        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {{0, buf_out}};
+        std::vector<std::pair<uint32_t, const void*>> bindings = {{0, buf_out}};
         std::vector<size_t> sizes = {buf_size};
 
         VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
@@ -6318,10 +6318,10 @@ auto VulkanBackend::dispatchLinspace(float start, float end, int64_t steps, DTyp
     int32_t device_id = device.index;
     auto* pipeline = getPipeline("linspace", device_id);
 
-    VkBuffer buf_out = getVulkanBuffer(output.data_ptr());
+    const void* buf_out = output.data_ptr();
     size_t buf_size = output.numel() * output.dtype_size();
 
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {{0, buf_out}};
+    std::vector<std::pair<uint32_t, const void*>> bindings = {{0, buf_out}};
     std::vector<size_t> sizes = {buf_size};
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
@@ -6371,10 +6371,10 @@ auto VulkanBackend::dispatchEye(int64_t n, int64_t m, DType dtype, const Device&
         int32_t device_id = device.index;
         auto* pipeline = getPipeline("eye_f64", device_id);
 
-        VkBuffer buf_out = getVulkanBuffer(output.data_ptr());
+        const void* buf_out = output.data_ptr();
         size_t buf_size = output.numel() * output.dtype_size();
 
-        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {{0, buf_out}};
+        std::vector<std::pair<uint32_t, const void*>> bindings = {{0, buf_out}};
         std::vector<size_t> sizes = {buf_size};
 
         VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
@@ -6417,10 +6417,10 @@ auto VulkanBackend::dispatchEye(int64_t n, int64_t m, DType dtype, const Device&
     int32_t device_id = device.index;
     auto* pipeline = getPipeline("eye", device_id);
 
-    VkBuffer buf_out = getVulkanBuffer(output.data_ptr());
+    const void* buf_out = output.data_ptr();
     size_t buf_size = output.numel() * output.dtype_size();
 
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {{0, buf_out}};
+    std::vector<std::pair<uint32_t, const void*>> bindings = {{0, buf_out}};
     std::vector<size_t> sizes = {buf_size};
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
@@ -6462,7 +6462,7 @@ auto VulkanBackend::dispatchFill(const Tensor& input, float value) -> Tensor {
     std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
     Tensor output(out_shape, input.dtype(), input.device());
 
-    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+    const void* buffer_out = output.data_ptr();
     size_t buffer_size_out = output.numel() * output.dtype_size();
 
     // Float64 requires special handling: the generic fill shader is 32-bit only,
@@ -6470,7 +6470,7 @@ auto VulkanBackend::dispatchFill(const Tensor& input, float value) -> Tensor {
     if (input.dtype() == DType::Float64) {
         auto* pipeline = getPipeline("full_f64", device_id);
 
-        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, buffer_out}
         };
         std::vector<size_t> sizes = {buffer_size_out};
@@ -6507,7 +6507,7 @@ auto VulkanBackend::dispatchFill(const Tensor& input, float value) -> Tensor {
 
     auto* pipeline = getPipeline("fill", device_id);
 
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_out}
     };
     std::vector<size_t> sizes = {buffer_size_out};
@@ -6592,8 +6592,8 @@ auto VulkanBackend::dispatchExpand(const Tensor& input, const std::vector<int64_
     // Create output tensor with new shape
     Tensor output(shape, input.dtype(), input.device());
 
-    VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+    const void* buffer_in = input.data_ptr();
+    const void* buffer_out = output.data_ptr();
     // For Float16, the shader works with uint32 (packed pairs), so descriptor size needs
     // to cover the full uint32 reads/writes
     size_t buffer_size_in = input.numel() * input.dtype_size();
@@ -6606,7 +6606,7 @@ auto VulkanBackend::dispatchExpand(const Tensor& input, const std::vector<int64_
         buffer_size_out = out_pairs * 4;
     }
 
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_in},
         {1, buffer_out}
     };
@@ -6739,7 +6739,7 @@ auto VulkanBackend::dispatchCat(const std::vector<Tensor>& inputs, int64_t dim) 
         return output;
     }
 
-    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+    auto [vk_buffer_out, buffer_out_offset] = getVulkanBufferAndOffset(output.data_ptr());
     size_t element_size = first_input.dtype_size();
 
     // Calculate strides for copying
@@ -6779,14 +6779,15 @@ auto VulkanBackend::dispatchCat(const std::vector<Tensor>& inputs, int64_t dim) 
             int64_t src_offset = outer_idx * input_dim_size * inner_size * element_size +
                                 static_cast<int64_t>(buffer_in_base_offset);
             int64_t dst_offset = outer_idx * total_dim_size * inner_size * element_size +
-                                current_offset_in_cat_dim * inner_size * element_size;
+                                current_offset_in_cat_dim * inner_size * element_size +
+                                static_cast<int64_t>(buffer_out_offset);
 
             VkBufferCopy copyRegion{};
             copyRegion.srcOffset = static_cast<VkDeviceSize>(src_offset);
             copyRegion.dstOffset = static_cast<VkDeviceSize>(dst_offset);
             copyRegion.size = static_cast<VkDeviceSize>(input_dim_size * inner_size * element_size);
 
-            vkCmdCopyBuffer(cmdBuffer, buffer_in, buffer_out, 1, &copyRegion);
+            vkCmdCopyBuffer(cmdBuffer, buffer_in, vk_buffer_out, 1, &copyRegion);
         }
 
         current_offset_in_cat_dim += input_dim_size;
@@ -6835,12 +6836,12 @@ auto VulkanBackend::dispatchClamp(const Tensor& input, float min_value, float ma
     std::vector<int64_t> output_shape(input_shape.begin(), input_shape.end());
     Tensor output(output_shape, input.dtype(), input.device());
 
-    VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+    const void* buffer_in = input.data_ptr();
+    const void* buffer_out = output.data_ptr();
     size_t buffer_size_in = input.numel() * input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
 
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_in},
         {1, buffer_out}
     };
@@ -6980,8 +6981,8 @@ auto VulkanBackend::dispatchActivation(const std::string& op_name,
     }
 
     // Get VkBuffer handles
-    VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+    const void* buffer_in = input.data_ptr();
+    const void* buffer_out = output.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_in = input.numel() * input.dtype_size();
@@ -6996,7 +6997,7 @@ auto VulkanBackend::dispatchActivation(const std::string& op_name,
 
     // Setup descriptor set
     // Binding 0: input, Binding 1: output
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_in},
         {1, buffer_out}
     };
@@ -7084,9 +7085,9 @@ auto VulkanBackend::dispatchActivationBackward(const std::string& op_name,
     push_constants.alpha = param;
 
     // Get VkBuffer handles
-    VkBuffer buffer_grad_out = getVulkanBuffer(grad_output.data_ptr());
-    VkBuffer buffer_input_or_output = getVulkanBuffer(input_or_output.data_ptr());
-    VkBuffer buffer_grad_in = getVulkanBuffer(grad_input.data_ptr());
+    const void* buffer_grad_out = grad_output.data_ptr();
+    const void* buffer_input_or_output = input_or_output.data_ptr();
+    const void* buffer_grad_in = grad_input.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_grad_out = grad_output.numel() * grad_output.dtype_size();
@@ -7104,7 +7105,7 @@ auto VulkanBackend::dispatchActivationBackward(const std::string& op_name,
 
     // Setup descriptor set
     // Binding 0: grad_output, Binding 1: input_or_output, Binding 2: grad_input
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_grad_out},
         {1, buffer_input_or_output},
         {2, buffer_grad_in}
@@ -7164,9 +7165,9 @@ auto VulkanBackend::dispatchSwishBackward(const Tensor& grad_output,
     push_constants.n = static_cast<uint32_t>(grad_output.numel());
 
     // Get VkBuffer handles
-    VkBuffer buffer_grad_out = getVulkanBuffer(grad_output.data_ptr());
-    VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_grad_in = getVulkanBuffer(grad_input.data_ptr());
+    const void* buffer_grad_out = grad_output.data_ptr();
+    const void* buffer_input = input.data_ptr();
+    const void* buffer_grad_in = grad_input.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_grad_out = grad_output.numel() * grad_output.dtype_size();
@@ -7175,7 +7176,7 @@ auto VulkanBackend::dispatchSwishBackward(const Tensor& grad_output,
 
     // Setup descriptor set
     // Binding 0: grad_output, Binding 1: input, Binding 2: grad_input
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_grad_out},
         {1, buffer_input},
         {2, buffer_grad_in}
@@ -7266,15 +7267,15 @@ auto VulkanBackend::dispatchSoftmaxBackward(const Tensor& grad_output,
     push_constants.inner_size = static_cast<uint32_t>(inner_size);
 
     // Get VkBuffer handles
-    VkBuffer buffer_grad_out = getVulkanBuffer(grad_output.data_ptr());
-    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
-    VkBuffer buffer_grad_in = getVulkanBuffer(grad_input.data_ptr());
+    const void* buffer_grad_out = grad_output.data_ptr();
+    const void* buffer_output = output.data_ptr();
+    const void* buffer_grad_in = grad_input.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size = grad_output.numel() * grad_output.dtype_size();
 
     // Setup descriptor set
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_grad_out},
         {1, buffer_output},
         {2, buffer_grad_in}
@@ -7353,15 +7354,15 @@ auto VulkanBackend::dispatchLogSoftmaxBackward(const Tensor& grad_output,
     push_constants.inner_size = static_cast<uint32_t>(inner_size);
 
     // Get VkBuffer handles
-    VkBuffer buffer_grad_out = getVulkanBuffer(grad_output.data_ptr());
-    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
-    VkBuffer buffer_grad_in = getVulkanBuffer(grad_input.data_ptr());
+    const void* buffer_grad_out = grad_output.data_ptr();
+    const void* buffer_output = output.data_ptr();
+    const void* buffer_grad_in = grad_input.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size = grad_output.numel() * grad_output.dtype_size();
 
     // Setup descriptor set
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_grad_out},
         {1, buffer_output},
         {2, buffer_grad_in}
@@ -7437,15 +7438,15 @@ auto VulkanBackend::dispatchAvgPool2dForward(const Tensor& input, const OpAttrib
     Tensor output(output_shape, input.dtype(), input.device());
 
     // Get VkBuffer handles
-    VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
+    const void* buffer_input = input.data_ptr();
+    const void* buffer_output = output.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_input = input.numel() * input.dtype_size();
     size_t buffer_size_output = output.numel() * output.dtype_size();
 
     // Allocate and write descriptor set
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_input},
         {1, buffer_output}
     };
@@ -7554,15 +7555,15 @@ auto VulkanBackend::dispatchMaxPool2dForward(const Tensor& input, const OpAttrib
     Tensor output(output_shape, input.dtype(), input.device());
 
     // Get VkBuffer handles
-    VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
+    const void* buffer_input = input.data_ptr();
+    const void* buffer_output = output.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_input = input.numel() * input.dtype_size();
     size_t buffer_size_output = output.numel() * output.dtype_size();
 
     // Allocate and write descriptor set
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_input},
         {1, buffer_output}
     };
@@ -7673,15 +7674,15 @@ auto VulkanBackend::dispatchAvgPool2dBackward(const Tensor& grad_output, const T
     grad_input = dispatchFill(grad_input, 0.0f);
 
     // Get VkBuffer handles
-    VkBuffer buffer_grad_output = getVulkanBuffer(grad_output.data_ptr());
-    VkBuffer buffer_grad_input = getVulkanBuffer(grad_input.data_ptr());
+    const void* buffer_grad_output = grad_output.data_ptr();
+    const void* buffer_grad_input = grad_input.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_grad_output = grad_output.numel() * grad_output.dtype_size();
     size_t buffer_size_grad_input = grad_input.numel() * grad_input.dtype_size();
 
     // Allocate and write descriptor set
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_grad_output},
         {1, buffer_grad_input}
     };
@@ -7783,9 +7784,9 @@ auto VulkanBackend::dispatchMaxPool2dBackward(const Tensor& grad_output, const T
     grad_input = dispatchFill(grad_input, 0.0f);
 
     // Get VkBuffer handles
-    VkBuffer buffer_grad_output = getVulkanBuffer(grad_output.data_ptr());
-    VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_grad_input = getVulkanBuffer(grad_input.data_ptr());
+    const void* buffer_grad_output = grad_output.data_ptr();
+    const void* buffer_input = input.data_ptr();
+    const void* buffer_grad_input = grad_input.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_grad_output = grad_output.numel() * grad_output.dtype_size();
@@ -7793,7 +7794,7 @@ auto VulkanBackend::dispatchMaxPool2dBackward(const Tensor& grad_output, const T
     size_t buffer_size_grad_input = grad_input.numel() * grad_input.dtype_size();
 
     // Allocate and write descriptor set
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_grad_output},
         {1, buffer_input},
         {2, buffer_grad_input}
@@ -7900,15 +7901,15 @@ auto VulkanBackend::dispatchMaxPool2dBackwardWithIndices(const Tensor& grad_outp
 
     auto* pipeline = getPipeline(shader_name, device_id);
 
-    VkBuffer buffer_grad_out = getVulkanBuffer(const_cast<void*>(grad_output.data_ptr()));
-    VkBuffer buffer_indices = getVulkanBuffer(const_cast<void*>(indices.data_ptr()));
-    VkBuffer buffer_grad_in = getVulkanBuffer(grad_input.data_ptr());
+    const void* buffer_grad_out = const_cast<void*>(grad_output.data_ptr());
+    const void* buffer_indices = const_cast<void*>(indices.data_ptr());
+    const void* buffer_grad_in = grad_input.data_ptr();
 
     size_t grad_out_size = grad_out_numel * grad_output.dtype_size();
     size_t indices_size = indices.numel() * indices.dtype_size();
     size_t grad_in_size = grad_in_numel * grad_input.dtype_size();
 
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_grad_out},
         {1, buffer_indices},
         {2, buffer_grad_in}
@@ -8014,10 +8015,10 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
     Tensor output(output_shape, input.dtype(), input.device());
 
     // Get VkBuffer handles
-    VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_weight = getVulkanBuffer(weight.data_ptr());
-    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
-    VkBuffer buffer_bias = has_bias ? getVulkanBuffer(bias->data_ptr()) : buffer_output;
+    const void* buffer_input = input.data_ptr();
+    const void* buffer_weight = weight.data_ptr();
+    const void* buffer_output = output.data_ptr();
+    const void* buffer_bias = has_bias ? bias->data_ptr() : buffer_output;
 
     // Calculate buffer sizes
     size_t buffer_size_input = input.numel() * input.dtype_size();
@@ -8026,7 +8027,7 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
     size_t buffer_size_bias = has_bias ? (bias->numel() * bias->dtype_size()) : 4;
 
     // Setup descriptor set bindings (input, weight, bias, output)
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_input},
         {1, buffer_weight},
         {2, buffer_bias},
@@ -8157,10 +8158,10 @@ auto VulkanBackend::dispatchConvTranspose2dForward(const Tensor& input, const Te
     Tensor output(output_shape, input.dtype(), input.device());
 
     // Get VkBuffer handles
-    VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_weight = getVulkanBuffer(weight.data_ptr());
-    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
-    VkBuffer buffer_bias = has_bias ? getVulkanBuffer(bias->data_ptr()) : buffer_output;
+    const void* buffer_input = input.data_ptr();
+    const void* buffer_weight = weight.data_ptr();
+    const void* buffer_output = output.data_ptr();
+    const void* buffer_bias = has_bias ? bias->data_ptr() : buffer_output;
 
     // Calculate buffer sizes
     size_t buffer_size_input = input.numel() * input.dtype_size();
@@ -8169,7 +8170,7 @@ auto VulkanBackend::dispatchConvTranspose2dForward(const Tensor& input, const Te
     size_t buffer_size_bias = has_bias ? (bias->numel() * bias->dtype_size()) : 4;
 
     // Setup descriptor set bindings (input, weight, bias, output)
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_input},
         {1, buffer_weight},
         {2, buffer_bias},
@@ -8296,7 +8297,7 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
     }
     auto* pipeline = getPipeline(shader_name, device_id);
 
-    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+    const void* buffer_out = output.data_ptr();
     // For Float16, the shader works with uint32 (packed pairs), so descriptor size needs
     // to cover the full uint32 writes. Even for 1 element, shader writes a full uint32.
     size_t buffer_size_out = output.numel() * output.dtype_size();
@@ -8306,7 +8307,7 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
         buffer_size_out = num_pairs * 4;
     }
 
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_out}
     };
     std::vector<size_t> sizes = {buffer_size_out};
@@ -8527,10 +8528,10 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
 
         auto* pipeline = getPipeline("ones_f64", device_id);
 
-        VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+        const void* buffer_out = output.data_ptr();
         size_t buffer_size_out = output.numel() * output.dtype_size();
 
-        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {{0, buffer_out}};
+        std::vector<std::pair<uint32_t, const void*>> bindings = {{0, buffer_out}};
         std::vector<size_t> sizes = {buffer_size_out};
 
         VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
@@ -8571,7 +8572,7 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
 
     auto* pipeline = getPipeline(shader_name, device_id);
 
-    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+    const void* buffer_out = output.data_ptr();
     // For Float16, the shader works with uint32 (packed pairs), so descriptor size needs
     // to cover the full uint32 writes. Even for 1 element, shader writes a full uint32.
     size_t buffer_size_out = output.numel() * output.dtype_size();
@@ -8581,7 +8582,7 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
         buffer_size_out = num_pairs * 4;
     }
 
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_out}
     };
     std::vector<size_t> sizes = {buffer_size_out};
@@ -8717,10 +8718,10 @@ auto VulkanBackend::dispatchRand(const std::vector<int64_t>& shape, DType dtype)
 
     auto* pipeline = getPipeline(shader_name, device_id);
 
-    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+    const void* buffer_out = output.data_ptr();
     size_t buffer_size = numel * output.dtype_size();
 
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {{0, buffer_out}};
+    std::vector<std::pair<uint32_t, const void*>> bindings = {{0, buffer_out}};
     std::vector<size_t> sizes = {buffer_size};
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
@@ -8792,10 +8793,10 @@ auto VulkanBackend::dispatchRandn(const std::vector<int64_t>& shape, DType dtype
 
     auto* pipeline = getPipeline(shader_name, device_id);
 
-    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+    const void* buffer_out = output.data_ptr();
     size_t buffer_size = numel * output.dtype_size();
 
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {{0, buffer_out}};
+    std::vector<std::pair<uint32_t, const void*>> bindings = {{0, buffer_out}};
     std::vector<size_t> sizes = {buffer_size};
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
@@ -8923,14 +8924,14 @@ auto VulkanBackend::dispatchMaskedSelect(const Tensor& input, const Tensor& mask
     Tensor count_buf({static_cast<int64_t>(n_workgroups + 1)}, DType::Int32, input.device());
     count_buf = dispatchFill(count_buf, 0.0f);
 
-    VkBuffer buffer_mask = getVulkanBuffer(mask.data_ptr());
-    VkBuffer buffer_count = getVulkanBuffer(count_buf.data_ptr());
+    const void* buffer_mask = mask.data_ptr();
+    const void* buffer_count = count_buf.data_ptr();
     size_t mask_bytes = mask.numel() * mask.dtype_size();
     size_t count_bytes = count_buf.numel() * count_buf.dtype_size();
 
     {
         auto* pipeline = getPipeline("masked_select_count", device_id);
-        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {{0, buffer_mask}, {1, buffer_count}};
+        std::vector<std::pair<uint32_t, const void*>> bindings = {{0, buffer_mask}, {1, buffer_count}};
         std::vector<size_t> sizes = {mask_bytes, count_bytes};
         VkDescriptorSet ds_1a = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
         VkDescriptorSet ds_1b = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
@@ -8973,8 +8974,8 @@ auto VulkanBackend::dispatchMaskedSelect(const Tensor& input, const Tensor& mask
     Tensor block_sums({static_cast<int64_t>(n_workgroups)}, DType::Int32, input.device());
     block_sums = dispatchFill(block_sums, 0.0f);
 
-    VkBuffer buffer_prefix = getVulkanBuffer(prefix_sums.data_ptr());
-    VkBuffer buffer_blocks = getVulkanBuffer(block_sums.data_ptr());
+    const void* buffer_prefix = prefix_sums.data_ptr();
+    const void* buffer_blocks = block_sums.data_ptr();
     size_t prefix_bytes = prefix_sums.numel() * prefix_sums.dtype_size();
     size_t blocks_bytes = block_sums.numel() * block_sums.dtype_size();
 
@@ -8983,8 +8984,8 @@ auto VulkanBackend::dispatchMaskedSelect(const Tensor& input, const Tensor& mask
         output = dispatchFill(output, 0.0f);
     }
 
-    VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
+    const void* buffer_input = input.data_ptr();
+    const void* buffer_output = output.data_ptr();
     size_t input_bytes = input.numel() * input.dtype_size();
     size_t output_bytes = output.numel() * output.dtype_size();
 
@@ -8993,14 +8994,14 @@ auto VulkanBackend::dispatchMaskedSelect(const Tensor& input, const Tensor& mask
         auto* gather_pipeline = getPipeline(gather_shader, device_id);
 
         // Pre-allocate all descriptor sets
-        std::vector<std::pair<uint32_t, VkBuffer>> prefix_bindings = {{0, buffer_mask}, {1, buffer_prefix}, {2, buffer_blocks}};
+        std::vector<std::pair<uint32_t, const void*>> prefix_bindings = {{0, buffer_mask}, {1, buffer_prefix}, {2, buffer_blocks}};
         std::vector<size_t> prefix_sizes = {mask_bytes, prefix_bytes, blocks_bytes};
         VkDescriptorSet ds_2a = allocateAndWriteDescriptorSet(device_id, prefix_pipeline, prefix_bindings, prefix_sizes);
         VkDescriptorSet ds_2b = (n_workgroups > 1)
             ? allocateAndWriteDescriptorSet(device_id, prefix_pipeline, prefix_bindings, prefix_sizes)
             : VK_NULL_HANDLE;
 
-        std::vector<std::pair<uint32_t, VkBuffer>> gather_bindings = {
+        std::vector<std::pair<uint32_t, const void*>> gather_bindings = {
             {0, buffer_input}, {1, buffer_mask}, {2, buffer_output}, {3, buffer_prefix}
         };
         std::vector<size_t> gather_sizes = {input_bytes, mask_bytes, output_bytes, prefix_bytes};
@@ -9149,15 +9150,15 @@ auto VulkanBackend::dispatchInterpolate(const Tensor& input, const OpAttributes&
     Tensor output(output_shape, input.dtype(), input.device());
 
     // Get VkBuffer handles
-    VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
+    const void* buffer_input = input.data_ptr();
+    const void* buffer_output = output.data_ptr();
 
     // Calculate buffer sizes
     size_t buffer_size_input = input.numel() * input.dtype_size();
     size_t buffer_size_output = output.numel() * output.dtype_size();
 
     // Allocate and write descriptor set
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_input},
         {1, buffer_output}
     };
@@ -9248,16 +9249,16 @@ auto VulkanBackend::dispatchROIAlignForward(const Tensor& features, const Tensor
     Tensor output(output_shape, features.dtype(), features.device());
 
     // Get VkBuffer handles
-    VkBuffer buffer_features = getVulkanBuffer(features.data_ptr());
-    VkBuffer buffer_rois = getVulkanBuffer(rois.data_ptr());
-    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
+    const void* buffer_features = features.data_ptr();
+    const void* buffer_rois = rois.data_ptr();
+    const void* buffer_output = output.data_ptr();
 
     size_t buffer_size_features = features.numel() * features.dtype_size();
     size_t buffer_size_rois = rois.numel() * rois.dtype_size();
     size_t buffer_size_output = output.numel() * output.dtype_size();
 
     // Allocate and write descriptor set (3 bindings)
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_features},
         {1, buffer_rois},
         {2, buffer_output}
@@ -9352,15 +9353,15 @@ auto VulkanBackend::dispatchROIAlignBackward(const Tensor& grad_output, const Te
     // Zero-initialize grad_features (atomicAdd accumulates into it)
     grad_features = dispatchFill(grad_features, 0.0f);
 
-    VkBuffer buffer_grad_output = getVulkanBuffer(grad_output.data_ptr());
-    VkBuffer buffer_rois = getVulkanBuffer(rois.data_ptr());
-    VkBuffer buffer_grad_features = getVulkanBuffer(grad_features.data_ptr());
+    const void* buffer_grad_output = grad_output.data_ptr();
+    const void* buffer_rois = rois.data_ptr();
+    const void* buffer_grad_features = grad_features.data_ptr();
 
     size_t buffer_size_grad_output = grad_output.numel() * grad_output.dtype_size();
     size_t buffer_size_rois = rois.numel() * rois.dtype_size();
     size_t buffer_size_grad_features = grad_features.numel() * grad_features.dtype_size();
 
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_grad_output},
         {1, buffer_rois},
         {2, buffer_grad_features}
@@ -9531,9 +9532,9 @@ auto VulkanBackend::dispatchArgSort(const Tensor& input, int64_t dim, bool desce
 
         // Step 2: Run all bitonic sort passes in a single command buffer
         {
-            VkBuffer buffer_values = getVulkanBuffer(work_values.data_ptr());
-            VkBuffer buffer_indices = getVulkanBuffer(work_indices.data_ptr());
-            std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+            const void* buffer_values = work_values.data_ptr();
+            const void* buffer_indices = work_indices.data_ptr();
+            std::vector<std::pair<uint32_t, const void*>> bindings = {
                 {0, buffer_values}, {1, buffer_indices}
             };
             std::vector<size_t> sizes = {values_bytes, indices_bytes};
@@ -9668,10 +9669,10 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
     std::vector<int64_t> out_shape(input.shape().begin(), input.shape().end());
     Tensor output(out_shape, target_dtype, input.device());
 
-    VkBuffer buf_in = getVulkanBuffer(input.data_ptr());
-    VkBuffer buf_out = getVulkanBuffer(output.data_ptr());
+    const void* buf_in = input.data_ptr();
+    const void* buf_out = output.data_ptr();
 
-    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buf_in},
         {1, buf_out}
     };

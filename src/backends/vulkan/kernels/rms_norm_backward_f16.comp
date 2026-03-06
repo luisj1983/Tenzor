@@ -76,7 +76,7 @@ void main() {
 
     // Step 1: Compute c = sum(grad_output[i] * input[i] * weight[i]) * rrms^2 / normalized_shape
     float local_sum = 0.0;
-    for (uint i = tid; i < params.normalized_shape; i += 256) {
+    for (uint i = tid; i < params.normalized_shape; i += WORKGROUP_SIZE) {
         float go = readF16(0, base_idx + i);
         float inp = readF16(1, base_idx + i);
         float w = readF16(3, i);
@@ -86,7 +86,7 @@ void main() {
     barrier();
 
     // Parallel reduction
-    for (uint s = 128; s > 0; s >>= 1) {
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
         if (tid < s) {
             shared_sum[tid] += shared_sum[tid + s];
         }
@@ -97,7 +97,7 @@ void main() {
     barrier();
 
     // Step 2: Compute grad_input and accumulate grad_weight
-    for (uint i = tid; i < params.normalized_shape; i += 256) {
+    for (uint i = tid; i < params.normalized_shape; i += WORKGROUP_SIZE) {
         float go = readF16(0, base_idx + i);
         float inp = readF16(1, base_idx + i);
         float w = readF16(3, i);

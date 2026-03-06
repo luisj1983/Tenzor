@@ -33,14 +33,14 @@ void main() {
 
         // Step 1: Find maximum for numerical stability
         float local_max = -1.0 / 0.0; // -infinity
-        for (uint i = tid; i < params.num_classes; i += 256) {
+        for (uint i = tid; i < params.num_classes; i += WORKGROUP_SIZE) {
             local_max = max(local_max, input_data[base_idx + i]);
         }
         shared_max[tid] = local_max;
         barrier();
 
         // Parallel reduction for max
-        for (uint s = 128; s > 0; s >>= 1) {
+        for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
             if (tid < s) {
                 shared_max[tid] = max(shared_max[tid], shared_max[tid + s]);
             }
@@ -52,7 +52,7 @@ void main() {
 
         // Step 2: Compute exp(x - max) and sum
         float local_sum = 0.0;
-        for (uint i = tid; i < params.num_classes; i += 256) {
+        for (uint i = tid; i < params.num_classes; i += WORKGROUP_SIZE) {
             float exp_val = exp(input_data[base_idx + i] - row_max);
             output_data[base_idx + i] = exp_val;
             local_sum += exp_val;
@@ -61,7 +61,7 @@ void main() {
         barrier();
 
         // Parallel reduction for sum
-        for (uint s = 128; s > 0; s >>= 1) {
+        for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
             if (tid < s) {
                 shared_sum[tid] += shared_sum[tid + s];
             }
@@ -72,7 +72,7 @@ void main() {
         barrier();
 
         // Step 3: Divide by sum
-        for (uint i = tid; i < params.num_classes; i += 256) {
+        for (uint i = tid; i < params.num_classes; i += WORKGROUP_SIZE) {
             output_data[base_idx + i] /= row_sum;
         }
     }

@@ -7,7 +7,16 @@ namespace tenzor {
 
 // Parse device index from string suffix and validate it's non-negative
 static auto parse_device_index(std::string_view str, size_t prefix_len) -> int {
-    int idx = std::stoi(std::string(str.substr(prefix_len)));
+    auto suffix = std::string(str.substr(prefix_len));
+    int idx;
+    try {
+        idx = std::stoi(suffix);
+    } catch (const std::invalid_argument&) {
+        throw DeviceException("Invalid device index in '" + std::string(str) +
+                              "' — expected integer after ':'");
+    } catch (const std::out_of_range&) {
+        throw DeviceException("Device index out of range in '" + std::string(str) + "'");
+    }
     if (idx < 0) {
         throw DeviceException("Device index must be non-negative, got: " + std::to_string(idx));
     }

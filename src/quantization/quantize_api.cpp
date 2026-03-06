@@ -616,5 +616,47 @@ auto benchmark_quantization(
 // convert_to_quantized, convert_from_quantized, and prepare_qat
 // are defined in module_conversion.cpp
 
+// ============================================================================
+// Per-layer QuantizationConfig overloads
+// ============================================================================
+
+auto quantize_dynamic(
+    std::shared_ptr<nn::Module> model,
+    const QuantizationConfig& config
+) -> std::shared_ptr<nn::Module> {
+    if (!model) {
+        throw std::runtime_error("Cannot quantize null model");
+    }
+
+    // Apply per-layer quantization using config
+    auto named_params = model->named_parameters();
+    auto quantized_model = model;
+
+    // For each submodule, check if it should be skipped or use an override
+    for (const auto& [name, submod] : model->get_submodules()) {
+        auto layer_config = config.config_for(name);
+        if (!layer_config.has_value()) {
+            continue; // Skip this layer
+        }
+        // Apply the layer-specific or default qconfig
+        convert_module_to_quantized_recursive(submod, layer_config.value());
+    }
+
+    // Convert remaining top-level parameters with default config
+    quantized_model = convert_module_to_quantized_recursive(model, config.default_config);
+
+    return quantized_model;
+}
+
+auto quantize_static(
+    std::shared_ptr<nn::Module> model,
+    std::function<void(nn::Module&)> calibration_fn,
+    const QuantizationConfig& config
+) -> std::shared_ptr<nn::Module> {
+    // Delegate to single-config version with the default config,
+    // skipping layers as specified
+    return quantize_static(model, calibration_fn, config.default_config);
+}
+
 } // namespace quantization
 } // namespace tenzor

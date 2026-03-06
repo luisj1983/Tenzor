@@ -875,7 +875,7 @@ VkBuffer VulkanBackend::getVulkanBuffer(const void* ptr) const {
 VkDescriptorSet VulkanBackend::allocateAndWriteDescriptorSet(
     int32_t device_id,
     vulkan::ComputePipeline* pipeline,
-    const std::vector<std::pair<uint32_t, VkBuffer>>& bufferBindings,
+    const std::vector<std::pair<uint32_t, const void*>>& bufferPtrs,
     const std::vector<size_t>& bufferSizes) {
 
     auto& ctx = devices_[device_id];
@@ -918,13 +918,15 @@ VkDescriptorSet VulkanBackend::allocateAndWriteDescriptorSet(
 
     vulkan::checkVk(result, "Failed to allocate descriptor set");
 
-    // Write descriptor set bindings
-    std::vector<VkDescriptorBufferInfo> bufferInfos(bufferBindings.size());
-    std::vector<VkWriteDescriptorSet> writes(bufferBindings.size());
+    // Write descriptor set bindings — resolve VkBuffer + byte offset from raw pointers
+    // so tensor views (slices with non-zero storage offset) bind correctly.
+    std::vector<VkDescriptorBufferInfo> bufferInfos(bufferPtrs.size());
+    std::vector<VkWriteDescriptorSet> writes(bufferPtrs.size());
 
-    for (size_t i = 0; i < bufferBindings.size(); ++i) {
-        bufferInfos[i].buffer = bufferBindings[i].second;
-        bufferInfos[i].offset = 0;
+    for (size_t i = 0; i < bufferPtrs.size(); ++i) {
+        auto [buffer, offset] = getVulkanBufferAndOffset(bufferPtrs[i].second);
+        bufferInfos[i].buffer = buffer;
+        bufferInfos[i].offset = offset;
         // Round up to 4-byte boundary (minimum uint32 size for shader access).
         // Float16 shaders pack 2 elements per uint32, so odd-element-count tensors
         // need the range rounded up to avoid out-of-bounds descriptor access.
@@ -933,7 +935,7 @@ VkDescriptorSet VulkanBackend::allocateAndWriteDescriptorSet(
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].pNext = nullptr;
         writes[i].dstSet = descriptorSet;
-        writes[i].dstBinding = bufferBindings[i].first;
+        writes[i].dstBinding = bufferPtrs[i].first;
         writes[i].dstArrayElement = 0;
         writes[i].descriptorCount = 1;
         writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;

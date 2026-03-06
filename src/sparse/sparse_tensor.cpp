@@ -128,6 +128,91 @@ auto SparseTensor::sparse_csr(const Tensor& crow_indices, const Tensor& col_indi
     return s;
 }
 
+auto SparseTensor::from_dense(const Tensor& dense, SparseLayout layout) -> SparseTensor {
+    auto dense_cont = dense.contiguous().to(Device::cpu());
+    auto shape = std::vector<int64_t>(dense.shape().begin(), dense.shape().end());
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    int64_t numel = dense_cont.numel();
+
+    // Count non-zero elements
+    std::vector<int64_t> nz_flat_indices;
+    nz_flat_indices.reserve(numel / 4); // heuristic
+
+    // Scan for non-zeros (using Float32/Float64 comparison)
+    auto scan_nonzeros = [&]<typename T>(const T* data) {
+        for (int64_t i = 0; i < numel; ++i) {
+            if (data[i] != T(0)) {
+                nz_flat_indices.push_back(i);
+            }
+        }
+    };
+
+    switch (dense_cont.dtype()) {
+        case DType::Float32: scan_nonzeros(dense_cont.data<float>()); break;
+        case DType::Float64: scan_nonzeros(dense_cont.data<double>()); break;
+        case DType::Int32:   scan_nonzeros(dense_cont.data<int32_t>()); break;
+        case DType::Int64:   scan_nonzeros(dense_cont.data<int64_t>()); break;
+        case DType::Int8:    scan_nonzeros(dense_cont.data<int8_t>()); break;
+        case DType::UInt8:   scan_nonzeros(dense_cont.data<uint8_t>()); break;
+        default:
+            throw std::runtime_error("from_dense: unsupported dtype");
+    }
+
+    int64_t nnz = static_cast<int64_t>(nz_flat_indices.size());
+
+    // Build COO indices (ndim x nnz) and values (nnz)
+    Tensor indices({ndim, nnz}, DType::Int64, Device::cpu());
+    Tensor values({nnz}, dense_cont.dtype(), Device::cpu());
+
+    auto* idx_ptr = indices.data<int64_t>();
+
+    // Convert flat indices to multi-dimensional indices
+    std::vector<int64_t> strides(ndim);
+    strides[ndim - 1] = 1;
+    for (int64_t d = ndim - 2; d >= 0; --d) {
+        strides[d] = strides[d + 1] * shape[d + 1];
+    }
+
+    for (int64_t j = 0; j < nnz; ++j) {
+        int64_t flat = nz_flat_indices[j];
+        for (int64_t d = 0; d < ndim; ++d) {
+            idx_ptr[d * nnz + j] = flat / strides[d];
+            flat %= strides[d];
+        }
+    }
+
+    // Copy non-zero values
+    auto copy_values = [&]<typename T>(const T* src, T* dst) {
+        for (int64_t j = 0; j < nnz; ++j) {
+            dst[j] = src[nz_flat_indices[j]];
+        }
+    };
+
+    switch (dense_cont.dtype()) {
+        case DType::Float32: copy_values(dense_cont.data<float>(), values.data<float>()); break;
+        case DType::Float64: copy_values(dense_cont.data<double>(), values.data<double>()); break;
+        case DType::Int32:   copy_values(dense_cont.data<int32_t>(), values.data<int32_t>()); break;
+        case DType::Int64:   copy_values(dense_cont.data<int64_t>(), values.data<int64_t>()); break;
+        case DType::Int8:    copy_values(dense_cont.data<int8_t>(), values.data<int8_t>()); break;
+        case DType::UInt8:   copy_values(dense_cont.data<uint8_t>(), values.data<uint8_t>()); break;
+        default: break;
+    }
+
+    // Move back to original device if needed
+    if (dense.device() != Device::cpu()) {
+        indices = indices.to(dense.device());
+        values = values.to(dense.device());
+    }
+
+    auto result = sparse_coo(indices, values, shape);
+
+    // Convert to requested layout if not COO
+    if (layout == SparseLayout::CSR) return result.to_csr();
+    if (layout == SparseLayout::CSC) return result.to_csc();
+
+    return result;
+}
+
 auto SparseTensor::to_dense() const -> Tensor {
     auto result = zeros(shape_, values_.dtype(), values_.device());
 

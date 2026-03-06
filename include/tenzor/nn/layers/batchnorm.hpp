@@ -76,6 +76,14 @@ public:
     /// @brief Get the epsilon value used for numerical stability.
     [[nodiscard]] auto eps() const -> double { return eps_; }
 
+    auto extra_repr() const -> std::string override {
+        return "num_features=" + std::to_string(num_features_) +
+               ", eps=" + std::to_string(eps_) +
+               ", momentum=" + std::to_string(momentum_) +
+               ", affine=" + std::string(affine_ ? "True" : "False") +
+               ", track_running_stats=" + std::string(track_running_stats_ ? "True" : "False");
+    }
+
 private:
     int64_t num_features_;          ///< Number of feature channels
     double eps_;                    ///< Numerical stability constant
@@ -145,6 +153,14 @@ public:
 
     /// @brief Get the epsilon value used for numerical stability.
     [[nodiscard]] auto eps() const -> double { return eps_; }
+
+    auto extra_repr() const -> std::string override {
+        return "num_features=" + std::to_string(num_features_) +
+               ", eps=" + std::to_string(eps_) +
+               ", momentum=" + std::to_string(momentum_) +
+               ", affine=" + std::string(affine_ ? "True" : "False") +
+               ", track_running_stats=" + std::string(track_running_stats_ ? "True" : "False");
+    }
 
 private:
     int64_t num_features_;          ///< Number of feature channels

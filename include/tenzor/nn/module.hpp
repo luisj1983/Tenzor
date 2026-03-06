@@ -123,6 +123,14 @@ public:
     virtual auto forward_impl(const Variable& input) -> Variable = 0;
 
     /**
+     * @brief Extra representation string for __repr__.
+     *
+     * Override in subclasses to show constructor args (e.g. "in_features=10, out_features=5").
+     * @return Extra string to display inside ClassName(...)
+     */
+    virtual auto extra_repr() const -> std::string { return ""; }
+
+    /**
      * @brief Convenience operator for forward pass.
      *
      * Equivalent to calling forward() - provided for functional syntax.

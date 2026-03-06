@@ -94,7 +94,7 @@ void main() {
 
     if (zero_variance) {
         // Zero out grad_input for this batch element
-        for (uint i = tid; i < params.normalized_shape; i += 256) {
+        for (uint i = tid; i < params.normalized_shape; i += WORKGROUP_SIZE) {
             writeF16(base_idx + i, 0.0);
 
             // Still accumulate grad_bias
@@ -110,7 +110,7 @@ void main() {
     // Accumulate in Float32 for numerical stability
     float local_sum_dy_w = 0.0;
     float local_sum_dy_w_xhat = 0.0;
-    for (uint i = tid; i < params.normalized_shape; i += 256) {
+    for (uint i = tid; i < params.normalized_shape; i += WORKGROUP_SIZE) {
         float dy = readF16(0, base_idx + i);
         float w = (params.affine > 0) ? readF16(4, i) : 1.0;
         float xhat = (readF16(1, base_idx + i) - mean) * rstd;
@@ -123,7 +123,7 @@ void main() {
     barrier();
 
     // Parallel reduction for sum_dy_w and sum_dy_w_xhat
-    for (uint s = 128; s > 0; s >>= 1) {
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
         if (tid < s) {
             shared_sum_dy_w[tid] += shared_sum_dy_w[tid + s];
             shared_sum_dy_w_xhat[tid] += shared_sum_dy_w_xhat[tid + s];
@@ -137,7 +137,7 @@ void main() {
     barrier();
 
     // Step 2: Compute grad_input and accumulate grad_weight, grad_bias
-    for (uint i = tid; i < params.normalized_shape; i += 256) {
+    for (uint i = tid; i < params.normalized_shape; i += WORKGROUP_SIZE) {
         float dy = readF16(0, base_idx + i);
         float w = (params.affine > 0) ? readF16(4, i) : 1.0;
         float xhat = (readF16(1, base_idx + i) - mean) * rstd;

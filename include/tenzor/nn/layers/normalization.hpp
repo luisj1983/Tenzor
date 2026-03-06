@@ -75,6 +75,18 @@ public:
     /// @brief Get the epsilon value used for numerical stability.
     [[nodiscard]] auto eps() const -> double { return eps_; }
 
+    auto extra_repr() const -> std::string override {
+        std::string shape_str = "(";
+        for (size_t i = 0; i < normalized_shape_.size(); ++i) {
+            if (i > 0) shape_str += ", ";
+            shape_str += std::to_string(normalized_shape_[i]);
+        }
+        shape_str += ")";
+        return "normalized_shape=" + shape_str +
+               ", eps=" + std::to_string(eps_) +
+               ", elementwise_affine=" + std::string(elementwise_affine_ ? "True" : "False");
+    }
+
 private:
     std::vector<int64_t> normalized_shape_;  ///< Dimensions to normalize over
     double eps_;                             ///< Numerical stability constant
@@ -158,6 +170,13 @@ public:
      * @throws std::runtime_error if input channels don't match num_channels
      */
     auto forward_impl(const Variable& input) -> Variable override;
+
+    auto extra_repr() const -> std::string override {
+        return "num_groups=" + std::to_string(num_groups_) +
+               ", num_channels=" + std::to_string(num_channels_) +
+               ", eps=" + std::to_string(eps_) +
+               ", affine=" + std::string(affine_ ? "True" : "False");
+    }
 
 private:
     int64_t num_groups_;    ///< Number of groups
