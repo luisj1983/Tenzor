@@ -1095,6 +1095,43 @@ auto conv2d_forward_kernel(
     // Fall through to im2col+GEMM if oneDNN not applicable
 #endif
 
+    // Try Winograd for eligible 3x3 stride-1 convolutions (Float32 only)
+    if (input.dtype() == DType::Float32) {
+        bool used_winograd = false;
+        int64_t pad_val = static_cast<int64_t>(padding);
+
+        if (can_use_winograd_f4x3(kernel_h, kernel_w, stride, dilation, groups, out_h, out_w)) {
+            winograd_conv2d_f4x3(
+                input.data<float>(), weight.data<float>(), output.data<float>(),
+                batch, input_shape[1], height, width, out_channels, out_h, out_w,
+                pad_val, pad_val);
+            used_winograd = true;
+        } else if (can_use_winograd_f2x3(kernel_h, kernel_w, stride, dilation, groups)) {
+            winograd_conv2d_f2x3(
+                input.data<float>(), weight.data<float>(), output.data<float>(),
+                batch, input_shape[1], height, width, out_channels, out_h, out_w,
+                pad_val, pad_val);
+            used_winograd = true;
+        }
+
+        if (used_winograd) {
+            // Add bias if present
+            if (bias) {
+                const float* bias_data = bias->data<float>();
+                float* out_data = output.data<float>();
+                int64_t spatial = out_h * out_w;
+                for (int64_t b_idx = 0; b_idx < batch; ++b_idx) {
+                    for (int64_t oc = 0; oc < out_channels; ++oc) {
+                        float bv = bias_data[oc];
+                        float* ch = out_data + (b_idx * out_channels + oc) * spatial;
+                        for (int64_t i = 0; i < spatial; ++i) ch[i] += bv;
+                    }
+                }
+            }
+            return output;
+        }
+    }
+
     // Dispatch based on dtype
     if (input.dtype() == DType::Float32) {
         conv2d_forward_impl<float>(input, weight, bias, output, stride, padding, dilation, groups);
