@@ -3,7 +3,7 @@
 
 // Broadcasting-aware binary operations for Int64 dtype
 // Handles 64-bit integer operations with proper overflow behavior
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer InputA { int64_t a[]; };
 layout(binding = 1) buffer InputB { int64_t b[]; };

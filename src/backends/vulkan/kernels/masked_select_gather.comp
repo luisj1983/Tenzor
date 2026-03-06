@@ -2,7 +2,7 @@
 
 // Masked select - Pass 2: Gather selected elements
 // Uses exclusive scan to compute output indices
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input { float input_data[]; };
 layout(binding = 1) buffer Mask { uint mask_data[]; };

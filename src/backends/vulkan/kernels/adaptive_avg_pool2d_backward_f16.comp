@@ -5,7 +5,7 @@
 // Distributes gradients from output back to input positions
 // Float16 doesn't support atomics, so we iterate over INPUT positions
 // and accumulate contributions from all output positions that map to each input
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { uint grad_output[]; };  // Packed float16 (2 per uint)
 layout(binding = 1) buffer GradInput { uint grad_input[]; };    // Packed float16 (2 per uint)

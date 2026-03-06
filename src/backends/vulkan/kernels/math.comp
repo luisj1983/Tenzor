@@ -2,7 +2,7 @@
 
 // Math operations: add, sub, mul, div, sqrt, exp, log, neg, abs, pow, sign, floor, ceil, round, trunc, reciprocal
 // Supports denormal number preservation for add/sub operations
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 // Use uint buffers for raw bit access to support denormal preservation
 layout(binding = 0) buffer InputA { uint a[]; };

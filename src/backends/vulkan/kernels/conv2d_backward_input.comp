@@ -7,7 +7,7 @@
 // output positions that used it during forward pass.
 // With groups: each input channel only connects to output channels in same group.
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { float grad_output[]; };  // (N, C_out, H_out, W_out)
 layout(binding = 1) buffer Weight { float weight[]; };           // (C_out, C_in/groups, K_h, K_w)

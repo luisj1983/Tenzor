@@ -1,7 +1,7 @@
 #version 450
 
 // Ones operation: create tensor filled with 1.0 (or 1 for integer types)
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Output { uint output_data[]; };
 

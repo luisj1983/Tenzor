@@ -978,6 +978,11 @@ auto Tensor::reshape(std::vector<int64_t> new_shape) const -> Tensor {
         );
     }
 
+    // Non-contiguous tensors cannot be reshaped as a view — make contiguous first.
+    // This is safe for all backends and avoids silent corruption when GPU reshape
+    // kernels assume contiguous layout.
+    Tensor src = is_contiguous() ? *this : contiguous();
+
     // Build attributes with new shape
     OpAttributes attrs;
     std::string shape_str;
@@ -988,7 +993,7 @@ auto Tensor::reshape(std::vector<int64_t> new_shape) const -> Tensor {
     attrs.set(AttrKey::Shape, shape_str);
 
     // Dispatch to backend for reshape operation
-    std::vector<Tensor> inputs = {*this};
+    std::vector<Tensor> inputs = {src};
     return dispatch(OpId::Reshape, inputs, attrs)[0];
 }
 

@@ -2,7 +2,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 
 // 2D Convolution Forward Pass - Float16 version (with groups support)
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input { float16_t input_data[]; };
 layout(binding = 1) buffer Weight { float16_t weight_data[]; };

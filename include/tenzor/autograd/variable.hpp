@@ -56,7 +56,9 @@ struct VariableImpl {
           requires_grad_(other.requires_grad_.load(std::memory_order_relaxed)),
           retain_grad_(other.retain_grad_.load(std::memory_order_relaxed)),
           hooks_(other.hooks_),
-          next_hook_id_(other.next_hook_id_.load(std::memory_order_relaxed)) {}
+          next_hook_id_(other.next_hook_id_.load(std::memory_order_relaxed)),
+          // grad_mutex_ is default-constructed (not copyable)
+          thread_safe_(other.thread_safe_.load(std::memory_order_relaxed)) {}
 
     VariableImpl(VariableImpl&& other) noexcept
         : data_(std::move(other.data_)),
@@ -65,7 +67,9 @@ struct VariableImpl {
           requires_grad_(other.requires_grad_.load(std::memory_order_relaxed)),
           retain_grad_(other.retain_grad_.load(std::memory_order_relaxed)),
           hooks_(std::move(other.hooks_)),
-          next_hook_id_(other.next_hook_id_.load(std::memory_order_relaxed)) {}
+          next_hook_id_(other.next_hook_id_.load(std::memory_order_relaxed)),
+          // grad_mutex_ is default-constructed (not movable)
+          thread_safe_(other.thread_safe_.load(std::memory_order_relaxed)) {}
 
     VariableImpl& operator=(const VariableImpl& other) {
         if (this != &other) {
@@ -76,6 +80,8 @@ struct VariableImpl {
             retain_grad_.store(other.retain_grad_.load(std::memory_order_relaxed), std::memory_order_relaxed);
             hooks_ = other.hooks_;
             next_hook_id_.store(other.next_hook_id_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            // grad_mutex_ is not assignable — left as-is
+            thread_safe_.store(other.thread_safe_.load(std::memory_order_relaxed), std::memory_order_relaxed);
         }
         return *this;
     }
@@ -89,6 +95,8 @@ struct VariableImpl {
             retain_grad_.store(other.retain_grad_.load(std::memory_order_relaxed), std::memory_order_relaxed);
             hooks_ = std::move(other.hooks_);
             next_hook_id_.store(other.next_hook_id_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            // grad_mutex_ is not assignable — left as-is
+            thread_safe_.store(other.thread_safe_.load(std::memory_order_relaxed), std::memory_order_relaxed);
         }
         return *this;
     }
@@ -120,6 +128,15 @@ struct VariableImpl {
 
     /// Next hook ID for register_hook (atomic for thread-safe concurrent register_hook calls)
     std::atomic<size_t> next_hook_id_{0};
+
+    /// Mutex protecting grad_ for concurrent gradient accumulation.
+    /// Always present (sizeof ~40 bytes on Linux). Only locked when
+    /// thread_safe_ is true, so zero overhead for single-threaded code.
+    std::mutex grad_mutex_;
+
+    /// Opt-in flag for thread-safe gradient access. When true, grad_mutex_
+    /// is locked around gradient reads/writes. Enable via Variable::make_thread_safe().
+    std::atomic<bool> thread_safe_{false};
 };
 
 /**
@@ -367,6 +384,30 @@ public:
      * Useful for cleanup in test fixtures and module teardown.
      */
     auto clear_hooks() -> void;
+
+    /**
+     * @brief Enable thread-safe gradient access for this variable.
+     *
+     * When enabled, gradient reads/writes are protected by a mutex,
+     * allowing safe concurrent gradient accumulation from multiple
+     * backward passes (e.g., data-parallel training).
+     *
+     * Zero overhead when not enabled — the mutex exists but is never locked.
+     *
+     * @code
+     * Variable shared_param(tensor, true);
+     * shared_param.make_thread_safe();
+     * // Now safe to call backward() concurrently from multiple threads
+     * @endcode
+     */
+    auto make_thread_safe() -> void;
+
+    /**
+     * @brief Check if thread-safe gradient access is enabled.
+     *
+     * @return true if make_thread_safe() has been called
+     */
+    auto is_thread_safe() const -> bool;
 
     /**
      * @brief Enable gradient retention for non-leaf variables.

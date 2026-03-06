@@ -8,7 +8,7 @@
 // with grad_output values across all batch samples and spatial positions.
 // With groups: weight shape is (C_out, C_in/groups, K_h, K_w)
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { float grad_output[]; };  // (N, C_out, H_out, W_out)
 layout(binding = 1) buffer Input { float input_data[]; };        // (N, C_in, H_in, W_in)

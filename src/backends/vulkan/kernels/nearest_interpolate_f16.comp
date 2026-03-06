@@ -6,7 +6,7 @@
 // Input shape: (N, C, H_in, W_in)
 // Output shape: (N, C, H_out, W_out)
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input { uint input_data[]; };    // Packed F16
 layout(binding = 1) buffer Output { uint output_data[]; };  // Packed F16

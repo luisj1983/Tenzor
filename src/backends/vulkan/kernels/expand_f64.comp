@@ -3,7 +3,7 @@
 
 // Expand operation: broadcast tensor to larger size (Float64 variant)
 // Supports multi-dimensional broadcasting following NumPy rules
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input { double input_data[]; };
 layout(binding = 1) buffer Output { double output_data[]; };

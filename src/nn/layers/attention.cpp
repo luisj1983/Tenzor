@@ -148,7 +148,8 @@ auto MultiheadAttention::scaled_dot_product_attention(
     const Variable& value,
     const Tensor& attn_mask,
     double dropout_p,
-    bool need_weights) const -> std::pair<Variable, Variable> {
+    bool need_weights,
+    const Tensor& position_bias) const -> std::pair<Variable, Variable> {
 
     // Query: (batch, num_heads, seq_len_q, head_dim)
     // Key: (batch, num_heads, seq_len_k, head_dim)
@@ -328,6 +329,13 @@ auto MultiheadAttention::scaled_dot_product_attention(
 
     scores = scores * scale_var;
 
+    // Apply relative position bias if provided
+    // position_bias shape: (num_heads, seq_len_q, seq_len_k) or (1, num_heads, seq_len_q, seq_len_k)
+    if (position_bias.is_valid() && position_bias.shape().size() > 0) {
+        Variable bias_var(position_bias, false);
+        scores = scores + bias_var;
+    }
+
     // Apply causal mask if is_causal_ is set (masks future tokens)
     if (is_causal_) {
         // Create rectangular causal mask (seq_q, seq_k) — future positions get -inf
@@ -410,7 +418,8 @@ auto MultiheadAttention::forward(const Variable& query,
                                 const Variable& value,
                                 const Tensor& key_padding_mask,
                                 const Tensor& attn_mask,
-                                bool need_weights) -> std::pair<Variable, Variable> {
+                                bool need_weights,
+                                const Tensor& position_bias) -> std::pair<Variable, Variable> {
     // Call forward pre-hooks (enables CPU-start offloading)
     // NOTE: This is necessary because this multi-argument forward bypasses Module::forward()
     call_forward_pre_hooks();
@@ -522,7 +531,7 @@ auto MultiheadAttention::forward(const Variable& query,
     }
 
     // Compute attention
-    auto [attended_values, attn_weights] = scaled_dot_product_attention(Q, K, V, combined_mask, dropout_, need_weights);
+    auto [attended_values, attn_weights] = scaled_dot_product_attention(Q, K, V, combined_mask, dropout_, need_weights, position_bias);
 
     // Merge heads
     Variable output = merge_heads(attended_values);

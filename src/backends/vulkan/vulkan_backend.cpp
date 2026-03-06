@@ -462,6 +462,9 @@ void VulkanBackend::createLogicalDevices() {
                 (subgroupProps.supportedOperations & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) != 0;
         }
 
+        // Determine optimal 1D workgroup size from device limits
+        ctx.workgroupSize = vulkan::optimalWorkgroupSize(ctx.physicalDevice);
+
         // Create pipeline cache (try loading from disk)
         {
             VkPipelineCacheCreateInfo cacheCreateInfo{};
@@ -792,10 +795,23 @@ vulkan::ComputePipeline* VulkanBackend::getPipeline(const std::string& shader_na
         pushConstants.push_back(push_range);
     }
 
-    // Create pipeline (using persistent pipeline cache for faster creation)
+    // Create pipeline with workgroup size specialization constant.
+    // Spec constant ID 0 maps to local_size_x_id = 0 in all shaders,
+    // allowing runtime override of the workgroup size per device.
     auto& ctx = devices_[device_id];
+    uint32_t wgSize = ctx.workgroupSize;
+    VkSpecializationMapEntry specEntry{};
+    specEntry.constantID = 0;
+    specEntry.offset = 0;
+    specEntry.size = sizeof(uint32_t);
+    VkSpecializationInfo specInfo{};
+    specInfo.mapEntryCount = 1;
+    specInfo.pMapEntries = &specEntry;
+    specInfo.dataSize = sizeof(uint32_t);
+    specInfo.pData = &wgSize;
+
     auto pipeline = std::make_unique<vulkan::ComputePipeline>(
-        ctx.device, shaderCode, bindings, pushConstants, ctx.pipelineCache
+        ctx.device, shaderCode, bindings, pushConstants, ctx.pipelineCache, &specInfo
     );
 
     auto* pipelinePtr = pipeline.get();
@@ -882,9 +898,10 @@ VkDescriptorSet VulkanBackend::allocateAndWriteDescriptorSet(
 
     // If descriptor pool is exhausted, wait for pending work, reset, and retry
     if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL) {
-        // Wait for all submitted frame fences to complete before resetting.
-        // Uses fence-based wait instead of vkDeviceWaitIdle for better
-        // concurrency — only blocks on our own submissions.
+        // Force-submit any pending batched commands before resetting pools.
+        // Without this, activeCommandBuffer references descriptors from the pool
+        // we're about to reset, causing use-after-reset corruption.
+        submitBatchIfNeeded(device_id, true);
         ensurePendingWorkComplete(device_id);
 
         // Reset command pool and descriptor pool

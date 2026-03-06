@@ -2,7 +2,7 @@
 
 // 2D Transposed Convolution Forward Pass (with groups support)
 // Uses gather approach: each output element gathers contributions from input positions
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input { float input_data[]; };
 layout(binding = 1) buffer Weight { float weight_data[]; };

@@ -978,7 +978,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
                           VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(PushConstants), &push_constants);
 
-        uint32_t workgroups = (n_channels + 255) / 256;
+        uint32_t workgroups = div_wg(n_channels, devices_[device_id].workgroupSize);
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
@@ -1629,7 +1629,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         pc.centered = centered ? 1u : 0u;
         pc.has_momentum = has_momentum ? 1u : 0u;
 
-        uint32_t workgroups = (numel + 255) / 256;
+        uint32_t workgroups = div_wg(numel, devices_[device_id].workgroupSize);
         VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
         vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
         vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -1687,7 +1687,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         pc.padding1 = 0;
         pc.padding2 = 0;
 
-        uint32_t workgroups = (numel + 255) / 256;
+        uint32_t workgroups = div_wg(numel, devices_[device_id].workgroupSize);
         VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
         vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
         vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -1735,7 +1735,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         pc.eps = eps;
         pc.weight_decay = weight_decay;
 
-        uint32_t workgroups = (numel + 255) / 256;
+        uint32_t workgroups = div_wg(numel, devices_[device_id].workgroupSize);
         VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
         vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
         vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,

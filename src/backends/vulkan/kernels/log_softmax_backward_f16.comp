@@ -4,7 +4,7 @@
 // Log softmax backward for Float16
 // grad_input = grad_output - exp(output) * sum(grad_output)
 // Float16 elements are packed 2 per 32-bit word
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { uint grad_output[]; };
 layout(binding = 1) buffer OutputBuffer { uint output_data[]; };  // log_softmax output

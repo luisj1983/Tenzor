@@ -1,7 +1,7 @@
 #version 450
 
 // Cast Int64 to Int32 on GPU
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer InputInt64 {
     // In Vulkan, int64_t requires GL_ARB_gpu_shader_int64 extension

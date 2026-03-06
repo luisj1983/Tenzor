@@ -101,6 +101,7 @@ set(TENZOR_CORE_SOURCES
     nn/utils/grad_accumulation.cpp
     nn/utils/spectral_norm.cpp
     nn/utils/weight_norm.cpp
+    nn/utils/rnn_utils.cpp
     nn/init.cpp
     nn/parallel/data_parallel.cpp
     # nn/parallel/distributed_data_parallel.cpp  # Disabled - use new distributed API from distributed/ instead

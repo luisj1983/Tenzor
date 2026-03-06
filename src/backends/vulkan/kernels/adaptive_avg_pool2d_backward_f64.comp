@@ -6,7 +6,7 @@
 // Note: Float64 atomic operations are not widely supported, so this version
 // iterates over output positions and distributes gradients (no atomics needed
 // when processing is structured to avoid race conditions)
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { double grad_output[]; };
 layout(binding = 1) buffer GradInput { double grad_input[]; };

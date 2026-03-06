@@ -5,7 +5,8 @@
 // Float16 elements are packed 2 per 32-bit word
 // Uses atomicCompSwap for safe packed F16 writes
 // One workgroup per batch element
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
 
 layout(binding = 0) buffer Input { uint input_data[]; };
 layout(binding = 1) buffer Output { uint output_data[]; };
@@ -19,7 +20,7 @@ layout(push_constant) uniform PushConstants {
     uint padding;
 } params;
 
-shared float shared_sum_sq[256];
+shared float shared_sum_sq[WORKGROUP_SIZE];
 
 // Helper to read float16 from packed uint buffer at element index
 float readF16(uint buffer_idx, uint element_idx) {

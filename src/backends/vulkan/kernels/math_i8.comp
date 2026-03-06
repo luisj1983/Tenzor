@@ -3,7 +3,7 @@
 
 // Math operations for Int8 dtype: add, sub, mul, div, neg, abs, sign
 // Uses 8-bit storage extension for proper byte-level access
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer InputA { int8_t a[]; };
 layout(binding = 1) buffer InputB { int8_t b[]; };

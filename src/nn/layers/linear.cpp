@@ -121,9 +121,17 @@ auto Linear::forward_impl(const Variable& input) -> Variable {
     auto input_shape = input.shape();
     const bool is_2d = (input_shape.size() == 2);
 
-    // Get weight and bias from parameters
-    auto& weight_ptr = parameters_["weight"];
-    auto& weight = *weight_ptr;
+    // Populate cached pointers on first call (avoids hash map lookup per forward)
+    if (!cached_weight_) {
+        cached_weight_ = parameters_["weight"].get();
+        if (has_bias_) {
+            auto it = parameters_.find("bias");
+            if (it != parameters_.end()) {
+                cached_bias_ = it->second.get();
+            }
+        }
+    }
+    auto& weight = *cached_weight_;
 
     // Fast path: 2D input - skip reshape operations entirely
     // This eliminates 2 ReshapeBackward allocations per forward pass
@@ -145,9 +153,8 @@ auto Linear::forward_impl(const Variable& input) -> Variable {
         // Get bias and convert if needed
         Variable bias_matched;
         Variable* bias_ptr = nullptr;
-        auto bias_it = parameters_.find("bias");
-        if (bias_it != parameters_.end()) {
-            bias_matched = variable_cast(*bias_it->second, compute_dtype);
+        if (cached_bias_) {
+            bias_matched = variable_cast(*cached_bias_, compute_dtype);
             bias_ptr = &bias_matched;
         }
 
@@ -196,9 +203,8 @@ auto Linear::forward_impl(const Variable& input) -> Variable {
     // Get bias and convert if needed
     Variable bias_matched;
     Variable* bias_ptr = nullptr;
-    auto bias_it = parameters_.find("bias");
-    if (bias_it != parameters_.end()) {
-        bias_matched = variable_cast(*bias_it->second, compute_dtype);
+    if (cached_bias_) {
+        bias_matched = variable_cast(*cached_bias_, compute_dtype);
         bias_ptr = &bias_matched;
     }
 

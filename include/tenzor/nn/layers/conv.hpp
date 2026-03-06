@@ -380,5 +380,47 @@ private:
     auto reset_parameters() -> void;
 };
 
+/**
+ * @brief Transposed 1D convolution (deconvolution) layer.
+ *
+ * Applies a 1D transposed convolution for upsampling sequences.
+ * Often used in sequence generation, audio upsampling, and decoders.
+ *
+ * Shape transformations:
+ * - Input: (N, C_in, L_in)
+ * - Output: (N, C_out, L_out)
+ * - Weight: (C_in, C_out/groups, K)
+ *
+ * Output length:
+ * - L_out = (L_in - 1) * stride - 2*padding + kernel_size + output_padding
+ *
+ * @see Conv1d for standard 1D convolution
+ * @see ConvTranspose2d for 2D transposed convolution
+ */
+class ConvTranspose1d : public Module {
+public:
+    ConvTranspose1d(int64_t in_channels,
+                    int64_t out_channels,
+                    int64_t kernel_size,
+                    int64_t stride = 1,
+                    int64_t padding = 0,
+                    int64_t output_padding = 0,
+                    int64_t groups = 1,
+                    bool bias = true);
+
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    int64_t in_channels_;
+    int64_t out_channels_;
+    int64_t kernel_size_;
+    int64_t stride_;
+    int64_t padding_;
+    int64_t output_padding_;
+    int64_t groups_;
+
+    auto reset_parameters() -> void;
+};
+
 } // namespace nn
 } // namespace tenzor

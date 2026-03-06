@@ -3,7 +3,7 @@
 // BatchNorm running statistics update using exponential moving average
 // running_mean = (1 - momentum) * running_mean + momentum * batch_mean
 // running_var  = (1 - momentum) * running_var  + momentum * batch_var
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer RunningMean { float running_mean[]; };
 layout(binding = 1) buffer RunningVar { float running_var[]; };

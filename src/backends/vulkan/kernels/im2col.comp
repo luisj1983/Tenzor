@@ -2,7 +2,7 @@
 
 // Im2col (Unfold) operation for converting image to column format
 // Transforms (N,C,H,W) → (N, C*K*K, L) where L=out_h*out_w
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input { float input_data[]; };
 layout(binding = 1) buffer Output { float output_data[]; };

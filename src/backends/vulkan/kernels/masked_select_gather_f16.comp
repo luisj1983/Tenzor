@@ -3,7 +3,7 @@
 
 // Masked select - Pass 2: Gather selected elements (Float16 variant)
 // Reads/writes uint16 pairs packed in uint32
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input { uint input_data[]; };     // Packed F16 pairs
 layout(binding = 1) buffer Mask { uint mask_data[]; };

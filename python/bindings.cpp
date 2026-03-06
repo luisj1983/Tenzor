@@ -62,6 +62,7 @@
 #include <tenzor/autograd/anomaly_mode.hpp>
 #include <tenzor/backend/cpu_caching_allocator.hpp>
 #include <tenzor/nn/utils/clip_grad.hpp>
+#include <tenzor/nn/utils/rnn_utils.hpp>
 #include <tenzor/utils/error.hpp>
 #include "numpy_interop.hpp"
 #include <thread>
@@ -3455,6 +3456,18 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("groups") = 1,
              py::arg("bias") = true);
 
+    py::class_<tenzor::nn::ConvTranspose1d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::ConvTranspose1d>>(nn, "ConvTranspose1d")
+        .def(py::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, bool>(),
+             py::arg("in_channels"),
+             py::arg("out_channels"),
+             py::arg("kernel_size"),
+             py::arg("stride") = 1,
+             py::arg("padding") = 0,
+             py::arg("output_padding") = 0,
+             py::arg("groups") = 1,
+             py::arg("bias") = true);
+
     // Normalization layers
     py::class_<tenzor::nn::BatchNorm2d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::BatchNorm2d>>(nn, "BatchNorm2d")
@@ -3956,12 +3969,13 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("forward", [](tenzor::nn::MultiheadAttention& self, const tenzor::Variable& query,
                            const tenzor::Variable& key, const tenzor::Variable& value,
                            const tenzor::Tensor& key_padding_mask, const tenzor::Tensor& attn_mask,
-                           bool need_weights) {
-            return self.forward(query, key, value, key_padding_mask, attn_mask, need_weights);
+                           bool need_weights, const tenzor::Tensor& position_bias) {
+            return self.forward(query, key, value, key_padding_mask, attn_mask, need_weights, position_bias);
         }, py::arg("query"), py::arg("key"), py::arg("value"),
            py::arg("key_padding_mask") = tenzor::Tensor{},
            py::arg("attn_mask") = tenzor::Tensor{},
-           py::arg("need_weights") = true)
+           py::arg("need_weights") = true,
+           py::arg("position_bias") = tenzor::Tensor{})
         .def("__repr__", [](const tenzor::nn::MultiheadAttention&) { return "MultiheadAttention()"; });
 
     py::class_<tenzor::nn::PositionalEncoding, tenzor::nn::Module,
@@ -4355,6 +4369,27 @@ PYBIND11_MODULE(tenzor_core, m) {
     nn.def("clip_grad_value_", &tenzor::nn::utils::clip_grad_value_,
            py::arg("parameters"), py::arg("clip_value"),
            "Clip gradient values to [-clip_value, clip_value]");
+
+    // PackedSequence and RNN utilities
+    py::class_<tenzor::nn::PackedSequence>(nn, "PackedSequence")
+        .def_readwrite("data", &tenzor::nn::PackedSequence::data)
+        .def_readwrite("batch_sizes", &tenzor::nn::PackedSequence::batch_sizes)
+        .def_readwrite("sorted_indices", &tenzor::nn::PackedSequence::sorted_indices)
+        .def_readwrite("unsorted_indices", &tenzor::nn::PackedSequence::unsorted_indices);
+
+    nn.def("pack_padded_sequence", &tenzor::nn::pack_padded_sequence,
+           py::arg("input"), py::arg("lengths"),
+           py::arg("batch_first") = false, py::arg("enforce_sorted") = true,
+           "Pack a padded batch of variable-length sequences");
+
+    nn.def("pad_packed_sequence", &tenzor::nn::pad_packed_sequence,
+           py::arg("packed"), py::arg("batch_first") = false,
+           py::arg("padding_value") = 0.0f, py::arg("total_length") = -1,
+           "Unpack a PackedSequence back to padded tensor");
+
+    nn.def("pack_sequence", &tenzor::nn::pack_sequence,
+           py::arg("sequences"), py::arg("enforce_sorted") = true,
+           "Pack a list of variable-length tensors");
 
     // Optimizers
     auto optim = m.def_submodule("optim", "Optimization algorithms");

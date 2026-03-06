@@ -1,7 +1,8 @@
 #version 450
 
 // Boolean reductions: all, any
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
 
 layout(binding = 0) buffer Input { float input_data[]; };      // Treating as boolean (0 or non-zero)
 layout(binding = 1) buffer Output { int output_data[]; };      // Boolean result
@@ -13,7 +14,7 @@ layout(push_constant) uniform PushConstants {
     uint op;             // 0=all, 1=any
 } params;
 
-shared int shared_data[256];
+shared int shared_data[WORKGROUP_SIZE];
 
 void main() {
     uint tid = gl_LocalInvocationID.x;

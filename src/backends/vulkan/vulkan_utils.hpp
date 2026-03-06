@@ -55,10 +55,27 @@ inline std::vector<uint32_t> loadShader(const std::string& filename) {
     }
 
     size_t fileSize = static_cast<size_t>(file.tellg());
+    if (fileSize < 20) {  // SPIR-V minimum: 5-word header (20 bytes)
+        throw std::runtime_error("Shader file too small to be valid SPIR-V: " + filename);
+    }
+    if (fileSize % sizeof(uint32_t) != 0) {
+        throw std::runtime_error("Shader file size not aligned to 4 bytes: " + filename);
+    }
+
     std::vector<uint32_t> buffer(fileSize / sizeof(uint32_t));
     file.seekg(0);
     file.read(reinterpret_cast<char*>(buffer.data()), fileSize);
     file.close();
+
+    // Validate SPIR-V magic number
+    constexpr uint32_t SPIRV_MAGIC = 0x07230203;
+    if (buffer[0] != SPIRV_MAGIC) {
+        char hex[9];
+        snprintf(hex, sizeof(hex), "%08x", buffer[0]);
+        throw std::runtime_error(
+            "Invalid SPIR-V magic number in shader: " + filename +
+            " (expected 0x07230203, got 0x" + hex + ")");
+    }
 
     return buffer;
 }

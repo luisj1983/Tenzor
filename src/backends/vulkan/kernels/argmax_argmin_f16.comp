@@ -4,7 +4,8 @@
 
 // Argmax and Argmin for Float16 inputs
 // Reads packed F16 pairs, uses float32 shared memory for reduction
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
 
 layout(binding = 0) buffer Input { uint input_data[]; };    // Packed F16 pairs
 layout(binding = 1) buffer Output { int64_t output_indices[]; };
@@ -28,8 +29,8 @@ float readF16Element(uint flat_idx) {
     return float(readF16(input_data[word_idx], half_idx));
 }
 
-shared float shared_vals[256];
-shared int64_t shared_indices[256];
+shared float shared_vals[WORKGROUP_SIZE];
+shared int64_t shared_indices[WORKGROUP_SIZE];
 
 void main() {
     uint tid = gl_LocalInvocationID.x;

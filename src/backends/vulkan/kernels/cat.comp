@@ -2,7 +2,7 @@
 
 // Concatenate operation: join tensors along a dimension
 // Each workgroup processes output elements and determines which input tensor to read from
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input0 { float input0_data[]; };
 layout(binding = 1) buffer Input1 { float input1_data[]; };

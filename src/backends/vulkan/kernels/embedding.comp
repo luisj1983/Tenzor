@@ -1,7 +1,7 @@
 #version 450
 
 // Embedding lookup
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer EmbeddingTable { float embeddings[]; };  // (num_embeddings x embedding_dim)
 layout(binding = 1) buffer Indices { int indices[]; };              // (batch_size x seq_len)

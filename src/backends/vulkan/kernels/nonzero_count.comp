@@ -2,7 +2,8 @@
 
 // Nonzero - Pass 1: Count nonzero elements and write per-element flags
 // Reuses prefix_sum.comp for exclusive scan, then nonzero_gather.comp for output
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
 
 layout(binding = 0) buffer Input { float input_data[]; };
 layout(binding = 1) buffer Flags { uint flags[]; };         // Per-element: 1 if nonzero, 0 if zero
@@ -13,7 +14,7 @@ layout(push_constant) uniform PushConstants {
     uint pass;            // 0 = per-element flag + workgroup count, 1 = reduce workgroup counts
 } params;
 
-shared uint shared_count[256];
+shared uint shared_count[WORKGROUP_SIZE];
 
 void main() {
     uint tid = gl_LocalInvocationID.x;

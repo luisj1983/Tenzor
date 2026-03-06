@@ -1,7 +1,7 @@
 #version 450
 
 // Math operations for int32: add, sub, mul, div, neg, abs, sign
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer InputA { int a[]; };
 layout(binding = 1) buffer InputB { int b[]; };

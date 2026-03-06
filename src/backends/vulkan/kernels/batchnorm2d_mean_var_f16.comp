@@ -7,7 +7,7 @@
 //
 // Each thread processes one input element and atomically accumulates
 // into per-channel global buffers. This handles any number of channels.
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input { uint input_data[]; };       // Packed F16 (N, C, H, W)
 layout(binding = 1) buffer Mean { float mean_data[]; };        // (C) Float32

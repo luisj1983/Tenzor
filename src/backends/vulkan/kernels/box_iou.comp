@@ -2,7 +2,7 @@
 
 // Box IoU computation (supports IoU, GIoU, DIoU, CIoU)
 // Each thread computes one (i, j) pair in the NxM IoU matrix
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Boxes1 { float boxes1[]; };     // (N, 4) x1,y1,x2,y2
 layout(binding = 1) buffer Boxes2 { float boxes2[]; };     // (M, 4) x1,y1,x2,y2

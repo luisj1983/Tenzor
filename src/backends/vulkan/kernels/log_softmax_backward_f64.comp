@@ -4,7 +4,7 @@
 // Log softmax backward for Float64: grad_input = grad_output - exp(output) * sum(grad_output)
 // This requires reduction along a dimension
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { double grad_output[]; };
 layout(binding = 1) buffer OutputBuffer { double output_data[]; };  // log_softmax output

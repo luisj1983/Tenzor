@@ -3,7 +3,7 @@
 // Scatter operation: scatter elements along specified dimension
 // Uses uint buffer for output to support CAS-loop atomics without requiring
 // GL_EXT_shader_atomic_float (following the same pattern as scatter_f64.comp).
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input { float input_data[]; };       // Source data
 layout(binding = 1) buffer Indices { int indices[]; };          // Scatter indices

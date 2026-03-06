@@ -3,7 +3,7 @@
 
 // Index select for Float16: select specific indices along a dimension
 // Reads/writes packed F16 pairs using element-level indexing
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input { uint input_data[]; };    // Packed F16
 layout(binding = 1) buffer Indices { int indices[]; };

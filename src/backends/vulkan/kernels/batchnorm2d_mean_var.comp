@@ -11,7 +11,8 @@
 // mean[c] = sum(input[n, c, h, w]) / (N * H * W)
 // var[c] = sum((input[n, c, h, w] - mean[c])^2) / (N * H * W)
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
 
 layout(binding = 0) buffer Input { float input_data[]; };      // (N, C, H, W)
 layout(binding = 1) buffer Mean { float mean_data[]; };        // (C) - output
@@ -27,7 +28,7 @@ layout(push_constant) uniform PushConstants {
 } params;
 
 // Shared memory for workgroup-level reduction
-shared float s_channel_sums[256];
+shared float s_channel_sums[WORKGROUP_SIZE];
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;

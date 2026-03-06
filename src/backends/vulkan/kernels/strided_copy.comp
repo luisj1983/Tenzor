@@ -2,7 +2,7 @@
 
 // Strided copy operation: copy non-contiguous tensor to contiguous layout
 // Supports up to 8 dimensions for general N-D tensors
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input { float input_data[]; };
 layout(binding = 1) buffer Output { float output_data[]; };

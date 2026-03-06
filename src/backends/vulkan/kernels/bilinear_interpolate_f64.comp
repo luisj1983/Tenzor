@@ -7,7 +7,7 @@
 // Uses float for coordinate computation (sufficient precision for indices)
 // and double for data read/interpolation
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input { double input_data[]; };
 layout(binding = 1) buffer Output { double output_data[]; };

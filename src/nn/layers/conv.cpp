@@ -1431,4 +1431,261 @@ auto ConvTranspose3d::reset_parameters() -> void {
     }
 }
 
+// ============================================================================
+// ConvTranspose1d Implementation
+// ============================================================================
+
+class ConvTranspose1dBackward : public Function {
+public:
+    ConvTranspose1dBackward(int64_t stride, int64_t padding, int64_t output_padding,
+                            int64_t groups, std::vector<Tensor> tensors_to_save)
+        : stride_(stride), padding_(padding), output_padding_(output_padding),
+          groups_(groups) {
+        saved_tensors_ = std::move(tensors_to_save);
+    }
+
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+        throw std::runtime_error("ConvTranspose1dBackward::forward should not be called");
+    }
+
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        const Tensor& grad_output = grad_outputs[0];
+        const Tensor& input = saved_tensors_[0];
+        const Tensor& weight = saved_tensors_[1];
+        bool has_bias = saved_tensors_.size() > 2;
+
+        auto input_shape = input.shape();
+
+        // Convert to 4D for ConvTranspose2d backward dispatch
+        auto grad_4d = grad_output.unsqueeze(2);     // [N, C_out, L] -> [N, C_out, 1, L]
+        auto input_4d = input.unsqueeze(2);           // [N, C_in, L] -> [N, C_in, 1, L]
+        auto weight_4d = weight.unsqueeze(2);         // [C_in, C_out/g, K] -> [C_in, C_out/g, 1, K]
+
+        // grad_input: backward of ConvTranspose w.r.t. input is regular Conv2d
+        NewOpAttributes conv_attrs;
+        conv_attrs.set(AttrKey::Stride, stride_);
+        conv_attrs.set(AttrKey::Padding, padding_);
+        conv_attrs.set(AttrKey::Dilation, static_cast<int64_t>(1));
+        conv_attrs.set(AttrKey::Groups, groups_);
+
+        std::vector<Tensor> conv_inputs = {grad_4d, weight_4d};
+        auto conv_result = dispatch(OpId::Conv2dForward, std::span<const Tensor>(conv_inputs), conv_attrs);
+        Tensor grad_input_4d = conv_result[0];
+
+        // Handle potential shape mismatch from output_padding
+        auto gi_shape = grad_input_4d.shape();
+        if (gi_shape.size() == 4 && gi_shape[2] != 1) {
+            grad_input_4d = tenzor::slice(grad_input_4d, 2, 0, 1);
+        }
+        if (gi_shape[3] != input_shape[2]) {
+            grad_input_4d = tenzor::slice(grad_input_4d, 3, 0, input_shape[2]);
+        }
+
+        Tensor grad_input = grad_input_4d.squeeze(2);
+
+        // grad_weight: swap roles of input and grad_output
+        auto weight_4d_shape = weight_4d.shape();
+        std::string ws_str = std::to_string(weight_4d_shape[0]) + "," +
+                             std::to_string(weight_4d_shape[1]) + "," +
+                             std::to_string(weight_4d_shape[2]) + "," +
+                             std::to_string(weight_4d_shape[3]);
+        NewOpAttributes weight_grad_attrs;
+        weight_grad_attrs.set(AttrKey::Stride, stride_);
+        weight_grad_attrs.set(AttrKey::Padding, padding_);
+        weight_grad_attrs.set(AttrKey::Dilation, static_cast<int64_t>(1));
+        weight_grad_attrs.set(AttrKey::Groups, groups_);
+        weight_grad_attrs.set(AttrKey::WeightShape, std::string_view(ws_str));
+
+        std::vector<Tensor> weight_grad_inputs = {input_4d, grad_4d};
+        auto weight_grad_result = dispatch(OpId::Conv2dBackwardWeight,
+            std::span<const Tensor>(weight_grad_inputs), weight_grad_attrs);
+        Tensor grad_weight = weight_grad_result[0].squeeze(2);
+
+        if (has_bias) {
+            // grad_bias = sum(grad_output, dims=[0,2])
+            Tensor grad_bias = tenzor::sum(tenzor::sum(grad_output, 0, false), 1, false);
+            return {grad_input, grad_weight, grad_bias};
+        }
+        return {grad_input, grad_weight};
+    }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        std::vector<Tensor> tensor_grads;
+        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
+        auto results = backward(std::move(tensor_grads));
+        std::vector<Variable> var_results;
+        for (auto& t : results) var_results.emplace_back(t, false);
+        return var_results;
+    }
+
+private:
+    int64_t stride_;
+    int64_t padding_;
+    int64_t output_padding_;
+    int64_t groups_;
+};
+
+ConvTranspose1d::ConvTranspose1d(int64_t in_channels, int64_t out_channels, int64_t kernel_size,
+                                 int64_t stride, int64_t padding, int64_t output_padding,
+                                 int64_t groups, bool bias)
+    : in_channels_(in_channels), out_channels_(out_channels),
+      kernel_size_(kernel_size), stride_(stride),
+      padding_(padding), output_padding_(output_padding), groups_(groups) {
+
+    if (in_channels % groups != 0) {
+        throw std::invalid_argument("in_channels must be divisible by groups");
+    }
+    if (out_channels % groups != 0) {
+        throw std::invalid_argument("out_channels must be divisible by groups");
+    }
+    if (output_padding >= stride) {
+        throw std::invalid_argument("output_padding must be smaller than stride");
+    }
+
+    // Weight shape: [in_channels, out_channels/groups, kernel_size]
+    std::vector<int64_t> weight_shape = {in_channels, out_channels / groups, kernel_size};
+    int64_t fan_in = in_channels * kernel_size;
+    float std_init = std::sqrt(2.0f / fan_in);
+    auto weight_tensor = randn(weight_shape) * std_init;
+    register_parameter("weight", Variable(weight_tensor, true));
+
+    if (bias) {
+        std::vector<int64_t> bias_shape = {out_channels};
+        float bound = 1.0f / std::sqrt(static_cast<float>(fan_in));
+        auto bias_tensor = (rand(bias_shape) * 2.0f * bound) - bound;
+        register_parameter("bias", Variable(bias_tensor, true));
+    }
+}
+
+auto ConvTranspose1d::forward_impl(const Variable& input) -> Variable {
+    auto input_shape = input.shape();
+    if (input_shape.size() != 3) {
+        throw std::invalid_argument("ConvTranspose1d expects 3D input [batch, channels, length]");
+    }
+
+    int64_t in_channels = input_shape[1];
+    if (in_channels != in_channels_) {
+        throw std::invalid_argument("Input channels mismatch");
+    }
+
+    auto& weight = *parameters_["weight"];
+    auto bias_it = parameters_.find("bias");
+    Device original_device = input.tensor().device();
+
+    // Handle dtype and device mismatch
+    Variable weight_matched = weight;
+    bool weight_needs_conversion = (input.dtype() != weight.dtype()) ||
+                                   (input.tensor().device().type != weight.tensor().device().type);
+    if (weight_needs_conversion) {
+        auto weight_converted = weight.tensor();
+        if (input.tensor().device().type != weight.tensor().device().type) {
+            weight_converted = weight_converted.to(original_device);
+        }
+        if (input.dtype() != weight_converted.dtype()) {
+            weight_converted = weight_converted.to(input.dtype());
+        }
+        weight_matched = Variable(weight_converted, weight.requires_grad());
+        weight_matched.set_grad_fn(weight.grad_fn());
+    }
+
+    const Tensor* bias_ptr = nullptr;
+    Variable bias_matched;
+    if (bias_it != parameters_.end()) {
+        auto& bias = *bias_it->second;
+        bool bias_needs_conversion = (input.dtype() != bias.dtype()) ||
+                                     (input.tensor().device().type != bias.tensor().device().type);
+        if (bias_needs_conversion) {
+            auto bias_converted = bias.tensor();
+            if (input.tensor().device().type != bias.tensor().device().type) {
+                bias_converted = bias_converted.to(original_device);
+            }
+            if (input.dtype() != bias_converted.dtype()) {
+                bias_converted = bias_converted.to(input.dtype());
+            }
+            bias_matched = Variable(bias_converted, bias.requires_grad());
+            bias_matched.set_grad_fn(bias.grad_fn());
+            bias_ptr = &bias_matched.tensor();
+        } else {
+            bias_ptr = &bias.tensor();
+        }
+    }
+
+    // Unsqueeze to 4D: [N, C, L] -> [N, C, 1, L]
+    auto input_4d = input.tensor().unsqueeze(2);
+    auto weight_4d = weight_matched.tensor().unsqueeze(2);
+
+    // Dispatch to ConvTranspose2d forward
+    std::vector<Tensor> tensors_for_dispatch = {input_4d};
+    auto* backend = Dispatcher::get_backend(tensors_for_dispatch);
+
+    std::vector<Tensor> inputs_vec = {input_4d, weight_4d};
+    if (bias_ptr != nullptr) {
+        inputs_vec.push_back(*bias_ptr);
+    }
+
+    NewOpAttributes forward_attrs;
+    forward_attrs.set(AttrKey::Stride, stride_);
+    forward_attrs.set(AttrKey::Padding, padding_);
+    forward_attrs.set(AttrKey::OutputPadding, output_padding_);
+    forward_attrs.set(AttrKey::Dilation, static_cast<int64_t>(1));
+    forward_attrs.set(AttrKey::Groups, groups_);
+    auto output_result = backend->dispatch(
+        "conv_transpose2d_forward",
+        std::span<const Tensor>(inputs_vec),
+        forward_attrs
+    );
+    Tensor output_4d = output_result[0];
+
+    // Squeeze back: [N, C_out, 1, L_out] -> [N, C_out, L_out]
+    Tensor output = output_4d.squeeze(2);
+
+    auto result = Variable(output, input.requires_grad() || weight.requires_grad());
+
+    if (input.requires_grad() || weight.requires_grad()) {
+        std::vector<Tensor> tensors_to_save;
+        if (bias_ptr != nullptr) {
+            tensors_to_save = {input.tensor(), weight_matched.tensor(), *bias_ptr};
+        } else {
+            tensors_to_save = {input.tensor(), weight_matched.tensor()};
+        }
+
+        auto backward_fn = std::make_shared<ConvTranspose1dBackward>(
+            stride_, padding_, output_padding_, groups_, std::move(tensors_to_save)
+        );
+
+        result.set_grad_fn(backward_fn);
+
+        std::vector<Variable> input_vars = {input, *parameters_["weight"]};
+        if (bias_it != parameters_.end()) {
+            input_vars.push_back(*bias_it->second);
+        }
+        backward_fn->set_input_variables(input_vars);
+
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        if (input.grad_fn()) {
+            next_funcs.push_back(input.grad_fn());
+        }
+        backward_fn->set_next_functions(next_funcs);
+    }
+
+    return result;
+}
+
+auto ConvTranspose1d::reset_parameters() -> void {
+    int64_t fan_in = in_channels_ * kernel_size_;
+    float std = std::sqrt(2.0f / fan_in);
+
+    std::vector<int64_t> weight_shape = {in_channels_, out_channels_ / groups_, kernel_size_};
+    auto new_weight_tensor = randn(weight_shape) * std;
+    parameters_["weight"] = std::make_shared<Variable>(new_weight_tensor, true);
+
+    auto bias_it = parameters_.find("bias");
+    if (bias_it != parameters_.end()) {
+        std::vector<int64_t> bias_shape = {out_channels_};
+        float bound = 1.0f / std::sqrt(static_cast<float>(fan_in));
+        auto new_bias_tensor = (rand(bias_shape) * 2.0f * bound) - bound;
+        bias_it->second = std::make_shared<Variable>(new_bias_tensor, true);
+    }
+}
+
 } // namespace tenzor::nn

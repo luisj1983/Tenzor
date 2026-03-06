@@ -3,7 +3,7 @@
 
 // Broadcasting-aware binary operations for Int8 dtype
 // Handles byte-level access for 8-bit integer operations
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 // Use 8-bit storage extension for proper byte access
 layout(binding = 0) buffer InputA { int8_t a[]; };

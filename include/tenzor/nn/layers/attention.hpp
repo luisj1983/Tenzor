@@ -162,7 +162,8 @@ public:
                 const Variable& value,
                 const Tensor& key_padding_mask = Tensor{},
                 const Tensor& attn_mask = Tensor{},
-                bool need_weights = true) -> std::pair<Variable, Variable>;
+                bool need_weights = true,
+                const Tensor& position_bias = Tensor{}) -> std::pair<Variable, Variable>;
 
     /**
      * @brief Default forward for Module interface (uses self-attention).
@@ -239,7 +240,8 @@ private:
                                      const Variable& value,
                                      const Tensor& attn_mask = Tensor{},
                                      double dropout_p = 0.0,
-                                     bool need_weights = false) const
+                                     bool need_weights = false,
+                                     const Tensor& position_bias = Tensor{}) const
         -> std::pair<Variable, Variable>;
 
     /**

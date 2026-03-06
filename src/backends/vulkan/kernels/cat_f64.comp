@@ -2,7 +2,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
 // Concatenate operation for Float64: join tensors along a dimension
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input0 { float64_t input0_data[]; };
 layout(binding = 1) buffer Input1 { float64_t input1_data[]; };

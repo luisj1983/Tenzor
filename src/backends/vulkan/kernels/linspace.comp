@@ -1,7 +1,7 @@
 #version 450
 
 // Linspace: generate linearly-spaced values from start to end
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Output { float output_data[]; };
 

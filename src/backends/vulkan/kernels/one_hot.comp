@@ -3,7 +3,7 @@
 // One-Hot Encoding
 // Each thread handles one (batch, class) pair
 // Output 1.0 if indices[batch] == class, else 0.0
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Indices { int indices_data[]; };    // (batch_size,) class indices
 layout(binding = 1) buffer Output { float output_data[]; };    // (batch_size, num_classes)

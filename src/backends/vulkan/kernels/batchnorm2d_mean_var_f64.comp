@@ -16,7 +16,7 @@
 // shared memory atomicAdd, since shaderSharedFloat64AtomicAdd is not
 // available in standard Vulkan extensions.
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input { double input_data[]; };      // (N, C, H, W)
 layout(binding = 1) buffer Mean { double mean_data[]; };        // (C) - output

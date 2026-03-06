@@ -5,7 +5,7 @@
 // Finds maximum value in pooling window
 // Supports dilation parameter
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input { double input_data[]; };    // (N, C, H, W)
 layout(binding = 1) buffer Output { double output_data[]; };  // (N, C, H_out, W_out)

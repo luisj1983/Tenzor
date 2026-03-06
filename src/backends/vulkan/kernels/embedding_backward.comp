@@ -6,7 +6,7 @@
 // Input: grad_output (num_indices, embedding_dim), indices (num_indices)
 // Output: grad_weight (num_embeddings, embedding_dim)
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { float grad_output_data[]; };
 layout(binding = 1) buffer Indices { int indices_data[]; };

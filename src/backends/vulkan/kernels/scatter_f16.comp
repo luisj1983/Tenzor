@@ -4,7 +4,7 @@
 // Scatter operation for Float16: scatter elements along specified dimension
 // Float16 elements are packed 2 per 32-bit word in uint buffers
 // Uses atomic operations for the packed output buffer
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input { uint input_data[]; };       // Packed F16 pairs (source)
 layout(binding = 1) buffer Indices { int indices[]; };          // Scatter indices

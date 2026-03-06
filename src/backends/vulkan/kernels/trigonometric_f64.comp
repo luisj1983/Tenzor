@@ -2,7 +2,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
 // Trigonometric functions for Float64: sin, cos, tan, asin, acos, atan
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer InputBuffer { double input_data[]; };
 layout(binding = 1) buffer OutputBuffer { double output_data[]; };

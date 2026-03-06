@@ -8,7 +8,8 @@
 //
 // Each thread processes a pair of F16 elements (one 32-bit word) to avoid
 // race conditions when writing packed data.
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
 
 layout(binding = 0) buffer GradOutput { uint grad_output[]; };   // Packed F16 (N, C, H, W)
 layout(binding = 1) buffer Input { uint input_data[]; };          // Packed F16 (N, C, H, W)
@@ -42,8 +43,8 @@ uint packF16Pair(float v0, float v1) {
     return bits0 | (bits1 << 16);
 }
 
-shared float s_grad_gamma[256];
-shared float s_grad_beta[256];
+shared float s_grad_gamma[WORKGROUP_SIZE];
+shared float s_grad_beta[WORKGROUP_SIZE];
 
 // Process a single element and return (grad_input, grad_gamma_contrib, grad_beta_contrib)
 vec3 processElement(uint flat_idx, uint word_idx, uint half_idx) {

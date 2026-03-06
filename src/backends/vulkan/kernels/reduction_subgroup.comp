@@ -4,7 +4,8 @@
 // Reduction operations with subgroup optimization: sum, mean, max, min
 // Uses subgroup (warp-level) operations for the final reduction steps,
 // eliminating shared memory barriers for threads within the same subgroup.
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
 
 layout(binding = 0) buffer Input { float input_data[]; };
 layout(binding = 1) buffer Output { float output_data[]; };
@@ -18,9 +19,9 @@ layout(push_constant) uniform PushConstants {
 } params;
 
 // Specialization constant: subgroup size (set at pipeline creation time)
-layout(constant_id = 0) const uint SUBGROUP_SIZE = 32;
+layout(constant_id = 1) const uint SUBGROUP_SIZE = 32;
 
-shared float shared_data[256];
+shared float shared_data[WORKGROUP_SIZE];
 
 void main() {
     uint tid = gl_LocalInvocationID.x;

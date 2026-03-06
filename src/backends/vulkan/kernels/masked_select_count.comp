@@ -2,7 +2,8 @@
 
 // Masked select - Pass 1: Count true elements in mask
 // Uses parallel reduction to count efficiently
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
 
 layout(binding = 0) buffer Mask { uint mask_data[]; };   // Bool mask (packed as uint8 in uint32)
 layout(binding = 1) buffer Count { uint count[]; };      // Output: count per workgroup, then total
@@ -13,7 +14,7 @@ layout(push_constant) uniform PushConstants {
     uint pass;            // 0 = per-element, 1 = reduce workgroup counts
 } params;
 
-shared uint shared_count[256];
+shared uint shared_count[WORKGROUP_SIZE];
 
 void main() {
     uint tid = gl_LocalInvocationID.x;

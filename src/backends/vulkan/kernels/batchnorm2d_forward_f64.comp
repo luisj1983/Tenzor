@@ -8,7 +8,7 @@
 // Input shape: (N, C, H, W)
 // Statistics shape: (C) - one mean/var per channel
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input { double input_data[]; };      // (N, C, H, W)
 layout(binding = 1) buffer Mean { double mean_data[]; };        // (C)

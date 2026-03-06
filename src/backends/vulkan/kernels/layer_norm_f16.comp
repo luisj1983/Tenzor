@@ -4,7 +4,8 @@
 // Layer Normalization for Float16
 // Float16 elements are packed 2 per 32-bit word
 // Uses paired writes to avoid race conditions
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
 
 layout(binding = 0) buffer Input { uint input_data[]; };
 layout(binding = 1) buffer Output { uint output_data[]; };
@@ -18,8 +19,8 @@ layout(push_constant) uniform PushConstants {
     uint affine;           // 0=no affine, 1=with affine
 } params;
 
-shared float shared_sum[256];
-shared float shared_sum_sq[256];
+shared float shared_sum[WORKGROUP_SIZE];
+shared float shared_sum_sq[WORKGROUP_SIZE];
 
 // Helper to read float16 from buffer at element index
 float readF16(uint buffer_idx, uint element_idx) {

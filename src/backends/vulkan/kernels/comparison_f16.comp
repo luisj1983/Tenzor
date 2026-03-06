@@ -4,7 +4,7 @@
 
 // Comparison operations for Float16: eq, ne, lt, le, gt, ge
 // Input: packed F16 pairs in uint32. Output: uint8 booleans per element.
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer InputA { uint a[]; };
 layout(binding = 1) buffer InputB { uint b[]; };

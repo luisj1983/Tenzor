@@ -4,7 +4,7 @@
 // Max Pooling 2D Backward Pass using pre-computed indices
 // This kernel scatters gradients to the positions where max values were found
 // Uses atomic operations for overlapping pooling windows
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { float grad_output[]; };  // (N, C, H_out, W_out) flattened
 layout(binding = 1) buffer Indices { float indices[]; };          // Pre-computed max indices

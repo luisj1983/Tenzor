@@ -2,7 +2,7 @@
 #extension GL_ARB_gpu_shader_fp64 : enable
 
 // BatchNorm running statistics update for Float64
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer RunningMean { double running_mean[]; };
 layout(binding = 1) buffer RunningVar { double running_var[]; };

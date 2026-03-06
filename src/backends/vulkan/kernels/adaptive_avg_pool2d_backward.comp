@@ -4,7 +4,7 @@
 // Adaptive Average Pool 2D Backward
 // Distributes gradients from output back to input positions
 // This version uses atomic float operations (requires GL_EXT_shader_atomic_float)
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { float grad_output[]; };
 layout(binding = 1) buffer GradInput { float grad_input[]; };

@@ -85,17 +85,13 @@ inline void insertPreReadBarrier(VkCommandBuffer cmdBuffer) {
     }
 }
 
-/// Post-dispatch compute barrier. Ensures SHADER_WRITE → SHADER_READ visibility.
-/// In non-batching mode, also adds a host-readback barrier.
+/// Post-dispatch compute barrier. Ensures SHADER_WRITE → SHADER_READ visibility
+/// and compute → host/transfer visibility for readback.
+/// Always inserts both barriers — the host barrier is a no-op if no readback follows,
+/// but omitting it causes data corruption when batched commands precede a host read.
 inline void insertComputeBarrier(VkCommandBuffer cmdBuffer) {
-    // Compute-to-compute barrier (SHADER_WRITE → SHADER_READ only — no WRITE on dst
-    // since the next dispatch hasn't written yet)
     insertBarrier(cmdBuffer, BarrierType::ComputeToCompute);
-
-    if constexpr (!vulkan_config::USE_COMMAND_BATCHING) {
-        // Non-batching mode: also add transfer/host barrier for immediate readback
-        insertBarrier(cmdBuffer, BarrierType::ComputeToHost);
-    }
+    insertBarrier(cmdBuffer, BarrierType::ComputeToHost);
 }
 
 // Helper: Check if two shapes are broadcastable
@@ -171,6 +167,12 @@ static inline bool isSimpleTranspose2D(const Tensor& t) {
     // A transposed 2D contiguous tensor has strides [1, rows] where rows = shape[0]
     // (original was [cols, 1] before transpose)
     return strides[0] == 1 && strides[1] == static_cast<int64_t>(shape[0]);
+}
+
+/// Compute number of workgroups for a given element count and workgroup size.
+/// Equivalent to ceil(n / wg_size).
+inline uint32_t div_wg(uint64_t n, uint32_t wg_size) {
+    return static_cast<uint32_t>((n + wg_size - 1) / wg_size);
 }
 
 } // namespace tenzor

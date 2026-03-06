@@ -3,7 +3,7 @@
 
 // Fill tensor with ones for UInt8 dtype
 // Uses direct byte access via 8-bit storage extension
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Output { uint8_t output_data[]; };
 

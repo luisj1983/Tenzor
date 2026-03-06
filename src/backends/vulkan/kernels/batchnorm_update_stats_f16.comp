@@ -2,7 +2,7 @@
 
 // BatchNorm running statistics update for Float16
 // Works on packed uint16 pairs
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer RunningMean { uint running_mean[]; };
 layout(binding = 1) buffer RunningVar { uint running_var[]; };

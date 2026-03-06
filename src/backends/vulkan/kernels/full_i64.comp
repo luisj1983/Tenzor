@@ -3,7 +3,7 @@
 
 // Fill tensor with a constant value for Int64 dtype
 // Note: Push constants are limited in size, so we pass value as two 32-bit parts
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Output { int64_t output_data[]; };
 

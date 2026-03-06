@@ -5,7 +5,7 @@
 // Operations: 0=relu, 1=sigmoid, 2=tanh, 3=leaky_relu, 4=gelu
 // Float16 elements are packed 2 per 32-bit word
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { uint grad_output[]; };
 layout(binding = 1) buffer InputOrOutput { uint input_or_output[]; };

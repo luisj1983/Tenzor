@@ -6,7 +6,8 @@
 // Float16 elements are packed 2 per 32-bit word
 // Computation in float32, grad_weight accumulated in float32 buffer
 // One workgroup per batch element
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
 
 layout(binding = 0) buffer GradOutput { uint grad_output_data[]; };    // packed f16
 layout(binding = 1) buffer Input { uint input_data[]; };               // packed f16
@@ -22,7 +23,7 @@ layout(push_constant) uniform PushConstants {
     uint padding1;
 } params;
 
-shared float shared_sum[256];
+shared float shared_sum[WORKGROUP_SIZE];
 
 // Helper to read float16 from packed uint buffer at element index
 float readF16(uint buffer_idx, uint element_idx) {

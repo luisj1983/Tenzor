@@ -3,7 +3,7 @@
 
 // Math operations for Int64 dtype: add, sub, mul, div, neg, abs, sign
 // Uses 64-bit integer extension for proper 64-bit arithmetic
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer InputA { int64_t a[]; };
 layout(binding = 1) buffer InputB { int64_t b[]; };

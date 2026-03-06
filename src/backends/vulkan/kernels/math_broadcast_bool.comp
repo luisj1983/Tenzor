@@ -3,7 +3,7 @@
 
 // Broadcasting-aware binary operations for Boolean tensors
 // Bool is stored as uint8 (1 byte per element)
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer InputA { uint8_t a[]; };
 layout(binding = 1) buffer InputB { uint8_t b[]; };

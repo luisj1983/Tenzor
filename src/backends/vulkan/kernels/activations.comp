@@ -1,7 +1,7 @@
 #version 450
 
 // Activation functions: ReLU, Sigmoid, Tanh, GELU, LeakyReLU, Swish, ELU, SELU, Mish, Softplus
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input { float input_data[]; };
 layout(binding = 1) buffer Output { float output_data[]; };

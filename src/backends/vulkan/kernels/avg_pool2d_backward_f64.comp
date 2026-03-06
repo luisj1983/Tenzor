@@ -6,7 +6,7 @@
 // Distributes gradient evenly across pooling window
 // Uses atomic operations for overlapping regions
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { double grad_output[]; };  // (N, C, H_out, W_out)
 layout(binding = 1) buffer GradInput { double grad_input[]; };    // (N, C, H, W)

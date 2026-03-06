@@ -6,7 +6,7 @@
 // Input: grad_output (num_rois, C, output_h, output_w), rois (num_rois, 5)
 // Output: grad_features (N, C, H, W)
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { float grad_output_data[]; };
 layout(binding = 1) buffer ROIs { float rois_data[]; };

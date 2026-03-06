@@ -3,7 +3,7 @@
 
 // Concatenate operation for Float16: join tensors along a dimension
 // Float16 elements are packed 2 per uint32
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input0 { uint input0_data[]; };
 layout(binding = 1) buffer Input1 { uint input1_data[]; };

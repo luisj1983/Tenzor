@@ -4,7 +4,7 @@
 
 // Comparison operations for Bool dtype: eq, ne, lt, le, gt, ge
 // Bool values are stored as uint8_t (0 = false, non-zero = true)
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer InputA { uint8_t a[]; };
 layout(binding = 1) buffer InputB { uint8_t b[]; };

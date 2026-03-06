@@ -11,7 +11,8 @@
 // 1. Per-channel accumulation for grad_gamma and grad_beta
 // 2. Per-element computation for grad_input considering channel statistics
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
 
 layout(binding = 0) buffer GradOutput { float grad_output[]; };  // (N, C, H, W)
 layout(binding = 1) buffer Input { float input_data[]; };         // (N, C, H, W)
@@ -32,8 +33,8 @@ layout(push_constant) uniform PushConstants {
 } params;
 
 // Shared memory for channel-wise accumulation
-shared float s_grad_gamma[256];
-shared float s_grad_beta[256];
+shared float s_grad_gamma[WORKGROUP_SIZE];
+shared float s_grad_beta[WORKGROUP_SIZE];
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;

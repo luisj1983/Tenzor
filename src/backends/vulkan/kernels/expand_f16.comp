@@ -4,7 +4,7 @@
 // Expand operation: broadcast tensor to larger size for Float16
 // Supports multi-dimensional broadcasting following NumPy rules
 // Float16 elements are packed 2 per 32-bit word
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 // For Float16, we use uint buffers and pack/unpack manually
 layout(binding = 0) buffer Input { uint input_data[]; };

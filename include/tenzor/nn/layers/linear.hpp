@@ -107,6 +107,11 @@ private:
     int64_t out_features_;                  ///< Output feature dimension
     bool has_bias_;                         ///< Whether this layer has bias
 
+    /// Cached raw pointers to avoid hash map lookups in forward pass.
+    /// Populated lazily on first forward call.
+    mutable Variable* cached_weight_ = nullptr;
+    mutable Variable* cached_bias_ = nullptr;
+
     /**
      * @brief Initialize parameters using Kaiming uniform.
      */

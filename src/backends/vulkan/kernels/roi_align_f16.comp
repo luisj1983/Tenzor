@@ -4,7 +4,7 @@
 // ROI Align Forward Pass (Float16)
 // Computation done in float32, input/output in float16
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Features { float16_t features_data[]; };
 layout(binding = 1) buffer ROIs { float16_t rois_data[]; };

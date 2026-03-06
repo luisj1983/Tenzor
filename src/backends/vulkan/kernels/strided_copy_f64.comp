@@ -2,7 +2,7 @@
 #extension GL_ARB_gpu_shader_int64 : enable
 
 // Strided copy operation for Float64: copy non-contiguous tensor to contiguous layout
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 // Use uvec2 to represent double (64-bit) values
 layout(binding = 0) buffer Input { uvec2 input_data[]; };

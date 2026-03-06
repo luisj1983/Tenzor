@@ -3,7 +3,7 @@
 // Bitonic sort - one compare-and-swap pass per dispatch
 // Operates on (value, index) pairs: sorts by value, produces sorted indices
 // Multiple dispatches required: log2(N) * (log2(N)+1) / 2 passes total
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Values { float values[]; };      // Values to sort by
 layout(binding = 1) buffer Indices { int indices[]; };       // Corresponding indices (output)

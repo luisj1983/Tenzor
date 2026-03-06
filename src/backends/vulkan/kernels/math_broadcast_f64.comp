@@ -3,7 +3,7 @@
 
 // Broadcasting-aware binary operations for Vulkan with Float64 support
 // Supports NumPy-style broadcasting rules
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 // For Float64, we use double buffers directly
 layout(binding = 0) buffer InputA { double a[]; };

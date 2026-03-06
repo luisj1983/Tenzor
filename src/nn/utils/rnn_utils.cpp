@@ -1,0 +1,287 @@
+#include "tenzor/nn/utils/rnn_utils.hpp"
+#include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/indexing.hpp"
+#include <algorithm>
+#include <numeric>
+#include <stdexcept>
+#include <cstring>
+
+namespace tenzor::nn {
+
+auto pack_padded_sequence(const Tensor& input, const Tensor& lengths,
+                          bool batch_first, bool enforce_sorted)
+    -> PackedSequence {
+    if (lengths.ndim() != 1) {
+        throw std::invalid_argument("lengths must be a 1D tensor");
+    }
+
+    // Get input dimensions
+    Tensor seq_input = batch_first ? input.permute({1, 0, 2}) : input;
+    // seq_input shape: (seq_len, batch, features)
+    auto shape = seq_input.shape();
+    int64_t batch_size = shape[1];
+    int64_t features = shape[2];
+
+    if (lengths.numel() != batch_size) {
+        throw std::invalid_argument("lengths size must match batch dimension");
+    }
+
+    // Read lengths to CPU
+    Tensor lengths_cpu = lengths.device().type != Device::Type::CPU
+        ? lengths.to(Device::cpu()) : lengths;
+    Tensor lengths_int64 = lengths_cpu.dtype() != DType::Int64
+        ? lengths_cpu.to(DType::Int64) : lengths_cpu;
+
+    std::vector<int64_t> len_vec(batch_size);
+    auto* len_data = lengths_int64.data<int64_t>();
+    for (int64_t i = 0; i < batch_size; ++i) {
+        len_vec[i] = len_data[i];
+    }
+
+    // Create sort indices (descending by length)
+    std::vector<int64_t> sorted_idx(batch_size);
+    std::iota(sorted_idx.begin(), sorted_idx.end(), 0);
+    std::sort(sorted_idx.begin(), sorted_idx.end(),
+              [&](int64_t a, int64_t b) { return len_vec[a] > len_vec[b]; });
+
+    if (enforce_sorted) {
+        // Verify already sorted
+        for (int64_t i = 0; i < batch_size; ++i) {
+            if (sorted_idx[i] != i) {
+                throw std::runtime_error(
+                    "pack_padded_sequence: sequences must be sorted by length "
+                    "in decreasing order when enforce_sorted=true");
+            }
+        }
+    }
+
+    // Sorted lengths
+    std::vector<int64_t> sorted_lengths(batch_size);
+    for (int64_t i = 0; i < batch_size; ++i) {
+        sorted_lengths[i] = len_vec[sorted_idx[i]];
+    }
+
+    // Compute batch_sizes: for each timestep, how many sequences are active
+    int64_t actual_max_len = sorted_lengths[0];
+    std::vector<int64_t> batch_sizes_vec(actual_max_len);
+    for (int64_t t = 0; t < actual_max_len; ++t) {
+        int64_t count = 0;
+        for (int64_t b = 0; b < batch_size; ++b) {
+            if (sorted_lengths[b] > t) ++count;
+        }
+        batch_sizes_vec[t] = count;
+    }
+
+    // Compute total elements
+    int64_t total = 0;
+    for (auto bs : batch_sizes_vec) total += bs;
+
+    // Pack data: for each timestep t, take batch_sizes[t] elements from sorted sequences
+    Tensor packed_data = zeros({total, features}, input.dtype(), input.device());
+
+    // Reorder input by sorted_idx
+    Tensor reordered = seq_input;  // (seq_len, batch, features)
+
+    int64_t offset = 0;
+    for (int64_t t = 0; t < actual_max_len; ++t) {
+        int64_t bs = batch_sizes_vec[t];
+        for (int64_t b = 0; b < bs; ++b) {
+            // Copy seq_input[t, sorted_idx[b], :] to packed_data[offset + b, :]
+            auto src = tenzor::slice(tenzor::slice(reordered, 0, t, t + 1), 1, sorted_idx[b], sorted_idx[b] + 1);
+            src = src.reshape({features});
+            auto dst = tenzor::slice(packed_data, 0, offset + b, offset + b + 1).reshape({features});
+            // Copy via fill from source
+            auto src_data = src.to(Device::cpu());
+            auto dst_packed = packed_data;
+            // Use direct element copy
+            if (features > 0) {
+                auto row = src.reshape({1, features});
+                // Write into packed_data at offset+b
+                auto target = tenzor::slice(packed_data, 0, offset + b, offset + b + 1);
+                // Copy via tensor assignment
+                auto src_cont = src.contiguous();
+                std::memcpy(
+                    static_cast<char*>(packed_data.data_ptr()) + (offset + b) * features * packed_data.dtype_size(),
+                    src_cont.data_ptr(),
+                    features * packed_data.dtype_size()
+                );
+            }
+        }
+        offset += bs;
+    }
+
+    // Create result tensors
+    Tensor batch_sizes_tensor = zeros({actual_max_len}, DType::Int64, Device::cpu());
+    auto* bs_data = batch_sizes_tensor.data<int64_t>();
+    for (int64_t t = 0; t < actual_max_len; ++t) {
+        bs_data[t] = batch_sizes_vec[t];
+    }
+
+    Tensor sorted_indices = zeros({batch_size}, DType::Int64, Device::cpu());
+    Tensor unsorted_indices = zeros({batch_size}, DType::Int64, Device::cpu());
+    auto* si_data = sorted_indices.data<int64_t>();
+    auto* ui_data = unsorted_indices.data<int64_t>();
+    for (int64_t i = 0; i < batch_size; ++i) {
+        si_data[i] = sorted_idx[i];
+        ui_data[sorted_idx[i]] = i;
+    }
+
+    return PackedSequence{
+        std::move(packed_data),
+        std::move(batch_sizes_tensor),
+        std::move(sorted_indices),
+        std::move(unsorted_indices)
+    };
+}
+
+auto pad_packed_sequence(const PackedSequence& packed,
+                         bool batch_first,
+                         float padding_value,
+                         int64_t total_length)
+    -> std::pair<Tensor, Tensor> {
+
+    auto bs_tensor = packed.batch_sizes;
+    auto* bs_data = bs_tensor.data<int64_t>();
+    int64_t max_seq_len = bs_tensor.numel();
+    int64_t batch_size = bs_data[0];  // First timestep has all sequences
+    int64_t features = packed.data.shape()[1];
+
+    if (total_length >= 0) {
+        if (total_length < max_seq_len) {
+            throw std::invalid_argument("total_length must be >= max sequence length");
+        }
+        max_seq_len = total_length;
+    }
+
+    // Create output tensor filled with padding value
+    Tensor output;
+    if (batch_first) {
+        output = full({batch_size, max_seq_len, features}, padding_value,
+                      packed.data.dtype(), packed.data.device());
+    } else {
+        output = full({max_seq_len, batch_size, features}, padding_value,
+                      packed.data.dtype(), packed.data.device());
+    }
+
+    // Compute lengths from batch_sizes
+    std::vector<int64_t> sorted_lengths(batch_size, 0);
+    int64_t actual_len = bs_tensor.numel();
+    for (int64_t t = 0; t < actual_len; ++t) {
+        for (int64_t b = 0; b < bs_data[t]; ++b) {
+            sorted_lengths[b] = t + 1;
+        }
+    }
+
+    // Unpack data into output
+    int64_t offset = 0;
+    for (int64_t t = 0; t < actual_len; ++t) {
+        int64_t bs = bs_data[t];
+        for (int64_t b = 0; b < bs; ++b) {
+            auto src = tenzor::slice(packed.data, 0, offset + b, offset + b + 1).reshape({features});
+            auto src_cont = src.contiguous();
+
+            if (batch_first) {
+                // output[b, t, :] = src
+                std::memcpy(
+                    static_cast<char*>(output.data_ptr()) + (b * max_seq_len * features + t * features) * output.dtype_size(),
+                    src_cont.data_ptr(),
+                    features * output.dtype_size()
+                );
+            } else {
+                // output[t, b, :] = src
+                std::memcpy(
+                    static_cast<char*>(output.data_ptr()) + (t * batch_size * features + b * features) * output.dtype_size(),
+                    src_cont.data_ptr(),
+                    features * output.dtype_size()
+                );
+            }
+        }
+        offset += bs;
+    }
+
+    // Unsort lengths back to original order
+    Tensor lengths_tensor = zeros({batch_size}, DType::Int64, Device::cpu());
+    auto* len_out = lengths_tensor.data<int64_t>();
+
+    // Also unsort the output
+    if (batch_first) {
+        Tensor unsorte_output = zeros_like(output);
+        // Use sorted_indices to map back
+        auto* si_data = packed.sorted_indices.data<int64_t>();
+        for (int64_t sorted_pos = 0; sorted_pos < batch_size; ++sorted_pos) {
+            int64_t orig_pos = si_data[sorted_pos];
+            len_out[orig_pos] = sorted_lengths[sorted_pos];
+            // Copy output[sorted_pos, :, :] to unsorted_output[orig_pos, :, :]
+            std::memcpy(
+                static_cast<char*>(unsorte_output.data_ptr()) + orig_pos * max_seq_len * features * output.dtype_size(),
+                static_cast<char*>(output.data_ptr()) + sorted_pos * max_seq_len * features * output.dtype_size(),
+                max_seq_len * features * output.dtype_size()
+            );
+        }
+        output = unsorte_output;
+    } else {
+        // For seq-first layout, we need to unsort along dim=1 for each timestep
+        Tensor unsorted_output = zeros_like(output);
+        auto* si_data = packed.sorted_indices.data<int64_t>();
+        for (int64_t t = 0; t < max_seq_len; ++t) {
+            for (int64_t sorted_pos = 0; sorted_pos < batch_size; ++sorted_pos) {
+                int64_t orig_pos = si_data[sorted_pos];
+                if (t == 0) {
+                    len_out[orig_pos] = sorted_lengths[sorted_pos];
+                }
+                std::memcpy(
+                    static_cast<char*>(unsorted_output.data_ptr()) + (t * batch_size + orig_pos) * features * output.dtype_size(),
+                    static_cast<char*>(output.data_ptr()) + (t * batch_size + sorted_pos) * features * output.dtype_size(),
+                    features * output.dtype_size()
+                );
+            }
+        }
+        output = unsorted_output;
+    }
+
+    return {std::move(output), std::move(lengths_tensor)};
+}
+
+auto pack_sequence(const std::vector<Tensor>& sequences, bool enforce_sorted)
+    -> PackedSequence {
+    if (sequences.empty()) {
+        throw std::invalid_argument("pack_sequence: empty sequence list");
+    }
+
+    // Get features from first sequence
+    int64_t features = sequences[0].shape().back();
+    int64_t batch_size = static_cast<int64_t>(sequences.size());
+
+    // Find max length
+    int64_t max_len = 0;
+    std::vector<int64_t> lengths(batch_size);
+    for (int64_t i = 0; i < batch_size; ++i) {
+        lengths[i] = sequences[i].shape()[0];
+        max_len = std::max(max_len, lengths[i]);
+    }
+
+    // Create padded tensor (batch_first format)
+    Tensor padded = zeros({batch_size, max_len, features},
+                          sequences[0].dtype(), sequences[0].device());
+
+    // Copy each sequence
+    for (int64_t i = 0; i < batch_size; ++i) {
+        auto seq = sequences[i].contiguous();
+        std::memcpy(
+            static_cast<char*>(padded.data_ptr()) + i * max_len * features * padded.dtype_size(),
+            seq.data_ptr(),
+            lengths[i] * features * padded.dtype_size()
+        );
+    }
+
+    // Create lengths tensor
+    Tensor lengths_tensor = zeros({batch_size}, DType::Int64, Device::cpu());
+    auto* len_data = lengths_tensor.data<int64_t>();
+    for (int64_t i = 0; i < batch_size; ++i) {
+        len_data[i] = lengths[i];
+    }
+
+    return pack_padded_sequence(padded, lengths_tensor, /*batch_first=*/true, enforce_sorted);
+}
+
+} // namespace tenzor::nn

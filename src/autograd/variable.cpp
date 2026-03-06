@@ -59,14 +59,24 @@ auto Variable::grad() -> std::optional<Tensor>& {
 }
 
 auto Variable::has_grad() const -> bool {
-    return impl_ && impl_->grad_.has_value();
+    if (!impl_) return false;
+    if (impl_->thread_safe_.load(std::memory_order_relaxed)) {
+        std::lock_guard lock(impl_->grad_mutex_);
+        return impl_->grad_.has_value();
+    }
+    return impl_->grad_.has_value();
 }
 
 auto Variable::set_grad(Tensor gradient) -> void {
     if (!impl_) {
         throw std::runtime_error("Cannot set grad of uninitialized Variable");
     }
-    impl_->grad_ = std::move(gradient);
+    if (impl_->thread_safe_.load(std::memory_order_relaxed)) {
+        std::lock_guard lock(impl_->grad_mutex_);
+        impl_->grad_ = std::move(gradient);
+    } else {
+        impl_->grad_ = std::move(gradient);
+    }
 }
 
 auto Variable::backward(std::optional<Tensor> gradient, bool retain_graph, bool create_graph) -> void {
@@ -101,6 +111,17 @@ auto Variable::clear_hooks() -> void {
     impl_->hooks_.clear();
 }
 
+auto Variable::make_thread_safe() -> void {
+    if (!impl_) {
+        throw std::runtime_error("Cannot make uninitialized Variable thread-safe");
+    }
+    impl_->thread_safe_.store(true, std::memory_order_release);
+}
+
+auto Variable::is_thread_safe() const -> bool {
+    return impl_ && impl_->thread_safe_.load(std::memory_order_acquire);
+}
+
 auto Variable::retain_grad() -> void {
     if (!impl_) {
         throw std::runtime_error("Cannot retain grad of uninitialized Variable");
@@ -114,9 +135,12 @@ auto Variable::retains_grad() const -> bool {
 
 auto Variable::zero_grad() -> void {
     if (impl_) {
-        // Reset the gradient optional entirely, not just zero the values
-        // This makes has_grad() return false as expected
-        impl_->grad_.reset();
+        if (impl_->thread_safe_.load(std::memory_order_relaxed)) {
+            std::lock_guard lock(impl_->grad_mutex_);
+            impl_->grad_.reset();
+        } else {
+            impl_->grad_.reset();
+        }
     }
 }
 

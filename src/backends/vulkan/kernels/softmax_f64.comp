@@ -3,7 +3,8 @@
 
 // Softmax with numerical stability for Float64
 // Uses shared memory for max and sum - no external buffers needed
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
 
 layout(binding = 0) buffer Input { double input_data[]; };
 layout(binding = 1) buffer Output { double output_data[]; };
@@ -15,8 +16,8 @@ layout(push_constant) uniform PushConstants {
     uint mode;          // 0=forward, 1=backward
 } params;
 
-shared double shared_max[256];
-shared double shared_sum[256];
+shared double shared_max[WORKGROUP_SIZE];
+shared double shared_sum[WORKGROUP_SIZE];
 
 // Helper: exp for double using range reduction
 // exp(x) = exp(k*ln(2) + r) = 2^k * exp(r) where |r| < ln(2)/2

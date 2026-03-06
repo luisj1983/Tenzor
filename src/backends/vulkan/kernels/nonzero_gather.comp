@@ -2,7 +2,7 @@
 
 // Nonzero - Pass 3: Gather N-dimensional indices of nonzero elements
 // Each nonzero element writes its multi-dimensional index to the output
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Flags { uint flags[]; };           // Per-element nonzero flags
 layout(binding = 1) buffer PrefixSums { uint prefix_sums[]; }; // Exclusive prefix sums of flags

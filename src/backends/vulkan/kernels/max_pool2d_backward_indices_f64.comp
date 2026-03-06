@@ -4,7 +4,7 @@
 // Max Pooling 2D Backward Pass for Float64 using pre-computed indices
 // Note: Since 64-bit atomics aren't universally supported, we use a serialization
 // approach for overlapping indices. For most pooling configurations, overlaps are rare.
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { double grad_output[]; };
 layout(binding = 1) buffer Indices { double indices[]; };

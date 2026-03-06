@@ -2,7 +2,7 @@
 
 // Exclusive prefix sum (scan) for masked_select
 // Blelloch-style parallel scan
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Mask { uint mask_data[]; };
 layout(binding = 1) buffer PrefixSums { uint prefix_sums[]; };

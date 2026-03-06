@@ -84,6 +84,7 @@ private:
         bool hasAtomicInt64 = false;          // Whether GPU supports VK_EXT_shader_atomic_int64
         bool hasSubgroupArithmetic = false;   // Whether GPU supports subgroup arithmetic ops
         uint32_t subgroupSize = 0;            // Subgroup (warp) size for this device
+        uint32_t workgroupSize = 256;         // Optimal 1D workgroup size (power-of-2, from device limits)
         VkPipelineCache pipelineCache = VK_NULL_HANDLE;  // Persistent pipeline cache
 
         // Configurable fence timeout (default 30s, override with TENZOR_VULKAN_FENCE_TIMEOUT_S)
@@ -114,7 +115,7 @@ private:
         mutable std::recursive_mutex mutex;
 
         // Set on VK_ERROR_DEVICE_LOST — prevents further submissions to lost device.
-        bool device_lost = false;
+        std::atomic<bool> device_lost{false};
 
         DeviceContext() = default;
         DeviceContext(DeviceContext&& other) noexcept
@@ -127,6 +128,7 @@ private:
             , descriptorPool(std::move(other.descriptorPool))
             , canPreserveDenormsF32(other.canPreserveDenormsF32)
             , hasAtomicInt64(other.hasAtomicInt64)
+            , workgroupSize(other.workgroupSize)
             , pipelineCache(other.pipelineCache)
             , pendingFence(other.pendingFence)
             , hasPendingWork(other.hasPendingWork)
@@ -139,6 +141,7 @@ private:
             , activeCommandBuffer(other.activeCommandBuffer)
             , operationsInBatch(other.operationsInBatch)
             // mutex is default-constructed (not movable)
+            , device_lost(other.device_lost.load(std::memory_order_relaxed))
         {}
         DeviceContext& operator=(DeviceContext&&) = delete;
         DeviceContext(const DeviceContext&) = delete;

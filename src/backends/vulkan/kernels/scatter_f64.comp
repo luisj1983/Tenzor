@@ -5,7 +5,7 @@
 
 // Scatter operation for Float64: scatter elements along specified dimension
 // Uses CAS-loop atomics for thread-safe reductions on float64 values
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input { float64_t input_data[]; };       // Source data
 layout(binding = 1) buffer Indices { int indices[]; };               // Scatter indices

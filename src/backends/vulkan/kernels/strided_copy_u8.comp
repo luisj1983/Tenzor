@@ -2,7 +2,7 @@
 
 // Strided copy operation for UInt8/Bool/Int8: copy non-contiguous tensor to contiguous layout
 // Byte-sized elements are packed 4 per uint32, accessed via bitwise operations
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input { uint input_data[]; };   // Packed bytes (4 per uint32)
 layout(binding = 1) buffer Output { uint output_data[]; };  // Packed bytes (4 per uint32)

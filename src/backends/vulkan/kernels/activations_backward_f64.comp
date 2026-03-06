@@ -4,7 +4,7 @@
 // Backward activation functions for Float64 autograd
 // Operations: 0=relu, 1=sigmoid, 2=tanh, 3=leaky_relu, 4=gelu, 5=elu, 6=selu, 7=mish, 8=softplus
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { double grad_output[]; };
 layout(binding = 1) buffer InputOrOutput { double input_or_output[]; };

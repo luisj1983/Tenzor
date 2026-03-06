@@ -4,7 +4,7 @@
 #extension GL_EXT_shader_float64 : enable
 
 // Comparison operations for Float64 dtype: eq, ne, lt, le, gt, ge
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer InputA { double a[]; };
 layout(binding = 1) buffer InputB { double b[]; };

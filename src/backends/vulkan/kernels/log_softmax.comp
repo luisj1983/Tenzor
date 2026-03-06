@@ -1,7 +1,8 @@
 #version 450
 
 // Log Softmax with numerical stability
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
 
 layout(binding = 0) buffer Input { float input_data[]; };
 layout(binding = 1) buffer Output { float output_data[]; };
@@ -12,8 +13,8 @@ layout(push_constant) uniform PushConstants {
     uint dim;
 } params;
 
-shared float shared_max[256];
-shared float shared_sum[256];
+shared float shared_max[WORKGROUP_SIZE];
+shared float shared_sum[WORKGROUP_SIZE];
 
 void main() {
     uint tid = gl_LocalInvocationID.x;

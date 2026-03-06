@@ -2,7 +2,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
 // Masked select - Pass 2: Gather selected elements (Float64 variant)
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input { float64_t input_data[]; };
 layout(binding = 1) buffer Mask { uint mask_data[]; };

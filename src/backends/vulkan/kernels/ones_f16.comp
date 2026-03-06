@@ -3,7 +3,7 @@
 
 // Ones operation: create tensor filled with 1.0 for Float16 dtype
 // Float16 elements are packed 2 per 32-bit word
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Output { uint output_data[]; };
 

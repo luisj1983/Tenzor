@@ -2,7 +2,7 @@
 
 // GPU Random Number Generation for Float16 using Philox 4x32
 // Generates values and converts to half precision
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Output { uint output_data[]; };  // Packed float16 pairs
 

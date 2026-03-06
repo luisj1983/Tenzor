@@ -3,7 +3,7 @@
 
 // Max Pooling 2D Forward Pass for Float16
 // Reads packed F16 pairs, computes in float32 for stability
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input { uint input_data[]; };    // Packed F16 (N, C, H, W)
 layout(binding = 1) buffer Output { uint output_data[]; };  // Packed F16 (N, C, H_out, W_out)

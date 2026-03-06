@@ -2,7 +2,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
 // Embedding lookup (Float64)
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer EmbeddingTable { float64_t embeddings[]; };  // (num_embeddings x embedding_dim)
 layout(binding = 1) buffer Indices { int indices[]; };                   // (batch_size x seq_len)

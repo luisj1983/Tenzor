@@ -143,7 +143,12 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
         }
     }
 
-    root.grad() = *gradient;
+    if (root.impl_ && root.impl_->thread_safe_.load(std::memory_order_relaxed)) {
+        std::lock_guard lock(root.impl_->grad_mutex_);
+        root.grad() = *gradient;
+    } else {
+        root.grad() = *gradient;
+    }
 
     // If no grad_fn, this is a leaf variable, nothing to backprop
     if (!root.grad_fn()) {
@@ -314,22 +319,32 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                     }
                 }
 
-                // Accumulate gradient to leaf variables
+                // Accumulate gradient to leaf variables.
+                // When thread_safe_ is enabled, lock to prevent concurrent
+                // accumulation from corrupting the gradient tensor.
                 if (var.is_leaf() || var.retains_grad()) {
-                    if (var.has_grad()) {
-                        // Promote to higher precision rather than silently demoting
-                        auto existing_grad = var.grad().value();
-                        if (grad_to_apply.dtype() != existing_grad.dtype()) {
-                            DType target = promote_dtype(grad_to_apply.dtype(), existing_grad.dtype());
-                            if (target != existing_grad.dtype()) {
-                                var.grad() = existing_grad.to(target);
+                    auto accumulate = [&]() {
+                        if (var.has_grad()) {
+                            auto existing_grad = var.grad().value();
+                            if (grad_to_apply.dtype() != existing_grad.dtype()) {
+                                DType target = promote_dtype(grad_to_apply.dtype(), existing_grad.dtype());
+                                if (target != existing_grad.dtype()) {
+                                    var.grad() = existing_grad.to(target);
+                                }
+                                grad_to_apply = grad_to_apply.to(target);
+                                existing_grad = var.grad().value();
                             }
-                            grad_to_apply = grad_to_apply.to(target);
-                            existing_grad = var.grad().value();
+                            var.grad() = existing_grad + grad_to_apply;
+                        } else {
+                            var.grad() = grad_to_apply;
                         }
-                        var.grad() = existing_grad + grad_to_apply;
+                    };
+
+                    if (var.impl_ && var.impl_->thread_safe_.load(std::memory_order_relaxed)) {
+                        std::lock_guard lock(var.impl_->grad_mutex_);
+                        accumulate();
                     } else {
-                        var.grad() = grad_to_apply;
+                        accumulate();
                     }
                 }
             }
@@ -450,7 +465,12 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
         if (!roots[i] || !roots[i]->requires_grad()) {
             continue;
         }
-        roots[i]->grad() = gradients[i];
+        if (roots[i]->impl_ && roots[i]->impl_->thread_safe_.load(std::memory_order_relaxed)) {
+            std::lock_guard lock(roots[i]->impl_->grad_mutex_);
+            roots[i]->grad() = gradients[i];
+        } else {
+            roots[i]->grad() = gradients[i];
+        }
     }
 
     // Build combined topological sort from all roots using iterative DFS
@@ -582,19 +602,28 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                 }
 
                 if (var.is_leaf() || var.retains_grad()) {
-                    if (var.has_grad()) {
-                        auto existing_grad = var.grad().value();
-                        if (grad_to_apply.dtype() != existing_grad.dtype()) {
-                            DType target = promote_dtype(grad_to_apply.dtype(), existing_grad.dtype());
-                            if (target != existing_grad.dtype()) {
-                                var.grad() = existing_grad.to(target);
+                    auto accumulate = [&]() {
+                        if (var.has_grad()) {
+                            auto existing_grad = var.grad().value();
+                            if (grad_to_apply.dtype() != existing_grad.dtype()) {
+                                DType target = promote_dtype(grad_to_apply.dtype(), existing_grad.dtype());
+                                if (target != existing_grad.dtype()) {
+                                    var.grad() = existing_grad.to(target);
+                                }
+                                grad_to_apply = grad_to_apply.to(target);
+                                existing_grad = var.grad().value();
                             }
-                            grad_to_apply = grad_to_apply.to(target);
-                            existing_grad = var.grad().value();
+                            var.grad() = existing_grad + grad_to_apply;
+                        } else {
+                            var.grad() = grad_to_apply;
                         }
-                        var.grad() = existing_grad + grad_to_apply;
+                    };
+
+                    if (var.impl_ && var.impl_->thread_safe_.load(std::memory_order_relaxed)) {
+                        std::lock_guard lock(var.impl_->grad_mutex_);
+                        accumulate();
                     } else {
-                        var.grad() = grad_to_apply;
+                        accumulate();
                     }
                 }
             }

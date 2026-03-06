@@ -3,7 +3,7 @@
 
 // Average Pooling 2D Backward Pass for Float16
 // Uses atomics to distribute gradients to packed F16 output
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { uint grad_output[]; };  // Packed F16 (N, C, H_out, W_out)
 layout(binding = 1) buffer GradInput { uint grad_input[]; };    // Packed F16 (N, C, H, W) - atomically accumulated

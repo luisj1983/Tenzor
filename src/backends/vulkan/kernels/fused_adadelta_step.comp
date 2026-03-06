@@ -2,7 +2,7 @@
 
 // Fused Adadelta optimizer step (Float32)
 // Per-element: updates square_avg, acc_delta, and param in one kernel
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Grad { float grad_data[]; };
 layout(binding = 1) buffer Param { float param_data[]; };

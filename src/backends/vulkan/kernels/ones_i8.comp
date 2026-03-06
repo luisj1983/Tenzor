@@ -2,7 +2,7 @@
 
 // Ones operation: create tensor filled with 1 for Int8 dtype
 // Int8 elements are packed 4 per 32-bit word
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Output { uint output_data[]; };
 

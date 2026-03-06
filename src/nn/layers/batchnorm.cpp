@@ -318,6 +318,14 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
     // Keep data on original device throughout (no CPU fallbacks)
     Tensor input_work = input.tensor();
 
+    // FP16/BF16 forward upcast: compute in FP32 to prevent overflow/underflow
+    // in mean/variance reductions. Matches cuDNN behavior and the backward pass pattern.
+    DType orig_dtype = input_work.dtype();
+    bool needs_upcast = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    if (needs_upcast) {
+        input_work = input_work.to(DType::Float32);
+    }
+
     Tensor batch_mean, batch_var;
 
     if (training_) {
@@ -530,6 +538,11 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
         std::vector<Tensor> forward_inputs = {input_work, batch_mean, batch_var};
         std::vector<Tensor> forward_results = dispatch(OpId::BatchNorm2dForward, forward_inputs, forward_attrs);
         output = forward_results[0];
+    }
+
+    // Downcast output back to original dtype if we upcasted
+    if (needs_upcast) {
+        output = output.to(orig_dtype);
     }
 
     // Set up autograd if needed - check is_grad_enabled() first for fast inference path

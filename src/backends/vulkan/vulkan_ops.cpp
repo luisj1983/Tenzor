@@ -169,9 +169,9 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         uint32_t workgroups;
         if (is_float16) {
             uint32_t num_pairs = (static_cast<uint32_t>(a.numel()) + 1) / 2;
-            workgroups = (num_pairs + 255) / 256;
+            workgroups = div_wg(num_pairs, devices_[device_id].workgroupSize);
         } else {
-            workgroups = (a.numel() + 255) / 256;
+            workgroups = div_wg(a.numel(), devices_[device_id].workgroupSize);
         }
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
@@ -303,9 +303,9 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         uint32_t workgroups;
         if (is_float16) {
             uint32_t num_pairs = (output_numel + 1) / 2;
-            workgroups = (num_pairs + 255) / 256;
+            workgroups = div_wg(num_pairs, devices_[device_id].workgroupSize);
         } else {
-            workgroups = (output_numel + 255) / 256;
+            workgroups = div_wg(output_numel, devices_[device_id].workgroupSize);
         }
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
@@ -496,7 +496,7 @@ auto VulkanBackend::dispatchUnaryOp(const std::string& op_name,
     // For F16 packed-pair shaders, each thread processes 2 elements
     bool is_f16_packed = (shader_name == "math_f16" || shader_name == "trigonometric_f16" || shader_name == "hyperbolic_f16");
     uint32_t num_work_items = is_f16_packed ? static_cast<uint32_t>((input.numel() + 1) / 2) : static_cast<uint32_t>(input.numel());
-    uint32_t workgroups = (num_work_items + 255) / 256;
+    uint32_t workgroups = div_wg(num_work_items, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     insertComputeBarrier(cmdBuffer);
@@ -609,7 +609,7 @@ auto VulkanBackend::dispatchUnaryOpWithParam(const std::string& op_name,
 
     // For F16 packed-pair shader, each thread processes 2 elements
     uint32_t num_work_items = (shader_name == "math_f16") ? static_cast<uint32_t>((input.numel() + 1) / 2) : static_cast<uint32_t>(input.numel());
-    uint32_t workgroups = (num_work_items + 255) / 256;
+    uint32_t workgroups = div_wg(num_work_items, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     insertComputeBarrier(cmdBuffer);
@@ -684,7 +684,7 @@ auto VulkanBackend::dispatchTrigonometricOp(const std::string& op_name,
     // For F16, each thread processes 2 elements
     uint32_t num_work_items = (input.dtype() == DType::Float16) ?
         static_cast<uint32_t>((input.numel() + 1) / 2) : static_cast<uint32_t>(input.numel());
-    uint32_t workgroups = (num_work_items + 255) / 256;
+    uint32_t workgroups = div_wg(num_work_items, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -758,7 +758,7 @@ auto VulkanBackend::dispatchHyperbolicOp(const std::string& op_name,
     // For F16, each thread processes 2 elements
     uint32_t num_work_items = (input.dtype() == DType::Float16) ?
         static_cast<uint32_t>((input.numel() + 1) / 2) : static_cast<uint32_t>(input.numel());
-    uint32_t workgroups = (num_work_items + 255) / 256;
+    uint32_t workgroups = div_wg(num_work_items, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -879,7 +879,7 @@ auto VulkanBackend::dispatchComparisonOp(const std::string& op_name,
                       0, sizeof(PushConstants), &push_constants);
 
     // Dispatch compute workgroups
-    uint32_t workgroups = (a.numel() + 255) / 256;
+    uint32_t workgroups = div_wg(a.numel(), devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier to ensure shader writes complete
@@ -1597,7 +1597,7 @@ auto VulkanBackend::dispatchConv2dBackwardInput(
 
     // Dispatch workgroups (256 threads per workgroup as defined in shader)
     int64_t total_elements = batch * channels_in * height_in * width_in;
-    uint32_t workgroups = static_cast<uint32_t>((total_elements + 255) / 256);
+    uint32_t workgroups = static_cast<uint32_t>(div_wg(total_elements, devices_[device_id].workgroupSize));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -1727,7 +1727,7 @@ auto VulkanBackend::dispatchConv2dBackwardWeight(
     // Weight shape: (C_out, C_in/groups, K_h, K_w) - total elements is the product of these
     int64_t in_channels_per_group = channels_in / groups;
     int64_t total_weight_elements = channels_out * in_channels_per_group * kernel_h * kernel_w;
-    uint32_t workgroups = static_cast<uint32_t>((total_weight_elements + 255) / 256);
+    uint32_t workgroups = static_cast<uint32_t>(div_wg(total_weight_elements, devices_[device_id].workgroupSize));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -1817,7 +1817,7 @@ auto VulkanBackend::dispatchConv2dBackwardBias(const Tensor& grad_output) -> Ten
                       0, sizeof(PushConstants), &push_constants);
 
     // Dispatch workgroups (256 threads per workgroup, one thread per output channel)
-    uint32_t workgroups = static_cast<uint32_t>((channels_out + 255) / 256);
+    uint32_t workgroups = static_cast<uint32_t>(div_wg(channels_out, devices_[device_id].workgroupSize));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -1920,7 +1920,7 @@ auto VulkanBackend::dispatchIm2Col(const Tensor& input, const OpAttributes& attr
                       0, sizeof(PushConstants), &push_constants);
 
     // Dispatch workgroups (256 threads per workgroup)
-    uint32_t workgroups = (total_elements + 255) / 256;
+    uint32_t workgroups = div_wg(total_elements, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -1989,7 +1989,7 @@ auto VulkanBackend::dispatchCol2Im(const Tensor& input, const OpAttributes& attr
         vkCmdPushConstants(cmdBuffer, fill_pipeline->layout(),
                           VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(FillPushConstants), &fill_push);
-        uint32_t fill_workgroups = (output.numel() + 255) / 256;
+        uint32_t fill_workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
         vkCmdDispatch(cmdBuffer, fill_workgroups, 1, 1);
         endSingleTimeCommands(cmdBuffer, device_id);
     }
@@ -2053,7 +2053,7 @@ auto VulkanBackend::dispatchCol2Im(const Tensor& input, const OpAttributes& attr
                       0, sizeof(PushConstants), &push_constants);
 
     // Dispatch workgroups (256 threads per workgroup)
-    uint32_t workgroups = (total_elements + 255) / 256;
+    uint32_t workgroups = div_wg(total_elements, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -2253,7 +2253,7 @@ auto VulkanBackend::dispatchAvgPool2d(const Tensor& input, int64_t kernel_h, int
                       0, sizeof(PushConstants), &push_constants);
 
     // Shader uses local_size_x = 256, processing elements linearly
-    uint32_t workgroups = (push_constants.n_elements + 255) / 256;
+    uint32_t workgroups = div_wg(push_constants.n_elements, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -2502,7 +2502,7 @@ auto VulkanBackend::dispatchAdaptiveAvgPool2dBackward(const Tensor& grad_output,
         vkCmdPushConstants(fillCmd, fill_pipeline->layout(),
                           VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(FillPushConstants), &fill_push_constants);
-        uint32_t fill_workgroups = (fill_push_constants.n_elements + 255) / 256;
+        uint32_t fill_workgroups = div_wg(fill_push_constants.n_elements, devices_[device_id].workgroupSize);
         vkCmdDispatch(fillCmd, fill_workgroups, 1, 1);
 
         VkMemoryBarrier fillBarrier{};
@@ -2573,7 +2573,7 @@ auto VulkanBackend::dispatchAdaptiveAvgPool2dBackward(const Tensor& grad_output,
     } else {
         total_elements = static_cast<uint32_t>(batch * channels * H_out * W_out);
     }
-    uint32_t workgroups = (total_elements + 255) / 256;
+    uint32_t workgroups = div_wg(total_elements, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -2598,7 +2598,7 @@ auto VulkanBackend::dispatchMaxPool2dBackward(const Tensor& grad_out, const Tens
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
 
-    uint32_t workgroups = (input.numel() + 255) / 256;
+    uint32_t workgroups = div_wg(input.numel(), devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -2622,7 +2622,7 @@ auto VulkanBackend::dispatchBatchNorm2d(const Tensor& input, const Tensor& mean,
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
 
-    uint32_t workgroups = (input.numel() + 255) / 256;
+    uint32_t workgroups = div_wg(input.numel(), devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -2765,7 +2765,7 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
     if (input.dtype() == DType::Float16) {
         dispatch_count = (n_elements + 1) / 2;  // number of words
     }
-    uint32_t workgroups = (dispatch_count + 255) / 256;
+    uint32_t workgroups = div_wg(dispatch_count, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -2938,7 +2938,7 @@ auto VulkanBackend::dispatchBatchNorm2dForward(const Tensor& input, const Tensor
     if (input.dtype() == DType::Float16) {
         dispatch_count = (input.numel() + 1) / 2;  // number of words
     }
-    uint32_t workgroups = static_cast<uint32_t>((dispatch_count + 255) / 256);
+    uint32_t workgroups = static_cast<uint32_t>(div_wg(dispatch_count, devices_[device_id].workgroupSize));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -3038,7 +3038,7 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
                           VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(PushConstants), &push_constants);
 
-        uint32_t workgroups = static_cast<uint32_t>((input.numel() + 255) / 256);
+        uint32_t workgroups = static_cast<uint32_t>(div_wg(input.numel(), devices_[device_id].workgroupSize));
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
@@ -3094,7 +3094,7 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
                           VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(PushConstants), &push_constants);
 
-        uint32_t workgroups = static_cast<uint32_t>((input.numel() + 255) / 256);
+        uint32_t workgroups = static_cast<uint32_t>(div_wg(input.numel(), devices_[device_id].workgroupSize));
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
@@ -3652,7 +3652,7 @@ auto VulkanBackend::dispatchEmbeddingBackward(const Tensor& grad_output, const T
 
     // Total threads = num_indices * embedding_dim (one per element)
     uint64_t total_threads = static_cast<uint64_t>(num_indices) * embedding_dim;
-    uint32_t workgroups = static_cast<uint32_t>((total_threads + 255) / 256);
+    uint32_t workgroups = static_cast<uint32_t>(div_wg(total_threads, devices_[device_id].workgroupSize));
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
@@ -3889,7 +3889,7 @@ auto VulkanBackend::dispatchBoxIoU(const Tensor& boxes1, const Tensor& boxes2, i
     push_constants.padding = 0;
 
     uint64_t total = static_cast<uint64_t>(N) * M;
-    uint32_t workgroups = static_cast<uint32_t>((total + 255) / 256);
+    uint32_t workgroups = static_cast<uint32_t>(div_wg(total, devices_[device_id].workgroupSize));
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
@@ -3947,7 +3947,7 @@ auto VulkanBackend::dispatchOneHot(const Tensor& indices, int64_t num_classes) -
     push_constants.num_classes = static_cast<uint32_t>(num_classes);
 
     uint64_t total = static_cast<uint64_t>(batch_size) * num_classes;
-    uint32_t workgroups = static_cast<uint32_t>((total + 255) / 256);
+    uint32_t workgroups = static_cast<uint32_t>(div_wg(total, devices_[device_id].workgroupSize));
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
@@ -3977,7 +3977,7 @@ auto VulkanBackend::dispatchNonzero(const Tensor& input) -> Tensor {
 
     int32_t device_id = input.device().index;
     uint32_t n = static_cast<uint32_t>(numel);
-    uint32_t n_workgroups = (n + 255) / 256;
+    uint32_t n_workgroups = div_wg(n, devices_[device_id].workgroupSize);
 
     // Ensure input is Float32 for the nonzero_count shader
     Tensor input_f32 = (input.dtype() == DType::Float32) ? input : input.to(DType::Float32);
@@ -4859,7 +4859,7 @@ auto VulkanBackend::dispatchAll(const Tensor& input, int64_t dim, bool keepdim) 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
 
-    uint32_t workgroups = (output.numel() + 255) / 256;
+    uint32_t workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -4893,7 +4893,7 @@ auto VulkanBackend::dispatchAny(const Tensor& input, int64_t dim, bool keepdim) 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
 
-    uint32_t workgroups = (output.numel() + 255) / 256;
+    uint32_t workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -4960,7 +4960,7 @@ auto VulkanBackend::dispatchEmbedding(const Tensor& weight, const Tensor& indice
                                cast_pipeline->layout(), 0, 1, &cast_ds, 0, nullptr);
         vkCmdPushConstants(cast_cmd, cast_pipeline->layout(),
                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(cast_pc), &cast_pc);
-        vkCmdDispatch(cast_cmd, (indices.numel() + 255) / 256, 1, 1);
+        vkCmdDispatch(cast_cmd, div_wg(indices.numel(), devices_[device_id].workgroupSize), 1, 1);
         insertComputeBarrier(cast_cmd);
         endSingleTimeCommands(cast_cmd, device_id);
     }
@@ -5007,7 +5007,7 @@ auto VulkanBackend::dispatchEmbedding(const Tensor& weight, const Tensor& indice
                       0, sizeof(PushConstants), &push_constants);
 
     // One thread per index (each thread copies embedding_dim elements)
-    uint32_t workgroups = (num_indices + 255) / 256;
+    uint32_t workgroups = div_wg(num_indices, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     insertComputeBarrier(cmdBuffer);
@@ -5065,7 +5065,7 @@ auto VulkanBackend::dispatchGather(const Tensor& input, int64_t dim, const Tenso
         struct { uint32_t n_elements; } cast_pc;
         cast_pc.n_elements = static_cast<uint32_t>(indices.numel());
 
-        uint32_t cast_groups = (cast_pc.n_elements + 255) / 256;
+        uint32_t cast_groups = div_wg(cast_pc.n_elements, devices_[device_id].workgroupSize);
         VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cast_pipeline->pipeline());
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cast_pipeline->layout(), 0, 1, &cast_ds, 0, nullptr);
@@ -5136,7 +5136,7 @@ auto VulkanBackend::dispatchGather(const Tensor& input, int64_t dim, const Tenso
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    uint32_t workgroups = (output.numel() + 255) / 256;
+    uint32_t workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -5208,7 +5208,7 @@ auto VulkanBackend::dispatchScatter(const Tensor& input, int64_t dim, const Tens
         struct { uint32_t n_elements; } cast_pc;
         cast_pc.n_elements = static_cast<uint32_t>(indices.numel());
 
-        uint32_t cast_groups = (cast_pc.n_elements + 255) / 256;
+        uint32_t cast_groups = div_wg(cast_pc.n_elements, devices_[device_id].workgroupSize);
         VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cast_pipeline->pipeline());
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cast_pipeline->layout(), 0, 1, &cast_ds, 0, nullptr);
@@ -5294,7 +5294,7 @@ auto VulkanBackend::dispatchScatter(const Tensor& input, int64_t dim, const Tens
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    uint32_t workgroups = (indices.numel() + 255) / 256;
+    uint32_t workgroups = div_wg(indices.numel(), devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -5368,7 +5368,7 @@ auto VulkanBackend::dispatchIndexSelect(const Tensor& input, int64_t dim, const 
         struct { uint32_t n_elements; } cast_pc;
         cast_pc.n_elements = static_cast<uint32_t>(indices.numel());
 
-        uint32_t cast_groups = (cast_pc.n_elements + 255) / 256;
+        uint32_t cast_groups = div_wg(cast_pc.n_elements, devices_[device_id].workgroupSize);
         VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cast_pipeline->pipeline());
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cast_pipeline->layout(), 0, 1, &cast_ds, 0, nullptr);
@@ -5440,7 +5440,7 @@ auto VulkanBackend::dispatchIndexSelect(const Tensor& input, int64_t dim, const 
                       0, sizeof(PushConstants), &push_constants);
 
     // Dispatch compute workgroups
-    uint32_t workgroups = (output.numel() + 255) / 256;
+    uint32_t workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -5535,7 +5535,7 @@ auto VulkanBackend::dispatchGatherRelativePositionBias(const Tensor& table, cons
                       0, sizeof(PushConstants), &push_constants);
 
     // Dispatch compute workgroups
-    uint32_t workgroups = (total_elements + 255) / 256;
+    uint32_t workgroups = div_wg(total_elements, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -5668,7 +5668,7 @@ auto VulkanBackend::dispatchTranspose(const Tensor& input, int64_t dim0, int64_t
                           VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(PushConstants), &push_constants);
 
-        uint32_t workgroups = (input.numel() + 255) / 256;
+        uint32_t workgroups = div_wg(input.numel(), devices_[device_id].workgroupSize);
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
@@ -5849,7 +5849,7 @@ auto VulkanBackend::dispatchPermute(const Tensor& input, const std::vector<int64
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    uint32_t workgroups = (output.numel() + 255) / 256;
+    uint32_t workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -6064,7 +6064,7 @@ auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    uint32_t workgroups = (total_elements + 255) / 256;
+    uint32_t workgroups = div_wg(total_elements, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -6132,7 +6132,7 @@ auto VulkanBackend::dispatchZeros(const std::vector<int64_t>& shape, DType dtype
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    uint32_t workgroups = (output.numel() + 255) / 256;
+    uint32_t workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -6195,7 +6195,7 @@ auto VulkanBackend::dispatchArange(float start, float end, float step, DType dty
                           VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(PushConstantsF64), &push_constants);
 
-        uint32_t workgroups = (numel + 255) / 256;
+        uint32_t workgroups = div_wg(numel, devices_[device_id].workgroupSize);
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         insertComputeBarrier(cmdBuffer);
@@ -6242,7 +6242,7 @@ auto VulkanBackend::dispatchArange(float start, float end, float step, DType dty
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    uint32_t workgroups = (numel + 255) / 256;
+    uint32_t workgroups = div_wg(numel, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     insertComputeBarrier(cmdBuffer);
@@ -6298,7 +6298,7 @@ auto VulkanBackend::dispatchLinspace(float start, float end, int64_t steps, DTyp
                           VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(PushConstantsF64), &push_constants);
 
-        uint32_t workgroups = (steps + 255) / 256;
+        uint32_t workgroups = div_wg(steps, devices_[device_id].workgroupSize);
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         insertComputeBarrier(cmdBuffer);
@@ -6345,7 +6345,7 @@ auto VulkanBackend::dispatchLinspace(float start, float end, int64_t steps, DTyp
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    uint32_t workgroups = (steps + 255) / 256;
+    uint32_t workgroups = div_wg(steps, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     insertComputeBarrier(cmdBuffer);
@@ -6397,7 +6397,7 @@ auto VulkanBackend::dispatchEye(int64_t n, int64_t m, DType dtype, const Device&
                           VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(PushConstants), &push_constants);
 
-        uint32_t workgroups = (total + 255) / 256;
+        uint32_t workgroups = div_wg(total, devices_[device_id].workgroupSize);
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         insertComputeBarrier(cmdBuffer);
@@ -6443,7 +6443,7 @@ auto VulkanBackend::dispatchEye(int64_t n, int64_t m, DType dtype, const Device&
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    uint32_t workgroups = (total + 255) / 256;
+    uint32_t workgroups = div_wg(total, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     insertComputeBarrier(cmdBuffer);
@@ -6496,7 +6496,7 @@ auto VulkanBackend::dispatchFill(const Tensor& input, float value) -> Tensor {
                           VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(PushConstantsF64), &push_constants);
 
-        uint32_t workgroups = (output.numel() + 255) / 256;
+        uint32_t workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         insertComputeBarrier(cmdBuffer);
@@ -6539,7 +6539,7 @@ auto VulkanBackend::dispatchFill(const Tensor& input, float value) -> Tensor {
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    uint32_t workgroups = (output.numel() + 255) / 256;
+    uint32_t workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -6656,7 +6656,7 @@ auto VulkanBackend::dispatchExpand(const Tensor& input, const std::vector<int64_
 
     // Float16 shader processes 2 elements per thread
     uint32_t num_items = is_float16 ? ((output.numel() + 1) / 2) : output.numel();
-    uint32_t workgroups = (num_items + 255) / 256;
+    uint32_t workgroups = div_wg(num_items, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -6892,9 +6892,9 @@ auto VulkanBackend::dispatchClamp(const Tensor& input, float min_value, float ma
     uint32_t workgroups;
     if (is_float16) {
         uint32_t num_pairs = (static_cast<uint32_t>(output.numel()) + 1) / 2;
-        workgroups = (num_pairs + 255) / 256;
+        workgroups = div_wg(num_pairs, devices_[device_id].workgroupSize);
     } else {
-        workgroups = (output.numel() + 255) / 256;
+        workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
     }
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
@@ -7021,9 +7021,9 @@ auto VulkanBackend::dispatchActivation(const std::string& op_name,
     if (is_float16) {
         // Each thread handles 2 elements (pair), 256 threads per workgroup
         uint32_t num_pairs = (num_elements + 1) / 2;
-        workgroups = (num_pairs + 255) / 256;
+        workgroups = div_wg(num_pairs, devices_[device_id].workgroupSize);
     } else {
-        workgroups = (num_elements + 255) / 256;
+        workgroups = div_wg(num_elements, devices_[device_id].workgroupSize);
     }
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
@@ -7126,7 +7126,7 @@ auto VulkanBackend::dispatchActivationBackward(const std::string& op_name,
     // Dispatch compute workgroups
     // For Float16, each thread processes 2 elements (pairs)
     uint32_t num_threads = is_float16 ? ((grad_output.numel() + 1) / 2) : grad_output.numel();
-    uint32_t workgroups = (num_threads + 255) / 256;
+    uint32_t workgroups = div_wg(num_threads, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -7195,7 +7195,7 @@ auto VulkanBackend::dispatchSwishBackward(const Tensor& grad_output,
                       0, sizeof(PushConstants), &push_constants);
 
     // Dispatch compute workgroups
-    uint32_t workgroups = (grad_output.numel() + 255) / 256;
+    uint32_t workgroups = div_wg(grad_output.numel(), devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -7295,7 +7295,7 @@ auto VulkanBackend::dispatchSoftmaxBackward(const Tensor& grad_output,
 
     // Dispatch: one thread per (outer, inner) position
     uint32_t total_threads = static_cast<uint32_t>(outer_size * inner_size);
-    uint32_t workgroups = (total_threads + 255) / 256;
+    uint32_t workgroups = div_wg(total_threads, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -7382,7 +7382,7 @@ auto VulkanBackend::dispatchLogSoftmaxBackward(const Tensor& grad_output,
 
     // Dispatch: one thread per (outer, inner) position
     uint32_t total_threads = static_cast<uint32_t>(outer_size * inner_size);
-    uint32_t workgroups = (total_threads + 255) / 256;
+    uint32_t workgroups = div_wg(total_threads, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -7500,7 +7500,7 @@ auto VulkanBackend::dispatchAvgPool2dForward(const Tensor& input, const OpAttrib
                       0, sizeof(PushConstants), &push_constants);
 
     // Dispatch workgroups
-    uint32_t workgroups = static_cast<uint32_t>((output.numel() + 255) / 256);
+    uint32_t workgroups = static_cast<uint32_t>(div_wg(output.numel(), devices_[device_id].workgroupSize));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -7619,7 +7619,7 @@ auto VulkanBackend::dispatchMaxPool2dForward(const Tensor& input, const OpAttrib
                       0, sizeof(PushConstants), &push_constants);
 
     // Dispatch workgroups
-    uint32_t workgroups = static_cast<uint32_t>((output.numel() + 255) / 256);
+    uint32_t workgroups = static_cast<uint32_t>(div_wg(output.numel(), devices_[device_id].workgroupSize));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -7736,7 +7736,7 @@ auto VulkanBackend::dispatchAvgPool2dBackward(const Tensor& grad_output, const T
                       0, sizeof(PushConstants), &push_constants);
 
     // Dispatch workgroups (iterate over grad_output elements)
-    uint32_t workgroups = static_cast<uint32_t>((grad_output.numel() + 255) / 256);
+    uint32_t workgroups = static_cast<uint32_t>(div_wg(grad_output.numel(), devices_[device_id].workgroupSize));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -7851,7 +7851,7 @@ auto VulkanBackend::dispatchMaxPool2dBackward(const Tensor& grad_output, const T
                       0, sizeof(PushConstants), &push_constants);
 
     // Dispatch workgroups (iterate over grad_output elements)
-    uint32_t workgroups = static_cast<uint32_t>((grad_output.numel() + 255) / 256);
+    uint32_t workgroups = static_cast<uint32_t>(div_wg(grad_output.numel(), devices_[device_id].workgroupSize));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -7934,7 +7934,7 @@ auto VulkanBackend::dispatchMaxPool2dBackwardWithIndices(const Tensor& grad_outp
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    uint32_t workgroups = (grad_out_numel + 255) / 256;
+    uint32_t workgroups = div_wg(grad_out_numel, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -8090,7 +8090,7 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
                       0, sizeof(PushConstants), &push_constants);
 
     // Dispatch workgroups
-    uint32_t workgroups = static_cast<uint32_t>((output.numel() + 255) / 256);
+    uint32_t workgroups = static_cast<uint32_t>(div_wg(output.numel(), devices_[device_id].workgroupSize));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -8235,7 +8235,7 @@ auto VulkanBackend::dispatchConvTranspose2dForward(const Tensor& input, const Te
                       0, sizeof(PushConstants), &push_constants);
 
     // Dispatch workgroups
-    uint32_t workgroups = static_cast<uint32_t>((output.numel() + 255) / 256);
+    uint32_t workgroups = static_cast<uint32_t>(div_wg(output.numel(), devices_[device_id].workgroupSize));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -8334,7 +8334,7 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
                           VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(PushConstantsF64), &push_constants);
 
-        uint32_t workgroups = (output.numel() + 255) / 256;
+        uint32_t workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
@@ -8367,7 +8367,7 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
 
         // Each thread handles 2 float16 elements, so we need half the workgroups
         uint32_t num_pairs = (output.numel() + 1) / 2;
-        uint32_t workgroups = (num_pairs + 255) / 256;
+        uint32_t workgroups = div_wg(num_pairs, devices_[device_id].workgroupSize);
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
@@ -8399,7 +8399,7 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
 
         // Each thread handles 4 int8 elements, so we need 1/4 the workgroups
         uint32_t num_quads = (output.numel() + 3) / 4;
-        uint32_t workgroups = (num_quads + 255) / 256;
+        uint32_t workgroups = div_wg(num_quads, devices_[device_id].workgroupSize);
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
@@ -8432,7 +8432,7 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
                           0, sizeof(PushConstantsUInt8), &push_constants_u8);
 
         // Each thread handles 1 uint8 element
-        uint32_t workgroups = (output.numel() + 255) / 256;
+        uint32_t workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
@@ -8464,7 +8464,7 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
                           VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(PushConstantsI64), &push_constants_i64);
 
-        uint32_t workgroups = (output.numel() + 255) / 256;
+        uint32_t workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
@@ -8498,7 +8498,7 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    uint32_t workgroups = (output.numel() + 255) / 256;
+    uint32_t workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -8549,7 +8549,7 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
                           VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(PushConstantsF64), &push_constants);
 
-        uint32_t workgroups = (output.numel() + 255) / 256;
+        uint32_t workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         insertComputeBarrier(cmdBuffer);
@@ -8607,7 +8607,7 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
 
         // Each thread handles 2 float16 elements, so we need half the workgroups
         uint32_t num_pairs = (output.numel() + 1) / 2;
-        uint32_t workgroups = (num_pairs + 255) / 256;
+        uint32_t workgroups = div_wg(num_pairs, devices_[device_id].workgroupSize);
 
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
@@ -8637,7 +8637,7 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
 
         // Each thread handles 4 int8 elements, so we need 1/4 the workgroups
         uint32_t num_quads = (output.numel() + 3) / 4;
-        uint32_t workgroups = (num_quads + 255) / 256;
+        uint32_t workgroups = div_wg(num_quads, devices_[device_id].workgroupSize);
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
@@ -8675,7 +8675,7 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    uint32_t workgroups = (output.numel() + 255) / 256;
+    uint32_t workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -8750,7 +8750,7 @@ auto VulkanBackend::dispatchRand(const std::vector<int64_t>& shape, DType dtype)
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    uint32_t workgroups = (numel + 255) / 256;
+    uint32_t workgroups = div_wg(numel, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -8825,7 +8825,7 @@ auto VulkanBackend::dispatchRandn(const std::vector<int64_t>& shape, DType dtype
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    uint32_t workgroups = (numel + 255) / 256;
+    uint32_t workgroups = div_wg(numel, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -8917,10 +8917,9 @@ auto VulkanBackend::dispatchMaskedSelect(const Tensor& input, const Tensor& mask
     int32_t device_id = input.device().index;
     uint32_t n = static_cast<uint32_t>(numel);
     uint32_t mask_is_float = (mask.dtype() == DType::Float32) ? 1 : 0;
-    uint32_t n_workgroups = (n + 255) / 256;
+    uint32_t n_workgroups = div_wg(n, devices_[device_id].workgroupSize);
 
-    // ---- Pass 1: Count true elements ----
-    // Allocate count buffer (one per workgroup + 1 for total)
+    // ---- Pass 1: Count true elements (1a + 1b in single command buffer) ----
     Tensor count_buf({static_cast<int64_t>(n_workgroups + 1)}, DType::Int32, input.device());
     count_buf = dispatchFill(count_buf, 0.0f);
 
@@ -8929,47 +8928,38 @@ auto VulkanBackend::dispatchMaskedSelect(const Tensor& input, const Tensor& mask
     size_t mask_bytes = mask.numel() * mask.dtype_size();
     size_t count_bytes = count_buf.numel() * count_buf.dtype_size();
 
-    // Pass 1a: Per-workgroup count
     {
         auto* pipeline = getPipeline("masked_select_count", device_id);
         std::vector<std::pair<uint32_t, VkBuffer>> bindings = {{0, buffer_mask}, {1, buffer_count}};
         std::vector<size_t> sizes = {mask_bytes, count_bytes};
-        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+        VkDescriptorSet ds_1a = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+        VkDescriptorSet ds_1b = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
         struct { uint32_t n_elements; uint32_t mask_is_float; uint32_t pass; } pc;
-        pc.n_elements = n; pc.mask_is_float = mask_is_float; pc.pass = 0;
+        pc.n_elements = n; pc.mask_is_float = mask_is_float;
 
         VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+
+        // Pass 1a: Per-workgroup count
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout(), 0, 1, &ds_1a, 0, nullptr);
+        pc.pass = 0;
         vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
         vkCmdDispatch(cmd, n_workgroups, 1, 1);
-        insertComputeBarrier(cmd);
-        endSingleTimeCommands(cmd, device_id);
-        synchronize(device_id);
-    }
+        insertBarrier(cmd, BarrierType::ComputeToCompute);
 
-    // Pass 1b: Sum workgroup counts
-    {
-        auto* pipeline = getPipeline("masked_select_count", device_id);
-        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {{0, buffer_mask}, {1, buffer_count}};
-        std::vector<size_t> sizes = {mask_bytes, count_bytes};
-        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
-
-        struct { uint32_t n_elements; uint32_t mask_is_float; uint32_t pass; } pc;
-        pc.n_elements = n; pc.mask_is_float = mask_is_float; pc.pass = 1;
-
-        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        // Pass 1b: Sum workgroup counts (single workgroup)
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout(), 0, 1, &ds_1b, 0, nullptr);
+        pc.pass = 1;
         vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
         vkCmdDispatch(cmd, 1, 1, 1);
         insertComputeBarrier(cmd);
+
         endSingleTimeCommands(cmd, device_id);
-        synchronize(device_id);
+        synchronize(device_id);  // Single sync for CPU readback of count
     }
 
-    // Read back total count (GPU→CPU sync required for variable-size output)
+    // Read back total count (GPU->CPU sync required for variable-size output)
     Tensor count_cpu = count_buf.to(Device::cpu());
     int64_t total_count = static_cast<int64_t>(count_cpu.data<int32_t>()[0]);
 
@@ -8977,7 +8967,7 @@ auto VulkanBackend::dispatchMaskedSelect(const Tensor& input, const Tensor& mask
         return Tensor({0}, input.dtype(), input.device());
     }
 
-    // ---- Pass 2: Prefix sum ----
+    // ---- Passes 2+3: Prefix sum + gather in single command buffer ----
     Tensor prefix_sums({static_cast<int64_t>(n)}, DType::Int32, input.device());
     prefix_sums = dispatchFill(prefix_sums, 0.0f);
     Tensor block_sums({static_cast<int64_t>(n_workgroups)}, DType::Int32, input.device());
@@ -8988,49 +8978,7 @@ auto VulkanBackend::dispatchMaskedSelect(const Tensor& input, const Tensor& mask
     size_t prefix_bytes = prefix_sums.numel() * prefix_sums.dtype_size();
     size_t blocks_bytes = block_sums.numel() * block_sums.dtype_size();
 
-    // Pass 2a: Local scan
-    {
-        auto* pipeline = getPipeline("prefix_sum", device_id);
-        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {{0, buffer_mask}, {1, buffer_prefix}, {2, buffer_blocks}};
-        std::vector<size_t> sizes = {mask_bytes, prefix_bytes, blocks_bytes};
-        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
-
-        struct { uint32_t n_elements; uint32_t mask_is_float; uint32_t pass; } pc;
-        pc.n_elements = n; pc.mask_is_float = mask_is_float; pc.pass = 0;
-
-        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout(), 0, 1, &ds, 0, nullptr);
-        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-        vkCmdDispatch(cmd, n_workgroups, 1, 1);
-        insertComputeBarrier(cmd);
-        endSingleTimeCommands(cmd, device_id);
-        synchronize(device_id);
-    }
-
-    // Pass 2b: Add block offsets
-    if (n_workgroups > 1) {
-        auto* pipeline = getPipeline("prefix_sum", device_id);
-        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {{0, buffer_mask}, {1, buffer_prefix}, {2, buffer_blocks}};
-        std::vector<size_t> sizes = {mask_bytes, prefix_bytes, blocks_bytes};
-        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
-
-        struct { uint32_t n_elements; uint32_t mask_is_float; uint32_t pass; } pc;
-        pc.n_elements = n; pc.mask_is_float = mask_is_float; pc.pass = 1;
-
-        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout(), 0, 1, &ds, 0, nullptr);
-        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-        vkCmdDispatch(cmd, n_workgroups, 1, 1);
-        insertComputeBarrier(cmd);
-        endSingleTimeCommands(cmd, device_id);
-        synchronize(device_id);
-    }
-
-    // ---- Pass 3: Gather selected elements ----
     Tensor output({total_count}, input.dtype(), input.device());
-    // F16 gather shader uses atomicOr on packed uint32, so output must be zeroed
     if (input.dtype() == DType::Float16) {
         output = dispatchFill(output, 0.0f);
     }
@@ -9041,24 +8989,58 @@ auto VulkanBackend::dispatchMaskedSelect(const Tensor& input, const Tensor& mask
     size_t output_bytes = output.numel() * output.dtype_size();
 
     {
-        auto* pipeline = getPipeline(gather_shader, device_id);
-        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        auto* prefix_pipeline = getPipeline("prefix_sum", device_id);
+        auto* gather_pipeline = getPipeline(gather_shader, device_id);
+
+        // Pre-allocate all descriptor sets
+        std::vector<std::pair<uint32_t, VkBuffer>> prefix_bindings = {{0, buffer_mask}, {1, buffer_prefix}, {2, buffer_blocks}};
+        std::vector<size_t> prefix_sizes = {mask_bytes, prefix_bytes, blocks_bytes};
+        VkDescriptorSet ds_2a = allocateAndWriteDescriptorSet(device_id, prefix_pipeline, prefix_bindings, prefix_sizes);
+        VkDescriptorSet ds_2b = (n_workgroups > 1)
+            ? allocateAndWriteDescriptorSet(device_id, prefix_pipeline, prefix_bindings, prefix_sizes)
+            : VK_NULL_HANDLE;
+
+        std::vector<std::pair<uint32_t, VkBuffer>> gather_bindings = {
             {0, buffer_input}, {1, buffer_mask}, {2, buffer_output}, {3, buffer_prefix}
         };
-        std::vector<size_t> sizes = {input_bytes, mask_bytes, output_bytes, prefix_bytes};
-        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
-
-        struct { uint32_t n_elements; uint32_t mask_is_float; uint32_t output_size; } pc;
-        pc.n_elements = n; pc.mask_is_float = mask_is_float; pc.output_size = static_cast<uint32_t>(total_count);
+        std::vector<size_t> gather_sizes = {input_bytes, mask_bytes, output_bytes, prefix_bytes};
+        VkDescriptorSet ds_3 = allocateAndWriteDescriptorSet(device_id, gather_pipeline, gather_bindings, gather_sizes);
 
         VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout(), 0, 1, &ds, 0, nullptr);
-        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+
+        // Pass 2a: Local scan
+        struct { uint32_t n_elements; uint32_t mask_is_float; uint32_t pass; } pc;
+        pc.n_elements = n; pc.mask_is_float = mask_is_float;
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, prefix_pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, prefix_pipeline->layout(), 0, 1, &ds_2a, 0, nullptr);
+        pc.pass = 0;
+        vkCmdPushConstants(cmd, prefix_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, n_workgroups, 1, 1);
+        insertBarrier(cmd, BarrierType::ComputeToCompute);
+
+        // Pass 2b: Add block offsets
+        if (n_workgroups > 1) {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, prefix_pipeline->layout(), 0, 1, &ds_2b, 0, nullptr);
+            pc.pass = 1;
+            vkCmdPushConstants(cmd, prefix_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+            vkCmdDispatch(cmd, n_workgroups, 1, 1);
+            insertBarrier(cmd, BarrierType::ComputeToCompute);
+        }
+
+        // Pass 3: Gather selected elements
+        struct { uint32_t n_elements; uint32_t mask_is_float; uint32_t output_size; } gather_pc;
+        gather_pc.n_elements = n; gather_pc.mask_is_float = mask_is_float;
+        gather_pc.output_size = static_cast<uint32_t>(total_count);
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gather_pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gather_pipeline->layout(), 0, 1, &ds_3, 0, nullptr);
+        vkCmdPushConstants(cmd, gather_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(gather_pc), &gather_pc);
         vkCmdDispatch(cmd, n_workgroups, 1, 1);
         insertComputeBarrier(cmd);
+
         endSingleTimeCommands(cmd, device_id);
-        synchronize(device_id);
+        synchronize(device_id);  // Single sync for entire prefix-sum + gather
     }
 
     return output;
@@ -9218,7 +9200,7 @@ auto VulkanBackend::dispatchInterpolate(const Tensor& input, const OpAttributes&
                       0, sizeof(PushConstants), &push_constants);
 
     // Dispatch workgroups
-    uint32_t workgroups = static_cast<uint32_t>((output.numel() + 255) / 256);
+    uint32_t workgroups = static_cast<uint32_t>(div_wg(output.numel(), devices_[device_id].workgroupSize));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -9322,7 +9304,7 @@ auto VulkanBackend::dispatchROIAlignForward(const Tensor& features, const Tensor
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    uint32_t workgroups = static_cast<uint32_t>((output.numel() + 255) / 256);
+    uint32_t workgroups = static_cast<uint32_t>(div_wg(output.numel(), devices_[device_id].workgroupSize));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     insertComputeBarrier(cmdBuffer);
@@ -9426,7 +9408,7 @@ auto VulkanBackend::dispatchROIAlignBackward(const Tensor& grad_output, const Te
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    uint32_t workgroups = static_cast<uint32_t>((grad_output.numel() + 255) / 256);
+    uint32_t workgroups = static_cast<uint32_t>(div_wg(grad_output.numel(), devices_[device_id].workgroupSize));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     insertComputeBarrier(cmdBuffer);
@@ -9526,7 +9508,7 @@ auto VulkanBackend::dispatchArgSort(const Tensor& input, int64_t dim, bool desce
     size_t indices_bytes = padded_n * sizeof(int32_t);
 
     auto* pipeline = getPipeline(sort_shader, device_id);
-    uint32_t workgroups = (padded_n / 2 + 255) / 256;
+    uint32_t workgroups = div_wg(padded_n / 2, devices_[device_id].workgroupSize);
 
     // Pre-build initial index array on CPU (reused for each slice)
     std::vector<int32_t> init_indices(padded_n);
@@ -9535,25 +9517,19 @@ auto VulkanBackend::dispatchArgSort(const Tensor& input, int64_t dim, bool desce
     }
 
     for (int64_t slice = 0; slice < num_slices; ++slice) {
-        // Step 1: Initialize working buffers
-        // Fill values buffer with pad value (inf for ascending, -inf for descending)
+        // Step 1: Initialize working buffers (batched into single sync)
         work_values = dispatchFill(work_values, pad_value);
-        synchronize(device_id);
 
-        // Copy this slice's data into the start of the working buffer
         size_t slice_bytes = sort_size * elem_size;
         copy(work_values.data_ptr(),
              static_cast<const char*>(input.data_ptr()) + slice * slice_bytes,
              slice_bytes, CopyKind::DeviceToDevice);
-        synchronize(device_id);
 
-        // Upload initial indices (0, 1, ..., n-1, n, n, ..., n)
         copy(work_indices.data_ptr(), init_indices.data(),
              padded_n * sizeof(int32_t), CopyKind::HostToDevice);
-        synchronize(device_id);
+        synchronize(device_id);  // Single sync for all 3 init operations
 
         // Step 2: Run all bitonic sort passes in a single command buffer
-        // Get VkBuffer handles after fill/copy since dispatchFill may reallocate
         {
             VkBuffer buffer_values = getVulkanBuffer(work_values.data_ptr());
             VkBuffer buffer_indices = getVulkanBuffer(work_indices.data_ptr());
@@ -9716,10 +9692,10 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
         (src_dtype == DType::Float32 && target_dtype == DType::Float16)) {
         // Each invocation handles 2 elements (one packed pair)
         uint32_t num_pairs = (static_cast<uint32_t>(numel) + 1) / 2;
-        dispatch_count = (num_pairs + 255) / 256;
+        dispatch_count = div_wg(num_pairs, devices_[device_id].workgroupSize);
     } else {
         // Each invocation handles 1 element
-        dispatch_count = (static_cast<uint32_t>(numel) + 255) / 256;
+        dispatch_count = div_wg(static_cast<uint32_t>(numel), devices_[device_id].workgroupSize);
     }
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);

@@ -3,7 +3,8 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
 // Argmax and Argmin for Float64 inputs
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
 
 layout(binding = 0) buffer Input { double input_data[]; };
 layout(binding = 1) buffer Output { int64_t output_indices[]; };
@@ -16,8 +17,8 @@ layout(push_constant) uniform PushConstants {
     uint op;             // 0=argmax, 1=argmin
 } params;
 
-shared double shared_vals[256];
-shared int64_t shared_indices[256];
+shared double shared_vals[WORKGROUP_SIZE];
+shared int64_t shared_indices[WORKGROUP_SIZE];
 
 void main() {
     uint tid = gl_LocalInvocationID.x;

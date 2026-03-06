@@ -3,7 +3,7 @@
 
 // Max Pooling 2D Backward Pass for Float16 using pre-computed indices
 // We work in float32 for the atomic operations, then pack back to float16
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { uint grad_output[]; };   // Packed float16 pairs
 layout(binding = 1) buffer Indices { uint indices_data[]; };     // Packed float16 pairs
