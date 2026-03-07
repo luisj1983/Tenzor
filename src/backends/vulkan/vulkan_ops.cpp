@@ -1991,6 +1991,8 @@ auto VulkanBackend::dispatchCol2Im(const Tensor& input, const OpAttributes& attr
                           0, sizeof(FillPushConstants), &fill_push);
         uint32_t fill_workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
         vkCmdDispatch(cmdBuffer, fill_workgroups, 1, 1);
+        // Barrier between fill and col2im accumulation to prevent WAW race
+        insertComputeBarrier(cmdBuffer);
         endSingleTimeCommands(cmdBuffer, device_id);
     }
 

@@ -12,7 +12,8 @@ namespace tenzor {
 // - Integer sum/prod accumulate in Int64 to prevent overflow
 // - mean/var/std/norm on integers produce Float32 results
 static bool is_small_int_dtype(DType dt) {
-    return dt == DType::Int8 || dt == DType::UInt8 || dt == DType::Int16 || dt == DType::Bool;
+    return dt == DType::Int8 || dt == DType::UInt8 || dt == DType::Int16 ||
+           dt == DType::Int32 || dt == DType::UInt16 || dt == DType::UInt32 || dt == DType::Bool;
 }
 
 static bool is_integer_dtype(DType dt) {

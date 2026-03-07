@@ -9,6 +9,7 @@
 #include "tenzor/backend/caching_allocator.hpp"
 #include "cuda_common.cuh"
 #include "../cublas_handle_pool.hpp"
+#include "../cuda_stream_pool.hpp"
 #include <stdexcept>
 #include <cmath>
 #include <algorithm>
@@ -152,8 +153,11 @@ auto fused_linear_relu_cuda(
     output_shape.push_back(out_features);
     Tensor output(output_shape, input.dtype(), input.device());
 
-    // Get cuBLAS handle
-    auto handle = CuBLASHandlePool::get();
+    // Get device and acquire a stream from the pool
+    int32_t device_id = input.device().index;
+    auto stream_guard = cuda::CUDAStreamPool::instance().acquire_guard(device_id);
+    cudaStream_t stream = stream_guard.get();
+    auto handle = CuBLASHandlePool::get(stream);
 
     // cuBLAS uses column-major, so we compute: output^T = weight * input^T
     // which in row-major is: output = input @ weight^T
@@ -191,14 +195,14 @@ auto fused_linear_relu_cuda(
     } else if (input.dtype() == DType::BFloat16) {
         // Use GemmEx with BFloat16 input and Float32 compute
         float alpha = 1.0f, beta_val = 0.0f;
-        cublasGemmEx(handle, CUBLAS_OP_T, CUBLAS_OP_N,
+        CUBLAS_CHECK(cublasGemmEx(handle, CUBLAS_OP_T, CUBLAS_OP_N,
                      M, N, K,
                      &alpha,
                      weight.data_ptr(), CUDA_R_16BF, K,
                      input.data_ptr(), CUDA_R_16BF, K,
                      &beta_val,
                      output.data_ptr(), CUDA_R_16BF, M,
-                     CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+                     CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
     } else {
         throw std::runtime_error("fused_linear_relu_cuda: Unsupported dtype");
     }
@@ -210,45 +214,45 @@ auto fused_linear_relu_cuda(
 
     if (input.dtype() == DType::Float32) {
         if (bias) {
-            bias_relu_kernel<<<blocks, block_size>>>(
+            bias_relu_kernel<<<blocks, block_size, 0, stream>>>(
                 output.data<float>(), bias->data<float>(), total_elements, out_features);
             TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else {
-            relu_inplace_kernel<<<blocks, block_size>>>(
+            relu_inplace_kernel<<<blocks, block_size, 0, stream>>>(
                 output.data<float>(), total_elements);
             TENZOR_CUDA_POST_LAUNCH_CHECK();
         }
     } else if (input.dtype() == DType::Float64) {
         if (bias) {
-            bias_relu_kernel<<<blocks, block_size>>>(
+            bias_relu_kernel<<<blocks, block_size, 0, stream>>>(
                 output.data<double>(), bias->data<double>(), total_elements, out_features);
             TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else {
-            relu_inplace_kernel<<<blocks, block_size>>>(
+            relu_inplace_kernel<<<blocks, block_size, 0, stream>>>(
                 output.data<double>(), total_elements);
             TENZOR_CUDA_POST_LAUNCH_CHECK();
         }
     } else if (input.dtype() == DType::Float16) {
         if (bias) {
-            bias_relu_kernel<<<blocks, block_size>>>(
+            bias_relu_kernel<<<blocks, block_size, 0, stream>>>(
                 reinterpret_cast<__half*>(output.data_ptr()),
                 reinterpret_cast<const __half*>(bias->data_ptr()),
                 total_elements, out_features);
             TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else {
-            relu_inplace_kernel<<<blocks, block_size>>>(
+            relu_inplace_kernel<<<blocks, block_size, 0, stream>>>(
                 reinterpret_cast<__half*>(output.data_ptr()), total_elements);
             TENZOR_CUDA_POST_LAUNCH_CHECK();
         }
     } else if (input.dtype() == DType::BFloat16) {
         if (bias) {
-            bias_relu_kernel<<<blocks, block_size>>>(
+            bias_relu_kernel<<<blocks, block_size, 0, stream>>>(
                 reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
                 reinterpret_cast<const __nv_bfloat16*>(bias->data_ptr()),
                 total_elements, out_features);
             TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else {
-            relu_inplace_kernel<<<blocks, block_size>>>(
+            relu_inplace_kernel<<<blocks, block_size, 0, stream>>>(
                 reinterpret_cast<__nv_bfloat16*>(output.data_ptr()), total_elements);
             TENZOR_CUDA_POST_LAUNCH_CHECK();
         }
@@ -338,12 +342,13 @@ auto fused_batchnorm_relu_cuda(
 
     int64_t total_elements = input.numel();
     int min_grid_size, block_size;
+    cudaStream_t stream = cudaStreamPerThread;
 
     if (input.dtype() == DType::Float32) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_batchnorm_relu_kernel<float>, 0, 0);
         int blocks = clamp_blocks((total_elements + block_size - 1) / block_size);
-        fused_batchnorm_relu_kernel<<<blocks, block_size>>>(
+        fused_batchnorm_relu_kernel<<<blocks, block_size, 0, stream>>>(
             input.data<float>(),
             running_mean.data<float>(),
             running_var.data<float>(),
@@ -360,7 +365,7 @@ auto fused_batchnorm_relu_cuda(
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_batchnorm_relu_kernel<double>, 0, 0);
         int blocks = clamp_blocks((total_elements + block_size - 1) / block_size);
-        fused_batchnorm_relu_kernel<<<blocks, block_size>>>(
+        fused_batchnorm_relu_kernel<<<blocks, block_size, 0, stream>>>(
             input.data<double>(),
             running_mean.data<double>(),
             running_var.data<double>(),
@@ -377,7 +382,7 @@ auto fused_batchnorm_relu_cuda(
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_batchnorm_relu_kernel<__half>, 0, 0);
         int blocks = clamp_blocks((total_elements + block_size - 1) / block_size);
-        fused_batchnorm_relu_kernel<<<blocks, block_size>>>(
+        fused_batchnorm_relu_kernel<<<blocks, block_size, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<const __half*>(running_mean.data_ptr()),
             reinterpret_cast<const __half*>(running_var.data_ptr()),
@@ -394,7 +399,7 @@ auto fused_batchnorm_relu_cuda(
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_batchnorm_relu_kernel<__nv_bfloat16>, 0, 0);
         int blocks = clamp_blocks((total_elements + block_size - 1) / block_size);
-        fused_batchnorm_relu_kernel<<<blocks, block_size>>>(
+        fused_batchnorm_relu_kernel<<<blocks, block_size, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(running_mean.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(running_var.data_ptr()),
@@ -543,12 +548,13 @@ auto fused_add_relu_cuda(const Tensor& a, const Tensor& b) -> Tensor {
 
     int64_t n = a.numel();
     int min_grid_size, block_size;
+    cudaStream_t stream = cudaStreamPerThread;
 
     if (a.dtype() == DType::Float32) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_add_relu_kernel<float>, 0, 0);
         int blocks = clamp_blocks((n + block_size - 1) / block_size);
-        fused_add_relu_kernel<<<blocks, block_size>>>(
+        fused_add_relu_kernel<<<blocks, block_size, 0, stream>>>(
             a.data<float>(),
             b.data<float>(),
             result.data<float>(),
@@ -559,7 +565,7 @@ auto fused_add_relu_cuda(const Tensor& a, const Tensor& b) -> Tensor {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_add_relu_kernel<double>, 0, 0);
         int blocks = clamp_blocks((n + block_size - 1) / block_size);
-        fused_add_relu_kernel<<<blocks, block_size>>>(
+        fused_add_relu_kernel<<<blocks, block_size, 0, stream>>>(
             a.data<double>(),
             b.data<double>(),
             result.data<double>(),
@@ -570,7 +576,7 @@ auto fused_add_relu_cuda(const Tensor& a, const Tensor& b) -> Tensor {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_add_relu_kernel<__half>, 0, 0);
         int blocks = clamp_blocks((n + block_size - 1) / block_size);
-        fused_add_relu_kernel<<<blocks, block_size>>>(
+        fused_add_relu_kernel<<<blocks, block_size, 0, stream>>>(
             reinterpret_cast<const __half*>(a.data_ptr()),
             reinterpret_cast<const __half*>(b.data_ptr()),
             reinterpret_cast<__half*>(result.data_ptr()),
@@ -581,7 +587,7 @@ auto fused_add_relu_cuda(const Tensor& a, const Tensor& b) -> Tensor {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_add_relu_kernel<__nv_bfloat16>, 0, 0);
         int blocks = clamp_blocks((n + block_size - 1) / block_size);
-        fused_add_relu_kernel<<<blocks, block_size>>>(
+        fused_add_relu_kernel<<<blocks, block_size, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(a.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(b.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(result.data_ptr()),
@@ -700,12 +706,13 @@ auto fused_gelu_cuda(const Tensor& input) -> Tensor {
 
     int64_t n = input.numel();
     int min_grid_size, block_size;
+    cudaStream_t stream = cudaStreamPerThread;
 
     if (input.dtype() == DType::Float32) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_gelu_kernel<float>, 0, 0);
         int blocks = clamp_blocks((n + block_size - 1) / block_size);
-        fused_gelu_kernel<<<blocks, block_size>>>(
+        fused_gelu_kernel<<<blocks, block_size, 0, stream>>>(
             input.data<float>(),
             output.data<float>(),
             n
@@ -715,7 +722,7 @@ auto fused_gelu_cuda(const Tensor& input) -> Tensor {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_gelu_kernel<double>, 0, 0);
         int blocks = clamp_blocks((n + block_size - 1) / block_size);
-        fused_gelu_kernel<<<blocks, block_size>>>(
+        fused_gelu_kernel<<<blocks, block_size, 0, stream>>>(
             input.data<double>(),
             output.data<double>(),
             n
@@ -725,7 +732,7 @@ auto fused_gelu_cuda(const Tensor& input) -> Tensor {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_gelu_kernel<__half>, 0, 0);
         int blocks = clamp_blocks((n + block_size - 1) / block_size);
-        fused_gelu_kernel<<<blocks, block_size>>>(
+        fused_gelu_kernel<<<blocks, block_size, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<__half*>(output.data_ptr()),
             n
@@ -735,7 +742,7 @@ auto fused_gelu_cuda(const Tensor& input) -> Tensor {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_gelu_kernel<__nv_bfloat16>, 0, 0);
         int blocks = clamp_blocks((n + block_size - 1) / block_size);
-        fused_gelu_kernel<<<blocks, block_size>>>(
+        fused_gelu_kernel<<<blocks, block_size, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
             n
@@ -1456,13 +1463,14 @@ auto fused_conv2d_bn_relu_cuda(
 
     int64_t total_elements = batch_size * out_channels * out_h * out_w;
     int min_grid_size, block_size;
+    cudaStream_t stream = cudaStreamPerThread;
 
     if (input.dtype() == DType::Float32) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_conv2d_bn_relu_kernel<float>, 0, 0);
         int blocks = clamp_blocks((total_elements + block_size - 1) / block_size);
         const float* bias_ptr = bias ? bias->data<float>() : nullptr;
-        fused_conv2d_bn_relu_kernel<<<blocks, block_size>>>(
+        fused_conv2d_bn_relu_kernel<<<blocks, block_size, 0, stream>>>(
             input.data<float>(),
             weight.data<float>(),
             bias_ptr,
@@ -1647,12 +1655,13 @@ auto fused_elementwise_chain_cuda(
 
     int64_t n = a.numel();
     int min_grid_size, block_size;
+    cudaStream_t stream = cudaStreamPerThread;
 
     if (a.dtype() == DType::Float32) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            fused_elementwise_chain_kernel<float>, 0, 0);
         int blocks = clamp_blocks((n + block_size - 1) / block_size);
-        fused_elementwise_chain_kernel<<<blocks, block_size>>>(
+        fused_elementwise_chain_kernel<<<blocks, block_size, 0, stream>>>(
             a.data<float>(),
             b.data<float>(),
             c.data<float>(),

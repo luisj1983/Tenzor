@@ -53,7 +53,7 @@ auto ROCmBackend::get_device_info(int32_t device_id) const -> DeviceInfo {
     }
 
     hipDeviceProp_t props;
-    hipGetDeviceProperties(&props, device_id);
+    check_hip_error(hipGetDeviceProperties(&props, device_id), "hipGetDeviceProperties");
 
     DeviceInfo info;
     info.name = props.name;
@@ -61,7 +61,7 @@ auto ROCmBackend::get_device_info(int32_t device_id) const -> DeviceInfo {
 
     // Get driver version
     int driver_version = 0;
-    hipDriverGetVersion(&driver_version);
+    check_hip_error(hipDriverGetVersion(&driver_version), "hipDriverGetVersion");
     info.driver_version = std::to_string(driver_version / 100) + "." +
                           std::to_string(driver_version % 100);
 
@@ -69,10 +69,10 @@ auto ROCmBackend::get_device_info(int32_t device_id) const -> DeviceInfo {
     info.total_memory = props.totalGlobalMem;
     size_t free_mem = 0, total_mem = 0;
     int current_device;
-    hipGetDevice(&current_device);
-    hipSetDevice(device_id);
-    hipMemGetInfo(&free_mem, &total_mem);
-    hipSetDevice(current_device);
+    check_hip_error(hipGetDevice(&current_device), "hipGetDevice");
+    check_hip_error(hipSetDevice(device_id), "hipSetDevice");
+    check_hip_error(hipMemGetInfo(&free_mem, &total_mem), "hipMemGetInfo");
+    check_hip_error(hipSetDevice(current_device), "hipSetDevice restore");
     info.available_memory = free_mem;
 
     // Compute info

@@ -97,20 +97,18 @@ public:
      * of backward(). It receives and returns Variables so that the gradient
      * computation itself is tracked by autograd, enabling higher-order gradients.
      *
-     * The default implementation falls back to backward() with raw Tensors,
-     * which means no higher-order gradient support. Subclasses that need
-     * higher-order gradient support (e.g., MulBackward, MatMulBackward) should
-     * override this method.
+     * The default implementation throws an error if any grad_output requires grad,
+     * since the gradient graph cannot be built without a proper implementation.
+     * Subclasses that support higher-order gradients must override this method.
      *
-     * **create_graph coverage:** Currently only the following ops have full
+     * **create_graph coverage:** Currently the following ops have full
      * higher-order gradient support via backward_with_variables():
      *   - AddBackward, SubBackward, MulBackward, DivBackward, MatMulBackward
-     * All other backward functions (~60) use the default fallback which
-     * disconnects the gradient graph. This produces correct first-order
-     * gradients but a warning is emitted when create_graph=true.
+     *   - LinearBackward, SumBackward, MeanBackward, LogBackward
      *
      * @param grad_outputs Gradient Variables with respect to outputs
      * @return Gradient Variables with respect to inputs (with grad_fn set)
+     * @throws std::runtime_error if create_graph=true and op doesn't support it
      */
     virtual auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable>;
 
@@ -208,8 +206,9 @@ public:
      * @brief Get saved tensors.
      *
      * Retrieves tensors saved during forward pass for use in backward pass.
+     * Validates that saved tensors have not been modified in-place since save.
      *
-     * @return Vector of saved tensors
+     * @return Reference to saved tensors vector
      */
     auto saved_tensors() const -> const std::vector<Tensor>&;
 

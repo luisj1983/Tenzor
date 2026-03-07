@@ -4668,6 +4668,13 @@ auto cosh_kernel(const Tensor& input) -> Tensor {
 
 // Rounding functions
 auto round_kernel(const Tensor& input) -> Tensor {
+    // Float16/BFloat16: convert to Float32, round, convert back
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto f32 = input.to(DType::Float32);
+        auto result = round_kernel(f32);
+        return result.to(input.dtype());
+    }
+
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
     int64_t n = input.numel();
@@ -4698,6 +4705,12 @@ auto round_kernel(const Tensor& input) -> Tensor {
 }
 
 auto floor_kernel(const Tensor& input) -> Tensor {
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto f32 = input.to(DType::Float32);
+        auto result = floor_kernel(f32);
+        return result.to(input.dtype());
+    }
+
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
     int64_t n = input.numel();
@@ -4728,6 +4741,12 @@ auto floor_kernel(const Tensor& input) -> Tensor {
 }
 
 auto ceil_kernel(const Tensor& input) -> Tensor {
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto f32 = input.to(DType::Float32);
+        auto result = ceil_kernel(f32);
+        return result.to(input.dtype());
+    }
+
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
     int64_t n = input.numel();

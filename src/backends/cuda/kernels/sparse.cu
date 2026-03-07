@@ -152,7 +152,7 @@ SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse) {
         CUDA_CHECK_SPARSE(cudaGetLastError());
 
         // Convert COO row indices to CSR row pointers on GPU
-        cusparseHandle_t handle = CuSPARSEHandlePool::get();
+        cusparseHandle_t handle = CuSPARSEHandlePool::get(cudaStreamPerThread);
         CUSPARSE_CHECK(cusparseXcoo2csr(
             handle, row_i32_buf.as<int32_t>(), static_cast<int>(nnz), static_cast<int>(nrows),
             crow_i32_buf.as<int32_t>(), CUSPARSE_INDEX_BASE_ZERO));
@@ -210,7 +210,7 @@ Tensor cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
     auto result = zeros({M, N}, dtype, Device::cuda());
 
     // Get cuSPARSE handle
-    cusparseHandle_t handle = CuSPARSEHandlePool::get();
+    cusparseHandle_t handle = CuSPARSEHandlePool::get(cudaStreamPerThread);
     cudaDataType cuda_dtype = get_cuda_data_type(dtype);
 
     // Get raw pointers
@@ -333,7 +333,7 @@ Tensor cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
     auto result = zeros({M}, dtype, Device::cuda());
 
     // Get cuSPARSE handle
-    cusparseHandle_t handle = CuSPARSEHandlePool::get();
+    cusparseHandle_t handle = CuSPARSEHandlePool::get(cudaStreamPerThread);
     cudaDataType cuda_dtype = get_cuda_data_type(dtype);
 
     // Get raw pointers

@@ -84,14 +84,7 @@ auto Function::saved_tensors() const -> const std::vector<Tensor>& {
         }
     }
     // Check that saved tensors have not been modified in-place since save
-    for (size_t i = 0; i < saved_tensors_.size() && i < saved_versions_.size(); ++i) {
-        if (saved_tensors_[i].version() != saved_versions_[i]) {
-            throw std::runtime_error(
-                "one of the variables needed for gradient computation has been modified by an "
-                "in-place operation after the forward pass. Use .clone() before in-place ops "
-                "on tensors used in autograd computation.");
-        }
-    }
+    validate_saved_tensors();
     return saved_tensors_;
 }
 
@@ -125,41 +118,45 @@ auto Function::saved_variables() const -> const std::vector<Variable>& {
 }
 
 auto Function::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    // Default fallback: extract Tensors, call backward(), wrap results back.
-    // This provides no higher-order gradient support — gradient graph will be
-    // disconnected at this operation when create_graph=true.
-    static thread_local std::unordered_set<std::string> warned_ops;
+    // Check if any grad_output requires grad (i.e., create_graph=true was used)
     bool any_requires_grad = false;
     for (auto& var : grad_outputs) {
         if (var.requires_grad()) { any_requires_grad = true; break; }
     }
+
     if (any_requires_grad) {
-        // Warn about missing create_graph support. Controlled by env:
-        //   TENZOR_WARN_HIGHER_ORDER_GRAD=0  → silent
-        //   TENZOR_WARN_HIGHER_ORDER_GRAD=1  → once per op type (default)
-        //   TENZOR_WARN_HIGHER_ORDER_GRAD=2  → every call
-        static int warn_level = []() {
-            if (const char* env = std::getenv("TENZOR_WARN_HIGHER_ORDER_GRAD"))
-                return std::atoi(env);
-            return 1;
-        }();
-        if (warn_level > 0) {
-            auto op_name = name();
-            bool should_warn = (warn_level >= 2);
-            if (!should_warn) {
-                if (warned_ops.find(op_name) == warned_ops.end()) {
-                    warned_ops.insert(op_name);
-                    should_warn = true;
-                }
+        // Higher-order gradients requested but this op doesn't support them.
+        // Behavior controlled by env var:
+        //   TENZOR_HIGHER_ORDER_GRAD=error  → throw (default, safe)
+        //   TENZOR_HIGHER_ORDER_GRAD=warn   → warn and fall through (backward compat)
+        static int mode = []() {
+            if (const char* env = std::getenv("TENZOR_HIGHER_ORDER_GRAD")) {
+                if (std::string(env) == "warn") return 1;
+                if (std::string(env) == "silent") return 2;
             }
-            if (should_warn) {
+            return 0; // error by default
+        }();
+
+        auto op_name = name();
+        if (mode == 0) {
+            throw std::runtime_error(
+                "create_graph=true requires higher-order gradient support, but '" +
+                op_name + "' does not implement backward_with_variables(). "
+                "Either use create_graph=false, or set TENZOR_HIGHER_ORDER_GRAD=warn "
+                "to fall through with disconnected gradient graph.");
+        } else if (mode == 1) {
+            static thread_local std::unordered_set<std::string> warned_ops;
+            if (warned_ops.find(op_name) == warned_ops.end()) {
+                warned_ops.insert(op_name);
                 std::cerr << "[tenzor::autograd] Warning: " << op_name
                           << " does not support higher-order gradients. "
                           << "Gradient graph will be disconnected at this operation.\n";
             }
         }
+        // mode == 2: silent fallthrough
     }
 
+    // Fallback: extract Tensors, call backward(), wrap results without grad tracking
     std::vector<Tensor> tensor_grads;
     tensor_grads.reserve(grad_outputs.size());
     for (auto& var : grad_outputs) {
@@ -3244,7 +3241,7 @@ auto SpMMBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Vari
 auto SpMMBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     // Y = S @ D  =>  grad_D = S^T @ grad_Y
     // saved_tensors_[0] = S^T (the sparse matrix, transposed and stored as dense)
-    const auto& sparse_t = saved_tensors()[0];  // shape (K, M)
+    const auto& sparse_t = saved_tensors_[0];  // shape (K, M)
     const auto& grad_output = grad_outputs[0];  // shape (M, N)
 
     // grad_D = S^T @ grad_Y = sparse_t @ grad_output, shape (K, N)

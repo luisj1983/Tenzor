@@ -993,7 +993,8 @@ __global__ void embedding_backward_kernel_impl(
     const IndexT* indices,     // [*]
     T* grad_weight,            // [num_embeddings, embedding_dim]
     int64_t num_indices,
-    int64_t embedding_dim) {
+    int64_t embedding_dim,
+    int64_t num_embeddings) {
 
     int64_t total_elements = num_indices * embedding_dim;
 
@@ -1002,8 +1003,9 @@ __global__ void embedding_backward_kernel_impl(
         int64_t j = idx % embedding_dim;  // which embedding dimension
 
         int64_t token_idx = static_cast<int64_t>(indices[i]);
-        // Use atomicAdd for thread-safe accumulation
-        atomicAdd(&grad_weight[token_idx * embedding_dim + j], grad_output[idx]);
+        if (token_idx >= 0 && token_idx < num_embeddings) {
+            atomicAdd(&grad_weight[token_idx * embedding_dim + j], grad_output[idx]);
+        }
     }
 }
 
@@ -1014,7 +1016,8 @@ __global__ void embedding_backward_fp16_kernel_impl(
     const IndexT* indices,
     __half* grad_weight,
     int64_t num_indices,
-    int64_t embedding_dim) {
+    int64_t embedding_dim,
+    int64_t num_embeddings) {
 
     int64_t total_elements = num_indices * embedding_dim;
 
@@ -1023,6 +1026,7 @@ __global__ void embedding_backward_fp16_kernel_impl(
         int64_t j = idx % embedding_dim;
 
         int64_t token_idx = static_cast<int64_t>(indices[i]);
+        if (token_idx < 0 || token_idx >= num_embeddings) continue;
 #if __CUDA_ARCH__ >= 700
         atomicAdd(&grad_weight[token_idx * embedding_dim + j], grad_output[idx]);
 #else
@@ -1048,7 +1052,8 @@ __global__ void embedding_backward_bf16_kernel_impl(
     const IndexT* indices,
     __nv_bfloat16* grad_weight,
     int64_t num_indices,
-    int64_t embedding_dim) {
+    int64_t embedding_dim,
+    int64_t num_embeddings) {
 
     int64_t total_elements = num_indices * embedding_dim;
 
@@ -1057,6 +1062,7 @@ __global__ void embedding_backward_bf16_kernel_impl(
         int64_t j = idx % embedding_dim;
 
         int64_t token_idx = static_cast<int64_t>(indices[i]);
+        if (token_idx < 0 || token_idx >= num_embeddings) continue;
 #if __CUDA_ARCH__ >= 800
         atomicAdd(&grad_weight[token_idx * embedding_dim + j], grad_output[idx]);
 #else
@@ -1107,11 +1113,11 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
         if (idx_is_int32) \
             embedding_backward_kernel_impl<T, int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
                 grad_output.data<T>(), indices.data<int32_t>(), grad_weight.data<T>(), \
-                num_indices, embedding_dim); \
+                num_indices, embedding_dim, num_embeddings); \
         else \
             embedding_backward_kernel_impl<T, int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
                 grad_output.data<T>(), indices.data<int64_t>(), grad_weight.data<T>(), \
-                num_indices, embedding_dim); \
+                num_indices, embedding_dim, num_embeddings); \
         CUDA_CHECK(cudaGetLastError())
 
     switch (grad_output.dtype()) {
@@ -1123,13 +1129,13 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
                     reinterpret_cast<const __half*>(grad_output.data_ptr()),
                     indices.data<int32_t>(),
                     reinterpret_cast<__half*>(grad_weight.data_ptr()),
-                    num_indices, embedding_dim);
+                    num_indices, embedding_dim, num_embeddings);
             else
                 embedding_backward_fp16_kernel_impl<int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                     reinterpret_cast<const __half*>(grad_output.data_ptr()),
                     indices.data<int64_t>(),
                     reinterpret_cast<__half*>(grad_weight.data_ptr()),
-                    num_indices, embedding_dim);
+                    num_indices, embedding_dim, num_embeddings);
             CUDA_CHECK(cudaGetLastError());
             break;
         case DType::BFloat16:
@@ -1138,13 +1144,13 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
                     reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
                     indices.data<int32_t>(),
                     reinterpret_cast<__nv_bfloat16*>(grad_weight.data_ptr()),
-                    num_indices, embedding_dim);
+                    num_indices, embedding_dim, num_embeddings);
             else
                 embedding_backward_bf16_kernel_impl<int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                     reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
                     indices.data<int64_t>(),
                     reinterpret_cast<__nv_bfloat16*>(grad_weight.data_ptr()),
-                    num_indices, embedding_dim);
+                    num_indices, embedding_dim, num_embeddings);
             CUDA_CHECK(cudaGetLastError());
             break;
         default:

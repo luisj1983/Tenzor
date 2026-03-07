@@ -1,5 +1,6 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/shape.hpp"
+#include "tenzor/ops/creation.hpp"
 #include "tenzor/utils/error.hpp"
 #include <random>
 #include <stdexcept>
@@ -190,7 +191,8 @@ auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& d
 
 namespace detail {
     // Thread-local random number generator for thread safety
-    thread_local std::mt19937 rng(std::random_device{}());
+    // Seeded from get_global_seed() so manual_seed() controls reproducibility
+    thread_local std::mt19937 rng(static_cast<unsigned int>(tenzor::get_global_seed()));
 }
 
 // ============================================================================

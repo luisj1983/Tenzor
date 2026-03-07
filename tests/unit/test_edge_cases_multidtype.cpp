@@ -174,7 +174,14 @@ TEST_P(EdgeCaseMultiDTypeTest, EmptyTensor_Reduction) {
     // Sum over empty dimension
     auto result = sum(empty, 0);
     EXPECT_EQ(result.shape()[0], 5);
-    EXPECT_EQ(result.dtype(), dtype);
+    // Integer types smaller than Int64 are promoted to Int64 for sum (matches PyTorch)
+    if (dtype == DType::Int8 || dtype == DType::UInt8 || dtype == DType::Int16 ||
+        dtype == DType::Int32 || dtype == DType::UInt16 || dtype == DType::UInt32 ||
+        dtype == DType::Bool) {
+        EXPECT_EQ(result.dtype(), DType::Int64);
+    } else {
+        EXPECT_EQ(result.dtype(), dtype);
+    }
 }
 
 // ============================================================================

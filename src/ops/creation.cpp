@@ -82,6 +82,12 @@ auto zeros(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
         return dispatch_to_device(OpId::Zeros, device.type, {}, attrs)[0];
     }
 
+    // CPU path: validate device index (only index 0 is valid for CPU)
+    if (device.index != 0) {
+        throw std::runtime_error("Invalid device index " + std::to_string(device.index) +
+            " for CPU (only index 0 is valid)");
+    }
+
     // CPU path: use zero-initialized constructor directly
     return Tensor(std::move(shape), dtype, device);
 }

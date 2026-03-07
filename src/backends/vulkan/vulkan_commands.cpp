@@ -363,6 +363,11 @@ void VulkanBackend::waitForFrame(int32_t device_id, size_t frameIndex) {
     VkFence fence = ctx.frameFences[frameIndex];
 
     VkResult result = vkWaitForFences(ctx.device, 1, &fence, VK_TRUE, ctx.fence_timeout_ns);
+    if (result == VK_ERROR_DEVICE_LOST) {
+        ctx.device_lost.store(true, std::memory_order_release);
+        throw std::runtime_error("GPU device lost while waiting for frame fence. "
+            "The GPU may have crashed or been reset.");
+    }
     if (result == VK_TIMEOUT) {
         throw std::runtime_error("GPU frame fence wait timed out after " +
             std::to_string(ctx.fence_timeout_ns / 1'000'000'000ULL) + " seconds. "
