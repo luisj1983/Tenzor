@@ -589,6 +589,9 @@ public:
         }
     }
 
+    // Blocks until all operations on the specified device queue complete.
+    // SYCL has no timeout API — wait_and_throw() blocks indefinitely.
+    // A hung kernel will cause this call to never return.
     auto synchronize(int32_t device_id) -> void override {
         validate_device_id(device_id);
         get_queue(device_id).wait_and_throw();

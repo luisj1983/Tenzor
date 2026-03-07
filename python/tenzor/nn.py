@@ -103,6 +103,15 @@ class Module(_CppModule):
                 self.register_buffer(name, value)
             return
 
+        # Warn if assigning a list/tuple containing Modules (should use ModuleList)
+        if isinstance(value, (list, tuple)) and any(isinstance(v, _CppModule) for v in value):
+            import warnings
+            warnings.warn(
+                f"Assigning a list of modules to '{name}' — "
+                "use ModuleList for auto-registration",
+                stacklevel=2,
+            )
+
         # Regular attribute — no cache invalidation needed
         object.__setattr__(self, name, value)
 

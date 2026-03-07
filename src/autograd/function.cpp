@@ -67,7 +67,7 @@ auto Function::save_for_backward(std::vector<Tensor> tensors) -> void {
         auto dev = tensors[0].device();
         if (dev.type != Device::Type::CPU) {
             offloaded_device_ = dev;
-            tensors_offloaded_ = true;
+            tensors_offloaded_.store(true, std::memory_order_release);
             for (auto& t : tensors) {
                 t = t.to(Device::cpu());
             }
@@ -77,8 +77,11 @@ auto Function::save_for_backward(std::vector<Tensor> tensors) -> void {
 }
 
 auto Function::saved_tensors() const -> const std::vector<Tensor>& {
-    if (tensors_offloaded_) {
-        reload_saved_tensors();
+    if (tensors_offloaded_.load(std::memory_order_acquire)) {
+        std::lock_guard lock(offload_mutex_);
+        if (tensors_offloaded_.load(std::memory_order_relaxed)) {
+            reload_saved_tensors();
+        }
     }
     // Check that saved tensors have not been modified in-place since save
     for (size_t i = 0; i < saved_tensors_.size() && i < saved_versions_.size(); ++i) {
@@ -104,11 +107,13 @@ void Function::validate_saved_tensors() const {
 }
 
 void Function::reload_saved_tensors() const {
-    if (!tensors_offloaded_) return;
+    if (!tensors_offloaded_.load(std::memory_order_acquire)) return;
+    std::lock_guard lock(offload_mutex_);
+    if (!tensors_offloaded_.load(std::memory_order_relaxed)) return;
     for (auto& t : saved_tensors_) {
         t = t.to(offloaded_device_);
     }
-    tensors_offloaded_ = false;
+    tensors_offloaded_.store(false, std::memory_order_release);
 }
 
 auto Function::save_variables_for_backward(std::vector<Variable> variables) -> void {

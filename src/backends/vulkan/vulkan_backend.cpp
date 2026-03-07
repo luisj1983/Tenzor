@@ -137,7 +137,12 @@ VulkanBackend::~VulkanBackend() {
                             out.write(cache_data.data(), static_cast<std::streamsize>(cache_size));
                             out.close();
                             if (out.good()) {
-                                std::rename(tmp_path.c_str(), path.c_str());
+                                if (std::rename(tmp_path.c_str(), path.c_str()) != 0) {
+                                    // Rename failed — clean up temp file
+                                    std::remove(tmp_path.c_str());
+                                }
+                            } else {
+                                std::remove(tmp_path.c_str());
                             }
                         }
                     }
@@ -956,6 +961,7 @@ VkDescriptorSet VulkanBackend::allocateAndWriteDescriptorSet(
         writes[i].pTexelBufferView = nullptr;
     }
 
+    // vkUpdateDescriptorSets returns void per Vulkan spec — no error check needed
     vkUpdateDescriptorSets(ctx.device, static_cast<uint32_t>(writes.size()),
                           writes.data(), 0, nullptr);
 

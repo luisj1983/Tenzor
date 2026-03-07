@@ -103,6 +103,10 @@ static auto promote_dtype(DType a, DType b) -> DType {
             case DType::Int16:    return 1;
             case DType::Int8:     return 0;
             case DType::UInt8:    return 0;
+            case DType::UInt16:   return 1;
+            case DType::UInt32:   return 1;
+            case DType::UInt64:   return 2;
+            case DType::Bool:     return -1;
             default:              return 0;
         }
     };
@@ -157,7 +161,7 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
         }
     }
 
-    if (root.impl_ && root.impl_->thread_safe_.load(std::memory_order_relaxed)) {
+    if (root.impl_ && root.impl_->thread_safe_.load(std::memory_order_acquire)) {
         std::lock_guard lock(root.impl_->grad_mutex_);
         root.grad() = *gradient;
     } else {
@@ -355,11 +359,8 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                             auto existing_grad = var.grad().value();
                             if (grad_to_apply.dtype() != existing_grad.dtype()) {
                                 DType target = promote_dtype(grad_to_apply.dtype(), existing_grad.dtype());
-                                if (target != existing_grad.dtype()) {
-                                    var.grad() = existing_grad.to(target);
-                                }
+                                existing_grad = existing_grad.to(target);
                                 grad_to_apply = grad_to_apply.to(target);
-                                existing_grad = var.grad().value();
                             }
                             var.grad() = existing_grad + grad_to_apply;
                         } else {
@@ -367,7 +368,7 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                         }
                     };
 
-                    if (var.impl_ && var.impl_->thread_safe_.load(std::memory_order_relaxed)) {
+                    if (var.impl_ && var.impl_->thread_safe_.load(std::memory_order_acquire)) {
                         std::lock_guard lock(var.impl_->grad_mutex_);
                         accumulate();
                     } else {
@@ -492,7 +493,7 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
         if (!roots[i] || !roots[i]->requires_grad()) {
             continue;
         }
-        if (roots[i]->impl_ && roots[i]->impl_->thread_safe_.load(std::memory_order_relaxed)) {
+        if (roots[i]->impl_ && roots[i]->impl_->thread_safe_.load(std::memory_order_acquire)) {
             std::lock_guard lock(roots[i]->impl_->grad_mutex_);
             roots[i]->grad() = gradients[i];
         } else {
@@ -648,11 +649,8 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                             auto existing_grad = var.grad().value();
                             if (grad_to_apply.dtype() != existing_grad.dtype()) {
                                 DType target = promote_dtype(grad_to_apply.dtype(), existing_grad.dtype());
-                                if (target != existing_grad.dtype()) {
-                                    var.grad() = existing_grad.to(target);
-                                }
+                                existing_grad = existing_grad.to(target);
                                 grad_to_apply = grad_to_apply.to(target);
-                                existing_grad = var.grad().value();
                             }
                             var.grad() = existing_grad + grad_to_apply;
                         } else {
@@ -660,7 +658,7 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                         }
                     };
 
-                    if (var.impl_ && var.impl_->thread_safe_.load(std::memory_order_relaxed)) {
+                    if (var.impl_ && var.impl_->thread_safe_.load(std::memory_order_acquire)) {
                         std::lock_guard lock(var.impl_->grad_mutex_);
                         accumulate();
                     } else {

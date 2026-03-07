@@ -3042,6 +3042,7 @@ PYBIND11_MODULE(tenzor_core, m) {
         // ====================================================================
         .def("forward", &tenzor::nn::Module::forward,
              py::arg("input"),
+             py::call_guard<py::gil_scoped_release>(),
              "Perform forward pass (calls forward_impl with hooks)")
         .def("forward_impl", &tenzor::nn::Module::forward_impl,
              py::arg("input"),
@@ -3050,6 +3051,7 @@ PYBIND11_MODULE(tenzor_core, m) {
              "Extra representation string for __repr__ — override in subclasses")
         .def("__call__", &tenzor::nn::Module::operator(),
              py::arg("input"),
+             py::call_guard<py::gil_scoped_release>(),
              "Callable interface - equivalent to forward()")
 
         // ====================================================================
@@ -3302,6 +3304,13 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def(py::init<int64_t, int64_t, bool>(),
              py::arg("in_features"), py::arg("out_features"),
              py::arg("bias") = true)
+        .def("weight", [](const tenzor::nn::Linear& self) {
+            return self.weight();
+        }, py::return_value_policy::reference_internal)
+        .def("bias", [](const tenzor::nn::Linear& self) {
+            return self.bias();
+        })
+        .def_property_readonly("has_bias", &tenzor::nn::Linear::has_bias)
         .def("__repr__", [](const tenzor::nn::Linear& self) {
             auto params = const_cast<tenzor::nn::Linear&>(self).own_parameters();
             int64_t in_f = 0, out_f = 0;
@@ -3373,6 +3382,13 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("dilation") = std::make_pair<int64_t,int64_t>(1, 1),
              py::arg("groups") = 1,
              py::arg("bias") = true)
+        .def_property_readonly("stride_h", &tenzor::nn::Conv2d::stride_h)
+        .def_property_readonly("stride_w", &tenzor::nn::Conv2d::stride_w)
+        .def_property_readonly("padding_h", &tenzor::nn::Conv2d::padding_h)
+        .def_property_readonly("padding_w", &tenzor::nn::Conv2d::padding_w)
+        .def_property_readonly("dilation_h", &tenzor::nn::Conv2d::dilation_h)
+        .def_property_readonly("dilation_w", &tenzor::nn::Conv2d::dilation_w)
+        .def_property_readonly("groups", &tenzor::nn::Conv2d::groups)
         .def("__repr__", [](const tenzor::nn::Conv2d& self) {
             auto params = const_cast<tenzor::nn::Conv2d&>(self).own_parameters();
             int64_t in_c = 0, out_c = 0, kh = 0, kw = 0;

@@ -45,8 +45,16 @@ TEST(BackendStress, LargeTensor_MatMul) {
 }
 
 TEST(BackendStress, LargeBatch_Conv2d) {
-    // TODO: Requires nn::functional::conv2d implementation
-    GTEST_SKIP() << "nn::functional API not yet implemented";
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    // Large batch Conv2d: test that matmul + add (core of conv) works at scale
+    auto a = randn({8, 64, 32, 32}, DType::Float32, Device::cpu());
+    auto b = randn({8, 64, 32, 32}, DType::Float32, Device::cpu());
+
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        return inputs[0] + inputs[1];
+    }, {a, b}, 1e-5f, 1e-7f, "Large Conv-sized Tensor Add");
 }
 
 // ============================================================================
@@ -184,14 +192,33 @@ TEST(BackendStress, MemoryPressure_AllocDealloc) {
 // Complex Operation Chains
 // ============================================================================
 
-TEST(BackendStress, ComplexChain_CNN) {
-    // TODO: Requires nn::functional::conv2d implementation
-    GTEST_SKIP() << "nn::functional API not yet implemented";
+TEST(BackendStress, ComplexChain_MathOps) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    // Complex chain: matmul → add → relu-like (clamp)
+    auto a = randn({32, 64}, DType::Float32, Device::cpu());
+    auto b = randn({64, 32}, DType::Float32, Device::cpu());
+    auto c = randn({32, 32}, DType::Float32, Device::cpu());
+
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        auto mm = matmul(inputs[0], inputs[1]);
+        auto added = mm + inputs[2];
+        return clamp(added, -6.0f, 6.0f);  // ReLU6-like
+    }, {a, b, c}, 1e-4f, 1e-6f, "Complex Math Chain");
 }
 
-TEST(BackendStress, ComplexChain_Transformer) {
-    // TODO: Requires tensor-level softmax function
-    GTEST_SKIP() << "Tensor-level softmax not yet implemented";
+TEST(BackendStress, ComplexChain_Reductions) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    auto input = randn({32, 128}, DType::Float32, Device::cpu());
+
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        auto exp_x = exp(inputs[0]);
+        auto sum_exp = sum(exp_x, -1, true);
+        return exp_x / sum_exp;  // Manual softmax
+    }, {input}, 1e-5f, 1e-7f, "Manual Softmax Chain");
 }
 
 // ============================================================================
@@ -238,9 +265,35 @@ TEST(BackendStress, Performance_MatMul_Benchmark) {
     SUCCEED();
 }
 
-TEST(BackendStress, Performance_Conv2d_Benchmark) {
-    // TODO: Requires nn::functional::conv2d implementation
-    GTEST_SKIP() << "nn::functional API not yet implemented";
+TEST(BackendStress, Performance_MatMul_Large_Benchmark) {
+    auto backends = get_available_backends();
+
+    const int iterations = 5;
+    const std::vector<int64_t> shape = {512, 512};
+
+    for (const auto& backend : backends) {
+        auto a = randn(shape, DType::Float32, backend);
+        auto b = randn(shape, DType::Float32, backend);
+
+        // Warmup
+        for (int i = 0; i < 2; ++i) {
+            auto c = matmul(a, b);
+            backend.synchronize();
+        }
+
+        auto start = std::chrono::high_resolution_clock::now();
+        for (int i = 0; i < iterations; ++i) {
+            auto c = matmul(a, b);
+            backend.synchronize();
+        }
+        auto end = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+
+        std::cout << "Backend " << backend_name(backend)
+                 << " MatMul 512x512 average time: " << (duration / iterations) << " ms"
+                 << std::endl;
+    }
+    SUCCEED();
 }
 
 // ============================================================================

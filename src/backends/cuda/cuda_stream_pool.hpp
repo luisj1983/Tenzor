@@ -121,7 +121,11 @@ public:
         // All streams busy — create a temporary one (rare path)
         cudaStream_t stream;
         cudaSetDevice(device_id);
-        cudaStreamCreate(&stream);
+        auto err = cudaStreamCreate(&stream);
+        if (err != cudaSuccess) {
+            throw std::runtime_error(
+                "Failed to create CUDA stream: " + std::string(cudaGetErrorString(err)));
+        }
         pool.streams.push_back(stream);
         pool.available.push_back(false);
         return stream;

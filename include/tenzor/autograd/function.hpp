@@ -9,6 +9,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <vector>
 #include <atomic>
 #include "../core/tensor.hpp"
@@ -171,7 +172,11 @@ public:
      *
      * Called after backward() to release GPU memory held by saved tensors.
      */
-    void release_saved_tensors() { saved_tensors_.clear(); }
+    void release_saved_tensors() {
+        std::lock_guard lock(offload_mutex_);
+        saved_tensors_.clear();
+        tensors_offloaded_.store(false, std::memory_order_relaxed);
+    }
 
     /**
      * @brief Validate that saved tensors have not been modified in-place.
@@ -241,7 +246,8 @@ protected:
     mutable std::vector<uint64_t> saved_versions_;                  ///< Tensor versions at save time (for in-place detection)
     mutable std::vector<Variable> saved_variables_;                 ///< Variables saved for backward (preserves graph for create_graph)
     mutable Device offloaded_device_{Device::cpu()};                ///< Original device when offloaded
-    mutable bool tensors_offloaded_{false};                         ///< Whether saved tensors are on CPU due to offloading
+    mutable std::atomic<bool> tensors_offloaded_{false};            ///< Whether saved tensors are on CPU due to offloading
+    mutable std::mutex offload_mutex_;                              ///< Guards offload/reload of saved tensors
     std::vector<std::shared_ptr<Function>> next_functions_;         ///< Chained gradient functions
     std::vector<Variable> input_variables_;                          ///< Input variables for gradient accumulation (stored by value)
 };

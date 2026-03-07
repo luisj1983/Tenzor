@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <cmath>
+#include <cstring>
 
 using namespace tenzor;
 
@@ -138,15 +139,21 @@ TEST(UtilityOpsTest, ClampOperation) {
 
     // Create tensor with values: -5, -3, -1, 1, 3, 5
     std::vector<float> data = {-5.0f, -3.0f, -1.0f, 1.0f, 3.0f, 5.0f};
-    auto input = tenzor::zeros({6}, DType::Float32, device);
-    // TODO: Fill tensor with data
+    auto input = tenzor::zeros({6}, DType::Float32, Device::cpu());
+    std::memcpy(input.data<float>(), data.data(), data.size() * sizeof(float));
+    input = input.to(device);
 
     auto result = tenzor::clamp(input, -2.0f, 2.0f);
     auto result_cpu = result.to(Device::cpu());
 
     // Expected: [-2, -2, -1, 1, 2, 2]
-    // This test needs proper tensor initialization
-    GTEST_SKIP() << "Clamp test requires proper tensor initialization";
+    auto* ptr = result_cpu.data<float>();
+    EXPECT_FLOAT_EQ(ptr[0], -2.0f);
+    EXPECT_FLOAT_EQ(ptr[1], -2.0f);
+    EXPECT_FLOAT_EQ(ptr[2], -1.0f);
+    EXPECT_FLOAT_EQ(ptr[3], 1.0f);
+    EXPECT_FLOAT_EQ(ptr[4], 2.0f);
+    EXPECT_FLOAT_EQ(ptr[5], 2.0f);
 }
 
 TEST(UtilityOpsTest, SignOperation) {

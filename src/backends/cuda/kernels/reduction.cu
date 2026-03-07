@@ -125,7 +125,7 @@ __global__ void argmax_final_kernel(const T* input, const int64_t* block_indices
         best_idx = block_indices[tid];
         best_val = input[best_idx];
     } else {
-        best_val = -FLT_MAX;
+        best_val = sentinel_lowest<T>();
         best_idx = 0;
     }
 
@@ -171,7 +171,7 @@ __global__ void argmin_final_kernel(const T* input, const int64_t* block_indices
         best_idx = block_indices[tid];
         best_val = input[best_idx];
     } else {
-        best_val = FLT_MAX;
+        best_val = sentinel_max<T>();
         best_idx = 0;
     }
 
@@ -468,7 +468,7 @@ __global__ void max_reduce_kernel(const T* input, T* output, int64_t n) {
     __syncthreads();
 
     // Block-level reduction
-    for (int stride = blockDim.x / 2; stride > WARP_SIZE; stride >>= 1) {
+    for (int stride = blockDim.x / 2; stride >= WARP_SIZE; stride >>= 1) {
         if (tid < stride) {
             T other = shared[tid + stride];
             shared[tid] = (shared[tid] > other) ? shared[tid] : other;
@@ -479,13 +479,6 @@ __global__ void max_reduce_kernel(const T* input, T* output, int64_t n) {
     // Warp-level reduction
     if (tid < WARP_SIZE) {
         T val = shared[tid];
-        #pragma unroll
-        for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
-            if (tid + offset < blockDim.x) {
-                T other = shared[tid + offset];
-                val = (val > other) ? val : other;
-            }
-        }
         val = warp_reduce_max(val);
 
         if (tid == 0) {
@@ -515,7 +508,7 @@ __global__ void min_reduce_kernel(const T* input, T* output, int64_t n) {
     __syncthreads();
 
     // Block-level reduction
-    for (int stride = blockDim.x / 2; stride > WARP_SIZE; stride >>= 1) {
+    for (int stride = blockDim.x / 2; stride >= WARP_SIZE; stride >>= 1) {
         if (tid < stride) {
             T other = shared[tid + stride];
             shared[tid] = (shared[tid] < other) ? shared[tid] : other;
@@ -526,13 +519,6 @@ __global__ void min_reduce_kernel(const T* input, T* output, int64_t n) {
     // Warp-level reduction
     if (tid < WARP_SIZE) {
         T val = shared[tid];
-        #pragma unroll
-        for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
-            if (tid + offset < blockDim.x) {
-                T other = shared[tid + offset];
-                val = (val < other) ? val : other;
-            }
-        }
         val = warp_reduce_min(val);
 
         if (tid == 0) {
@@ -566,7 +552,7 @@ __global__ void max_reduce_kernel_half(const __half* input, __half* output, int6
     __syncthreads();
 
     // Block-level reduction
-    for (int stride = blockDim.x / 2; stride > WARP_SIZE; stride >>= 1) {
+    for (int stride = blockDim.x / 2; stride >= WARP_SIZE; stride >>= 1) {
         if (tid < stride) {
             __half other = shared[tid + stride];
             shared[tid] = cuda_max_val(shared[tid], other);
@@ -577,13 +563,6 @@ __global__ void max_reduce_kernel_half(const __half* input, __half* output, int6
     // Warp-level reduction
     if (tid < WARP_SIZE) {
         __half val = shared[tid];
-        #pragma unroll
-        for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
-            if (tid + offset < blockDim.x) {
-                __half other = shared[tid + offset];
-                val = cuda_max_val(val, other);
-            }
-        }
         val = warp_reduce_max(val);
 
         if (tid == 0) {
@@ -613,7 +592,7 @@ __global__ void min_reduce_kernel_half(const __half* input, __half* output, int6
     __syncthreads();
 
     // Block-level reduction
-    for (int stride = blockDim.x / 2; stride > WARP_SIZE; stride >>= 1) {
+    for (int stride = blockDim.x / 2; stride >= WARP_SIZE; stride >>= 1) {
         if (tid < stride) {
             __half other = shared[tid + stride];
             shared[tid] = cuda_min_val(shared[tid], other);
@@ -624,13 +603,6 @@ __global__ void min_reduce_kernel_half(const __half* input, __half* output, int6
     // Warp-level reduction
     if (tid < WARP_SIZE) {
         __half val = shared[tid];
-        #pragma unroll
-        for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
-            if (tid + offset < blockDim.x) {
-                __half other = shared[tid + offset];
-                val = cuda_min_val(val, other);
-            }
-        }
         val = warp_reduce_min(val);
 
         if (tid == 0) {
@@ -664,7 +636,7 @@ __global__ void max_reduce_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16
     __syncthreads();
 
     // Block-level reduction
-    for (int stride = blockDim.x / 2; stride > WARP_SIZE; stride >>= 1) {
+    for (int stride = blockDim.x / 2; stride >= WARP_SIZE; stride >>= 1) {
         if (tid < stride) {
             __nv_bfloat16 other = shared[tid + stride];
             shared[tid] = cuda_max_val(shared[tid], other);
@@ -675,13 +647,6 @@ __global__ void max_reduce_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16
     // Warp-level reduction
     if (tid < WARP_SIZE) {
         __nv_bfloat16 val = shared[tid];
-        #pragma unroll
-        for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
-            if (tid + offset < blockDim.x) {
-                __nv_bfloat16 other = shared[tid + offset];
-                val = cuda_max_val(val, other);
-            }
-        }
         val = warp_reduce_max(val);
 
         if (tid == 0) {
@@ -711,7 +676,7 @@ __global__ void min_reduce_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16
     __syncthreads();
 
     // Block-level reduction
-    for (int stride = blockDim.x / 2; stride > WARP_SIZE; stride >>= 1) {
+    for (int stride = blockDim.x / 2; stride >= WARP_SIZE; stride >>= 1) {
         if (tid < stride) {
             __nv_bfloat16 other = shared[tid + stride];
             shared[tid] = cuda_min_val(shared[tid], other);
@@ -722,13 +687,6 @@ __global__ void min_reduce_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16
     // Warp-level reduction
     if (tid < WARP_SIZE) {
         __nv_bfloat16 val = shared[tid];
-        #pragma unroll
-        for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
-            if (tid + offset < blockDim.x) {
-                __nv_bfloat16 other = shared[tid + offset];
-                val = cuda_min_val(val, other);
-            }
-        }
         val = warp_reduce_min(val);
 
         if (tid == 0) {

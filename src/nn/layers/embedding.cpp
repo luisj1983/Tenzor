@@ -473,7 +473,8 @@ auto Embedding::initialize_weights() -> void {
     // Initialize with Normal(0, 1)
     weight_ = Variable(randn({num_embeddings_, embedding_dim_}), true);
 
-    // Set padding_idx embedding to zeros if specified (dtype-aware)
+    // Padding embeddings are always zeroed: both at init and after each backward pass.
+    // The gradient for padding_idx is explicitly zeroed in EmbeddingBackward.
     if (padding_idx_ >= 0) {
         DType weight_dtype = weight_.tensor().dtype();
         int64_t row_offset = padding_idx_ * embedding_dim_;

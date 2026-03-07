@@ -646,6 +646,27 @@ __global__ void sum_bias_grad_kernel_f16(
     }
 }
 
+// Float64 bias gradient kernel
+__global__ void sum_bias_grad_kernel_f64(
+    const double* grad_output,
+    double* grad_bias,
+    int64_t batch,
+    int64_t channels,
+    int64_t spatial_size
+) {
+    int64_t c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c < channels) {
+        double sum = 0.0;
+        for (int64_t b = 0; b < batch; ++b) {
+            for (int64_t s = 0; s < spatial_size; ++s) {
+                int64_t idx = b * (channels * spatial_size) + c * spatial_size + s;
+                sum += grad_output[idx];
+            }
+        }
+        grad_bias[c] = sum;
+    }
+}
+
 // ============================================================================
 // FP16 Tensor Core Matmul (Forward Declaration)
 // ============================================================================
@@ -1384,17 +1405,96 @@ auto conv2d_backward_kernel(
                                    compute_grad_input, compute_grad_weight, compute_grad_bias, stream);
     }
 
-    // Float64 backward requires cuDNN — the im2col + cublasDgemm fallback is only
-    // implemented for the forward path.  Backward needs col2im and transposed GEMM
-    // variants that are not yet ported to Float64.
-    // TODO: Implement Float64 backward using im2col/col2im + cublasDgemm to match
-    //       the Float64 forward fallback path added above.
+    // Float64 backward: mirror Float32 path with cublasDgemm + double types
     if (input.dtype() == DType::Float64) {
-        throw std::runtime_error(
-            "conv2d_backward_kernel: Float64 backward is not yet supported without cuDNN. "
-            "The Float64 forward path uses im2col + cublasDgemm, but the backward pass "
-            "requires col2im + transposed GEMM variants that have not been ported. "
-            "Please enable cuDNN for Float64 convolution training, or use Float32.");
+        Tensor grad_input({batch, in_channels, height, width}, DType::Float64, input.device());
+        Tensor grad_weight({out_channels, in_channels_per_group, kernel_h, kernel_w}, DType::Float64, weight.device());
+        Tensor grad_bias({out_channels}, DType::Float64, weight.device());
+
+        if (compute_grad_input) {
+            TENZOR_CUDA_CHECK(cudaMemsetAsync(grad_input.data<double>(), 0, grad_input.numel() * sizeof(double), stream));
+        }
+        if (compute_grad_weight) {
+            TENZOR_CUDA_CHECK(cudaMemsetAsync(grad_weight.data<double>(), 0, grad_weight.numel() * sizeof(double), stream));
+        }
+        if (compute_grad_bias) {
+            TENZOR_CUDA_CHECK(cudaMemsetAsync(grad_bias.data<double>(), 0, grad_bias.numel() * sizeof(double), stream));
+        }
+
+        cublasHandle_t cublas_handle = CuBLASHandlePool::get(stream);
+        int64_t out_channels_per_group = out_channels / groups;
+        int64_t col_rows = batch * out_h * out_w;
+        int64_t col_cols = in_channels_per_group * kernel_h * kernel_w;
+
+        for (int64_t g = 0; g < groups; ++g) {
+            int64_t in_start = g * in_channels_per_group;
+            int64_t out_start = g * out_channels_per_group;
+
+            if (compute_grad_input) {
+                backend::CachedMemoryGuard grad_col_guard(col_rows * col_cols * sizeof(double));
+                auto* grad_col = static_cast<double*>(grad_col_guard.get());
+
+                int64_t M = col_rows, K = out_channels_per_group, N = col_cols;
+                double alpha = 1.0, beta = 0.0;
+
+                const double* grad_out_ptr = grad_output.data<double>() + out_start * out_h * out_w;
+                const double* weight_ptr = weight.data<double>() + out_start * in_channels_per_group * kernel_h * kernel_w;
+
+                TENZOR_CUBLAS_CHECK(cublasDgemm(
+                    cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                    N, M, K, &alpha, weight_ptr, N, grad_out_ptr, K, &beta, grad_col, N));
+
+                dim3 grid, block;
+                int64_t total_elements = batch * out_h * out_w * in_channels_per_group * kernel_h * kernel_w;
+                compute_launch_config_1d(total_elements, grid, block);
+
+                double* grad_input_ptr = grad_input.data<double>() + in_start * height * width;
+                col2im_kernel<double><<<grid, block, 0, stream>>>(
+                    grad_col, grad_input_ptr, batch, in_channels_per_group,
+                    height, width, kernel_h, kernel_w, stride, padding, dilation, out_h, out_w);
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
+            }
+
+            if (compute_grad_weight) {
+                backend::CachedMemoryGuard input_col_guard(col_rows * col_cols * sizeof(double));
+                auto* input_col = static_cast<double*>(input_col_guard.get());
+
+                dim3 grid, block;
+                int64_t total_elements = batch * out_h * out_w * in_channels_per_group * kernel_h * kernel_w;
+                compute_launch_config_1d(total_elements, grid, block);
+
+                const double* input_ptr = input.data<double>() + in_start * height * width;
+                im2col_kernel<double><<<grid, block, 0, stream>>>(
+                    input_ptr, input_col, batch, in_channels_per_group,
+                    height, width, kernel_h, kernel_w, stride, padding, dilation, out_h, out_w);
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+                int64_t M = out_channels_per_group, K = col_rows, N = col_cols;
+                double alpha = 1.0, beta = 0.0;
+
+                const double* grad_out_ptr = grad_output.data<double>() + out_start * out_h * out_w;
+                double* grad_weight_ptr = grad_weight.data<double>() + out_start * in_channels_per_group * kernel_h * kernel_w;
+
+                TENZOR_CUBLAS_CHECK(cublasDgemm(
+                    cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                    N, M, K, &alpha, input_col, N, grad_out_ptr, out_channels_per_group, &beta, grad_weight_ptr, N));
+            }
+        }
+
+        if (compute_grad_bias) {
+            int64_t spatial_size = out_h * out_w;
+            const double* grad_out_data = grad_output.data<double>();
+            double* grad_bias_data = grad_bias.data<double>();
+
+            // Per-channel sum over batch and spatial dims (same pattern as Float32)
+            dim3 grid, block;
+            compute_launch_config_1d(out_channels, grid, block);
+            sum_bias_grad_kernel_f64<<<grid, block, 0, stream>>>(
+                grad_out_data, grad_bias_data, batch, out_channels, spatial_size);
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
+        }
+
+        return std::make_tuple(grad_input, grad_weight, grad_bias);
     }
 
     // Initialize outputs (Float32 path)

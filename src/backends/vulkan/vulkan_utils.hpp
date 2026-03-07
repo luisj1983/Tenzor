@@ -668,8 +668,8 @@ private:
  * @return Optimal workgroup size (always a power of 2, at most 1024)
  */
 inline uint32_t optimalWorkgroupSize(VkPhysicalDevice physicalDevice) {
-    static VkPhysicalDevice cachedDevice = VK_NULL_HANDLE;
-    static uint32_t cachedResult = 0;
+    thread_local VkPhysicalDevice cachedDevice = VK_NULL_HANDLE;
+    thread_local uint32_t cachedResult = 0;
 
     if (cachedDevice == physicalDevice && cachedResult != 0) {
         return cachedResult;

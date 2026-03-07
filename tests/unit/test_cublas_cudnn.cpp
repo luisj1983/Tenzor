@@ -6,7 +6,7 @@
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
 #include <cmath>
-#include "tenzor/core/tensor.hpp"
+#include <tenzor/tenzor.hpp>
 
 using namespace tenzor;
 
@@ -164,13 +164,24 @@ TEST_F(CuBLAScuDNNTest, Conv2d_Forward_Simple) {
     Tensor input = Tensor::ones({1, 1, 5, 5}, DType::Float32, device);
     Tensor weight = Tensor::ones({1, 1, 3, 3}, DType::Float32, device);
 
-    // Each output element should be 9.0 (sum of 3x3 = 9)
-    // TODO: Call conv2d when implemented
-    // Tensor output = conv2d(input, weight, nullptr, 1, 0, 1, 1);
+    // Use nn::Conv2d for forward
+    nn::Conv2d conv(1, 1, 3, 1, 0, 1, 1, false);
+    // Set weight to ones
+    auto params = conv.own_parameters();
+    params[0]->tensor() = weight.to(Device::cpu());
+    conv.to(device);
 
-    // For now, just check tensors are created correctly
-    EXPECT_EQ(input.device().type, Device::Type::CUDA);
-    EXPECT_EQ(weight.device().type, Device::Type::CUDA);
+    auto output = conv.forward(Variable(input, false)).tensor();
+
+    // Output shape: (1, 1, 3, 3) for 5x5 input with 3x3 kernel, no padding
+    EXPECT_EQ(output.shape()[0], 1);
+    EXPECT_EQ(output.shape()[1], 1);
+    EXPECT_EQ(output.shape()[2], 3);
+    EXPECT_EQ(output.shape()[3], 3);
+
+    // Each output element should be ~9.0 (sum of 3x3 ones)
+    auto output_cpu = output.to(Device::cpu());
+    EXPECT_NEAR(output_cpu.data<float>()[0], 9.0f, 0.1f);
 }
 
 TEST_F(CuBLAScuDNNTest, Conv2d_Forward_WithPadding) {
@@ -184,12 +195,15 @@ TEST_F(CuBLAScuDNNTest, Conv2d_Forward_WithPadding) {
     Tensor weight = Tensor::randn({16, 3, 3, 3}, DType::Float32, device);
     Tensor bias = Tensor::randn({16}, DType::Float32, device);
 
-    // TODO: Call conv2d when implemented
-    // Tensor output = conv2d(input, weight, &bias, 1, 1, 1, 1);
+    nn::Conv2d conv(3, 16, 3, 1, 1);
+    conv.to(device);
+    auto output = conv.forward(Variable(input, false)).tensor();
 
-    // Check shapes
-    EXPECT_EQ(input.shape()[0], 2);
-    EXPECT_EQ(input.shape()[1], 3);
+    // Output shape: (2, 16, 28, 28) with padding=1
+    EXPECT_EQ(output.shape()[0], 2);
+    EXPECT_EQ(output.shape()[1], 16);
+    EXPECT_EQ(output.shape()[2], 28);
+    EXPECT_EQ(output.shape()[3], 28);
 }
 
 TEST_F(CuBLAScuDNNTest, Conv2d_Backward_GradientCheck) {
@@ -226,11 +240,15 @@ TEST_F(CuBLAScuDNNTest, BatchNorm2d_Forward_Inference) {
     Tensor running_mean = Tensor::zeros({8}, DType::Float32, device);
     Tensor running_var = Tensor::ones({8}, DType::Float32, device);
 
-    // TODO: Call batchnorm when implemented
-    // Tensor output = batchnorm2d(input, scale, bias, running_mean, running_var, false);
+    nn::BatchNorm2d bn(8);
+    bn.eval();  // Inference mode
+    bn.to(device);
 
-    // For now, check tensor properties
-    EXPECT_EQ(input.shape()[1], 8);  // Number of channels
+    auto output = bn.forward(Variable(input, false)).tensor();
+    EXPECT_EQ(output.shape()[0], 4);
+    EXPECT_EQ(output.shape()[1], 8);
+    EXPECT_EQ(output.shape()[2], 16);
+    EXPECT_EQ(output.shape()[3], 16);
 }
 
 TEST_F(CuBLAScuDNNTest, BatchNorm2d_Forward_Training) {
@@ -243,26 +261,32 @@ TEST_F(CuBLAScuDNNTest, BatchNorm2d_Forward_Training) {
     Tensor running_mean = Tensor::zeros({16}, DType::Float32, device);
     Tensor running_var = Tensor::ones({16}, DType::Float32, device);
 
-    // TODO: Call batchnorm in training mode
-    // auto [output, saved_mean, saved_var] = batchnorm2d_training(input, scale, bias, running_mean, running_var);
+    nn::BatchNorm2d bn(16);
+    bn.train();  // Training mode
+    bn.to(device);
 
-    EXPECT_EQ(scale.shape()[0], 16);
+    auto output = bn.forward(Variable(input, true)).tensor();
+    EXPECT_EQ(output.shape()[0], 8);
+    EXPECT_EQ(output.shape()[1], 16);
+    EXPECT_EQ(output.shape()[2], 32);
+    EXPECT_EQ(output.shape()[3], 32);
 }
 
 TEST_F(CuBLAScuDNNTest, BatchNorm2d_Backward) {
     Device device = Device::cuda(0);
 
-    // Gradient computation for batch normalization
-    Tensor grad_output = Tensor::randn({4, 8, 16, 16}, DType::Float32, device);
-    Tensor input = Tensor::randn({4, 8, 16, 16}, DType::Float32, device);
-    Tensor scale = Tensor::ones({8}, DType::Float32, device);
-    Tensor saved_mean = Tensor::zeros({8}, DType::Float32, device);
-    Tensor saved_var = Tensor::ones({8}, DType::Float32, device);
+    nn::BatchNorm2d bn(8);
+    bn.train();
+    bn.to(device);
 
-    // TODO: Call batchnorm backward
-    // auto [grad_input, grad_scale, grad_bias] = batchnorm2d_backward(grad_output, input, scale, saved_mean, saved_var);
+    auto input = Variable(randn({4, 8, 16, 16}, DType::Float32, device), true);
+    auto output = bn.forward(input);
 
-    EXPECT_TRUE(true);  // Placeholder
+    // Backward pass
+    output.backward();
+    EXPECT_TRUE(input.has_grad());
+    EXPECT_EQ(input.grad().value().shape()[0], 4);
+    EXPECT_EQ(input.grad().value().shape()[1], 8);
 }
 
 // ============================================================================
@@ -275,16 +299,21 @@ TEST_F(CuBLAScuDNNTest, MultipleOperations_Pipeline) {
     // Test a sequence of operations (simulating a small neural network)
     Tensor x = Tensor::randn({16, 32, 28, 28}, DType::Float32, device);
 
-    // Conv -> BatchNorm -> ReLU -> MaxPool -> FC -> Softmax
-    // This tests that multiple cuDNN/cuBLAS operations work together
+    // Conv -> BatchNorm -> ReLU pipeline
+    nn::Conv2d conv(32, 64, 3, 1, 1);
+    nn::BatchNorm2d bn(64);
+    conv.to(device);
+    bn.to(device);
 
-    // TODO: Implement full pipeline when all operations are ready
-    // For now, just test basic flow
-    Tensor w1 = Tensor::randn({64, 32, 3, 3}, DType::Float32, device);
+    auto input_var = Variable(x, false);
+    auto conv_out = conv.forward(input_var);
+    auto bn_out = bn.forward(conv_out);
+    auto relu_out = Variable(relu(bn_out.tensor()), false);
 
-    // Just verify we can create the tensors
-    EXPECT_EQ(x.device().type, Device::Type::CUDA);
-    EXPECT_EQ(w1.device().type, Device::Type::CUDA);
+    EXPECT_EQ(relu_out.tensor().shape()[0], 16);
+    EXPECT_EQ(relu_out.tensor().shape()[1], 64);
+    EXPECT_EQ(relu_out.tensor().shape()[2], 28);
+    EXPECT_EQ(relu_out.tensor().shape()[3], 28);
 }
 
 TEST_F(CuBLAScuDNNTest, MixedPrecision_FP16_FP32) {
@@ -304,9 +333,14 @@ TEST_F(CuBLAScuDNNTest, MixedPrecision_FP16_FP32) {
     // Operations in FP16
     Tensor w_fp16 = Tensor::randn({32, 16, 3, 3}, DType::Float16, device);
 
-    // TODO: Conv in FP16, convert back to FP32
-    // Tensor y_fp16 = conv2d(x_fp16, w_fp16, ...);
-    // Tensor y_fp32 = y_fp16.to(DType::Float32);
+    // Conv in FP16 via nn::Conv2d
+    nn::Conv2d conv_fp16(16, 32, 3, 1, 1);
+    conv_fp16.to(DType::Float16);
+    conv_fp16.to(device);
+    auto y_fp16 = conv_fp16.forward(Variable(x_fp16, false)).tensor();
+    Tensor y_fp32 = y_fp16.to(DType::Float32);
+    EXPECT_EQ(y_fp32.dtype(), DType::Float32);
+    EXPECT_EQ(y_fp32.shape()[1], 32);
 
     // Verify conversion works
     Tensor back_to_fp32 = x_fp16.to(DType::Float32);

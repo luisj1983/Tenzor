@@ -1673,7 +1673,14 @@ auto sub_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const Float16* a_data = a.data<Float16>();
             const Float16* b_data = b.data<Float16>();
             Float16* c_data = result.data<Float16>();
-            detail::sub_scalar(a_data, b_data, c_data, n);
+
+            // Use F16C SIMD for Float16 sub
+            float16_simd::sub_f16(
+                reinterpret_cast<const uint16_t*>(a_data),
+                reinterpret_cast<const uint16_t*>(b_data),
+                reinterpret_cast<uint16_t*>(c_data),
+                n
+            );
 
         } else if (a.dtype() == DType::Float32) {
             const float* a_data = a.data<float>();

@@ -358,6 +358,8 @@ __global__ void scatter_values_kernel_impl(
         int64_t index_offset = outer_idx * index_dim_size * inner_size +
                                index_pos * inner_size + inner_idx;
         int64_t scatter_idx = static_cast<int64_t>(indices[index_offset]);
+        if (scatter_idx < 0) scatter_idx += dim_size;
+        scatter_idx = max(int64_t(0), min(scatter_idx, dim_size - 1));
 
         int64_t output_offset = outer_idx * dim_size * inner_size +
                                 scatter_idx * inner_size +
@@ -556,6 +558,8 @@ __global__ void scatter_add_kernel_impl(
         int64_t index_offset = outer_idx * index_dim_size * inner_size +
                                index_pos * inner_size + inner_idx;
         int64_t scatter_idx = static_cast<int64_t>(indices[index_offset]);
+        if (scatter_idx < 0) scatter_idx += dim_size;
+        scatter_idx = max(int64_t(0), min(scatter_idx, dim_size - 1));
 
         int64_t output_offset = outer_idx * dim_size * inner_size +
                                 scatter_idx * inner_size +

@@ -601,6 +601,9 @@ private:
  *
  * Variable z = x * 3.0f;  // Gradient tracking restored
  * @endcode
+ *
+ * @warning Thread-local — does NOT propagate to spawned threads.
+ * Each thread starts with gradients enabled regardless of parent thread state.
  */
 class NoGradGuard {
 public:
@@ -662,6 +665,8 @@ auto set_creating_graph(bool creating) -> void;
  * }
  * // create_graph mode restored to previous state
  * @endcode
+ *
+ * @warning Thread-local — does NOT propagate to spawned threads.
  */
 class CreateGraphGuard {
 public:

@@ -348,7 +348,7 @@ static BroadcastMeta make_broadcast_meta(
 // Generic broadcast kernel - works for all binary operations
 template<typename T, typename Op>
 __global__ void broadcast_kernel(
-    const T* a, const T* b, T* c,
+    const T* __restrict__ a, const T* __restrict__ b, T* __restrict__ c,
     BroadcastMeta meta, int64_t ndim, int64_t n, Op op) {
 
     CUDA_KERNEL_LOOP(out_idx, n) {
