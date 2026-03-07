@@ -54,8 +54,8 @@ TEST_F(OptimizersExtendedTest, RMSpropBasicStep) {
     auto optimizer = RMSprop(params_, 0.01, 0.99, 1e-8);
 
     // Set gradients
-    param1_->grad() = ones({2, 3});
-    param2_->grad() = ones({4});
+    param1_->set_grad(ones({2, 3}));
+    param2_->set_grad(ones({4}));
 
     // Get initial parameter values
     auto param1_before = param1_->tensor().data<float>()[0];
@@ -80,8 +80,8 @@ TEST_F(OptimizersExtendedTest, RMSpropWithMomentum) {
     auto optimizer = RMSprop(params_, 0.01, 0.99, 1e-8, 0.0, 0.9);
 
     // Set gradients
-    param1_->grad() = ones({2, 3});
-    param2_->grad() = ones({4});
+    param1_->set_grad(ones({2, 3}));
+    param2_->set_grad(ones({4}));
 
     // First step
     optimizer.step();
@@ -89,8 +89,8 @@ TEST_F(OptimizersExtendedTest, RMSpropWithMomentum) {
 
     // Second step with same gradient
     optimizer.zero_grad();
-    param1_->grad() = ones({2, 3});
-    param2_->grad() = ones({4});
+    param1_->set_grad(ones({2, 3}));
+    param2_->set_grad(ones({4}));
     optimizer.step();
     auto param1_step2 = param1_->tensor().data<float>()[0];
 
@@ -105,8 +105,8 @@ TEST_F(OptimizersExtendedTest, RMSpropCentered) {
     auto optimizer = RMSprop(params_, 0.01, 0.99, 1e-8, 0.0, 0.0, true);
 
     // Set gradients
-    param1_->grad() = ones({2, 3});
-    param2_->grad() = ones({4});
+    param1_->set_grad(ones({2, 3}));
+    param2_->set_grad(ones({4}));
 
     // Should work without errors
     EXPECT_NO_THROW(optimizer.step());
@@ -132,8 +132,8 @@ TEST_F(OptimizersExtendedTest, RMSpropStateDictSaveLoad) {
     // Run optimizer1 for a few steps
     for (int i = 0; i < 3; ++i) {
         optimizer1.zero_grad();
-        param1_->grad() = ones({2, 3});
-        param2_->grad() = ones({4});
+        param1_->set_grad(ones({2, 3}));
+        param2_->set_grad(ones({4}));
         optimizer1.step();
     }
 
@@ -160,8 +160,8 @@ TEST_F(OptimizersExtendedTest, AdagradBasicStep) {
     auto optimizer = Adagrad(params_, 0.01);
 
     // Set gradients
-    param1_->grad() = ones({2, 3});
-    param2_->grad() = ones({4});
+    param1_->set_grad(ones({2, 3}));
+    param2_->set_grad(ones({4}));
 
     auto param1_before = param1_->tensor().data<float>()[0];
 
@@ -178,16 +178,16 @@ TEST_F(OptimizersExtendedTest, AdagradAccumulation) {
     auto optimizer = Adagrad(params_, 0.1);
 
     // First step
-    param1_->grad() = ones({2, 3});
-    param2_->grad() = ones({4});
+    param1_->set_grad(ones({2, 3}));
+    param2_->set_grad(ones({4}));
     optimizer.step();
     auto param1_step1 = param1_->tensor().data<float>()[0];
     float delta1 = 1.0f - param1_step1;
 
     // Second step
     optimizer.zero_grad();
-    param1_->grad() = ones({2, 3});
-    param2_->grad() = ones({4});
+    param1_->set_grad(ones({2, 3}));
+    param2_->set_grad(ones({4}));
     optimizer.step();
     auto param1_step2 = param1_->tensor().data<float>()[0];
     float delta2 = param1_step1 - param1_step2;
@@ -203,8 +203,8 @@ TEST_F(OptimizersExtendedTest, AdagradLearningRateDecay) {
     EXPECT_FLOAT_EQ(optimizer.get_lr(), 0.1);
 
     // After first step
-    param1_->grad() = ones({2, 3});
-    param2_->grad() = ones({4});
+    param1_->set_grad(ones({2, 3}));
+    param2_->set_grad(ones({4}));
     optimizer.step();
 
     // Learning rate should decay
@@ -214,8 +214,8 @@ TEST_F(OptimizersExtendedTest, AdagradLearningRateDecay) {
 TEST_F(OptimizersExtendedTest, AdagradInitialAccumulator) {
     auto optimizer = Adagrad(params_, 0.01, 0.0, 0.0, /*initial_accumulator=*/0.1);
 
-    param1_->grad() = ones({2, 3});
-    param2_->grad() = ones({4});
+    param1_->set_grad(ones({2, 3}));
+    param2_->set_grad(ones({4}));
 
     // Should work without errors
     EXPECT_NO_THROW(optimizer.step());
@@ -228,8 +228,8 @@ TEST_F(OptimizersExtendedTest, AdagradStateDictSaveLoad) {
     // Run optimizer1
     for (int i = 0; i < 3; ++i) {
         optimizer1.zero_grad();
-        param1_->grad() = ones({2, 3});
-        param2_->grad() = ones({4});
+        param1_->set_grad(ones({2, 3}));
+        param2_->set_grad(ones({4}));
         optimizer1.step();
     }
 
@@ -256,8 +256,8 @@ TEST_F(OptimizersExtendedTest, AdadeltaBasicStep) {
     auto optimizer = Adadelta(params_, 1.0, 0.9, 1e-6);
 
     // Set gradients
-    param1_->grad() = ones({2, 3});
-    param2_->grad() = ones({4});
+    param1_->set_grad(ones({2, 3}));
+    param2_->set_grad(ones({4}));
 
     auto param1_before = param1_->tensor().data<float>()[0];
 
@@ -276,8 +276,8 @@ TEST_F(OptimizersExtendedTest, AdadeltaNoLearningRateNeeded) {
 
     EXPECT_FLOAT_EQ(optimizer.get_lr(), 1.0);
 
-    param1_->grad() = ones({2, 3});
-    param2_->grad() = ones({4});
+    param1_->set_grad(ones({2, 3}));
+    param2_->set_grad(ones({4}));
 
     // Should work with default parameters
     EXPECT_NO_THROW(optimizer.step());
@@ -292,8 +292,8 @@ TEST_F(OptimizersExtendedTest, AdadeltaAdaptiveRate) {
 
     for (int i = 0; i < 5; ++i) {
         optimizer.zero_grad();
-        param1_->grad() = ones({2, 3});
-        param2_->grad() = ones({4});
+        param1_->set_grad(ones({2, 3}));
+        param2_->set_grad(ones({4}));
         optimizer.step();
 
         float curr_val = param1_->tensor().data<float>()[0];
@@ -314,8 +314,8 @@ TEST_F(OptimizersExtendedTest, AdadeltaStateDictSaveLoad) {
     // Run optimizer1
     for (int i = 0; i < 3; ++i) {
         optimizer1.zero_grad();
-        param1_->grad() = ones({2, 3});
-        param2_->grad() = ones({4});
+        param1_->set_grad(ones({2, 3}));
+        param2_->set_grad(ones({4}));
         optimizer1.step();
     }
 
@@ -354,7 +354,7 @@ TEST_F(OptimizersExtendedTest, RMSpropConvergence) {
         auto grad_ptr = grad_tensor.data<float>();
         grad_ptr[0] = 2.0f * (x - 3.0f);
 
-        param->grad() = grad_tensor;
+        param->set_grad(grad_tensor);
         optimizer.step();
     }
 
@@ -377,7 +377,7 @@ TEST_F(OptimizersExtendedTest, AdagradConvergence) {
         auto grad_ptr = grad_tensor.data<float>();
         grad_ptr[0] = 2.0f * (x - 3.0f);
 
-        param->grad() = grad_tensor;
+        param->set_grad(grad_tensor);
         optimizer.step();
     }
 
@@ -401,7 +401,7 @@ TEST_F(OptimizersExtendedTest, AdadeltaConvergence) {
         auto grad_ptr = grad_tensor.data<float>();
         grad_ptr[0] = 2.0f * (x - 3.0f);
 
-        param->grad() = grad_tensor;
+        param->set_grad(grad_tensor);
         optimizer.step();
     }
 

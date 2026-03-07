@@ -110,7 +110,7 @@ auto OffloadContext::get_stats() -> OffloadStats {
         auto all_params = model_.parameters();
         for (auto& param_ptr : all_params) {
             if (param_ptr && param_ptr->grad().has_value()) {
-                Tensor* grad_tensor_ptr = &(param_ptr->grad().value());
+                Tensor* grad_tensor_ptr = &(param_ptr->mutable_grad().value());
 
                 // Track gradient if not already tracked
                 {
@@ -570,7 +570,7 @@ auto OffloadContext::backward_pre_hook(Module* layer) -> void {
             for (auto& param_ptr : params) {
                 if (!param_ptr || !param_ptr->grad().has_value()) continue;
 
-                Tensor* grad_tensor_ptr = &(param_ptr->grad().value());
+                Tensor* grad_tensor_ptr = &(param_ptr->mutable_grad().value());
                 auto it = tensor_map_.find(grad_tensor_ptr);
                 if (it != tensor_map_.end() && it->second.is_offloaded) {
                     gradients_to_prefetch.push_back(grad_tensor_ptr);
@@ -602,7 +602,7 @@ auto OffloadContext::backward_post_hook(Module* layer) -> void {
 
         // Offload gradient to CPU if configured
         if (config_.offload_gradients && param_ptr->grad().has_value()) {
-            Tensor* grad_tensor_ptr = &(param_ptr->grad().value());
+            Tensor* grad_tensor_ptr = &(param_ptr->mutable_grad().value());
 
             // Skip if not on GPU
             if (grad_tensor_ptr->device().type != Device::Type::CUDA) continue;

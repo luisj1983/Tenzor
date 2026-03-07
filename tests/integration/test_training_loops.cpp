@@ -327,7 +327,7 @@ TEST(TrainingLoops, MNISTWithGradientClipping) {
                 float scale = clip_norm / (total_norm + 1e-6f);
                 for (auto& param : params) {
                     if (param->grad().has_value()) {
-                        param->grad() = param->grad().value() * scale;
+                        param->set_grad(param->grad().value() * scale);
                     }
                 }
             }

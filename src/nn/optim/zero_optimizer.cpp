@@ -571,7 +571,7 @@ auto ZeROStage1Optimizer::all_reduce_gradients() -> void {
     // All-reduce gradients for all parameters
     for (auto& param : parameters_) {
         if (param->has_grad()) {
-            auto& grad_opt = param->grad();
+            const auto& grad_opt = param->grad();
             if (grad_opt.has_value()) {
                 Tensor grad = grad_opt.value();
 
@@ -587,8 +587,8 @@ auto ZeROStage1Optimizer::all_reduce_gradients() -> void {
                 // Average by world size
                 grad = grad / static_cast<float>(config_.world_size);
 
-                // Update the gradient (this modifies the optional)
-                grad_opt = grad;
+                // Update the gradient
+                param->set_grad(grad);
             }
         }
     }
@@ -1285,7 +1285,7 @@ auto ZeROStage2Optimizer::reduce_scatter_gradients(GradientBucket& bucket) -> vo
             size_t grad_idx = 0;
             for (auto& param : bucket.params) {
                 if (param->has_grad() && grad_idx < local_grads.size()) {
-                    param->grad() = local_grads[grad_idx];
+                    param->set_grad(local_grads[grad_idx]);
                     grad_idx++;
                 }
             }
@@ -1295,7 +1295,7 @@ auto ZeROStage2Optimizer::reduce_scatter_gradients(GradientBucket& bucket) -> vo
         for (auto& param : bucket.params) {
             if (param->has_grad()) {
                 // Set gradient to empty tensor to free memory
-                param->grad() = std::nullopt;
+                param->zero_grad();
             }
         }
     }
@@ -1360,6 +1360,77 @@ auto ZeROStage2Optimizer::unflatten_into(
 // =============================================================================
 // ZeRO Stage 3 Optimizer Implementation
 // =============================================================================
+
+// PrefetchScheduler must be defined before constructor (unique_ptr needs complete type)
+class ZeROStage3Optimizer::PrefetchScheduler {
+public:
+    struct Config {
+        int max_concurrent{4};
+        size_t max_buffer_bytes{500 * 1024 * 1024};  // 500MB
+    };
+
+    PrefetchScheduler(const Config& config, ZeROStage3Optimizer* optimizer)
+        : config_(config), optimizer_(optimizer) {}
+
+    auto schedule_prefetch(ParameterInfo& param_state, int priority) -> void {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+
+        if (in_flight_.count(param_state.param) > 0) {
+            return;
+        }
+
+        if (current_buffer_size_ + param_state.size_bytes > config_.max_buffer_bytes) {
+            return;
+        }
+
+        PrefetchRequest request;
+        request.param_state = &param_state;
+        request.priority = priority;
+
+        queue_.push(request);
+        current_buffer_size_ += param_state.size_bytes;
+
+        execute_pending();
+    }
+
+    auto execute_pending() -> void {
+        while (in_flight_.size() < static_cast<size_t>(config_.max_concurrent) && !queue_.empty()) {
+            auto request = queue_.top();
+            queue_.pop();
+
+            start_async_gather(*request.param_state);
+
+            in_flight_.insert(request.param_state->param);
+        }
+    }
+
+private:
+    struct PrefetchRequest {
+        ParameterInfo* param_state;
+        int priority;
+
+        bool operator<(const PrefetchRequest& other) const {
+            return priority < other.priority;
+        }
+    };
+
+    Config config_;
+    ZeROStage3Optimizer* optimizer_;
+    std::priority_queue<PrefetchRequest> queue_;
+    std::unordered_set<Tensor*> in_flight_;
+    size_t current_buffer_size_{0};
+    std::mutex queue_mutex_;
+
+    auto start_async_gather(ParameterInfo& param_state) -> void {
+        if (param_state.is_gathered || param_state.is_prefetching) {
+            return;
+        }
+
+        param_state.is_prefetching = true;
+
+        optimizer_->gather_parameter_impl(param_state);
+    }
+};
 
 ZeROStage3Optimizer::ZeROStage3Optimizer(
     std::unique_ptr<Optimizer> base_optimizer,
@@ -1460,7 +1531,7 @@ auto ZeROStage3Optimizer::zero_grad() -> void {
     auto& partition = local_partition();
     for (auto& param : partition.params) {
         if (param->has_grad()) {
-            param->grad() = std::nullopt;
+            param->zero_grad();
         }
     }
 }
@@ -1919,8 +1990,6 @@ auto ZeROStage3Optimizer::forward_pre_hook(Module* module, const std::vector<Ten
         Tensor* param = &param_ptr->tensor();
         auto it = param_states_.find(param);
         if (it != param_states_.end()) {
-            auto& state = it->second;
-
             // Gather parameter (handles prefetch hits)
             Tensor full_param = gather_parameter(param);
 
@@ -2041,7 +2110,7 @@ auto ZeROStage3Optimizer::scatter_parameter_gradient(Tensor* param) -> void {
 
     // Update the Variable's gradient with local partition
     // This frees the full gradient and saves memory
-    param_var->grad() = local_grad;
+    param_var->set_grad(local_grad);
 }
 
 auto ZeROStage3Optimizer::prefetch_next_parameters(Module* current_module) -> void {
@@ -2097,88 +2166,6 @@ auto ZeROStage3Optimizer::reset_stats() -> void {
 
     perf_stats_ = PerformanceStats{};
 }
-
-// =============================================================================
-// PrefetchScheduler Implementation
-// =============================================================================
-
-class ZeROStage3Optimizer::PrefetchScheduler {
-public:
-    struct Config {
-        int max_concurrent{4};
-        size_t max_buffer_bytes{500 * 1024 * 1024};  // 500MB
-    };
-
-    PrefetchScheduler(const Config& config, ZeROStage3Optimizer* optimizer)
-        : config_(config), optimizer_(optimizer) {}
-
-    auto schedule_prefetch(ParameterInfo& param_state, int priority) -> void {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-
-        // Check if already in queue or in-flight
-        if (in_flight_.count(param_state.param) > 0) {
-            return;
-        }
-
-        // Check buffer size limit
-        if (current_buffer_size_ + param_state.size_bytes > config_.max_buffer_bytes) {
-            return;  // Buffer full
-        }
-
-        // Add to priority queue
-        PrefetchRequest request;
-        request.param_state = &param_state;
-        request.priority = priority;
-
-        queue_.push(request);
-        current_buffer_size_ += param_state.size_bytes;
-
-        // Execute if capacity available
-        execute_pending();
-    }
-
-    auto execute_pending() -> void {
-        while (in_flight_.size() < static_cast<size_t>(config_.max_concurrent) && !queue_.empty()) {
-            auto request = queue_.top();
-            queue_.pop();
-
-            // Start async gather
-            start_async_gather(*request.param_state);
-
-            in_flight_.insert(request.param_state->param);
-        }
-    }
-
-private:
-    struct PrefetchRequest {
-        ParameterInfo* param_state;
-        int priority;
-
-        bool operator<(const PrefetchRequest& other) const {
-            return priority < other.priority;  // Higher priority first
-        }
-    };
-
-    Config config_;
-    ZeROStage3Optimizer* optimizer_;
-    std::priority_queue<PrefetchRequest> queue_;
-    std::unordered_set<Tensor*> in_flight_;
-    size_t current_buffer_size_{0};
-    std::mutex queue_mutex_;
-
-    auto start_async_gather(ParameterInfo& param_state) -> void {
-        if (param_state.is_gathered || param_state.is_prefetching) {
-            return;
-        }
-
-        // Mark as prefetching
-        param_state.is_prefetching = true;
-
-        // For now, perform synchronous gather
-        // In a full implementation, this would use async NCCL operations
-        optimizer_->gather_parameter_impl(param_state);
-    }
-};
 
 // =============================================================================
 // Additional Stage 3 Methods

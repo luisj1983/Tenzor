@@ -161,12 +161,7 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
         }
     }
 
-    if (root.impl_ && root.impl_->thread_safe_.load(std::memory_order_acquire)) {
-        std::lock_guard lock(root.impl_->grad_mutex_);
-        root.grad() = *gradient;
-    } else {
-        root.grad() = *gradient;
-    }
+    root.set_grad(*gradient);
 
     // If no grad_fn, this is a leaf variable, nothing to backprop
     if (!root.grad_fn()) {
@@ -231,16 +226,18 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                 continue;  // No gradient flows to this function
             }
 
-            // Sum all accumulated gradients with dtype promotion
-            Tensor total_grad = accum_grads[0];
+            // Sum all accumulated gradients with dtype promotion.
+            // Pre-compute target dtype to avoid repeated conversions.
+            DType target_dtype = accum_grads[0].dtype();
             for (size_t i = 1; i < accum_grads.size(); ++i) {
-                Tensor gi = accum_grads[i];
-                if (gi.dtype() != total_grad.dtype()) {
-                    DType target = promote_dtype(gi.dtype(), total_grad.dtype());
-                    total_grad = total_grad.to(target);
-                    gi = gi.to(target);
-                }
-                total_grad = total_grad + gi;
+                target_dtype = promote_dtype(target_dtype, accum_grads[i].dtype());
+            }
+            Tensor total_grad = (accum_grads[0].dtype() == target_dtype)
+                ? accum_grads[0]
+                : accum_grads[0].to(target_dtype);
+            for (size_t i = 1; i < accum_grads.size(); ++i) {
+                const Tensor& gi = accum_grads[i];
+                total_grad = total_grad + (gi.dtype() == target_dtype ? gi : gi.to(target_dtype));
             }
             grad_outputs.push_back(total_grad);
 
@@ -367,9 +364,9 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                                 existing_grad = existing_grad.to(target);
                                 grad_to_apply = grad_to_apply.to(target);
                             }
-                            var.grad() = existing_grad + grad_to_apply;
+                            var.mutable_grad() = existing_grad + grad_to_apply;
                         } else {
-                            var.grad() = grad_to_apply;
+                            var.mutable_grad() = grad_to_apply;
                         }
                     };
 
@@ -498,12 +495,7 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
         if (!roots[i] || !roots[i]->requires_grad()) {
             continue;
         }
-        if (roots[i]->impl_ && roots[i]->impl_->thread_safe_.load(std::memory_order_acquire)) {
-            std::lock_guard lock(roots[i]->impl_->grad_mutex_);
-            roots[i]->grad() = gradients[i];
-        } else {
-            roots[i]->grad() = gradients[i];
-        }
+        roots[i]->set_grad(gradients[i]);
     }
 
     // Build combined topological sort from all roots using iterative DFS
@@ -588,16 +580,18 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                 continue;  // No gradient flows to this function
             }
 
-            // Sum all accumulated gradients with dtype promotion
-            Tensor total_grad = accum_grads[0];
+            // Sum all accumulated gradients with dtype promotion.
+            // Pre-compute target dtype to avoid repeated conversions.
+            DType target_dtype = accum_grads[0].dtype();
             for (size_t i = 1; i < accum_grads.size(); ++i) {
-                Tensor gi = accum_grads[i];
-                if (gi.dtype() != total_grad.dtype()) {
-                    DType target = promote_dtype(gi.dtype(), total_grad.dtype());
-                    total_grad = total_grad.to(target);
-                    gi = gi.to(target);
-                }
-                total_grad = total_grad + gi;
+                target_dtype = promote_dtype(target_dtype, accum_grads[i].dtype());
+            }
+            Tensor total_grad = (accum_grads[0].dtype() == target_dtype)
+                ? accum_grads[0]
+                : accum_grads[0].to(target_dtype);
+            for (size_t i = 1; i < accum_grads.size(); ++i) {
+                const Tensor& gi = accum_grads[i];
+                total_grad = total_grad + (gi.dtype() == target_dtype ? gi : gi.to(target_dtype));
             }
             grad_outputs.push_back(total_grad);
 
@@ -657,9 +651,9 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                                 existing_grad = existing_grad.to(target);
                                 grad_to_apply = grad_to_apply.to(target);
                             }
-                            var.grad() = existing_grad + grad_to_apply;
+                            var.mutable_grad() = existing_grad + grad_to_apply;
                         } else {
-                            var.grad() = grad_to_apply;
+                            var.mutable_grad() = grad_to_apply;
                         }
                     };
 

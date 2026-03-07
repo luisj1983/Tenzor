@@ -798,8 +798,16 @@ vulkan::ComputePipeline* VulkanBackend::getPipeline(const std::string& shader_na
     // Determine push constant size via SPIR-V reflection
     std::vector<VkPushConstantRange> pushConstants;
     uint32_t pushConstantSize = vulkan::reflectPushConstantSize(shaderCode);
-    assert(pushConstantSize % 4 == 0 && "Push constant size must be 4-byte aligned");
-    assert(pushConstantSize <= 256 && "Push constant size exceeds typical Vulkan limits");
+    if (pushConstantSize % 4 != 0) {
+        throw std::runtime_error("Vulkan pipeline '" + shader_name +
+            "': push constant size (" + std::to_string(pushConstantSize) +
+            ") must be 4-byte aligned (SPIR-V reflection error)");
+    }
+    if (pushConstantSize > 256) {
+        throw std::runtime_error("Vulkan pipeline '" + shader_name +
+            "': push constant size (" + std::to_string(pushConstantSize) +
+            ") exceeds 256-byte Vulkan limit");
+    }
     if (pushConstantSize > 0) {
         VkPushConstantRange push_range{};
         push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -909,13 +917,17 @@ VkDescriptorSet VulkanBackend::allocateAndWriteDescriptorSet(
     VkDescriptorSet descriptorSet;
     VkResult result = vkAllocateDescriptorSets(ctx.device, &allocInfo, &descriptorSet);
 
-    // If descriptor pool is exhausted, wait for pending work, reset, and retry
+    // If descriptor pool is exhausted, wait for ALL work to complete, reset, and retry
     if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL) {
         // Force-submit any pending batched commands before resetting pools.
         // Without this, activeCommandBuffer references descriptors from the pool
         // we're about to reset, causing use-after-reset corruption.
         submitBatchIfNeeded(device_id, true);
         ensurePendingWorkComplete(device_id);
+        // Full device idle ensures no command buffer is still referencing pool descriptors.
+        // ensurePendingWorkComplete only waits on fences we track, but there may be
+        // in-flight commands from other code paths. vkDeviceWaitIdle is the safe barrier.
+        vkDeviceWaitIdle(ctx.device);
 
         // Reset command pool and descriptor pool
         vulkan::checkVk(vkResetCommandPool(ctx.device, ctx.commandPool, 0),

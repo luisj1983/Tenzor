@@ -135,7 +135,7 @@ TEST_F(ZeROGlooTest, TwoRankGradientAllReduce) {
         float grad_value = static_cast<float>(rank_ + 1);
         auto shape_span = param->tensor().shape();
         std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
-        param->grad() = full(shape, grad_value, DType::Float32, Device::cpu());
+        param->set_grad(full(shape, grad_value, DType::Float32, Device::cpu()));
     }
 
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
@@ -181,7 +181,7 @@ TEST_F(ZeROGlooTest, GradientSynchronizationCorrectness) {
         float grad_value = static_cast<float>(rank_ * 10 + i);
         auto shape_span = params[i]->tensor().shape();
         std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
-        params[i]->grad() = full(shape, grad_value, DType::Float32, Device::cpu());
+        params[i]->set_grad(full(shape, grad_value, DType::Float32, Device::cpu()));
     }
 
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
@@ -267,7 +267,7 @@ TEST_F(ZeROGlooTest, StateDictSaveLoadAcrossRanks) {
     for (auto& param : params) {
         auto shape_span = param->tensor().shape();
         std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
-        param->grad() = ones(shape, DType::Float32, Device::cpu());
+        param->set_grad(ones(shape, DType::Float32, Device::cpu()));
     }
 
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
@@ -299,7 +299,7 @@ TEST_F(ZeROGlooTest, CheckpointCompatibilityAcrossRanks) {
     for (auto& param : params) {
         auto shape_span = param->tensor().shape();
         std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
-        param->grad() = ones(shape, DType::Float32, Device::cpu());
+        param->set_grad(ones(shape, DType::Float32, Device::cpu()));
     }
 
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
@@ -311,7 +311,7 @@ TEST_F(ZeROGlooTest, CheckpointCompatibilityAcrossRanks) {
         for (auto& param : params) {
             auto shape_span = param->tensor().shape();
             std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
-            param->grad() = ones(shape, DType::Float32, Device::cpu());
+            param->set_grad(ones(shape, DType::Float32, Device::cpu()));
         }
     }
 
@@ -382,7 +382,7 @@ TEST_F(ZeRONCCLTest, TwoGPUGradientAllReduce) {
         float grad_value = static_cast<float>(rank_ + 1);
         auto shape_span = param->tensor().shape();
         std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
-        param->grad() = full(shape, grad_value, DType::Float32, Device::cuda(rank_));
+        param->set_grad(full(shape, grad_value, DType::Float32, Device::cuda(rank_)));
     }
 
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
@@ -433,7 +433,7 @@ TEST_F(ZeRONCCLTest, EightGPUScaling) {
     for (auto& param : params) {
         auto shape_span = param->tensor().shape();
         std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
-        param->grad() = ones(shape, DType::Float32, Device::cuda(rank_));
+        param->set_grad(ones(shape, DType::Float32, Device::cuda(rank_)));
     }
 
     EXPECT_NO_THROW(optimizer.step());
@@ -527,7 +527,7 @@ TEST_F(ZeRONCCLTest, CPUOffloadWithGPUTraining) {
     for (auto& param : params) {
         auto shape_span = param->tensor().shape();
         std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
-        param->grad() = ones(shape, DType::Float32, Device::cuda(rank_));
+        param->set_grad(ones(shape, DType::Float32, Device::cuda(rank_)));
     }
 
     // Step should work with offload enabled
@@ -612,7 +612,7 @@ TEST_F(ZeROGlooTest, EmptyGradientsOnSomeRanks) {
         for (auto& param : params) {
             auto shape_span = param->tensor().shape();
             std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
-            param->grad() = ones(shape, DType::Float32, Device::cpu());
+            param->set_grad(ones(shape, DType::Float32, Device::cpu()));
         }
     }
 
@@ -657,7 +657,7 @@ TEST_F(ZeROGlooTest, ConcurrentOptimizationSteps) {
         for (auto& param : params) {
             auto shape_span = param->tensor().shape();
             std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
-            param->grad() = ones(shape, DType::Float32, Device::cpu());
+            param->set_grad(ones(shape, DType::Float32, Device::cpu()));
         }
 
         optimizer.step();

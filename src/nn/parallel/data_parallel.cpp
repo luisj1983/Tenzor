@@ -393,7 +393,7 @@ auto DataParallel::synchronize_gradients() -> void {
         // Tensor averaged_grad = summed_grad * scale_factor;
         //
         // 5. Update master parameter
-        // param->grad() = averaged_grad;
+        // param->set_grad(averaged_grad);
 
         // Current simplified approach: Scale the gradient by 1/num_devices
         // This assumes gradients from all devices have been accumulated
@@ -401,7 +401,7 @@ auto DataParallel::synchronize_gradients() -> void {
         Tensor scaled_grad = grad_tensor * scale_factor;
 
         // Update the parameter's gradient
-        param->grad() = scaled_grad;
+        param->set_grad(scaled_grad);
     }
 
     // Synchronize stream
@@ -430,7 +430,7 @@ auto DataParallel::synchronize_gradients() -> void {
 
         // Scale gradient by averaging factor
         Tensor scaled_grad = grad_opt.value() * scale_factor;
-        param->grad() = scaled_grad;
+        param->set_grad(scaled_grad);
     }
 #endif
 }

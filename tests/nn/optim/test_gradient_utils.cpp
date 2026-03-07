@@ -112,8 +112,8 @@ TEST_F(GradientUtilsTest, FlattenVariables) {
     // Create gradients
     v1->set_grad(Tensor({10, 20}, DType::Float32, Device::cpu()));
     v2->set_grad(Tensor({5, 5}, DType::Float32, Device::cpu()));
-    v1->grad()->fill_(1.0f);
-    v2->grad()->fill_(2.0f);
+    v1->mutable_grad()->fill_(1.0f);
+    v2->mutable_grad()->fill_(2.0f);
 
     auto flat = flatten_tensors({v1, v2});
 

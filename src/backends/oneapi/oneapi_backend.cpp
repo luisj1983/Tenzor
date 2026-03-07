@@ -351,6 +351,13 @@ namespace oneapi_internal {
 class OneAPIBackend : public Backend {
 public:
     OneAPIBackend() {
+        // Wire up queue provider BEFORE device enumeration, so kernel registry
+        // callbacks can safely access queues if triggered during device init.
+        oneapi_internal::set_backend_queue_provider(this);
+        oneapi_internal::set_queue_getter([](void* backend, int32_t device_id) -> sycl::queue& {
+            return static_cast<OneAPIBackend*>(backend)->get_queue(device_id);
+        });
+
         try {
             // Enumerate all available SYCL devices
             auto platforms = sycl::platform::get_platforms();
@@ -397,12 +404,6 @@ public:
         } catch (const sycl::exception& e) {
             // No SYCL devices available
         }
-
-        // Wire up queue provider for the kernel registry
-        oneapi_internal::set_backend_queue_provider(this);
-        oneapi_internal::set_queue_getter([](void* backend, int32_t device_id) -> sycl::queue& {
-            return static_cast<OneAPIBackend*>(backend)->get_queue(device_id);
-        });
     }
 
     ~OneAPIBackend() override {

@@ -392,7 +392,7 @@ TEST(SchedulerTest, StepLR_SGD_Integration) {
 
     // Training loop simulation
     for (int epoch = 0; epoch < 6; epoch++) {
-        param->grad() = ones({2, 2}, DType::Float32);
+        param->set_grad(ones({2, 2}, DType::Float32));
         optimizer.step();
         scheduler.step();
 
@@ -412,7 +412,7 @@ TEST(SchedulerTest, ExponentialLR_Adam_Integration) {
     auto scheduler = ExponentialLR(optimizer, 0.9);
 
     for (int epoch = 0; epoch < 10; epoch++) {
-        param->grad() = ones({2, 2}, DType::Float32);
+        param->set_grad(ones({2, 2}, DType::Float32));
         optimizer.step();
         scheduler.step();
 
@@ -430,7 +430,7 @@ TEST(SchedulerTest, CosineAnnealingLR_SGD_Integration) {
     auto scheduler = CosineAnnealingLR(optimizer, 10, 0.1);
 
     for (int epoch = 0; epoch < 10; epoch++) {
-        param->grad() = ones({2, 2}, DType::Float32);
+        param->set_grad(ones({2, 2}, DType::Float32));
         optimizer.step();
         scheduler.step();
 

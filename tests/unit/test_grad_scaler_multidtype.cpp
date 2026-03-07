@@ -106,7 +106,7 @@ TEST_P(GradScalerMultiDTypeTest, GradientUnscaling) {
     auto param = Variable(param_tensor, true);
 
     auto grad_tensor = CreateTensor<float>({2, 3}, 200.0f);
-    param.grad() = grad_tensor;
+    param.set_grad(grad_tensor);
 
     auto param_ptr = std::make_shared<Variable>(param);
     auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
@@ -142,7 +142,7 @@ TEST_P(GradScalerMultiDTypeTest, InfDetection) {
         float* grad_data = grad_cpu.data<float>();
         grad_data[1] = std::numeric_limits<float>::infinity();
     }
-    param.grad() = grad_cpu.to(device());
+    param.set_grad(grad_cpu.to(device()));
 
     auto param_ptr = std::make_shared<Variable>(param);
     auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
@@ -174,7 +174,7 @@ TEST_P(GradScalerMultiDTypeTest, NanDetection) {
         float* grad_data = grad_cpu.data<float>();
         grad_data[2] = std::numeric_limits<float>::quiet_NaN();
     }
-    param.grad() = grad_cpu.to(device());
+    param.set_grad(grad_cpu.to(device()));
 
     auto param_ptr = std::make_shared<Variable>(param);
     auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
@@ -203,7 +203,7 @@ TEST_P(GradScalerMultiDTypeTest, ScaleBackoff) {
         static_cast<float>(std::numeric_limits<double>::infinity()) :
         std::numeric_limits<float>::infinity();
     auto grad_tensor = full({2, 2}, inf_val, dtype(), device());
-    param.grad() = grad_tensor;
+    param.set_grad(grad_tensor);
 
     auto param_ptr = std::make_shared<Variable>(param);
     auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
@@ -236,7 +236,7 @@ TEST_P(GradScalerMultiDTypeTest, ScaleGrowth) {
 
     for (int i = 0; i < 3; ++i) {
         auto grad_tensor = CreateTensor<float>({2, 2}, 1.0f);
-        param.grad() = grad_tensor;
+        param.set_grad(grad_tensor);
 
         bool success = scaler.step(optimizer);
         EXPECT_TRUE(success) << "Step " << i << " failed";
@@ -265,7 +265,7 @@ TEST_P(GradScalerMultiDTypeTest, SGDIntegration) {
     SGD optimizer(params, 0.1);
 
     auto grad_tensor = CreateTensor<float>({3, 3}, 10.0f);
-    param.grad() = grad_tensor;
+    param.set_grad(grad_tensor);
 
     bool success = scaler.step(optimizer);
     scaler.update();
@@ -296,7 +296,7 @@ TEST_P(GradScalerMultiDTypeTest, AdamIntegration) {
     Adam optimizer(params, 0.01);
 
     auto grad_tensor = CreateTensor<float>({2, 2}, 50.0f);
-    param.grad() = grad_tensor;
+    param.set_grad(grad_tensor);
 
     bool success = scaler.step(optimizer);
     scaler.update();
@@ -324,10 +324,10 @@ TEST_P(GradScalerMultiDTypeTest, MultipleParameters) {
     auto param2 = Variable(param2_tensor, true);
 
     auto grad1_tensor = CreateTensor<float>({2, 2}, 100.0f);
-    param1.grad() = grad1_tensor;
+    param1.set_grad(grad1_tensor);
 
     auto grad2_tensor = CreateTensor<float>({3, 3}, 200.0f);
-    param2.grad() = grad2_tensor;
+    param2.set_grad(grad2_tensor);
 
     auto param1_ptr = std::make_shared<Variable>(param1);
     auto param2_ptr = std::make_shared<Variable>(param2);
@@ -365,7 +365,7 @@ TEST_P(GradScalerMultiDTypeTest, UnderflowPrevention) {
     // Pre-scale the gradient (simulates what backward does with scaled loss)
     float scaled_gradient = tiny_gradient * scale;
     auto grad_tensor = CreateTensor<float>({4, 4}, scaled_gradient);
-    param.grad() = grad_tensor;
+    param.set_grad(grad_tensor);
 
     auto param_ptr = std::make_shared<Variable>(param);
     auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
@@ -409,7 +409,7 @@ TEST_P(GradScalerMultiDTypeTest, TrainingLoopSimulation) {
             std::numeric_limits<float>::infinity() : 1.0f;
 
         auto grad_tensor = CreateTensor<float>({10, 10}, grad_value);
-        param.grad() = grad_tensor;
+        param.set_grad(grad_tensor);
 
         bool success = scaler.step(optimizer);
         scaler.update();
@@ -442,7 +442,7 @@ TEST_P(GradScalerMultiDTypeTest, NumericRangeDifferences) {
     // CreateTensor casts to float before creating the tensor
     float large_value = std::numeric_limits<float>::max() / 2048.0f;
     auto grad_tensor = CreateTensor<float>({3, 3}, large_value);
-    param.grad() = grad_tensor;
+    param.set_grad(grad_tensor);
 
     auto param_ptr = std::make_shared<Variable>(param);
     auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
@@ -466,7 +466,7 @@ TEST_P(GradScalerMultiDTypeTest, StateDictConsistency) {
     auto param_tensor = ones({2, 2}, dtype(), device());
     auto param = Variable(param_tensor, true);
     auto grad_tensor = CreateTensor<float>({2, 2}, 1.0f);
-    param.grad() = grad_tensor;
+    param.set_grad(grad_tensor);
 
     auto param_ptr = std::make_shared<Variable>(param);
     auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};

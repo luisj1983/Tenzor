@@ -90,11 +90,12 @@ class Module(_CppModule):
             object.__setattr__(self, name, value)
             return
 
-        # Handle Module assignment
+        # Handle Module assignment — hold lock across both cache invalidation
+        # and registration to prevent races with concurrent __getattr__
         if isinstance(value, _CppModule):
             with object.__getattribute__(self, '_cache_lock'):
                 object.__setattr__(self, '_submodule_cache', None)
-            self.register_module(name, value)
+                self.register_module(name, value)
             return
 
         # Handle Variable assignment (potential parameter)
@@ -102,12 +103,10 @@ class Module(_CppModule):
             with object.__getattribute__(self, '_cache_lock'):
                 if value.requires_grad():
                     object.__setattr__(self, '_param_cache', None)
+                    self.register_parameter(name, value)
                 else:
                     object.__setattr__(self, '_buffer_cache', None)
-            if value.requires_grad():
-                self.register_parameter(name, value)
-            else:
-                self.register_buffer(name, value)
+                    self.register_buffer(name, value)
             return
 
         # Warn if assigning a list/tuple containing Modules (should use ModuleList)

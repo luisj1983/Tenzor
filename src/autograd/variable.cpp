@@ -51,7 +51,7 @@ auto Variable::grad() const -> const std::optional<Tensor>& {
     return impl_->grad_;
 }
 
-auto Variable::grad() -> std::optional<Tensor>& {
+auto Variable::mutable_grad() -> std::optional<Tensor>& {
     if (!impl_) {
         throw std::runtime_error("Cannot access grad of uninitialized Variable");
     }

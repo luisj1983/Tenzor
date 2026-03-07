@@ -228,11 +228,14 @@ public:
     auto grad() const -> const std::optional<Tensor>&;
 
     /**
-     * @brief Get mutable reference to gradient.
+     * @brief Get mutable reference to gradient (internal use only).
+     *
+     * @warning This accessor bypasses thread-safe locking. Use set_grad()
+     * for external gradient mutation when thread_safe_ is enabled.
      *
      * @return Optional tensor containing gradient
      */
-    auto grad() -> std::optional<Tensor>&;
+    auto mutable_grad() -> std::optional<Tensor>&;
 
     /**
      * @brief Check if variable has gradient.

@@ -66,7 +66,7 @@ auto GradScaler::unscale_(optim::Optimizer& optimizer) -> void {
             continue;
         }
 
-        auto& grad = param->grad();
+        auto& grad = param->mutable_grad();
         if (!grad.has_value()) {
             continue;
         }

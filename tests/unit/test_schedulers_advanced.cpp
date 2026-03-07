@@ -444,7 +444,7 @@ TEST(AdvancedSchedulerTest, ReduceLROnPlateau_Training_Simulation) {
 
     double last_lr = 0.1;
     for (size_t epoch = 0; epoch < val_losses.size(); epoch++) {
-        param->grad() = ones({2, 2}, DType::Float32);
+        param->set_grad(ones({2, 2}, DType::Float32));
         optimizer.step();
         scheduler.step(val_losses[epoch]);
 
@@ -466,7 +466,7 @@ TEST(AdvancedSchedulerTest, CyclicLR_Training_Simulation) {
 
     // Simulate 50 batch updates
     for (int batch = 0; batch < 50; batch++) {
-        param->grad() = ones({2, 2}, DType::Float32);
+        param->set_grad(ones({2, 2}, DType::Float32));
         optimizer.step();
         scheduler.step();
 
@@ -492,7 +492,7 @@ TEST(AdvancedSchedulerTest, OneCycleLR_Training_Simulation) {
 
     for (int epoch = 0; epoch < num_epochs; epoch++) {
         for (int batch = 0; batch < batches_per_epoch; batch++) {
-            param->grad() = ones({2, 2}, DType::Float32);
+            param->set_grad(ones({2, 2}, DType::Float32));
             optimizer.step();
             scheduler.step();
         }
@@ -510,7 +510,7 @@ TEST(AdvancedSchedulerTest, CosineAnnealingWarmRestarts_Training_Simulation) {
 
     int total_epochs = 30;
     for (int epoch = 0; epoch < total_epochs; epoch++) {
-        param->grad() = ones({2, 2}, DType::Float32);
+        param->set_grad(ones({2, 2}, DType::Float32));
         optimizer.step();
         scheduler.step();
 

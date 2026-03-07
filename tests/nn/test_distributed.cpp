@@ -202,8 +202,8 @@ TEST(GradientBucketTest, AddGradients) {
     auto param2 = Variable(randn({500, 500}, DType::Float32, Device::cpu()), true);
 
     // Set gradients
-    param1.grad() = randn({1000, 100}, DType::Float32, Device::cpu());
-    param2.grad() = randn({500, 500}, DType::Float32, Device::cpu());
+    param1.set_grad(randn({1000, 100}, DType::Float32, Device::cpu()));
+    param2.set_grad(randn({500, 500}, DType::Float32, Device::cpu()));
 
     // Add first parameter (1000*100*4 = 400KB)
     bool is_full = bucket.add_gradient(&param1);
@@ -221,7 +221,7 @@ TEST(GradientBucketTest, Reset) {
     GradientBucket bucket(25);
 
     auto param = Variable(randn({100, 100}, DType::Float32, Device::cpu()), true);
-    param.grad() = randn({100, 100}, DType::Float32, Device::cpu());
+    param.set_grad(randn({100, 100}, DType::Float32, Device::cpu()));
 
     bucket.add_gradient(&param);
     EXPECT_FALSE(bucket.is_empty());

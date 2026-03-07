@@ -461,7 +461,7 @@ TEST_P(SchedulerAdvancedMultiDTypeTest, ReduceLROnPlateau_Training_Simulation) {
 
     double last_lr = 0.1;
     for (size_t epoch = 0; epoch < val_losses.size(); epoch++) {
-        param->grad() = createOnes({2, 2});
+        param->set_grad(createOnes({2, 2}));
         optimizer.step();
         scheduler.step(val_losses[epoch]);
 
@@ -481,7 +481,7 @@ TEST_P(SchedulerAdvancedMultiDTypeTest, CyclicLR_Training_Simulation) {
     auto scheduler = CyclicLR(optimizer, 0.001, 0.01, 10);
 
     for (int batch = 0; batch < 50; batch++) {
-        param->grad() = createOnes({2, 2});
+        param->set_grad(createOnes({2, 2}));
         optimizer.step();
         scheduler.step();
 
@@ -502,7 +502,7 @@ TEST_P(SchedulerAdvancedMultiDTypeTest, OneCycleLR_Training_Simulation) {
     auto scheduler = OneCycleLR(optimizer, 0.1, total_steps);
 
     for (int step = 0; step < total_steps; step++) {
-        param->grad() = createOnes({2, 2});
+        param->set_grad(createOnes({2, 2}));
         optimizer.step();
         scheduler.step();
     }

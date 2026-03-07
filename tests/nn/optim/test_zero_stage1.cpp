@@ -284,7 +284,7 @@ TEST_F(ZeROStage1Test, OptimizerStatesPreserveAfterStep) {
 
     // Set gradients to non-zero values
     for (auto& param : params) {
-        param->grad() = ones_like(param->tensor());
+        param->set_grad(ones_like(param->tensor()));
     }
 
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
@@ -312,7 +312,7 @@ TEST_F(ZeROStage1Test, ZeroGradClearsGradients) {
 
     // Set gradients
     for (auto& param : params) {
-        param->grad() = ones_like(param->tensor());
+        param->set_grad(ones_like(param->tensor()));
     }
 
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
@@ -329,7 +329,7 @@ TEST_F(ZeROStage1Test, ZeroGradClearsGradients) {
     // All gradients should be zero
     for (const auto& param : params) {
         if (param->has_grad()) {
-            auto grad_data = static_cast<float*>(param->grad().value().data_ptr());
+            auto grad_data = static_cast<const float*>(param->grad().value().data_ptr());
             int numel = param->grad().value().numel();
             for (int i = 0; i < numel; ++i) {
                 EXPECT_FLOAT_EQ(grad_data[i], 0.0f);
@@ -364,7 +364,7 @@ TEST_F(ZeROStage1Test, SaveStateDictToDict) {
 
     // Set gradients and take a step to create optimizer state
     for (auto& param : params) {
-        param->grad() = ones_like(param->tensor());
+        param->set_grad(ones_like(param->tensor()));
     }
 
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
@@ -389,7 +389,7 @@ TEST_F(ZeROStage1Test, LoadStateDictFromDict) {
     {
         auto params_copy = create_test_params(10);
         for (auto& param : params_copy) {
-            param->grad() = ones_like(param->tensor());
+            param->set_grad(ones_like(param->tensor()));
         }
 
         auto opt1 = std::make_unique<Adam>(params_copy, 0.001);
@@ -465,7 +465,7 @@ TEST_F(ZeROStage1Test, CPUOffloadStepCompletes) {
     auto params = create_test_params(10);
 
     for (auto& param : params) {
-        param->grad() = ones_like(param->tensor());
+        param->set_grad(ones_like(param->tensor()));
     }
 
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
@@ -497,7 +497,7 @@ TEST_F(ZeROStage1Test, CPUOffloadFromGPU) {
     }
 
     for (auto& param : params) {
-        param->grad() = ones_like(param->tensor());
+        param->set_grad(ones_like(param->tensor()));
     }
 
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
@@ -531,7 +531,7 @@ TEST_F(ZeROStage1Test, CPUOffloadThresholdRespected) {
     auto small_params = create_test_params(10, {4, 4}, Device::cuda(0));  // 64 bytes each
 
     for (auto& param : small_params) {
-        param->grad() = ones_like(param->tensor());
+        param->set_grad(ones_like(param->tensor()));
     }
 
     auto base_optimizer = std::make_unique<Adam>(small_params, 0.001);
@@ -683,7 +683,7 @@ TEST_F(ZeROStage1Test, MemoryStatsAfterStep) {
     auto params = create_test_params(10);
 
     for (auto& param : params) {
-        param->grad() = ones_like(param->tensor());
+        param->set_grad(ones_like(param->tensor()));
     }
 
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);

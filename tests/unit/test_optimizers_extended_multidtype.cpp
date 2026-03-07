@@ -156,8 +156,8 @@ TEST_P(OptimizersExtendedMultiDTypeTest, RMSpropBasicStep) {
     auto optimizer = RMSprop(params_, 0.01, 0.99, 1e-8);
 
     // Set gradients
-    param1_->grad() = createOnes({2, 3});
-    param2_->grad() = createOnes({4});
+    param1_->set_grad(createOnes({2, 3}));
+    param2_->set_grad(createOnes({4}));
 
     auto param1_before = getScalarGeneric(param1_->tensor());
     auto param2_before = getScalarGeneric(param2_->tensor());
@@ -178,16 +178,16 @@ TEST_P(OptimizersExtendedMultiDTypeTest, RMSpropBasicStep) {
 TEST_P(OptimizersExtendedMultiDTypeTest, RMSpropWithMomentum) {
     auto optimizer = RMSprop(params_, 0.01, 0.99, 1e-8, 0.0, 0.9);
 
-    param1_->grad() = createOnes({2, 3});
-    param2_->grad() = createOnes({4});
+    param1_->set_grad(createOnes({2, 3}));
+    param2_->set_grad(createOnes({4}));
 
     optimizer.step();
     auto param1_step1 = getScalarGeneric(param1_->tensor());
 
     // Second step with same gradient
     optimizer.zero_grad();
-    param1_->grad() = createOnes({2, 3});
-    param2_->grad() = createOnes({4});
+    param1_->set_grad(createOnes({2, 3}));
+    param2_->set_grad(createOnes({4}));
     optimizer.step();
     auto param1_step2 = getScalarGeneric(param1_->tensor());
 
@@ -201,8 +201,8 @@ TEST_P(OptimizersExtendedMultiDTypeTest, RMSpropWithMomentum) {
 TEST_P(OptimizersExtendedMultiDTypeTest, RMSpropCentered) {
     auto optimizer = RMSprop(params_, 0.01, 0.99, 1e-8, 0.0, 0.0, true);
 
-    param1_->grad() = createOnes({2, 3});
-    param2_->grad() = createOnes({4});
+    param1_->set_grad(createOnes({2, 3}));
+    param2_->set_grad(createOnes({4}));
 
     EXPECT_NO_THROW(optimizer.step());
 
@@ -226,8 +226,8 @@ TEST_P(OptimizersExtendedMultiDTypeTest, RMSpropStateDictSaveLoad) {
     // Run optimizer1 for a few steps
     for (int i = 0; i < 3; ++i) {
         optimizer1.zero_grad();
-        param1_->grad() = createOnes({2, 3});
-        param2_->grad() = createOnes({4});
+        param1_->set_grad(createOnes({2, 3}));
+        param2_->set_grad(createOnes({4}));
         optimizer1.step();
     }
 
@@ -245,8 +245,8 @@ TEST_P(OptimizersExtendedMultiDTypeTest, RMSpropStateDictSaveLoad) {
 TEST_P(OptimizersExtendedMultiDTypeTest, AdagradBasicStep) {
     auto optimizer = Adagrad(params_, 0.01);
 
-    param1_->grad() = createOnes({2, 3});
-    param2_->grad() = createOnes({4});
+    param1_->set_grad(createOnes({2, 3}));
+    param2_->set_grad(createOnes({4}));
 
     auto param1_before = getScalarGeneric(param1_->tensor());
 
@@ -262,16 +262,16 @@ TEST_P(OptimizersExtendedMultiDTypeTest, AdagradAccumulation) {
     auto optimizer = Adagrad(params_, 0.1);
 
     // First step
-    param1_->grad() = createOnes({2, 3});
-    param2_->grad() = createOnes({4});
+    param1_->set_grad(createOnes({2, 3}));
+    param2_->set_grad(createOnes({4}));
     optimizer.step();
     auto param1_step1 = getScalarGeneric(param1_->tensor());
     double delta1 = 1.0 - param1_step1;
 
     // Second step
     optimizer.zero_grad();
-    param1_->grad() = createOnes({2, 3});
-    param2_->grad() = createOnes({4});
+    param1_->set_grad(createOnes({2, 3}));
+    param2_->set_grad(createOnes({4}));
     optimizer.step();
     auto param1_step2 = getScalarGeneric(param1_->tensor());
     double delta2 = param1_step1 - param1_step2;
@@ -285,8 +285,8 @@ TEST_P(OptimizersExtendedMultiDTypeTest, AdagradLearningRateDecay) {
 
     EXPECT_FLOAT_EQ(optimizer.get_lr(), 0.1);
 
-    param1_->grad() = createOnes({2, 3});
-    param2_->grad() = createOnes({4});
+    param1_->set_grad(createOnes({2, 3}));
+    param2_->set_grad(createOnes({4}));
     optimizer.step();
 
     // Learning rate should decay
@@ -296,8 +296,8 @@ TEST_P(OptimizersExtendedMultiDTypeTest, AdagradLearningRateDecay) {
 TEST_P(OptimizersExtendedMultiDTypeTest, AdagradInitialAccumulator) {
     auto optimizer = Adagrad(params_, 0.01, 0.0, 0.0, /*initial_accumulator=*/0.1);
 
-    param1_->grad() = createOnes({2, 3});
-    param2_->grad() = createOnes({4});
+    param1_->set_grad(createOnes({2, 3}));
+    param2_->set_grad(createOnes({4}));
 
     EXPECT_NO_THROW(optimizer.step());
 }
@@ -308,8 +308,8 @@ TEST_P(OptimizersExtendedMultiDTypeTest, AdagradStateDictSaveLoad) {
 
     for (int i = 0; i < 3; ++i) {
         optimizer1.zero_grad();
-        param1_->grad() = createOnes({2, 3});
-        param2_->grad() = createOnes({4});
+        param1_->set_grad(createOnes({2, 3}));
+        param2_->set_grad(createOnes({4}));
         optimizer1.step();
     }
 
@@ -327,8 +327,8 @@ TEST_P(OptimizersExtendedMultiDTypeTest, AdagradStateDictSaveLoad) {
 TEST_P(OptimizersExtendedMultiDTypeTest, AdadeltaBasicStep) {
     auto optimizer = Adadelta(params_, 1.0, 0.9, 1e-6);
 
-    param1_->grad() = createOnes({2, 3});
-    param2_->grad() = createOnes({4});
+    param1_->set_grad(createOnes({2, 3}));
+    param2_->set_grad(createOnes({4}));
 
     auto param1_before = getScalarGeneric(param1_->tensor());
 
@@ -345,8 +345,8 @@ TEST_P(OptimizersExtendedMultiDTypeTest, AdadeltaNoLearningRateNeeded) {
 
     EXPECT_FLOAT_EQ(optimizer.get_lr(), 1.0);
 
-    param1_->grad() = createOnes({2, 3});
-    param2_->grad() = createOnes({4});
+    param1_->set_grad(createOnes({2, 3}));
+    param2_->set_grad(createOnes({4}));
 
     EXPECT_NO_THROW(optimizer.step());
 }
@@ -359,8 +359,8 @@ TEST_P(OptimizersExtendedMultiDTypeTest, AdadeltaAdaptiveRate) {
 
     for (int i = 0; i < 5; ++i) {
         optimizer.zero_grad();
-        param1_->grad() = createOnes({2, 3});
-        param2_->grad() = createOnes({4});
+        param1_->set_grad(createOnes({2, 3}));
+        param2_->set_grad(createOnes({4}));
         optimizer.step();
 
         double curr_val = getScalarGeneric(param1_->tensor());
@@ -380,8 +380,8 @@ TEST_P(OptimizersExtendedMultiDTypeTest, AdadeltaStateDictSaveLoad) {
 
     for (int i = 0; i < 3; ++i) {
         optimizer1.zero_grad();
-        param1_->grad() = createOnes({2, 3});
-        param2_->grad() = createOnes({4});
+        param1_->set_grad(createOnes({2, 3}));
+        param2_->set_grad(createOnes({4}));
         optimizer1.step();
     }
 
@@ -407,7 +407,7 @@ TEST_P(OptimizersExtendedMultiDTypeTest, RMSpropConvergence) {
 
         double x = getScalarGeneric(param->tensor());
         // Gradient of (x - 3)^2 is 2*(x - 3)
-        param->grad() = createFull({1}, 2.0 * (x - 3.0));
+        param->set_grad(createFull({1}, 2.0 * (x - 3.0)));
         optimizer.step();
     }
 
@@ -427,7 +427,7 @@ TEST_P(OptimizersExtendedMultiDTypeTest, AdagradConvergence) {
 
         double x = getScalarGeneric(param->tensor());
         // Gradient of (x - 3)^2 is 2*(x - 3)
-        param->grad() = createFull({1}, 2.0 * (x - 3.0));
+        param->set_grad(createFull({1}, 2.0 * (x - 3.0)));
         optimizer.step();
     }
 
@@ -446,7 +446,7 @@ TEST_P(OptimizersExtendedMultiDTypeTest, AdadeltaConvergence) {
 
         double x = getScalarGeneric(param->tensor());
         // Gradient of (x - 3)^2 is 2*(x - 3)
-        param->grad() = createFull({1}, 2.0 * (x - 3.0));
+        param->set_grad(createFull({1}, 2.0 * (x - 3.0)));
         optimizer.step();
     }
 
@@ -460,7 +460,7 @@ TEST_P(OptimizersExtendedMultiDTypeTest, AdadeltaConvergence) {
 
 TEST_P(OptimizersExtendedMultiDTypeTest, RMSpropNumericalStability) {
     auto param = std::make_shared<Variable>(createOnes({10}), true);
-    param->grad() = createFull({10}, 1e-7);
+    param->set_grad(createFull({10}, 1e-7));
 
     auto optimizer = RMSprop(std::vector<std::shared_ptr<Variable>>{param}, 0.1);
 
@@ -477,7 +477,7 @@ TEST_P(OptimizersExtendedMultiDTypeTest, AdagradNumericalStability) {
     // Use very small gradient to test numerical stability with minimal update
     // Adagrad: update = lr * grad / (sqrt(sum) + eps)
     // With grad=1e-8: sum=1e-16, sqrt=1e-8, update ≈ 0.1 * 1e-8 / 2e-8 = 0.05
-    param->grad() = createFull({10}, 1e-8);
+    param->set_grad(createFull({10}, 1e-8));
 
     auto optimizer = Adagrad(std::vector<std::shared_ptr<Variable>>{param}, 0.01);
 
@@ -491,7 +491,7 @@ TEST_P(OptimizersExtendedMultiDTypeTest, AdagradNumericalStability) {
 
 TEST_P(OptimizersExtendedMultiDTypeTest, AdadeltaNumericalStability) {
     auto param = std::make_shared<Variable>(createOnes({10}), true);
-    param->grad() = createFull({10}, 1e-5);
+    param->set_grad(createFull({10}, 1e-5));
 
     auto optimizer = Adadelta(std::vector<std::shared_ptr<Variable>>{param}, 1.0, 0.9, 1e-8);
 

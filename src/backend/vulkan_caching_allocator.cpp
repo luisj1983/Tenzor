@@ -990,6 +990,23 @@ VulkanCachingAllocator::StagingBuffer* VulkanCachingAllocator::acquire_staging_b
         }
     }
 
+    // GC: if the staging pool has grown too large, evict unused buffers.
+    // Cap at 64 entries to prevent unbounded growth in long-running servers.
+    constexpr size_t MAX_STAGING_POOL_SIZE = 64;
+    if (device_alloc.staging_pool.size() >= MAX_STAGING_POOL_SIZE) {
+        auto& pool = device_alloc.staging_pool;
+        auto new_end = std::remove_if(pool.begin(), pool.end(),
+            [&](const std::unique_ptr<StagingBuffer>& sb) {
+                if (!sb->in_use) {
+                    vkDestroyBuffer(device_alloc.device, sb->buffer, nullptr);
+                    vkFreeMemory(device_alloc.device, sb->memory, nullptr);
+                    return true;
+                }
+                return false;
+            });
+        pool.erase(new_end, pool.end());
+    }
+
     // No suitable buffer found, create a new one
     StagingBuffer* new_staging = create_staging_buffer(size, device);
     new_staging->in_use = true;

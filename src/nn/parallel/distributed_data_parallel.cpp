@@ -704,7 +704,7 @@ auto DistributedDataParallel::synchronize_bucket(GradientBucket& bucket) -> void
         grad = grad * scale;
 
         // Update parameter gradient
-        param->grad() = grad;
+        param->set_grad(grad);
     }
 #else
     (void)bucket;

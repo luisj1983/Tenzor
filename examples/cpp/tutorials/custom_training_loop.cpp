@@ -214,8 +214,8 @@ void clip_grad_norm(std::vector<std::shared_ptr<Variable>>& parameters, float ma
         float scale = max_norm / (total_norm + 1e-6f);
 
         for (auto& param : parameters) {
-            if (param->grad().has_value()) {
-                auto& grad = param->grad().value();
+            if (param->has_grad()) {
+                auto& grad = param->mutable_grad().value();
                 grad = grad * scale;
             }
         }

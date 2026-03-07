@@ -66,7 +66,7 @@ auto Optimizer::param_groups() const -> const std::vector<ParamGroup>& {
 auto Optimizer::zero_grad() -> void {
     for (auto& param : parameters_) {
         if (param && param->has_grad()) {
-            auto& grad = param->grad().value();
+            auto& grad = param->mutable_grad().value();
 
             // CPU path: use direct memset for maximum performance
             if (grad.device().type == Device::Type::CPU) {

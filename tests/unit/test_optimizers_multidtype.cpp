@@ -146,7 +146,7 @@ protected:
 
 TEST_P(OptimizersMultiDTypeTest, SGDBasicStep) {
     auto param = std::make_shared<Variable>(ones({2, 2}, dtype, device), true);
-    param->grad() = ones({2, 2}, dtype, device);
+    param->set_grad(ones({2, 2}, dtype, device));
 
     auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 0.1);
@@ -165,7 +165,7 @@ TEST_P(OptimizersMultiDTypeTest, SGDMultipleSteps) {
 
     // Take multiple steps with constant gradient
     for (int step = 0; step < 5; step++) {
-        param->grad() = ones({2, 2}, dtype, device);
+        param->set_grad(ones({2, 2}, dtype, device));
         optimizer.step();
     }
 
@@ -175,7 +175,7 @@ TEST_P(OptimizersMultiDTypeTest, SGDMultipleSteps) {
 
 TEST_P(OptimizersMultiDTypeTest, SGDWithMomentum) {
     auto param = std::make_shared<Variable>(ones({2, 2}, dtype, device), true);
-    param->grad() = ones({2, 2}, dtype, device);
+    param->set_grad(ones({2, 2}, dtype, device));
 
     auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 0.1, 0.9);  // lr=0.1, momentum=0.9
@@ -185,14 +185,14 @@ TEST_P(OptimizersMultiDTypeTest, SGDWithMomentum) {
     VerifyDataGeneric(param->tensor(), 0.9, 4, get_tolerance());
 
     // Second step: velocity = 1 * 0.9 + 1 = 1.9, param = 0.9 - 0.1 * 1.9 = 0.71
-    param->grad() = ones({2, 2}, dtype, device);
+    param->set_grad(ones({2, 2}, dtype, device));
     optimizer.step();
     VerifyDataGeneric(param->tensor(), 0.71, 4, get_relaxed_tolerance());
 }
 
 TEST_P(OptimizersMultiDTypeTest, SGDWithWeightDecay) {
     auto param = std::make_shared<Variable>(ones({2, 2}, dtype, device), true);
-    param->grad() = zeros({2, 2}, dtype, device);
+    param->set_grad(zeros({2, 2}, dtype, device));
 
     auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 0.1, 0.0, 0.0, 0.01);  // weight_decay=0.01
@@ -206,8 +206,8 @@ TEST_P(OptimizersMultiDTypeTest, SGDMultipleParameters) {
     auto param1 = std::make_shared<Variable>(ones({2, 2}, dtype, device), true);
     auto param2 = std::make_shared<Variable>(create_full({2, 2}, 2.0), true);
 
-    param1->grad() = ones({2, 2}, dtype, device);
-    param2->grad() = create_full({2, 2}, 0.5);
+    param1->set_grad(ones({2, 2}, dtype, device));
+    param2->set_grad(create_full({2, 2}, 0.5));
 
     auto params = std::vector<std::shared_ptr<Variable>>{param1, param2};
     auto optimizer = SGD(params, 0.1);
@@ -223,7 +223,7 @@ TEST_P(OptimizersMultiDTypeTest, SGDMultipleParameters) {
 
 TEST_P(OptimizersMultiDTypeTest, SGDZeroGrad) {
     auto param = std::make_shared<Variable>(ones({2, 2}, dtype, device), true);
-    param->grad() = ones({2, 2}, dtype, device);
+    param->set_grad(ones({2, 2}, dtype, device));
 
     auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 0.1);
@@ -252,7 +252,7 @@ TEST_P(OptimizersMultiDTypeTest, SGDNoGradient) {
 
 TEST_P(OptimizersMultiDTypeTest, AdamBasicStep) {
     auto param = std::make_shared<Variable>(ones({2, 2}, dtype, device), true);
-    param->grad() = ones({2, 2}, dtype, device);
+    param->set_grad(ones({2, 2}, dtype, device));
 
     auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = Adam(params, 0.001);
@@ -283,7 +283,7 @@ TEST_P(OptimizersMultiDTypeTest, AdamBasicStep) {
 
 TEST_P(OptimizersMultiDTypeTest, AdamBiasCorrection) {
     auto param = std::make_shared<Variable>(ones({2, 2}, dtype, device), true);
-    param->grad() = ones({2, 2}, dtype, device);
+    param->set_grad(ones({2, 2}, dtype, device));
 
     auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = Adam(params, 0.001, 0.9, 0.999, 1e-8);
@@ -308,7 +308,7 @@ TEST_P(OptimizersMultiDTypeTest, AdamMultipleSteps) {
 
     double prev_value = 1.0;
     for (int step = 0; step < 10; step++) {
-        param->grad() = ones({2, 2}, dtype, device);
+        param->set_grad(ones({2, 2}, dtype, device));
         optimizer.step();
 
         auto cpu_tensor = param->tensor().to(Device::cpu());
@@ -332,7 +332,7 @@ TEST_P(OptimizersMultiDTypeTest, AdamMultipleSteps) {
 
 TEST_P(OptimizersMultiDTypeTest, AdamWithWeightDecay) {
     auto param = std::make_shared<Variable>(ones({2, 2}, dtype, device), true);
-    param->grad() = zeros({2, 2}, dtype, device);
+    param->set_grad(zeros({2, 2}, dtype, device));
 
     auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = Adam(params, 0.01, 0.9, 0.999, 1e-8, 0.01);  // weight_decay=0.01
@@ -370,7 +370,7 @@ TEST_P(OptimizersMultiDTypeTest, AdamConvergenceTest) {
     // Simulate gradient descent towards zero
     for (int step = 0; step < 100; step++) {
         // Gradient points in direction of current value
-        param->grad() = param->tensor();
+        param->set_grad(param->tensor());
         optimizer.step();
     }
 
@@ -382,8 +382,8 @@ TEST_P(OptimizersMultiDTypeTest, AdamMultipleParameters) {
     auto param1 = std::make_shared<Variable>(ones({2, 2}, dtype, device), true);
     auto param2 = std::make_shared<Variable>(create_full({2, 2}, 2.0), true);
 
-    param1->grad() = ones({2, 2}, dtype, device);
-    param2->grad() = create_full({2, 2}, 2.0);
+    param1->set_grad(ones({2, 2}, dtype, device));
+    param2->set_grad(create_full({2, 2}, 2.0));
 
     auto params = std::vector<std::shared_ptr<Variable>>{param1, param2};
     auto optimizer = Adam(params, 0.01);
@@ -413,7 +413,7 @@ TEST_P(OptimizersMultiDTypeTest, AdamMultipleParameters) {
 
 TEST_P(OptimizersMultiDTypeTest, AdamZeroGrad) {
     auto param = std::make_shared<Variable>(ones({2, 2}, dtype, device), true);
-    param->grad() = ones({2, 2}, dtype, device);
+    param->set_grad(ones({2, 2}, dtype, device));
 
     auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = Adam(params, 0.001);
@@ -442,7 +442,7 @@ TEST_P(OptimizersMultiDTypeTest, AdamNoGradient) {
 
 TEST_P(OptimizersMultiDTypeTest, SGDLearningRateChange) {
     auto param = std::make_shared<Variable>(ones({2, 2}, dtype, device), true);
-    param->grad() = ones({2, 2}, dtype, device);
+    param->set_grad(ones({2, 2}, dtype, device));
 
     auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 0.1);
@@ -460,7 +460,7 @@ TEST_P(OptimizersMultiDTypeTest, SGDLearningRateChange) {
 
 TEST_P(OptimizersMultiDTypeTest, AdamLearningRateChange) {
     auto param = std::make_shared<Variable>(ones({2, 2}, dtype, device), true);
-    param->grad() = ones({2, 2}, dtype, device);
+    param->set_grad(ones({2, 2}, dtype, device));
 
     auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = Adam(params, 0.001);
@@ -517,8 +517,8 @@ TEST_P(OptimizersMultiDTypeTest, SGDSimpleLinearRegression) {
             double grad_b = 2 * (y_pred - y_train[i]);
 
             if (i == 0) {
-                weight->grad() = create_full({1}, 0.0);
-                bias->grad() = create_full({1}, 0.0);
+                weight->set_grad(create_full({1}, 0.0));
+                bias->set_grad(create_full({1}, 0.0));
             }
 
             auto weight_grad_cpu = weight->grad().value().to(Device::cpu());
@@ -533,8 +533,8 @@ TEST_P(OptimizersMultiDTypeTest, SGDSimpleLinearRegression) {
             }
 
             // Copy back to device
-            weight->grad() = weight_grad_cpu.to(device);
-            bias->grad() = bias_grad_cpu.to(device);
+            weight->set_grad(weight_grad_cpu.to(device));
+            bias->set_grad(bias_grad_cpu.to(device));
         }
 
         optimizer.step();
@@ -564,7 +564,7 @@ TEST_P(OptimizersMultiDTypeTest, SGDSimpleLinearRegression) {
 TEST_P(OptimizersMultiDTypeTest, SGDNumericalStability) {
     // Test with very small gradients to verify precision handling
     auto param = std::make_shared<Variable>(ones({10}, dtype, device), true);
-    param->grad() = create_full({10}, 1e-7);
+    param->set_grad(create_full({10}, 1e-7));
 
     auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 0.1);
@@ -582,7 +582,7 @@ TEST_P(OptimizersMultiDTypeTest, SGDNumericalStability) {
 TEST_P(OptimizersMultiDTypeTest, AdamNumericalStability) {
     // Test Adam with very small updates
     auto param = std::make_shared<Variable>(ones({10}, dtype, device), true);
-    param->grad() = create_full({10}, 1e-6);
+    param->set_grad(create_full({10}, 1e-6));
 
     auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = Adam(params, 0.001, 0.9, 0.999, 1e-8);

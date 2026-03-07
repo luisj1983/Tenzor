@@ -211,6 +211,15 @@ inline std::string backend_name(const Device& device) {
 /**
  * @brief Check if two tensors are close within tolerance.
  *
+ * Supports all floating-point and integer dtypes by dispatching to the
+ * correct data pointer type. Integer dtypes use exact comparison (atol=0).
+ *
+ * Tolerance rationale:
+ * - Element-wise ops (add, mul): rtol=1e-5, atol=1e-8 (single rounding)
+ * - Accumulation ops (matmul, sum): rtol=1e-4, atol=1e-5 (FP32 accumulation error)
+ * - Reduction chains (mean, var): rtol=1e-5, atol=1e-7 (moderate accumulation)
+ * - Convolution: rtol=1e-4, atol=1e-6 (algorithm-dependent rounding)
+ *
  * @param a First tensor
  * @param b Second tensor
  * @param rtol Relative tolerance (default: 1e-5)
@@ -229,68 +238,110 @@ inline bool tensors_close(const Tensor& a, const Tensor& b,
         return false;
     }
 
+    // Synchronize devices before comparison
+    if (a.device().type != Device::Type::CPU) a.device().synchronize();
+    if (b.device().type != Device::Type::CPU) b.device().synchronize();
+
     // Move both to CPU for comparison
     auto a_cpu = a.device().type == Device::Type::CPU ? a : a.to(Device::cpu());
     auto b_cpu = b.device().type == Device::Type::CPU ? b : b.to(Device::cpu());
 
-    // Synchronize devices before comparison
-    a.device().synchronize();
-    b.device().synchronize();
-
-    const float* a_data = a_cpu.data<float>();
-    const float* b_data = b_cpu.data<float>();
-
-    for (int64_t i = 0; i < a_cpu.numel(); ++i) {
-        float va = a_data[i];
-        float vb = b_data[i];
-
-        // Handle NaN
-        if (std::isnan(va) && std::isnan(vb)) {
-            if (equal_nan) continue;
-            return false;
-        }
-
-        if (std::isnan(va) || std::isnan(vb)) {
-            return false;
-        }
-
-        // Handle infinity
-        if (std::isinf(va) && std::isinf(vb)) {
-            if ((va > 0) == (vb > 0)) continue;
-            return false;
-        }
-
-        // Check tolerance
-        float diff = std::abs(va - vb);
-        float threshold = atol + rtol * std::abs(vb);
-
-        if (diff > threshold) {
-            return false;
-        }
+    // For Float16/BFloat16, promote to Float32 for comparison since
+    // data<float16>() would require half-precision comparison math.
+    if (a_cpu.dtype() == DType::Float16 || a_cpu.dtype() == DType::BFloat16) {
+        a_cpu = a_cpu.to(DType::Float32);
+        b_cpu = b_cpu.to(DType::Float32);
     }
 
-    return true;
+    // Dispatch comparison by dtype
+    auto compare_float = [&](auto* a_data, auto* b_data) -> bool {
+        for (int64_t i = 0; i < a_cpu.numel(); ++i) {
+            double va = static_cast<double>(a_data[i]);
+            double vb = static_cast<double>(b_data[i]);
+
+            if (std::isnan(va) && std::isnan(vb)) {
+                if (equal_nan) continue;
+                return false;
+            }
+            if (std::isnan(va) || std::isnan(vb)) return false;
+
+            if (std::isinf(va) && std::isinf(vb)) {
+                if ((va > 0) == (vb > 0)) continue;
+                return false;
+            }
+
+            double diff = std::abs(va - vb);
+            double threshold = static_cast<double>(atol) + static_cast<double>(rtol) * std::abs(vb);
+            if (diff > threshold) return false;
+        }
+        return true;
+    };
+
+    auto compare_int = [&](auto* a_data, auto* b_data) -> bool {
+        for (int64_t i = 0; i < a_cpu.numel(); ++i) {
+            if (a_data[i] != b_data[i]) return false;
+        }
+        return true;
+    };
+
+    switch (a_cpu.dtype()) {
+        case DType::Float32:
+            return compare_float(a_cpu.data<float>(), b_cpu.data<float>());
+        case DType::Float64:
+            return compare_float(a_cpu.data<double>(), b_cpu.data<double>());
+        case DType::Int8:
+            return compare_int(a_cpu.data<int8_t>(), b_cpu.data<int8_t>());
+        case DType::Int16:
+            return compare_int(a_cpu.data<int16_t>(), b_cpu.data<int16_t>());
+        case DType::Int32:
+            return compare_int(a_cpu.data<int32_t>(), b_cpu.data<int32_t>());
+        case DType::Int64:
+            return compare_int(a_cpu.data<int64_t>(), b_cpu.data<int64_t>());
+        case DType::UInt8:
+            return compare_int(a_cpu.data<uint8_t>(), b_cpu.data<uint8_t>());
+        case DType::Bool:
+            return compare_int(a_cpu.data<uint8_t>(), b_cpu.data<uint8_t>());
+        default:
+            // Fall back to Float32 comparison for any unhandled dtype
+            return compare_float(a_cpu.data<float>(), b_cpu.data<float>());
+    }
 }
 
 /**
  * @brief Compute maximum absolute difference between two tensors.
+ *
+ * Promotes Float16/BFloat16 to Float32 for comparison.
  */
 inline float max_abs_diff(const Tensor& a, const Tensor& b) {
+    if (a.device().type != Device::Type::CPU) a.device().synchronize();
+    if (b.device().type != Device::Type::CPU) b.device().synchronize();
+
     auto a_cpu = a.device().type == Device::Type::CPU ? a : a.to(Device::cpu());
     auto b_cpu = b.device().type == Device::Type::CPU ? b : b.to(Device::cpu());
 
-    a.device().synchronize();
-    b.device().synchronize();
-
-    const float* a_data = a_cpu.data<float>();
-    const float* b_data = b_cpu.data<float>();
-
-    float max_diff = 0.0f;
-    for (int64_t i = 0; i < a_cpu.numel(); ++i) {
-        float diff = std::abs(a_data[i] - b_data[i]);
-        max_diff = std::max(max_diff, diff);
+    // Promote half types
+    if (a_cpu.dtype() == DType::Float16 || a_cpu.dtype() == DType::BFloat16) {
+        a_cpu = a_cpu.to(DType::Float32);
+        b_cpu = b_cpu.to(DType::Float32);
     }
 
+    if (a_cpu.dtype() == DType::Float64) {
+        const double* a_data = a_cpu.data<double>();
+        const double* b_data = b_cpu.data<double>();
+        double max_diff = 0.0;
+        for (int64_t i = 0; i < a_cpu.numel(); ++i) {
+            max_diff = std::max(max_diff, std::abs(a_data[i] - b_data[i]));
+        }
+        return static_cast<float>(max_diff);
+    }
+
+    // Default: Float32 path (also handles promoted half types)
+    const float* a_data = a_cpu.data<float>();
+    const float* b_data = b_cpu.data<float>();
+    float max_diff = 0.0f;
+    for (int64_t i = 0; i < a_cpu.numel(); ++i) {
+        max_diff = std::max(max_diff, std::abs(a_data[i] - b_data[i]));
+    }
     return max_diff;
 }
 

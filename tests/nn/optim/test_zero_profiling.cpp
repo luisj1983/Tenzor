@@ -41,13 +41,13 @@ protected:
         param3->tensor().fill_(0.01f);
 
         // Create mock gradients
-        param1->grad() = Tensor({128, 256}, DType::Float32, Device::cpu());
-        param2->grad() = Tensor({256, 512}, DType::Float32, Device::cpu());
-        param3->grad() = Tensor({512, 128}, DType::Float32, Device::cpu());
+        param1->set_grad(Tensor({128, 256}, DType::Float32, Device::cpu()));
+        param2->set_grad(Tensor({256, 512}, DType::Float32, Device::cpu()));
+        param3->set_grad(Tensor({512, 128}, DType::Float32, Device::cpu()));
 
-        param1->grad()->fill_(0.1f);
-        param2->grad()->fill_(0.1f);
-        param3->grad()->fill_(0.1f);
+        param1->mutable_grad()->fill_(0.1f);
+        param2->mutable_grad()->fill_(0.1f);
+        param3->mutable_grad()->fill_(0.1f);
 
         parameters_ = {param1, param2, param3};
     }

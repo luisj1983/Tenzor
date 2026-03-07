@@ -267,7 +267,7 @@ auto DistributedDataParallel::all_reduce_bucket_async(
         }
 
         // Get the gradient tensor
-        Tensor& grad = param->grad().value();
+        Tensor& grad = param->mutable_grad().value();
 
         // Launch NCCL all-reduce asynchronously on the communication stream.
         // The NCCL kernel reads gradient data from GPU memory; since the
@@ -357,7 +357,7 @@ auto DistributedDataParallel::all_reduce_bucket(GradBucket& bucket) -> void {
         }
 
         // Get the gradient tensor
-        Tensor& grad = param->grad().value();
+        Tensor& grad = param->mutable_grad().value();
 
         // All-reduce: sum gradients across all processes
         pg_.all_reduce(grad, ReduceOp::SUM);

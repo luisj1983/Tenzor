@@ -15,7 +15,7 @@ class OptimizerTestSGDBasicStep : public BackendTest {};
 TEST_P(OptimizerTestSGDBasicStep, BasicStep) {
     // Create a parameter with gradient
     auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32, device), true);
-    param->grad() = ones({2, 2}, DType::Float32, device);
+    param->set_grad(ones({2, 2}, DType::Float32, device));
 
     // Create SGD optimizer with lr=0.1
     auto params = std::vector<std::shared_ptr<Variable>>{param};
@@ -44,7 +44,7 @@ TEST_P(OptimizerTestSGDMultipleSteps, MultipleSteps) {
 
     // Take multiple steps with constant gradient
     for (int step = 0; step < 5; step++) {
-        param->grad() = ones({2, 2}, DType::Float32, device);
+        param->set_grad(ones({2, 2}, DType::Float32, device));
         optimizer.step();
     }
 
@@ -62,7 +62,7 @@ class OptimizerTestSGDWithMomentum : public BackendTest {};
 
 TEST_P(OptimizerTestSGDWithMomentum, WithMomentum) {
     auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32, device), true);
-    param->grad() = ones({2, 2}, DType::Float32, device);
+    param->set_grad(ones({2, 2}, DType::Float32, device));
 
     auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 0.1, 0.9);  // lr=0.1, momentum=0.9
@@ -77,7 +77,7 @@ TEST_P(OptimizerTestSGDWithMomentum, WithMomentum) {
     }
 
     // Second step: velocity = 1 * 0.9 + 1 = 1.9, param = 0.9 - 0.1 * 1.9 = 0.71
-    param->grad() = ones({2, 2}, DType::Float32, device);
+    param->set_grad(ones({2, 2}, DType::Float32, device));
     optimizer.step();
 
     cpu_tensor = param->tensor().to(Device::cpu());
@@ -93,7 +93,7 @@ class OptimizerTestSGDWithWeightDecay : public BackendTest {};
 
 TEST_P(OptimizerTestSGDWithWeightDecay, WithWeightDecay) {
     auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32, device), true);
-    param->grad() = zeros({2, 2}, DType::Float32, device);  // Zero gradient
+    param->set_grad(zeros({2, 2}, DType::Float32, device));  // Zero gradient
 
     auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 0.1, 0.0, 0.0, 0.01);  // weight_decay=0.01
@@ -116,8 +116,8 @@ TEST_P(OptimizerTestSGDMultipleParameters, MultipleParameters) {
     auto param1 = std::make_shared<Variable>(ones({2, 2}, DType::Float32, device), true);
     auto param2 = std::make_shared<Variable>(full({2, 2}, 2.0f, DType::Float32, device), true);
 
-    param1->grad() = ones({2, 2}, DType::Float32, device);
-    param2->grad() = full({2, 2}, 0.5f, DType::Float32, device);
+    param1->set_grad(ones({2, 2}, DType::Float32, device));
+    param2->set_grad(full({2, 2}, 0.5f, DType::Float32, device));
 
     auto params = std::vector<std::shared_ptr<Variable>>{param1, param2};
     auto optimizer = SGD(params, 0.1);
@@ -145,7 +145,7 @@ class OptimizerTestSGDZeroGrad : public BackendTest {};
 
 TEST_P(OptimizerTestSGDZeroGrad, ZeroGrad) {
     auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32, device), true);
-    param->grad() = ones({2, 2}, DType::Float32, device);
+    param->set_grad(ones({2, 2}, DType::Float32, device));
 
     auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 0.1);
@@ -193,7 +193,7 @@ class OptimizerTestAdamBasicStep : public BackendTest {};
 
 TEST_P(OptimizerTestAdamBasicStep, BasicStep) {
     auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32, device), true);
-    param->grad() = ones({2, 2}, DType::Float32, device);
+    param->set_grad(ones({2, 2}, DType::Float32, device));
 
     auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = Adam(params, 0.001);
@@ -215,7 +215,7 @@ class OptimizerTestAdamBiasCorrection : public BackendTest {};
 
 TEST_P(OptimizerTestAdamBiasCorrection, BiasCorrection) {
     auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32, device), true);
-    param->grad() = ones({2, 2}, DType::Float32, device);
+    param->set_grad(ones({2, 2}, DType::Float32, device));
 
     auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = Adam(params, 0.001, 0.9, 0.999, 1e-8);
@@ -249,7 +249,7 @@ TEST_P(OptimizerTestAdamMultipleSteps, MultipleSteps) {
 
     float prev_value = 1.0f;
     for (int step = 0; step < 10; step++) {
-        param->grad() = ones({2, 2}, DType::Float32, device);
+        param->set_grad(ones({2, 2}, DType::Float32, device));
         optimizer.step();
 
         auto cpu_tensor = param->tensor().to(Device::cpu());
@@ -268,7 +268,7 @@ class OptimizerTestAdamWithWeightDecay : public BackendTest {};
 
 TEST_P(OptimizerTestAdamWithWeightDecay, WithWeightDecay) {
     auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32, device), true);
-    param->grad() = zeros({2, 2}, DType::Float32, device);
+    param->set_grad(zeros({2, 2}, DType::Float32, device));
 
     auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = Adam(params, 0.01, 0.9, 0.999, 1e-8, 0.01);  // weight_decay=0.01
@@ -298,7 +298,7 @@ TEST_P(OptimizerTestAdamConvergenceTest, ConvergenceTest) {
     // Simulate gradient descent towards zero
     for (int step = 0; step < 100; step++) {
         // Gradient points in direction of current value
-        param->grad() = param->tensor();
+        param->set_grad(param->tensor());
         optimizer.step();
     }
 
@@ -318,8 +318,8 @@ TEST_P(OptimizerTestAdamMultipleParameters, MultipleParameters) {
     auto param1 = std::make_shared<Variable>(ones({2, 2}, DType::Float32, device), true);
     auto param2 = std::make_shared<Variable>(full({2, 2}, 2.0f, DType::Float32, device), true);
 
-    param1->grad() = ones({2, 2}, DType::Float32, device);
-    param2->grad() = full({2, 2}, 2.0f, DType::Float32, device);
+    param1->set_grad(ones({2, 2}, DType::Float32, device));
+    param2->set_grad(full({2, 2}, 2.0f, DType::Float32, device));
 
     auto params = std::vector<std::shared_ptr<Variable>>{param1, param2};
     auto optimizer = Adam(params, 0.01);
@@ -344,7 +344,7 @@ class OptimizerTestAdamZeroGrad : public BackendTest {};
 
 TEST_P(OptimizerTestAdamZeroGrad, ZeroGrad) {
     auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32, device), true);
-    param->grad() = ones({2, 2}, DType::Float32, device);
+    param->set_grad(ones({2, 2}, DType::Float32, device));
 
     auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = Adam(params, 0.001);
@@ -389,7 +389,7 @@ class OptimizerTestSGDLearningRateChange : public BackendTest {};
 
 TEST_P(OptimizerTestSGDLearningRateChange, LearningRateChange) {
     auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32, device), true);
-    param->grad() = ones({2, 2}, DType::Float32, device);
+    param->set_grad(ones({2, 2}, DType::Float32, device));
 
     auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 0.1);
@@ -414,7 +414,7 @@ class OptimizerTestAdamLearningRateChange : public BackendTest {};
 
 TEST_P(OptimizerTestAdamLearningRateChange, LearningRateChange) {
     auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32, device), true);
-    param->grad() = ones({2, 2}, DType::Float32, device);
+    param->set_grad(ones({2, 2}, DType::Float32, device));
 
     auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = Adam(params, 0.001);
@@ -466,8 +466,8 @@ TEST_P(OptimizerTestSGDSimpleLinearRegression, SimpleLinearRegression) {
             float grad_b = 2 * (y_pred - y_train[i]);
 
             if (i == 0) {
-                weight->grad() = full({1}, 0.0f, DType::Float32, device);
-                bias->grad() = full({1}, 0.0f, DType::Float32, device);
+                weight->set_grad(full({1}, 0.0f, DType::Float32, device));
+                bias->set_grad(full({1}, 0.0f, DType::Float32, device));
             }
 
             auto weight_grad_cpu = weight->grad().value().to(Device::cpu());
@@ -476,8 +476,8 @@ TEST_P(OptimizerTestSGDSimpleLinearRegression, SimpleLinearRegression) {
             bias_grad_cpu.data<float>()[0] += grad_b;
 
             // Copy back to device
-            weight->grad() = weight_grad_cpu.to(device);
-            bias->grad() = bias_grad_cpu.to(device);
+            weight->set_grad(weight_grad_cpu.to(device));
+            bias->set_grad(bias_grad_cpu.to(device));
         }
 
         optimizer.step();

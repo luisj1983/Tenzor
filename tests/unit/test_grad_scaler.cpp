@@ -87,7 +87,7 @@ TEST_F(GradScalerTest, GradientUnscaling) {
 
     // Create fake scaled gradient
     auto grad_tensor = full({2, 3}, 200.0f, DType::Float32, device_);
-    param.grad() = grad_tensor;
+    param.set_grad(grad_tensor);
 
     // Create optimizer with this parameter
     auto param_ptr = std::make_shared<Variable>(param);
@@ -113,7 +113,7 @@ TEST_F(GradScalerTest, NoInfNanDetection) {
     auto param = Variable(param_tensor, true);
 
     auto grad_tensor = full({3, 3}, 1.5f, DType::Float32, device_);
-    param.grad() = grad_tensor;
+    param.set_grad(grad_tensor);
 
     auto param_ptr = std::make_shared<Variable>(param);
     auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
@@ -137,7 +137,7 @@ TEST_F(GradScalerTest, InfDetection) {
     auto grad_tensor = full({2, 2}, 1.0f, DType::Float32, device_);
     float* grad_data = grad_tensor.data<float>();
     grad_data[1] = std::numeric_limits<float>::infinity();
-    param.grad() = grad_tensor;
+    param.set_grad(grad_tensor);
 
     auto param_ptr = std::make_shared<Variable>(param);
     auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
@@ -161,7 +161,7 @@ TEST_F(GradScalerTest, NanDetection) {
     auto grad_tensor = full({2, 2}, 1.0f, DType::Float32, device_);
     float* grad_data = grad_tensor.data<float>();
     grad_data[2] = std::numeric_limits<float>::quiet_NaN();
-    param.grad() = grad_tensor;
+    param.set_grad(grad_tensor);
 
     auto param_ptr = std::make_shared<Variable>(param);
     auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
@@ -186,7 +186,7 @@ TEST_F(GradScalerTest, ScaleBackoff) {
 
     auto grad_tensor = full({2, 2}, std::numeric_limits<float>::infinity(),
                                    DType::Float32, device_);
-    param.grad() = grad_tensor;
+    param.set_grad(grad_tensor);
 
     auto param_ptr = std::make_shared<Variable>(param);
     auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
@@ -218,7 +218,7 @@ TEST_F(GradScalerTest, ScaleGrowth) {
     // Perform 3 successful iterations
     for (int i = 0; i < 3; ++i) {
         auto grad_tensor = full({2, 2}, 1.0f, DType::Float32, device_);
-        param.grad() = grad_tensor;
+        param.set_grad(grad_tensor);
 
         bool success = scaler.step(optimizer);
         EXPECT_TRUE(success);
@@ -248,7 +248,7 @@ TEST_F(GradScalerTest, SGDIntegration) {
 
     // Manually set gradient (simulating backward)
     auto grad_tensor = full({3, 3}, 10.0f, DType::Float32, device_);
-    param.grad() = grad_tensor;
+    param.set_grad(grad_tensor);
 
     // Step with scaler
     bool success = scaler.step(optimizer);
@@ -276,7 +276,7 @@ TEST_F(GradScalerTest, AdamIntegration) {
 
     // Set gradient
     auto grad_tensor = full({2, 2}, 50.0f, DType::Float32, device_);
-    param.grad() = grad_tensor;
+    param.set_grad(grad_tensor);
 
     // Step with scaler
     bool success = scaler.step(optimizer);
@@ -298,7 +298,7 @@ TEST_F(GradScalerTest, Reset) {
     auto param_tensor = ones({2, 2}, DType::Float32, device_);
     auto param = Variable(param_tensor, true);
     auto grad_tensor = full({2, 2}, 1.0f, DType::Float32, device_);
-    param.grad() = grad_tensor;
+    param.set_grad(grad_tensor);
 
     auto param_ptr = std::make_shared<Variable>(param);
     auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
@@ -327,7 +327,7 @@ TEST_F(GradScalerTest, StateDictSaveLoad) {
     auto param_tensor = ones({2, 2}, DType::Float32, device_);
     auto param = Variable(param_tensor, true);
     auto grad_tensor = full({2, 2}, 1.0f, DType::Float32, device_);
-    param.grad() = grad_tensor;
+    param.set_grad(grad_tensor);
 
     auto param_ptr = std::make_shared<Variable>(param);
     auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
@@ -364,10 +364,10 @@ TEST_F(GradScalerTest, MultipleParameters) {
 
     // Set gradients
     auto grad1_tensor = full({2, 2}, 100.0f, DType::Float32, device_);
-    param1.grad() = grad1_tensor;
+    param1.set_grad(grad1_tensor);
 
     auto grad2_tensor = full({3, 3}, 200.0f, DType::Float32, device_);
-    param2.grad() = grad2_tensor;
+    param2.set_grad(grad2_tensor);
 
     auto param1_ptr = std::make_shared<Variable>(param1);
     auto param2_ptr = std::make_shared<Variable>(param2);
@@ -415,7 +415,7 @@ TEST_F(GradScalerTest, TrainingLoopSimulation) {
             std::numeric_limits<float>::infinity() : 1.0f;
 
         auto grad_tensor = full({10, 10}, grad_value, DType::Float32, device_);
-        param.grad() = grad_tensor;
+        param.set_grad(grad_tensor);
 
         // Step and update
         bool success = scaler.step(optimizer);
@@ -449,7 +449,7 @@ TEST_F(GradScalerTest, ScaleLimits) {
     for (int i = 0; i < 10; ++i) {
         auto grad_tensor = full({2, 2}, std::numeric_limits<float>::infinity(),
                                        DType::Float32, device_);
-        param.grad() = grad_tensor;
+        param.set_grad(grad_tensor);
         scaler_min.step(optimizer);
         scaler_min.update();
     }
@@ -466,7 +466,7 @@ TEST_F(GradScalerTest, DoubleUnscaleProtection) {
     auto param = Variable(param_tensor, true);
 
     auto grad_tensor = full({2, 2}, 200.0f, DType::Float32, device_);
-    param.grad() = grad_tensor;
+    param.set_grad(grad_tensor);
 
     auto param_ptr = std::make_shared<Variable>(param);
     auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
