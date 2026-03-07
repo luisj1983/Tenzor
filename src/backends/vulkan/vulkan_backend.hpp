@@ -152,13 +152,18 @@ private:
     struct StagingBuffer {
         std::unique_ptr<vulkan::VulkanBuffer> buffer;
         size_t size = 0;
-        bool in_use = false;  // Whether currently acquired by a transfer
+        bool in_use = false;           // Whether currently acquired by a transfer
+        uint64_t last_use_tick = 0;    // Monotonic tick for LRU eviction
     };
 
-    // Pool of staging buffers per device for concurrent transfers
+    // Pool of staging buffers per device for concurrent transfers.
+    // Evicts oldest unused buffers when pool exceeds kMaxPoolSize.
     struct StagingBufferPool {
+        static constexpr size_t kMaxPoolSize = 16;
+
         std::vector<StagingBuffer> buffers;
         std::unique_ptr<std::mutex> mutex = std::make_unique<std::mutex>();
+        uint64_t tick_counter = 0;     // Monotonic counter for LRU ordering
 
         StagingBufferPool() = default;
         StagingBufferPool(StagingBufferPool&&) = default;

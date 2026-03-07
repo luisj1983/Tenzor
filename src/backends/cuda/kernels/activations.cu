@@ -10,6 +10,7 @@
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/backend/backend.hpp"  // For OpAttributes (dispatch wrappers)
 #include "cuda_launch_utils.cuh"
+#include "cuda_common.cuh"
 #include <stdexcept>
 #include <vector>
 #include <charconv>  // For std::from_chars (dispatch wrappers)
@@ -1204,24 +1205,9 @@ __device__ __forceinline__ __nv_bfloat16 numeric_min<__nv_bfloat16>() {
     return __float2bfloat16(-3.38e38f);  // Close to -FLT_MAX but within BFloat16 range
 }
 
-// Warp-level reduction using shuffle instructions
-template<typename T>
-__device__ __forceinline__ T warp_reduce_max(T val) {
-    for (int offset = 16; offset > 0; offset /= 2) {
-        val = device_max(val, __shfl_down_sync(0xffffffff, val, offset));
-    }
-    return val;
-}
+// warp_reduce_sum, block_reduce_sum, warp_reduce_max are in cuda_common.cuh
 
-template<typename T>
-__device__ __forceinline__ T warp_reduce_sum(T val) {
-    for (int offset = 16; offset > 0; offset /= 2) {
-        val += __shfl_down_sync(0xffffffff, val, offset);
-    }
-    return val;
-}
-
-// Block-level reduction using shared memory
+// Block-level max reduction using shared memory (activations-specific with numeric_min identity)
 template<typename T>
 __device__ T block_reduce_max(T val, T* shared) {
     int lane = threadIdx.x % 32;
@@ -1237,26 +1223,6 @@ __device__ T block_reduce_max(T val, T* shared) {
     val = (threadIdx.x < blockDim.x / 32) ? shared[lane] : numeric_min<T>();
     if (wid == 0) {
         val = warp_reduce_max(val);
-    }
-
-    return val;
-}
-
-template<typename T>
-__device__ T block_reduce_sum(T val, T* shared) {
-    int lane = threadIdx.x % 32;
-    int wid = threadIdx.x / 32;
-
-    val = warp_reduce_sum(val);
-
-    if (lane == 0) {
-        shared[wid] = val;
-    }
-    __syncthreads();
-
-    val = (threadIdx.x < blockDim.x / 32) ? shared[lane] : T(0);
-    if (wid == 0) {
-        val = warp_reduce_sum(val);
     }
 
     return val;

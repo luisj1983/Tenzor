@@ -20,6 +20,7 @@
 // Intel oneDNN for optimized layer operations
 #ifdef TENZOR_USE_ONEDNN
 #include <dnnl.hpp>
+#include "onednn_cache.hpp"
 #include <list>
 #include <unordered_map>
 #endif
@@ -124,32 +125,7 @@ struct LayerNormCachedPrimitive {
 
 static constexpr size_t LAYERNORM_CACHE_SIZE = 32;
 
-class LayerNormPrimitiveCache {
-public:
-    std::shared_ptr<LayerNormCachedPrimitive> get(const LayerNormCacheKey& key) {
-        auto it = cache_.find(key);
-        if (it != cache_.end()) {
-            lru_list_.remove(key);
-            lru_list_.push_front(key);
-            return it->second;
-        }
-        return nullptr;
-    }
-
-    void put(const LayerNormCacheKey& key, std::shared_ptr<LayerNormCachedPrimitive> value) {
-        if (cache_.size() >= LAYERNORM_CACHE_SIZE) {
-            auto evict_key = lru_list_.back();
-            lru_list_.pop_back();
-            cache_.erase(evict_key);
-        }
-        cache_[key] = value;
-        lru_list_.push_front(key);
-    }
-
-private:
-    std::unordered_map<LayerNormCacheKey, std::shared_ptr<LayerNormCachedPrimitive>, LayerNormCacheKeyHash> cache_;
-    std::list<LayerNormCacheKey> lru_list_;
-};
+using LayerNormPrimitiveCache = OneDNNPrimitiveCache<LayerNormCacheKey, LayerNormCachedPrimitive, LayerNormCacheKeyHash, LAYERNORM_CACHE_SIZE>;
 
 static thread_local LayerNormPrimitiveCache g_layernorm_cache;
 #endif

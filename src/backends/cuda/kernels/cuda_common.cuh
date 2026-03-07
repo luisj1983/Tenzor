@@ -15,6 +15,7 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cuda_bf16.h>
 #include <stdexcept>
 #include <string>
 
@@ -125,6 +126,150 @@ __device__ __forceinline__ __half float2half_sat(float x) {
     constexpr float kHalfMax = 65504.0f;
     x = fminf(fmaxf(x, -kHalfMax), kHalfMax);
     return __float2half(x);
+}
+
+// ============================================================================
+// Warp and Block Reduction Primitives
+// ============================================================================
+
+/// Warp-level sum reduction using shuffle instructions (full warp, 32 threads).
+template<typename T>
+__device__ __forceinline__ T warp_reduce_sum(T val) {
+    for (int offset = 16; offset > 0; offset /= 2) {
+        val += __shfl_down_sync(0xffffffff, val, offset);
+    }
+    return val;
+}
+
+/// Specialization for __half using native half-precision add.
+template<>
+__device__ __forceinline__ __half warp_reduce_sum(__half val) {
+    for (int offset = 16; offset > 0; offset /= 2) {
+        val = __hadd(val, __shfl_down_sync(0xffffffff, val, offset));
+    }
+    return val;
+}
+
+/// Specialization for __nv_bfloat16 using native bfloat16 add.
+template<>
+__device__ __forceinline__ __nv_bfloat16 warp_reduce_sum(__nv_bfloat16 val) {
+    for (int offset = 16; offset > 0; offset /= 2) {
+        val = __hadd(val, __shfl_down_sync(0xffffffff, val, offset));
+    }
+    return val;
+}
+
+/// Warp-level max reduction using shuffle instructions.
+template<typename T>
+__device__ __forceinline__ T warp_reduce_max(T val) {
+    for (int offset = 16; offset > 0; offset /= 2) {
+        T other = __shfl_down_sync(0xffffffff, val, offset);
+        val = (val > other) ? val : other;
+    }
+    return val;
+}
+
+/// Specialization for __half using intrinsic comparison.
+template<>
+__device__ __forceinline__ __half warp_reduce_max(__half val) {
+    for (int offset = 16; offset > 0; offset /= 2) {
+        __half other = __shfl_down_sync(0xffffffff, val, offset);
+        val = __hgt(val, other) ? val : other;
+    }
+    return val;
+}
+
+/// Specialization for __nv_bfloat16 using intrinsic comparison.
+template<>
+__device__ __forceinline__ __nv_bfloat16 warp_reduce_max(__nv_bfloat16 val) {
+    for (int offset = 16; offset > 0; offset /= 2) {
+        __nv_bfloat16 other = __shfl_down_sync(0xffffffff, val, offset);
+        val = __hgt(val, other) ? val : other;
+    }
+    return val;
+}
+
+/// Warp-level min reduction using shuffle instructions.
+template<typename T>
+__device__ __forceinline__ T warp_reduce_min(T val) {
+    for (int offset = 16; offset > 0; offset /= 2) {
+        T other = __shfl_down_sync(0xffffffff, val, offset);
+        val = (val < other) ? val : other;
+    }
+    return val;
+}
+
+/// Specialization for __half using intrinsic comparison.
+template<>
+__device__ __forceinline__ __half warp_reduce_min(__half val) {
+    for (int offset = 16; offset > 0; offset /= 2) {
+        __half other = __shfl_down_sync(0xffffffff, val, offset);
+        val = __hlt(val, other) ? val : other;
+    }
+    return val;
+}
+
+/// Specialization for __nv_bfloat16 using intrinsic comparison.
+template<>
+__device__ __forceinline__ __nv_bfloat16 warp_reduce_min(__nv_bfloat16 val) {
+    for (int offset = 16; offset > 0; offset /= 2) {
+        __nv_bfloat16 other = __shfl_down_sync(0xffffffff, val, offset);
+        val = __hlt(val, other) ? val : other;
+    }
+    return val;
+}
+
+/**
+ * @brief Block-level sum reduction using shared memory.
+ * @param val    Per-thread input value
+ * @param shared Shared memory array, must have at least (blockDim.x / 32) elements
+ * @return       Reduced sum (valid only in thread 0)
+ */
+template<typename T>
+__device__ T block_reduce_sum(T val, T* shared) {
+    int lane = threadIdx.x % 32;
+    int wid = threadIdx.x / 32;
+
+    val = warp_reduce_sum(val);
+
+    if (lane == 0) {
+        shared[wid] = val;
+    }
+    __syncthreads();
+
+    val = (threadIdx.x < blockDim.x / 32) ? shared[lane] : T(0);
+    if (wid == 0) {
+        val = warp_reduce_sum(val);
+    }
+
+    return val;
+}
+
+/**
+ * @brief Block-level max reduction using shared memory.
+ * @param val    Per-thread input value
+ * @param shared Shared memory array, must have at least (blockDim.x / 32) elements
+ * @param init   Identity element for max (e.g., -FLT_MAX)
+ * @return       Reduced max (valid only in thread 0)
+ */
+template<typename T>
+__device__ T block_reduce_max(T val, T* shared, T init) {
+    int lane = threadIdx.x % 32;
+    int wid = threadIdx.x / 32;
+
+    val = warp_reduce_max(val);
+
+    if (lane == 0) {
+        shared[wid] = val;
+    }
+    __syncthreads();
+
+    val = (threadIdx.x < blockDim.x / 32) ? shared[lane] : init;
+    if (wid == 0) {
+        val = warp_reduce_max(val);
+    }
+
+    return val;
 }
 
 } // namespace cuda

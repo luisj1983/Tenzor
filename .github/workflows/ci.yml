@@ -320,11 +320,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Configure CMake
-        run: cmake -B build -DTENZOR_BUILD_CUDA=OFF -DTENZOR_BUILD_VULKAN=OFF -DTENZOR_BUILD_ROCM=OFF -DTENZOR_BUILD_ONEAPI=OFF -DTENZOR_BUILD_WEBGPU=OFF -DTENZOR_BUILD_METAL=OFF -DTENZOR_BUILD_PYTHON=OFF -DTENZOR_BUILD_MODEL_HUB=OFF
+        run: cmake -B build -DTENZOR_BUILD_CUDA=OFF -DTENZOR_BUILD_VULKAN=OFF -DTENZOR_BUILD_ROCM=OFF -DTENZOR_BUILD_ONEAPI=OFF -DTENZOR_BUILD_WEBGPU=OFF -DTENZOR_BUILD_METAL=ON -DTENZOR_BUILD_PYTHON=OFF -DTENZOR_BUILD_MODEL_HUB=OFF
       - name: Build
         run: cmake --build build --config Release -j 3
-      - name: Test
-        run: cd build && ctest --output-on-failure -R "cpu" --timeout 120
+      - name: Test (CPU + Metal)
+        run: cd build && ctest --output-on-failure -R "cpu|metal" --timeout 120
 
   # Tier 2: Full CPU tests (every PR, ~30 min)
   full-cpu-tests:

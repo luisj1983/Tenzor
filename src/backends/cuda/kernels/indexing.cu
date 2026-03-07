@@ -65,7 +65,8 @@ __global__ void index_select_kernel_impl(
     int64_t dim_size,
     int64_t outer_size,
     int64_t inner_size,
-    int64_t total_output) {
+    int64_t total_output,
+    int* error_flag) {
 
     CUDA_GRID_STRIDE_LOOP(idx, total_output) {
         // Decompose output index into (outer, index_pos, inner)
@@ -74,10 +75,13 @@ __global__ void index_select_kernel_impl(
         int64_t index_pos = temp % num_indices;
         int64_t outer_idx = temp / num_indices;
 
-        // Get the actual index value with bounds handling
+        // Get the actual index value with bounds checking
         int64_t selected_idx = static_cast<int64_t>(indices[index_pos]);
         if (selected_idx < 0) selected_idx += dim_size;
-        selected_idx = max(int64_t(0), min(selected_idx, dim_size - 1));
+        if (selected_idx < 0 || selected_idx >= dim_size) {
+            atomicExch(error_flag, 1);
+            return;
+        }
 
         // Compute input offset
         int64_t input_offset = outer_idx * dim_size * inner_size +
@@ -129,15 +133,21 @@ auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index,
         throw std::invalid_argument("index_select: index must be Int32 or Int64");
     }
 
+    // Device-side OOB error flag
+    CudaBuffer error_buf(sizeof(int));
+    CUDA_CHECK(cudaMemsetAsync(error_buf.as<int>(), 0, sizeof(int), stream));
+
     #define LAUNCH_INDEX_SELECT(T) \
         if (idx_is_int32) \
             index_select_kernel_impl<T, int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
                 input.data<T>(), index.data<int32_t>(), output.data<T>(), \
-                num_indices, dim_size, outer_size, inner_size, total_output); \
+                num_indices, dim_size, outer_size, inner_size, total_output, \
+                error_buf.as<int>()); \
         else \
             index_select_kernel_impl<T, int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
                 input.data<T>(), index.data<int64_t>(), output.data<T>(), \
-                num_indices, dim_size, outer_size, inner_size, total_output); \
+                num_indices, dim_size, outer_size, inner_size, total_output, \
+                error_buf.as<int>()); \
         CUDA_CHECK(cudaGetLastError())
 
     switch (input.dtype()) {
@@ -153,13 +163,15 @@ auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                     reinterpret_cast<const __half*>(input.data_ptr()),
                     index.data<int32_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
-                    num_indices, dim_size, outer_size, inner_size, total_output);
+                    num_indices, dim_size, outer_size, inner_size, total_output,
+                    error_buf.as<int>());
             else
                 index_select_kernel_impl<__half, int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                     reinterpret_cast<const __half*>(input.data_ptr()),
                     index.data<int64_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
-                    num_indices, dim_size, outer_size, inner_size, total_output);
+                    num_indices, dim_size, outer_size, inner_size, total_output,
+                    error_buf.as<int>());
             CUDA_CHECK(cudaGetLastError());
             break;
         case DType::BFloat16:
@@ -168,13 +180,15 @@ auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                     reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
                     index.data<int32_t>(),
                     reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
-                    num_indices, dim_size, outer_size, inner_size, total_output);
+                    num_indices, dim_size, outer_size, inner_size, total_output,
+                    error_buf.as<int>());
             else
                 index_select_kernel_impl<__nv_bfloat16, int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                     reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
                     index.data<int64_t>(),
                     reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
-                    num_indices, dim_size, outer_size, inner_size, total_output);
+                    num_indices, dim_size, outer_size, inner_size, total_output,
+                    error_buf.as<int>());
             CUDA_CHECK(cudaGetLastError());
             break;
         default:
@@ -183,7 +197,17 @@ auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index,
 
     #undef LAUNCH_INDEX_SELECT
 
-    CUDA_CHECK(cudaGetLastError());
+    // Check for out-of-bounds index errors
+    int host_error = 0;
+    CUDA_CHECK(cudaMemcpyAsync(&host_error, error_buf.as<int>(), sizeof(int),
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    if (host_error) {
+        throw std::out_of_range(
+            "index_select: index out of range for dimension of size " +
+            std::to_string(dim_size));
+    }
+
     return output;
 }
 
@@ -347,7 +371,8 @@ __global__ void scatter_values_kernel_impl(
     int64_t dim_size,
     int64_t inner_size,
     int64_t index_dim_size,
-    int64_t total_scatter) {
+    int64_t total_scatter,
+    int* error_flag) {
 
     CUDA_GRID_STRIDE_LOOP(idx, total_scatter) {
         int64_t inner_idx = idx % inner_size;
@@ -359,7 +384,10 @@ __global__ void scatter_values_kernel_impl(
                                index_pos * inner_size + inner_idx;
         int64_t scatter_idx = static_cast<int64_t>(indices[index_offset]);
         if (scatter_idx < 0) scatter_idx += dim_size;
-        scatter_idx = max(int64_t(0), min(scatter_idx, dim_size - 1));
+        if (scatter_idx < 0 || scatter_idx >= dim_size) {
+            atomicExch(error_flag, 1);
+            return;
+        }
 
         int64_t output_offset = outer_idx * dim_size * inner_size +
                                 scatter_idx * inner_size +
@@ -411,6 +439,10 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
     int num_blocks_copy = get_num_blocks(total_input);
     int num_blocks_scatter = get_num_blocks(total_scatter);
 
+    // Device-side OOB error flag
+    CudaBuffer error_buf(sizeof(int));
+    CUDA_CHECK(cudaMemsetAsync(error_buf.as<int>(), 0, sizeof(int), stream));
+
     #define LAUNCH_SCATTER(T) \
         copy_kernel_impl<T><<<num_blocks_copy, BLOCK_SIZE, 0, stream>>>( \
             input.data<T>(), output.data<T>(), total_input); \
@@ -418,11 +450,13 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
         if (idx_is_int32) \
             scatter_values_kernel_impl<T, int32_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>( \
                 index.data<int32_t>(), src.data<T>(), output.data<T>(), \
-                outer_size, dim_size, inner_size, index_dim_size, total_scatter); \
+                outer_size, dim_size, inner_size, index_dim_size, total_scatter, \
+                error_buf.as<int>()); \
         else \
             scatter_values_kernel_impl<T, int64_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>( \
                 index.data<int64_t>(), src.data<T>(), output.data<T>(), \
-                outer_size, dim_size, inner_size, index_dim_size, total_scatter); \
+                outer_size, dim_size, inner_size, index_dim_size, total_scatter, \
+                error_buf.as<int>()); \
         CUDA_CHECK(cudaGetLastError())
 
     switch (input.dtype()) {
@@ -442,13 +476,15 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                     index.data<int32_t>(),
                     reinterpret_cast<const __half*>(src.data_ptr()),
                     reinterpret_cast<__half*>(output.data_ptr()),
-                    outer_size, dim_size, inner_size, index_dim_size, total_scatter);
+                    outer_size, dim_size, inner_size, index_dim_size, total_scatter,
+                    error_buf.as<int>());
             else
                 scatter_values_kernel_impl<__half, int64_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>(
                     index.data<int64_t>(),
                     reinterpret_cast<const __half*>(src.data_ptr()),
                     reinterpret_cast<__half*>(output.data_ptr()),
-                    outer_size, dim_size, inner_size, index_dim_size, total_scatter);
+                    outer_size, dim_size, inner_size, index_dim_size, total_scatter,
+                    error_buf.as<int>());
             CUDA_CHECK(cudaGetLastError());
             break;
         case DType::BFloat16:
@@ -456,19 +492,20 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                 reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
                 reinterpret_cast<__nv_bfloat16*>(output.data_ptr()), total_input);
             CUDA_CHECK(cudaGetLastError());
-            // No sync needed: CUDA stream ordering guarantees sequential execution
             if (idx_is_int32)
                 scatter_values_kernel_impl<__nv_bfloat16, int32_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>(
                     index.data<int32_t>(),
                     reinterpret_cast<const __nv_bfloat16*>(src.data_ptr()),
                     reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
-                    outer_size, dim_size, inner_size, index_dim_size, total_scatter);
+                    outer_size, dim_size, inner_size, index_dim_size, total_scatter,
+                    error_buf.as<int>());
             else
                 scatter_values_kernel_impl<__nv_bfloat16, int64_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>(
                     index.data<int64_t>(),
                     reinterpret_cast<const __nv_bfloat16*>(src.data_ptr()),
                     reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
-                    outer_size, dim_size, inner_size, index_dim_size, total_scatter);
+                    outer_size, dim_size, inner_size, index_dim_size, total_scatter,
+                    error_buf.as<int>());
             CUDA_CHECK(cudaGetLastError());
             break;
         default:
@@ -477,7 +514,17 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
 
     #undef LAUNCH_SCATTER
 
-    CUDA_CHECK(cudaGetLastError());
+    // Check for out-of-bounds index errors
+    int host_error = 0;
+    CUDA_CHECK(cudaMemcpyAsync(&host_error, error_buf.as<int>(), sizeof(int),
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    if (host_error) {
+        throw std::out_of_range(
+            "scatter: index out of range for dimension of size " +
+            std::to_string(dim_size));
+    }
+
     return output;
 }
 
@@ -519,7 +566,8 @@ __device__ void warp_reduce_atomic_add(T* output, int64_t output_offset, T value
                               static_cast<int>(reduced));
                 } else if constexpr (std::is_same_v<T, int64_t>) {
                     unsigned long long* addr = reinterpret_cast<unsigned long long*>(&output[output_offset]);
-                    unsigned long long old_val = *addr;
+                    // Use atomicCAS for initial read to avoid data race (non-atomic *addr is UB)
+                    unsigned long long old_val = atomicCAS(addr, 0ULL, 0ULL);
                     unsigned long long assumed;
                     do {
                         assumed = old_val;
@@ -547,7 +595,8 @@ __global__ void scatter_add_kernel_impl(
     int64_t dim_size,
     int64_t inner_size,
     int64_t index_dim_size,
-    int64_t total_scatter) {
+    int64_t total_scatter,
+    int* error_flag) {
 
     CUDA_GRID_STRIDE_LOOP(idx, total_scatter) {
         int64_t inner_idx = idx % inner_size;
@@ -559,7 +608,10 @@ __global__ void scatter_add_kernel_impl(
                                index_pos * inner_size + inner_idx;
         int64_t scatter_idx = static_cast<int64_t>(indices[index_offset]);
         if (scatter_idx < 0) scatter_idx += dim_size;
-        scatter_idx = max(int64_t(0), min(scatter_idx, dim_size - 1));
+        if (scatter_idx < 0 || scatter_idx >= dim_size) {
+            atomicExch(error_flag, 1);
+            return;
+        }
 
         int64_t output_offset = outer_idx * dim_size * inner_size +
                                 scatter_idx * inner_size +
@@ -606,15 +658,21 @@ auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
     if (total_scatter == 0) return output;
     int num_blocks_scatter = get_num_blocks(total_scatter);
 
+    // Device-side OOB error flag
+    CudaBuffer error_buf(sizeof(int));
+    CUDA_CHECK(cudaMemsetAsync(error_buf.as<int>(), 0, sizeof(int), stream));
+
     #define LAUNCH_SCATTER_ADD(T) \
         if (idx_is_int32) \
             scatter_add_kernel_impl<T, int32_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>( \
                 index.data<int32_t>(), src.data<T>(), output.data<T>(), \
-                outer_size, dim_size, inner_size, index_dim_size, total_scatter); \
+                outer_size, dim_size, inner_size, index_dim_size, total_scatter, \
+                error_buf.as<int>()); \
         else \
             scatter_add_kernel_impl<T, int64_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>( \
                 index.data<int64_t>(), src.data<T>(), output.data<T>(), \
-                outer_size, dim_size, inner_size, index_dim_size, total_scatter); \
+                outer_size, dim_size, inner_size, index_dim_size, total_scatter, \
+                error_buf.as<int>()); \
         CUDA_CHECK(cudaGetLastError())
 
     switch (input.dtype()) {
@@ -626,6 +684,17 @@ auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
     }
 
     #undef LAUNCH_SCATTER_ADD
+
+    // Check for out-of-bounds index errors
+    int host_error = 0;
+    CUDA_CHECK(cudaMemcpyAsync(&host_error, error_buf.as<int>(), sizeof(int),
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    if (host_error) {
+        throw std::out_of_range(
+            "scatter_add: index out of range for dimension of size " +
+            std::to_string(dim_size));
+    }
 
     return output;
 }
@@ -1035,7 +1104,7 @@ __global__ void embedding_backward_fp16_kernel_impl(
         unsigned int* addr = reinterpret_cast<unsigned int*>(&grad_weight[(token_idx * embedding_dim + j) & ~1]);
         unsigned int old_val, new_val;
         do {
-            old_val = *addr;
+            old_val = atomicCAS(addr, 0u, 0u);  // Atomic initial read
             __half* h = reinterpret_cast<__half*>(&old_val);
             __half result = __float2half(__half2float(h[(token_idx * embedding_dim + j) & 1]) + val);
             new_val = old_val;
@@ -1071,7 +1140,7 @@ __global__ void embedding_backward_bf16_kernel_impl(
         unsigned int* addr = reinterpret_cast<unsigned int*>(&grad_weight[(token_idx * embedding_dim + j) & ~1]);
         unsigned int old_val, new_val;
         do {
-            old_val = *addr;
+            old_val = atomicCAS(addr, 0u, 0u);  // Atomic initial read (avoids data race)
             __nv_bfloat16* h = reinterpret_cast<__nv_bfloat16*>(&old_val);
             __nv_bfloat16 result = __float2bfloat16(__bfloat162float(h[(token_idx * embedding_dim + j) & 1]) + val);
             new_val = old_val;
@@ -1496,7 +1565,7 @@ __global__ void put_kernel_impl<int8_t>(
                     reinterpret_cast<char*>(output) + (target_idx - byte_offset));
                 unsigned int old_val, new_val;
                 do {
-                    old_val = *addr;
+                    old_val = atomicCAS(addr, 0u, 0u);  // Atomic initial read
                     int8_t cur = static_cast<int8_t>((old_val >> (byte_offset * 8)) & 0xFF);
                     int8_t sum = static_cast<int8_t>(cur + source[idx]);
                     new_val = (old_val & ~(0xFFu << (byte_offset * 8))) |
@@ -1531,7 +1600,7 @@ __global__ void put_kernel_impl<uint8_t>(
                     reinterpret_cast<char*>(output) + (target_idx - byte_offset));
                 unsigned int old_val, new_val;
                 do {
-                    old_val = *addr;
+                    old_val = atomicCAS(addr, 0u, 0u);  // Atomic initial read
                     uint8_t cur = static_cast<uint8_t>((old_val >> (byte_offset * 8)) & 0xFF);
                     uint8_t sum = static_cast<uint8_t>(cur + source[idx]);
                     new_val = (old_val & ~(0xFFu << (byte_offset * 8))) |
@@ -1629,7 +1698,7 @@ __global__ void put_kernel_impl<__half>(
                 unsigned int* addr = reinterpret_cast<unsigned int*>(&output[target_idx & ~1]);
                 unsigned int old_val, new_val;
                 do {
-                    old_val = *addr;
+                    old_val = atomicCAS(addr, 0u, 0u);  // Atomic initial read
                     __half* h = reinterpret_cast<__half*>(&old_val);
                     __half result = __float2half(__half2float(h[target_idx & 1]) + val);
                     new_val = old_val;
@@ -1667,7 +1736,7 @@ __global__ void put_kernel_impl<__nv_bfloat16>(
                 unsigned int* addr = reinterpret_cast<unsigned int*>(&output[target_idx & ~1]);
                 unsigned int old_val, new_val;
                 do {
-                    old_val = *addr;
+                    old_val = atomicCAS(addr, 0u, 0u);  // Atomic initial read
                     __nv_bfloat16* h = reinterpret_cast<__nv_bfloat16*>(&old_val);
                     __nv_bfloat16 result = __float2bfloat16(__bfloat162float(h[target_idx & 1]) + val);
                     new_val = old_val;

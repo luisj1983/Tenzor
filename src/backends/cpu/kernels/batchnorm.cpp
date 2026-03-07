@@ -502,32 +502,7 @@ struct BatchNormCachedPrimitive {
 
 static constexpr size_t BATCHNORM_CACHE_SIZE = 32;
 
-class BatchNormPrimitiveCache {
-public:
-    std::shared_ptr<BatchNormCachedPrimitive> get(const BatchNormCacheKey& key) {
-        auto it = cache_.find(key);
-        if (it != cache_.end()) {
-            lru_list_.remove(key);
-            lru_list_.push_front(key);
-            return it->second;
-        }
-        return nullptr;
-    }
-
-    void put(const BatchNormCacheKey& key, std::shared_ptr<BatchNormCachedPrimitive> value) {
-        if (cache_.size() >= BATCHNORM_CACHE_SIZE) {
-            auto evict_key = lru_list_.back();
-            lru_list_.pop_back();
-            cache_.erase(evict_key);
-        }
-        cache_[key] = value;
-        lru_list_.push_front(key);
-    }
-
-private:
-    std::unordered_map<BatchNormCacheKey, std::shared_ptr<BatchNormCachedPrimitive>, BatchNormCacheKeyHash> cache_;
-    std::list<BatchNormCacheKey> lru_list_;
-};
+using BatchNormPrimitiveCache = OneDNNPrimitiveCache<BatchNormCacheKey, BatchNormCachedPrimitive, BatchNormCacheKeyHash, BATCHNORM_CACHE_SIZE>;
 
 static thread_local BatchNormPrimitiveCache g_batchnorm_cache;
 

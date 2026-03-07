@@ -12,6 +12,7 @@
 #include <cub/cub.cuh>
 #include "../cuda_error.hpp"
 #include "cuda_launch_utils.cuh"
+#include "cuda_common.cuh"
 
 namespace tenzor {
 namespace cuda {
@@ -295,34 +296,7 @@ __global__ void argmin_final_kernel_half(const __half* input, const int64_t* blo
 // Warp-level reduction primitives
 // ============================================================================
 
-template<typename T>
-__device__ __forceinline__ T warp_reduce_sum(T val) {
-    #pragma unroll
-    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
-        val += __shfl_down_sync(0xffffffff, val, offset);
-    }
-    return val;
-}
-
-// Specialization for __half
-template<>
-__device__ __forceinline__ __half warp_reduce_sum(__half val) {
-    #pragma unroll
-    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
-        val = __hadd(val, __shfl_down_sync(0xffffffff, val, offset));
-    }
-    return val;
-}
-
-// Specialization for __nv_bfloat16
-template<>
-__device__ __forceinline__ __nv_bfloat16 warp_reduce_sum(__nv_bfloat16 val) {
-    #pragma unroll
-    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
-        val = __hadd(val, __shfl_down_sync(0xffffffff, val, offset));
-    }
-    return val;
-}
+// warp_reduce_sum (including __half and __nv_bfloat16 specializations) is in cuda_common.cuh
 
 // Helper for __half comparison (using __hgt and __hlt)
 __device__ __forceinline__ __half cuda_max_val(__half a, __half b) {
@@ -343,69 +317,7 @@ __device__ __forceinline__ __half half_pos_inf() {
     return __ushort_as_half(0x7C00);  // +inf in half precision
 }
 
-template<typename T>
-__device__ __forceinline__ T warp_reduce_max(T val) {
-    #pragma unroll
-    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
-        T other = __shfl_down_sync(0xffffffff, val, offset);
-        val = (val > other) ? val : other;
-    }
-    return val;
-}
-
-// Specialization for __half
-template<>
-__device__ __forceinline__ __half warp_reduce_max(__half val) {
-    #pragma unroll
-    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
-        __half other = __shfl_down_sync(0xffffffff, val, offset);
-        val = cuda_max_val(val, other);
-    }
-    return val;
-}
-
-template<typename T>
-__device__ __forceinline__ T warp_reduce_min(T val) {
-    #pragma unroll
-    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
-        T other = __shfl_down_sync(0xffffffff, val, offset);
-        val = (val < other) ? val : other;
-    }
-    return val;
-}
-
-// Specialization for __half
-template<>
-__device__ __forceinline__ __half warp_reduce_min(__half val) {
-    #pragma unroll
-    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
-        __half other = __shfl_down_sync(0xffffffff, val, offset);
-        val = cuda_min_val(val, other);
-    }
-    return val;
-}
-
-// Specialization for __nv_bfloat16
-template<>
-__device__ __forceinline__ __nv_bfloat16 warp_reduce_max(__nv_bfloat16 val) {
-    #pragma unroll
-    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
-        __nv_bfloat16 other = __shfl_down_sync(0xffffffff, val, offset);
-        val = cuda_max_val(val, other);
-    }
-    return val;
-}
-
-// Specialization for __nv_bfloat16
-template<>
-__device__ __forceinline__ __nv_bfloat16 warp_reduce_min(__nv_bfloat16 val) {
-    #pragma unroll
-    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
-        __nv_bfloat16 other = __shfl_down_sync(0xffffffff, val, offset);
-        val = cuda_min_val(val, other);
-    }
-    return val;
-}
+// warp_reduce_max, warp_reduce_min are in cuda_common.cuh
 
 // ============================================================================
 // Block-level reduction kernels (full reduction)

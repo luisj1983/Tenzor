@@ -24,10 +24,13 @@ size_t VulkanBackend::StagingBufferPool::acquire(
         int32_t /*device_id*/, size_t size, const DeviceContext& ctx) {
     std::lock_guard<std::mutex> lock(*mutex);
 
+    uint64_t current_tick = ++tick_counter;
+
     // Try to find an existing buffer that is not in use and large enough
     for (size_t i = 0; i < buffers.size(); ++i) {
         if (!buffers[i].in_use && buffers[i].buffer && buffers[i].size >= size) {
             buffers[i].in_use = true;
+            buffers[i].last_use_tick = current_tick;
             return i;
         }
     }
@@ -42,7 +45,31 @@ size_t VulkanBackend::StagingBufferPool::acquire(
             );
             buffers[i].size = size;
             buffers[i].in_use = true;
+            buffers[i].last_use_tick = current_tick;
             return i;
+        }
+    }
+
+    // Evict oldest unused buffers if pool exceeds max size
+    if (buffers.size() >= kMaxPoolSize) {
+        size_t oldest_idx = SIZE_MAX;
+        uint64_t oldest_tick = UINT64_MAX;
+        for (size_t i = 0; i < buffers.size(); ++i) {
+            if (!buffers[i].in_use && buffers[i].last_use_tick < oldest_tick) {
+                oldest_tick = buffers[i].last_use_tick;
+                oldest_idx = i;
+            }
+        }
+        if (oldest_idx != SIZE_MAX) {
+            buffers[oldest_idx].buffer = std::make_unique<vulkan::VulkanBuffer>(
+                ctx.device, ctx.physicalDevice, size,
+                VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+            );
+            buffers[oldest_idx].size = size;
+            buffers[oldest_idx].in_use = true;
+            buffers[oldest_idx].last_use_tick = current_tick;
+            return oldest_idx;
         }
     }
 
@@ -56,6 +83,7 @@ size_t VulkanBackend::StagingBufferPool::acquire(
     );
     sb.size = size;
     sb.in_use = true;
+    sb.last_use_tick = current_tick;
     return idx;
 }
 

@@ -423,34 +423,7 @@ struct Conv2dCachedPrimitive {
 // Thread-local cache with LRU eviction (max 32 entries per thread)
 static constexpr size_t CONV2D_CACHE_SIZE = 32;
 
-class Conv2dPrimitiveCache {
-public:
-    std::shared_ptr<Conv2dCachedPrimitive> get(const Conv2dCacheKey& key) {
-        auto it = cache_.find(key);
-        if (it != cache_.end()) {
-            // Move to front of LRU list
-            lru_list_.remove(key);
-            lru_list_.push_front(key);
-            return it->second;
-        }
-        return nullptr;
-    }
-
-    void put(const Conv2dCacheKey& key, std::shared_ptr<Conv2dCachedPrimitive> value) {
-        // Evict if cache is full
-        if (cache_.size() >= CONV2D_CACHE_SIZE) {
-            auto evict_key = lru_list_.back();
-            lru_list_.pop_back();
-            cache_.erase(evict_key);
-        }
-        cache_[key] = value;
-        lru_list_.push_front(key);
-    }
-
-private:
-    std::unordered_map<Conv2dCacheKey, std::shared_ptr<Conv2dCachedPrimitive>, Conv2dCacheKeyHash> cache_;
-    std::list<Conv2dCacheKey> lru_list_;
-};
+using Conv2dPrimitiveCache = OneDNNPrimitiveCache<Conv2dCacheKey, Conv2dCachedPrimitive, Conv2dCacheKeyHash, CONV2D_CACHE_SIZE>;
 
 static thread_local Conv2dPrimitiveCache g_conv2d_cache;
 

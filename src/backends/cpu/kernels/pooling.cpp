@@ -84,32 +84,7 @@ struct PoolingCachedPrimitive {
 
 static constexpr size_t POOLING_CACHE_SIZE = 32;
 
-class PoolingPrimitiveCache {
-public:
-    std::shared_ptr<PoolingCachedPrimitive> get(const PoolingCacheKey& key) {
-        auto it = cache_.find(key);
-        if (it != cache_.end()) {
-            lru_list_.remove(key);
-            lru_list_.push_front(key);
-            return it->second;
-        }
-        return nullptr;
-    }
-
-    void put(const PoolingCacheKey& key, std::shared_ptr<PoolingCachedPrimitive> value) {
-        if (cache_.size() >= POOLING_CACHE_SIZE) {
-            auto evict_key = lru_list_.back();
-            lru_list_.pop_back();
-            cache_.erase(evict_key);
-        }
-        cache_[key] = value;
-        lru_list_.push_front(key);
-    }
-
-private:
-    std::unordered_map<PoolingCacheKey, std::shared_ptr<PoolingCachedPrimitive>, PoolingCacheKeyHash> cache_;
-    std::list<PoolingCacheKey> lru_list_;
-};
+using PoolingPrimitiveCache = OneDNNPrimitiveCache<PoolingCacheKey, PoolingCachedPrimitive, PoolingCacheKeyHash, POOLING_CACHE_SIZE>;
 
 static thread_local PoolingPrimitiveCache g_pooling_cache;
 

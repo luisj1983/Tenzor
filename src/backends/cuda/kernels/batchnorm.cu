@@ -30,39 +30,7 @@ inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
     return (n + block_size - 1) / block_size;
 }
 
-// ============================================================================
-// Warp and Block Reduction Primitives
-// ============================================================================
-
-// Warp-level reduction using shuffle instructions
-template<typename T>
-__device__ __forceinline__ T warp_reduce_sum(T val) {
-    for (int offset = 16; offset > 0; offset /= 2) {
-        val += __shfl_down_sync(0xffffffff, val, offset);
-    }
-    return val;
-}
-
-// Block-level reduction using shared memory
-template<typename T>
-__device__ T block_reduce_sum(T val, T* shared) {
-    int lane = threadIdx.x % 32;
-    int wid = threadIdx.x / 32;
-
-    val = warp_reduce_sum(val);
-
-    if (lane == 0) {
-        shared[wid] = val;
-    }
-    __syncthreads();
-
-    val = (threadIdx.x < blockDim.x / 32) ? shared[lane] : T(0);
-    if (wid == 0) {
-        val = warp_reduce_sum(val);
-    }
-
-    return val;
-}
+// Warp/block reduction primitives are in cuda_common.cuh
 
 // ============================================================================
 // BatchNorm2d Mean/Variance Computation (Welford's Algorithm)

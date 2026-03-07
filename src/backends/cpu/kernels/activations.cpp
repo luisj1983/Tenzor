@@ -86,32 +86,7 @@ struct EltwiseCachedPrimitive {
 
 static constexpr size_t ELTWISE_CACHE_SIZE = 64;
 
-class EltwisePrimitiveCache {
-public:
-    std::shared_ptr<EltwiseCachedPrimitive> get(const EltwiseCacheKey& key) {
-        auto it = cache_.find(key);
-        if (it != cache_.end()) {
-            lru_list_.remove(key);
-            lru_list_.push_front(key);
-            return it->second;
-        }
-        return nullptr;
-    }
-
-    void put(const EltwiseCacheKey& key, std::shared_ptr<EltwiseCachedPrimitive> value) {
-        if (cache_.size() >= ELTWISE_CACHE_SIZE) {
-            auto evict_key = lru_list_.back();
-            lru_list_.pop_back();
-            cache_.erase(evict_key);
-        }
-        cache_[key] = value;
-        lru_list_.push_front(key);
-    }
-
-private:
-    std::unordered_map<EltwiseCacheKey, std::shared_ptr<EltwiseCachedPrimitive>, EltwiseCacheKeyHash> cache_;
-    std::list<EltwiseCacheKey> lru_list_;
-};
+using EltwisePrimitiveCache = OneDNNPrimitiveCache<EltwiseCacheKey, EltwiseCachedPrimitive, EltwiseCacheKeyHash, ELTWISE_CACHE_SIZE>;
 
 static thread_local EltwisePrimitiveCache g_eltwise_cache;
 
@@ -146,32 +121,7 @@ struct SoftmaxCachedPrimitive {
 
 static constexpr size_t SOFTMAX_CACHE_SIZE = 32;
 
-class SoftmaxPrimitiveCache {
-public:
-    std::shared_ptr<SoftmaxCachedPrimitive> get(const SoftmaxCacheKey& key) {
-        auto it = cache_.find(key);
-        if (it != cache_.end()) {
-            lru_list_.remove(key);
-            lru_list_.push_front(key);
-            return it->second;
-        }
-        return nullptr;
-    }
-
-    void put(const SoftmaxCacheKey& key, std::shared_ptr<SoftmaxCachedPrimitive> value) {
-        if (cache_.size() >= SOFTMAX_CACHE_SIZE) {
-            auto evict_key = lru_list_.back();
-            lru_list_.pop_back();
-            cache_.erase(evict_key);
-        }
-        cache_[key] = value;
-        lru_list_.push_front(key);
-    }
-
-private:
-    std::unordered_map<SoftmaxCacheKey, std::shared_ptr<SoftmaxCachedPrimitive>, SoftmaxCacheKeyHash> cache_;
-    std::list<SoftmaxCacheKey> lru_list_;
-};
+using SoftmaxPrimitiveCache = OneDNNPrimitiveCache<SoftmaxCacheKey, SoftmaxCachedPrimitive, SoftmaxCacheKeyHash, SOFTMAX_CACHE_SIZE>;
 
 static thread_local SoftmaxPrimitiveCache g_softmax_cache;
 

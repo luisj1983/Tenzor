@@ -114,8 +114,13 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Tenzor-specific compiler flags (stored in variables, applied per-target to avoid
 # polluting consumers via add_subdirectory or FetchContent)
+option(TENZOR_WERROR "Treat warnings as errors (for CI)" OFF)
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set(TENZOR_WARNING_FLAGS -Wall -Wextra -pedantic)
+    if(TENZOR_WERROR)
+        list(APPEND TENZOR_WARNING_FLAGS -Werror)
+    endif()
 
     # Use -march=native for maximum performance on the build machine.
     # Disable for distribution (cross-compilation or portable binaries).
@@ -151,6 +156,9 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     endif()
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
     set(TENZOR_WARNING_FLAGS /W4 /arch:AVX2)
+    if(TENZOR_WERROR)
+        list(APPEND TENZOR_WARNING_FLAGS /WX)
+    endif()
 endif()
 
 # clang-tidy integration
