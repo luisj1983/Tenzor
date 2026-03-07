@@ -121,13 +121,26 @@ void MetalBackend::deallocate(void* ptr) {
 
 void MetalBackend::memcpy_h2d(void* dst, const void* src, size_t size) {
     @autoreleasepool {
+        // Synchronize to ensure any in-flight GPU work on this buffer completes
+        // before we overwrite its contents from the CPU side.
+        id<MTLCommandBuffer> commandBuffer = createCommandBuffer(command_queue_);
+        executeAndWait(commandBuffer);
+
         id<MTLBuffer> buffer = (__bridge id<MTLBuffer>)dst;
         memcpy([buffer contents], src, size);
+
+        // didModifyRange ensures the GPU sees the updated data for shared buffers
+        [buffer didModifyRange:NSMakeRange(0, size)];
     }
 }
 
 void MetalBackend::memcpy_d2h(void* dst, const void* src, size_t size) {
     @autoreleasepool {
+        // Synchronize to ensure all GPU work on this buffer completes
+        // before we read its contents from the CPU side.
+        id<MTLCommandBuffer> commandBuffer = createCommandBuffer(command_queue_);
+        executeAndWait(commandBuffer);
+
         id<MTLBuffer> buffer = (__bridge id<MTLBuffer>)src;
         memcpy(dst, [buffer contents], size);
     }

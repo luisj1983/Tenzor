@@ -1,6 +1,7 @@
 #include "rocm_backend.hpp"
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/backend/rocm_caching_allocator.hip.hpp"
+#include "tenzor/utils/logging.hpp"
 #include <hip/hip_runtime.h>
 #include <stdexcept>
 #include <cstdlib>
@@ -118,6 +119,13 @@ auto ROCmBackend::allocate(size_t bytes, int32_t device_id) -> void* {
             std::string("Failed to allocate device memory: ") + hipGetErrorString(err)
         );
     }
+
+    // Track allocation -> device mapping
+    {
+        std::lock_guard<std::mutex> lock(alloc_map_mutex_);
+        alloc_device_map_[ptr] = device_id;
+    }
+
     return ptr;
 }
 
@@ -128,15 +136,36 @@ auto ROCmBackend::deallocate(void* ptr) -> void {
     }
 
     if (use_caching_allocator_) {
-        // Note: we don't know the device_id here, but CachingAllocator tracks it
-        // For proper integration, we'd need to look up the device from the pointer
-        int device_id = 0;
-        hipPointerAttribute_t attrs;
-        if (hipPointerGetAttributes(&attrs, ptr) == hipSuccess) {
-            device_id = attrs.device;
+        // Look up device_id from our tracking map first
+        int device_id = -1;
+        {
+            std::lock_guard<std::mutex> lock(alloc_map_mutex_);
+            auto it = alloc_device_map_.find(ptr);
+            if (it != alloc_device_map_.end()) {
+                device_id = it->second;
+                alloc_device_map_.erase(it);
+            }
         }
+
+        // Fall back to hipPointerGetAttributes if not in our map
+        if (device_id < 0) {
+            hipPointerAttribute_t attrs;
+            if (hipPointerGetAttributes(&attrs, ptr) == hipSuccess) {
+                device_id = attrs.device;
+            } else {
+                TENZOR_LOG_WARNING("ROCm deallocate: failed to determine device for pointer, defaulting to device 0");
+                device_id = 0;
+            }
+        }
+
         backend::rocm::RocmCachingAllocator::get().free(ptr, device_id);
         return;
+    }
+
+    // Remove from tracking map for non-caching path too
+    {
+        std::lock_guard<std::mutex> lock(alloc_map_mutex_);
+        alloc_device_map_.erase(ptr);
     }
 
     check_hip_error(hipFree(ptr), "hipFree");
@@ -164,10 +193,18 @@ auto ROCmBackend::copy(void* dst, const void* src, size_t bytes, CopyKind kind) 
             break;
     }
 
-    hipError_t err = hipMemcpy(dst, src, bytes, hip_kind);
+    // Use async copy on the default stream for non-blocking transfers
+    hipError_t err = hipMemcpyAsync(dst, src, bytes, hip_kind, nullptr);
     if (err != hipSuccess) {
         throw std::runtime_error(
-            std::string("HIP copy failed: ") + hipGetErrorString(err)
+            std::string("HIP async copy failed: ") + hipGetErrorString(err)
+        );
+    }
+    // Synchronize default stream to maintain same semantics as before
+    err = hipStreamSynchronize(nullptr);
+    if (err != hipSuccess) {
+        throw std::runtime_error(
+            std::string("HIP stream sync after copy failed: ") + hipGetErrorString(err)
         );
     }
 }

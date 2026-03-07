@@ -952,6 +952,15 @@ auto ONNXImporter::convert_node(const ONNXImportNode& node) -> std::optional<std
         return convert_global_avgpool(node);
     }
 
+    // Quantization (QDQ)
+    else if (node.op_type == "QuantizeLinear") {
+        convert_quantize_linear(node);
+        return std::nullopt;
+    } else if (node.op_type == "DequantizeLinear") {
+        convert_dequantize_linear(node);
+        return std::nullopt;
+    }
+
     else {
         throw std::runtime_error("Unsupported ONNX operator: " + node.op_type);
     }
@@ -1780,6 +1789,54 @@ auto ONNXImporter::log(const std::string& message) -> void {
     if (verbose_) {
         std::cout << "[ONNX Importer] " << message << std::endl;
     }
+}
+
+// ============================================================================
+// Quantization (QDQ) Operations
+// ============================================================================
+
+auto ONNXImporter::convert_quantize_linear(const ONNXImportNode& node) -> void {
+    // QuantizeLinear: y = saturate(round(x / y_scale) + y_zero_point)
+    // Inputs: x, y_scale, y_zero_point (optional)
+    auto x = get_input(node.inputs[0]);
+    auto y_scale = get_input(node.inputs[1]);
+
+    // Compute quantized = round(x / scale) + zero_point
+    auto scaled = x / y_scale;
+
+    // Round to nearest even
+    auto rounded = round(scaled);
+
+    if (node.inputs.size() > 2 && !node.inputs[2].empty()) {
+        auto y_zero_point = get_input(node.inputs[2]);
+        rounded = rounded + y_zero_point.to(rounded.dtype());
+    }
+
+    // Clamp to INT8 range (most common case)
+    auto result = clamp(rounded, -128.0f, 127.0f).to(DType::Int8);
+
+    register_output(node.outputs[0], result);
+    log("Converted QuantizeLinear: " + node.outputs[0]);
+}
+
+auto ONNXImporter::convert_dequantize_linear(const ONNXImportNode& node) -> void {
+    // DequantizeLinear: y = (x - x_zero_point) * x_scale
+    // Inputs: x, x_scale, x_zero_point (optional)
+    auto x = get_input(node.inputs[0]);
+    auto x_scale = get_input(node.inputs[1]);
+
+    // Convert quantized input to float
+    auto x_float = x.to(DType::Float32);
+
+    if (node.inputs.size() > 2 && !node.inputs[2].empty()) {
+        auto x_zero_point = get_input(node.inputs[2]);
+        x_float = x_float - x_zero_point.to(DType::Float32);
+    }
+
+    auto result = x_float * x_scale;
+
+    register_output(node.outputs[0], result);
+    log("Converted DequantizeLinear: " + node.outputs[0]);
 }
 
 // ============================================================================

@@ -1,6 +1,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "cuda_common.cuh"
+#include "cuda_launch_utils.cuh"
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include <cuda_fp16.h>        // For __half
@@ -1390,13 +1391,13 @@ void matmul_f16(
         int64_t Np = round_up_16(N);
         int64_t Kp = round_up_16(K);
 
-        // Allocate zero-initialized padded buffers
-        __half* A_pad = nullptr;
-        __half* B_pad = nullptr;
-        __half* C_pad = nullptr;
-        TENZOR_CUDA_CHECK(cudaMallocAsync(&A_pad, Mp * Kp * sizeof(__half), stream));
-        TENZOR_CUDA_CHECK(cudaMallocAsync(&B_pad, Kp * Np * sizeof(__half), stream));
-        TENZOR_CUDA_CHECK(cudaMallocAsync(&C_pad, Mp * Np * sizeof(__half), stream));
+        // Allocate zero-initialized padded buffers (RAII ensures cleanup on exception)
+        CudaAsyncBuffer A_buf(Mp * Kp * sizeof(__half), stream);
+        CudaAsyncBuffer B_buf(Kp * Np * sizeof(__half), stream);
+        CudaAsyncBuffer C_buf(Mp * Np * sizeof(__half), stream);
+        auto* A_pad = A_buf.as<__half>();
+        auto* B_pad = B_buf.as<__half>();
+        auto* C_pad = C_buf.as<__half>();
         TENZOR_CUDA_CHECK(cudaMemsetAsync(A_pad, 0, Mp * Kp * sizeof(__half), stream));
         TENZOR_CUDA_CHECK(cudaMemsetAsync(B_pad, 0, Kp * Np * sizeof(__half), stream));
 
@@ -1435,10 +1436,7 @@ void matmul_f16(
             N  * sizeof(__half),                 // width in bytes to copy per row
             M,                                   // number of rows
             cudaMemcpyDeviceToDevice, stream));
-
-        TENZOR_CUDA_CHECK(cudaFreeAsync(A_pad, stream));
-        TENZOR_CUDA_CHECK(cudaFreeAsync(B_pad, stream));
-        TENZOR_CUDA_CHECK(cudaFreeAsync(C_pad, stream));
+        // CudaAsyncBuffer RAII handles cleanup automatically
     } else {
         // Fall back to standard tiled kernel for non-aligned dimensions
         // (either too small for TC or padding overhead too high)
@@ -1598,13 +1596,13 @@ void batched_matmul_f16(
         int64_t stride_b_pad = Kp * Np;
         int64_t stride_c_pad = Mp * Np;
 
-        // Allocate zero-initialized padded buffers for the entire batch
-        __half* A_pad = nullptr;
-        __half* B_pad = nullptr;
-        __half* C_pad = nullptr;
-        TENZOR_CUDA_CHECK(cudaMallocAsync(&A_pad, batch_size * stride_a_pad * sizeof(__half), stream));
-        TENZOR_CUDA_CHECK(cudaMallocAsync(&B_pad, batch_size * stride_b_pad * sizeof(__half), stream));
-        TENZOR_CUDA_CHECK(cudaMallocAsync(&C_pad, batch_size * stride_c_pad * sizeof(__half), stream));
+        // Allocate zero-initialized padded buffers for the entire batch (RAII)
+        CudaAsyncBuffer A_buf(batch_size * stride_a_pad * sizeof(__half), stream);
+        CudaAsyncBuffer B_buf(batch_size * stride_b_pad * sizeof(__half), stream);
+        CudaAsyncBuffer C_buf(batch_size * stride_c_pad * sizeof(__half), stream);
+        auto* A_pad = A_buf.as<__half>();
+        auto* B_pad = B_buf.as<__half>();
+        auto* C_pad = C_buf.as<__half>();
         TENZOR_CUDA_CHECK(cudaMemsetAsync(A_pad, 0, batch_size * stride_a_pad * sizeof(__half), stream));
         TENZOR_CUDA_CHECK(cudaMemsetAsync(B_pad, 0, batch_size * stride_b_pad * sizeof(__half), stream));
 
@@ -1647,10 +1645,7 @@ void batched_matmul_f16(
                 M,                                                // number of rows
                 cudaMemcpyDeviceToDevice, stream));
         }
-
-        TENZOR_CUDA_CHECK(cudaFreeAsync(A_pad, stream));
-        TENZOR_CUDA_CHECK(cudaFreeAsync(B_pad, stream));
-        TENZOR_CUDA_CHECK(cudaFreeAsync(C_pad, stream));
+        // CudaAsyncBuffer RAII handles cleanup automatically
     } else {
         // Batched tiled F16 kernel using blockIdx.z for batch indexing
         // (either too small for TC or padding overhead too high)

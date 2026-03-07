@@ -58,6 +58,7 @@ set_target_properties(tenzor_backend_cuda PROPERTIES
     OUTPUT_NAME "tenzor_backend_cuda"
     PREFIX ""  # Remove 'lib' prefix on Unix
     CUDA_SEPARABLE_COMPILATION ON
+    # nvcc does not fully support C++23 — C++20 is the highest supported host standard
     CUDA_STANDARD 20
     CUDA_STANDARD_REQUIRED ON
 )

@@ -13,8 +13,10 @@
 #include "tenzor/core/device.hpp"
 #include <hip/hip_runtime.h>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 #include <span>
 
@@ -178,6 +180,10 @@ public:
 
 private:
     bool use_caching_allocator_{false};
+
+    /// Tracks device_id for each allocation (used by deallocate to find correct device)
+    mutable std::mutex alloc_map_mutex_;
+    std::unordered_map<void*, int32_t> alloc_device_map_;
 
     /**
      * @brief Helper to check and throw on HIP errors

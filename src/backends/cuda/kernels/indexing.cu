@@ -24,6 +24,10 @@
 #include <thrust/iterator/counting_iterator.h>
 
 namespace tenzor {
+
+// Forward-declare: nvcc can't include creation.hpp (uses std::expected)
+auto zeros(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor;
+
 namespace cuda {
 
 // Centralized error checking
@@ -1732,6 +1736,154 @@ auto put_kernel(Tensor& input, const Tensor& indices, const Tensor& source,
             break;
         default:
             throw std::runtime_error("put_kernel: unsupported dtype");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return output;
+}
+
+// ============================================================================
+// EmbeddingBag forward aggregation kernel
+// ============================================================================
+
+// Each block handles one bag. Threads within a block cooperate on reduction.
+template<typename T>
+__global__ void embedding_bag_sum_kernel(
+    const T* embeddings,       // [total_elements, embedding_dim]
+    const int64_t* offsets,    // [num_bags] or [num_bags+1]
+    T* output,                 // [num_bags, embedding_dim]
+    int64_t num_bags,
+    int64_t total_elements,
+    int64_t embedding_dim,
+    int64_t offsets_size,      // actual size of offsets tensor
+    bool divide_by_count)      // true for mean mode
+{
+    int64_t bag = blockIdx.x;
+    if (bag >= num_bags) return;
+
+    int64_t start = offsets[bag];
+    int64_t end = (bag + 1 < offsets_size) ? offsets[bag + 1] : total_elements;
+    int64_t bag_size = end - start;
+
+    // Each thread handles a subset of embedding dimensions
+    for (int64_t j = threadIdx.x; j < embedding_dim; j += blockDim.x) {
+        T acc = T(0);
+        for (int64_t i = start; i < end; ++i) {
+            acc += embeddings[i * embedding_dim + j];
+        }
+        if (divide_by_count && bag_size > 0) {
+            acc = acc / T(bag_size);
+        }
+        output[bag * embedding_dim + j] = acc;
+    }
+}
+
+template<typename T>
+__global__ void embedding_bag_max_kernel(
+    const T* embeddings,
+    const int64_t* offsets,
+    T* output,
+    int64_t num_bags,
+    int64_t total_elements,
+    int64_t embedding_dim,
+    int64_t offsets_size)
+{
+    int64_t bag = blockIdx.x;
+    if (bag >= num_bags) return;
+
+    int64_t start = offsets[bag];
+    int64_t end = (bag + 1 < offsets_size) ? offsets[bag + 1] : total_elements;
+
+    if (start >= end) return;
+
+    for (int64_t j = threadIdx.x; j < embedding_dim; j += blockDim.x) {
+        T max_val = embeddings[start * embedding_dim + j];
+        for (int64_t i = start + 1; i < end; ++i) {
+            T val = embeddings[i * embedding_dim + j];
+            if (val > max_val) max_val = val;
+        }
+        output[bag * embedding_dim + j] = max_val;
+    }
+}
+
+auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offsets,
+                                   const std::string& mode, int64_t embedding_dim,
+                                   bool include_last_offset, cudaStream_t stream) -> Tensor {
+    int64_t total_elements = embeddings.shape()[0];
+    int64_t offsets_size = offsets.numel();
+    int64_t num_bags = include_last_offset ? (offsets_size - 1) : offsets_size;
+
+    if (num_bags <= 0) {
+        return tenzor::zeros({0, embedding_dim}, embeddings.dtype(), embeddings.device());
+    }
+
+    auto output = tenzor::zeros({num_bags, embedding_dim}, embeddings.dtype(), embeddings.device());
+
+    int threads = std::min(static_cast<int>(embedding_dim), 256);
+    int blocks = static_cast<int>(num_bags);
+
+    bool is_mean = (mode == "mean");
+    bool is_max = (mode == "max");
+
+    switch (embeddings.dtype()) {
+        case DType::Float32:
+            if (is_max) {
+                embedding_bag_max_kernel<float><<<blocks, threads, 0, stream>>>(
+                    embeddings.data<float>(), offsets.data<int64_t>(),
+                    output.data<float>(), num_bags, total_elements,
+                    embedding_dim, offsets_size);
+            } else {
+                embedding_bag_sum_kernel<float><<<blocks, threads, 0, stream>>>(
+                    embeddings.data<float>(), offsets.data<int64_t>(),
+                    output.data<float>(), num_bags, total_elements,
+                    embedding_dim, offsets_size, is_mean);
+            }
+            break;
+        case DType::Float64:
+            if (is_max) {
+                embedding_bag_max_kernel<double><<<blocks, threads, 0, stream>>>(
+                    embeddings.data<double>(), offsets.data<int64_t>(),
+                    output.data<double>(), num_bags, total_elements,
+                    embedding_dim, offsets_size);
+            } else {
+                embedding_bag_sum_kernel<double><<<blocks, threads, 0, stream>>>(
+                    embeddings.data<double>(), offsets.data<int64_t>(),
+                    output.data<double>(), num_bags, total_elements,
+                    embedding_dim, offsets_size, is_mean);
+            }
+            break;
+        case DType::Float16:
+            if (is_max) {
+                embedding_bag_max_kernel<__half><<<blocks, threads, 0, stream>>>(
+                    reinterpret_cast<const __half*>(embeddings.data_ptr()),
+                    offsets.data<int64_t>(),
+                    reinterpret_cast<__half*>(output.data_ptr()),
+                    num_bags, total_elements, embedding_dim, offsets_size);
+            } else {
+                embedding_bag_sum_kernel<__half><<<blocks, threads, 0, stream>>>(
+                    reinterpret_cast<const __half*>(embeddings.data_ptr()),
+                    offsets.data<int64_t>(),
+                    reinterpret_cast<__half*>(output.data_ptr()),
+                    num_bags, total_elements, embedding_dim, offsets_size, is_mean);
+            }
+            break;
+        case DType::BFloat16:
+            if (is_max) {
+                embedding_bag_max_kernel<__nv_bfloat16><<<blocks, threads, 0, stream>>>(
+                    reinterpret_cast<const __nv_bfloat16*>(embeddings.data_ptr()),
+                    offsets.data<int64_t>(),
+                    reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+                    num_bags, total_elements, embedding_dim, offsets_size);
+            } else {
+                embedding_bag_sum_kernel<__nv_bfloat16><<<blocks, threads, 0, stream>>>(
+                    reinterpret_cast<const __nv_bfloat16*>(embeddings.data_ptr()),
+                    offsets.data<int64_t>(),
+                    reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+                    num_bags, total_elements, embedding_dim, offsets_size, is_mean);
+            }
+            break;
+        default:
+            throw std::runtime_error("embedding_bag_forward: unsupported dtype");
     }
 
     CUDA_CHECK(cudaGetLastError());

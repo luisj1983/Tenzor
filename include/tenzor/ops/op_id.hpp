@@ -435,6 +435,8 @@ enum class OpId : uint16_t {
     WinogradConv2d,            // 431
     LogSumExp,                 // 432
     HasInfNan,                 // 433
+    EmbeddingBagForward,       // 434
+    EmbeddingBagBackward,      // 435
 
     // =========================================================================
     // Complex Number Operations (440-449)

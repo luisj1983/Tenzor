@@ -10,6 +10,7 @@
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include <array>
 #include <stdexcept>
 #include <cmath>
 #include <cstring>
@@ -885,13 +886,31 @@ auto EmbeddingBag::aggregate_embeddings(const Variable& embeddings, const Variab
     }
 
     // No gradient needed — compute aggregation directly (no autograd overhead)
-    // Save original device and dtype, then transfer to CPU Float32 for computation.
-    // TODO(perf): For GPU tensors this transfers the entire embedding result to CPU
-    // for aggregation (sum/mean/max), then transfers back. This should be replaced
-    // with a fused GPU kernel that performs the per-bag aggregation directly on-device,
-    // avoiding two expensive D2H/H2D transfers per forward pass.
     Device original_device = emb_tensor.device();
     DType original_dtype = emb_tensor.dtype();
+
+    // GPU path: dispatch to on-device EmbeddingBag kernel (avoids D2H/H2D transfers)
+    if (original_device != Device::cpu()) {
+        OpAttributes bag_attrs;
+        bag_attrs.set(AttrKey::Mode, mode_);
+        bag_attrs.set(AttrKey::EmbeddingDim, embedding_dim);
+        bag_attrs.set(AttrKey::IncludeLastOffset, include_last_offset_);
+
+        Tensor offsets_gpu;
+        if (has_offsets) {
+            offsets_gpu = offsets_tensor;
+        } else {
+            // No offsets: single bag starting at index 0
+            offsets_gpu = zeros({1}, DType::Int64, original_device);
+        }
+
+        std::array<Tensor, 2> bag_inputs = {emb_tensor, offsets_gpu};
+        auto result = dispatch_single<OpId::EmbeddingBagForward>(
+            bag_inputs, bag_attrs);
+        return Variable(result, false);
+    }
+
+    // CPU path: compute aggregation directly
     Tensor emb_cpu = (original_device == Device::cpu()) ? emb_tensor : emb_tensor.to(Device::cpu());
     // Upcast to Float32 for aggregation if needed (avoids precision loss with Float16/BFloat16)
     if (emb_cpu.dtype() != DType::Float32) {

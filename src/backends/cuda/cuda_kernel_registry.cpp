@@ -169,6 +169,7 @@ namespace cuda {
     // Embedding operations
     auto embedding_kernel(const Tensor& weight, const Tensor& indices, cudaStream_t stream) -> Tensor;
     auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices, int64_t num_embeddings, cudaStream_t stream) -> Tensor;
+    auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offsets, const std::string& mode, int64_t embedding_dim, bool include_last_offset, cudaStream_t stream) -> Tensor;
 
     // Linear algebra operations (cuSOLVER)
 #ifdef TENZOR_HAS_CUSOLVER
@@ -1218,6 +1219,15 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         // attrs: num_embeddings
         int64_t num_embeddings = attrs.get_int(AttrKey::NumEmbeddings, 0);
         return cuda::embedding_backward_kernel(inputs[0], inputs[1], num_embeddings, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::EmbeddingBagForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // inputs: [embeddings, offsets]
+        // attrs: Mode, EmbeddingDim, IncludeLastOffset
+        std::string mode{attrs.get_string(AttrKey::Mode, "sum")};
+        int64_t embedding_dim = attrs.get_int(AttrKey::EmbeddingDim, 0);
+        bool include_last_offset = attrs.get_bool(AttrKey::IncludeLastOffset, false);
+        return cuda::embedding_bag_forward_kernel(inputs[0], inputs[1], mode, embedding_dim, include_last_offset, get_cuda_stream(attrs));
     });
 
     // =========================================================================

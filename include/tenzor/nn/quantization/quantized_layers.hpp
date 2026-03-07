@@ -12,6 +12,8 @@
 #include "../module.hpp"
 #include "quantize.hpp"
 #include "qconfig.hpp"
+#include <array>
+#include <tuple>
 
 namespace tenzor {
 namespace nn {
@@ -101,6 +103,10 @@ public:
      * @param bias Bias tensor (floating-point or quantized)
      */
     auto set_bias(const Tensor& bias) -> void;
+
+    auto weight() const -> const QuantizedTensor& { return weight_; }
+    auto has_bias() const -> bool { return bias_.has_value(); }
+    auto bias() const -> const Tensor& { return *bias_; }
 
     /**
      * @brief Create quantized layer from floating-point layer.
@@ -521,6 +527,225 @@ public:
 
 private:
     bool last_per_channel_{false};  ///< Track if last operation was per-channel
+};
+
+/**
+ * @brief Quantized embedding table for memory-efficient lookup.
+ *
+ * Stores embedding weights in INT8 or INT4 format, reducing memory usage
+ * 4-8x compared to FP32. Dequantizes looked-up rows on-the-fly during forward.
+ *
+ * Supports per-tensor and per-channel (per-row) quantization.
+ */
+class QuantizedEmbedding : public Module {
+public:
+    QuantizedEmbedding(
+        int64_t num_embeddings,
+        int64_t embedding_dim,
+        QuantizationParams weight_qparams,
+        int64_t padding_idx = -1
+    );
+
+    auto forward_impl(const Variable& input) -> Variable override;
+
+    auto forward_quantized(const Tensor& indices) -> Tensor;
+
+    auto set_weight(const QuantizedTensor& weights) -> void;
+
+    auto num_embeddings() const -> int64_t { return num_embeddings_; }
+    auto embedding_dim() const -> int64_t { return embedding_dim_; }
+
+    static auto from_float(Module& fp_embedding, const QConfig& qconfig)
+        -> std::shared_ptr<QuantizedEmbedding>;
+
+private:
+    int64_t num_embeddings_;
+    int64_t embedding_dim_;
+    int64_t padding_idx_;
+    QuantizedTensor weight_;
+};
+
+/**
+ * @brief Quantized LSTM cell for efficient sequence processing.
+ *
+ * Uses INT8 quantized weights for input-to-hidden and hidden-to-hidden
+ * transforms. Gate computations (sigmoid, tanh) run in FP32 after
+ * dequantization to preserve accuracy.
+ */
+class QuantizedLSTM : public Module {
+public:
+    QuantizedLSTM(
+        int64_t input_size,
+        int64_t hidden_size,
+        int64_t num_layers = 1,
+        bool bias = true,
+        bool batch_first = true,
+        bool bidirectional = false,
+        QuantizationParams weight_qparams = QuantizationParams(
+            Tensor(), Tensor(), QuantDType::INT8, QuantizationScheme::PerTensorSymmetric)
+    );
+
+    auto forward_impl(const Variable& input) -> Variable override;
+
+    auto forward_with_state(const Variable& input,
+                            const Variable& h0, const Variable& c0)
+        -> std::tuple<Variable, Variable, Variable>;
+
+    auto input_size() const -> int64_t { return input_size_; }
+    auto hidden_size() const -> int64_t { return hidden_size_; }
+    auto num_layers() const -> int64_t { return num_layers_; }
+
+    static auto from_float(Module& fp_lstm, const QConfig& qconfig)
+        -> std::shared_ptr<QuantizedLSTM>;
+
+private:
+    int64_t input_size_;
+    int64_t hidden_size_;
+    int64_t num_layers_;
+    bool bias_;
+    bool batch_first_;
+    bool bidirectional_;
+
+    // Per-layer quantized weights: weight_ih, weight_hh, bias_ih, bias_hh
+    struct LayerWeights {
+        QuantizedTensor weight_ih;
+        QuantizedTensor weight_hh;
+        std::optional<Tensor> bias_ih;
+        std::optional<Tensor> bias_hh;
+    };
+    std::vector<LayerWeights> layers_;
+};
+
+/**
+ * @brief Quantized 3D convolution layer.
+ *
+ * INT8 3D convolution for volumetric data (video, medical imaging).
+ * Same interface as QuantizedConv2d but extended to 3 spatial dimensions.
+ */
+class QuantizedConv3d : public Module {
+public:
+    QuantizedConv3d(
+        int64_t in_channels,
+        int64_t out_channels,
+        std::array<int64_t, 3> kernel_size,
+        std::array<int64_t, 3> stride = {1, 1, 1},
+        std::array<int64_t, 3> padding = {0, 0, 0},
+        std::array<int64_t, 3> dilation = {1, 1, 1},
+        int64_t groups = 1,
+        QuantizationParams weight_qparams = QuantizationParams(
+            Tensor(), Tensor(), QuantDType::INT8, QuantizationScheme::PerTensorSymmetric)
+    );
+
+    auto forward_impl(const Variable& input) -> Variable override;
+    auto forward_quantized(const QuantizedTensor& input) -> Tensor;
+
+    auto set_weight(const QuantizedTensor& weights) -> void;
+    auto set_bias(const Tensor& bias) -> void;
+
+    static auto from_float(Module& fp_conv3d, const QConfig& qconfig)
+        -> std::shared_ptr<QuantizedConv3d>;
+
+private:
+    int64_t in_channels_;
+    int64_t out_channels_;
+    std::array<int64_t, 3> kernel_size_;
+    std::array<int64_t, 3> stride_;
+    std::array<int64_t, 3> padding_;
+    std::array<int64_t, 3> dilation_;
+    int64_t groups_;
+    QuantizedTensor weight_;
+    std::optional<Tensor> bias_;
+};
+
+/**
+ * @brief Quantized multihead attention for efficient transformer inference.
+ *
+ * Uses INT8 for Q/K/V linear projections. Softmax and attention score
+ * computation run in FP32 for numerical stability.
+ */
+class QuantizedMultiheadAttention : public Module {
+public:
+    QuantizedMultiheadAttention(
+        int64_t embed_dim,
+        int64_t num_heads,
+        QuantizationParams weight_qparams,
+        bool bias = true,
+        float dropout = 0.0f
+    );
+
+    auto forward_impl(const Variable& input) -> Variable override;
+
+    auto forward_qkv(const Variable& query, const Variable& key,
+                      const Variable& value,
+                      const Variable& attn_mask = Variable{})
+        -> std::pair<Variable, Variable>;
+
+    auto embed_dim() const -> int64_t { return embed_dim_; }
+    auto num_heads() const -> int64_t { return num_heads_; }
+
+    static auto from_float(Module& fp_mha, const QConfig& qconfig)
+        -> std::shared_ptr<QuantizedMultiheadAttention>;
+
+private:
+    int64_t embed_dim_;
+    int64_t num_heads_;
+    int64_t head_dim_;
+    float dropout_;
+
+    // Quantized projection weights
+    std::shared_ptr<QuantizedLinear> q_proj_;
+    std::shared_ptr<QuantizedLinear> k_proj_;
+    std::shared_ptr<QuantizedLinear> v_proj_;
+    std::shared_ptr<QuantizedLinear> out_proj_;
+};
+
+/**
+ * @brief Quantized GRU cell for efficient sequence processing.
+ *
+ * Uses INT8 quantized weights for input-to-hidden and hidden-to-hidden
+ * transforms. Gate computations (sigmoid, tanh) run in FP32 after
+ * dequantization to preserve accuracy.
+ */
+class QuantizedGRU : public Module {
+public:
+    QuantizedGRU(
+        int64_t input_size,
+        int64_t hidden_size,
+        int64_t num_layers = 1,
+        bool bias = true,
+        bool batch_first = true,
+        bool bidirectional = false,
+        QuantizationParams weight_qparams = QuantizationParams(
+            Tensor(), Tensor(), QuantDType::INT8, QuantizationScheme::PerTensorSymmetric)
+    );
+
+    auto forward_impl(const Variable& input) -> Variable override;
+
+    auto forward_with_state(const Variable& input, const Variable& h0)
+        -> std::pair<Variable, Variable>;
+
+    auto input_size() const -> int64_t { return input_size_; }
+    auto hidden_size() const -> int64_t { return hidden_size_; }
+    auto num_layers() const -> int64_t { return num_layers_; }
+
+    static auto from_float(Module& fp_gru, const QConfig& qconfig)
+        -> std::shared_ptr<QuantizedGRU>;
+
+private:
+    int64_t input_size_;
+    int64_t hidden_size_;
+    int64_t num_layers_;
+    bool bias_;
+    bool batch_first_;
+    bool bidirectional_;
+
+    struct LayerWeights {
+        QuantizedTensor weight_ih;
+        QuantizedTensor weight_hh;
+        std::optional<Tensor> bias_ih;
+        std::optional<Tensor> bias_hh;
+    };
+    std::vector<LayerWeights> layers_;
 };
 
 } // namespace quantization

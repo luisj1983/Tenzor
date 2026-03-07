@@ -2,6 +2,7 @@
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/backend/oneapi_caching_allocator.hpp"
+#include "tenzor/utils/logging.hpp"
 #include <sycl/sycl.hpp>
 #include <vector>
 #include <unordered_map>
@@ -387,7 +388,8 @@ public:
 
                         devices_.push_back(dev_data);
                     } catch (const sycl::exception& e) {
-                        // Skip devices that can't create queues
+                        TENZOR_LOG_WARNING(
+                            std::string("Skipping SYCL device: ") + e.what());
                         continue;
                     }
                 }
@@ -537,14 +539,37 @@ public:
                 std::memcpy(dst, src, bytes);
                 return;
 
-            case CopyKind::HostToDevice:
-            case CopyKind::DeviceToHost:
-            case CopyKind::DeviceToDevice: {
-                // Use first available queue (device 0)
+            case CopyKind::HostToDevice: {
+                // Use destination device's queue for H2D
                 if (devices_.empty()) {
                     throw std::runtime_error("No SYCL devices available for copy");
                 }
-                queue_ptr = devices_[0].queue.get();
+                auto dst_it = allocations_.find(dst);
+                int32_t dev_id = (dst_it != allocations_.end()) ? dst_it->second : 0;
+                if (dev_id < 0 || dev_id >= static_cast<int32_t>(devices_.size())) dev_id = 0;
+                queue_ptr = devices_[dev_id].queue.get();
+                break;
+            }
+            case CopyKind::DeviceToHost: {
+                // Use source device's queue for D2H
+                if (devices_.empty()) {
+                    throw std::runtime_error("No SYCL devices available for copy");
+                }
+                auto src_it = allocations_.find(const_cast<void*>(src));
+                int32_t dev_id = (src_it != allocations_.end()) ? src_it->second : 0;
+                if (dev_id < 0 || dev_id >= static_cast<int32_t>(devices_.size())) dev_id = 0;
+                queue_ptr = devices_[dev_id].queue.get();
+                break;
+            }
+            case CopyKind::DeviceToDevice: {
+                // Use destination device's queue for D2D
+                if (devices_.empty()) {
+                    throw std::runtime_error("No SYCL devices available for copy");
+                }
+                auto dst_it = allocations_.find(dst);
+                int32_t dev_id = (dst_it != allocations_.end()) ? dst_it->second : 0;
+                if (dev_id < 0 || dev_id >= static_cast<int32_t>(devices_.size())) dev_id = 0;
+                queue_ptr = devices_[dev_id].queue.get();
                 break;
             }
         }

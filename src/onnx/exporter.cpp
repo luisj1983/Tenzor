@@ -4,6 +4,7 @@
  */
 
 #include "../../include/tenzor/onnx/exporter.hpp"
+#include "../../include/tenzor/nn/quantization/quantized_layers.hpp"
 #include "../../include/tenzor/utils/error.hpp"
 #include "../../include/tenzor/utils/logging.hpp"
 #include <cstring>
@@ -2905,6 +2906,112 @@ auto ONNXExporter::convert_jit_node_to_onnx(
     }
 
     graph_.add_node(onnx_node);
+}
+
+// ============================================================================
+// Quantization (QDQ) Nodes
+// ============================================================================
+
+auto ONNXExporter::export_quantize_linear(const Tensor& input, const Tensor& scale,
+                                           const Tensor& zero_point,
+                                           const std::string& output_name,
+                                           int64_t axis) -> void {
+    ONNXExportNode node("QuantizeLinear", context_.generate_name("quantize_linear"));
+
+    std::string input_name = get_tensor_name(input, "ql_input");
+    std::string scale_name = context_.generate_name("ql_scale");
+    std::string zp_name = context_.generate_name("ql_zero_point");
+
+    add_initializer_tensor(scale, scale_name);
+    add_initializer_tensor(zero_point, zp_name);
+
+    node.add_input(input_name);
+    node.add_input(scale_name);
+    node.add_input(zp_name);
+    node.add_output(output_name);
+
+    if (axis >= 0) {
+        node.set_attr("axis", axis);
+    }
+
+    graph_.add_node(node);
+}
+
+auto ONNXExporter::export_dequantize_linear(const Tensor& input, const Tensor& scale,
+                                             const Tensor& zero_point,
+                                             const std::string& output_name,
+                                             int64_t axis) -> void {
+    ONNXExportNode node("DequantizeLinear", context_.generate_name("dequantize_linear"));
+
+    std::string input_name = get_tensor_name(input, "dql_input");
+    std::string scale_name = context_.generate_name("dql_scale");
+    std::string zp_name = context_.generate_name("dql_zero_point");
+
+    add_initializer_tensor(scale, scale_name);
+    add_initializer_tensor(zero_point, zp_name);
+
+    node.add_input(input_name);
+    node.add_input(scale_name);
+    node.add_input(zp_name);
+    node.add_output(output_name);
+
+    if (axis >= 0) {
+        node.set_attr("axis", axis);
+    }
+
+    graph_.add_node(node);
+}
+
+auto ONNXExporter::export_quantized_linear(
+    const nn::quantization::QuantizedLinear& layer,
+    const Tensor& input,
+    const std::string& output_name) -> void {
+    // QDQ pattern: DequantizeLinear(weight) → MatMul → [Add bias] → output
+    // The input is assumed to already be in FP32 (dequantized upstream).
+
+    // Get quantized weight data and params
+    auto& q_weight = layer.weight();
+    auto& params = q_weight.params();
+
+    // DequantizeLinear for weight
+    std::string dq_weight_name = context_.generate_name("ql_dq_weight");
+    std::string weight_name = context_.generate_name("ql_weight_q");
+    std::string scale_name = context_.generate_name("ql_weight_scale");
+    std::string zp_name = context_.generate_name("ql_weight_zp");
+
+    add_initializer_tensor(q_weight.data(), weight_name);
+    add_initializer_tensor(params.scale, scale_name);
+    add_initializer_tensor(params.zero_point, zp_name);
+
+    ONNXExportNode dq_node("DequantizeLinear", context_.generate_name("dequantize_weight"));
+    dq_node.add_input(weight_name);
+    dq_node.add_input(scale_name);
+    dq_node.add_input(zp_name);
+    dq_node.add_output(dq_weight_name);
+
+    if (params.scheme == nn::quantization::QuantizationScheme::PerChannelSymmetric ||
+        params.scheme == nn::quantization::QuantizationScheme::PerChannelAsymmetric) {
+        dq_node.set_attr("axis", static_cast<int64_t>(0));
+    }
+    graph_.add_node(dq_node);
+
+    // Transpose weight for Gemm (from [out, in] to [in, out])
+    std::string input_name = get_tensor_name(input, "ql_input");
+
+    // Use Gemm node: output = input @ weight^T + bias
+    ONNXExportNode gemm_node("Gemm", context_.generate_name("ql_gemm"));
+    gemm_node.add_input(input_name);
+    gemm_node.add_input(dq_weight_name);
+
+    if (layer.has_bias()) {
+        std::string bias_name = context_.generate_name("ql_bias");
+        add_initializer_tensor(layer.bias(), bias_name);
+        gemm_node.add_input(bias_name);
+    }
+
+    gemm_node.add_output(output_name);
+    gemm_node.set_attr("transB", static_cast<int64_t>(1));
+    graph_.add_node(gemm_node);
 }
 
 // ============================================================================

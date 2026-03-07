@@ -1,365 +1,348 @@
 # Tenzor Comprehensive Fix & Feature Plan
 
-Based on a thorough review of 520k LOC across 1,220 source files, verified by targeted
-audits to eliminate false positives. Items are ordered by priority within each phase.
+Based on thorough review of 525K LOC across 1,226 source files, with all issues
+verified against actual code. Items marked NOT-A-BUG were confirmed as intentional
+design or already fixed and are excluded.
+
+## Completion Status
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| 1 (P0 Critical Bugs) | ✅ COMPLETE | OneAPI copy, Metal sync, ROCm NMS RAII |
+| 2 (P1 High Priority) | ✅ COMPLETE | Metal MPS already handled; ROCm async+tracking; OneAPI logging |
+| 3.1 (EmbeddingBag GPU) | ✅ COMPLETE | CUDA+CPU kernels, OpId, embedding.cpp dispatch |
+| 3.2 (Vulkan Shaders) | ✅ ALREADY DONE | Ninja parallelizes add_custom_command natively |
+| 4 (Higher-Order Grad) | ✅ ALREADY DONE | All ~65 backward ops have backward_with_variables |
+| 5 (SyncBatchNorm) | ⏭ SKIPPED | Requires distributed testing infrastructure |
+| 6 (Sparse NN) | ✅ COMPLETE | SparseLinear + SparseEmbedding implemented |
+| 7 (Quantization+QDQ) | ✅ COMPLETE | 5 quantized layers (Embedding,LSTM,GRU,Conv3d,MHA) + ONNX QDQ |
+| 8.1 (OneAPI CMake) | ✅ COMPLETE | Centralized compile function, common flags |
+| 8.2 (GPU C++ Docs) | ✅ COMPLETE | Comments added to CUDA/ROCm/OneAPI CMakeLists |
+| 9.1 (CUDA RAII) | ✅ COMPLETE | CudaAsyncBuffer wrapper, matmul.cu updated |
+| 9.2 (Reduction Errors) | ✅ COMPLETE | CUDA_PEEK_AND_THROW macro, 10 sites updated |
 
 ---
 
-## Phase 1: Confirmed Bug Fixes (P0 - Critical)
+## Phase 1: Critical Backend Bug Fixes (P0)
 
-### 1.1 Vulkan: Missing VkResult Check on vkCreatePipelineCache
-- **File:** `src/backends/vulkan/vulkan_backend.cpp:528`
-- **Issue:** `vkCreatePipelineCache()` return value is not checked. If it fails (e.g.,
-  corrupt cache data from disk), `ctx.pipelineCache` is invalid, causing crashes on any
-  subsequent pipeline creation.
-- **Fix:** Wrap with `vulkan::checkVk()`. On failure, log warning and proceed with
-  `VK_NULL_HANDLE` pipeline cache (pipelines work without cache, just slower).
-- **Test:** Add unit test that loads a corrupt pipeline cache file and verifies graceful
-  fallback.
+### 1.1 OneAPI Cross-Device Copy Queue Selection
+- **File:** `src/backends/oneapi/oneapi_backend.cpp:543-547`
+- **Bug:** All copy ops hardcode `devices_[0].queue` regardless of source/dest device
+- **Fix:** Determine correct queue from pointer device attributes or destination device_id
+  - For H2D: use destination device queue
+  - For D2H: use source device queue
+  - For D2D: use destination device queue, stage through host if different platforms
+- **Test:** Add backend test with multi-device copy (if 2+ OneAPI devices available)
 
-### 1.2 Vulkan: Missing VkResult Check on vkResetCommandPool
-- **File:** `src/backends/vulkan/vulkan_backend.cpp:908`
-- **Issue:** `vkResetCommandPool()` in the descriptor pool exhaustion recovery path is
-  unchecked. If reset fails, the recovery silently continues with a dirty command pool.
-- **Fix:** Wrap with `vulkan::checkVk()`. On failure, throw with context about the
-  recovery path.
-- **Test:** Existing descriptor exhaustion tests should cover this path.
-
-### 1.3 Non-Contiguous GPU fill_() Round-Trips Through CPU
-- **File:** `src/core/tensor.cpp:774-826`
-- **Issue:** For non-contiguous GPU tensors, `fill_()` copies the *entire storage* to CPU,
-  modifies target elements with stride iteration, then copies back. Filling 10 elements
-  of a 1GB tensor copies 2GB.
-- **Fix:** Implement per-backend strided fill kernels:
-  - **CUDA:** Trivial kernel — one thread per element, compute strided offset, write value.
-    Register as `OpId::StridedFill` or handle inside existing `Fill` kernel with stride args.
-  - **Vulkan:** Add `strided_fill.comp` shader with push constants for shape/strides/value.
-  - **OneAPI:** SYCL parallel_for with strided offset computation.
-  - Update `tensor.cpp:fill_()` to dispatch `OpId::StridedFill` when non-contiguous on GPU
-    instead of the CPU round-trip path.
-- **Test:** `fill_(value)` on a non-contiguous GPU slice; verify correctness and that no
-  D2H/H2D copies occur (check via profiling or mock allocator).
-
-### 1.4 Int8 Multiply Uses Truncation Instead of Saturation
-- **File:** `src/backends/cpu/kernels/int_simd.hpp:146-178`
-- **Issue:** Int8 multiply truncates results via `AND 0xFF` mask and `static_cast<int8_t>`.
-  `127 * 2` produces `-2` instead of `127` (saturated). This affects quantized inference
-  correctness.
+### 1.2 Metal Shared Buffer GPU-CPU Synchronization
+- **File:** `src/backends/metal/metal_backend.mm:122-134`
+- **Bug:** `memcpy_h2d`/`memcpy_d2h` call `[buffer contents]` without GPU synchronization
 - **Fix:**
-  - SIMD path: After `_mm256_mullo_epi16`, clamp with `_mm256_max_epi16(result, min_val)`
-    and `_mm256_min_epi16(result, max_val)` where min=-128, max=127, then pack.
-  - Scalar path: Replace `static_cast<int8_t>(a*b)` with
-    `static_cast<int8_t>(std::clamp(a*b, -128, 127))`.
-- **Test:** Add test: `mul_i8({127, -128, 64}, {2, 2, 3})` expects `{127, -128, 127}`.
+  - Add `[commandBuffer waitUntilCompleted]` or equivalent fence before D2H reads
+  - For H2D, add memory barrier after write to ensure GPU sees updated data
+  - Consider switching to private buffers + blit encoder for correctness
+- **Test:** Add test that writes GPU data then immediately reads back
 
----
-
-## Phase 2: Core API Improvements (P1 - High)
-
-### 2.1 Add Tensor::to(Device, DType) Combo Method
-- **File:** `include/tenzor/core/tensor.hpp`, `src/core/tensor.cpp`
-- **Issue:** Users must chain `.to(device).to(dtype)` causing two allocations and two
-  transfers instead of one.
-- **Fix:** Add overload:
-  ```cpp
-  auto to(Device device, DType dtype) const -> Tensor;
-  ```
-  Implementation: If device differs, transfer first then cast on target device (avoids
-  transferring in wrong dtype). If same device, just cast. Check for no-op (same device
-  AND same dtype).
-- **Also add:** `auto to(Device device, DType dtype, MemoryFormat fmt) const -> Tensor;`
-- **Python binding:** Add `tensor.to(device, dtype)` overload in `bindings.cpp`.
-- **Test:** Verify single-allocation path; verify no-op returns self.
-
-### 2.2 Validate Shape/Stride Mutations in Internal API
-- **File:** `include/tenzor/core/tensor.hpp:1049-1063`
-- **Issue:** `mutable_shape()` and `mutable_strides()` allow arbitrary changes without
-  validating that the new shape fits within storage bounds.
-- **Fix:** Replace raw accessors with:
-  ```cpp
-  void set_sizes_and_strides(std::span<const int64_t> sizes,
-                             std::span<const int64_t> strides);
-  ```
-  This method validates: (a) all dimensions non-negative, (b) max reachable offset
-  `<= storage_size / dtype_size`, (c) no integer overflow in offset computation.
-  Keep `mutable_shape()`/`mutable_strides()` but add `TENZOR_DEBUG` assertions.
-- **Test:** Verify that invalid shapes throw; valid shapes succeed.
-
-### 2.3 PositionalEncoding: Compute on Target Device
-- **File:** `src/nn/layers/transformer.cpp:23-151`
-- **Issue:** PE is computed on CPU at init and sliced/transferred on every forward pass.
+### 1.3 ROCm NMS Kernel Resource Leak
+- **File:** `src/backends/rocm/kernels/nms.hip.cpp:111-180`
+- **Bug:** hipMalloc/hipMemcpy/hipMemset have no error checks; leak on failure
 - **Fix:**
-  - Cache the PE tensor on the input's device after first forward call.
-  - Use a `device_` member tracking where PE is cached.
-  - On forward: if `pe_.device() != input.device()`, transfer and cache.
-  - On subsequent calls with same device: zero-copy slice from cached tensor.
-- **Test:** Verify PE on GPU after first forward; verify no CPU→GPU transfer on second call.
+  - Add `HIP_CHECK()` macro around all hip* calls
+  - Use RAII wrapper or goto-cleanup pattern for d_sorted_indices, d_suppression_mask
+  - On hipMalloc failure, throw before using uninitialized pointer
+- **Test:** Existing NMS tests should pass; add edge case with 0 boxes
 
 ---
 
-## Phase 3: Missing NN Layers (P1 - High)
+## Phase 2: High-Priority Backend Fixes (P1)
 
-### 3.1 BatchNorm3d
-- **Files:** `include/tenzor/nn/layers/batchnorm.hpp`, `src/nn/layers/batchnorm.cpp`
-- **Design:** Same as BatchNorm2d but for 5D input (N, C, D, H, W). Reshape to
-  (N, C, D*H*W), delegate to existing BatchNorm computation, reshape back.
-- **Backend support:** CPU dispatch through existing BatchNorm kernel with flattened spatial
-  dims. CUDA: cuDNN supports 5D BatchNorm natively.
-- **Test:** Forward/backward with 5D input; parity with PyTorch `nn.BatchNorm3d`.
+### 2.1 Metal MPS Error Handling
+- **File:** `src/backends/metal/metal_backend.mm:240-277`
+- **Bug:** MPS matmul operations don't check MTLCommandBuffer errors
+- **Fix:**
+  - After `[commandBuffer waitUntilCompleted]`, check `[commandBuffer status]`
+  - If `MTLCommandBufferStatusError`, throw with `[commandBuffer error].localizedDescription`
+  - Apply same pattern to all MPS-dispatched operations
+- **Test:** Verify error propagation with invalid inputs
 
-### 3.2 InstanceNorm3d
-- **Files:** `include/tenzor/nn/layers/normalization.hpp`, `src/nn/layers/normalization.cpp`
-- **Design:** Extend existing InstanceNorm pattern. Compute mean/var over (D, H, W) dims
-  per (N, C) pair.
-- **Test:** Forward/backward with 5D input; parity with PyTorch `nn.InstanceNorm3d`.
+### 2.2 ROCm Async Memory Copies
+- **File:** `src/backends/rocm/rocm_backend.cpp:167-172`
+- **Bug:** Uses blocking `hipMemcpy()` instead of `hipMemcpyAsync()`
+- **Fix:**
+  - Replace `hipMemcpy()` with `hipMemcpyAsync()` using device stream
+  - Add stream parameter plumbing if not already available
+  - Keep synchronous fallback for cases where no stream is available
+- **Test:** Verify async copy correctness with existing ROCm tests
 
-### 3.3 SyncBatchNorm
-- **Files:** New `include/tenzor/nn/layers/sync_batchnorm.hpp`,
-  `src/nn/layers/sync_batchnorm.cpp`
-- **Design:** Extends BatchNorm2d. During training:
-  1. Compute local mean and var per GPU.
-  2. All-reduce mean and var across process group.
-  3. Normalize using global statistics.
-- **Dependencies:** Requires `distributed::ProcessGroup` for all-reduce.
-- **Test:** Multi-GPU test with 2+ processes verifying synchronized statistics.
+### 2.3 ROCm Device ID Fallback
+- **File:** `src/backends/rocm/rocm_backend.cpp:130-139`
+- **Bug:** Falls back to device 0 silently when hipPointerGetAttributes fails
+- **Fix:**
+  - Log warning when pointer attribute lookup fails
+  - Store device_id in allocation tracking map (like CUDA caching allocator does)
+  - Look up device_id from tracking map first, fall back to hipPointerGetAttributes
+- **Test:** Verify correct device deallocation with multi-device scenario
 
----
-
-## Phase 4: Missing Operations (P1 - High)
-
-### 4.1 einsum
-- **Files:** New `include/tenzor/ops/einsum.hpp`, `src/ops/einsum.cpp`
-- **Design:**
-  1. Parse Einstein notation string (e.g., `"ij,jk->ik"`).
-  2. Identify contraction, batch, and free dimensions.
-  3. Decompose into sequence of: transpose, reshape, matmul/bmm, reduce.
-  4. Optimize common patterns: matmul (`ij,jk->ik`), batch matmul (`bij,bjk->bik`),
-     trace (`ii->`), outer product (`i,j->ij`), dot (`i,i->`).
-- **OpId:** Add `OpId::Einsum` for potential backend-specific fast paths.
-- **Python:** Expose as `tz.einsum("ij,jk->ik", a, b)`.
-- **Test:** All common patterns; verify gradient flow; parity with `numpy.einsum`.
-
-### 4.2 median and mode
-- **Files:** `include/tenzor/ops/reduction.hpp`, `src/ops/reduction.cpp`,
-  CPU/CUDA kernel files.
-- **Design:**
-  - `median(tensor, dim)` → partial sort (nth_element on CPU, CUB radix select on CUDA).
-  - `mode(tensor, dim)` → sort + adjacent count (CPU), sort + reduce-by-key (CUDA).
-  - Both return `(values, indices)` tuple like PyTorch.
-- **OpId:** Add `OpId::Median`, `OpId::Mode`.
-- **Test:** Various shapes and dtypes; edge cases (even-length for median, ties for mode).
-
-### 4.3 linalg.matrix_power
-- **File:** `include/tenzor/ops/linalg.hpp`, `src/ops/linalg.cpp`
-- **Design:** Binary exponentiation: `A^n` via repeated squaring. Handle n=0 (identity),
-  n<0 (invert then exponentiate). Delegate to existing `matmul` and `linalg_inv`.
-- **Test:** A^0=I, A^1=A, A^(-1)=inv(A), A^4 = (A^2)^2.
-
-### 4.4 Trilinear Interpolation
-- **File:** `src/ops/vision.cpp`, backend kernel files.
-- **Design:** Extend existing `interpolate` with `mode="trilinear"` for 5D inputs (N,C,D,H,W).
-  Follow the same pattern as bilinear but in 3 spatial dimensions (8-point interpolation).
-- **OpId:** Reuse `OpId::Interpolate` with `AttrKey::Mode = "trilinear"`.
-- **CPU:** Nested loop with 8-point weight computation.
-- **CUDA:** Grid-stride kernel, one thread per output element.
-- **Vulkan:** `interpolate_trilinear.comp` shader.
-- **Test:** Upsample and downsample 5D tensors; parity with PyTorch
-  `F.interpolate(mode='trilinear')`.
+### 2.4 OneAPI Silent Device Skip Logging
+- **File:** `src/backends/oneapi/oneapi_backend.cpp:389-392`
+- **Bug:** Silently catches exception and skips device with no log
+- **Fix:**
+  - Add `LOG_WARNING("Skipping SYCL device '{}': {}", device_name, e.what())`
+  - After loop, if no devices initialized, throw descriptive error
+- **Test:** Manual verification with logging output
 
 ---
 
-## Phase 5: CPU Performance Optimizations (P2 - Medium)
+## Phase 3: Performance Fixes (P1)
 
-### 5.1 Fused Conv+Bias+ReLU CPU Kernel
-- **File:** `src/backends/cpu/kernels/fused_ops.cpp` (currently only forward declarations)
-- **Design:** After im2col + GEMM, fuse bias addition and ReLU into a single pass over the
-  output buffer. Avoids 2 extra full-tensor passes.
+### 3.1 EmbeddingBag Fused GPU Kernel
+- **File:** `src/nn/layers/embedding.cpp:889-892`
+- **Bug:** GPU embeddings transferred to CPU for aggregation, then back to GPU
+- **Fix:**
+  - Implement CUDA kernel `embedding_bag_forward_kernel` that:
+    - Takes embedding table, indices, offsets on device
+    - Computes per-bag sum/mean/max directly on GPU
+    - Avoids D2H/H2D round-trip
+  - Register as OpId (e.g., `EmbeddingBagForward`)
+  - CPU path remains as-is (no transfer needed)
+  - Add Vulkan compute shader variant
+- **Files to change:**
+  - `include/tenzor/ops/op_id.hpp` - add EmbeddingBagForward, EmbeddingBagBackward
+  - `src/backends/cuda/kernels/embedding.cu` - new kernel
+  - `src/backends/cpu/kernels/embedding.cpp` - register CPU kernel
+  - `src/nn/layers/embedding.cpp` - dispatch to new op
+- **Test:** Compare GPU EmbeddingBag output with CPU reference
+
+### 3.2 Vulkan Shader Parallel Compilation
+- **File:** `src/backends/vulkan/CMakeLists.txt`
+- **Issue:** 235+ shaders compiled serially
+- **Fix:**
+  - Each shader already has its own `add_custom_command()` which Ninja can parallelize
+  - Verify Ninja actually parallelizes these (it should via dependency graph)
+  - If not, consider `CMAKE_JOB_POOL_COMPILE` or a batch compilation script
+  - Alternative: group shaders into a single `glslc` invocation with `--depfile`
+- **Test:** Measure build time before/after
+
+---
+
+## Phase 4: Higher-Order Gradient Support (P2)
+
+### 4.1 Extend backward_with_variables for Common Ops
+- **Files:** `src/autograd/ops.cpp`, `include/tenzor/autograd/ops.hpp`
+- **Current:** Only Add, Sub, Mul, Div, MatMul support create_graph=true (5/79)
+- **Fix:** Implement proper `backward_with_variables()` for most-used ops:
+  - **Batch 1 (elementwise):** Neg, Abs, Sqrt, Exp, Log, Pow, Clamp
+  - **Batch 2 (activations):** ReLU, Sigmoid, Tanh, GELU, Softmax
+  - **Batch 3 (reductions):** Sum, Mean
+  - **Batch 4 (transforms):** Transpose, Reshape, Slice, Cat
+  - **Batch 5 (advanced):** BatchNorm, LayerNorm, Conv2d (if feasible)
+- **Pattern for each op:**
   ```cpp
-  // Instead of: gemm(output); add_bias(output); relu(output);
-  // Do:         gemm(output); for each elem: output[i] = max(0, output[i] + bias[c]);
+  auto XXXBackward::backward_with_variables(
+      const std::vector<Variable>& grad_outputs) -> std::vector<Variable> {
+      // Use autograd::ops (Variable-level) instead of raw tensor ops
+      // This preserves the computation graph for higher-order gradients
+  }
   ```
-- **SIMD:** Vectorize with `_mm256_max_ps(_mm256_add_ps(out, bias), zero)`.
-- **Registration:** `OpId::FusedConv2dReLU` and `OpId::FusedConvBiasReLU`.
-- **Test:** Numerical parity with separate conv → bias → relu.
-
-### 5.2 Winograd F(4x4, 3x3) Larger Tile
-- **File:** `src/backends/cpu/kernels/winograd.hpp`
-- **Current:** Only F(2x2, 3x3) implemented (output tile 2x2).
-- **Add:** F(4x4, 3x3) for 6x6 transform tiles. Reduces multiplies further for large
-  spatial dimensions. Published transform matrices available in literature.
-- **Gate:** Use F(4x4) for spatial dims >= 8, F(2x2) for smaller.
-- **Test:** Numerical parity with im2col path; benchmark improvement.
-
-### 5.3 Depthwise Conv GEMM Optimization
-- **File:** `src/backends/cpu/kernels/conv2d.cpp`
-- **Issue:** Depthwise conv currently uses naive loop.
-- **Fix:** For depthwise (groups == in_channels), use per-channel GEMM with smaller
-  matrices. Alternatively, use direct SIMD convolution for common 3x3 depthwise.
-- **Test:** MobileNet-style depthwise conv benchmark.
+- **Test:** Extend `tests/autograd/test_higher_order_gradients.cpp` for each new op
+- **Priority:** Batch 1-2 first (most commonly needed for meta-learning, MAML)
 
 ---
 
-## Phase 6: ONNX Completeness (P2 - Medium)
+## Phase 5: SyncBatchNorm (P2)
 
-### 6.1 ONNX Importer: Expand Op Coverage (27 → 60+ ops)
-- **File:** `src/onnx/importer.cpp`
-- **Priority ops to add (by frequency in real models):**
-  1. **LSTM, GRU** — Map to existing RNN layers
-  2. **Embedding/Gather** — Map to `OpId::Embedding` / `OpId::Gather`
-  3. **ReduceSum, ReduceMean, ReduceMax** — Map to existing reduction ops
-  4. **Unsqueeze, Squeeze** — Map to existing shape ops
-  5. **Slice, Pad** — Map to existing indexing ops
-  6. **Clip** — Map to `OpId::Clamp`
-  7. **Cast** — Map to `Tensor::to(DType)`
-  8. **Dropout** — Map to `OpId::Dropout` (identity in eval mode)
-  9. **Resize** — Map to `OpId::Interpolate`
-  10. **LayerNormalization, GroupNormalization** — Map to existing norm layers
-- **Test:** Round-trip test: export model → import → compare forward pass outputs.
-
-### 6.2 ONNX QDQ Node Support
-- **Files:** `src/onnx/exporter.cpp`, `src/onnx/importer.cpp`
-- **Design:** Add `QuantizeLinear` and `DequantizeLinear` ONNX ops.
-  - Export: Convert Tenzor quantized layers to QDQ pattern.
-  - Import: Map QDQ nodes to Tenzor's quantized ops.
-- **Test:** Export quantized model; verify loadable by ONNX Runtime.
-
----
-
-## Phase 7: Sparse Tensor Operations (P2 - Medium)
-
-### 7.1 Expand Sparse Op Coverage
-- **Files:** `src/sparse/sparse_ops.cpp`, `include/tenzor/sparse/sparse_ops.hpp`
-- **Add operations:**
-  1. **sparse_mm (sparse @ sparse → sparse)** — Merge-based COO multiplication
-  2. **sparse_sum / sparse_mean** — Reduction along dimensions
-  3. **sparse_softmax** — Over non-zero entries per row
-  4. **sparse_to_dense_backward** — Gradient for dense→sparse conversion
-  5. **sparse_index_select** — Select rows/columns from sparse matrix
-- **Test:** Each op with COO and CSR inputs; verify against dense equivalent.
-
-### 7.2 Sparse Float16/BFloat16 Support
-- **Files:** `src/sparse/sparse_ops.cpp`, `src/backends/cuda/kernels/sparse.cu`
-- **Issue:** Only Float32/Float64 supported in cuSPARSE path.
-- **Fix:** Add FP16→FP32 conversion wrapper for sparse ops (cuSPARSE doesn't natively
-  support FP16 for most ops).
-- **Test:** spmm with FP16 inputs; verify numerical parity with FP32.
-
----
-
-## Phase 8: Distributed Training Completeness (P2 - Medium)
-
-### 8.1 DistributedSampler
-- **Files:** New `include/tenzor/data/distributed_sampler.hpp`,
-  `src/data/distributed_sampler.cpp`
+### 5.1 Implement SyncBatchNorm Layer
+- **New files:**
+  - `include/tenzor/nn/layers/sync_batchnorm.hpp`
+  - `src/nn/layers/sync_batchnorm.cpp`
 - **Design:**
-  - Partition dataset indices across `world_size` ranks.
-  - Each rank gets `ceil(len(dataset) / world_size)` samples.
-  - Shuffle with rank-specific seed per epoch.
-  - Pad last rank if uneven split (configurable: pad or drop).
-- **Integration:** DataLoader accepts optional Sampler; DistributedSampler is one impl.
-- **Test:** 2-rank test verifying non-overlapping indices covering full dataset.
-
-### 8.2 Gradient Compression
-- **File:** `include/tenzor/distributed/gradient_compression.hpp` (header exists)
-- **Implement:**
-  1. **Top-K sparsification** — Only communicate largest K% of gradients.
-  2. **Error feedback** — Accumulate residuals for next iteration.
-  3. **Quantized all-reduce** — Compress gradients to INT8 before communication.
-- **Test:** Convergence test on small model with compression vs baseline.
-
----
-
-## Phase 9: JIT Enhancements (P3 - Low)
-
-### 9.1 Control Flow Support (If/Loop)
-- **File:** `src/jit/compiler.cpp`
-- **Design:**
-  - `If` node: Two subgraphs (then/else), condition tensor, merge outputs.
-  - `Loop` node: Body subgraph, trip count, loop-carried dependencies.
-  - Optimization: constant-fold conditions, unroll small loops.
-- **Tracing limitation:** Trace-based JIT captures one execution path. For control flow,
-  need scripting mode or symbolic tracing.
-- **Test:** Model with conditional branch; model with fixed-iteration loop.
-
-### 9.2 Cross-Kernel Fusion
-- **File:** `src/jit/compiler.cpp`
-- **Current:** Conv+BN, Conv+ReLU, Linear+ReLU, MatMul+Add fusions exist.
-- **Add:**
-  1. **Conv+BN+ReLU** triple fusion (already exists per audit — verify)
-  2. **LayerNorm+Dropout** fusion
-  3. **Attention fusion** (Q*K^T/sqrt(d) + mask + softmax + V multiply)
-- **Test:** Benchmark fused vs unfused; verify numerical parity.
-
----
-
-## Phase 10: Additional Missing Features (P3 - Low)
-
-### 10.1 Autograd: Checkpoint Determinism Warning
-- **File:** `src/autograd/checkpoint.cpp`
-- **Issue:** Checkpoint assumes deterministic functions but doesn't warn or validate.
-- **Fix:** Add optional `verify=True` parameter that recomputes forward twice during the
-  first backward pass and compares outputs. If mismatch detected, emit warning.
-- **Default:** `verify=False` (no overhead in production).
-
-### 10.2 View Aliasing: Overlap Detection
-- **File:** `src/core/tensor.cpp:724-766`
-- **Current:** Detects same-storage aliasing and clones. But overlapping views from
-  different slices of same storage are also detected (same storage pointer check).
-- **Enhancement:** For extra safety, could add range-overlap check:
+  - Subclass of Module (not BatchNorm2d, to avoid virtual dispatch overhead)
+  - Forward pass:
+    1. Compute local mean and variance per GPU
+    2. `all_reduce(mean)` and `all_reduce(var)` across process group
+    3. Normalize using global statistics
+    4. Apply affine transform (gamma, beta)
+  - Backward pass: synchronized gradient reduction
+  - Requires `ProcessGroup` reference (passed at construction or via context)
+- **API:**
   ```cpp
-  bool ranges_overlap(offset_a, size_a, offset_b, size_b);
-  ```
-  Only clone when ranges actually overlap, not just when storage matches.
-  This is an optimization (avoids unnecessary clones), not a correctness fix.
+  SyncBatchNorm(int64_t num_features, double eps=1e-5, double momentum=0.1,
+                bool affine=true, bool track_running_stats=true,
+                std::shared_ptr<ProcessGroup> process_group=nullptr);
 
-### 10.3 Thread Safety Documentation
-- **File:** `include/tenzor/core/tensor.hpp`
-- **Add:** Prominent section documenting:
-  - Read operations are thread-safe.
-  - Concurrent read + write requires external synchronization.
-  - `mutable_shape()`/`mutable_strides()` are NOT thread-safe.
-  - Autograd forward pass is NOT thread-safe on shared Variables.
-  - Autograd backward pass is thread-safe with per-Variable `make_thread_safe()`.
+  static auto convert_sync_batchnorm(std::shared_ptr<Module> module,
+                                      std::shared_ptr<ProcessGroup> pg)
+      -> std::shared_ptr<Module>;  // Converts all BN layers in-place
+  ```
+- **Python binding:** Add to `bindings.cpp` and `nn.py`
+- **Test:** Multi-process test comparing SyncBN output with single-GPU BN on full batch
+
+---
+
+## Phase 6: Sparse NN Layers (P2)
+
+### 6.1 SparseLinear
+- **New files:**
+  - `include/tenzor/nn/layers/sparse_linear.hpp`
+  - `src/nn/layers/sparse_linear.cpp`
+- **Design:**
+  - Weight stored as sparse tensor (CSR format for efficient SpMM)
+  - Forward: `output = sparse_matmul(input, weight.t()) + bias`
+  - Backward: gradient w.r.t. input via sparse transpose matmul
+  - Constructor accepts density ratio or pre-built sparse weight
+- **Test:** Compare with dense Linear on same weights
+
+### 6.2 SparseEmbedding
+- **New files:**
+  - `include/tenzor/nn/layers/sparse_embedding.hpp`
+  - `src/nn/layers/sparse_embedding.cpp`
+- **Design:**
+  - Sparse gradient accumulation for embedding lookups
+  - Only accessed rows get gradients (no full-table gradient)
+  - Uses COO format for gradient accumulation
+- **Test:** Verify sparse gradients match dense embedding gradients
+
+---
+
+## Phase 7: Extended Quantization & ONNX QDQ (P2)
+
+### 7.1 Additional Quantized Layers
+- **Files to add/modify:**
+  - `include/tenzor/nn/quantization/quantized_layers.hpp` - add new classes
+  - New kernel implementations in CPU/CUDA backends
+- **New layers:**
+  - `QuantizedLSTM` - INT8 LSTM cell with dequantized gates
+  - `QuantizedGRU` - INT8 GRU cell
+  - `QuantizedConv3d` - INT8 3D convolution
+  - `QuantizedEmbedding` - INT8/INT4 embedding table (reduces memory 4-8x)
+  - `QuantizedMultiheadAttention` - INT8 attention with FP32 softmax
+- **Test:** Accuracy comparison with FP32 reference for each layer
+
+### 7.2 ONNX QDQ Node Support
+- **Files:**
+  - `src/onnx/exporter.cpp` - add QuantizeLinear/DequantizeLinear export
+  - `src/onnx/importer.cpp` - add QDQ node parsing
+- **Export changes:**
+  - When exporting quantized layers, emit QDQ pattern:
+    `input -> QuantizeLinear -> DequantizeLinear -> Conv/Linear -> ...`
+  - Include scale/zero_point as initializers
+  - Support per-tensor and per-channel quantization parameters
+- **Import changes:**
+  - Detect QDQ pattern and reconstruct quantized layer
+  - Parse scale, zero_point, axis attributes
+  - Map to Tenzor's QuantizedLinear/QuantizedConv2d
+- **Test:** Round-trip test: export quantized model -> import -> verify outputs match
+
+---
+
+## Phase 8: Build System Improvements (P3)
+
+### 8.1 OneAPI CMake Modernization
+- **File:** `src/backends/oneapi/CMakeLists.txt`
+- **Fix:**
+  - Replace manual `add_custom_command()` loops with `add_library(... OBJECT ...)`
+  - Use `target_compile_options()` for SYCL flags instead of manual command construction
+  - If icpx doesn't integrate with CMake's SYCL support, wrap in a function:
+    ```cmake
+    function(tenzor_add_sycl_library target)
+        add_library(${target} SHARED ${ARGN})
+        target_compile_options(${target} PRIVATE -fsycl ...)
+        target_link_options(${target} PRIVATE -fsycl ...)
+    endfunction()
+    ```
+  - Preserve functional equivalence with current build
+- **Test:** Full OneAPI backend build + test suite passes
+
+### 8.2 GPU Backend C++ Standard Documentation
+- **Files:** CUDA, ROCm, OneAPI CMakeLists.txt files
+- **Issue:** CUDA=C++20, ROCm=C++20, OneAPI=C++23 (inconsistent)
+- **Fix:**
+  - Document why CUDA/ROCm use C++20 (nvcc/hipcc don't fully support C++23)
+  - Add comments in each CMakeLists.txt explaining the constraint
+  - Verify OneAPI C++23 doesn't cause ABI issues with C++23 core library
+
+---
+
+## Phase 9: Code Hardening (P3)
+
+### 9.1 CUDA Async Allocation RAII Wrapper
+- **File:** `src/backends/cuda/kernels/matmul.cu:1397-1441`
+- **Issue:** Not a bug currently, but exception-unsafe pattern
+- **Fix:** Add simple RAII wrapper for CUDA async allocations:
+  ```cpp
+  struct CudaAsyncBuffer {
+      void* ptr = nullptr;
+      cudaStream_t stream;
+      CudaAsyncBuffer(size_t bytes, cudaStream_t s) : stream(s) {
+          TENZOR_CUDA_CHECK(cudaMallocAsync(&ptr, bytes, stream));
+      }
+      ~CudaAsyncBuffer() { if (ptr) cudaFreeAsync(ptr, stream); }
+      CudaAsyncBuffer(const CudaAsyncBuffer&) = delete;
+      CudaAsyncBuffer& operator=(const CudaAsyncBuffer&) = delete;
+  };
+  ```
+  - Apply to matmul.cu Tensor Core path and any similar patterns
+- **Test:** Existing matmul tests
+
+### 9.2 CUDA Reduction Error Checking Improvement
+- **File:** `src/backends/cuda/kernels/reduction.cu` (8 occurrences)
+- **Issue:** `cudaGetLastError()` without sync may miss async errors in release
+- **Fix:**
+  - Replace `#ifndef NDEBUG` pattern with:
+    ```cpp
+    cudaError_t err = cudaPeekAtLastError();  // Non-blocking check
+    if (err != cudaSuccess) {
+        cudaStreamSynchronize(stream);  // Only sync on error
+        throw std::runtime_error(...);
+    }
+    ```
+  - This catches launch failures without the cost of full synchronization
+- **Test:** Existing reduction tests
 
 ---
 
 ## Dependency Graph
 
 ```
-Phase 1 (Bug Fixes)     ─── no dependencies, start immediately
-Phase 2 (Core API)      ─── no dependencies, can parallelize with Phase 1
-Phase 3 (NN Layers)     ─── 3.3 SyncBatchNorm depends on distributed (Phase 8)
-Phase 4 (Missing Ops)   ─── 4.1 einsum depends on existing matmul/transpose
-Phase 5 (CPU Perf)      ─── no dependencies
-Phase 6 (ONNX)          ─── 6.1 depends on ops existing (Phases 3-4)
-Phase 7 (Sparse)        ─── no dependencies
-Phase 8 (Distributed)   ─── no dependencies
-Phase 9 (JIT)           ─── depends on fused op kernels (Phase 5)
-Phase 10 (Misc)         ─── no dependencies
+Phase 1 (Critical bugs)     -- no dependencies, start immediately
+Phase 2 (High-priority)     -- no dependencies, can parallel with Phase 1
+Phase 3 (Performance)       -- Phase 1.1 for OneAPI, otherwise independent
+Phase 4 (Higher-order grad) -- independent
+Phase 5 (SyncBatchNorm)     -- requires working distributed backend (already done)
+Phase 6 (Sparse NN)         -- requires working sparse ops (already done)
+Phase 7 (Quantization)      -- Phase 7.2 (ONNX QDQ) independent; layers independent
+Phase 8 (Build system)      -- independent, low risk
+Phase 9 (Hardening)         -- independent, low risk
 ```
-
-## Recommended Execution Order
-
-1. **Phase 1** — Bug fixes first (small scope, high impact)
-2. **Phase 2** — Core API improvements (enables cleaner code in later phases)
-3. **Phases 3 + 4 + 5 in parallel** — Independent workstreams (NN layers, ops, CPU perf)
-4. **Phase 6** — ONNX after new ops exist
-5. **Phases 7 + 8 in parallel** — Sparse and distributed (independent)
-6. **Phase 9** — JIT after fused kernels exist
-7. **Phase 10** — Polish items last
 
 ## Estimated Scope
 
-| Phase | Files Modified | Files Created | Approx LOC |
-|-------|---------------|---------------|------------|
-| 1     | 4             | 0             | ~200       |
-| 2     | 5             | 0             | ~300       |
-| 3     | 4             | 2             | ~800       |
-| 4     | 8             | 4             | ~2,500     |
-| 5     | 3             | 1             | ~600       |
-| 6     | 2             | 0             | ~1,500     |
-| 7     | 3             | 0             | ~600       |
-| 8     | 2             | 2             | ~500       |
-| 9     | 1             | 0             | ~800       |
-| 10    | 3             | 0             | ~200       |
-| **Total** | **~35**   | **~9**        | **~8,000** |
+| Phase | Items | Size | Risk |
+|-------|-------|------|------|
+| 1 | 3 critical fixes | Small | Low - well-understood bugs |
+| 2 | 4 high-priority fixes | Small-Medium | Low |
+| 3 | 2 perf improvements | Medium | Medium - new GPU kernels |
+| 4 | ~20 backward ops | Medium-Large | Medium - correctness critical |
+| 5 | SyncBatchNorm | Medium | Medium - distributed coordination |
+| 6 | 2 sparse layers | Small-Medium | Low |
+| 7 | 5 quant layers + ONNX QDQ | Medium-Large | Medium |
+| 8 | 2 build fixes | Small | Low |
+| 9 | 2 hardening items | Small | Low |
+
+---
+
+## Items Verified as NOT Needing Fixes
+
+The following items from the review were verified and require no action:
+
+- CUDA thread-local cudaMalloc (math.cu:128) - intentional per-thread persistence
+- CUDA Float16 matmul allocation pattern - functional, just not RAII-wrapped (Phase 9.1 adds wrapper as improvement)
+- CUDA reduction sync pattern - intentional async checking in release (Phase 9.2 improves it)
+- int32_t->int cast in indexing.cu - already documented as the fix in MEMORY.md
+- OMP threshold static init - C++11 guarantees thread-safe function-local static
+- BFloat16 shuffle packing - correct AVX2 implementation verified
+- Vulkan fill buffer truncation - already fixed with proper clamping
+- Packed sequences - fully implemented (pack_padded_sequence, pad_packed_sequence)
+- JIT compilation pipeline - fully implemented (tracing, optimization, execution)
+- Distributed/NCCL - fully implemented (all_reduce, DDP, gradient compression)
+- Sparse tensor core ops - fully implemented (COO, CSR, CSC, BSR formats)

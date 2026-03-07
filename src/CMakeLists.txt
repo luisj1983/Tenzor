@@ -60,6 +60,8 @@ set(TENZOR_CORE_SOURCES
     nn/layers/normalization.cpp
     nn/layers/flatten.cpp
     nn/layers/embedding.cpp
+    nn/layers/sparse_linear.cpp
+    nn/layers/sparse_embedding.cpp
     nn/layers/attention.cpp
     nn/layers/gqa_attention.cpp
     nn/layers/transformer.cpp

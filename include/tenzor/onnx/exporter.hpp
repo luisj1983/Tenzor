@@ -23,6 +23,10 @@
 #include "types.hpp"
 
 namespace tenzor {
+
+// Forward declarations for quantization types
+namespace nn::quantization { class QuantizedLinear; }
+
 namespace onnx {
 
 // Forward declarations
@@ -685,6 +689,52 @@ public:
     auto export_adaptive_avgpool2d(const Tensor& input,
                                    const std::vector<int64_t>& output_size,
                                    const Tensor& output, const std::string& output_name) -> void;
+
+    // ============================================================================
+    // Quantization (QDQ) Nodes
+    // ============================================================================
+
+    /**
+     * @brief Export QuantizeLinear node (ONNX opset 10+).
+     *
+     * Produces: y = clamp(round(x / y_scale) + y_zero_point)
+     *
+     * @param input       Input floating-point tensor
+     * @param scale       Quantization scale (scalar or per-channel)
+     * @param zero_point  Quantization zero point (scalar or per-channel)
+     * @param output_name Name for the quantized output
+     * @param axis        Channel axis for per-channel quantization (-1 = per-tensor)
+     */
+    auto export_quantize_linear(const Tensor& input, const Tensor& scale,
+                                 const Tensor& zero_point,
+                                 const std::string& output_name,
+                                 int64_t axis = -1) -> void;
+
+    /**
+     * @brief Export DequantizeLinear node (ONNX opset 10+).
+     *
+     * Produces: y = (x - x_zero_point) * x_scale
+     *
+     * @param input       Quantized input tensor (INT8/UINT8)
+     * @param scale       Dequantization scale
+     * @param zero_point  Dequantization zero point
+     * @param output_name Name for the dequantized output
+     * @param axis        Channel axis for per-channel dequantization (-1 = per-tensor)
+     */
+    auto export_dequantize_linear(const Tensor& input, const Tensor& scale,
+                                   const Tensor& zero_point,
+                                   const std::string& output_name,
+                                   int64_t axis = -1) -> void;
+
+    /**
+     * @brief Export a QuantizedLinear layer as QDQ pattern.
+     *
+     * Emits: DequantizeLinear(weight) → Gemm → QuantizeLinear(output)
+     * This is the standard QDQ representation for quantized linear layers.
+     */
+    auto export_quantized_linear(const nn::quantization::QuantizedLinear& layer,
+                                  const Tensor& input,
+                                  const std::string& output_name) -> void;
 
     // ============================================================================
     // JIT-based Module Export

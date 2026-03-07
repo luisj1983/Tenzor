@@ -78,5 +78,51 @@ inline int compute_grid_size(int64_t num_elements, int block_size = 256) {
     return std::max(1, std::min(num_blocks, 2147483647));  // CUDA x-dim max: 2^31-1
 }
 
+/**
+ * @brief RAII wrapper for cudaMallocAsync/cudaFreeAsync allocations.
+ *
+ * Ensures async allocations are freed even when exceptions occur between
+ * allocation and deallocation. Non-copyable, move-only.
+ */
+struct CudaAsyncBuffer {
+    void* ptr = nullptr;
+    cudaStream_t stream = nullptr;
+
+    CudaAsyncBuffer() = default;
+
+    CudaAsyncBuffer(size_t bytes, cudaStream_t s) : stream(s) {
+        auto err = cudaMallocAsync(&ptr, bytes, stream);
+        if (err != cudaSuccess) {
+            throw std::runtime_error(
+                std::string("cudaMallocAsync failed: ") + cudaGetErrorString(err));
+        }
+    }
+
+    ~CudaAsyncBuffer() {
+        if (ptr) cudaFreeAsync(ptr, stream);
+    }
+
+    CudaAsyncBuffer(const CudaAsyncBuffer&) = delete;
+    CudaAsyncBuffer& operator=(const CudaAsyncBuffer&) = delete;
+
+    CudaAsyncBuffer(CudaAsyncBuffer&& other) noexcept
+        : ptr(other.ptr), stream(other.stream) {
+        other.ptr = nullptr;
+    }
+
+    CudaAsyncBuffer& operator=(CudaAsyncBuffer&& other) noexcept {
+        if (this != &other) {
+            if (ptr) cudaFreeAsync(ptr, stream);
+            ptr = other.ptr;
+            stream = other.stream;
+            other.ptr = nullptr;
+        }
+        return *this;
+    }
+
+    template<typename T>
+    T* as() { return static_cast<T*>(ptr); }
+};
+
 } // namespace cuda
 } // namespace tenzor

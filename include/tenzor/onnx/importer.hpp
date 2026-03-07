@@ -164,6 +164,10 @@ private:
     auto convert_avgpool(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
     auto convert_global_avgpool(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
 
+    // Quantization (QDQ)
+    auto convert_quantize_linear(const ONNXImportNode& node) -> void;
+    auto convert_dequantize_linear(const ONNXImportNode& node) -> void;
+
     // Helper functions
     auto get_input(const std::string& name) -> Tensor;
     auto register_output(const std::string& name, const Tensor& tensor) -> void;

@@ -280,6 +280,7 @@ namespace cpu {
     // Embedding
     auto embedding_kernel(const Tensor& weight, const Tensor& indices) -> Tensor;
     auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices, int64_t num_embeddings) -> Tensor;
+    auto embedding_bag_forward_kernel(std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor;
 
     // Linear
     auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias) -> Tensor;
@@ -1116,6 +1117,11 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         int64_t num_embeddings = attrs.get_int(AttrKey::NumEmbeddings, 0);
         return std::vector<Tensor>{cpu::embedding_backward_kernel(inputs[0], inputs[1], num_embeddings)};
     });
+
+    table.register_single_output_kernel(OpId::EmbeddingBagForward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            return cpu::embedding_bag_forward_kernel(inputs, attrs);
+        });
 
     // =========================================================================
     // Dropout Operations

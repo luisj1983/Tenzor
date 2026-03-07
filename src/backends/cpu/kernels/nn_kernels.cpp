@@ -935,6 +935,119 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
     return grad_weight;
 }
 
+// EmbeddingBag forward aggregation kernel
+// inputs[0] = embedded tensor [total_elements, embedding_dim]
+// inputs[1] = offsets tensor [num_bags] (int64_t)
+// attrs: Mode ("sum"/"mean"/"max"), EmbeddingDim, IncludeLastOffset
+auto embedding_bag_forward_kernel(std::span<const Tensor> inputs,
+                                   const OpAttributes& attrs) -> Tensor {
+    const auto& embeddings = inputs[0];
+    const auto& offsets = inputs[1];
+
+    int64_t embedding_dim = attrs.get_int(AttrKey::EmbeddingDim, 0);
+    std::string mode{attrs.get_string(AttrKey::Mode, "sum")};
+    bool include_last_offset = attrs.get_bool(AttrKey::IncludeLastOffset, false);
+
+    int64_t total_elements = embeddings.shape()[0];
+    int64_t num_bags = offsets.numel();
+    const int64_t* offsets_ptr = offsets.data<int64_t>();
+
+    // If include_last_offset, last element of offsets is the end sentinel
+    if (include_last_offset && num_bags > 0) {
+        num_bags -= 1;
+    }
+
+    auto output = zeros({num_bags, embedding_dim}, embeddings.dtype(), embeddings.device());
+
+    if (embeddings.dtype() == DType::Float32) {
+        const float* emb_ptr = embeddings.data<float>();
+        float* out_ptr = output.data<float>();
+
+        #pragma omp parallel for if(num_bags > 16)
+        for (int64_t bag = 0; bag < num_bags; ++bag) {
+            int64_t start = offsets_ptr[bag];
+            int64_t end;
+            if (bag + 1 < offsets.numel()) {
+                end = offsets_ptr[bag + 1];
+            } else {
+                end = total_elements;
+            }
+            int64_t bag_size = end - start;
+            if (bag_size <= 0) continue;
+
+            float* bag_out = out_ptr + bag * embedding_dim;
+
+            if (mode == "sum" || mode == "mean") {
+                for (int64_t i = start; i < end; ++i) {
+                    const float* row = emb_ptr + i * embedding_dim;
+                    for (int64_t j = 0; j < embedding_dim; ++j) {
+                        bag_out[j] += row[j];
+                    }
+                }
+                if (mode == "mean") {
+                    for (int64_t j = 0; j < embedding_dim; ++j) {
+                        bag_out[j] /= bag_size;
+                    }
+                }
+            } else { // max
+                const float* first = emb_ptr + start * embedding_dim;
+                for (int64_t j = 0; j < embedding_dim; ++j) {
+                    bag_out[j] = first[j];
+                }
+                for (int64_t i = start + 1; i < end; ++i) {
+                    const float* row = emb_ptr + i * embedding_dim;
+                    for (int64_t j = 0; j < embedding_dim; ++j) {
+                        if (row[j] > bag_out[j]) bag_out[j] = row[j];
+                    }
+                }
+            }
+        }
+    } else if (embeddings.dtype() == DType::Float64) {
+        const double* emb_ptr = embeddings.data<double>();
+        double* out_ptr = output.data<double>();
+
+        #pragma omp parallel for if(num_bags > 16)
+        for (int64_t bag = 0; bag < num_bags; ++bag) {
+            int64_t start = offsets_ptr[bag];
+            int64_t end = (bag + 1 < offsets.numel()) ? offsets_ptr[bag + 1] : total_elements;
+            int64_t bag_size = end - start;
+            if (bag_size <= 0) continue;
+
+            double* bag_out = out_ptr + bag * embedding_dim;
+            if (mode == "sum" || mode == "mean") {
+                for (int64_t i = start; i < end; ++i) {
+                    const double* row = emb_ptr + i * embedding_dim;
+                    for (int64_t j = 0; j < embedding_dim; ++j) {
+                        bag_out[j] += row[j];
+                    }
+                }
+                if (mode == "mean") {
+                    for (int64_t j = 0; j < embedding_dim; ++j) {
+                        bag_out[j] /= bag_size;
+                    }
+                }
+            } else {
+                const double* first = emb_ptr + start * embedding_dim;
+                for (int64_t j = 0; j < embedding_dim; ++j) bag_out[j] = first[j];
+                for (int64_t i = start + 1; i < end; ++i) {
+                    const double* row = emb_ptr + i * embedding_dim;
+                    for (int64_t j = 0; j < embedding_dim; ++j) {
+                        if (row[j] > bag_out[j]) bag_out[j] = row[j];
+                    }
+                }
+            }
+        }
+    } else {
+        // Float16/BFloat16: upcast to Float32, compute, downcast
+        auto emb_f32 = embeddings.to(DType::Float32);
+        std::array<Tensor, 2> f32_inputs = {emb_f32, offsets};
+        auto result = embedding_bag_forward_kernel(f32_inputs, attrs);
+        return result.to(embeddings.dtype());
+    }
+
+    return output;
+}
+
 #ifdef TENZOR_USE_ONEDNN
 // oneDNN-accelerated LayerNorm with primitive caching - provides 10-50x speedup
 static bool layer_norm_onednn(

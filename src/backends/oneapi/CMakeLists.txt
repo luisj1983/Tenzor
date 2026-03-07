@@ -1,5 +1,11 @@
 # OneAPI Backend - Intel CPU/GPU via SYCL
 # Uses icpx from Intel oneAPI Base Toolkit
+#
+# Note: We use add_custom_command() instead of add_library() because CMake
+# does not natively support icpx's -fsycl compilation mode. The icpx compiler
+# requires -fsycl flags at both compile and link time, and CMake's CXX compiler
+# detection doesn't handle SYCL target triples. Using custom commands gives us
+# full control over the compilation pipeline.
 
 # Find Intel icpx compiler
 find_program(ICPX_COMPILER NAMES icpx)
@@ -50,7 +56,62 @@ if(MKL_FOUND)
     endif()
 endif()
 
+# =========================================================================
+# Common SYCL compile/link flags
+# =========================================================================
+# icpx supports C++23 — using it for std::expected, std::ranges, and other C++23 features
+set(SYCL_COMMON_FLAGS
+    -std=c++23 -fPIC
+    -fsycl -fsycl-targets=${SYCL_TARGET_ARCH}
+    -O3 -DNDEBUG
+    -I${CMAKE_SOURCE_DIR}/include
+)
+
+set(ONEMKL_COMPILE_FLAGS "")
+if(ONEMKL_SYCL_FOUND)
+    list(APPEND ONEMKL_COMPILE_FLAGS -DTENZOR_HAS_ONEMKL -I${ONEMKL_SYCL_INCLUDE_DIR})
+endif()
+
+# =========================================================================
+# Function to compile a SYCL source file to an object file
+# =========================================================================
+function(tenzor_compile_sycl SOURCE_FILE OBJ_VAR)
+    cmake_parse_arguments(ARG "" "" "EXTRA_FLAGS" ${ARGN})
+
+    get_filename_component(OBJ_NAME ${SOURCE_FILE} NAME_WE)
+    # Disambiguate backend glue vs kernel objects
+    if(ARG_EXTRA_FLAGS)
+        set(OBJ_FILE "${CMAKE_CURRENT_BINARY_DIR}/${OBJ_NAME}_backend.o")
+    else()
+        set(OBJ_FILE "${CMAKE_CURRENT_BINARY_DIR}/${OBJ_NAME}.o")
+    endif()
+
+    # Resolve source path (may be relative or absolute)
+    if(IS_ABSOLUTE ${SOURCE_FILE})
+        set(SRC_FULL ${SOURCE_FILE})
+    else()
+        set(SRC_FULL ${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_FILE})
+    endif()
+
+    add_custom_command(
+        OUTPUT ${OBJ_FILE}
+        COMMAND ${SYCL_COMPILER}
+            -c ${SRC_FULL}
+            -o ${OBJ_FILE}
+            ${SYCL_COMMON_FLAGS}
+            ${ONEMKL_COMPILE_FLAGS}
+            ${ARG_EXTRA_FLAGS}
+        DEPENDS ${SRC_FULL}
+        COMMENT "Compiling SYCL: ${SOURCE_FILE}"
+        VERBATIM
+    )
+
+    set(${OBJ_VAR} ${OBJ_FILE} PARENT_SCOPE)
+endfunction()
+
+# =========================================================================
 # SYCL kernel sources
+# =========================================================================
 set(ONEAPI_SYCL_SOURCES
     kernels/math.cpp
     kernels/activations.cpp
@@ -74,38 +135,16 @@ set(ONEAPI_SYCL_SOURCES
     kernels/utilities.cpp
 )
 
-# Prepare compile flags
-set(ONEMKL_COMPILE_FLAGS "")
-if(ONEMKL_SYCL_FOUND)
-    set(ONEMKL_COMPILE_FLAGS "-DTENZOR_HAS_ONEMKL" "-I${ONEMKL_SYCL_INCLUDE_DIR}")
-endif()
-
-# Collect all object files
 set(ALL_OBJECTS "")
 
-# Build SYCL kernel sources
 foreach(SRC ${ONEAPI_SYCL_SOURCES})
-    get_filename_component(OBJ_NAME ${SRC} NAME_WE)
-    set(OBJ_FILE "${CMAKE_CURRENT_BINARY_DIR}/${OBJ_NAME}.o")
+    tenzor_compile_sycl(${SRC} OBJ_FILE)
     list(APPEND ALL_OBJECTS ${OBJ_FILE})
-
-    add_custom_command(
-        OUTPUT ${OBJ_FILE}
-        COMMAND ${SYCL_COMPILER}
-            -c ${CMAKE_CURRENT_SOURCE_DIR}/${SRC}
-            -o ${OBJ_FILE}
-            -std=c++23 -fPIC
-            -fsycl -fsycl-targets=${SYCL_TARGET_ARCH}
-            -O3 -DNDEBUG
-            -I${CMAKE_SOURCE_DIR}/include
-            ${ONEMKL_COMPILE_FLAGS}
-        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${SRC}
-        COMMENT "Compiling SYCL kernel: ${SRC}"
-        VERBATIM
-    )
 endforeach()
 
-# Build backend glue sources
+# =========================================================================
+# Backend glue sources (need TENZOR_ONEAPI_BACKEND define)
+# =========================================================================
 set(BACKEND_GLUE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/oneapi_backend.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/oneapi_kernel_registry.cpp
@@ -113,40 +152,26 @@ set(BACKEND_GLUE_SOURCES
 )
 
 foreach(SRC ${BACKEND_GLUE_SOURCES})
-    get_filename_component(OBJ_NAME ${SRC} NAME_WE)
-    set(OBJ_FILE "${CMAKE_CURRENT_BINARY_DIR}/${OBJ_NAME}_backend.o")
+    tenzor_compile_sycl(${SRC} OBJ_FILE EXTRA_FLAGS -DTENZOR_ONEAPI_BACKEND)
     list(APPEND ALL_OBJECTS ${OBJ_FILE})
-
-    add_custom_command(
-        OUTPUT ${OBJ_FILE}
-        COMMAND ${SYCL_COMPILER}
-            -c ${SRC}
-            -o ${OBJ_FILE}
-            -std=c++23 -fPIC
-            -fsycl -fsycl-targets=${SYCL_TARGET_ARCH}
-            -O3 -DNDEBUG
-            -DTENZOR_ONEAPI_BACKEND
-            -I${CMAKE_SOURCE_DIR}/include
-            ${ONEMKL_COMPILE_FLAGS}
-        DEPENDS ${SRC}
-        COMMENT "Compiling backend source: ${OBJ_NAME}"
-        VERBATIM
-    )
 endforeach()
 
-# Prepare link flags
+# =========================================================================
+# Link into shared library
+# =========================================================================
 set(ONEMKL_LINK_FLAGS "")
 if(ONEMKL_SYCL_FOUND)
     get_filename_component(ONEMKL_LIB_DIR "${ONEMKL_SYCL_INCLUDE_DIR}/../lib" ABSOLUTE)
     # Use GNU threading layer instead of Intel threading to avoid cleanup symbol issues
     # Link order: mkl_sycl -> mkl_intel_ilp64 -> mkl_gnu_thread -> mkl_core -> gomp
-    set(ONEMKL_LINK_FLAGS "-L${ONEMKL_LIB_DIR}" "-Wl,-rpath,${ONEMKL_LIB_DIR}" "-Wl,--no-as-needed" "-lmkl_sycl" "-lmkl_intel_ilp64" "-lmkl_gnu_thread" "-lmkl_core" "-lgomp" "-Wl,--as-needed")
+    set(ONEMKL_LINK_FLAGS
+        -L${ONEMKL_LIB_DIR} -Wl,-rpath,${ONEMKL_LIB_DIR}
+        -Wl,--no-as-needed -lmkl_sycl -lmkl_intel_ilp64 -lmkl_gnu_thread -lmkl_core -lgomp -Wl,--as-needed
+    )
 endif()
 
-# SYCL library linking
-set(SYCL_LINK_FLAGS "-L${SYCL_LIBRARY_DIR}" "-lsycl" "-Wl,-rpath,${SYCL_LIBRARY_DIR}")
+set(SYCL_LINK_FLAGS -L${SYCL_LIBRARY_DIR} -lsycl -Wl,-rpath,${SYCL_LIBRARY_DIR})
 
-# Create shared library
 set(ONEAPI_SO_OUTPUT "${CMAKE_BINARY_DIR}/bin/tenzor_backend_oneapi.so")
 add_custom_command(
     OUTPUT ${ONEAPI_SO_OUTPUT}
@@ -173,7 +198,7 @@ add_custom_target(tenzor_backend_oneapi_build ALL
 # Ensure core library is built first
 add_dependencies(tenzor_backend_oneapi_build tenzor_core)
 
-# Create an imported library target
+# Create an imported library target for downstream use
 add_library(tenzor_backend_oneapi SHARED IMPORTED GLOBAL)
 set_target_properties(tenzor_backend_oneapi PROPERTIES
     IMPORTED_LOCATION ${ONEAPI_SO_OUTPUT}

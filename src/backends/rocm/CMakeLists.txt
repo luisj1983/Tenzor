@@ -64,6 +64,7 @@ add_library(tenzor_rocm_kernels STATIC ${ROCM_HIP_SOURCES})
 # Note: HIP_SEPARABLE_COMPILATION OFF to avoid RDC linking issues
 set_target_properties(tenzor_rocm_kernels PROPERTIES
     HIP_SEPARABLE_COMPILATION OFF
+    # hipcc does not fully support C++23 — C++20 is the highest supported standard
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED ON
     POSITION_INDEPENDENT_CODE ON

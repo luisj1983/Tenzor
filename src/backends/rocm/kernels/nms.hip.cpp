@@ -94,6 +94,25 @@ __global__ void nms_kernel(const float* boxes, const int64_t* sorted_indices,
     }
 }
 
+// RAII wrapper for HIP device memory
+struct HipDevicePtr {
+    void* ptr = nullptr;
+    HipDevicePtr() = default;
+    ~HipDevicePtr() { if (ptr) hipFree(ptr); }
+    HipDevicePtr(const HipDevicePtr&) = delete;
+    HipDevicePtr& operator=(const HipDevicePtr&) = delete;
+};
+
+#define NMS_HIP_CHECK(call) \
+    do { \
+        hipError_t err = (call); \
+        if (err != hipSuccess) { \
+            throw std::runtime_error( \
+                std::string("HIP NMS error at ") + __FILE__ + ":" + \
+                std::to_string(__LINE__) + ": " + hipGetErrorString(err)); \
+        } \
+    } while(0)
+
 // Host function to perform NMS on GPU
 extern "C" void nms_hip(const float* boxes, const float* scores,
                          int64_t num_boxes, float iou_threshold,
@@ -108,8 +127,8 @@ extern "C" void nms_hip(const float* boxes, const float* scores,
     std::vector<float> scores_cpu(num_boxes);
 
     // Copy scores to host
-    hipMemcpy(scores_cpu.data(), scores, num_boxes * sizeof(float),
-               hipMemcpyDeviceToHost);
+    NMS_HIP_CHECK(hipMemcpy(scores_cpu.data(), scores, num_boxes * sizeof(float),
+                             hipMemcpyDeviceToHost));
 
     // Sort indices
     for (int64_t i = 0; i < num_boxes; ++i) {
@@ -120,28 +139,31 @@ extern "C" void nms_hip(const float* boxes, const float* scores,
                   return scores_cpu[i] > scores_cpu[j];
               });
 
-    // Allocate device memory for sorted indices
-    int64_t* d_sorted_indices;
-    hipMalloc(&d_sorted_indices, num_boxes * sizeof(int64_t));
-    hipMemcpy(d_sorted_indices, sorted_indices.data(),
-               num_boxes * sizeof(int64_t), hipMemcpyHostToDevice);
+    // Allocate device memory with RAII guards
+    HipDevicePtr d_sorted_guard;
+    NMS_HIP_CHECK(hipMalloc(&d_sorted_guard.ptr, num_boxes * sizeof(int64_t)));
+    auto* d_sorted_indices = static_cast<int64_t*>(d_sorted_guard.ptr);
+    NMS_HIP_CHECK(hipMemcpy(d_sorted_indices, sorted_indices.data(),
+                             num_boxes * sizeof(int64_t), hipMemcpyHostToDevice));
 
-    // Allocate suppression mask
+    // Allocate suppression mask with RAII guard
     const int64_t num_chunks = (num_boxes + 63) / 64;
-    uint64_t* d_suppression_mask;
-    hipMalloc(&d_suppression_mask, num_boxes * num_chunks * sizeof(uint64_t));
-    hipMemset(d_suppression_mask, 0, num_boxes * num_chunks * sizeof(uint64_t));
+    HipDevicePtr d_mask_guard;
+    NMS_HIP_CHECK(hipMalloc(&d_mask_guard.ptr, num_boxes * num_chunks * sizeof(uint64_t)));
+    auto* d_suppression_mask = static_cast<uint64_t*>(d_mask_guard.ptr);
+    NMS_HIP_CHECK(hipMemset(d_suppression_mask, 0, num_boxes * num_chunks * sizeof(uint64_t)));
 
     // Launch NMS kernel
     const int threads_per_block = 256;
     hipLaunchKernelGGL(nms_kernel, dim3(num_boxes), dim3(threads_per_block), 0, 0,
                       boxes, d_sorted_indices, d_suppression_mask, num_boxes, iou_threshold);
+    NMS_HIP_CHECK(hipGetLastError());
 
     // Copy suppression mask to host
     std::vector<uint64_t> suppression_mask(num_boxes * num_chunks);
-    hipMemcpy(suppression_mask.data(), d_suppression_mask,
-               num_boxes * num_chunks * sizeof(uint64_t),
-               hipMemcpyDeviceToHost);
+    NMS_HIP_CHECK(hipMemcpy(suppression_mask.data(), d_suppression_mask,
+                             num_boxes * num_chunks * sizeof(uint64_t),
+                             hipMemcpyDeviceToHost));
 
     // Process suppression mask to get keep indices
     std::vector<bool> suppressed(num_boxes, false);
@@ -172,12 +194,12 @@ extern "C" void nms_hip(const float* boxes, const float* scores,
 
     // Copy results
     *num_keep = static_cast<int64_t>(keep.size());
-    hipMemcpy(keep_indices, keep.data(), keep.size() * sizeof(int64_t),
-               hipMemcpyHostToDevice);
+    if (!keep.empty()) {
+        NMS_HIP_CHECK(hipMemcpy(keep_indices, keep.data(), keep.size() * sizeof(int64_t),
+                                 hipMemcpyHostToDevice));
+    }
 
-    // Cleanup
-    hipFree(d_sorted_indices);
-    hipFree(d_suppression_mask);
+    // RAII guards handle cleanup automatically
 }
 
 } // namespace rocm
