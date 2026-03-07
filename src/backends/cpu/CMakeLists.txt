@@ -76,6 +76,8 @@ target_link_libraries(tenzor_backend_cpu PRIVATE
 if(OpenMP_CXX_FOUND)
     target_link_libraries(tenzor_backend_cpu PRIVATE OpenMP::OpenMP_CXX)
     message(STATUS "CPU Backend: OpenMP enabled")
+else()
+    message(WARNING "CPU Backend: OpenMP not found — parallel operations will use a single thread")
 endif()
 
 # Platform-specific optimizations
@@ -122,7 +124,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
             kernels/activations_simd_avx512.cpp
             kernels/batchnorm_avx512.cpp
             kernels/pooling_avx512.cpp
-            PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx2;-mfma;-mf16c"
+            PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512bw;-mavx512dq;-mavx2;-mfma;-mf16c"
         )
 
         # F16C and FMA are available in portable mode via per-function attributes

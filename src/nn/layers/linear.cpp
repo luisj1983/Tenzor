@@ -163,12 +163,9 @@ auto Linear::forward_impl(const Variable& input) -> Variable {
         // Use fused linear kernel if available (CPU with MKL, CUDA with cuBLAS)
         // Falls back to matmul + add for other backends
         if (has_fused_linear_kernel(weight.tensor().device())) {
-            // Create zero bias if needed for fused kernel
-            Variable zero_bias_var;
             if (!bias_ptr) {
-                auto zero_bias = zeros({out_features_}, compute_dtype, input_device.tensor().device());
-                zero_bias_var = Variable(zero_bias, false);
-                return autograd::linear(input_device, weight_matched, zero_bias_var);
+                // No bias: use matmul path to avoid unnecessary zero tensor allocation
+                return linear_via_matmul(input_device, weight_matched, nullptr);
             } else {
                 return autograd::linear(input_device, weight_matched, *bias_ptr);
             }
@@ -215,16 +212,9 @@ auto Linear::forward_impl(const Variable& input) -> Variable {
 
     // Compute linear operation
     Variable output_2d;
-    if (has_fused_linear_kernel(weight.tensor().device())) {
-        // Use fused linear kernel (CPU with MKL, CUDA with cuBLAS)
-        Variable zero_bias_var;
-        if (!bias_ptr) {
-            auto zero_bias = zeros({out_features_}, compute_dtype, input_2d_device.tensor().device());
-            zero_bias_var = Variable(zero_bias, false);
-            output_2d = autograd::linear(input_2d_device, weight_matched, zero_bias_var);
-        } else {
-            output_2d = autograd::linear(input_2d_device, weight_matched, *bias_ptr);
-        }
+    if (has_fused_linear_kernel(weight.tensor().device()) && bias_ptr) {
+        // Use fused linear kernel (CPU with MKL, CUDA with cuBLAS) — only when bias present
+        output_2d = autograd::linear(input_2d_device, weight_matched, *bias_ptr);
     } else {
         // Fallback: use matmul + add for other backends
         output_2d = linear_via_matmul(input_2d_device, weight_matched, bias_ptr);

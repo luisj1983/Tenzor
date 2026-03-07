@@ -14,6 +14,7 @@
  */
 
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 #include <stdexcept>
 #include <string>
 
@@ -114,6 +115,17 @@ static_assert(sizeof(int) == sizeof(int32_t),
          i < (n);                                                              \
          i += blockDim.x * gridDim.x)
 #endif
+
+/**
+ * @brief Saturating float-to-half conversion.
+ * Clamps input to the valid FP16 range [-65504, 65504] before conversion,
+ * preventing inf on overflow.
+ */
+__device__ __forceinline__ __half float2half_sat(float x) {
+    constexpr float kHalfMax = 65504.0f;
+    x = fminf(fmaxf(x, -kHalfMax), kHalfMax);
+    return __float2half(x);
+}
 
 } // namespace cuda
 } // namespace tenzor

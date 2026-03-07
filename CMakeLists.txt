@@ -333,6 +333,23 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/tenzor.pc"
     DESTINATION lib/pkgconfig
 )
 
+# Python module installation
+if(TENZOR_BUILD_PYTHON AND TARGET tenzor_python)
+    # Install the compiled extension module
+    install(TARGETS tenzor_python
+        LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/python/tenzor
+        COMPONENT python
+    )
+    # Install Python source files
+    install(DIRECTORY python/tenzor/
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/python/tenzor
+        COMPONENT python
+        FILES_MATCHING
+            PATTERN "*.py"
+            PATTERN "*.pyi"
+    )
+endif()
+
 # Print configuration summary
 message(STATUS "")
 message(STATUS "Tenzor Configuration Summary")

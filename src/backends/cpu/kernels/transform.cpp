@@ -43,6 +43,39 @@ auto fill_kernel(const Tensor& input, float value) -> Tensor {
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = static_cast<int64_t>(value);
         }
+    } else if (input.dtype() == DType::Float16) {
+        auto* data = result.data<Float16>();
+        Float16 val(value);
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = val;
+        }
+    } else if (input.dtype() == DType::BFloat16) {
+        auto* data = result.data<BFloat16>();
+        BFloat16 val(value);
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = val;
+        }
+    } else if (input.dtype() == DType::Int8) {
+        auto* data = result.data<int8_t>();
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = static_cast<int8_t>(value);
+        }
+    } else if (input.dtype() == DType::Int16) {
+        auto* data = result.data<int16_t>();
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = static_cast<int16_t>(value);
+        }
+    } else if (input.dtype() == DType::UInt8) {
+        auto* data = result.data<uint8_t>();
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = static_cast<uint8_t>(value);
+        }
+    } else if (input.dtype() == DType::Bool) {
+        auto* data = result.data<bool>();
+        bool val = (value != 0.0f);
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = val;
+        }
     }
 
     return result;
@@ -80,6 +113,14 @@ auto reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape) 
 }
 
 auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1) -> Tensor {
+    const int64_t ndim = input.ndim();
+    if (dim0 < 0) dim0 += ndim;
+    if (dim1 < 0) dim1 += ndim;
+    if (dim0 < 0 || dim0 >= ndim || dim1 < 0 || dim1 >= ndim) {
+        throw std::out_of_range("transpose: dimension out of range (got " +
+            std::to_string(dim0) + " and " + std::to_string(dim1) +
+            " for tensor with " + std::to_string(ndim) + " dimensions)");
+    }
     // Transpose just swaps dimensions in metadata
     Tensor result;
     TensorAccessor::get_impl_mutable(result) = std::make_shared<TensorImpl>(*TensorAccessor::get_impl(input));

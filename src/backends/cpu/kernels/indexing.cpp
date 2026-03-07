@@ -74,6 +74,21 @@ void gather_impl(const T* input_ptr, T* output_ptr,
                  const std::vector<int64_t>& input_strides,
                  const std::vector<int64_t>& index_strides,
                  size_t ndims, int64_t dim) {
+    // Validate gather-dim indices sequentially (throwing from inside OMP parallel is UB)
+    {
+        const int64_t dim_size = input_shape[dim];
+        for (int64_t i = 0; i < numel; ++i) {
+            int64_t idx_val = index_ptr[i];
+            if (idx_val < 0) idx_val += dim_size;
+            if (idx_val < 0 || idx_val >= dim_size) {
+                throw std::out_of_range("gather: index " + std::to_string(index_ptr[i]) +
+                    " out of range for dimension " + std::to_string(dim) +
+                    " with size " + std::to_string(dim_size));
+            }
+        }
+    }
+
+    // Gather in parallel (indices already validated)
     #pragma omp parallel for if(numel > 65536)
     for (int64_t flat_idx = 0; flat_idx < numel; ++flat_idx) {
         int64_t temp = flat_idx;
@@ -84,11 +99,6 @@ void gather_impl(const T* input_ptr, T* output_ptr,
             if (static_cast<int64_t>(d) == dim) {
                 int64_t idx_val = index_ptr[flat_idx];
                 if (idx_val < 0) idx_val += input_shape[d];
-                if (idx_val < 0 || idx_val >= input_shape[d]) {
-                    throw std::out_of_range("gather: index " + std::to_string(index_ptr[flat_idx]) +
-                        " out of range for dimension " + std::to_string(d) +
-                        " with size " + std::to_string(input_shape[d]));
-                }
                 input_idx += idx_val * input_strides[d];
             } else {
                 input_idx += coord * input_strides[d];

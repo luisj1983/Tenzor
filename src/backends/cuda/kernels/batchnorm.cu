@@ -10,6 +10,7 @@
 #include <vector>
 #include "../cuda_error.hpp"
 #include "cuda_launch_utils.cuh"
+#include "cuda_common.cuh"
 
 namespace tenzor {
 namespace cuda {
@@ -19,13 +20,6 @@ namespace cuda {
     for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; \
          i < (n); \
          i += blockDim.x * gridDim.x)
-
-// FP16 saturating conversion
-__device__ __forceinline__ __half __float2half_sat(float x) {
-    constexpr float kHalfMax = 65504.0f;
-    x = fminf(fmaxf(x, -kHalfMax), kHalfMax);
-    return __float2half(x);
-}
 
 // Optimal block size
 constexpr int BLOCK_SIZE = 256;
@@ -207,7 +201,7 @@ __global__ void batchnorm_normalize_fp16_kernel(const __half* input,
         float invstd = rsqrtf(channel_var + epsilon);
 
         float result = (__half2float(input[idx]) - channel_mean) * invstd;
-        output[idx] = __float2half_sat(result);
+        output[idx] = float2half_sat(result);
     }
 }
 
@@ -289,7 +283,7 @@ __global__ void batchnorm_forward_affine_fp16_kernel(const __half* input,
 
         float normalized = (__half2float(input[idx]) - channel_mean) * invstd;
         float result = __half2float(gamma[c]) * normalized + __half2float(beta[c]);
-        output[idx] = __float2half_sat(result);
+        output[idx] = float2half_sat(result);
     }
 }
 

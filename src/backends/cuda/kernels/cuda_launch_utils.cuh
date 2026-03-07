@@ -79,6 +79,26 @@ inline int compute_grid_size(int64_t num_elements, int block_size = 256) {
 }
 
 /**
+ * @brief RAII wrapper for cudaMalloc/cudaFree allocations (synchronous).
+ */
+struct CudaBuffer {
+    void* ptr = nullptr;
+    explicit CudaBuffer(size_t bytes) {
+        if (bytes > 0) {
+            auto err = cudaMalloc(&ptr, bytes);
+            if (err != cudaSuccess) {
+                throw std::runtime_error(
+                    std::string("cudaMalloc failed: ") + cudaGetErrorString(err));
+            }
+        }
+    }
+    ~CudaBuffer() { if (ptr) cudaFree(ptr); }
+    CudaBuffer(const CudaBuffer&) = delete;
+    CudaBuffer& operator=(const CudaBuffer&) = delete;
+    template<typename T> T* as() { return static_cast<T*>(ptr); }
+};
+
+/**
  * @brief RAII wrapper for cudaMallocAsync/cudaFreeAsync allocations.
  *
  * Ensures async allocations are freed even when exceptions occur between

@@ -1,0 +1,8 @@
+# ASAN leak suppressions for third-party libraries
+# These libraries manage their own memory pools and report false-positive leaks
+leak:libmkl
+leak:libtbb
+leak:libtbbmalloc
+leak:libiomp
+leak:libcuda
+leak:libvulkan

@@ -217,6 +217,7 @@ PYBIND11_MODULE(tenzor_core, m) {
 
     // Library initialization
     m.def("initialize", &tenzor::initialize,
+          py::call_guard<py::gil_scoped_release>(),
           "Initialize the Tenzor library (registers backends and operations)");
 
     m.def("mkl_cleanup", &tenzor::mkl_cleanup,

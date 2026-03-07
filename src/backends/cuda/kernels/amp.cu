@@ -51,9 +51,9 @@ auto has_inf_nan_kernel(const Tensor& input, int64_t /*dim*/, bool /*keepdim*/, 
         return make_bool_scalar(false, input.device());
     }
 
-    // Allocate device flag (single int)
-    int* d_flag = nullptr;
-    TENZOR_CUDA_CHECK(cudaMalloc(&d_flag, sizeof(int)));
+    // Allocate device flag (single int) via RAII
+    CudaBuffer flag_buf(sizeof(int));
+    int* d_flag = static_cast<int*>(flag_buf.ptr);
     TENZOR_CUDA_CHECK(cudaMemsetAsync(d_flag, 0, sizeof(int), stream));
 
     // Handle BFloat16/Float16 by casting to Float32 first
@@ -79,7 +79,6 @@ auto has_inf_nan_kernel(const Tensor& input, int64_t /*dim*/, bool /*keepdim*/, 
         }
         default:
             // Integer types can't have inf/nan
-            cudaFree(d_flag);
             return make_bool_scalar(false, input.device());
     }
     TENZOR_CUDA_CHECK(cudaGetLastError());
@@ -89,7 +88,6 @@ auto has_inf_nan_kernel(const Tensor& input, int64_t /*dim*/, bool /*keepdim*/, 
     TENZOR_CUDA_CHECK(cudaMemcpyAsync(&h_flag, d_flag, sizeof(int),
                                         cudaMemcpyDeviceToHost, stream));
     TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
-    cudaFree(d_flag);
 
     return make_bool_scalar(h_flag != 0, input.device());
 }

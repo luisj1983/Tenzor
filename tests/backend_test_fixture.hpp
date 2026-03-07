@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 #include "tenzor/tenzor.hpp"
 #include <string>
+#include <mutex>
 
 namespace tenzor {
 namespace testing {
@@ -21,14 +22,13 @@ namespace testing {
 class BackendTest : public ::testing::TestWithParam<std::string> {
 protected:
     Device device;
-    static bool initialized;
+    static std::once_flag init_flag;
 
     void SetUp() override {
-        // Initialize Tenzor library and load backends (only once)
-        if (!initialized) {
+        // Initialize Tenzor library and load backends (thread-safe, exactly once)
+        std::call_once(init_flag, []() {
             tenzor::initialize();
-            initialized = true;
-        }
+        });
 
         std::string backend_name = GetParam();
 
@@ -95,7 +95,7 @@ protected:
 };
 
 // Define static member with inline to avoid multiple definition errors
-inline bool BackendTest::initialized = false;
+inline std::once_flag BackendTest::init_flag;
 
 // Instantiate tests for all available backends
 #define INSTANTIATE_BACKEND_TESTS(TestSuiteName) \

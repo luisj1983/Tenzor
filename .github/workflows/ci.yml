@@ -155,7 +155,7 @@ jobs:
 
       - name: Run tests under sanitizers
         env:
-          ASAN_OPTIONS: detect_leaks=0,halt_on_error=1
+          ASAN_OPTIONS: detect_leaks=1,halt_on_error=1,suppressions=sanitizer_suppressions.txt
           UBSAN_OPTIONS: halt_on_error=1,print_stacktrace=1
         run: |
           cd build
@@ -320,7 +320,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Configure CMake
-        run: cmake -B build -DTENZOR_BUILD_CUDA=OFF -DTENZOR_BUILD_VULKAN=OFF -DTENZOR_BUILD_ROCM=OFF -DTENZOR_BUILD_ONEAPI=OFF -DTENZOR_BUILD_WEBGPU=OFF -DTENZOR_BUILD_PYTHON=OFF -DTENZOR_BUILD_MODEL_HUB=OFF
+        run: cmake -B build -DTENZOR_BUILD_CUDA=OFF -DTENZOR_BUILD_VULKAN=OFF -DTENZOR_BUILD_ROCM=OFF -DTENZOR_BUILD_ONEAPI=OFF -DTENZOR_BUILD_WEBGPU=OFF -DTENZOR_BUILD_METAL=OFF -DTENZOR_BUILD_PYTHON=OFF -DTENZOR_BUILD_MODEL_HUB=OFF
       - name: Build
         run: cmake --build build --config Release -j 3
       - name: Test

@@ -53,15 +53,8 @@ inline void compute_launch_config_2d(int64_t rows, int64_t cols, dim3& grid, dim
          i < (n); \
          i += blockDim.x * gridDim.x)
 
-// ============================================================================
-// FP16 Saturating Conversion
-// ============================================================================
-
-__device__ __forceinline__ __half __float2half_sat(float x) {
-    constexpr float kHalfMax = 65504.0f;
-    x = fminf(fmaxf(x, -kHalfMax), kHalfMax);
-    return __float2half(x);
-}
+// FP16 saturating conversion: use float2half_sat() from cuda_common.cuh
+using tenzor::cuda::float2half_sat;
 
 // ============================================================================
 // Helper Functions
@@ -547,7 +540,7 @@ __global__ void col2im_kernel_f16(
         }
 
         // Direct write - NO ATOMIC NEEDED!
-        output[output_idx] = __float2half_sat(sum);
+        output[output_idx] = float2half_sat(sum);
     }
 }
 
@@ -642,7 +635,7 @@ __global__ void sum_bias_grad_kernel_f16(
                 sum += __half2float(grad_output[idx]);
             }
         }
-        grad_bias[c] = __float2half_sat(sum);
+        grad_bias[c] = float2half_sat(sum);
     }
 }
 
@@ -1846,7 +1839,7 @@ __global__ void conv_transpose2d_forward_kernel_f16(
             sum += __half2float(bias[c]);
         }
 
-        output[idx] = __float2half_sat(sum);
+        output[idx] = float2half_sat(sum);
     }
 }
 

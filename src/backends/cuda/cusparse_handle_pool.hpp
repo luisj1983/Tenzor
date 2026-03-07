@@ -62,7 +62,7 @@ private:
     CuSPARSEHandlePool& operator=(const CuSPARSEHandlePool&) = delete;
 
     cusparseHandle_t handle_ = nullptr;
-    cudaStream_t last_stream_ = nullptr;
+    cudaStream_t last_stream_ = reinterpret_cast<cudaStream_t>(~uintptr_t(0));  // Sentinel: force stream set on first use
 };
 
 } // namespace cuda

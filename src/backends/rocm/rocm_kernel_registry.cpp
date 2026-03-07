@@ -488,29 +488,25 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{rocm::dot_kernel(inputs[0], inputs[1], get_hip_stream(attrs))};
     });
 
-    // In-place operations
-    table.register_kernel(OpId::AddInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        Tensor a = inputs[0];  // Copy to allow modification
-        rocm::add_inplace_kernel(a, inputs[1], get_hip_stream(attrs));
-        return std::vector<Tensor>{a};
+    // In-place arithmetic operations (proper inplace dispatch)
+    table.register_inplace_kernel(OpId::AddInplace, [](Tensor& target, std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor& {
+        rocm::add_inplace_kernel(target, inputs[0], get_hip_stream(attrs));
+        return target;
     });
 
-    table.register_kernel(OpId::SubInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        Tensor a = inputs[0];
-        rocm::sub_inplace_kernel(a, inputs[1], get_hip_stream(attrs));
-        return std::vector<Tensor>{a};
+    table.register_inplace_kernel(OpId::SubInplace, [](Tensor& target, std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor& {
+        rocm::sub_inplace_kernel(target, inputs[0], get_hip_stream(attrs));
+        return target;
     });
 
-    table.register_kernel(OpId::MulInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        Tensor a = inputs[0];
-        rocm::mul_inplace_kernel(a, inputs[1], get_hip_stream(attrs));
-        return std::vector<Tensor>{a};
+    table.register_inplace_kernel(OpId::MulInplace, [](Tensor& target, std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor& {
+        rocm::mul_inplace_kernel(target, inputs[0], get_hip_stream(attrs));
+        return target;
     });
 
-    table.register_kernel(OpId::DivInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        Tensor a = inputs[0];
-        rocm::div_inplace_kernel(a, inputs[1], get_hip_stream(attrs));
-        return std::vector<Tensor>{a};
+    table.register_inplace_kernel(OpId::DivInplace, [](Tensor& target, std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor& {
+        rocm::div_inplace_kernel(target, inputs[0], get_hip_stream(attrs));
+        return target;
     });
 
     // ========================================================================
@@ -674,6 +670,43 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         float beta = static_cast<float>(attrs.get_float(AttrKey::Beta, 1.0));
         float threshold = static_cast<float>(attrs.get_float(AttrKey::Threshold, 20.0));
         return std::vector<Tensor>{rocm::softplus_backward_kernel(inputs[0], inputs[1], beta, threshold, get_hip_stream(attrs))};
+    });
+
+    // In-place activation operations
+    table.register_inplace_kernel(OpId::ReLUInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
+        auto result = rocm::relu_kernel(target, get_hip_stream(attrs));
+        hipMemcpyAsync(target.data_ptr(), result.data_ptr(), target.numel() * dtype_size(target.dtype()),
+                       hipMemcpyDeviceToDevice, get_hip_stream(attrs));
+        return target;
+    });
+
+    table.register_inplace_kernel(OpId::SigmoidInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
+        auto result = rocm::sigmoid_kernel(target, get_hip_stream(attrs));
+        hipMemcpyAsync(target.data_ptr(), result.data_ptr(), target.numel() * dtype_size(target.dtype()),
+                       hipMemcpyDeviceToDevice, get_hip_stream(attrs));
+        return target;
+    });
+
+    table.register_inplace_kernel(OpId::TanhInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
+        auto result = rocm::tanh_kernel(target, get_hip_stream(attrs));
+        hipMemcpyAsync(target.data_ptr(), result.data_ptr(), target.numel() * dtype_size(target.dtype()),
+                       hipMemcpyDeviceToDevice, get_hip_stream(attrs));
+        return target;
+    });
+
+    table.register_inplace_kernel(OpId::LeakyReLUInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
+        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
+        auto result = rocm::leaky_relu_kernel(target, alpha, get_hip_stream(attrs));
+        hipMemcpyAsync(target.data_ptr(), result.data_ptr(), target.numel() * dtype_size(target.dtype()),
+                       hipMemcpyDeviceToDevice, get_hip_stream(attrs));
+        return target;
+    });
+
+    table.register_inplace_kernel(OpId::GeluInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
+        auto result = rocm::gelu_kernel(target, get_hip_stream(attrs));
+        hipMemcpyAsync(target.data_ptr(), result.data_ptr(), target.numel() * dtype_size(target.dtype()),
+                       hipMemcpyDeviceToDevice, get_hip_stream(attrs));
+        return target;
     });
 
     // ========================================================================

@@ -296,7 +296,7 @@ Tensor cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
     ));
 
     // Stream-synchronize to ensure computation is complete (avoids blocking other streams)
-    CUDA_CHECK_SPARSE(cudaStreamSynchronize(nullptr));
+    CUDA_CHECK_SPARSE(cudaStreamSynchronize(cudaStreamPerThread));
 
     return result;
 }

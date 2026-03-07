@@ -204,8 +204,8 @@ auto MultiheadAttention::scaled_dot_product_attention(
         // Return result (no attention weights computed in fused path for efficiency)
         Variable attended(output_tensor, false);
 
-        // Return empty attention weights in fused path (saves memory/compute)
-        Tensor empty_weights;
+        // Return zero-shaped weights to indicate fused path (no weights computed)
+        Tensor empty_weights({0}, DType::Float32, output_tensor.device());
         Variable attn_weights(empty_weights, false);
 
         return {attended, attn_weights};
@@ -241,7 +241,7 @@ auto MultiheadAttention::scaled_dot_product_attention(
             Tensor output = dispatch<OpId::FusedAttention>(fused_inputs, attrs)[0];
 
             Variable attended(output, false);
-            Tensor empty_weights;
+            Tensor empty_weights({0}, output.dtype(), output.device());
             Variable attn_weights_empty(empty_weights, false);
 
             return {attended, attn_weights_empty};
@@ -286,7 +286,7 @@ auto MultiheadAttention::scaled_dot_product_attention(
             Tensor output = dispatch<OpId::FlashAttention>(flash_inputs, attrs)[0];
 
             Variable attended(output, false);
-            Tensor empty_weights;
+            Tensor empty_weights({0}, output.dtype(), output.device());
             Variable attn_weights_empty(empty_weights, false);
 
             return {attended, attn_weights_empty};
