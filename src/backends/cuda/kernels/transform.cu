@@ -173,8 +173,6 @@ auto contiguous_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
         throw std::runtime_error("Contiguous: unsupported dtype");
     }
 
-    CUDA_CHECK(cudaGetLastError());
-
     return result;
 }
 

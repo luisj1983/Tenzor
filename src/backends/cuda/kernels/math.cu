@@ -116,19 +116,49 @@ __global__ void check_for_zeros_kernel(const T* data, int64_t n, int* has_zero) 
     }
 }
 
+// RAII wrapper for the persistent thread-local device flag used by
+// check_integer_divisor_for_zeros.  Ensures cudaFree is called when the
+// thread exits, preventing a device-memory leak.
+struct DeviceFlagHolder {
+    int* ptr = nullptr;
+
+    DeviceFlagHolder() {
+        // Allocation deferred to first use (see get())
+    }
+
+    int* get() {
+        if (!ptr) {
+            CUDA_CHECK(cudaMalloc(&ptr, sizeof(int)));
+        }
+        return ptr;
+    }
+
+    ~DeviceFlagHolder() {
+        if (ptr) {
+            // Best-effort free — if the CUDA context is already torn down
+            // (e.g. during process exit), cudaFree may return an error;
+            // we silently ignore it to avoid throwing from a destructor.
+            (void)cudaFree(ptr);
+            ptr = nullptr;
+        }
+    }
+
+    DeviceFlagHolder(const DeviceFlagHolder&) = delete;
+    DeviceFlagHolder& operator=(const DeviceFlagHolder&) = delete;
+};
+
 // Host function to check for zeros in an integer tensor
 // Only enabled in debug builds to avoid the stream sync penalty in release.
-// Uses a persistent thread-local device flag to avoid per-call cudaHostAlloc
-// and cudaFreeHost overhead.  The flag is reset via cudaMemsetAsync before each
+// Uses a persistent thread-local device flag to avoid per-call cudaMalloc
+// and cudaFree overhead.  The flag is reset via cudaMemsetAsync before each
 // check and only copied back (D2H) when we actually need to inspect the result.
+// The DeviceFlagHolder RAII wrapper ensures the allocation is freed on thread exit.
 template<typename T>
 inline void check_integer_divisor_for_zeros(const T* data, int64_t n, cudaStream_t stream) {
 #ifndef TENZOR_SKIP_INTEGER_DIV_CHECK
-    // Persistent thread-local device flag — allocated once, reused across calls.
-    static thread_local int* d_flag = nullptr;
-    if (!d_flag) {
-        CUDA_CHECK(cudaMalloc(&d_flag, sizeof(int)));
-    }
+    // Persistent thread-local device flag — allocated once per thread, freed on thread exit.
+    static thread_local DeviceFlagHolder flag_holder;
+    int* d_flag = flag_holder.get();
 
     // Reset flag to 0 asynchronously on the current stream
     CUDA_CHECK(cudaMemsetAsync(d_flag, 0, sizeof(int), stream));
@@ -2372,7 +2402,9 @@ auto expand_kernel(const Tensor& input, const std::vector<int64_t>& shape, void*
 // Fill Operations (zeros, ones, full)
 // ============================================================================
 
-// Fill kernel - set all elements to a constant value
+// Fill kernel - set all elements to a constant value.
+// Note: This operation is asynchronous on the given stream. Callers must
+// synchronize the stream before reading the tensor on the host.
 template<typename T>
 __global__ void fill_kernel_device(T* output, T value, int64_t n) {
     CUDA_KERNEL_LOOP(idx, n) {
@@ -2448,6 +2480,7 @@ __global__ void strided_fill_kernel_device(
     }
 }
 
+// Strided fill for non-contiguous tensors. Asynchronous on the given stream.
 auto strided_fill_kernel(Tensor& self, float value, cudaStream_t stream) -> void {
     int64_t n = self.numel();
     if (n == 0) return;

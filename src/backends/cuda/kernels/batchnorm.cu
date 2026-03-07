@@ -74,64 +74,7 @@ __device__ T block_reduce_sum(T val, T* shared) {
 // BatchNorm2d Mean/Variance Computation (Welford's Algorithm)
 // ============================================================================
 
-// Compute per-channel mean and variance using Welford's online algorithm
-// Input: [N, C, H, W] - NCHW format
-// Output: mean[C], variance[C]
-template<typename T>
-__global__ void batchnorm_mean_var_kernel(const T* input,
-                                          T* mean,
-                                          T* variance,
-                                          int64_t N,
-                                          int64_t C,
-                                          int64_t H,
-                                          int64_t W) {
-    extern __shared__ __align__(sizeof(T)) unsigned char shared_mem[];
-    T* shared = reinterpret_cast<T*>(shared_mem);
-
-    int64_t spatial_size = H * W;
-    int64_t total_elements = N * spatial_size;
-
-    // Each block handles one channel
-    int64_t c = blockIdx.x;
-    if (c >= C) return;
-
-    // Welford's algorithm for numerically stable mean/variance computation
-    T mean_acc = T(0);
-    T m2_acc = T(0);  // Sum of squared differences from mean
-    int64_t count = 0;
-
-    // Each thread processes multiple elements
-    for (int64_t n = 0; n < N; n++) {
-        for (int64_t idx = threadIdx.x; idx < spatial_size; idx += blockDim.x) {
-            int64_t h = idx / W;
-            int64_t w = idx % W;
-            int64_t tensor_idx = ((n * C + c) * H + h) * W + w;
-
-            T value = input[tensor_idx];
-            count++;
-
-            // Welford's update
-            T delta = value - mean_acc;
-            mean_acc += delta / T(count);
-            T delta2 = value - mean_acc;
-            m2_acc += delta * delta2;
-        }
-    }
-
-    // Reduce across threads in block
-    mean_acc = block_reduce_sum(mean_acc, shared);
-    __syncthreads();
-    m2_acc = block_reduce_sum(m2_acc, shared);
-    __syncthreads();
-
-    // Thread 0 writes final result
-    if (threadIdx.x == 0) {
-        mean[c] = mean_acc / T(blockDim.x);
-        variance[c] = m2_acc / T(total_elements);
-    }
-}
-
-// Optimized version using two-pass algorithm (more parallel but requires two passes)
+// Two-pass algorithm for per-channel mean and variance computation
 template<typename T>
 __global__ void batchnorm_mean_kernel(const T* input,
                                       T* mean,

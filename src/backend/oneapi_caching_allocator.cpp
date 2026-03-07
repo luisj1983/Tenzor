@@ -461,57 +461,14 @@ OneAPIBlock* OneAPICachingAllocator::allocate_new_block(size_t size, int device,
 }
 
 bool OneAPICachingAllocator::split_block(OneAPIBlock* block, size_t size) {
-    if (block->size < size + min_split_size_) {
-        return false;
-    }
-
-    auto& device_alloc = device_allocators_[block->device];
-    sycl::queue* queue = static_cast<sycl::queue*>(device_alloc.queue);
-
-    // Calculate split size
-    size_t remaining_size = block->size - size;
-
-    // Allocate new block for remaining memory
-    void* new_ptr = nullptr;
-    try {
-        if (block->is_shared) {
-            new_ptr = sycl::malloc_shared(remaining_size, *queue);
-        } else {
-            new_ptr = sycl::malloc_device(remaining_size, *queue);
-        }
-    } catch (const sycl::exception&) {
-        return false;  // Can't split, just use whole block
-    }
-
-    if (new_ptr == nullptr) {
-        return false;
-    }
-
-    // Create new block for remaining memory
-    auto new_block = std::make_unique<OneAPIBlock>(new_ptr, remaining_size, block->device,
-                                                    block->is_shared);
-    new_block->allocated = false;
-    OneAPIBlock* new_block_ptr = new_block.get();
-
-    // Add to all_blocks
-    device_alloc.all_blocks[new_ptr] = std::move(new_block);
-
-    // Add to appropriate free blocks
-    if (block->is_shared) {
-        device_alloc.free_shared_blocks.insert(new_block_ptr);
-    } else {
-        device_alloc.free_device_blocks.insert(new_block_ptr);
-    }
-
-    // Update original block size
-    block->size = size;
-
-    // Update statistics
-    device_alloc.stats.num_splits++;
-    device_alloc.stats.cached_bytes += remaining_size;
-    device_alloc.stats.reserved_bytes += remaining_size;
-
-    return true;
+    // USM allocations cannot be sub-divided — each sycl::malloc_* call returns
+    // an independent allocation. The previous implementation allocated NEW memory
+    // for the remainder, which defeats the purpose of caching. Instead, we simply
+    // return the oversized block. ML workloads have stable allocation patterns,
+    // so fragmentation from oversized blocks is minimal.
+    (void)block;
+    (void)size;
+    return false;
 }
 
 bool OneAPICachingAllocator::try_merge_blocks(OneAPIBlock* block) {

@@ -460,7 +460,7 @@ private:
 class DescriptorPool {
 public:
     DescriptorPool(VkDevice device, uint32_t maxSets)
-        : device_(device) {
+        : device_(device), max_sets_(maxSets) {
 
         VkDescriptorPoolSize poolSize{};
         poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -488,6 +488,27 @@ public:
 
     VkDescriptorPool pool() const { return pool_; }
 
+    /// Track a descriptor set allocation and warn if pool usage exceeds 80%.
+    void trackAllocation() {
+        allocated_sets_++;
+        if (!warning_issued_ && max_sets_ > 0) {
+            uint32_t threshold = max_sets_ * 4 / 5;  // 80%
+            if (allocated_sets_ >= threshold) {
+                std::cerr << "[Vulkan WARNING] Descriptor pool usage at "
+                          << allocated_sets_ << "/" << max_sets_
+                          << " (" << (allocated_sets_ * 100 / max_sets_)
+                          << "%). Consider calling synchronize() to reclaim sets.\n";
+                warning_issued_ = true;
+            }
+        }
+    }
+
+    /// Return current allocation count.
+    uint32_t allocated_sets() const { return allocated_sets_; }
+
+    /// Return pool capacity (maxSets).
+    uint32_t max_sets() const { return max_sets_; }
+
     /**
      * @brief Reset the descriptor pool, freeing all allocated descriptor sets
      *
@@ -497,12 +518,17 @@ public:
     void reset() {
         if (pool_ != VK_NULL_HANDLE) {
             vkResetDescriptorPool(device_, pool_, 0);
+            allocated_sets_ = 0;
+            warning_issued_ = false;
         }
     }
 
 private:
     VkDevice device_;
     VkDescriptorPool pool_ = VK_NULL_HANDLE;
+    uint32_t max_sets_ = 0;
+    uint32_t allocated_sets_ = 0;
+    bool warning_issued_ = false;
 };
 
 /**

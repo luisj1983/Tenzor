@@ -1763,6 +1763,18 @@ target_link_libraries(test_onnx_import PRIVATE
 
 tenzor_discover_tests(test_onnx_import DISCOVERY_TIMEOUT 30)
 
+# ONNX round-trip tests
+add_executable(test_onnx_roundtrip
+    unit/test_onnx_roundtrip.cpp
+)
+
+target_link_libraries(test_onnx_roundtrip PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+tenzor_discover_tests(test_onnx_roundtrip DISCOVERY_TIMEOUT 30)
+
 # Gradient checking tests
 add_executable(test_gradcheck
     autograd/test_gradcheck.cpp

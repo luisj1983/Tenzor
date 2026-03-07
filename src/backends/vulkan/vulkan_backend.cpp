@@ -927,6 +927,9 @@ VkDescriptorSet VulkanBackend::allocateAndWriteDescriptorSet(
 
     vulkan::checkVk(result, "Failed to allocate descriptor set");
 
+    // Track allocation count and warn if approaching pool capacity
+    ctx.descriptorPool->trackAllocation();
+
     // Write descriptor set bindings — resolve VkBuffer + byte offset from raw pointers
     // so tensor views (slices with non-zero storage offset) bind correctly.
     std::vector<VkDescriptorBufferInfo> bufferInfos(bufferPtrs.size());

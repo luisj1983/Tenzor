@@ -36,6 +36,32 @@ inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
     return (n + block_size - 1) / block_size;
 }
 
+// RAII wrapper for rocBLAS handle to prevent leaks on exceptions
+class RocBLASHandleGuard {
+public:
+    RocBLASHandleGuard() {
+        rocblas_status status = rocblas_create_handle(&handle_);
+        if (status != rocblas_status_success) {
+            throw std::runtime_error("Failed to create rocBLAS handle");
+        }
+    }
+    ~RocBLASHandleGuard() {
+        if (handle_) {
+            rocblas_destroy_handle(handle_);
+        }
+    }
+    RocBLASHandleGuard(const RocBLASHandleGuard&) = delete;
+    RocBLASHandleGuard& operator=(const RocBLASHandleGuard&) = delete;
+
+    rocblas_handle get() const { return handle_; }
+
+    void set_stream(hipStream_t stream) {
+        rocblas_set_stream(handle_, stream);
+    }
+private:
+    rocblas_handle handle_ = nullptr;
+};
+
 // Kernel to add bias (broadcasted across batch dimension)
 template<typename T>
 __global__ void add_bias_kernel(const T* __restrict__ bias, T* __restrict__ gates,
@@ -747,9 +773,9 @@ auto gru_forward_kernel(
                    hipMemcpyDeviceToDevice, stream);
 
     if (input.dtype() == DType::Float32) {
-        rocblas_handle handle;
-        rocblas_create_handle(&handle);
-        rocblas_set_stream(handle, stream);
+        RocBLASHandleGuard handle_guard;
+        rocblas_handle handle = handle_guard.get();
+        handle_guard.set_stream(stream);
 
         const float alpha = 1.0f;
         const float beta_zero = 0.0f;
@@ -825,16 +851,14 @@ auto gru_forward_kernel(
                           hipMemcpyDeviceToDevice, stream);
         }
 
-        rocblas_destroy_handle(handle);
-
         // Copy final state
         hipMemcpyAsync(h_n.data<float>(), h_t_ptr,
                       batch * hidden * sizeof(float),
                       hipMemcpyDeviceToDevice, stream);
     } else if (input.dtype() == DType::Float64) {
-        rocblas_handle handle;
-        rocblas_create_handle(&handle);
-        rocblas_set_stream(handle, stream);
+        RocBLASHandleGuard handle_guard2;
+        rocblas_handle handle = handle_guard2.get();
+        handle_guard2.set_stream(stream);
 
         const double alpha = 1.0;
         const double beta_zero = 0.0;
@@ -904,16 +928,14 @@ auto gru_forward_kernel(
                           hipMemcpyDeviceToDevice, stream);
         }
 
-        rocblas_destroy_handle(handle);
-
         // Copy final state
         hipMemcpyAsync(h_n.data<double>(), h_t_ptr,
                       batch * hidden * sizeof(double),
                       hipMemcpyDeviceToDevice, stream);
     } else if (input.dtype() == DType::Float16) {
-        rocblas_handle handle;
-        rocblas_create_handle(&handle);
-        rocblas_set_stream(handle, stream);
+        RocBLASHandleGuard handle_guard3;
+        rocblas_handle handle = handle_guard3.get();
+        handle_guard3.set_stream(stream);
 
         const rocblas_half alpha = rocblas_half(1.0f);
         const rocblas_half beta_zero = rocblas_half(0.0f);
@@ -981,8 +1003,6 @@ auto gru_forward_kernel(
                           batch * hidden * sizeof(__half),
                           hipMemcpyDeviceToDevice, stream);
         }
-
-        rocblas_destroy_handle(handle);
 
         // Copy final state
         hipMemcpyAsync(reinterpret_cast<__half*>(h_n.data<Float16>()), h_t_ptr,

@@ -281,4 +281,31 @@ constexpr auto dtype_name(DType dtype) -> std::string_view {
     return "unknown";
 }
 
+/**
+ * @brief DType promotion rules for binary operations and gradient accumulation.
+ *
+ * When two tensors with different dtypes are combined, the result dtype is
+ * determined by the following rules (highest priority first):
+ *
+ * 1. Complex types dominate: Float + Complex -> Complex
+ *    - Float32 + Complex64 -> Complex64
+ *    - Float64 + Complex128 -> Complex128
+ *
+ * 2. Float types dominate over integer:
+ *    - Int32 + Float32 -> Float32
+ *    - Int64 + Float64 -> Float64
+ *
+ * 3. Higher precision wins within category:
+ *    - Float16 + Float32 -> Float32
+ *    - Float32 + Float64 -> Float64
+ *    - Int8 + Int32 -> Int32
+ *    - BFloat16 + Float32 -> Float32
+ *
+ * 4. Bool promotes to the other type:
+ *    - Bool + Float32 -> Float32
+ *    - Bool + Int32 -> Int32
+ *
+ * These rules match PyTorch's type promotion semantics.
+ */
+
 } // namespace tenzor

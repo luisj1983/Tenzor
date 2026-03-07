@@ -3903,7 +3903,8 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("nonlinearity") = "tanh", py::arg("bias") = true)
         .def("forward", [](tenzor::nn::RNNCell& self, const tenzor::Variable& input, const tenzor::Variable& hx) {
             return self.forward(input, hx);
-        }, py::arg("input"), py::arg("hx") = tenzor::Variable{});
+        }, py::arg("input"), py::arg("hx") = tenzor::Variable{},
+           py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::RNN, tenzor::nn::Module, std::shared_ptr<tenzor::nn::RNN>>(nn, "RNN")
         .def(py::init<int64_t, int64_t, int64_t, const std::string&, bool, bool, double, bool>(),
@@ -3913,7 +3914,8 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("bidirectional") = false)
         .def("forward", [](tenzor::nn::RNN& self, const tenzor::Variable& input, const tenzor::Variable& hx) {
             return self.forward(input, hx);
-        }, py::arg("input"), py::arg("hx") = tenzor::Variable{});
+        }, py::arg("input"), py::arg("hx") = tenzor::Variable{},
+           py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::LSTMCell, tenzor::nn::Module, std::shared_ptr<tenzor::nn::LSTMCell>>(nn, "LSTMCell")
         .def(py::init<int64_t, int64_t, bool>(),
@@ -3922,7 +3924,8 @@ PYBIND11_MODULE(tenzor_core, m) {
                            const tenzor::Variable& hx, const tenzor::Variable& cx) {
             return self.forward(input, hx, cx);
         }, py::arg("input"), py::arg("hx") = tenzor::Variable{},
-           py::arg("cx") = tenzor::Variable{});
+           py::arg("cx") = tenzor::Variable{},
+           py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::LSTM, tenzor::nn::Module, std::shared_ptr<tenzor::nn::LSTM>>(nn, "LSTM")
         .def(py::init<int64_t, int64_t, int64_t, bool, bool, double, bool, int64_t>(),
@@ -3933,7 +3936,8 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("forward", [](tenzor::nn::LSTM& self, const tenzor::Variable& input,
                            const std::pair<tenzor::Variable, tenzor::Variable>& hx) {
             return self.forward(input, hx);
-        }, py::arg("input"), py::arg("hx") = std::pair<tenzor::Variable, tenzor::Variable>{})
+        }, py::arg("input"), py::arg("hx") = std::pair<tenzor::Variable, tenzor::Variable>{},
+           py::call_guard<py::gil_scoped_release>())
         .def("__repr__", [](const tenzor::nn::LSTM&) { return "LSTM()"; });
 
     py::class_<tenzor::nn::GRUCell, tenzor::nn::Module, std::shared_ptr<tenzor::nn::GRUCell>>(nn, "GRUCell")
@@ -3941,7 +3945,8 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("input_size"), py::arg("hidden_size"), py::arg("bias") = true)
         .def("forward", [](tenzor::nn::GRUCell& self, const tenzor::Variable& input, const tenzor::Variable& hx) {
             return self.forward(input, hx);
-        }, py::arg("input"), py::arg("hx") = tenzor::Variable{});
+        }, py::arg("input"), py::arg("hx") = tenzor::Variable{},
+           py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::GRU, tenzor::nn::Module, std::shared_ptr<tenzor::nn::GRU>>(nn, "GRU")
         .def(py::init<int64_t, int64_t, int64_t, bool, bool, double, bool>(),
@@ -3950,7 +3955,8 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("dropout") = 0.0, py::arg("bidirectional") = false)
         .def("forward", [](tenzor::nn::GRU& self, const tenzor::Variable& input, const tenzor::Variable& hx) {
             return self.forward(input, hx);
-        }, py::arg("input"), py::arg("hx") = tenzor::Variable{})
+        }, py::arg("input"), py::arg("hx") = tenzor::Variable{},
+           py::call_guard<py::gil_scoped_release>())
         .def("__repr__", [](const tenzor::nn::GRU&) { return "GRU()"; });
 
     // Attention and Transformer
@@ -3971,14 +3977,16 @@ PYBIND11_MODULE(tenzor_core, m) {
            py::arg("key_padding_mask") = tenzor::Tensor{},
            py::arg("attn_mask") = tenzor::Tensor{},
            py::arg("need_weights") = true,
-           py::arg("position_bias") = tenzor::Tensor{})
+           py::arg("position_bias") = tenzor::Tensor{},
+           py::call_guard<py::gil_scoped_release>())
         .def("__repr__", [](const tenzor::nn::MultiheadAttention&) { return "MultiheadAttention()"; });
 
     py::class_<tenzor::nn::PositionalEncoding, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::PositionalEncoding>>(nn, "PositionalEncoding")
         .def(py::init<int64_t, int64_t, double>(),
              py::arg("d_model"), py::arg("max_len") = 5000, py::arg("dropout") = 0.0)
-        .def("forward", &tenzor::nn::PositionalEncoding::forward);
+        .def("forward", &tenzor::nn::PositionalEncoding::forward,
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::TransformerEncoderLayer, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::TransformerEncoderLayer>>(nn, "TransformerEncoderLayer")
@@ -3990,7 +3998,8 @@ PYBIND11_MODULE(tenzor_core, m) {
                            const tenzor::Tensor& src_mask, const tenzor::Tensor& src_key_padding_mask) {
             return self.forward(src, src_mask, src_key_padding_mask);
         }, py::arg("src"), py::arg("src_mask") = tenzor::Tensor{},
-           py::arg("src_key_padding_mask") = tenzor::Tensor{});
+           py::arg("src_key_padding_mask") = tenzor::Tensor{},
+           py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::TransformerEncoder, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::TransformerEncoder>>(nn, "TransformerEncoder")
@@ -4001,7 +4010,8 @@ PYBIND11_MODULE(tenzor_core, m) {
                            const tenzor::Tensor& mask, const tenzor::Tensor& src_key_padding_mask) {
             return self.forward(src, mask, src_key_padding_mask);
         }, py::arg("src"), py::arg("mask") = tenzor::Tensor{},
-           py::arg("src_key_padding_mask") = tenzor::Tensor{});
+           py::arg("src_key_padding_mask") = tenzor::Tensor{},
+           py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::TransformerDecoderLayer, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::TransformerDecoderLayer>>(nn, "TransformerDecoderLayer")
@@ -4018,7 +4028,8 @@ PYBIND11_MODULE(tenzor_core, m) {
            py::arg("tgt_mask") = tenzor::Tensor{},
            py::arg("memory_mask") = tenzor::Tensor{},
            py::arg("tgt_key_padding_mask") = tenzor::Tensor{},
-           py::arg("memory_key_padding_mask") = tenzor::Tensor{});
+           py::arg("memory_key_padding_mask") = tenzor::Tensor{},
+           py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::TransformerDecoder, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::TransformerDecoder>>(nn, "TransformerDecoder")
@@ -4034,7 +4045,8 @@ PYBIND11_MODULE(tenzor_core, m) {
            py::arg("tgt_mask") = tenzor::Tensor{},
            py::arg("memory_mask") = tenzor::Tensor{},
            py::arg("tgt_key_padding_mask") = tenzor::Tensor{},
-           py::arg("memory_key_padding_mask") = tenzor::Tensor{});
+           py::arg("memory_key_padding_mask") = tenzor::Tensor{},
+           py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::Transformer, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::Transformer>>(nn, "Transformer")
@@ -4057,7 +4069,8 @@ PYBIND11_MODULE(tenzor_core, m) {
            py::arg("memory_mask") = tenzor::Tensor{},
            py::arg("src_key_padding_mask") = tenzor::Tensor{},
            py::arg("tgt_key_padding_mask") = tenzor::Tensor{},
-           py::arg("memory_key_padding_mask") = tenzor::Tensor{});
+           py::arg("memory_key_padding_mask") = tenzor::Tensor{},
+           py::call_guard<py::gil_scoped_release>());
 
     // Embedding layers
     py::class_<tenzor::nn::Embedding, tenzor::nn::Module,
@@ -4067,7 +4080,8 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("padding_idx") = -1, py::arg("max_norm") = 0.0,
              py::arg("norm_type") = 2.0, py::arg("scale_grad_by_freq") = false,
              py::arg("sparse") = false)
-        .def("forward", &tenzor::nn::Embedding::forward)
+        .def("forward", &tenzor::nn::Embedding::forward,
+             py::call_guard<py::gil_scoped_release>())
         .def("weight", py::overload_cast<>(&tenzor::nn::Embedding::weight))
         .def_static("from_pretrained", &tenzor::nn::Embedding::from_pretrained,
              py::arg("embeddings"), py::arg("freeze") = true,
@@ -4092,7 +4106,8 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("sparse") = false, py::arg("include_last_offset") = false)
         .def("forward", [](tenzor::nn::EmbeddingBag& self, const tenzor::Variable& input, const tenzor::Variable& offsets) {
             return self.forward(input, offsets);
-        }, py::arg("input"), py::arg("offsets") = tenzor::Variable{});
+        }, py::arg("input"), py::arg("offsets") = tenzor::Variable{},
+           py::call_guard<py::gil_scoped_release>());
 
     // Functional activation functions
     nn.def("relu", &tenzor::nn::relu, "ReLU activation function");
@@ -4130,7 +4145,8 @@ PYBIND11_MODULE(tenzor_core, m) {
              "Create MSELoss with specified reduction mode")
         .def("forward", &tenzor::nn::MSELoss::forward,
              py::arg("input"), py::arg("target"),
-             "Compute MSE loss between input and target")
+             "Compute MSE loss between input and target",
+             py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::MSELoss::operator(),
              py::arg("input"), py::arg("target"),
              "Compute MSE loss between input and target");
@@ -4142,7 +4158,8 @@ PYBIND11_MODULE(tenzor_core, m) {
              "Create L1Loss with specified reduction mode")
         .def("forward", &tenzor::nn::L1Loss::forward,
              py::arg("input"), py::arg("target"),
-             "Compute L1 loss between input and target")
+             "Compute L1 loss between input and target",
+             py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::L1Loss::operator(),
              py::arg("input"), py::arg("target"),
              "Compute L1 loss between input and target");
@@ -4155,7 +4172,8 @@ PYBIND11_MODULE(tenzor_core, m) {
              "Create SmoothL1Loss with reduction mode and beta threshold")
         .def("forward", &tenzor::nn::SmoothL1Loss::forward,
              py::arg("input"), py::arg("target"),
-             "Compute Smooth L1 loss between input and target")
+             "Compute Smooth L1 loss between input and target",
+             py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::SmoothL1Loss::operator(),
              py::arg("input"), py::arg("target"),
              "Compute Smooth L1 loss between input and target");
@@ -4167,7 +4185,8 @@ PYBIND11_MODULE(tenzor_core, m) {
              "Create CrossEntropyLoss with specified reduction mode")
         .def("forward", &tenzor::nn::CrossEntropyLoss::forward,
              py::arg("input"), py::arg("target"),
-             "Compute cross entropy loss between input logits and target class indices")
+             "Compute cross entropy loss between input logits and target class indices",
+             py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::CrossEntropyLoss::operator(),
              py::arg("input"), py::arg("target"),
              "Compute cross entropy loss between input logits and target class indices");
@@ -4179,7 +4198,8 @@ PYBIND11_MODULE(tenzor_core, m) {
              "Create NLLLoss with specified reduction mode")
         .def("forward", &tenzor::nn::NLLLoss::forward,
              py::arg("input"), py::arg("target"),
-             "Compute NLL loss between input log-probabilities and target class indices")
+             "Compute NLL loss between input log-probabilities and target class indices",
+             py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::NLLLoss::operator(),
              py::arg("input"), py::arg("target"),
              "Compute NLL loss between input log-probabilities and target class indices");
@@ -4191,7 +4211,8 @@ PYBIND11_MODULE(tenzor_core, m) {
              "Create BCELoss with specified reduction mode")
         .def("forward", &tenzor::nn::BCELoss::forward,
              py::arg("input"), py::arg("target"),
-             "Compute BCE loss between input probabilities and binary targets")
+             "Compute BCE loss between input probabilities and binary targets",
+             py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::BCELoss::operator(),
              py::arg("input"), py::arg("target"),
              "Compute BCE loss between input probabilities and binary targets");
@@ -4203,7 +4224,8 @@ PYBIND11_MODULE(tenzor_core, m) {
              "Create BCEWithLogitsLoss with specified reduction mode")
         .def("forward", &tenzor::nn::BCEWithLogitsLoss::forward,
              py::arg("input"), py::arg("target"),
-             "Compute BCE with logits loss between input logits and binary targets")
+             "Compute BCE with logits loss between input logits and binary targets",
+             py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::BCEWithLogitsLoss::operator(),
              py::arg("input"), py::arg("target"),
              "Compute BCE with logits loss between input logits and binary targets");
@@ -4212,26 +4234,30 @@ PYBIND11_MODULE(tenzor_core, m) {
     py::class_<tenzor::nn::KLDivLoss>(nn, "KLDivLoss")
         .def(py::init<const std::string&, bool>(),
              py::arg("reduction") = "mean", py::arg("log_target") = false)
-        .def("forward", &tenzor::nn::KLDivLoss::forward)
+        .def("forward", &tenzor::nn::KLDivLoss::forward,
+             py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::KLDivLoss::operator());
 
     py::class_<tenzor::nn::FocalLoss>(nn, "FocalLoss")
         .def(py::init<double, double, const std::string&>(),
              py::arg("alpha") = 1.0, py::arg("gamma") = 2.0,
              py::arg("reduction") = "mean")
-        .def("forward", &tenzor::nn::FocalLoss::forward)
+        .def("forward", &tenzor::nn::FocalLoss::forward,
+             py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::FocalLoss::operator());
 
     py::class_<tenzor::nn::DiceLoss>(nn, "DiceLoss")
         .def(py::init<double, const std::string&>(),
              py::arg("smooth") = 1.0, py::arg("reduction") = "mean")
-        .def("forward", &tenzor::nn::DiceLoss::forward)
+        .def("forward", &tenzor::nn::DiceLoss::forward,
+             py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::DiceLoss::operator());
 
     py::class_<tenzor::nn::HuberLoss>(nn, "HuberLoss")
         .def(py::init<double, const std::string&>(),
              py::arg("delta") = 1.0, py::arg("reduction") = "mean")
-        .def("forward", &tenzor::nn::HuberLoss::forward)
+        .def("forward", &tenzor::nn::HuberLoss::forward,
+             py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::HuberLoss::operator());
 
     py::class_<tenzor::nn::CTCLoss>(nn, "CTCLoss",
@@ -4242,7 +4268,8 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("zero_infinity") = false)
         .def("forward", &tenzor::nn::CTCLoss::forward,
              py::arg("log_probs"), py::arg("targets"),
-             py::arg("input_lengths"), py::arg("target_lengths"))
+             py::arg("input_lengths"), py::arg("target_lengths"),
+             py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::CTCLoss::operator(),
              py::arg("log_probs"), py::arg("targets"),
              py::arg("input_lengths"), py::arg("target_lengths"));
@@ -4390,13 +4417,72 @@ PYBIND11_MODULE(tenzor_core, m) {
     // Optimizers
     auto optim = m.def_submodule("optim", "Optimization algorithms");
 
+    // ClipMode enum for gradient clipping
+    py::enum_<tenzor::optim::ClipMode>(optim, "ClipMode",
+        "Gradient clipping mode")
+        .value("NONE", tenzor::optim::ClipMode::None, "No gradient clipping")
+        .value("NORM", tenzor::optim::ClipMode::Norm, "Clip by global norm (L2)")
+        .value("VALUE", tenzor::optim::ClipMode::Value, "Clip by value (element-wise clamping)")
+        .export_values();
+
+    // ClipConfig struct for gradient clipping configuration
+    py::class_<tenzor::optim::ClipConfig>(optim, "ClipConfig",
+        "Configuration for automatic gradient clipping in optimizers")
+        .def(py::init<>())
+        .def(py::init([](tenzor::optim::ClipMode mode, double max_norm, double norm_type) {
+            return tenzor::optim::ClipConfig{mode, max_norm, norm_type};
+        }), py::arg("mode"), py::arg("max_norm") = 1.0, py::arg("norm_type") = 2.0)
+        .def_readwrite("mode", &tenzor::optim::ClipConfig::mode,
+             "Clipping mode")
+        .def_readwrite("max_norm", &tenzor::optim::ClipConfig::max_norm,
+             "Maximum norm for Norm mode, or max absolute value for Value mode")
+        .def_readwrite("norm_type", &tenzor::optim::ClipConfig::norm_type,
+             "Norm type for Norm mode (default: L2)")
+        .def("__repr__", [](const tenzor::optim::ClipConfig& self) {
+            std::string mode_str = "None";
+            if (self.mode == tenzor::optim::ClipMode::Norm) mode_str = "Norm";
+            else if (self.mode == tenzor::optim::ClipMode::Value) mode_str = "Value";
+            return "ClipConfig(mode=" + mode_str +
+                   ", max_norm=" + std::to_string(self.max_norm) +
+                   ", norm_type=" + std::to_string(self.norm_type) + ")";
+        });
+
+    // ParamGroup struct for per-group hyperparameters
+    py::class_<tenzor::optim::ParamGroup>(optim, "ParamGroup",
+        "Parameter group with individual learning rate and weight decay")
+        .def(py::init([](std::vector<std::shared_ptr<tenzor::Variable>> params, double lr, double weight_decay) {
+            return tenzor::optim::ParamGroup{std::move(params), lr, weight_decay};
+        }), py::arg("params"), py::arg("lr"), py::arg("weight_decay") = 0.0)
+        .def_readwrite("params", &tenzor::optim::ParamGroup::params,
+             "Parameters in this group")
+        .def_readwrite("lr", &tenzor::optim::ParamGroup::lr,
+             "Learning rate for this group")
+        .def_readwrite("weight_decay", &tenzor::optim::ParamGroup::weight_decay,
+             "Weight decay (L2 regularization) for this group")
+        .def("__repr__", [](const tenzor::optim::ParamGroup& self) {
+            return "ParamGroup(params=" + std::to_string(self.params.size()) +
+                   ", lr=" + std::to_string(self.lr) +
+                   ", weight_decay=" + std::to_string(self.weight_decay) + ")";
+        });
+
     // Optimizer base class - needed for functions that accept any optimizer
     py::class_<tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::Optimizer>>(optim, "Optimizer",
         "Base class for all optimizers")
         .def("zero_grad", &tenzor::optim::Optimizer::zero_grad, "Zero out all parameter gradients")
         .def("state_dict", &tenzor::optim::Optimizer::state_dict, "Get optimizer state dictionary")
         .def("load_state_dict", &tenzor::optim::Optimizer::load_state_dict, py::arg("state"),
-             "Load optimizer state dictionary");
+             "Load optimizer state dictionary")
+        .def("add_param_group", &tenzor::optim::Optimizer::add_param_group,
+             py::arg("group"), "Add a parameter group with custom hyperparameters")
+        .def("param_groups", static_cast<std::vector<tenzor::optim::ParamGroup>& (tenzor::optim::Optimizer::*)()>(
+             &tenzor::optim::Optimizer::param_groups),
+             py::return_value_policy::reference_internal,
+             "Get all parameter groups")
+        .def("set_clip_config", &tenzor::optim::Optimizer::set_clip_config,
+             py::arg("config"), "Set gradient clipping configuration")
+        .def("clip_config", &tenzor::optim::Optimizer::clip_config,
+             py::return_value_policy::reference_internal,
+             "Get current gradient clipping configuration");
 
     py::class_<tenzor::optim::SGD, tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::SGD>>(optim, "SGD")
         .def(py::init<std::vector<std::shared_ptr<tenzor::Variable>>, double, double, double, double, bool>(),
@@ -5252,7 +5338,8 @@ PYBIND11_MODULE(tenzor_core, m) {
             py::arg("bucket_size_bytes") = tenzor::distributed::DistributedDataParallel::DEFAULT_BUCKET_SIZE)
         .def("forward", &tenzor::distributed::DistributedDataParallel::forward,
             "Forward pass through wrapped module",
-            py::arg("input"))
+            py::arg("input"),
+            py::call_guard<py::gil_scoped_release>())
         .def("synchronize_gradients", &tenzor::distributed::DistributedDataParallel::synchronize_gradients,
             "Synchronize gradients across all processes")
         .def("sync_comm", &tenzor::distributed::DistributedDataParallel::sync_comm,
@@ -6224,7 +6311,8 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("num_values", &tenzor::jit::Graph::num_values)
         .def("forward", &tenzor::jit::Graph::forward,
              py::arg("inputs"),
-             "Execute graph with runtime inputs")
+             "Execute graph with runtime inputs",
+             py::call_guard<py::gil_scoped_release>())
         .def("save", &tenzor::jit::Graph::save,
              py::arg("path"),
              "Save graph to file")

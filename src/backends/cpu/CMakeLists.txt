@@ -232,11 +232,85 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
             /fp:fast
         )
         target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_PORTABLE)
+
+        # MSVC AVX2 files need /arch:AVX2 even in portable mode
+        set_source_files_properties(
+            kernels/math_simd.cpp
+            kernels/activations_simd.cpp
+            kernels/simd_dispatch.cpp
+            PROPERTIES COMPILE_OPTIONS "/arch:AVX2"
+        )
+        set_source_files_properties(
+            kernels/math_simd.cpp
+            kernels/activations_simd.cpp
+            kernels/simd_dispatch.cpp
+            PROPERTIES COMPILE_DEFINITIONS "TENZOR_HAS_F16C;TENZOR_HAS_FMA"
+        )
+
+        # AVX-512 files need /arch:AVX512 (MSVC 2019 16.9+)
+        set_source_files_properties(
+            kernels/math_simd_avx512.cpp
+            kernels/activations_simd_avx512.cpp
+            kernels/batchnorm_avx512.cpp
+            kernels/pooling_avx512.cpp
+            PROPERTIES COMPILE_OPTIONS "/arch:AVX512"
+        )
     else()
+        message(STATUS "CPU Backend: NATIVE mode (MSVC) - using /arch:AVX2")
         target_compile_options(tenzor_backend_cpu PRIVATE
             /arch:AVX2
             /fp:fast
         )
+
+        # Check for F16C support (available with AVX2 on MSVC)
+        include(CheckCXXSourceCompiles)
+        set(CMAKE_REQUIRED_FLAGS "/arch:AVX2")
+        check_cxx_source_compiles("
+            #include <immintrin.h>
+            int main() {
+                __m128i packed = _mm_setzero_si128();
+                __m256 unpacked = _mm256_cvtph_ps(packed);
+                (void)unpacked;
+                return 0;
+            }
+        " TENZOR_HAS_F16C)
+
+        if(TENZOR_HAS_F16C)
+            target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_HAS_F16C)
+            message(STATUS "CPU Backend: F16C (Float16 conversion) support enabled")
+        endif()
+
+        # FMA is always available with AVX2 on MSVC
+        target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_HAS_FMA)
+        message(STATUS "CPU Backend: FMA (Fused Multiply-Add) support enabled")
+
+        # Check for AVX-512 support
+        set(CMAKE_REQUIRED_FLAGS "/arch:AVX512")
+        check_cxx_source_compiles("
+            #include <immintrin.h>
+            int main() {
+                __m512 a = _mm512_setzero_ps();
+                __m512 b = _mm512_add_ps(a, a);
+                (void)b;
+                return 0;
+            }
+        " TENZOR_HAS_AVX512)
+
+        if(TENZOR_HAS_AVX512)
+            target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_HAS_AVX512)
+            message(STATUS "CPU Backend: AVX-512 support enabled")
+
+            # AVX-512 translation units
+            set_source_files_properties(
+                kernels/math_simd_avx512.cpp
+                kernels/activations_simd_avx512.cpp
+                kernels/batchnorm_avx512.cpp
+                kernels/pooling_avx512.cpp
+                PROPERTIES COMPILE_OPTIONS "/arch:AVX512"
+            )
+        else()
+            message(STATUS "CPU Backend: Using AVX2 (AVX-512 not available)")
+        endif()
     endif()
 endif()
 

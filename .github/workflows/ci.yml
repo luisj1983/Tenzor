@@ -302,46 +302,29 @@ jobs:
             -E "cuda|vulkan|oneapi|rocm" \
             --timeout 120
 
-  # Tier 1.9: macOS build (CPU-only smoke test)
-  macos-build:
-    name: macOS Build
-    runs-on: macos-14
-    needs: build-and-smoke
-    if: github.event_name == 'pull_request'
+  # Tier 1.85: Windows build (CPU-only smoke test)
+  windows-build:
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          brew install ninja googletest libomp
-
-      - name: Configure (CPU only)
-        run: |
-          cmake -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} \
-            -DTENZOR_BUILD_CUDA=OFF \
-            -DTENZOR_BUILD_ROCM=OFF \
-            -DTENZOR_BUILD_ONEAPI=OFF \
-            -DTENZOR_BUILD_VULKAN=OFF \
-            -DTENZOR_BUILD_METAL=OFF \
-            -DTENZOR_BUILD_WEBGPU=OFF \
-            -DTENZOR_BUILD_PYTHON=OFF \
-            -DTENZOR_BUILD_TESTS=ON \
-            -DTENZOR_BUILD_BENCHMARKS=OFF \
-            -DTENZOR_BUILD_EXAMPLES=OFF \
-            -DTENZOR_BUILD_MODEL_HUB=OFF \
-            -DTENZOR_NATIVE_ARCH=OFF
-
+      - name: Configure CMake
+        run: cmake -B build -DTENZOR_BUILD_CUDA=OFF -DTENZOR_BUILD_VULKAN=OFF -DTENZOR_BUILD_ROCM=OFF -DTENZOR_BUILD_ONEAPI=OFF -DTENZOR_BUILD_METAL=OFF -DTENZOR_BUILD_WEBGPU=OFF -DTENZOR_BUILD_PYTHON=OFF -DTENZOR_BUILD_MODEL_HUB=OFF
       - name: Build
-        run: ninja -C build
+        run: cmake --build build --config Release -j 4
+      - name: Test
+        run: cd build && ctest -C Release --output-on-failure -R "cpu" --timeout 120
 
-      - name: Run smoke tests
-        run: |
-          cd build
-          ctest --output-on-failure -j$(sysctl -n hw.logicalcpu) \
-            -R "TensorBasicTest|TensorCreationTest" \
-            -E "cuda|vulkan|oneapi|rocm" \
-            --timeout 120
+  # Tier 1.9: macOS build (CPU-only smoke test)
+  macos-build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure CMake
+        run: cmake -B build -DTENZOR_BUILD_CUDA=OFF -DTENZOR_BUILD_VULKAN=OFF -DTENZOR_BUILD_ROCM=OFF -DTENZOR_BUILD_ONEAPI=OFF -DTENZOR_BUILD_WEBGPU=OFF -DTENZOR_BUILD_PYTHON=OFF -DTENZOR_BUILD_MODEL_HUB=OFF
+      - name: Build
+        run: cmake --build build --config Release -j 3
+      - name: Test
+        run: cd build && ctest --output-on-failure -R "cpu" --timeout 120
 
   # Tier 2: Full CPU tests (every PR, ~30 min)
   full-cpu-tests:

@@ -50,6 +50,10 @@ auto Function::input_variables() const -> const std::vector<Variable>& {
     return input_variables_;
 }
 
+auto Function::input_variables() -> std::vector<Variable>& {
+    return input_variables_;
+}
+
 auto Function::save_for_backward(std::vector<Tensor> tensors) -> void {
     // Record version counters for in-place modification detection
     saved_versions_.clear();

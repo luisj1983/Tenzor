@@ -570,6 +570,21 @@ __global__ void add_bias_kernel(
     }
 }
 
+// Float64 bias addition kernel
+__global__ void add_bias_kernel_f64(
+    double* output,
+    const double* bias,
+    int64_t batch,
+    int64_t channels,
+    int64_t spatial_size,
+    int64_t n
+) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        int64_t c = (idx / spatial_size) % channels;
+        output[idx] += bias[c];
+    }
+}
+
 // FP16 bias addition kernel
 __global__ void add_bias_kernel_f16(
     __half* output,
@@ -907,6 +922,86 @@ auto conv2d_forward_kernel(
             compute_launch_config_1d(total, grid, block);
 
             add_bias_kernel_f16<<<grid, block, 0, stream>>>(
+                output_data, bias_data, batch, out_channels, spatial_size, total
+            );
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
+        }
+
+        return output;
+    }
+
+    // Float64 path: im2col + cublasDgemm (mirrors Float32 path below)
+    if (input.dtype() == DType::Float64) {
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(output.data<double>(), 0, output.numel() * sizeof(double), stream));
+
+        cublasHandle_t cublas_handle = CuBLASHandlePool::get(stream);
+        int64_t out_channels_per_group = out_channels / groups;
+
+        for (int64_t g = 0; g < groups; ++g) {
+            int64_t in_start = g * in_channels_per_group;
+            int64_t out_start = g * out_channels_per_group;
+
+            int64_t col_rows = batch * out_h * out_w;
+            int64_t col_cols = in_channels_per_group * kernel_h * kernel_w;
+            backend::CachedMemoryGuard col_buffer_guard(col_rows * col_cols * sizeof(double));
+            auto* col_buffer = static_cast<double*>(col_buffer_guard.get());
+
+            dim3 grid, block;
+            int64_t total_elements = batch * out_h * out_w * in_channels_per_group * kernel_h * kernel_w;
+            compute_launch_config_1d(total_elements, grid, block);
+
+            const double* input_ptr = input.data<double>() + in_start * height * width;
+            im2col_kernel<double><<<grid, block, 0, stream>>>(
+                input_ptr, col_buffer,
+                batch, in_channels_per_group, height, width,
+                kernel_h, kernel_w, stride, padding, dilation, out_h, out_w
+            );
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+            int64_t M = col_rows;
+            int64_t K = col_cols;
+            int64_t N = out_channels_per_group;
+
+            double alpha = 1.0;
+            double beta = 0.0;
+
+            const double* weight_ptr = weight.data<double>() + out_start * in_channels_per_group * kernel_h * kernel_w;
+
+            backend::CachedMemoryGuard temp_output_guard(M * N * sizeof(double));
+            auto* temp_output = static_cast<double*>(temp_output_guard.get());
+
+            TENZOR_CUBLAS_CHECK(cublasDgemm(
+                cublas_handle,
+                CUBLAS_OP_T,    // transpose B (weight)
+                CUBLAS_OP_N,    // don't transpose A (col_buffer)
+                N, M, K,
+                &alpha,
+                weight_ptr, K,
+                col_buffer, K,
+                &beta,
+                temp_output, N
+            ));
+
+            dim3 transpose_grid, transpose_block;
+            compute_launch_config_1d(M * N, transpose_grid, transpose_block);
+
+            nhwc_to_nchw_kernel<double><<<transpose_grid, transpose_block, 0, stream>>>(
+                temp_output, output.data<double>(),
+                batch, out_h, out_w, out_channels, N, out_start
+            );
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
+        }
+
+        if (bias != nullptr) {
+            int64_t spatial_size = out_h * out_w;
+            const double* bias_data = bias->data<double>();
+            double* output_data = output.data<double>();
+
+            dim3 grid, block;
+            int64_t total = batch * out_channels * out_h * out_w;
+            compute_launch_config_1d(total, grid, block);
+
+            add_bias_kernel_f64<<<grid, block, 0, stream>>>(
                 output_data, bias_data, batch, out_channels, spatial_size, total
             );
             TENZOR_CUDA_POST_LAUNCH_CHECK();
@@ -1289,11 +1384,17 @@ auto conv2d_backward_kernel(
                                    compute_grad_input, compute_grad_weight, compute_grad_bias, stream);
     }
 
-    // Check if Float64 - this custom kernel only supports Float32
-    // Float64 should be handled by cuDNN; if we reach here, throw a descriptive error
+    // Float64 backward requires cuDNN — the im2col + cublasDgemm fallback is only
+    // implemented for the forward path.  Backward needs col2im and transposed GEMM
+    // variants that are not yet ported to Float64.
+    // TODO: Implement Float64 backward using im2col/col2im + cublasDgemm to match
+    //       the Float64 forward fallback path added above.
     if (input.dtype() == DType::Float64) {
-        throw std::runtime_error("conv2d_backward_kernel: Float64 not supported in custom kernel. "
-                                 "Ensure cuDNN is enabled for Float64 convolution gradients.");
+        throw std::runtime_error(
+            "conv2d_backward_kernel: Float64 backward is not yet supported without cuDNN. "
+            "The Float64 forward path uses im2col + cublasDgemm, but the backward pass "
+            "requires col2im + transposed GEMM variants that have not been ported. "
+            "Please enable cuDNN for Float64 convolution training, or use Float32.");
     }
 
     // Initialize outputs (Float32 path)

@@ -153,8 +153,9 @@ auto ROCmBackend::deallocate(void* ptr) -> void {
             if (hipPointerGetAttributes(&attrs, ptr) == hipSuccess) {
                 device_id = attrs.device;
             } else {
-                TENZOR_LOG_WARNING("ROCm deallocate: failed to determine device for pointer, defaulting to device 0");
-                device_id = 0;
+                throw std::runtime_error("ROCm deallocate: failed to determine device for pointer " +
+                    std::to_string(reinterpret_cast<uintptr_t>(ptr)) +
+                    ". Pointer was not tracked and hipPointerGetAttributes failed.");
             }
         }
 
@@ -200,12 +201,15 @@ auto ROCmBackend::copy(void* dst, const void* src, size_t bytes, CopyKind kind) 
             std::string("HIP async copy failed: ") + hipGetErrorString(err)
         );
     }
-    // Synchronize default stream to maintain same semantics as before
-    err = hipStreamSynchronize(nullptr);
-    if (err != hipSuccess) {
-        throw std::runtime_error(
-            std::string("HIP stream sync after copy failed: ") + hipGetErrorString(err)
-        );
+    // Only synchronize for D2H copies where caller expects data to be available
+    // H2D and D2D can remain async on the default stream
+    if (kind == CopyKind::DeviceToHost) {
+        err = hipStreamSynchronize(nullptr);
+        if (err != hipSuccess) {
+            throw std::runtime_error(
+                std::string("HIP stream sync after D2H copy failed: ") + hipGetErrorString(err)
+            );
+        }
     }
 }
 

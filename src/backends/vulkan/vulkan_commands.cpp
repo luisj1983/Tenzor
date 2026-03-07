@@ -227,13 +227,11 @@ auto VulkanBackend::synchronize(int32_t device_id) -> void {
     // vkDeviceWaitIdle is equivalent to waiting on all queue fences and is
     // simpler than tracking individual frame fences for a full synchronize.
     VkResult waitResult = vkDeviceWaitIdle(ctx.device);
-    if (waitResult != VK_SUCCESS) {
-        std::string error_msg = "vkDeviceWaitIdle failed: " + std::to_string(waitResult);
-        if (waitResult == VK_ERROR_DEVICE_LOST) {
-            error_msg += " (VK_ERROR_DEVICE_LOST - GPU crash or timeout)";
-        }
-        throw std::runtime_error(error_msg);
+    if (waitResult == VK_ERROR_DEVICE_LOST) {
+        ctx.device_lost = true;
+        throw std::runtime_error("Vulkan: device lost during synchronize()");
     }
+    vulkan::checkVk(waitResult, "vkDeviceWaitIdle in synchronize");
 
     // Reset fence tracking state — all work is now complete
     ctx.submittedFrames = 0;

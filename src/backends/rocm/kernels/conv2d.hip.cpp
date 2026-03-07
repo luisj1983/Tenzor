@@ -40,6 +40,29 @@ namespace rocm {
 } while(0)
 #endif
 
+// RAII wrapper for rocBLAS handle to prevent leaks on exceptions
+class RocBLASHandleGuard {
+public:
+    RocBLASHandleGuard() {
+        ROCBLAS_CHECK(rocblas_create_handle(&handle_));
+    }
+    ~RocBLASHandleGuard() {
+        if (handle_) {
+            rocblas_destroy_handle(handle_);
+        }
+    }
+    RocBLASHandleGuard(const RocBLASHandleGuard&) = delete;
+    RocBLASHandleGuard& operator=(const RocBLASHandleGuard&) = delete;
+
+    rocblas_handle get() const { return handle_; }
+
+    void set_stream(hipStream_t stream) {
+        ROCBLAS_CHECK(rocblas_set_stream(handle_, stream));
+    }
+private:
+    rocblas_handle handle_ = nullptr;
+};
+
 // ============================================================================
 // Kernel Launch Helpers - Optimized for AMD GPUs
 // ============================================================================
@@ -818,10 +841,10 @@ auto conv2d_forward_kernel(
                        (dtype == DType::Float16) ? sizeof(__half) : sizeof(float);
     HIP_CHECK(hipMemsetAsync(output.data_ptr(), 0, output.numel() * elem_size, stream));
 
-    // Create rocBLAS handle
-    rocblas_handle rocblas_handle;
-    ROCBLAS_CHECK(rocblas_create_handle(&rocblas_handle));
-    ROCBLAS_CHECK(rocblas_set_stream(rocblas_handle, stream));
+    // Create rocBLAS handle (RAII ensures cleanup on exceptions)
+    RocBLASHandleGuard rocblas_guard;
+    rocblas_handle rocblas_handle = rocblas_guard.get();
+    rocblas_guard.set_stream(stream);
 
     // Process each group separately
     int64_t out_channels_per_group = out_channels / groups;
@@ -1011,7 +1034,6 @@ auto conv2d_forward_kernel(
             // Free col buffer
             HIP_CHECK(hipFree(col_buffer));
         } else {
-            ROCBLAS_CHECK(rocblas_destroy_handle(rocblas_handle));
             throw std::runtime_error("Conv2d: unsupported dtype (only Float32, Float64, and Float16 supported)");
         }
     }
@@ -1066,9 +1088,6 @@ auto conv2d_forward_kernel(
         }
         HIP_CHECK(hipGetLastError());
     }
-
-    // Cleanup
-    ROCBLAS_CHECK(rocblas_destroy_handle(rocblas_handle));
 
     return output;
 }
@@ -1152,10 +1171,10 @@ auto conv2d_backward_kernel(
         HIP_CHECK(hipMemsetAsync(grad_bias.data_ptr(), 0, grad_bias.numel() * elem_size, stream));
     }
 
-    // Create rocBLAS handle
-    rocblas_handle rocblas_handle;
-    ROCBLAS_CHECK(rocblas_create_handle(&rocblas_handle));
-    ROCBLAS_CHECK(rocblas_set_stream(rocblas_handle, stream));
+    // Create rocBLAS handle (RAII ensures cleanup on exceptions)
+    RocBLASHandleGuard rocblas_guard2;
+    rocblas_handle rocblas_handle = rocblas_guard2.get();
+    rocblas_guard2.set_stream(stream);
 
     int64_t out_channels_per_group = out_channels / groups;
     int64_t col_rows = batch * out_h * out_w;
@@ -1416,9 +1435,6 @@ auto conv2d_backward_kernel(
         }
         HIP_CHECK(hipGetLastError());
     }
-
-    // Cleanup
-    ROCBLAS_CHECK(rocblas_destroy_handle(rocblas_handle));
 
     return std::make_tuple(grad_input, grad_weight, grad_bias);
 }

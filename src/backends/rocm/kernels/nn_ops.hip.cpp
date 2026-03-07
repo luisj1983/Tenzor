@@ -27,6 +27,32 @@ namespace rocm {
 
 constexpr int BLOCK_SIZE = 256;
 
+// RAII wrapper for rocBLAS handle to prevent leaks on exceptions
+class RocBLASHandleGuard {
+public:
+    RocBLASHandleGuard() {
+        rocblas_status status = rocblas_create_handle(&handle_);
+        if (status != rocblas_status_success) {
+            throw std::runtime_error("Failed to create rocBLAS handle");
+        }
+    }
+    ~RocBLASHandleGuard() {
+        if (handle_) {
+            rocblas_destroy_handle(handle_);
+        }
+    }
+    RocBLASHandleGuard(const RocBLASHandleGuard&) = delete;
+    RocBLASHandleGuard& operator=(const RocBLASHandleGuard&) = delete;
+
+    rocblas_handle get() const { return handle_; }
+
+    void set_stream(hipStream_t stream) {
+        rocblas_set_stream(handle_, stream);
+    }
+private:
+    rocblas_handle handle_ = nullptr;
+};
+
 inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
     return std::min(static_cast<int64_t>((n + block_size - 1) / block_size), static_cast<int64_t>(65535));
 }
@@ -300,9 +326,9 @@ auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias
     Tensor output(out_shape, input.dtype(), input.device());
 
     // Use rocBLAS for matrix multiply: output = input @ weight.T
-    rocblas_handle handle;
-    rocblas_create_handle(&handle);
-    rocblas_set_stream(handle, stream);
+    RocBLASHandleGuard handle_guard;
+    rocblas_handle handle = handle_guard.get();
+    handle_guard.set_stream(stream);
 
     if (input.dtype() == DType::Float32) {
         const float alpha = 1.0f;
@@ -372,11 +398,9 @@ auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias
                 reinterpret_cast<__half*>(output.data<Float16>()), batch_size, out_features);
         }
     } else {
-        rocblas_destroy_handle(handle);
         throw std::runtime_error("Linear only supports Float32, Float64, and Float16");
     }
 
-    rocblas_destroy_handle(handle);
     HIP_CHECK(hipGetLastError());
     return output;
 }
@@ -406,9 +430,9 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input, cons
     Tensor grad_weight(std::vector<int64_t>(w_shape.begin(), w_shape.end()), weight.dtype(), weight.device());
     Tensor grad_bias({out_features}, input.dtype(), input.device());
 
-    rocblas_handle handle;
-    rocblas_create_handle(&handle);
-    rocblas_set_stream(handle, stream);
+    RocBLASHandleGuard handle_guard2;
+    rocblas_handle handle = handle_guard2.get();
+    handle_guard2.set_stream(stream);
 
     if (input.dtype() == DType::Float32) {
         const float alpha = 1.0f;
@@ -512,11 +536,9 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input, cons
             reinterpret_cast<__half*>(grad_bias.data<Float16>()),
             out_features);
     } else {
-        rocblas_destroy_handle(handle);
         throw std::runtime_error("Linear backward only supports Float32, Float64, and Float16");
     }
 
-    rocblas_destroy_handle(handle);
     HIP_CHECK(hipGetLastError());
     return {grad_input, grad_weight, grad_bias};
 }

@@ -14,10 +14,12 @@ namespace tenzor::nn {
 namespace autograd = tenzor;
 
 // TypeCast autograd function for dtype conversion with gradient flow
-// Gradients are passed through without dtype conversion - this allows gradients
-// to be stored in the computation dtype for mixed precision training compatibility
+// Gradients are cast back to the original (input) dtype so that parameter
+// gradients match the parameter dtype (e.g., Float16 weight gets Float16 grad).
 class TypeCastBackward : public Function {
 public:
+    DType original_dtype_ = DType::Float32;
+
     TypeCastBackward() = default;
 
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
@@ -25,13 +27,19 @@ public:
     }
 
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        // Pass gradient through as-is (in computation dtype)
-        return {grad_outputs[0]};
+        auto& grad = grad_outputs[0];
+        if (grad.dtype() != original_dtype_) {
+            return {grad.to(original_dtype_)};
+        }
+        return {grad};
     }
 
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
-        // Pass gradient through as-is (in computation dtype)
-        return {grad_outputs[0]};
+        auto& grad = grad_outputs[0];
+        if (grad.dtype() != original_dtype_) {
+            return {Variable(grad.tensor().to(original_dtype_), grad.requires_grad())};
+        }
+        return {grad};
     }
 };
 
@@ -46,6 +54,7 @@ static auto variable_cast(const Variable& input, DType target_dtype) -> Variable
 
     if (input.requires_grad() && is_grad_enabled()) {
         auto grad_fn = std::make_shared<TypeCastBackward>();
+        grad_fn->original_dtype_ = input.dtype();
 
         // Track input variable for gradient accumulation
         std::vector<Variable> input_vars = {input};
@@ -228,7 +237,14 @@ auto Linear::forward_impl(const Variable& input) -> Variable {
 }
 
 auto Linear::reset_parameters() -> void {
-    // Xavier/Glorot initialization already done in constructor
+    float bound = std::sqrt(1.0f / static_cast<float>(in_features_));
+    Variable weight(rand({out_features_, in_features_}) * (2.0f * bound) - bound, true);
+    register_parameter("weight", std::move(weight));
+
+    if (has_bias_) {
+        Variable bias_var(rand({out_features_}) * (2.0f * bound) - bound, true);
+        register_parameter("bias", std::move(bias_var));
+    }
 }
 
 } // namespace tenzor::nn

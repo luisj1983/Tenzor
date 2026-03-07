@@ -90,6 +90,13 @@ class VulkanBackend;
  *
  * Tensors use shared storage with reference counting for efficient memory usage.
  *
+ * Thread Safety:
+ * - Tensor is NOT thread-safe for concurrent mutation (write + write, or read + write)
+ * - Tensor IS safe for concurrent reads from multiple threads
+ * - For concurrent gradient accumulation, use Variable::make_thread_safe()
+ * - Forward/backward on shared Variables from different threads requires
+ *   external synchronization (e.g., mutex)
+ *
  * @threadsafety Read operations (shape(), strides(), ndim(), numel(), dtype(),
  * device(), is_contiguous(), data<T>() const, item<T>()) are thread-safe and
  * may be called concurrently from multiple threads on the same Tensor instance.

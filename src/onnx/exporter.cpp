@@ -2440,8 +2440,8 @@ auto ONNXExporter::serialize_model() -> std::vector<uint8_t> {
     // Graph (field 7) - simplified
     std::vector<uint8_t> graph_data;
 
-    // Graph name (field 1)
-    write_string(graph_data, 1, graph_.name);
+    // Graph name (field 2 in GraphProto)
+    write_string(graph_data, 2, graph_.name);
 
     // Serialize nodes (field 1 in GraphProto)
     for (const auto& node : graph_.nodes) {

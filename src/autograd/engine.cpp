@@ -278,6 +278,20 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
             // Check for NaN/Inf in computed gradients when anomaly detection is on
             check_for_anomaly(input_grads, function.get());
 
+            // Validate gradient dtypes are floating-point or complex
+            for (size_t i = 0; i < input_grads.size(); ++i) {
+                const auto& g = input_grads[i];
+                if (g.is_valid() && g.numel() > 0 &&
+                    !g.is_floating_point() && !g.is_complex()) {
+                    throw std::runtime_error(
+                        std::string("Backward function ") + function->name() +
+                        " returned non-floating-point gradient (dtype=" +
+                        std::string(dtype_name(g.dtype())) + " at index " +
+                        std::to_string(i) +
+                        "). Gradients must be floating-point or complex.");
+                }
+            }
+
             // Release saved tensors immediately to free GPU memory for subsequent layers.
             // This is safe because saved tensors are only needed during this backward() call.
             if (!retain_graph) {
@@ -285,11 +299,10 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
             }
 
             // Accumulate gradients to input variables
-            const auto& input_vars = function->input_variables();
+            auto& input_vars = function->input_variables();
 
             for (size_t i = 0; i < input_vars.size() && i < input_grads.size(); ++i) {
-                // Get reference to Variable (stored by value)
-                Variable& var = const_cast<Variable&>(input_vars[i]);
+                Variable& var = input_vars[i];
 
                 // Skip Variables without gradients (default-constructed with requires_grad=false)
                 if (!var.requires_grad()) {
@@ -589,15 +602,29 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
             // Check for NaN/Inf in computed gradients when anomaly detection is on
             check_for_anomaly(input_grads, function.get());
 
+            // Validate gradient dtypes are floating-point or complex
+            for (size_t i = 0; i < input_grads.size(); ++i) {
+                const auto& g = input_grads[i];
+                if (g.is_valid() && g.numel() > 0 &&
+                    !g.is_floating_point() && !g.is_complex()) {
+                    throw std::runtime_error(
+                        std::string("Backward function ") + function->name() +
+                        " returned non-floating-point gradient (dtype=" +
+                        std::string(dtype_name(g.dtype())) + " at index " +
+                        std::to_string(i) +
+                        "). Gradients must be floating-point or complex.");
+                }
+            }
+
             // Release saved tensors to free memory — only if we're not retaining the graph
             if (!retain_graph) {
                 function->release_saved_tensors();
             }
 
             // Accumulate gradients to input variables
-            const auto& input_vars = function->input_variables();
+            auto& input_vars = function->input_variables();
             for (size_t i = 0; i < input_vars.size() && i < input_grads.size(); ++i) {
-                Variable& var = const_cast<Variable&>(input_vars[i]);
+                Variable& var = input_vars[i];
                 if (!var.requires_grad()) continue;
 
                 Tensor grad_to_apply = input_grads[i];

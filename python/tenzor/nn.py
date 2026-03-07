@@ -308,10 +308,8 @@ class Module(_CppModule):
 
     def extra_repr(self) -> str:
         """Override in subclasses to show constructor args."""
-        # Try C++ extra_repr first (for wrapped C++ modules like Linear, Conv2d)
-        if hasattr(self._module, 'extra_repr'):
-            return self._module.extra_repr()
-        return ""
+        # Call C++ extra_repr (inherited from _CppModule)
+        return _CppModule.extra_repr(self)
 
     def __repr__(self) -> str:
         """Return a string representation of the module."""

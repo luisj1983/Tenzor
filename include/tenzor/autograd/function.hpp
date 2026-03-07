@@ -156,6 +156,7 @@ public:
      * @return Vector of tracked Variables
      */
     auto input_variables() const -> const std::vector<Variable>&;
+    auto input_variables() -> std::vector<Variable>&;
 
     /**
      * @brief Reload offloaded saved tensors back to GPU.
