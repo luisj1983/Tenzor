@@ -5290,6 +5290,7 @@ auto binary_math_kernel(const Tensor& a, const Tensor& b, F32Fn f32_fn, F64Fn f6
             const float* ad = a.data<float>();
             const float* bd = b.data<float>();
             float* od = result.data<float>();
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
             for (int64_t i = 0; i < n; ++i) {
                 int64_t a_idx = 0, b_idx = 0, idx = i;
                 for (int64_t d = ndim - 1; d >= 0; --d) {
@@ -5304,6 +5305,7 @@ auto binary_math_kernel(const Tensor& a, const Tensor& b, F32Fn f32_fn, F64Fn f6
             const double* ad = a.data<double>();
             const double* bd = b.data<double>();
             double* od = result.data<double>();
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
             for (int64_t i = 0; i < n; ++i) {
                 int64_t a_idx = 0, b_idx = 0, idx = i;
                 for (int64_t d = ndim - 1; d >= 0; --d) {

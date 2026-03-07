@@ -115,8 +115,8 @@ __global__ void half_to_float_kernel(const __half* src, float* dst, int64_t n) {
 // compare original values at those indices to find the global winner.
 template<typename T>
 __global__ void argmax_final_kernel(const T* input, const int64_t* block_indices, int64_t* output, int num_blocks) {
-    __shared__ T shared_vals[REDUCTION_BLOCK_SIZE];
-    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE];
+    __shared__ T shared_vals[REDUCTION_BLOCK_SIZE + 1];
+    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE + 1];
 
     int tid = threadIdx.x;
     T best_val;
@@ -161,8 +161,8 @@ __global__ void argmax_final_kernel(const T* input, const int64_t* block_indices
 
 template<typename T>
 __global__ void argmin_final_kernel(const T* input, const int64_t* block_indices, int64_t* output, int num_blocks) {
-    __shared__ T shared_vals[REDUCTION_BLOCK_SIZE];
-    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE];
+    __shared__ T shared_vals[REDUCTION_BLOCK_SIZE + 1];
+    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE + 1];
 
     int tid = threadIdx.x;
     T best_val;
@@ -206,8 +206,9 @@ __global__ void argmin_final_kernel(const T* input, const int64_t* block_indices
 
 // Half-precision variants of final reduction kernels
 __global__ void argmax_final_kernel_half(const __half* input, const int64_t* block_indices, int64_t* output, int num_blocks) {
-    __shared__ float shared_vals[REDUCTION_BLOCK_SIZE];
-    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE];
+    // +1 padding avoids shared memory bank conflicts between vals and idxs arrays
+    __shared__ float shared_vals[REDUCTION_BLOCK_SIZE + 1];
+    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE + 1];
 
     int tid = threadIdx.x;
     float best_val;
@@ -250,8 +251,8 @@ __global__ void argmax_final_kernel_half(const __half* input, const int64_t* blo
 }
 
 __global__ void argmin_final_kernel_half(const __half* input, const int64_t* block_indices, int64_t* output, int num_blocks) {
-    __shared__ float shared_vals[REDUCTION_BLOCK_SIZE];
-    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE];
+    __shared__ float shared_vals[REDUCTION_BLOCK_SIZE + 1];
+    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE + 1];
 
     int tid = threadIdx.x;
     float best_val;
@@ -1873,8 +1874,8 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
 // Argmax kernel for full reduction
 template<typename T>
 __global__ void argmax_full_kernel(const T* input, int64_t* output, int64_t n) {
-    __shared__ T shared_vals[REDUCTION_BLOCK_SIZE];
-    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE];
+    __shared__ T shared_vals[REDUCTION_BLOCK_SIZE + 1];
+    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE + 1];
 
     int tid = threadIdx.x;
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1932,8 +1933,8 @@ __global__ void argmax_full_kernel(const T* input, int64_t* output, int64_t n) {
 // Argmin kernel for full reduction
 template<typename T>
 __global__ void argmin_full_kernel(const T* input, int64_t* output, int64_t n) {
-    __shared__ T shared_vals[REDUCTION_BLOCK_SIZE];
-    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE];
+    __shared__ T shared_vals[REDUCTION_BLOCK_SIZE + 1];
+    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE + 1];
 
     int tid = threadIdx.x;
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2100,8 +2101,8 @@ __global__ void argmin_along_dim_kernel(
 
 // Specialized argmax_full_kernel for __half
 __global__ void argmax_full_kernel_half(const __half* input, int64_t* output, int64_t n) {
-    __shared__ __half shared_vals[REDUCTION_BLOCK_SIZE];
-    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE];
+    __shared__ __half shared_vals[REDUCTION_BLOCK_SIZE + 1];
+    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE + 1];
 
     int tid = threadIdx.x;
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2158,8 +2159,8 @@ __global__ void argmax_full_kernel_half(const __half* input, int64_t* output, in
 
 // Specialized argmin_full_kernel for __half
 __global__ void argmin_full_kernel_half(const __half* input, int64_t* output, int64_t n) {
-    __shared__ __half shared_vals[REDUCTION_BLOCK_SIZE];
-    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE];
+    __shared__ __half shared_vals[REDUCTION_BLOCK_SIZE + 1];
+    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE + 1];
 
     int tid = threadIdx.x;
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2324,8 +2325,8 @@ __global__ void argmin_along_dim_kernel_half(
 
 // BFloat16 final kernel for argmax
 __global__ void argmax_final_kernel_bf16(const __nv_bfloat16* input, const int64_t* block_indices, int64_t* output, int num_blocks) {
-    __shared__ float shared_vals[REDUCTION_BLOCK_SIZE];
-    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE];
+    __shared__ float shared_vals[REDUCTION_BLOCK_SIZE + 1];
+    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE + 1];
 
     int tid = threadIdx.x;
     float best_val;
@@ -2369,8 +2370,8 @@ __global__ void argmax_final_kernel_bf16(const __nv_bfloat16* input, const int64
 
 // BFloat16 final kernel for argmin
 __global__ void argmin_final_kernel_bf16(const __nv_bfloat16* input, const int64_t* block_indices, int64_t* output, int num_blocks) {
-    __shared__ float shared_vals[REDUCTION_BLOCK_SIZE];
-    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE];
+    __shared__ float shared_vals[REDUCTION_BLOCK_SIZE + 1];
+    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE + 1];
 
     int tid = threadIdx.x;
     float best_val;
@@ -2414,8 +2415,8 @@ __global__ void argmin_final_kernel_bf16(const __nv_bfloat16* input, const int64
 
 // Specialized argmax_full_kernel for __nv_bfloat16
 __global__ void argmax_full_kernel_bf16(const __nv_bfloat16* input, int64_t* output, int64_t n) {
-    __shared__ __nv_bfloat16 shared_vals[REDUCTION_BLOCK_SIZE];
-    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE];
+    __shared__ __nv_bfloat16 shared_vals[REDUCTION_BLOCK_SIZE + 1];
+    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE + 1];
 
     int tid = threadIdx.x;
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2472,8 +2473,8 @@ __global__ void argmax_full_kernel_bf16(const __nv_bfloat16* input, int64_t* out
 
 // Specialized argmin_full_kernel for __nv_bfloat16
 __global__ void argmin_full_kernel_bf16(const __nv_bfloat16* input, int64_t* output, int64_t n) {
-    __shared__ __nv_bfloat16 shared_vals[REDUCTION_BLOCK_SIZE];
-    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE];
+    __shared__ __nv_bfloat16 shared_vals[REDUCTION_BLOCK_SIZE + 1];
+    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE + 1];
 
     int tid = threadIdx.x;
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;

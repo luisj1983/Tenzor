@@ -1166,9 +1166,19 @@ auto VulkanBackend::dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor {
             shader_name = b_is_transposed ? "matmul_f64_bt" : "matmul_f64";
         }
     } else if (is_float16) {
-        shader_name = "matmul_f16";  // TODO: add matmul_f16_bt when needed
+        // No _bt variant for F16 — force B contiguous if transposed
+        if (b_is_transposed) {
+            b_for_compute = dispatchContiguous(b);
+            b_is_transposed = false;
+        }
+        shader_name = "matmul_f16";
     } else if (is_int32) {
-        shader_name = "matmul_i32";  // TODO: add matmul_i32_bt when needed
+        // No _bt variant for I32 — force B contiguous if transposed
+        if (b_is_transposed) {
+            b_for_compute = dispatchContiguous(b);
+            b_is_transposed = false;
+        }
+        shader_name = "matmul_i32";
     } else {
         shader_name = b_is_transposed ? "matmul_bt" : "matmul";
     }

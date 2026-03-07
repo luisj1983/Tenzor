@@ -1713,17 +1713,30 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         auto ndims = self.ndim();
         auto shp = self.shape();
         auto str = self.strides();
-        auto elem_size = dtype_size(self.dtype());
+        auto elem_size = static_cast<int64_t>(dtype_size(self.dtype()));
         auto* base = static_cast<uint8_t*>(self.data_ptr());
         int64_t n = self.numel();
 
-        std::vector<int64_t> indices(ndims, 0);
+        // Precompute cumulative products for flat-index-to-coordinate conversion
+        std::vector<int64_t> cum_sizes(ndims);
+        if (ndims > 0) {
+            cum_sizes[ndims - 1] = 1;
+            for (int64_t d = ndims - 2; d >= 0; --d)
+                cum_sizes[d] = cum_sizes[d + 1] * shp[d + 1];
+        }
+
+        auto dtype = self.dtype();
+        #pragma omp parallel for if(n > 65536)
         for (int64_t i = 0; i < n; ++i) {
             int64_t byte_offset = 0;
-            for (int64_t d = 0; d < ndims; ++d)
-                byte_offset += indices[d] * str[d] * static_cast<int64_t>(elem_size);
+            int64_t idx = i;
+            for (int64_t d = 0; d < ndims; ++d) {
+                int64_t coord = idx / cum_sizes[d];
+                idx %= cum_sizes[d];
+                byte_offset += coord * str[d] * elem_size;
+            }
             auto* ptr = base + byte_offset;
-            switch (self.dtype()) {
+            switch (dtype) {
                 case DType::Float32:  *reinterpret_cast<float*>(ptr) = static_cast<float>(value); break;
                 case DType::Float64:  *reinterpret_cast<double*>(ptr) = value; break;
                 case DType::Int32:    *reinterpret_cast<int32_t*>(ptr) = static_cast<int32_t>(value); break;
@@ -1735,10 +1748,6 @@ void register_cpu_kernels(BackendDispatchTable& table) {
                 case DType::BFloat16: *reinterpret_cast<BFloat16*>(ptr) = BFloat16(static_cast<float>(value)); break;
                 case DType::Bool:     *reinterpret_cast<bool*>(ptr) = (value != 0.0); break;
                 default: break;
-            }
-            for (int64_t d = ndims - 1; d >= 0; --d) {
-                if (++indices[d] < shp[d]) break;
-                indices[d] = 0;
             }
         }
         return self;

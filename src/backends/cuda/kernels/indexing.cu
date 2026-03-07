@@ -646,13 +646,10 @@ auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
 
     bool idx_is_int32 = (index.dtype() == DType::Int32);
 
-    // Step 1: Copy input to output
-    int num_blocks_copy = get_num_blocks(total_input);
-    copy_kernel_impl<float><<<num_blocks_copy, BLOCK_SIZE, 0, stream>>>(
-        reinterpret_cast<const float*>(input.data_ptr()),
-        reinterpret_cast<float*>(output.data_ptr()),
-        (total_input * dtype_size(input.dtype()) + 3) / 4);
-    CUDA_CHECK(cudaGetLastError());
+    // Step 1: Copy input to output (raw byte copy — works for all dtypes)
+    CUDA_CHECK(cudaMemcpyAsync(output.data_ptr(), input.data_ptr(),
+                               total_input * dtype_size(input.dtype()),
+                               cudaMemcpyDeviceToDevice, stream));
 
     // Step 2: Scatter-add with atomicAdd
     if (total_scatter == 0) return output;
@@ -680,7 +677,36 @@ auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
         case DType::Float64: LAUNCH_SCATTER_ADD(double); break;
         case DType::Int32:   LAUNCH_SCATTER_ADD(int32_t); break;
         case DType::Int64:   LAUNCH_SCATTER_ADD(int64_t); break;
-        default: throw std::runtime_error("scatter_add: unsupported dtype (atomicAdd requires float/double/int)");
+        case DType::Float16:
+        case DType::BFloat16: {
+            // Float16/BFloat16: upcast to Float32 for atomicAdd, then cast back.
+            // This is correct because atomicAdd is not natively supported for half types
+            // on all architectures, and upcasting avoids precision issues in accumulation.
+            Tensor input_f32 = input.to(DType::Float32);
+            Tensor src_f32 = src.to(DType::Float32);
+            Tensor output_f32(output_shape, DType::Float32, input.device());
+            CUDA_CHECK(cudaMemcpyAsync(output_f32.data_ptr(), input_f32.data_ptr(),
+                                       total_input * sizeof(float),
+                                       cudaMemcpyDeviceToDevice, stream));
+            if (total_scatter > 0) {
+                int num_blocks_scatter_f32 = get_num_blocks(total_scatter);
+                if (idx_is_int32)
+                    scatter_add_kernel_impl<float, int32_t><<<num_blocks_scatter_f32, BLOCK_SIZE, 0, stream>>>(
+                        index.data<int32_t>(), src_f32.data<float>(), output_f32.data<float>(),
+                        outer_size, dim_size, inner_size, index_dim_size, total_scatter,
+                        error_buf.as<int>());
+                else
+                    scatter_add_kernel_impl<float, int64_t><<<num_blocks_scatter_f32, BLOCK_SIZE, 0, stream>>>(
+                        index.data<int64_t>(), src_f32.data<float>(), output_f32.data<float>(),
+                        outer_size, dim_size, inner_size, index_dim_size, total_scatter,
+                        error_buf.as<int>());
+                CUDA_CHECK(cudaGetLastError());
+            }
+            output = output_f32.to(input.dtype());
+            break;
+        }
+        default: throw std::runtime_error("scatter_add: unsupported dtype " +
+                     std::string(dtype_name(input.dtype())));
     }
 
     #undef LAUNCH_SCATTER_ADD

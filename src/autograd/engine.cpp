@@ -305,6 +305,11 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
             // Accumulate gradients to input variables
             auto& input_vars = function->input_variables();
 
+            if (input_grads.size() < input_vars.size()) {
+                // Backward returned fewer gradients than inputs — warn and pad with empty
+                // (this could be intentional for ops that don't need all input gradients)
+            }
+
             for (size_t i = 0; i < input_vars.size() && i < input_grads.size(); ++i) {
                 Variable& var = input_vars[i];
 

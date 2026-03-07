@@ -742,6 +742,23 @@ auto slogdet(const Variable& input) -> std::tuple<Variable, Variable>;
  */
 auto spmm(const SparseTensor& sparse, const Variable& dense) -> Variable;
 
+/**
+ * @brief Sparse-dense matrix-vector multiplication with gradient tracking.
+ *
+ * Computes y = S @ v where S is a sparse matrix and v is a dense vector.
+ * Only the dense input v receives a gradient during backpropagation:
+ *   grad_v = S^T @ grad_y
+ *
+ * The sparse matrix S is treated as a constant (no gradient computed).
+ *
+ * @param sparse Sparse matrix (M, K) -- not differentiated
+ * @param vec Dense vector variable (K,) -- receives gradient
+ * @return Variable containing the dense result (M,) with gradient function
+ *
+ * @see SpMVBackward for gradient implementation
+ */
+auto spmv(const SparseTensor& sparse, const Variable& vec) -> Variable;
+
 } // namespace tenzor
 
 namespace tenzor {

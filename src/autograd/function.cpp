@@ -99,6 +99,24 @@ void Function::validate_saved_tensors() const {
     }
 }
 
+void Function::require_saved_tensors(size_t count) const {
+    if (saved_tensors_.size() < count) {
+        throw std::runtime_error(
+            std::string(name()) + "::backward() expected " + std::to_string(count) +
+            " saved tensors but got " + std::to_string(saved_tensors_.size()) +
+            ". This is an internal autograd bug — forward() did not save the expected tensors.");
+    }
+}
+
+void Function::require_saved_variables(size_t count) const {
+    if (saved_variables_.size() < count) {
+        throw std::runtime_error(
+            std::string(name()) + "::backward_with_variables() expected " + std::to_string(count) +
+            " saved variables but got " + std::to_string(saved_variables_.size()) +
+            ". This is an internal autograd bug.");
+    }
+}
+
 void Function::reload_saved_tensors() const {
     if (!tensors_offloaded_.load(std::memory_order_acquire)) return;
     std::lock_guard lock(offload_mutex_);
@@ -368,6 +386,7 @@ auto MulBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable>
 }
 
 auto MulBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(2);
     // d(a*b)/da = b, d(a*b)/db = a
     // Handle broadcasting
     auto grad_a_unreduced = mul(grad_outputs[0], saved_tensors_[1]);
@@ -384,10 +403,11 @@ auto MulBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     // Use saved Variables if available, otherwise wrap saved Tensors
     Variable saved_a, saved_b;
     if (has_saved_variables()) {
+        require_saved_variables(2);
         saved_a = saved_variables_[0];
         saved_b = saved_variables_[1];
     } else {
-        // Wrap raw tensors - no grad tracking but still works for first-order
+        require_saved_tensors(2);
         saved_a = Variable(saved_tensors_[0], false);
         saved_b = Variable(saved_tensors_[1], false);
     }
@@ -414,6 +434,7 @@ auto DivBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable>
 }
 
 auto DivBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(2);
     // d(a/b)/da = 1/b, d(a/b)/db = -a/(b^2)
     const auto& a = saved_tensors_[0];
     const auto& b = saved_tensors_[1];
@@ -431,9 +452,11 @@ auto DivBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     // d(a/b)/da = 1/b, d(a/b)/db = -a/(b^2)
     Variable saved_a, saved_b;
     if (has_saved_variables()) {
+        require_saved_variables(2);
         saved_a = saved_variables_[0];
         saved_b = saved_variables_[1];
     } else {
+        require_saved_tensors(2);
         saved_a = Variable(saved_tensors_[0], false);
         saved_b = Variable(saved_tensors_[1], false);
     }
@@ -456,6 +479,7 @@ auto MatMulBackward::forward(std::vector<Variable> inputs) -> std::vector<Variab
 }
 
 auto MatMulBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(2);
     // For C = A @ B:
     // dL/dA = dL/dC @ B.T
     // dL/dB = A.T @ dL/dC
@@ -483,9 +507,11 @@ auto MatMulBackward::backward_with_variables(std::vector<Variable> grad_outputs)
     // dL/dB = A.T @ dL/dC
     Variable saved_a, saved_b;
     if (has_saved_variables()) {
+        require_saved_variables(2);
         saved_a = saved_variables_[0];
         saved_b = saved_variables_[1];
     } else {
+        require_saved_tensors(2);
         saved_a = Variable(saved_tensors_[0], false);
         saved_b = Variable(saved_tensors_[1], false);
     }
@@ -532,6 +558,7 @@ auto LinearBackward::forward(std::vector<Variable> inputs) -> std::vector<Variab
 }
 
 auto LinearBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    require_saved_tensors(2);
     // For y = x @ W.T + b:
     // dL/dx = dL/dy @ W          -> (batch, out) @ (out, in) = (batch, in)
     // dL/dW = dL/dy.T @ x        -> (out, batch) @ (batch, in) = (out, in)
@@ -569,9 +596,11 @@ auto LinearBackward::backward_with_variables(std::vector<Variable> grad_outputs)
     // dL/db = sum(dL/dy, dim=0)
     Variable saved_x, saved_w;
     if (has_saved_variables()) {
+        require_saved_variables(2);
         saved_x = saved_variables_[0];
         saved_w = saved_variables_[1];
     } else {
+        require_saved_tensors(2);
         saved_x = Variable(saved_tensors_[0], false);
         saved_w = Variable(saved_tensors_[1], false);
     }
@@ -3241,6 +3270,7 @@ auto SpMMBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Vari
 auto SpMMBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     // Y = S @ D  =>  grad_D = S^T @ grad_Y
     // saved_tensors_[0] = S^T (the sparse matrix, transposed and stored as dense)
+    require_saved_tensors(1);
     const auto& sparse_t = saved_tensors_[0];  // shape (K, M)
     const auto& grad_output = grad_outputs[0];  // shape (M, N)
 
@@ -3248,6 +3278,31 @@ auto SpMMBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
     auto grad_dense = matmul(sparse_t, grad_output);
 
     return {grad_dense};
+}
+
+// ============================================================================
+// SpMVBackward
+// ============================================================================
+
+auto SpMVBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("SpMVBackward::forward should not be called directly");
+}
+
+auto SpMVBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    // y = S @ v  =>  grad_v = S^T @ grad_y
+    // saved_tensors_[0] = S^T (the sparse matrix, transposed and stored as dense)
+    require_saved_tensors(1);
+    const auto& sparse_t = saved_tensors_[0];  // shape (K, M)
+    const auto& grad_y = grad_outputs[0];      // shape (M,)
+
+    // grad_v = S^T @ grad_y
+    // S^T is (K, M), grad_y is (M,) -> matmul needs 2D inputs
+    // Reshape to (M, 1), matmul -> (K, 1), reshape to (K,)
+    auto grad_y_col = grad_y.reshape({grad_y.shape()[0], 1});  // (M, 1)
+    auto grad_v_col = matmul(sparse_t, grad_y_col);             // (K, 1)
+    auto grad_v = grad_v_col.reshape({grad_v_col.shape()[0]});  // (K,)
+
+    return {grad_v};
 }
 
 } // namespace tenzor

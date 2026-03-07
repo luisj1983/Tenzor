@@ -1422,4 +1422,27 @@ auto spmm(const SparseTensor& sparse, const Variable& dense) -> Variable {
     return output;
 }
 
+auto spmv(const SparseTensor& sparse, const Variable& vec) -> Variable {
+    if (!vec.requires_grad() || !is_grad_enabled()) {
+        return Variable(sparse::spmv(sparse, vec.tensor()), false);
+    }
+
+    // Compute forward: y = S @ v
+    auto result_tensor = sparse::spmv(sparse, vec.tensor());
+
+    // For backward: grad_v = S^T @ grad_y
+    // Save S^T as a dense tensor (transposed sparse matrix).
+    auto sparse_dense = sparse.to_dense();  // shape (M, K)
+    auto sparse_transposed = tenzor::transpose(sparse_dense, 0, 1);  // shape (K, M)
+
+    auto grad_fn = std::make_shared<SpMVBackward>();
+    grad_fn->save_for_backward({sparse_transposed});
+    grad_fn->set_next_functions({vec.grad_fn()});
+    grad_fn->set_input_variables({vec});
+
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
 } // namespace tenzor

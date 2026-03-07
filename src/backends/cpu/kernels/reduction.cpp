@@ -2950,11 +2950,30 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Ten
                 }
             } else {
                 // General Lp norm: (sum(|x|^p))^(1/p)
-                #pragma omp parallel for reduction(+:norm_value) if(n > 10000)
-                for (int64_t i = 0; i < n; i++) {
-                    norm_value += std::pow(std::abs(input_data[i]), p);
+                // For large p, use log-space computation to avoid overflow:
+                // norm = max_val * (sum(|x/max_val|^p))^(1/p)
+                if (p > 10.0f) {
+                    float max_val = 0.0f;
+                    #pragma omp parallel for reduction(max:max_val) if(n > 10000)
+                    for (int64_t i = 0; i < n; i++) {
+                        float abs_val = std::abs(input_data[i]);
+                        if (abs_val > max_val) max_val = abs_val;
+                    }
+                    if (max_val > 0.0f) {
+                        float inv_max = 1.0f / max_val;
+                        #pragma omp parallel for reduction(+:norm_value) if(n > 10000)
+                        for (int64_t i = 0; i < n; i++) {
+                            norm_value += std::pow(std::abs(input_data[i]) * inv_max, p);
+                        }
+                        norm_value = max_val * std::pow(norm_value, 1.0f / p);
+                    }
+                } else {
+                    #pragma omp parallel for reduction(+:norm_value) if(n > 10000)
+                    for (int64_t i = 0; i < n; i++) {
+                        norm_value += std::pow(std::abs(input_data[i]), p);
+                    }
+                    norm_value = std::pow(norm_value, 1.0f / p);
                 }
-                norm_value = std::pow(norm_value, 1.0f / p);
             }
 
             output_data[0] = norm_value;
@@ -2990,11 +3009,29 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Ten
                 }
             } else {
                 // General Lp norm: (sum(|x|^p))^(1/p)
-                #pragma omp parallel for reduction(+:norm_value) if(n > 10000)
-                for (int64_t i = 0; i < n; i++) {
-                    norm_value += std::pow(std::abs(input_data[i]), p);
+                // For large p, use max-normalization to avoid overflow
+                if (p > 10.0) {
+                    double max_val = 0.0;
+                    #pragma omp parallel for reduction(max:max_val) if(n > 10000)
+                    for (int64_t i = 0; i < n; i++) {
+                        double abs_val = std::abs(input_data[i]);
+                        if (abs_val > max_val) max_val = abs_val;
+                    }
+                    if (max_val > 0.0) {
+                        double inv_max = 1.0 / max_val;
+                        #pragma omp parallel for reduction(+:norm_value) if(n > 10000)
+                        for (int64_t i = 0; i < n; i++) {
+                            norm_value += std::pow(std::abs(input_data[i]) * inv_max, p);
+                        }
+                        norm_value = max_val * std::pow(norm_value, 1.0 / p);
+                    }
+                } else {
+                    #pragma omp parallel for reduction(+:norm_value) if(n > 10000)
+                    for (int64_t i = 0; i < n; i++) {
+                        norm_value += std::pow(std::abs(input_data[i]), p);
+                    }
+                    norm_value = std::pow(norm_value, 1.0 / p);
                 }
-                norm_value = std::pow(norm_value, 1.0 / p);
             }
 
             output_data[0] = norm_value;

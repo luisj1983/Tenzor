@@ -1033,14 +1033,18 @@ void conv2d_forward_impl(
 }
 
 auto conv2d_forward_kernel(
-    const Tensor& input,         // (batch, in_channels, height, width)
-    const Tensor& weight,        // (out_channels, in_channels, kernel_h, kernel_w)
+    const Tensor& input_orig,    // (batch, in_channels, height, width)
+    const Tensor& weight_orig,   // (out_channels, in_channels, kernel_h, kernel_w)
     const Tensor* bias,          // (out_channels) or nullptr
     int64_t stride,
     int64_t padding,
     int64_t dilation,
     int64_t groups
 ) -> Tensor {
+    // im2col assumes contiguous row-major layout — make contiguous if needed
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
+    Tensor weight = weight_orig.is_contiguous() ? weight_orig : weight_orig.contiguous();
+
     // Extract dimensions
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
@@ -1255,14 +1259,18 @@ void conv2d_backward_input_impl(
 }
 
 auto conv2d_backward_input_kernel(
-    const Tensor& grad_output,   // (batch, out_channels, out_h, out_w)
-    const Tensor& weight,        // (out_channels, in_channels, kernel_h, kernel_w)
+    const Tensor& grad_output_orig,   // (batch, out_channels, out_h, out_w)
+    const Tensor& weight_orig,        // (out_channels, in_channels, kernel_h, kernel_w)
     const std::vector<int64_t>& input_shape,  // (batch, in_channels, height, width)
     int64_t stride,
     int64_t padding,
     int64_t dilation,
     int64_t groups
 ) -> Tensor {
+    // Ensure contiguous layout for pointer-arithmetic kernels
+    Tensor grad_output = grad_output_orig.is_contiguous() ? grad_output_orig : grad_output_orig.contiguous();
+    Tensor weight = weight_orig.is_contiguous() ? weight_orig : weight_orig.contiguous();
+
     // Initialize gradient w.r.t input with correct dtype
     Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
 
@@ -1392,14 +1400,18 @@ void conv2d_backward_weight_impl(
 }
 
 auto conv2d_backward_weight_kernel(
-    const Tensor& grad_output,   // (batch, out_channels, out_h, out_w)
-    const Tensor& input,         // (batch, in_channels, height, width)
+    const Tensor& grad_output_orig,   // (batch, out_channels, out_h, out_w)
+    const Tensor& input_orig,         // (batch, in_channels, height, width)
     const std::vector<int64_t>& weight_shape,  // (out_channels, in_channels, kernel_h, kernel_w)
     int64_t stride,
     int64_t padding,
     int64_t dilation,
     int64_t groups
 ) -> Tensor {
+    // Ensure contiguous layout for pointer-arithmetic kernels
+    Tensor grad_output = grad_output_orig.is_contiguous() ? grad_output_orig : grad_output_orig.contiguous();
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
+
     // Initialize gradient w.r.t weight
     Tensor grad_weight(weight_shape, grad_output.dtype(), grad_output.device());
 
@@ -1634,8 +1646,8 @@ void conv_transpose2d_forward_impl(
 }
 
 auto conv_transpose2d_forward_kernel(
-    const Tensor& input,          // (batch, in_channels, in_h, in_w)
-    const Tensor& weight,         // (in_channels, out_channels/groups, kernel_h, kernel_w)
+    const Tensor& input_orig,     // (batch, in_channels, in_h, in_w)
+    const Tensor& weight_orig,    // (in_channels, out_channels/groups, kernel_h, kernel_w)
     const Tensor* bias,           // (out_channels) or nullptr
     int64_t stride,
     int64_t padding,
@@ -1643,6 +1655,10 @@ auto conv_transpose2d_forward_kernel(
     int64_t dilation,
     int64_t groups
 ) -> Tensor {
+    // Ensure contiguous layout for pointer-arithmetic kernels
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
+    Tensor weight = weight_orig.is_contiguous() ? weight_orig : weight_orig.contiguous();
+
     // Extract dimensions
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();

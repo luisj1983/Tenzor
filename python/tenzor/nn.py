@@ -17,6 +17,7 @@ Example:
             return self.fc2(x)
 """
 
+import threading
 from . import tenzor_core as _core
 
 # Store reference to original C++ Module BEFORE importing *
@@ -68,6 +69,8 @@ class Module(_CppModule):
 
     def __init__(self):
         super().__init__()
+        # Lock protects lazy cache invalidation/population from races
+        object.__setattr__(self, '_cache_lock', threading.Lock())
         # Lazy caches for submodule/parameter/buffer lookups.
         # Populated on first __getattr__ access, invalidated by __setattr__.
         object.__setattr__(self, '_submodule_cache', None)
@@ -89,17 +92,21 @@ class Module(_CppModule):
 
         # Handle Module assignment
         if isinstance(value, _CppModule):
-            object.__setattr__(self, '_submodule_cache', None)
+            with object.__getattribute__(self, '_cache_lock'):
+                object.__setattr__(self, '_submodule_cache', None)
             self.register_module(name, value)
             return
 
         # Handle Variable assignment (potential parameter)
         if isinstance(value, _core.Variable):
+            with object.__getattribute__(self, '_cache_lock'):
+                if value.requires_grad():
+                    object.__setattr__(self, '_param_cache', None)
+                else:
+                    object.__setattr__(self, '_buffer_cache', None)
             if value.requires_grad():
-                object.__setattr__(self, '_param_cache', None)
                 self.register_parameter(name, value)
             else:
-                object.__setattr__(self, '_buffer_cache', None)
                 self.register_buffer(name, value)
             return
 
@@ -155,25 +162,31 @@ class Module(_CppModule):
         if name.startswith('_'):
             return object.__getattribute__(self, name)
 
-        # Lazily populate and reuse caches to avoid repeated C++ boundary crossings
-        submodule_cache = object.__getattribute__(self, '_submodule_cache')
-        if submodule_cache is None:
-            submodule_cache = self.get_submodules()
-            object.__setattr__(self, '_submodule_cache', submodule_cache)
+        # Lazily populate and reuse caches to avoid repeated C++ boundary crossings.
+        # Lock protects cache population against concurrent __setattr__ invalidation.
+        lock = object.__getattribute__(self, '_cache_lock')
+
+        with lock:
+            submodule_cache = object.__getattribute__(self, '_submodule_cache')
+            if submodule_cache is None:
+                submodule_cache = self.get_submodules()
+                object.__setattr__(self, '_submodule_cache', submodule_cache)
         if name in submodule_cache:
             return submodule_cache[name]
 
-        param_cache = object.__getattribute__(self, '_param_cache')
-        if param_cache is None:
-            param_cache = self._get_own_named_params()
-            object.__setattr__(self, '_param_cache', param_cache)
+        with lock:
+            param_cache = object.__getattribute__(self, '_param_cache')
+            if param_cache is None:
+                param_cache = self._get_own_named_params()
+                object.__setattr__(self, '_param_cache', param_cache)
         if name in param_cache:
             return param_cache[name]
 
-        buffer_cache = object.__getattribute__(self, '_buffer_cache')
-        if buffer_cache is None:
-            buffer_cache = self._get_own_named_buffers()
-            object.__setattr__(self, '_buffer_cache', buffer_cache)
+        with lock:
+            buffer_cache = object.__getattribute__(self, '_buffer_cache')
+            if buffer_cache is None:
+                buffer_cache = self._get_own_named_buffers()
+                object.__setattr__(self, '_buffer_cache', buffer_cache)
         if name in buffer_cache:
             return buffer_cache[name]
 

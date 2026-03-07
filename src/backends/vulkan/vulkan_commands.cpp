@@ -96,7 +96,12 @@ void VulkanBackend::ensurePendingWorkComplete(int32_t device_id) {
     auto& ctx = devices_[device_id];
 
     if (ctx.device_lost) {
-        throw std::runtime_error("Vulkan device lost — cannot wait for work on a lost device");
+        // Attempt one-time recovery before giving up
+        if (!try_reset_device(device_id)) {
+            throw std::runtime_error("Vulkan device lost — cannot wait for work on a lost device");
+        }
+        // Recovery succeeded — no pending work remains
+        return;
     }
 
     // Wait on all frame fences that have been submitted
@@ -254,6 +259,57 @@ auto VulkanBackend::synchronize(int32_t device_id) -> void {
     if (ctx.descriptorPool) {
         ctx.descriptorPool->reset();
     }
+}
+
+auto VulkanBackend::is_device_lost(int32_t device_id) const -> bool {
+    if (device_id < 0 || device_id >= device_count()) return true;
+    return devices_[device_id].device_lost.load(std::memory_order_acquire);
+}
+
+auto VulkanBackend::try_reset_device(int32_t device_id) -> bool {
+    if (device_id < 0 || device_id >= device_count()) return false;
+    auto& ctx = devices_[device_id];
+    std::lock_guard<std::recursive_mutex> lock(ctx.mutex);
+
+    if (!ctx.device_lost.load(std::memory_order_acquire)) {
+        return true;  // Not lost — nothing to do
+    }
+
+    // Attempt recovery: wait for device idle (the GPU may have recovered
+    // from a transient TDR timeout after the driver resets it)
+    VkResult result = vkDeviceWaitIdle(ctx.device);
+    if (result == VK_ERROR_DEVICE_LOST) {
+        // Truly lost — hardware failure or unrecoverable driver state
+        return false;
+    }
+    if (result != VK_SUCCESS) {
+        return false;
+    }
+
+    // Device responded — reset all state
+    ctx.device_lost.store(false, std::memory_order_release);
+    ctx.submittedFrames = 0;
+    ctx.currentFrame = 0;
+    ctx.hasPendingWork = false;
+    ctx.activeCommandBuffer = VK_NULL_HANDLE;
+    ctx.operationsInBatch = 0;
+
+    // Reset command pool (all prior command buffers are now invalid)
+    vkResetCommandPool(ctx.device, ctx.commandPool, VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT);
+    ctx.nextCommandBufferIndex = 0;
+
+    // Reinitialize command buffer pool
+    initCommandBufferPool(ctx);
+
+    // Reset descriptor pool
+    if (ctx.descriptorPool) {
+        ctx.descriptorPool->reset();
+    }
+
+    // Flush deferred frees
+    flush_deferred_frees(device_id);
+
+    return true;
 }
 
 // ============================================================================

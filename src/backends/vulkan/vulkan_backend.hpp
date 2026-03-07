@@ -64,6 +64,15 @@ public:
     auto destroy_stream(StreamHandle stream) -> void override;
     auto synchronize_stream(StreamHandle stream) -> void override;
 
+    /// Check if a device has been lost (GPU crash/hang/timeout).
+    auto is_device_lost(int32_t device_id) const -> bool;
+
+    /// Attempt to recover from a device-lost state by waiting for the device
+    /// to become idle and resetting command pools. Returns true if recovery
+    /// succeeded. If the device is truly gone (hardware failure), returns false
+    /// and the device remains in a lost state.
+    auto try_reset_device(int32_t device_id) -> bool;
+
     auto memset(void* ptr, int value, size_t bytes, int32_t device_id) -> void override;
 
     auto dispatch(const std::string& op_name,

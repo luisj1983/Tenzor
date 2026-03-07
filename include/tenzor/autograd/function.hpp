@@ -185,6 +185,12 @@ public:
      */
     void validate_saved_tensors() const;
 
+    /// Assert that at least @p count tensors were saved. Throws if not.
+    void require_saved_tensors(size_t count) const;
+
+    /// Assert that at least @p count variables were saved. Throws if not.
+    void require_saved_variables(size_t count) const;
+
     /**
      * @brief Get number of saved tensors.
      *
@@ -1354,6 +1360,23 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto name() const -> std::string override { return "SpMMBackward"; }
+};
+
+/**
+ * @brief Backward function for sparse-dense matrix-vector multiplication (spmv).
+ *
+ * For y = S @ v where S is sparse (M,K) and v is dense (K,):
+ * - grad_v = S^T @ grad_y
+ * - The sparse matrix S is not differentiated.
+ *
+ * saved_tensors_[0]: the sparse matrix converted to dense (M,K), transposed to (K,M).
+ * The backward computes matmul(S^T, grad_y) = matmul(saved, grad_y).
+ */
+class SpMVBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "SpMVBackward"; }
 };
 
 } // namespace tenzor
