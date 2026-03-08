@@ -20,7 +20,7 @@
 #include <random>
 #include <charconv>  // For std::from_chars (dispatch wrappers)
 #include <span>      // For std::span (dispatch wrappers)
-#include "cuda_stream_pool.hpp"
+#include "../cuda_stream_pool.hpp"
 
 namespace tenzor {
 namespace cuda {

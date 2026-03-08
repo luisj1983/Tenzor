@@ -17,7 +17,7 @@
 #include <cublas_v2.h>
 #include <vector>
 #include <stdexcept>
-#include "cuda_stream_pool.hpp"
+#include "../cuda_stream_pool.hpp"
 
 namespace tenzor {
 namespace cuda {
