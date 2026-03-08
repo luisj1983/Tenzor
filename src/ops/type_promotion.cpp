@@ -66,20 +66,18 @@ auto promote_types(DType a, DType b) -> DType {
     }
 
     // Float wins over integer
+    // Float16/BFloat16 can only represent integers up to 2048 exactly,
+    // so any integer type mixed with Float16/BFloat16 promotes to Float32
+    // to match NumPy/PyTorch semantics.
     if (is_floating(a) && is_integer(b)) {
-        // Integer + Float16/BFloat16 -> Float32 (to avoid precision loss)
         if (a == DType::Float16 || a == DType::BFloat16) {
-            if (dtype_priority(b) > dtype_priority(DType::Int16)) {
-                return DType::Float32;
-            }
+            return DType::Float32;
         }
         return a;
     }
     if (is_floating(b) && is_integer(a)) {
         if (b == DType::Float16 || b == DType::BFloat16) {
-            if (dtype_priority(a) > dtype_priority(DType::Int16)) {
-                return DType::Float32;
-            }
+            return DType::Float32;
         }
         return b;
     }

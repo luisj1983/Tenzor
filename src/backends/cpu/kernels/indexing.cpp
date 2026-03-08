@@ -488,6 +488,29 @@ auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index, c
 
     if (input_c.dtype() == DType::Float32) { scatter_add_impl.template operator()<float>(); }
     else if (input_c.dtype() == DType::Float64) { scatter_add_impl.template operator()<double>(); }
+    else if (input_c.dtype() == DType::Float16) {
+        // Float16: accumulate in Float32 to avoid precision loss, then convert back
+        auto input_f32 = input_c.to(DType::Float32);
+        auto src_f32 = src_c.to(DType::Float32);
+        // Temporarily swap to Float32 tensors for accumulation
+        auto saved_input = input_c;
+        input_c = input_f32;
+        src_c = src_f32;
+        output = Tensor(input_shape, DType::Float32, input_f32.device());
+        scatter_add_impl.template operator()<float>();
+        output = output.to(DType::Float16);
+    }
+    else if (input_c.dtype() == DType::BFloat16) {
+        // BFloat16: accumulate in Float32 to avoid precision loss, then convert back
+        auto input_f32 = input_c.to(DType::Float32);
+        auto src_f32 = src_c.to(DType::Float32);
+        auto saved_input = input_c;
+        input_c = input_f32;
+        src_c = src_f32;
+        output = Tensor(input_shape, DType::Float32, input_f32.device());
+        scatter_add_impl.template operator()<float>();
+        output = output.to(DType::BFloat16);
+    }
     else if (input_c.dtype() == DType::Int32) { scatter_add_impl.template operator()<int32_t>(); }
     else if (input_c.dtype() == DType::Int64) { scatter_add_impl.template operator()<int64_t>(); }
     else if (input_c.dtype() == DType::Int8) { scatter_add_impl.template operator()<int8_t>(); }

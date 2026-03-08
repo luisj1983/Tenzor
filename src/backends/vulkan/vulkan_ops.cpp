@@ -175,7 +175,7 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         }
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-        insertComputeBarrier(cmdBuffer);
+        insertComputeOnlyBarrier(cmdBuffer);
 
         endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -309,7 +309,7 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         }
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-        insertComputeBarrier(cmdBuffer);
+        insertComputeOnlyBarrier(cmdBuffer);
 
         endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -499,7 +499,7 @@ auto VulkanBackend::dispatchUnaryOp(const std::string& op_name,
     uint32_t workgroups = div_wg(num_work_items, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
     // Synchronize to ensure GPU has completed before using the result
@@ -612,7 +612,7 @@ auto VulkanBackend::dispatchUnaryOpWithParam(const std::string& op_name,
     uint32_t workgroups = div_wg(num_work_items, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -688,7 +688,7 @@ auto VulkanBackend::dispatchTrigonometricOp(const std::string& op_name,
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -762,7 +762,7 @@ auto VulkanBackend::dispatchHyperbolicOp(const std::string& op_name,
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -883,7 +883,7 @@ auto VulkanBackend::dispatchComparisonOp(const std::string& op_name,
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier to ensure shader writes complete
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -1083,7 +1083,7 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -1252,7 +1252,7 @@ auto VulkanBackend::dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor {
     }
     vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, 1);
 
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -1385,7 +1385,7 @@ auto VulkanBackend::dispatchBmm(const Tensor& a, const Tensor& b) -> Tensor {
         uint32_t workgroups_z = push_constants.batch;
         vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, workgroups_z);
 
-        insertComputeBarrier(cmdBuffer);
+        insertComputeOnlyBarrier(cmdBuffer);
         endSingleTimeCommands(cmdBuffer, device_id);
 
         return output;
@@ -1450,7 +1450,7 @@ auto VulkanBackend::dispatchBmm(const Tensor& a, const Tensor& b) -> Tensor {
     uint32_t workgroups_z = push_constants.batch;
     vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, workgroups_z);
 
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -1611,7 +1611,7 @@ auto VulkanBackend::dispatchConv2dBackwardInput(
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -1741,7 +1741,7 @@ auto VulkanBackend::dispatchConv2dBackwardWeight(
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -1831,7 +1831,7 @@ auto VulkanBackend::dispatchConv2dBackwardBias(const Tensor& grad_output) -> Ten
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -1934,7 +1934,7 @@ auto VulkanBackend::dispatchIm2Col(const Tensor& input, const OpAttributes& attr
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
     return output;
@@ -2002,7 +2002,7 @@ auto VulkanBackend::dispatchCol2Im(const Tensor& input, const OpAttributes& attr
         uint32_t fill_workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
         vkCmdDispatch(cmdBuffer, fill_workgroups, 1, 1);
         // Barrier between fill and col2im accumulation to prevent WAW race
-        insertComputeBarrier(cmdBuffer);
+        insertComputeOnlyBarrier(cmdBuffer);
         endSingleTimeCommands(cmdBuffer, device_id);
     }
 
@@ -2069,7 +2069,7 @@ auto VulkanBackend::dispatchCol2Im(const Tensor& input, const OpAttributes& attr
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
     return output;
@@ -2169,7 +2169,7 @@ auto VulkanBackend::dispatchMaxPool2d(const Tensor& input, int64_t kernel_h, int
     }
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -2269,7 +2269,7 @@ auto VulkanBackend::dispatchAvgPool2d(const Tensor& input, int64_t kernel_h, int
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -2353,7 +2353,7 @@ auto VulkanBackend::dispatchAdaptiveMaxPool2d(const Tensor& input, int64_t out_h
     }
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -2449,7 +2449,7 @@ auto VulkanBackend::dispatchAdaptiveAvgPool2d(const Tensor& input, int64_t out_h
     }
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -2589,7 +2589,7 @@ auto VulkanBackend::dispatchAdaptiveAvgPool2dBackward(const Tensor& grad_output,
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -2614,7 +2614,7 @@ auto VulkanBackend::dispatchMaxPool2dBackward(const Tensor& grad_out, const Tens
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -2638,7 +2638,7 @@ auto VulkanBackend::dispatchBatchNorm2d(const Tensor& input, const Tensor& mean,
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -2781,7 +2781,7 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -2954,7 +2954,7 @@ auto VulkanBackend::dispatchBatchNorm2dForward(const Tensor& input, const Tensor
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -3054,7 +3054,7 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
-        insertComputeBarrier(cmdBuffer);
+        insertComputeOnlyBarrier(cmdBuffer);
 
         endSingleTimeCommands(cmdBuffer, device_id);
     }
@@ -3110,7 +3110,7 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
-        insertComputeBarrier(cmdBuffer);
+        insertComputeOnlyBarrier(cmdBuffer);
 
         endSingleTimeCommands(cmdBuffer, device_id);
     }
@@ -3223,7 +3223,7 @@ auto VulkanBackend::dispatchLayerNorm(const Tensor& input, int64_t normalized_sh
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -3350,7 +3350,7 @@ auto VulkanBackend::dispatchGroupNorm(const Tensor& input, int64_t num_groups,
     uint32_t workgroups = static_cast<uint32_t>(N * num_groups);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return {output, mean_out, inv_std_out};
@@ -3460,7 +3460,7 @@ auto VulkanBackend::dispatchLayerNormBackward(const Tensor& grad_output, const T
     uint32_t workgroups = static_cast<uint32_t>(batch_size);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return {grad_input, grad_weight, grad_bias};
@@ -3583,7 +3583,7 @@ auto VulkanBackend::dispatchGroupNormBackward(const Tensor& grad_output, const T
     uint32_t workgroups = static_cast<uint32_t>(N * num_groups);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return {grad_input, grad_weight, grad_bias};
@@ -3676,7 +3676,7 @@ auto VulkanBackend::dispatchEmbeddingBackward(const Tensor& grad_output, const T
 
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return grad_weight;
@@ -3758,7 +3758,7 @@ auto VulkanBackend::dispatchRMSNorm(const Tensor& input, const Tensor& weight,
     uint32_t workgroups = static_cast<uint32_t>(batch_size);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return {output, rrms};
@@ -3846,7 +3846,7 @@ auto VulkanBackend::dispatchRMSNormBackward(const Tensor& grad_output, const Ten
     uint32_t workgroups = static_cast<uint32_t>(batch_size);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return {grad_input, grad_weight};
@@ -3913,7 +3913,7 @@ auto VulkanBackend::dispatchBoxIoU(const Tensor& boxes1, const Tensor& boxes2, i
 
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
     // Convert back to original dtype if needed
@@ -3971,7 +3971,7 @@ auto VulkanBackend::dispatchOneHot(const Tensor& indices, int64_t num_classes) -
 
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -4254,7 +4254,7 @@ auto VulkanBackend::dispatchSoftmax(const Tensor& input, int64_t dim) -> Tensor 
     vkCmdDispatch(cmdBuffer, batch_size, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -4336,7 +4336,7 @@ auto VulkanBackend::dispatchLogSoftmax(const Tensor& input, int64_t dim) -> Tens
     vkCmdDispatch(cmdBuffer, batch_size, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -4413,7 +4413,7 @@ auto VulkanBackend::dispatchCrossEntropy(const Tensor& log_probs, const Tensor& 
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -4515,7 +4515,7 @@ auto VulkanBackend::dispatchArgmax(const Tensor& input, int64_t dim, bool keepdi
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -4616,7 +4616,7 @@ auto VulkanBackend::dispatchArgmin(const Tensor& input, int64_t dim, bool keepdi
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -4834,7 +4834,7 @@ auto VulkanBackend::dispatchProd(const Tensor& input, int64_t dim, bool keepdim)
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -4875,7 +4875,7 @@ auto VulkanBackend::dispatchAll(const Tensor& input, int64_t dim, bool keepdim) 
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -4909,7 +4909,7 @@ auto VulkanBackend::dispatchAny(const Tensor& input, int64_t dim, bool keepdim) 
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -5022,7 +5022,7 @@ auto VulkanBackend::dispatchEmbedding(const Tensor& weight, const Tensor& indice
     uint32_t workgroups = div_wg(num_indices, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -5152,7 +5152,7 @@ auto VulkanBackend::dispatchGather(const Tensor& input, int64_t dim, const Tenso
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -5310,7 +5310,7 @@ auto VulkanBackend::dispatchScatter(const Tensor& input, int64_t dim, const Tens
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -5456,7 +5456,7 @@ auto VulkanBackend::dispatchIndexSelect(const Tensor& input, int64_t dim, const 
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -5551,7 +5551,7 @@ auto VulkanBackend::dispatchGatherRelativePositionBias(const Tensor& table, cons
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -5684,7 +5684,7 @@ auto VulkanBackend::dispatchTranspose(const Tensor& input, int64_t dim0, int64_t
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
-        insertComputeBarrier(cmdBuffer);
+        insertComputeOnlyBarrier(cmdBuffer);
 
         endSingleTimeCommands(cmdBuffer, device_id);
         return output;
@@ -5865,7 +5865,7 @@ auto VulkanBackend::dispatchPermute(const Tensor& input, const std::vector<int64
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -6080,7 +6080,7 @@ auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -6148,7 +6148,7 @@ auto VulkanBackend::dispatchZeros(const std::vector<int64_t>& shape, DType dtype
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -6210,7 +6210,7 @@ auto VulkanBackend::dispatchArange(float start, float end, float step, DType dty
         uint32_t workgroups = div_wg(numel, devices_[device_id].workgroupSize);
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-        insertComputeBarrier(cmdBuffer);
+        insertComputeOnlyBarrier(cmdBuffer);
         endSingleTimeCommands(cmdBuffer, device_id);
 
         return output;
@@ -6257,7 +6257,7 @@ auto VulkanBackend::dispatchArange(float start, float end, float step, DType dty
     uint32_t workgroups = div_wg(numel, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -6313,7 +6313,7 @@ auto VulkanBackend::dispatchLinspace(float start, float end, int64_t steps, DTyp
         uint32_t workgroups = div_wg(steps, devices_[device_id].workgroupSize);
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-        insertComputeBarrier(cmdBuffer);
+        insertComputeOnlyBarrier(cmdBuffer);
         endSingleTimeCommands(cmdBuffer, device_id);
 
         return output;
@@ -6360,7 +6360,7 @@ auto VulkanBackend::dispatchLinspace(float start, float end, int64_t steps, DTyp
     uint32_t workgroups = div_wg(steps, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -6412,7 +6412,7 @@ auto VulkanBackend::dispatchEye(int64_t n, int64_t m, DType dtype, const Device&
         uint32_t workgroups = div_wg(total, devices_[device_id].workgroupSize);
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-        insertComputeBarrier(cmdBuffer);
+        insertComputeOnlyBarrier(cmdBuffer);
         endSingleTimeCommands(cmdBuffer, device_id);
 
         return output;
@@ -6458,7 +6458,7 @@ auto VulkanBackend::dispatchEye(int64_t n, int64_t m, DType dtype, const Device&
     uint32_t workgroups = div_wg(total, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -6511,7 +6511,7 @@ auto VulkanBackend::dispatchFill(const Tensor& input, float value) -> Tensor {
         uint32_t workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-        insertComputeBarrier(cmdBuffer);
+        insertComputeOnlyBarrier(cmdBuffer);
         endSingleTimeCommands(cmdBuffer, device_id);
 
         return output;
@@ -6555,7 +6555,7 @@ auto VulkanBackend::dispatchFill(const Tensor& input, float value) -> Tensor {
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -6672,7 +6672,7 @@ auto VulkanBackend::dispatchExpand(const Tensor& input, const std::vector<int64_
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -6912,7 +6912,7 @@ auto VulkanBackend::dispatchClamp(const Tensor& input, float min_value, float ma
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -7041,7 +7041,7 @@ auto VulkanBackend::dispatchActivation(const std::string& op_name,
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -7143,7 +7143,7 @@ auto VulkanBackend::dispatchActivationBackward(const std::string& op_name,
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -7212,7 +7212,7 @@ auto VulkanBackend::dispatchSwishBackward(const Tensor& grad_output,
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -7312,7 +7312,7 @@ auto VulkanBackend::dispatchSoftmaxBackward(const Tensor& grad_output,
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -7399,7 +7399,7 @@ auto VulkanBackend::dispatchLogSoftmaxBackward(const Tensor& grad_output,
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -7517,7 +7517,7 @@ auto VulkanBackend::dispatchAvgPool2dForward(const Tensor& input, const OpAttrib
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -7636,7 +7636,7 @@ auto VulkanBackend::dispatchMaxPool2dForward(const Tensor& input, const OpAttrib
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -7753,7 +7753,7 @@ auto VulkanBackend::dispatchAvgPool2dBackward(const Tensor& grad_output, const T
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -7868,7 +7868,7 @@ auto VulkanBackend::dispatchMaxPool2dBackward(const Tensor& grad_output, const T
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -7951,7 +7951,7 @@ auto VulkanBackend::dispatchMaxPool2dBackwardWithIndices(const Tensor& grad_outp
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -8107,7 +8107,7 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -8252,7 +8252,7 @@ auto VulkanBackend::dispatchConvTranspose2dForward(const Tensor& input, const Te
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -8351,7 +8351,7 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
-        insertComputeBarrier(cmdBuffer);
+        insertComputeOnlyBarrier(cmdBuffer);
 
         endSingleTimeCommands(cmdBuffer, device_id);
         return output;
@@ -8384,7 +8384,7 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
-        insertComputeBarrier(cmdBuffer);
+        insertComputeOnlyBarrier(cmdBuffer);
 
         endSingleTimeCommands(cmdBuffer, device_id);
         return output;
@@ -8416,7 +8416,7 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
-        insertComputeBarrier(cmdBuffer);
+        insertComputeOnlyBarrier(cmdBuffer);
 
         endSingleTimeCommands(cmdBuffer, device_id);
         return output;
@@ -8449,7 +8449,7 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
-        insertComputeBarrier(cmdBuffer);
+        insertComputeOnlyBarrier(cmdBuffer);
 
         endSingleTimeCommands(cmdBuffer, device_id);
         return output;
@@ -8481,7 +8481,7 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
-        insertComputeBarrier(cmdBuffer);
+        insertComputeOnlyBarrier(cmdBuffer);
 
         endSingleTimeCommands(cmdBuffer, device_id);
         return output;
@@ -8515,7 +8515,7 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -8565,7 +8565,7 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
         uint32_t workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-        insertComputeBarrier(cmdBuffer);
+        insertComputeOnlyBarrier(cmdBuffer);
         endSingleTimeCommands(cmdBuffer, device_id);
 
         return output;
@@ -8625,7 +8625,7 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
-        insertComputeBarrier(cmdBuffer);
+        insertComputeOnlyBarrier(cmdBuffer);
 
         endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -8654,7 +8654,7 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
-        insertComputeBarrier(cmdBuffer);
+        insertComputeOnlyBarrier(cmdBuffer);
 
         endSingleTimeCommands(cmdBuffer, device_id);
         return output;
@@ -8692,7 +8692,7 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -8767,7 +8767,7 @@ auto VulkanBackend::dispatchRand(const std::vector<int64_t>& shape, DType dtype)
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -8842,7 +8842,7 @@ auto VulkanBackend::dispatchRandn(const std::vector<int64_t>& shape, DType dtype
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -9217,7 +9217,7 @@ auto VulkanBackend::dispatchInterpolate(const Tensor& input, const OpAttributes&
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -9320,7 +9320,7 @@ auto VulkanBackend::dispatchROIAlignForward(const Tensor& features, const Tensor
     uint32_t workgroups = static_cast<uint32_t>(div_wg(output.numel(), devices_[device_id].workgroupSize));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -9424,7 +9424,7 @@ auto VulkanBackend::dispatchROIAlignBackward(const Tensor& grad_output, const Te
     uint32_t workgroups = static_cast<uint32_t>(div_wg(grad_output.numel(), devices_[device_id].workgroupSize));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
     // Convert back from f32 accumulation buffer to f16 if needed
@@ -9721,7 +9721,7 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
 
     vkCmdDispatch(cmdBuffer, dispatch_count, 1, 1);
 
-    insertComputeBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;

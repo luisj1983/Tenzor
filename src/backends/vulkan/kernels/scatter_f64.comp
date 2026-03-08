@@ -38,7 +38,7 @@ uint64_t f64ToBits(float64_t val) {
 void atomicAddF64(uint idx, float64_t val) {
     uint64_t old_bits = output_data[idx];
     uint64_t new_bits;
-    for (int attempt = 0; attempt < 1024; ++attempt) {
+    for (int attempt = 0; attempt < 65536; ++attempt) {
         float64_t old_val = bitsToF64(old_bits);
         new_bits = f64ToBits(old_val + val);
         uint64_t result = atomicCompSwap(output_data[idx], old_bits, new_bits);
@@ -53,7 +53,7 @@ void atomicAddF64(uint idx, float64_t val) {
 void atomicMulF64(uint idx, float64_t val) {
     uint64_t old_bits = output_data[idx];
     uint64_t new_bits;
-    for (int attempt = 0; attempt < 1024; ++attempt) {
+    for (int attempt = 0; attempt < 65536; ++attempt) {
         float64_t old_val = bitsToF64(old_bits);
         new_bits = f64ToBits(old_val * val);
         uint64_t result = atomicCompSwap(output_data[idx], old_bits, new_bits);

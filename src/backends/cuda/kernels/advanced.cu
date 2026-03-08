@@ -32,6 +32,26 @@ struct MultOp {
     __device__ __forceinline__ T operator()(const T& a, const T& b) const { return a * b; }
 };
 
+// Safe comparison helpers for half/bfloat16 types (C++ operators may not exist on all archs)
+template<typename T>
+__device__ __forceinline__ bool cuda_gt(const T& a, const T& b) { return a > b; }
+template<typename T>
+__device__ __forceinline__ bool cuda_lt(const T& a, const T& b) { return a < b; }
+template<typename T>
+__device__ __forceinline__ bool cuda_eq(const T& a, const T& b) { return a == b; }
+
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 530
+template<> __device__ __forceinline__ bool cuda_gt(const __half& a, const __half& b) { return __hgt(a, b); }
+template<> __device__ __forceinline__ bool cuda_lt(const __half& a, const __half& b) { return __hlt(a, b); }
+template<> __device__ __forceinline__ bool cuda_eq(const __half& a, const __half& b) { return __heq(a, b); }
+#endif
+
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+template<> __device__ __forceinline__ bool cuda_gt(const __nv_bfloat16& a, const __nv_bfloat16& b) { return __hgt(a, b); }
+template<> __device__ __forceinline__ bool cuda_lt(const __nv_bfloat16& a, const __nv_bfloat16& b) { return __hlt(a, b); }
+template<> __device__ __forceinline__ bool cuda_eq(const __nv_bfloat16& a, const __nv_bfloat16& b) { return __heq(a, b); }
+#endif
+
 // ============================================================================
 // TopK kernel using parallel block-wide selection
 // ============================================================================
@@ -106,8 +126,8 @@ __global__ void topk_slice_kernel(
             if (consumed) continue;
 
             if (!has_candidate ||
-                (largest ? (val > best_val) : (val < best_val)) ||
-                (val == best_val && i < best_pos)) {
+                (largest ? cuda_gt(val, best_val) : cuda_lt(val, best_val)) ||
+                (cuda_eq(val, best_val) && i < best_pos)) {
                 best_val = val;
                 best_pos = i;
                 has_candidate = true;
@@ -132,11 +152,11 @@ __global__ void topk_slice_kernel(
                     right_wins = false;
                 } else {
                     right_wins = largest ?
-                        (s_cand_vals[tid + stride] > s_cand_vals[tid] ||
-                         (s_cand_vals[tid + stride] == s_cand_vals[tid] &&
+                        (cuda_gt(s_cand_vals[tid + stride], s_cand_vals[tid]) ||
+                         (cuda_eq(s_cand_vals[tid + stride], s_cand_vals[tid]) &&
                           s_cand_pos[tid + stride] < s_cand_pos[tid])) :
-                        (s_cand_vals[tid + stride] < s_cand_vals[tid] ||
-                         (s_cand_vals[tid + stride] == s_cand_vals[tid] &&
+                        (cuda_lt(s_cand_vals[tid + stride], s_cand_vals[tid]) ||
+                         (cuda_eq(s_cand_vals[tid + stride], s_cand_vals[tid]) &&
                           s_cand_pos[tid + stride] < s_cand_pos[tid]));
                 }
                 if (right_wins) {
@@ -160,8 +180,8 @@ __global__ void topk_slice_kernel(
         int64_t i = 2 * tid + (phase & 1);
         if (i + 1 < k) {
             bool should_swap = largest ?
-                (s_topk_vals[i] < s_topk_vals[i + 1]) :
-                (s_topk_vals[i] > s_topk_vals[i + 1]);
+                cuda_lt(s_topk_vals[i], s_topk_vals[i + 1]) :
+                cuda_gt(s_topk_vals[i], s_topk_vals[i + 1]);
             if (should_swap) {
                 T tmp_v = s_topk_vals[i];
                 s_topk_vals[i] = s_topk_vals[i + 1];
@@ -220,17 +240,24 @@ auto topk_kernel(const Tensor& input, int64_t k, int64_t dim, bool largest,
         size_t cand_pos_bytes = block_size * sizeof(int64_t);
         size_t smem_size = aligned_topk_vals + aligned_topk_idx +
                            aligned_cand_vals + cand_pos_bytes;
+        // Use data_ptr() + reinterpret_cast for CUDA-native types (__half, __nv_bfloat16)
+        // that don't have Tensor::data<T>() instantiations in the core library
+        auto* input_ptr = reinterpret_cast<const T*>(input_cont.data_ptr());
+        auto* values_ptr = reinterpret_cast<T*>(values.data_ptr());
+        auto* indices_ptr = reinterpret_cast<int64_t*>(indices.data_ptr());
         topk_slice_kernel<T><<<num_slices, block_size, smem_size, stream>>>(
-            input_cont.data<T>(), values.data<T>(), indices.data<int64_t>(),
+            input_ptr, values_ptr, indices_ptr,
             dim_size, k, inner_size, outer_stride, k_stride, largest);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     };
 
     switch (dtype) {
-        case DType::Float32: launch.template operator()<float>(); break;
-        case DType::Float64: launch.template operator()<double>(); break;
-        case DType::Int32:   launch.template operator()<int32_t>(); break;
-        case DType::Int64:   launch.template operator()<int64_t>(); break;
+        case DType::Float32:  launch.template operator()<float>(); break;
+        case DType::Float64:  launch.template operator()<double>(); break;
+        case DType::Float16:  launch.template operator()<__half>(); break;
+        case DType::BFloat16: launch.template operator()<__nv_bfloat16>(); break;
+        case DType::Int32:    launch.template operator()<int32_t>(); break;
+        case DType::Int64:    launch.template operator()<int64_t>(); break;
         default: throw std::runtime_error("topk CUDA: unsupported dtype");
     }
 

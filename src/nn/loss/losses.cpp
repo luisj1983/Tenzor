@@ -41,24 +41,33 @@ auto MSELoss::forward(const Variable& input, const Variable& target) -> Variable
 BCELoss::BCELoss(Reduction reduction) : reduction_(reduction) {}
 
 auto BCELoss::forward(const Variable& input, const Variable& target) -> Variable {
-    // Clamp predictions to avoid log(0)
-    auto predictions_clamped = clamp(input, 1e-7f, 1.0f - 1e-7f);
-
-    // loss = -[target * log(pred) + (1 - target) * log(1 - pred)]
-    auto term1 = target * log(predictions_clamped);
-    auto term2 = scalar_sub(1.0f, target) * log(scalar_sub(1.0f, predictions_clamped));
-    auto loss_unreduced = term1 + term2;
-    auto neg_loss = neg(loss_unreduced);
+    // Numerically stable BCE using the same log-sum-exp decomposition as BCEWithLogitsLoss,
+    // but for inputs already passed through sigmoid (i.e., in [0, 1]).
+    //
+    // Direct log(p) and log(1-p) are numerically unstable near 0 and 1.
+    // Instead, compute via the logit (inverse sigmoid) and use the stable formula:
+    //   logit = log(p / (1-p))  (clamp p to avoid log(0))
+    //   BCE = max(logit, 0) - logit * target + log(1 + exp(-|logit|))
+    auto p = clamp(input, 1e-7f, 1.0f - 1e-7f);
+    // Compute logit = log(p / (1 - p))  where (1 - p) = -(p - 1)
+    auto one_minus_p = scalar_sub(1.0f, p);
+    auto logit = log(p / one_minus_p);
+    // Stable BCE: max(logit, 0) - logit * target + log(1 + exp(-|logit|))
+    auto abs_logit = abs(logit);
+    auto neg_abs = neg(abs_logit);
+    auto max_val = (logit + abs_logit) / 2.0f;  // max(logit, 0) = (logit + |logit|) / 2
+    auto log_term = log(exp(neg_abs) + 1.0f);
+    auto loss = max_val - logit * target + log_term;
 
     switch (reduction_) {
         case Reduction::None:
-            return neg_loss;
+            return loss;
         case Reduction::Mean:
-            return mean(neg_loss);
+            return mean(loss);
         case Reduction::Sum:
-            return sum(neg_loss);
+            return sum(loss);
     }
-    return neg_loss;
+    return loss;
 }
 
 // BCEWithLogitsLoss implementation

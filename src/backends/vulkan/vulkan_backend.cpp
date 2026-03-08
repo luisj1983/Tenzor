@@ -533,8 +533,10 @@ void VulkanBackend::createLogicalDevices() {
             VkResult cacheResult = vkCreatePipelineCache(ctx.device, &cacheCreateInfo, nullptr, &ctx.pipelineCache);
             if (cacheResult != VK_SUCCESS) {
                 // Non-fatal: pipelines work without cache, just slower startup
+                std::cerr << "[Vulkan] Warning: pipeline cache load failed (corrupt disk cache?). "
+                          << "Shader compilation will be slower on first run.\n";
                 ctx.pipelineCache = VK_NULL_HANDLE;
-                // Retry with empty cache (corrupt data from disk is the usual cause)
+                // Retry with empty cache
                 cacheCreateInfo.initialDataSize = 0;
                 cacheCreateInfo.pInitialData = nullptr;
                 vkCreatePipelineCache(ctx.device, &cacheCreateInfo, nullptr, &ctx.pipelineCache);

@@ -29,7 +29,7 @@ inline auto get_omp_thresholds() -> const OmpThresholds& {
             std::max(size_t(65536), size_t(16384) * n),
             std::max(size_t(32768), size_t(8192) * n),
             std::max(size_t(8192), size_t(2048) * n),
-            1024
+            std::max(size_t(1024), size_t(256) * n)
         };
     }();
     return t;

@@ -264,7 +264,7 @@ auto MultiheadAttention::scaled_dot_product_attention(
                                    head_dim <= 256 &&
                                    (is_causal_ || !attn_mask.is_valid() || attn_mask.shape().size() == 0);
 
-    if (can_use_flash_attention && !query.requires_grad()) {
+    if (can_use_flash_attention && !is_grad_enabled()) {
         try {
             float scale_f = 1.0f / std::sqrt(static_cast<float>(head_dim));
 
@@ -339,17 +339,21 @@ auto MultiheadAttention::scaled_dot_product_attention(
     // Apply causal mask if is_causal_ is set (masks future tokens)
     if (is_causal_) {
         // Create rectangular causal mask (seq_q, seq_k) — future positions get -inf
+        // Build directly in Float32 (sufficient precision for mask values)
         Tensor causal = zeros({seq_len_q, seq_len_k}, DType::Float32, Device::cpu());
         auto* causal_data = causal.data<float>();
+        // Use dtype-appropriate mask value: 1e4 for FP16/BF16 (avoids overflow), 1e9 for FP32+
+        DType qdt = query.dtype();
+        float neg_inf_val = (qdt == DType::Float16 || qdt == DType::BFloat16)
+                            ? -1e4f : -std::numeric_limits<float>::infinity();
         for (int64_t i = 0; i < seq_len_q; ++i) {
-            for (int64_t j = 0; j < seq_len_k; ++j) {
-                if (j > i) {
-                    causal_data[i * seq_len_k + j] = -std::numeric_limits<float>::infinity();
-                }
+            for (int64_t j = i + 1; j < seq_len_k; ++j) {
+                causal_data[i * seq_len_k + j] = neg_inf_val;
             }
         }
-        if (query.dtype() != DType::Float32) {
-            causal = causal.to(query.dtype());
+        // Convert to query dtype and device
+        if (qdt != DType::Float32) {
+            causal = causal.to(qdt);
         }
         if (query.device() != Device::cpu()) {
             causal = causal.to(query.device());

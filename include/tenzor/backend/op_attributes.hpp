@@ -352,9 +352,20 @@ public:
         size_t end = str.find(',');
         while (start < str.size()) {
             if (end == std::string::npos) end = str.size();
-            int64_t val;
-            auto [ptr, ec] = std::from_chars(str.data() + start, str.data() + end, val);
-            if (ec == std::errc{}) result.push_back(val);
+            // Skip leading whitespace
+            size_t trimmed = start;
+            while (trimmed < end && str[trimmed] == ' ') ++trimmed;
+            if (trimmed < end) {
+                int64_t val;
+                auto [ptr, ec] = std::from_chars(str.data() + trimmed, str.data() + end, val);
+                if (ec == std::errc{}) {
+                    result.push_back(val);
+                } else {
+                    throw std::invalid_argument(
+                        "get_int_list: malformed integer '" +
+                        str.substr(trimmed, end - trimmed) + "' in attribute value '" + str + "'");
+                }
+            }
             start = end + 1;
             end = str.find(',', start);
         }

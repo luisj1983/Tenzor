@@ -123,8 +123,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     endif()
 
     # Use -march=native for maximum performance on the build machine.
-    # Disable for distribution (cross-compilation or portable binaries).
-    option(TENZOR_NATIVE_ARCH "Use -march=native for host-specific optimizations" ON)
+    # Disabled by default for portable binaries. Enable for local dev builds.
+    option(TENZOR_NATIVE_ARCH "Use -march=native for host-specific optimizations" OFF)
     if(TENZOR_NATIVE_ARCH)
         list(APPEND TENZOR_WARNING_FLAGS -march=native)
     endif()

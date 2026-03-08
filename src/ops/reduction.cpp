@@ -3,6 +3,7 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/math.hpp"
+#include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/indexing.hpp"
 
@@ -147,6 +148,20 @@ auto has_inf_nan(const Tensor& input) -> Tensor {
 }
 
 auto logsumexp(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
+    // Empty tensor: return empty with appropriate shape
+    if (input.numel() == 0) {
+        // For empty input, result shape collapses dim to 1 (keepdim) or removes it
+        auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+        if (dim < 0) dim += static_cast<int64_t>(shape.size());
+        if (keepdim) {
+            shape[dim] = 1;
+        } else {
+            shape.erase(shape.begin() + dim);
+        }
+        // logsumexp of empty set is -inf (log(0))
+        return full(shape, -std::numeric_limits<double>::infinity(), input.dtype(), input.device());
+    }
+
     // Numerically stable logsumexp: log(sum(exp(x))) = max(x) + log(sum(exp(x - max(x))))
     // Subtracting the max prevents overflow in exp() for large values.
     auto max_val = tenzor::max(input, dim, /*keepdim=*/true);  // keepdim=true for broadcasting

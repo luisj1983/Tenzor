@@ -85,10 +85,16 @@ inline void insertPreReadBarrier(VkCommandBuffer cmdBuffer) {
     }
 }
 
-/// Post-dispatch compute barrier. Ensures SHADER_WRITE → SHADER_READ visibility
-/// and compute → host/transfer visibility for readback.
-/// Always inserts both barriers — the host barrier is a no-op if no readback follows,
-/// but omitting it causes data corruption when batched commands precede a host read.
+/// Post-dispatch compute barrier for GPU-only workloads.
+/// Only ensures SHADER_WRITE → SHADER_READ visibility between dispatches.
+/// Use this when the next operation is another compute dispatch (no host readback).
+inline void insertComputeOnlyBarrier(VkCommandBuffer cmdBuffer) {
+    insertBarrier(cmdBuffer, BarrierType::ComputeToCompute);
+}
+
+/// Post-dispatch compute barrier with host readback visibility.
+/// Ensures both SHADER_WRITE → SHADER_READ and compute → host/transfer visibility.
+/// Use this when a host readback (synchronize, copy-to-host) may follow.
 inline void insertComputeBarrier(VkCommandBuffer cmdBuffer) {
     insertBarrier(cmdBuffer, BarrierType::ComputeToCompute);
     insertBarrier(cmdBuffer, BarrierType::ComputeToHost);

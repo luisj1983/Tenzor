@@ -165,30 +165,27 @@ void batchnorm_mean_var_impl(const T* input,
     int final_threads = 1;
 #endif
 
-    // Compute mean and variance for each channel
+    // Compute mean and variance for each channel using Welford's online algorithm.
+    // Single-pass, numerically stable (no catastrophic cancellation for large N*H*W).
     #pragma omp parallel for num_threads(final_threads) if(C > 1)
     for (int64_t c = 0; c < C; c++) {
-        // Compute mean - simple sum (Kahan adds too much overhead)
-        T sum = T(0.0f);
-        for (int64_t n = 0; n < N; n++) {
-            const T* ch_ptr = input + (n * C + c) * spatial_size;
-            for (int64_t hw = 0; hw < spatial_size; hw++) {
-                sum += ch_ptr[hw];
-            }
-        }
-        T channel_mean = sum / T(static_cast<float>(total_elements));
-        mean[c] = channel_mean;
+        T channel_mean = T(0);
+        T m2 = T(0);  // sum of squared deviations from running mean
+        int64_t count = 0;
 
-        // Compute variance
-        T sum_sq_diff = T(0.0f);
         for (int64_t n = 0; n < N; n++) {
             const T* ch_ptr = input + (n * C + c) * spatial_size;
             for (int64_t hw = 0; hw < spatial_size; hw++) {
-                T diff = ch_ptr[hw] - channel_mean;
-                sum_sq_diff += diff * diff;
+                ++count;
+                T delta = ch_ptr[hw] - channel_mean;
+                channel_mean += delta / T(static_cast<float>(count));
+                T delta2 = ch_ptr[hw] - channel_mean;
+                m2 += delta * delta2;
             }
         }
-        variance[c] = sum_sq_diff / T(static_cast<float>(total_elements));
+
+        mean[c] = channel_mean;
+        variance[c] = m2 / T(static_cast<float>(total_elements));
     }
 }
 
