@@ -12,7 +12,12 @@ string(REGEX REPLACE "--offload-arch=[^ ]+" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAG
 # Find ROCm/HIP packages
 find_package(hip QUIET CONFIG PATHS /opt/rocm)
 find_package(rocblas QUIET CONFIG PATHS /opt/rocm)
+find_package(rocsolver QUIET CONFIG PATHS /opt/rocm)
 find_package(hiprand QUIET CONFIG PATHS /opt/rocm)
+find_package(rocfft QUIET CONFIG PATHS /opt/rocm)
+find_package(hipcub QUIET CONFIG PATHS /opt/rocm)
+find_package(rocprim QUIET CONFIG PATHS /opt/rocm)
+find_package(rocthrust QUIET CONFIG PATHS /opt/rocm)
 
 if(NOT hip_FOUND)
     message(WARNING "ROCm/HIP not found. ROCm backend will not be built.")
@@ -49,7 +54,18 @@ set(ROCM_HIP_SOURCES
     kernels/nms.hip.cpp
     kernels/roi_align.hip.cpp
     kernels/vision.hip.cpp
+    kernels/sort.hip.cpp
 )
+
+# Conditionally add linalg source if rocSOLVER is found
+if(rocsolver_FOUND)
+    list(APPEND ROCM_HIP_SOURCES kernels/linalg.hip.cpp)
+endif()
+
+# Conditionally add FFT source if rocFFT is found
+if(rocfft_FOUND)
+    list(APPEND ROCM_HIP_SOURCES kernels/fft.hip.cpp)
+endif()
 
 # Mark .hip.cpp files to be compiled as HIP language
 set_source_files_properties(
@@ -102,6 +118,36 @@ if(hiprand_FOUND)
     target_link_libraries(tenzor_rocm_kernels PRIVATE hip::hiprand)
 endif()
 
+# Add rocFFT support to kernels library if available
+if(rocfft_FOUND)
+    target_compile_definitions(tenzor_rocm_kernels PRIVATE TENZOR_HAS_ROCFFT)
+    target_link_libraries(tenzor_rocm_kernels PRIVATE roc::rocfft)
+endif()
+
+# Add rocSOLVER support to kernels library if available
+if(rocsolver_FOUND)
+    target_compile_definitions(tenzor_rocm_kernels PRIVATE TENZOR_HAS_ROCSOLVER)
+    target_link_libraries(tenzor_rocm_kernels PRIVATE roc::rocsolver roc::rocblas)
+endif()
+
+# Add hipcub support (needed for sort, cumsum, cumprod, unique)
+if(hipcub_FOUND)
+    target_link_libraries(tenzor_rocm_kernels PRIVATE hip::hipcub)
+    message(STATUS "ROCm Backend: hipcub support enabled")
+endif()
+
+# Add rocprim support (dependency of hipcub)
+if(rocprim_FOUND)
+    target_link_libraries(tenzor_rocm_kernels PRIVATE roc::rocprim)
+    message(STATUS "ROCm Backend: rocprim support enabled")
+endif()
+
+# Add rocthrust support (needed for sort, unique)
+if(rocthrust_FOUND)
+    target_link_libraries(tenzor_rocm_kernels PRIVATE roc::rocthrust)
+    message(STATUS "ROCm Backend: rocthrust support enabled")
+endif()
+
 # Manually compile rocm_backend.cpp to avoid HIP flag pollution
 # CMake's HIP language support adds HIP flags to all CXX compilation in this directory
 set(ROCM_BACKEND_OBJ "${CMAKE_CURRENT_BINARY_DIR}/rocm_backend.cpp.o")
@@ -130,6 +176,15 @@ add_custom_command(
 )
 
 # Manually compile rocm_kernel_registry.cpp (also pure C++, no HIP flags)
+# Build conditional define flags for the kernel registry
+set(ROCM_REGISTRY_EXTRA_DEFS "")
+if(rocfft_FOUND)
+    list(APPEND ROCM_REGISTRY_EXTRA_DEFS -DTENZOR_HAS_ROCFFT)
+endif()
+if(rocsolver_FOUND)
+    list(APPEND ROCM_REGISTRY_EXTRA_DEFS -DTENZOR_HAS_ROCSOLVER)
+endif()
+
 set(ROCM_KERNEL_REGISTRY_OBJ "${CMAKE_CURRENT_BINARY_DIR}/rocm_kernel_registry.cpp.o")
 add_custom_command(
     OUTPUT ${ROCM_KERNEL_REGISTRY_OBJ}
@@ -150,6 +205,7 @@ add_custom_command(
         -DUSE_PROF_API=1
         -D__HIP_PLATFORM_AMD__=1
         -Dtenzor_backend_rocm_EXPORTS
+        ${ROCM_REGISTRY_EXTRA_DEFS}
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/rocm_kernel_registry.cpp
     COMMENT "Compiling rocm_kernel_registry.cpp (pure C++, no HIP flags)"
     VERBATIM
@@ -203,6 +259,24 @@ if(hiprand_FOUND)
     message(STATUS "ROCm Backend: hipRAND support enabled")
 else()
     message(STATUS "ROCm Backend: hipRAND not found")
+endif()
+
+# Link rocFFT if available (equivalent to cuFFT)
+if(rocfft_FOUND)
+    target_link_libraries(tenzor_backend_rocm PRIVATE roc::rocfft)
+    target_compile_definitions(tenzor_backend_rocm PRIVATE TENZOR_HAS_ROCFFT)
+    message(STATUS "ROCm Backend: rocFFT support enabled")
+else()
+    message(STATUS "ROCm Backend: rocFFT not found")
+endif()
+
+# Link rocSOLVER if available (equivalent to cuSOLVER)
+if(rocsolver_FOUND)
+    target_link_libraries(tenzor_backend_rocm PRIVATE roc::rocsolver roc::rocblas)
+    target_compile_definitions(tenzor_backend_rocm PRIVATE TENZOR_HAS_ROCSOLVER)
+    message(STATUS "ROCm Backend: rocSOLVER support enabled")
+else()
+    message(STATUS "ROCm Backend: rocSOLVER not found")
 endif()
 
 # Find MIOpen (ROCm's DNN library - equivalent to cuDNN)
@@ -284,6 +358,26 @@ if(MIOpen_FOUND)
     endif()
 else()
     message(STATUS "  MIOpen: Not found")
+endif()
+if(rocsolver_FOUND)
+    message(STATUS "  rocSOLVER: Enabled")
+else()
+    message(STATUS "  rocSOLVER: Not found")
+endif()
+if(rocfft_FOUND)
+    message(STATUS "  rocFFT: Enabled")
+else()
+    message(STATUS "  rocFFT: Not found")
+endif()
+if(hipcub_FOUND)
+    message(STATUS "  hipcub: Enabled")
+else()
+    message(STATUS "  hipcub: Not found")
+endif()
+if(rocthrust_FOUND)
+    message(STATUS "  rocthrust: Enabled")
+else()
+    message(STATUS "  rocthrust: Not found")
 endif()
 message(STATUS "  NOTE: To compile for your specific GPU, set CMAKE_HIP_ARCHITECTURES")
 message(STATUS "        Example: cmake -DCMAKE_HIP_ARCHITECTURES=\"gfx906;gfx908\"")

@@ -1,0 +1,74 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Dropout backward for Float16: grad_input = grad_output * mask * scale
+// Each thread processes 2 elements (one packed uint32 word)
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { uint grad_output[]; };
+layout(binding = 1) buffer Mask { uint mask_data[]; };
+layout(binding = 2) buffer GradInput { uint grad_input[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    float scale;
+} params;
+
+float16_t readGradOutput(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = grad_output[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
+}
+
+float16_t readMask(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = mask_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
+}
+
+uint float_to_half(float f) {
+    uint bits = floatBitsToUint(f);
+    uint sign = (bits >> 16) & 0x8000;
+    int exp = int((bits >> 23) & 0xFF) - 127 + 15;
+    uint mant = bits & 0x7FFFFF;
+
+    if (exp <= 0) {
+        if (exp < -10) return sign;
+        mant |= 0x800000;
+        uint shift = uint(14 - exp);
+        mant >>= shift;
+        return sign | mant;
+    } else if (exp >= 31) {
+        return sign | 0x7C00;
+    }
+    return sign | (uint(exp) << 10) | (mant >> 13);
+}
+
+void main() {
+    uint word_idx = gl_GlobalInvocationID.x;
+    uint elem0 = word_idx * 2;
+    uint elem1 = word_idx * 2 + 1;
+
+    if (elem0 >= params.n_elements) {
+        return;
+    }
+
+    float g0 = float(readGradOutput(elem0));
+    float m0 = float(readMask(elem0));
+    float out0 = g0 * m0 * params.scale;
+
+    float out1 = 0.0;
+    if (elem1 < params.n_elements) {
+        float g1 = float(readGradOutput(elem1));
+        float m1 = float(readMask(elem1));
+        out1 = g1 * m1 * params.scale;
+    }
+
+    uint half0 = float_to_half(out0);
+    uint half1 = float_to_half(out1);
+    grad_input[word_idx] = half0 | (half1 << 16);
+}

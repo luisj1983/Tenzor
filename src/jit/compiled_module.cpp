@@ -9,6 +9,7 @@
 #include "../../include/tenzor/jit/compiler.hpp"
 #include "../../include/tenzor/jit/tracer.hpp"
 #include "../../include/tenzor/jit/serialization.hpp"
+#include <algorithm>
 #include <stdexcept>
 
 namespace tenzor {
@@ -17,6 +18,10 @@ namespace jit {
 // ============================================================================
 // CompiledModule Implementation
 // ============================================================================
+
+CompiledModule::~CompiledModule() {
+    invalidate_cuda_graph();
+}
 
 CompiledModule::CompiledModule(std::shared_ptr<Graph> graph)
     : graph_(std::move(graph)) {}
@@ -105,6 +110,102 @@ auto CompiledModule::has_metadata(const std::string& key) const -> bool {
 
 auto CompiledModule::all_metadata() const -> const std::unordered_map<std::string, std::string>& {
     return metadata_;
+}
+
+// ============================================================================
+// CUDA Graph Capture/Replay
+// ============================================================================
+
+auto CompiledModule::capture_cuda_graph(std::vector<Tensor> sample_inputs) -> void {
+    if (!graph_) {
+        throw std::runtime_error("CompiledModule has no graph");
+    }
+
+    // Invalidate any existing captured graph
+    invalidate_cuda_graph();
+
+    // Determine device ID from the first input tensor
+    int32_t device_id = 0;
+    if (!sample_inputs.empty()) {
+        device_id = sample_inputs[0].device().index;
+    }
+
+    // Create the CUDA graph capture object (returns nullptr if CUDA unavailable)
+    cuda_graph_ = CUDAGraph::create(device_id);
+    if (!cuda_graph_) {
+        throw std::runtime_error(
+            "CUDA is not available; cannot capture CUDA graph");
+    }
+
+    // Record input shapes for validation during replay
+    captured_shapes_.clear();
+    captured_shapes_.reserve(sample_inputs.size());
+    for (const auto& t : sample_inputs) {
+        auto s = t.shape();
+        captured_shapes_.emplace_back(s.begin(), s.end());
+    }
+
+    // Wrap inputs as Variables for the graph forward pass
+    std::vector<Variable> vars;
+    vars.reserve(sample_inputs.size());
+    for (auto& t : sample_inputs) {
+        vars.emplace_back(t, false);
+    }
+
+    // Capture: all GPU work submitted between begin/end is recorded
+    cuda_graph_->begin_capture();
+    try {
+        graph_->forward(vars);
+    } catch (...) {
+        // If forward fails during capture, we must still end capture to
+        // leave the stream in a valid state. The graph will be unusable.
+        try {
+            cuda_graph_->end_capture();
+        } catch (...) {
+            // Ignore end_capture errors during cleanup
+        }
+        cuda_graph_.reset();
+        captured_shapes_.clear();
+        throw;
+    }
+    cuda_graph_->end_capture();
+}
+
+auto CompiledModule::replay_cuda_graph(std::vector<Tensor>& inputs) -> bool {
+    if (!cuda_graph_ || !cuda_graph_->is_ready()) {
+        return false;
+    }
+
+    // Validate input shapes match captured shapes
+    if (inputs.size() != captured_shapes_.size()) {
+        throw std::runtime_error(
+            "CUDA graph replay: expected " +
+            std::to_string(captured_shapes_.size()) + " inputs, got " +
+            std::to_string(inputs.size()));
+    }
+
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        auto in_shape = inputs[i].shape();
+        const auto& cap_shape = captured_shapes_[i];
+        if (in_shape.size() != cap_shape.size() ||
+            !std::equal(in_shape.begin(), in_shape.end(), cap_shape.begin())) {
+            throw std::runtime_error(
+                "CUDA graph replay: input " + std::to_string(i) +
+                " shape mismatch (graph was captured with different shapes)");
+        }
+    }
+
+    cuda_graph_->replay();
+    return true;
+}
+
+auto CompiledModule::invalidate_cuda_graph() -> void {
+    cuda_graph_.reset();
+    captured_shapes_.clear();
+}
+
+auto CompiledModule::has_cuda_graph() const -> bool {
+    return cuda_graph_ && cuda_graph_->is_ready();
 }
 
 // ============================================================================

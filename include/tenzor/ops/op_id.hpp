@@ -448,6 +448,14 @@ enum class OpId : uint16_t {
     Polar,                     // Construct complex from magnitude and phase
 
     // =========================================================================
+    // RNN Backward / Extended RNN Operations (450-459)
+    // =========================================================================
+    LSTMBackward = 450,        // LSTM backward (single layer)
+    GRUBackward,               // GRU backward (single layer)
+    BiLSTMBackward,            // Bidirectional LSTM backward
+    RNNForward,                // Generic RNN forward (vanilla/Elman)
+
+    // =========================================================================
     // Sentinel (MUST BE LAST)
     // =========================================================================
     OP_COUNT

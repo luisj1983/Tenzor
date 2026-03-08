@@ -1,0 +1,67 @@
+#version 450
+
+// Linear backward pass
+// Computes: grad_input = grad_output @ weight
+//           grad_weight = grad_output^T @ input
+//           grad_bias = sum(grad_output, dim=0)
+//
+// This shader computes grad_input only.
+// grad_weight and grad_bias are computed via matmul and reduction in dispatch code.
+//
+// grad_output: (M, N), weight: (N, K) -> grad_input: (M, K)
+// This is effectively: grad_input = grad_output @ weight (not transposed)
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) buffer GradOutput { float grad_output[]; };
+layout(binding = 1) buffer Weight { float weight_data[]; };
+layout(binding = 2) buffer GradInput { float grad_input[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint M;  // batch size
+    uint N;  // output features
+    uint K;  // input features
+} params;
+
+shared float tileA[16][16];
+shared float tileB[16][16];
+
+void main() {
+    uint row = gl_GlobalInvocationID.y;  // batch index
+    uint col = gl_GlobalInvocationID.x;  // input feature index
+    uint local_row = gl_LocalInvocationID.y;
+    uint local_col = gl_LocalInvocationID.x;
+
+    float sum = 0.0;
+
+    uint num_tiles = (params.N + 15) / 16;
+
+    for (uint t = 0; t < num_tiles; t++) {
+        // Load tile from grad_output (M, N)
+        uint a_col = t * 16 + local_col;
+        if (row < params.M && a_col < params.N) {
+            tileA[local_row][local_col] = grad_output[row * params.N + a_col];
+        } else {
+            tileA[local_row][local_col] = 0.0;
+        }
+
+        // Load tile from weight (N, K) - direct access (not transposed)
+        uint b_row = t * 16 + local_row;
+        if (b_row < params.N && col < params.K) {
+            tileB[local_row][local_col] = weight_data[b_row * params.K + col];
+        } else {
+            tileB[local_row][local_col] = 0.0;
+        }
+
+        barrier();
+
+        for (uint k = 0; k < 16; k++) {
+            sum += tileA[local_row][k] * tileB[k][local_col];
+        }
+
+        barrier();
+    }
+
+    if (row < params.M && col < params.K) {
+        grad_input[row * params.K + col] = sum;
+    }
+}

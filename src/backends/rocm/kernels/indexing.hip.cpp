@@ -1788,5 +1788,295 @@ auto gather_relative_position_bias_kernel(const Tensor& table, const Tensor& ind
     return output;
 }
 
+// ==============================================================================
+// Scatter Add Operation — uses atomicAdd for overlapping indices
+// ==============================================================================
+
+template<typename T, typename IndexT>
+__global__ void scatter_add_kernel_impl(
+    const IndexT* indices,
+    const T* src,
+    T* output,
+    int64_t outer_size,
+    int64_t dim_size,
+    int64_t inner_size,
+    int64_t index_dim_size,
+    int64_t total_scatter,
+    int* error_flag) {
+
+    HIP_KERNEL_LOOP(idx, total_scatter) {
+        int64_t inner_idx = idx % inner_size;
+        int64_t temp = idx / inner_size;
+        int64_t index_pos = temp % index_dim_size;
+        int64_t outer_idx = temp / index_dim_size;
+
+        int64_t index_offset = outer_idx * index_dim_size * inner_size +
+                               index_pos * inner_size + inner_idx;
+        int64_t scatter_idx = static_cast<int64_t>(indices[index_offset]);
+        if (scatter_idx < 0) scatter_idx += dim_size;
+        if (scatter_idx < 0 || scatter_idx >= dim_size) {
+            atomicExch(error_flag, 1);
+            return;
+        }
+
+        int64_t output_offset = outer_idx * dim_size * inner_size +
+                                scatter_idx * inner_size +
+                                inner_idx;
+
+        atomicAddHelper(&output[output_offset], src[idx]);
+    }
+}
+
+auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
+                        const Tensor& src, hipStream_t stream) -> Tensor {
+    int64_t ndim = input.ndim();
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::invalid_argument("scatter_add: dimension out of range");
+    }
+
+    std::vector<int64_t> output_shape(input.shape().begin(), input.shape().end());
+    Tensor output(output_shape, input.dtype(), input.device());
+
+    int64_t total_input = input.numel();
+    int64_t total_scatter = index.numel();
+
+    if (total_input == 0) return output;
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= input.shape()[i];
+    int64_t dim_size = input.shape()[dim];
+    int64_t index_dim_size = index.shape()[dim];
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= input.shape()[i];
+
+    bool idx_is_int32 = (index.dtype() == DType::Int32);
+
+    // Step 1: Copy input to output
+    HIP_CHECK(hipMemcpyAsync(output.data_ptr(), input.data_ptr(),
+                             total_input * dtype_size(input.dtype()),
+                             hipMemcpyDeviceToDevice, stream));
+
+    // Step 2: Scatter-add with atomicAdd
+    if (total_scatter == 0) return output;
+
+    int threads = 256;
+    int blocks = (total_scatter + threads - 1) / threads;
+
+    // Device-side OOB error flag
+    int* d_error_flag = nullptr;
+    HIP_CHECK(hipMalloc(&d_error_flag, sizeof(int)));
+    HIP_CHECK(hipMemsetAsync(d_error_flag, 0, sizeof(int), stream));
+
+    #define LAUNCH_SCATTER_ADD_HIP(T) \
+        if (idx_is_int32) \
+            hipLaunchKernelGGL((scatter_add_kernel_impl<T, int32_t>), \
+                dim3(blocks), dim3(threads), 0, stream, \
+                index.data<int32_t>(), src.data<T>(), output.data<T>(), \
+                outer_size, dim_size, inner_size, index_dim_size, total_scatter, \
+                d_error_flag); \
+        else \
+            hipLaunchKernelGGL((scatter_add_kernel_impl<T, int64_t>), \
+                dim3(blocks), dim3(threads), 0, stream, \
+                index.data<int64_t>(), src.data<T>(), output.data<T>(), \
+                outer_size, dim_size, inner_size, index_dim_size, total_scatter, \
+                d_error_flag); \
+        HIP_CHECK(hipGetLastError())
+
+    switch (input.dtype()) {
+        case DType::Float32: LAUNCH_SCATTER_ADD_HIP(float); break;
+        case DType::Float64: LAUNCH_SCATTER_ADD_HIP(double); break;
+        case DType::Int32:   LAUNCH_SCATTER_ADD_HIP(int32_t); break;
+        case DType::Int64:   LAUNCH_SCATTER_ADD_HIP(int64_t); break;
+        case DType::Float16:
+        case DType::BFloat16: {
+            // Upcast to Float32 for atomicAdd, then cast back
+            Tensor input_f32 = input.to(DType::Float32);
+            Tensor src_f32 = src.to(DType::Float32);
+            Tensor output_f32(output_shape, DType::Float32, input.device());
+            HIP_CHECK(hipMemcpyAsync(output_f32.data_ptr(), input_f32.data_ptr(),
+                                     total_input * sizeof(float),
+                                     hipMemcpyDeviceToDevice, stream));
+            if (total_scatter > 0) {
+                int blocks_f32 = (total_scatter + threads - 1) / threads;
+                if (idx_is_int32)
+                    hipLaunchKernelGGL((scatter_add_kernel_impl<float, int32_t>),
+                        dim3(blocks_f32), dim3(threads), 0, stream,
+                        index.data<int32_t>(), src_f32.data<float>(), output_f32.data<float>(),
+                        outer_size, dim_size, inner_size, index_dim_size, total_scatter,
+                        d_error_flag);
+                else
+                    hipLaunchKernelGGL((scatter_add_kernel_impl<float, int64_t>),
+                        dim3(blocks_f32), dim3(threads), 0, stream,
+                        index.data<int64_t>(), src_f32.data<float>(), output_f32.data<float>(),
+                        outer_size, dim_size, inner_size, index_dim_size, total_scatter,
+                        d_error_flag);
+                HIP_CHECK(hipGetLastError());
+            }
+            output = output_f32.to(input.dtype());
+            break;
+        }
+        default: throw std::runtime_error("scatter_add: unsupported dtype " +
+                     std::string(dtype_name(input.dtype())));
+    }
+
+    #undef LAUNCH_SCATTER_ADD_HIP
+
+    // Check for out-of-bounds index errors
+    int host_error = 0;
+    HIP_CHECK(hipMemcpyAsync(&host_error, d_error_flag, sizeof(int),
+                             hipMemcpyDeviceToHost, stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipFree(d_error_flag));
+
+    if (host_error) {
+        throw std::out_of_range(
+            "scatter_add: index out of range for dimension of size " +
+            std::to_string(dim_size));
+    }
+
+    return output;
+}
+
+// ==============================================================================
+// EmbeddingBag Forward — sum/mean/max aggregation of embedding bags
+// ==============================================================================
+
+template<typename T>
+__global__ void embedding_bag_sum_kernel_hip(
+    const T* embeddings,
+    const int64_t* offsets,
+    T* output,
+    int64_t num_bags,
+    int64_t total_elements,
+    int64_t embedding_dim,
+    int64_t offsets_size,
+    bool divide_by_count)
+{
+    int64_t bag = blockIdx.x;
+    if (bag >= num_bags) return;
+
+    int64_t start = offsets[bag];
+    int64_t end = (bag + 1 < offsets_size) ? offsets[bag + 1] : total_elements;
+    int64_t bag_size = end - start;
+
+    for (int64_t j = threadIdx.x; j < embedding_dim; j += blockDim.x) {
+        T acc = T(0);
+        for (int64_t i = start; i < end; ++i) {
+            acc += embeddings[i * embedding_dim + j];
+        }
+        if (divide_by_count && bag_size > 0) {
+            acc = acc / T(bag_size);
+        }
+        output[bag * embedding_dim + j] = acc;
+    }
+}
+
+template<typename T>
+__global__ void embedding_bag_max_kernel_hip(
+    const T* embeddings,
+    const int64_t* offsets,
+    T* output,
+    int64_t num_bags,
+    int64_t total_elements,
+    int64_t embedding_dim,
+    int64_t offsets_size)
+{
+    int64_t bag = blockIdx.x;
+    if (bag >= num_bags) return;
+
+    int64_t start = offsets[bag];
+    int64_t end = (bag + 1 < offsets_size) ? offsets[bag + 1] : total_elements;
+
+    if (start >= end) return;
+
+    for (int64_t j = threadIdx.x; j < embedding_dim; j += blockDim.x) {
+        T max_val = embeddings[start * embedding_dim + j];
+        for (int64_t i = start + 1; i < end; ++i) {
+            T val = embeddings[i * embedding_dim + j];
+            if (val > max_val) max_val = val;
+        }
+        output[bag * embedding_dim + j] = max_val;
+    }
+}
+
+auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offsets,
+                                   const std::string& mode, int64_t embedding_dim,
+                                   bool include_last_offset, hipStream_t stream) -> Tensor {
+    int64_t total_elements = embeddings.shape()[0];
+    int64_t offsets_size = offsets.numel();
+    int64_t num_bags = include_last_offset ? (offsets_size - 1) : offsets_size;
+
+    if (num_bags <= 0) {
+        return Tensor({0, embedding_dim}, embeddings.dtype(), embeddings.device());
+    }
+
+    // Create zero-initialized output
+    Tensor output({num_bags, embedding_dim}, embeddings.dtype(), embeddings.device());
+    HIP_CHECK(hipMemsetAsync(output.data_ptr(), 0,
+                             num_bags * embedding_dim * dtype_size(embeddings.dtype()), stream));
+
+    int threads = std::min(static_cast<int>(embedding_dim), 256);
+    int blocks = static_cast<int>(num_bags);
+
+    bool is_mean = (mode == "mean");
+    bool is_max = (mode == "max");
+
+    switch (embeddings.dtype()) {
+        case DType::Float32:
+            if (is_max) {
+                hipLaunchKernelGGL(embedding_bag_max_kernel_hip<float>,
+                    dim3(blocks), dim3(threads), 0, stream,
+                    embeddings.data<float>(), offsets.data<int64_t>(),
+                    output.data<float>(), num_bags, total_elements,
+                    embedding_dim, offsets_size);
+            } else {
+                hipLaunchKernelGGL(embedding_bag_sum_kernel_hip<float>,
+                    dim3(blocks), dim3(threads), 0, stream,
+                    embeddings.data<float>(), offsets.data<int64_t>(),
+                    output.data<float>(), num_bags, total_elements,
+                    embedding_dim, offsets_size, is_mean);
+            }
+            break;
+        case DType::Float64:
+            if (is_max) {
+                hipLaunchKernelGGL(embedding_bag_max_kernel_hip<double>,
+                    dim3(blocks), dim3(threads), 0, stream,
+                    embeddings.data<double>(), offsets.data<int64_t>(),
+                    output.data<double>(), num_bags, total_elements,
+                    embedding_dim, offsets_size);
+            } else {
+                hipLaunchKernelGGL(embedding_bag_sum_kernel_hip<double>,
+                    dim3(blocks), dim3(threads), 0, stream,
+                    embeddings.data<double>(), offsets.data<int64_t>(),
+                    output.data<double>(), num_bags, total_elements,
+                    embedding_dim, offsets_size, is_mean);
+            }
+            break;
+        case DType::Float16:
+            if (is_max) {
+                hipLaunchKernelGGL(embedding_bag_max_kernel_hip<__half>,
+                    dim3(blocks), dim3(threads), 0, stream,
+                    reinterpret_cast<const __half*>(embeddings.data_ptr()),
+                    offsets.data<int64_t>(),
+                    reinterpret_cast<__half*>(output.data_ptr()),
+                    num_bags, total_elements, embedding_dim, offsets_size);
+            } else {
+                hipLaunchKernelGGL(embedding_bag_sum_kernel_hip<__half>,
+                    dim3(blocks), dim3(threads), 0, stream,
+                    reinterpret_cast<const __half*>(embeddings.data_ptr()),
+                    offsets.data<int64_t>(),
+                    reinterpret_cast<__half*>(output.data_ptr()),
+                    num_bags, total_elements, embedding_dim, offsets_size, is_mean);
+            }
+            break;
+        default:
+            throw std::runtime_error("embedding_bag_forward: unsupported dtype");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return output;
+}
+
 } // namespace rocm
 } // namespace tenzor

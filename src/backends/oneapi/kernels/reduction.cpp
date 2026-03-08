@@ -1419,5 +1419,300 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& 
     return output;
 }
 
+// ============================================================================
+// Sort kernel - sort along a dimension, returns (values, indices)
+// ============================================================================
+auto sort_kernel(const Tensor& input, int64_t dim, bool descending, sycl::queue& queue)
+    -> std::pair<Tensor, Tensor> {
+    auto shape_span = input.shape();
+    std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+    int64_t ndim = shape.size();
+    if (dim < 0) dim += ndim;
+
+    Tensor values(shape, input.dtype(), input.device());
+    Tensor indices(shape, DType::Int64, input.device());
+    int64_t numel = input.numel();
+    if (numel == 0) return {values, indices};
+
+    int64_t outer_size = 1, inner_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
+    int64_t dim_size = shape[dim];
+
+    // Host-side sort for correctness
+    if (input.dtype() == DType::Float32) {
+        std::vector<float> h_in(numel), h_out(numel);
+        std::vector<int64_t> h_idx(numel);
+        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(float)).wait();
+
+        for (int64_t o = 0; o < outer_size; ++o) {
+            for (int64_t i = 0; i < inner_size; ++i) {
+                std::vector<std::pair<float, int64_t>> pairs(dim_size);
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
+                    pairs[d] = {h_in[idx], d};
+                }
+                if (descending) {
+                    std::sort(pairs.begin(), pairs.end(), [](auto& a, auto& b) { return a.first > b.first; });
+                } else {
+                    std::sort(pairs.begin(), pairs.end(), [](auto& a, auto& b) { return a.first < b.first; });
+                }
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
+                    h_out[idx] = pairs[d].first;
+                    h_idx[idx] = pairs[d].second;
+                }
+            }
+        }
+        queue.memcpy(const_cast<void*>(values.data_ptr()), h_out.data(), numel * sizeof(float)).wait();
+        queue.memcpy(const_cast<void*>(indices.data_ptr()), h_idx.data(), numel * sizeof(int64_t)).wait();
+    } else if (input.dtype() == DType::Float64) {
+        std::vector<double> h_in(numel), h_out(numel);
+        std::vector<int64_t> h_idx(numel);
+        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(double)).wait();
+
+        for (int64_t o = 0; o < outer_size; ++o) {
+            for (int64_t i = 0; i < inner_size; ++i) {
+                std::vector<std::pair<double, int64_t>> pairs(dim_size);
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
+                    pairs[d] = {h_in[idx], d};
+                }
+                if (descending) {
+                    std::sort(pairs.begin(), pairs.end(), [](auto& a, auto& b) { return a.first > b.first; });
+                } else {
+                    std::sort(pairs.begin(), pairs.end(), [](auto& a, auto& b) { return a.first < b.first; });
+                }
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
+                    h_out[idx] = pairs[d].first;
+                    h_idx[idx] = pairs[d].second;
+                }
+            }
+        }
+        queue.memcpy(const_cast<void*>(values.data_ptr()), h_out.data(), numel * sizeof(double)).wait();
+        queue.memcpy(const_cast<void*>(indices.data_ptr()), h_idx.data(), numel * sizeof(int64_t)).wait();
+    } else {
+        throw std::runtime_error("sort: unsupported dtype");
+    }
+
+    return {values, indices};
+}
+
+// ============================================================================
+// TopK kernel - find top K values and indices along a dimension
+// ============================================================================
+auto topk_kernel(const Tensor& input, int64_t k, int64_t dim, bool largest, bool sorted,
+                 sycl::queue& queue) -> std::pair<Tensor, Tensor> {
+    auto shape_span = input.shape();
+    std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+    int64_t ndim = shape.size();
+    if (dim < 0) dim += ndim;
+
+    std::vector<int64_t> out_shape = shape;
+    out_shape[dim] = k;
+
+    Tensor values(out_shape, input.dtype(), input.device());
+    Tensor indices(out_shape, DType::Int64, input.device());
+
+    int64_t outer_size = 1, inner_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
+    int64_t dim_size = shape[dim];
+
+    if (input.dtype() == DType::Float32) {
+        int64_t in_numel = input.numel();
+        int64_t out_numel = outer_size * k * inner_size;
+        std::vector<float> h_in(in_numel), h_out(out_numel);
+        std::vector<int64_t> h_idx(out_numel);
+        queue.memcpy(h_in.data(), input.data_ptr(), in_numel * sizeof(float)).wait();
+
+        for (int64_t o = 0; o < outer_size; ++o) {
+            for (int64_t i = 0; i < inner_size; ++i) {
+                std::vector<std::pair<float, int64_t>> pairs(dim_size);
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
+                    pairs[d] = {h_in[idx], d};
+                }
+                if (largest) {
+                    std::partial_sort(pairs.begin(), pairs.begin() + k, pairs.end(),
+                                     [](auto& a, auto& b) { return a.first > b.first; });
+                } else {
+                    std::partial_sort(pairs.begin(), pairs.begin() + k, pairs.end(),
+                                     [](auto& a, auto& b) { return a.first < b.first; });
+                }
+                if (sorted && largest) {
+                    std::sort(pairs.begin(), pairs.begin() + k,
+                              [](auto& a, auto& b) { return a.first > b.first; });
+                } else if (sorted) {
+                    std::sort(pairs.begin(), pairs.begin() + k,
+                              [](auto& a, auto& b) { return a.first < b.first; });
+                }
+                for (int64_t d = 0; d < k; ++d) {
+                    int64_t out_idx = o * k * inner_size + d * inner_size + i;
+                    h_out[out_idx] = pairs[d].first;
+                    h_idx[out_idx] = pairs[d].second;
+                }
+            }
+        }
+        queue.memcpy(const_cast<void*>(values.data_ptr()), h_out.data(), out_numel * sizeof(float)).wait();
+        queue.memcpy(const_cast<void*>(indices.data_ptr()), h_idx.data(), out_numel * sizeof(int64_t)).wait();
+    } else if (input.dtype() == DType::Float64) {
+        int64_t in_numel = input.numel();
+        int64_t out_numel = outer_size * k * inner_size;
+        std::vector<double> h_in(in_numel), h_out(out_numel);
+        std::vector<int64_t> h_idx(out_numel);
+        queue.memcpy(h_in.data(), input.data_ptr(), in_numel * sizeof(double)).wait();
+
+        for (int64_t o = 0; o < outer_size; ++o) {
+            for (int64_t i = 0; i < inner_size; ++i) {
+                std::vector<std::pair<double, int64_t>> pairs(dim_size);
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
+                    pairs[d] = {h_in[idx], d};
+                }
+                if (largest) {
+                    std::partial_sort(pairs.begin(), pairs.begin() + k, pairs.end(),
+                                     [](auto& a, auto& b) { return a.first > b.first; });
+                } else {
+                    std::partial_sort(pairs.begin(), pairs.begin() + k, pairs.end(),
+                                     [](auto& a, auto& b) { return a.first < b.first; });
+                }
+                if (sorted && largest) {
+                    std::sort(pairs.begin(), pairs.begin() + k,
+                              [](auto& a, auto& b) { return a.first > b.first; });
+                } else if (sorted) {
+                    std::sort(pairs.begin(), pairs.begin() + k,
+                              [](auto& a, auto& b) { return a.first < b.first; });
+                }
+                for (int64_t d = 0; d < k; ++d) {
+                    int64_t out_idx = o * k * inner_size + d * inner_size + i;
+                    h_out[out_idx] = pairs[d].first;
+                    h_idx[out_idx] = pairs[d].second;
+                }
+            }
+        }
+        queue.memcpy(const_cast<void*>(values.data_ptr()), h_out.data(), out_numel * sizeof(double)).wait();
+        queue.memcpy(const_cast<void*>(indices.data_ptr()), h_idx.data(), out_numel * sizeof(int64_t)).wait();
+    } else {
+        throw std::runtime_error("topk: unsupported dtype");
+    }
+
+    return {values, indices};
+}
+
+// ============================================================================
+// Unique kernel - find unique values
+// ============================================================================
+auto unique_kernel(const Tensor& input, bool sorted, bool return_inverse, bool return_counts,
+                   sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor> {
+    int64_t numel = input.numel();
+
+    if (input.dtype() == DType::Float32) {
+        std::vector<float> h_in(numel);
+        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(float)).wait();
+
+        std::vector<float> unique_vals;
+        std::vector<int64_t> inverse(numel, 0);
+        std::vector<int64_t> counts;
+
+        if (sorted) {
+            std::vector<float> sorted_vals = h_in;
+            std::sort(sorted_vals.begin(), sorted_vals.end());
+            sorted_vals.erase(std::unique(sorted_vals.begin(), sorted_vals.end()), sorted_vals.end());
+            unique_vals = sorted_vals;
+        } else {
+            for (auto v : h_in) {
+                if (std::find(unique_vals.begin(), unique_vals.end(), v) == unique_vals.end()) {
+                    unique_vals.push_back(v);
+                }
+            }
+        }
+
+        if (return_inverse) {
+            for (int64_t i = 0; i < numel; ++i) {
+                for (size_t j = 0; j < unique_vals.size(); ++j) {
+                    if (h_in[i] == unique_vals[j]) { inverse[i] = j; break; }
+                }
+            }
+        }
+
+        if (return_counts) {
+            counts.resize(unique_vals.size(), 0);
+            for (int64_t i = 0; i < numel; ++i) {
+                for (size_t j = 0; j < unique_vals.size(); ++j) {
+                    if (h_in[i] == unique_vals[j]) { counts[j]++; break; }
+                }
+            }
+        }
+
+        int64_t n_unique = unique_vals.size();
+        Tensor out_vals({n_unique}, input.dtype(), input.device());
+        queue.memcpy(const_cast<void*>(out_vals.data_ptr()), unique_vals.data(), n_unique * sizeof(float)).wait();
+
+        Tensor out_inverse({numel}, DType::Int64, input.device());
+        queue.memcpy(const_cast<void*>(out_inverse.data_ptr()), inverse.data(), numel * sizeof(int64_t)).wait();
+
+        Tensor out_counts({return_counts ? n_unique : 0}, DType::Int64, input.device());
+        if (return_counts && n_unique > 0) {
+            queue.memcpy(const_cast<void*>(out_counts.data_ptr()), counts.data(), n_unique * sizeof(int64_t)).wait();
+        }
+
+        return {out_vals, out_inverse, out_counts};
+    } else if (input.dtype() == DType::Int64) {
+        std::vector<int64_t> h_in(numel);
+        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(int64_t)).wait();
+
+        std::vector<int64_t> unique_vals;
+        std::vector<int64_t> inverse(numel, 0);
+        std::vector<int64_t> counts;
+
+        if (sorted) {
+            unique_vals = h_in;
+            std::sort(unique_vals.begin(), unique_vals.end());
+            unique_vals.erase(std::unique(unique_vals.begin(), unique_vals.end()), unique_vals.end());
+        } else {
+            for (auto v : h_in) {
+                if (std::find(unique_vals.begin(), unique_vals.end(), v) == unique_vals.end()) {
+                    unique_vals.push_back(v);
+                }
+            }
+        }
+
+        if (return_inverse) {
+            for (int64_t i = 0; i < numel; ++i) {
+                for (size_t j = 0; j < unique_vals.size(); ++j) {
+                    if (h_in[i] == unique_vals[j]) { inverse[i] = j; break; }
+                }
+            }
+        }
+
+        if (return_counts) {
+            counts.resize(unique_vals.size(), 0);
+            for (int64_t i = 0; i < numel; ++i) {
+                for (size_t j = 0; j < unique_vals.size(); ++j) {
+                    if (h_in[i] == unique_vals[j]) { counts[j]++; break; }
+                }
+            }
+        }
+
+        int64_t n_unique = unique_vals.size();
+        Tensor out_vals({n_unique}, input.dtype(), input.device());
+        queue.memcpy(const_cast<void*>(out_vals.data_ptr()), unique_vals.data(), n_unique * sizeof(int64_t)).wait();
+
+        Tensor out_inverse({numel}, DType::Int64, input.device());
+        queue.memcpy(const_cast<void*>(out_inverse.data_ptr()), inverse.data(), numel * sizeof(int64_t)).wait();
+
+        Tensor out_counts({return_counts ? n_unique : 0}, DType::Int64, input.device());
+        if (return_counts && n_unique > 0) {
+            queue.memcpy(const_cast<void*>(out_counts.data_ptr()), counts.data(), n_unique * sizeof(int64_t)).wait();
+        }
+
+        return {out_vals, out_inverse, out_counts};
+    } else {
+        throw std::runtime_error("unique: unsupported dtype (only Float32 and Int64 supported)");
+    }
+}
+
 } // namespace oneapi
 } // namespace tenzor

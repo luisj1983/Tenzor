@@ -691,6 +691,127 @@ public:
                                    const Tensor& output, const std::string& output_name) -> void;
 
     // ============================================================================
+    // Phase 13: Expanded Export Coverage
+    // ============================================================================
+
+    /**
+     * @brief Export Cast (dtype conversion) operation
+     */
+    auto export_cast(const Tensor& input, DType target_dtype,
+                     const Tensor& output, const std::string& output_name) -> void;
+
+    /**
+     * @brief Export Triu (upper triangular) operation via ONNX Trilu
+     */
+    auto export_triu(const Tensor& input, int64_t diagonal,
+                     const Tensor& output, const std::string& output_name) -> void;
+
+    /**
+     * @brief Export Tril (lower triangular) operation via ONNX Trilu
+     */
+    auto export_tril(const Tensor& input, int64_t diagonal,
+                     const Tensor& output, const std::string& output_name) -> void;
+
+    /**
+     * @brief Export LogicalAnd operation
+     */
+    auto export_logical_and(const Tensor& a, const Tensor& b,
+                            const Tensor& output, const std::string& output_name) -> void;
+
+    /**
+     * @brief Export LogicalOr operation
+     */
+    auto export_logical_or(const Tensor& a, const Tensor& b,
+                           const Tensor& output, const std::string& output_name) -> void;
+
+    /**
+     * @brief Export LogicalNot operation
+     */
+    auto export_logical_not(const Tensor& input,
+                            const Tensor& output, const std::string& output_name) -> void;
+
+    /**
+     * @brief Export ScatterAdd via ONNX ScatterElements with reduction='add'
+     */
+    auto export_scatter_add(const Tensor& data, const Tensor& indices,
+                            const Tensor& updates, int64_t axis,
+                            const Tensor& output, const std::string& output_name) -> void;
+
+    /**
+     * @brief Export FFT via ONNX DFT (opset 17+)
+     */
+    auto export_fft(const Tensor& input, int64_t signal_ndim,
+                    const Tensor& output, const std::string& output_name) -> void;
+
+    /**
+     * @brief Export IFFT via ONNX DFT with inverse=1 (opset 17+)
+     */
+    auto export_ifft(const Tensor& input, int64_t signal_ndim,
+                     const Tensor& output, const std::string& output_name) -> void;
+
+    /**
+     * @brief Export RFFT via ONNX DFT with onesided=1 (opset 17+)
+     */
+    auto export_rfft(const Tensor& input, int64_t signal_ndim,
+                     const Tensor& output, const std::string& output_name) -> void;
+
+    /**
+     * @brief Export CumSum via ONNX CumSum (opset 11+)
+     */
+    auto export_cumsum(const Tensor& input, int64_t axis,
+                       const Tensor& output, const std::string& output_name) -> void;
+
+    /**
+     * @brief Export Roll via Slice + Concat decomposition
+     */
+    auto export_roll(const Tensor& input, int64_t shift, int64_t axis,
+                     const Tensor& output, const std::string& output_name) -> void;
+
+    /**
+     * @brief Export EmbeddingBag via Gather + Reduce decomposition
+     *
+     * @param mode 0=sum, 1=mean, 2=max
+     */
+    auto export_embedding_bag(const Tensor& weight, const Tensor& indices,
+                              const Tensor& offsets, int64_t mode,
+                              const Tensor& output, const std::string& output_name) -> void;
+
+    /**
+     * @brief Export DepthwiseConv2d via ONNX Conv with group=in_channels
+     */
+    auto export_depthwise_conv2d(const Tensor& input, const Tensor& weight,
+                                 const std::optional<Tensor>& bias,
+                                 const std::vector<int64_t>& kernel_size,
+                                 const std::vector<int64_t>& stride,
+                                 const std::vector<int64_t>& padding,
+                                 const std::vector<int64_t>& dilation,
+                                 int64_t in_channels,
+                                 const Tensor& output,
+                                 const std::string& output_name) -> void;
+
+    /**
+     * @brief Export Log2 via Log(x) / Log(2) decomposition
+     */
+    auto export_log2(const Tensor& input, const Tensor& output,
+                     const std::string& output_name) -> void;
+
+    /**
+     * @brief Export QuantizedConv2d via ONNX QLinearConv (opset 10+)
+     */
+    auto export_quantized_conv2d(
+        const Tensor& input, const Tensor& input_scale, const Tensor& input_zp,
+        const Tensor& weight, const Tensor& weight_scale, const Tensor& weight_zp,
+        const std::optional<Tensor>& bias,
+        const Tensor& output_scale, const Tensor& output_zp,
+        const std::vector<int64_t>& kernel_size,
+        const std::vector<int64_t>& stride,
+        const std::vector<int64_t>& padding,
+        const std::vector<int64_t>& dilation,
+        int64_t groups,
+        const Tensor& output,
+        const std::string& output_name) -> void;
+
+    // ============================================================================
     // Quantization (QDQ) Nodes
     // ============================================================================
 

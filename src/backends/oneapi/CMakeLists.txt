@@ -133,6 +133,9 @@ set(ONEAPI_SYCL_SOURCES
     kernels/vision.cpp
     kernels/quantization.cpp
     kernels/utilities.cpp
+    kernels/rnn.cpp
+    kernels/linalg.cpp
+    kernels/fft.cpp
 )
 
 set(ALL_OBJECTS "")

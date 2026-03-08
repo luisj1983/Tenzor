@@ -1,8 +1,18 @@
 #include "tenzor/core/tensor.hpp"
 #include <sycl/sycl.hpp>
+#include <cstring>
 #include <numeric>
 #include <algorithm>
 #include <stdexcept>
+#include <string>
+#include <vector>
+
+// Forward declarations for kernels in other files
+namespace tenzor {
+namespace oneapi {
+    auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, sycl::queue& queue) -> Tensor;
+}
+}
 
 namespace tenzor {
 namespace oneapi {
@@ -1035,6 +1045,734 @@ auto fill_kernel(const Tensor& tensor, float value, sycl::queue& queue) -> Tenso
     }
 
     return output;
+}
+
+// ============================================================================
+// Flatten kernel - reshape dims [start_dim..end_dim] into a single dimension
+// ============================================================================
+
+auto flatten_kernel(const Tensor& input, int64_t start_dim, int64_t end_dim, sycl::queue& queue) -> Tensor {
+    auto shape = input.shape();
+    int64_t ndim = shape.size();
+
+    if (start_dim < 0) start_dim += ndim;
+    if (end_dim < 0) end_dim += ndim;
+
+    int64_t flat_size = 1;
+    for (int64_t d = start_dim; d <= end_dim; ++d) {
+        flat_size *= shape[d];
+    }
+
+    std::vector<int64_t> new_shape;
+    for (int64_t d = 0; d < start_dim; ++d) new_shape.push_back(shape[d]);
+    new_shape.push_back(flat_size);
+    for (int64_t d = end_dim + 1; d < ndim; ++d) new_shape.push_back(shape[d]);
+
+    return reshape_kernel(input, new_shape, queue);
+}
+
+// ============================================================================
+// Slice kernel - extract a slice along dimensions
+// ============================================================================
+
+class SliceKernelCopy;
+
+auto slice_kernel(const Tensor& input,
+                  const std::vector<int64_t>& starts,
+                  const std::vector<int64_t>& ends,
+                  const std::vector<int64_t>& steps, sycl::queue& queue) -> Tensor {
+    // Apply slice iteratively along each dimension
+    Tensor result = input;
+    auto shape = input.shape();
+    int64_t ndim = shape.size();
+
+    for (size_t d = 0; d < starts.size() && d < static_cast<size_t>(ndim); ++d) {
+        auto cur_shape = result.shape();
+        int64_t dim_size = cur_shape[d];
+        int64_t start = starts[d];
+        int64_t end = ends[d];
+        int64_t step = steps[d];
+
+        if (start < 0) start += dim_size;
+        if (end < 0) end += dim_size;
+        start = std::max(int64_t(0), std::min(start, dim_size));
+        end = std::max(int64_t(0), std::min(end, dim_size));
+
+        int64_t slice_size = (end - start + step - 1) / step;
+        if (slice_size < 0) slice_size = 0;
+
+        if (slice_size == dim_size && step == 1 && start == 0) continue;  // No-op for this dim
+
+        std::vector<int64_t> new_shape(cur_shape.begin(), cur_shape.end());
+        new_shape[d] = slice_size;
+
+        int64_t outer_size = 1;
+        for (int64_t i = 0; i < static_cast<int64_t>(d); ++i) outer_size *= cur_shape[i];
+        int64_t inner_size = 1;
+        for (int64_t i = d + 1; i < static_cast<int64_t>(cur_shape.size()); ++i) inner_size *= cur_shape[i];
+
+        Tensor next(new_shape, result.dtype(), result.device());
+        size_t elem_size = result.dtype_size();
+
+        // Ensure contiguous for memcpy
+        Tensor cont = result.is_contiguous() ? result : contiguous_kernel(result, queue);
+
+        if (step == 1 && elem_size <= 8) {
+            // Bulk copy per outer iteration
+            size_t chunk_bytes = slice_size * inner_size * elem_size;
+            const uint8_t* src = static_cast<const uint8_t*>(cont.data_ptr());
+            uint8_t* dst = static_cast<uint8_t*>(const_cast<void*>(next.data_ptr()));
+            for (int64_t o = 0; o < outer_size; ++o) {
+                size_t src_off = (o * dim_size + start) * inner_size * elem_size;
+                size_t dst_off = o * slice_size * inner_size * elem_size;
+                queue.memcpy(dst + dst_off, src + src_off, chunk_bytes).wait();
+            }
+        } else {
+            // General strided copy via host
+            const uint8_t* src = static_cast<const uint8_t*>(cont.data_ptr());
+            uint8_t* dst = static_cast<uint8_t*>(const_cast<void*>(next.data_ptr()));
+
+            int64_t dst_idx = 0;
+            for (int64_t o = 0; o < outer_size; ++o) {
+                for (int64_t s = start; s < end; s += step) {
+                    size_t src_off = (o * dim_size + s) * inner_size * elem_size;
+                    size_t dst_off = dst_idx * inner_size * elem_size;
+                    queue.memcpy(dst + dst_off, src + src_off, inner_size * elem_size).wait();
+                    dst_idx += 1;
+                }
+            }
+        }
+
+        result = next;
+    }
+
+    return result;
+}
+
+// ============================================================================
+// Split kernel - split tensor into chunks along a dimension
+// ============================================================================
+
+auto split_kernel(const Tensor& input, int64_t split_size, int64_t dim, sycl::queue& queue) -> std::vector<Tensor> {
+    auto shape = input.shape();
+    int64_t ndim = shape.size();
+    if (dim < 0) dim += ndim;
+
+    int64_t dim_size = shape[dim];
+    Tensor cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+
+    int64_t outer_size = 1;
+    for (int64_t d = 0; d < dim; ++d) outer_size *= shape[d];
+    int64_t inner_size = 1;
+    for (int64_t d = dim + 1; d < ndim; ++d) inner_size *= shape[d];
+
+    size_t elem_size = input.dtype_size();
+    const uint8_t* src = static_cast<const uint8_t*>(cont.data_ptr());
+
+    std::vector<Tensor> result;
+    for (int64_t offset = 0; offset < dim_size; offset += split_size) {
+        int64_t chunk_size = std::min(split_size, dim_size - offset);
+        std::vector<int64_t> out_shape(shape.begin(), shape.end());
+        out_shape[dim] = chunk_size;
+
+        Tensor chunk(out_shape, input.dtype(), input.device());
+        uint8_t* dst = static_cast<uint8_t*>(const_cast<void*>(chunk.data_ptr()));
+
+        for (int64_t o = 0; o < outer_size; ++o) {
+            size_t src_off = (o * dim_size + offset) * inner_size * elem_size;
+            size_t dst_off = o * chunk_size * inner_size * elem_size;
+            queue.memcpy(dst + dst_off, src + src_off, chunk_size * inner_size * elem_size).wait();
+        }
+
+        result.push_back(std::move(chunk));
+    }
+
+    return result;
+}
+
+// ============================================================================
+// Chunk kernel - split into n chunks
+// ============================================================================
+
+auto chunk_kernel(const Tensor& input, int64_t chunks, int64_t dim, sycl::queue& queue) -> std::vector<Tensor> {
+    auto shape = input.shape();
+    if (dim < 0) dim += shape.size();
+    int64_t dim_size = shape[dim];
+    int64_t split_size = (dim_size + chunks - 1) / chunks;
+    return split_kernel(input, split_size, dim, queue);
+}
+
+// ============================================================================
+// Tile kernel - repeat tensor along each dimension
+// ============================================================================
+
+auto tile_kernel(const Tensor& input, const std::vector<int64_t>& reps, sycl::queue& queue) -> Tensor {
+    return repeat_kernel(input, reps, queue);
+}
+
+// ============================================================================
+// Take kernel - flattened index selection
+// ============================================================================
+
+class TakeKernelFloat32;
+class TakeKernelFloat64;
+class TakeKernelFloat16;
+class TakeKernelBFloat16;
+
+auto take_kernel(const Tensor& input, const Tensor& indices, sycl::queue& queue) -> Tensor {
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    Tensor idx_cont = indices.is_contiguous() ? indices : contiguous_kernel(indices, queue);
+
+    int64_t num_indices = idx_cont.numel();
+    std::vector<int64_t> out_shape(idx_cont.shape().begin(), idx_cont.shape().end());
+
+    Tensor output(out_shape, in_cont.dtype(), in_cont.device());
+
+    // Indices can be Int32 or Int64
+    bool is_int64 = (idx_cont.dtype() == DType::Int64);
+
+    if (in_cont.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+
+        if (is_int64) {
+            const int64_t* idx_ptr = get_data_ptr<const int64_t>(idx_cont);
+            queue.parallel_for<TakeKernelFloat32>(sycl::range<1>(num_indices), [=](sycl::id<1> i) {
+                out_ptr[i] = in_ptr[idx_ptr[i]];
+            }).wait();
+        } else {
+            const int32_t* idx_ptr = get_data_ptr<const int32_t>(idx_cont);
+            queue.parallel_for(sycl::range<1>(num_indices), [=](sycl::id<1> i) {
+                out_ptr[i] = in_ptr[idx_ptr[i]];
+            }).wait();
+        }
+    }
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+
+        if (is_int64) {
+            const int64_t* idx_ptr = get_data_ptr<const int64_t>(idx_cont);
+            queue.parallel_for<TakeKernelFloat64>(sycl::range<1>(num_indices), [=](sycl::id<1> i) {
+                out_ptr[i] = in_ptr[idx_ptr[i]];
+            }).wait();
+        } else {
+            const int32_t* idx_ptr = get_data_ptr<const int32_t>(idx_cont);
+            queue.parallel_for(sycl::range<1>(num_indices), [=](sycl::id<1> i) {
+                out_ptr[i] = in_ptr[idx_ptr[i]];
+            }).wait();
+        }
+    }
+    else {
+        // Generic byte copy via host for other dtypes
+        size_t elem_size = in_cont.dtype_size();
+        int64_t input_numel = in_cont.numel();
+
+        std::vector<uint8_t> in_host(input_numel * elem_size);
+        std::vector<uint8_t> out_host(num_indices * elem_size);
+        queue.memcpy(in_host.data(), in_cont.data_ptr(), in_host.size()).wait();
+
+        // Read indices to host
+        if (is_int64) {
+            std::vector<int64_t> idx_host(num_indices);
+            queue.memcpy(idx_host.data(), idx_cont.data_ptr(), num_indices * sizeof(int64_t)).wait();
+            for (int64_t i = 0; i < num_indices; ++i) {
+                std::memcpy(out_host.data() + i * elem_size,
+                           in_host.data() + idx_host[i] * elem_size, elem_size);
+            }
+        } else {
+            std::vector<int32_t> idx_host(num_indices);
+            queue.memcpy(idx_host.data(), idx_cont.data_ptr(), num_indices * sizeof(int32_t)).wait();
+            for (int64_t i = 0; i < num_indices; ++i) {
+                std::memcpy(out_host.data() + i * elem_size,
+                           in_host.data() + idx_host[i] * elem_size, elem_size);
+            }
+        }
+
+        queue.memcpy(const_cast<void*>(output.data_ptr()), out_host.data(), out_host.size()).wait();
+    }
+
+    return output;
+}
+
+// ============================================================================
+// Unfold kernel - extract sliding local blocks (im2col-like for 1D)
+// ============================================================================
+
+auto unfold_kernel(const Tensor& input, int64_t kernel_size, int64_t stride,
+                    int64_t padding, int64_t dilation, sycl::queue& queue) -> Tensor {
+    // 2D unfold: input [N, C, H, W] -> output [N, C*kH*kW, L]
+    auto shape = input.shape();
+    if (shape.size() != 4) {
+        throw std::runtime_error("unfold_kernel: expected 4D input [N, C, H, W]");
+    }
+
+    int64_t N = shape[0], C = shape[1], H = shape[2], W = shape[3];
+    int64_t H_out = (H + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+    int64_t W_out = (W + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+    int64_t L = H_out * W_out;
+    int64_t channels_col = C * kernel_size * kernel_size;
+
+    Tensor output({N, channels_col, L}, input.dtype(), input.device());
+
+    // Use existing im2col if available; otherwise simple host fallback
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    size_t elem_size = input.dtype_size();
+
+    // Host-based implementation for correctness
+    std::vector<uint8_t> in_host(in_cont.numel() * elem_size);
+    std::vector<uint8_t> out_host(output.numel() * elem_size, 0);
+    queue.memcpy(in_host.data(), in_cont.data_ptr(), in_host.size()).wait();
+
+    auto get_val = [&](int64_t n, int64_t c, int64_t h, int64_t w) -> float {
+        if (h < 0 || h >= H || w < 0 || w >= W) return 0.0f;
+        size_t idx = ((n * C + c) * H + h) * W + w;
+        if (input.dtype() == DType::Float32) {
+            float v; std::memcpy(&v, in_host.data() + idx * sizeof(float), sizeof(float)); return v;
+        } else if (input.dtype() == DType::Float64) {
+            double v; std::memcpy(&v, in_host.data() + idx * sizeof(double), sizeof(double)); return static_cast<float>(v);
+        }
+        return 0.0f;
+    };
+
+    auto set_val = [&](int64_t idx, float v) {
+        if (input.dtype() == DType::Float32) {
+            std::memcpy(out_host.data() + idx * sizeof(float), &v, sizeof(float));
+        } else if (input.dtype() == DType::Float64) {
+            double dv = static_cast<double>(v);
+            std::memcpy(out_host.data() + idx * sizeof(double), &dv, sizeof(double));
+        }
+    };
+
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            for (int64_t kh = 0; kh < kernel_size; ++kh) {
+                for (int64_t kw = 0; kw < kernel_size; ++kw) {
+                    int64_t col_idx = (c * kernel_size + kh) * kernel_size + kw;
+                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
+                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
+                            int64_t h_in = h_out * stride - padding + kh * dilation;
+                            int64_t w_in = w_out * stride - padding + kw * dilation;
+                            int64_t l = h_out * W_out + w_out;
+                            int64_t out_idx = (n * channels_col + col_idx) * L + l;
+                            set_val(out_idx, get_val(n, c, h_in, w_in));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    queue.memcpy(const_cast<void*>(output.data_ptr()), out_host.data(), out_host.size()).wait();
+    return output;
+}
+
+// ============================================================================
+// Fold kernel - inverse of unfold (col2im)
+// ============================================================================
+
+auto fold_kernel(const Tensor& input, const std::vector<int64_t>& output_size,
+                  int64_t kernel_size, int64_t stride, int64_t padding,
+                  int64_t dilation, sycl::queue& queue) -> Tensor {
+    auto shape = input.shape();
+    if (shape.size() != 3) {
+        throw std::runtime_error("fold_kernel: expected 3D input [N, C*kH*kW, L]");
+    }
+
+    int64_t N = shape[0];
+    int64_t channels_col = shape[1];
+    int64_t L = shape[2];
+    int64_t H_out = output_size[0];
+    int64_t W_out = output_size[1];
+    int64_t C = channels_col / (kernel_size * kernel_size);
+
+    Tensor output({N, C, H_out, W_out}, input.dtype(), input.device());
+
+    size_t elem_size = input.dtype_size();
+    std::vector<uint8_t> in_host(input.numel() * elem_size);
+    std::vector<uint8_t> out_host(output.numel() * elem_size, 0);
+
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    queue.memcpy(in_host.data(), in_cont.data_ptr(), in_host.size()).wait();
+
+    int64_t H_col = (H_out + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+    int64_t W_col = (W_out + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+
+    auto add_val = [&](int64_t idx, float v) {
+        if (input.dtype() == DType::Float32) {
+            float cur; std::memcpy(&cur, out_host.data() + idx * sizeof(float), sizeof(float));
+            cur += v;
+            std::memcpy(out_host.data() + idx * sizeof(float), &cur, sizeof(float));
+        } else if (input.dtype() == DType::Float64) {
+            double cur; std::memcpy(&cur, out_host.data() + idx * sizeof(double), sizeof(double));
+            cur += static_cast<double>(v);
+            std::memcpy(out_host.data() + idx * sizeof(double), &cur, sizeof(double));
+        }
+    };
+
+    auto get_col_val = [&](int64_t idx) -> float {
+        if (input.dtype() == DType::Float32) {
+            float v; std::memcpy(&v, in_host.data() + idx * sizeof(float), sizeof(float)); return v;
+        } else if (input.dtype() == DType::Float64) {
+            double v; std::memcpy(&v, in_host.data() + idx * sizeof(double), sizeof(double)); return static_cast<float>(v);
+        }
+        return 0.0f;
+    };
+
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            for (int64_t kh = 0; kh < kernel_size; ++kh) {
+                for (int64_t kw = 0; kw < kernel_size; ++kw) {
+                    int64_t col_idx = (c * kernel_size + kh) * kernel_size + kw;
+                    for (int64_t h_col = 0; h_col < H_col; ++h_col) {
+                        for (int64_t w_col = 0; w_col < W_col; ++w_col) {
+                            int64_t h = h_col * stride - padding + kh * dilation;
+                            int64_t w = w_col * stride - padding + kw * dilation;
+                            if (h >= 0 && h < H_out && w >= 0 && w < W_out) {
+                                int64_t l = h_col * W_col + w_col;
+                                int64_t in_idx = (n * channels_col + col_idx) * L + l;
+                                int64_t out_idx = ((n * C + c) * H_out + h) * W_out + w;
+                                add_val(out_idx, get_col_val(in_idx));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    queue.memcpy(const_cast<void*>(output.data_ptr()), out_host.data(), out_host.size()).wait();
+    return output;
+}
+
+// ============================================================================
+// Roll kernel - shift elements along a dimension with wraparound
+// ============================================================================
+
+class RollKernelFloat32;
+class RollKernelFloat64;
+class RollKernelFloat16;
+class RollKernelBFloat16;
+
+auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim, sycl::queue& queue) -> Tensor {
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    auto shape = in_cont.shape();
+    int64_t ndim = shape.size();
+    if (dim < 0) dim += ndim;
+
+    int64_t dim_size = shape[dim];
+    // Normalize shift to [0, dim_size)
+    shift = ((shift % dim_size) + dim_size) % dim_size;
+
+    if (shift == 0) return in_cont;
+
+    Tensor output(std::vector<int64_t>(shape.begin(), shape.end()),
+                  in_cont.dtype(), in_cont.device());
+
+    int64_t outer_size = 1;
+    for (int64_t d = 0; d < dim; ++d) outer_size *= shape[d];
+    int64_t inner_size = 1;
+    for (int64_t d = dim + 1; d < ndim; ++d) inner_size *= shape[d];
+
+    int64_t numel = in_cont.numel();
+
+    if (in_cont.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for<RollKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            int64_t i = idx;
+            int64_t inner_idx = i % inner_size;
+            int64_t dim_idx = (i / inner_size) % dim_size;
+            int64_t outer_idx = i / (inner_size * dim_size);
+            int64_t new_dim_idx = (dim_idx + shift) % dim_size;
+            int64_t out_i = (outer_idx * dim_size + new_dim_idx) * inner_size + inner_idx;
+            out_ptr[out_i] = in_ptr[i];
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+        queue.parallel_for<RollKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            int64_t i = idx;
+            int64_t inner_idx = i % inner_size;
+            int64_t dim_idx = (i / inner_size) % dim_size;
+            int64_t outer_idx = i / (inner_size * dim_size);
+            int64_t new_dim_idx = (dim_idx + shift) % dim_size;
+            int64_t out_i = (outer_idx * dim_size + new_dim_idx) * inner_size + inner_idx;
+            out_ptr[out_i] = in_ptr[i];
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<RollKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            int64_t i = idx;
+            int64_t inner_idx = i % inner_size;
+            int64_t dim_idx = (i / inner_size) % dim_size;
+            int64_t outer_idx = i / (inner_size * dim_size);
+            int64_t new_dim_idx = (dim_idx + shift) % dim_size;
+            int64_t out_i = (outer_idx * dim_size + new_dim_idx) * inner_size + inner_idx;
+            out_ptr[out_i] = in_ptr[i];
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for<RollKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            int64_t i = idx;
+            int64_t inner_idx = i % inner_size;
+            int64_t dim_idx = (i / inner_size) % dim_size;
+            int64_t outer_idx = i / (inner_size * dim_size);
+            int64_t new_dim_idx = (dim_idx + shift) % dim_size;
+            int64_t out_i = (outer_idx * dim_size + new_dim_idx) * inner_size + inner_idx;
+            out_ptr[out_i] = in_ptr[i];
+        }).wait();
+    }
+    else {
+        // Generic copy via host for other dtypes
+        size_t elem_size = in_cont.dtype_size();
+        std::vector<uint8_t> in_host(numel * elem_size);
+        std::vector<uint8_t> out_host(numel * elem_size);
+        queue.memcpy(in_host.data(), in_cont.data_ptr(), in_host.size()).wait();
+
+        for (int64_t i = 0; i < numel; ++i) {
+            int64_t inner_idx = i % inner_size;
+            int64_t dim_idx = (i / inner_size) % dim_size;
+            int64_t outer_idx = i / (inner_size * dim_size);
+            int64_t new_dim_idx = (dim_idx + shift) % dim_size;
+            int64_t out_i = (outer_idx * dim_size + new_dim_idx) * inner_size + inner_idx;
+            std::memcpy(out_host.data() + out_i * elem_size,
+                       in_host.data() + i * elem_size, elem_size);
+        }
+
+        queue.memcpy(const_cast<void*>(output.data_ptr()), out_host.data(), out_host.size()).wait();
+    }
+
+    return output;
+}
+
+// ============================================================================
+// Cast kernel - type conversion
+// ============================================================================
+class CastF32ToF64;
+class CastF64ToF32;
+class CastF32ToF16;
+class CastF16ToF32;
+class CastF32ToI32;
+class CastI32ToF32;
+class CastF32ToI64;
+class CastI64ToF32;
+class CastF32ToBF16;
+class CastBF16ToF32;
+class CastF32ToU8;
+class CastU8ToF32;
+class CastF32ToI8;
+class CastI8ToF32;
+class CastF32ToBool;
+class CastBoolToF32;
+
+auto cast_kernel(const Tensor& input, DType target_dtype, sycl::queue& queue) -> Tensor {
+    if (input.dtype() == target_dtype) {
+        return clone_kernel(input, queue);
+    }
+
+    auto shape_span = input.shape();
+    std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+    Tensor output(shape, target_dtype, input.device());
+    const int64_t numel = input.numel();
+    if (numel == 0) return output;
+
+    DType src = input.dtype();
+    DType dst = target_dtype;
+
+    if (src == DType::Float32 && dst == DType::Float64) {
+        const float* in = get_data_ptr<const float>(input);
+        double* out = get_data_ptr<double>(output);
+        queue.parallel_for<CastF32ToF64>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            out[i] = static_cast<double>(in[i]);
+        }).wait();
+    } else if (src == DType::Float64 && dst == DType::Float32) {
+        const double* in = get_data_ptr<const double>(input);
+        float* out = get_data_ptr<float>(output);
+        queue.parallel_for<CastF64ToF32>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            out[i] = static_cast<float>(in[i]);
+        }).wait();
+    } else if (src == DType::Float32 && dst == DType::Float16) {
+        const float* in = get_data_ptr<const float>(input);
+        sycl::half* out = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<CastF32ToF16>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            out[i] = sycl::half(in[i]);
+        }).wait();
+    } else if (src == DType::Float16 && dst == DType::Float32) {
+        const sycl::half* in = get_data_ptr<const sycl::half>(input);
+        float* out = get_data_ptr<float>(output);
+        queue.parallel_for<CastF16ToF32>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            out[i] = static_cast<float>(in[i]);
+        }).wait();
+    } else if (src == DType::Float32 && dst == DType::BFloat16) {
+        const float* in = get_data_ptr<const float>(input);
+        uint16_t* out = get_data_ptr<uint16_t>(output);
+        queue.parallel_for<CastF32ToBF16>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            out[i] = f32_to_bf16(in[i]);
+        }).wait();
+    } else if (src == DType::BFloat16 && dst == DType::Float32) {
+        const uint16_t* in = get_data_ptr<const uint16_t>(input);
+        float* out = get_data_ptr<float>(output);
+        queue.parallel_for<CastBF16ToF32>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            out[i] = bf16_to_f32(in[i]);
+        }).wait();
+    } else if (src == DType::Float32 && dst == DType::Int32) {
+        const float* in = get_data_ptr<const float>(input);
+        int32_t* out = get_data_ptr<int32_t>(output);
+        queue.parallel_for<CastF32ToI32>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            out[i] = static_cast<int32_t>(in[i]);
+        }).wait();
+    } else if (src == DType::Int32 && dst == DType::Float32) {
+        const int32_t* in = get_data_ptr<const int32_t>(input);
+        float* out = get_data_ptr<float>(output);
+        queue.parallel_for<CastI32ToF32>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            out[i] = static_cast<float>(in[i]);
+        }).wait();
+    } else if (src == DType::Float32 && dst == DType::Int64) {
+        const float* in = get_data_ptr<const float>(input);
+        int64_t* out = get_data_ptr<int64_t>(output);
+        queue.parallel_for<CastF32ToI64>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            out[i] = static_cast<int64_t>(in[i]);
+        }).wait();
+    } else if (src == DType::Int64 && dst == DType::Float32) {
+        const int64_t* in = get_data_ptr<const int64_t>(input);
+        float* out = get_data_ptr<float>(output);
+        queue.parallel_for<CastI64ToF32>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            out[i] = static_cast<float>(in[i]);
+        }).wait();
+    } else if (src == DType::Float32 && dst == DType::UInt8) {
+        const float* in = get_data_ptr<const float>(input);
+        uint8_t* out = get_data_ptr<uint8_t>(output);
+        queue.parallel_for<CastF32ToU8>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            out[i] = static_cast<uint8_t>(sycl::clamp(in[i], 0.0f, 255.0f));
+        }).wait();
+    } else if (src == DType::UInt8 && dst == DType::Float32) {
+        const uint8_t* in = get_data_ptr<const uint8_t>(input);
+        float* out = get_data_ptr<float>(output);
+        queue.parallel_for<CastU8ToF32>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            out[i] = static_cast<float>(in[i]);
+        }).wait();
+    } else if (src == DType::Float32 && dst == DType::Int8) {
+        const float* in = get_data_ptr<const float>(input);
+        int8_t* out = get_data_ptr<int8_t>(output);
+        queue.parallel_for<CastF32ToI8>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            out[i] = static_cast<int8_t>(sycl::clamp(in[i], -128.0f, 127.0f));
+        }).wait();
+    } else if (src == DType::Int8 && dst == DType::Float32) {
+        const int8_t* in = get_data_ptr<const int8_t>(input);
+        float* out = get_data_ptr<float>(output);
+        queue.parallel_for<CastI8ToF32>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            out[i] = static_cast<float>(in[i]);
+        }).wait();
+    } else if (src == DType::Float32 && dst == DType::Bool) {
+        const float* in = get_data_ptr<const float>(input);
+        bool* out = get_data_ptr<bool>(output);
+        queue.parallel_for<CastF32ToBool>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            out[i] = (in[i] != 0.0f);
+        }).wait();
+    } else if (src == DType::Bool && dst == DType::Float32) {
+        const bool* in = get_data_ptr<const bool>(input);
+        float* out = get_data_ptr<float>(output);
+        queue.parallel_for<CastBoolToF32>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            out[i] = in[i] ? 1.0f : 0.0f;
+        }).wait();
+    } else {
+        // Two-hop: src -> Float32 -> dst
+        if (src != DType::Float32) {
+            Tensor as_f32 = cast_kernel(input, DType::Float32, queue);
+            return cast_kernel(as_f32, target_dtype, queue);
+        }
+        throw std::runtime_error("cast_kernel: unsupported dtype conversion");
+    }
+
+    return output;
+}
+
+// ============================================================================
+// StridedFill kernel - fill non-contiguous tensor in-place
+// ============================================================================
+class StridedFillKernelF32;
+class StridedFillKernelF64;
+
+auto strided_fill_kernel(Tensor& self, double value, sycl::queue& queue) -> void {
+    int64_t numel = self.numel();
+    if (numel == 0) return;
+
+    auto shape_span = self.shape();
+    auto strides_span = self.strides();
+    size_t ndim = shape_span.size();
+
+    if (self.is_contiguous()) {
+        if (self.dtype() == DType::Float32) {
+            float val = static_cast<float>(value);
+            float* ptr = get_data_ptr<float>(self);
+            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) { ptr[i] = val; }).wait();
+        } else if (self.dtype() == DType::Float64) {
+            double* ptr = get_data_ptr<double>(self);
+            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) { ptr[i] = value; }).wait();
+        } else {
+            Tensor filled = fill_kernel(self, static_cast<float>(value), queue);
+            queue.memcpy(const_cast<void*>(self.data_ptr()), filled.data_ptr(),
+                         numel * self.dtype_size()).wait();
+        }
+        return;
+    }
+
+    int64_t shape_arr[8] = {0}, strides_arr[8] = {0}, cont_strides_arr[8] = {0};
+    for (size_t i = 0; i < ndim && i < 8; ++i) {
+        shape_arr[i] = shape_span[i];
+        strides_arr[i] = strides_span[i];
+    }
+    { int64_t s = 1; for (int64_t i = static_cast<int64_t>(ndim) - 1; i >= 0; --i) { cont_strides_arr[i] = s; s *= shape_span[i]; } }
+
+    if (self.dtype() == DType::Float32) {
+        float val = static_cast<float>(value);
+        float* ptr = get_data_ptr<float>(self);
+        queue.parallel_for<StridedFillKernelF32>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+            int64_t remaining = flat_idx;
+            int64_t offset = 0;
+            for (size_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / cont_strides_arr[d];
+                remaining %= cont_strides_arr[d];
+                offset += coord * strides_arr[d];
+            }
+            ptr[offset] = val;
+        }).wait();
+    } else if (self.dtype() == DType::Float64) {
+        double* ptr = get_data_ptr<double>(self);
+        queue.parallel_for<StridedFillKernelF64>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+            int64_t remaining = flat_idx;
+            int64_t offset = 0;
+            for (size_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / cont_strides_arr[d];
+                remaining %= cont_strides_arr[d];
+                offset += coord * strides_arr[d];
+            }
+            ptr[offset] = value;
+        }).wait();
+    } else {
+        throw std::runtime_error("strided_fill: unsupported dtype for non-contiguous fill");
+    }
+}
+
+// ============================================================================
+// ToMemoryFormat kernel
+// ============================================================================
+auto to_memory_format_kernel(const Tensor& input, int format_int, sycl::queue& queue) -> Tensor {
+    if (format_int == 0) {
+        return contiguous_kernel(input, queue);
+    }
+    // ChannelsLast: NCHW -> NHWC permutation (dim order: 0,2,3,1)
+    if (input.ndim() != 4) {
+        throw std::runtime_error("to_memory_format: ChannelsLast requires 4D tensor");
+    }
+    std::vector<int64_t> perm_dims = {0, 2, 3, 1};
+    return permute_kernel(input, perm_dims, queue);
 }
 
 } // namespace oneapi

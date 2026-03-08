@@ -1,0 +1,76 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// LSTM Cell compute shader — Float64 variant
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Gates { double gates[]; };
+layout(binding = 1) buffer CellPrev { double c_prev[]; };
+layout(binding = 2) buffer HiddenOut { double h_out[]; };
+layout(binding = 3) buffer CellOut { double c_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint hidden_size;
+} params;
+
+// Double-precision exp using range reduction
+double exp_d(double x) {
+    if (x != x) return x;
+    if (x > 709.0) return 1.0e308;
+    if (x < -745.0) return 0.0;
+    double ln2 = 0.6931471805599453;
+    double k_dbl = floor(x / ln2 + 0.5);
+    double r = x - k_dbl * ln2;
+    int k = int(clamp(k_dbl, -1100.0, 1100.0));
+    double exp_r = 1.0 + r * (1.0 + r * (0.5 + r * (1.0/6.0 + r * (1.0/24.0 + r * (1.0/120.0 +
+        r * (1.0/720.0 + r * (1.0/5040.0 + r * (1.0/40320.0 + r * (1.0/362880.0 +
+        r * (1.0/3628800.0 + r * (1.0/39916800.0 + r * (1.0/479001600.0))))))))))));
+    double pow2 = 1.0;
+    int abs_k = (k >= 0) ? k : -k;
+    double base = 2.0;
+    while (abs_k > 0) {
+        if ((abs_k & 1) != 0) pow2 *= base;
+        base *= base;
+        abs_k >>= 1;
+    }
+    return (k >= 0) ? (exp_r * pow2) : (exp_r / pow2);
+}
+
+double tanh_d(double x) {
+    if (x != x) return x;
+    if (x > 20.0) return 1.0;
+    if (x < -20.0) return -1.0;
+    if (x >= -9.0 && x <= 9.0) {
+        return double(tanh(float(x)));
+    }
+    double e2x = exp_d(2.0 * x);
+    return (e2x - 1.0) / (e2x + 1.0);
+}
+
+double sigmoid_d(double x) {
+    return 1.0 / (1.0 + exp_d(-x));
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = params.batch_size * params.hidden_size;
+
+    if (idx >= total) return;
+
+    uint b = idx / params.hidden_size;
+    uint h = idx % params.hidden_size;
+
+    uint gate_base = b * (4 * params.hidden_size);
+
+    double i_gate = sigmoid_d(gates[gate_base + h]);
+    double f_gate = sigmoid_d(gates[gate_base + params.hidden_size + h]);
+    double g_gate = tanh_d(gates[gate_base + 2 * params.hidden_size + h]);
+    double o_gate = sigmoid_d(gates[gate_base + 3 * params.hidden_size + h]);
+
+    double c_new = f_gate * c_prev[idx] + i_gate * g_gate;
+    double h_new = o_gate * tanh_d(c_new);
+
+    c_out[idx] = c_new;
+    h_out[idx] = h_new;
+}

@@ -1407,13 +1407,11 @@ auto spmm(const SparseTensor& sparse, const Variable& dense) -> Variable {
     auto result_tensor = sparse::spmm(sparse, dense.tensor());
 
     // For backward: grad_D = S^T @ grad_Y
-    // Save S^T as a dense tensor (transposed sparse matrix).
-    // We convert to dense and transpose so backward can use tenzor::matmul.
-    auto sparse_dense = sparse.to_dense();  // shape (M, K)
-    auto sparse_transposed = tenzor::transpose(sparse_dense, 0, 1);  // shape (K, M)
+    // Store S^T as a SparseTensor (avoids converting to dense).
+    auto sparse_transposed = sparse.transpose();  // shape (K, M)
 
     auto grad_fn = std::make_shared<SpMMBackward>();
-    grad_fn->save_for_backward({sparse_transposed});
+    grad_fn->set_sparse_transposed(std::move(sparse_transposed));
     grad_fn->set_next_functions({dense.grad_fn()});
     grad_fn->set_input_variables({dense});
 
@@ -1431,12 +1429,11 @@ auto spmv(const SparseTensor& sparse, const Variable& vec) -> Variable {
     auto result_tensor = sparse::spmv(sparse, vec.tensor());
 
     // For backward: grad_v = S^T @ grad_y
-    // Save S^T as a dense tensor (transposed sparse matrix).
-    auto sparse_dense = sparse.to_dense();  // shape (M, K)
-    auto sparse_transposed = tenzor::transpose(sparse_dense, 0, 1);  // shape (K, M)
+    // Store S^T as a SparseTensor (avoids converting to dense).
+    auto sparse_transposed = sparse.transpose();  // shape (K, M)
 
     auto grad_fn = std::make_shared<SpMVBackward>();
-    grad_fn->save_for_backward({sparse_transposed});
+    grad_fn->set_sparse_transposed(std::move(sparse_transposed));
     grad_fn->set_next_functions({vec.grad_fn()});
     grad_fn->set_input_variables({vec});
 

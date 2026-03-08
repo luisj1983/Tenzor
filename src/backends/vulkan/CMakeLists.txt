@@ -302,6 +302,34 @@ set(SHADERS
     fused_rmsprop_step
     fused_adadelta_step
     fused_adagrad_step
+    # Phase 11: Linear/Dropout operations
+    linear
+    linear_f64
+    linear_f16
+    linear_backward
+    linear_backward_f64
+    dropout
+    dropout_f64
+    dropout_f16
+    dropout_backward
+    dropout_backward_f64
+    dropout_backward_f16
+    # Phase 11.3: RNN cell shaders
+    lstm_cell
+    lstm_cell_f64
+    gru_cell
+    gru_cell_f64
+    # Phase 11.5: Misc operations
+    has_inf_nan
+    has_inf_nan_f64
+    depthwise_conv2d
+    depthwise_conv2d_f64
+    adaptive_max_pool2d_backward
+    adaptive_max_pool2d_backward_f64
+    strided_fill
+    strided_fill_f64
+    to_memory_format
+    to_memory_format_f64
 )
 
 # Shaders requiring SPIR-V 1.3 (subgroup operations, Vulkan 1.1+)

@@ -1,0 +1,46 @@
+#version 450
+
+// GRU Cell compute shader — processes one timestep
+// Computes gates from pre-computed linear transforms:
+//   gates_x = x * W_ih^T + bias_ih  [batch, 3*hidden]
+//   gates_h = h * W_hh^T + bias_hh  [batch, 3*hidden]
+// Layout: [r | z | n] for each
+//   r = sigmoid(gates_x[0:H] + gates_h[0:H])     — reset gate
+//   z = sigmoid(gates_x[H:2H] + gates_h[H:2H])   — update gate
+//   n = tanh(gates_x[2H:3H] + r * gates_h[2H:3H]) — new gate
+//   h_new = (1 - z) * n + z * h_prev
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GatesX { float gates_x[]; };
+layout(binding = 1) buffer GatesH { float gates_h[]; };
+layout(binding = 2) buffer HPrev { float h_prev[]; };
+layout(binding = 3) buffer HOut { float h_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint hidden_size;
+} params;
+
+float sigmoid(float x) {
+    return 1.0 / (1.0 + exp(-x));
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = params.batch_size * params.hidden_size;
+
+    if (idx >= total) return;
+
+    uint b = idx / params.hidden_size;
+    uint h = idx % params.hidden_size;
+
+    uint gate_base = b * (3 * params.hidden_size);
+
+    float r = sigmoid(gates_x[gate_base + h] + gates_h[gate_base + h]);
+    float z = sigmoid(gates_x[gate_base + params.hidden_size + h] +
+                      gates_h[gate_base + params.hidden_size + h]);
+    float n = tanh(gates_x[gate_base + 2 * params.hidden_size + h] +
+                   r * gates_h[gate_base + 2 * params.hidden_size + h]);
+
+    h_out[idx] = (1.0 - z) * n + z * h_prev[idx];
+}

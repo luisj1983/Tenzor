@@ -156,6 +156,18 @@ public:
     auto to_bsr(std::pair<int64_t, int64_t> block_size) const -> SparseTensor;
 
     /**
+     * @brief Transpose a 2D sparse tensor (swap rows and columns).
+     *
+     * For COO: swaps row and column indices.
+     * For CSR: converts to COO, transposes, converts back to CSR.
+     * For CSC: reinterprets as CSR with swapped dimensions.
+     *
+     * @return Transposed sparse tensor with shape {ncols, nrows}
+     * @throws std::runtime_error if tensor is not 2D
+     */
+    auto transpose() const -> SparseTensor;
+
+    /**
      * @brief Coalesce COO tensor: sort indices and merge duplicate entries.
      */
     auto coalesce() const -> SparseTensor;

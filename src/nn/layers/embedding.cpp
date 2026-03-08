@@ -10,6 +10,7 @@
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "tenzor/sparse/sparse_tensor.hpp"
 #include <array>
 #include <stdexcept>
 #include <cmath>
@@ -26,11 +27,14 @@ namespace nn {
 class EmbeddingBackward : public Function {
 public:
     EmbeddingBackward(Tensor indices, int64_t num_embeddings, int64_t embedding_dim,
-                      int64_t padding_idx = -1)
+                      int64_t padding_idx = -1, bool scale_grad_by_freq = false,
+                      bool sparse = false)
         : indices_(std::move(indices)),
           num_embeddings_(num_embeddings),
           embedding_dim_(embedding_dim),
-          padding_idx_(padding_idx) {}
+          padding_idx_(padding_idx),
+          scale_grad_by_freq_(scale_grad_by_freq),
+          sparse_(sparse) {}
 
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
         // inputs[0] = weight matrix [num_embeddings, embedding_dim]
@@ -133,9 +137,73 @@ public:
             return results;
         }
 
-        // CPU path: pointer-based gradient accumulation
+        // CPU path
         auto input_ptr = indices_.data<int64_t>();
         int64_t num_indices = indices_.numel();
+
+        // Sparse gradient path: build COO sparse tensor and convert to dense
+        // (full sparse autograd support is in Phase 12; for now, to_dense() ensures
+        //  compatibility with the dense autograd engine)
+        if (sparse_) {
+            // indices shape: [2, num_indices] (row=embedding_idx, col not used for 2D)
+            // values shape: [num_indices, embedding_dim]
+            auto idx_tensor = zeros({1, num_indices}, DType::Int64);
+            auto* idx_ptr = idx_tensor.data<int64_t>();
+            for (int64_t i = 0; i < num_indices; ++i) {
+                idx_ptr[i] = input_ptr[i];
+            }
+            // Reshape grad_output to [num_indices, embedding_dim]
+            auto grad_values = grad_output.reshape({num_indices, embedding_dim_});
+            auto sparse_grad = SparseTensor::sparse_coo(
+                idx_tensor, grad_values, {num_embeddings_, embedding_dim_});
+            auto grad_weight = sparse_grad.to_dense();
+
+            // Apply scale_grad_by_freq if needed
+            if (scale_grad_by_freq_) {
+                auto freq = zeros({num_embeddings_}, DType::Float32);
+                auto freq_ptr = freq.data<float>();
+                for (int64_t i = 0; i < num_indices; ++i) {
+                    freq_ptr[input_ptr[i]] += 1.0f;
+                }
+                DType grad_dtype = grad_output.dtype();
+                if (grad_dtype == DType::Float32) {
+                    auto* gw_ptr = grad_weight.data<float>();
+                    for (int64_t r = 0; r < num_embeddings_; ++r) {
+                        if (freq_ptr[r] > 0.0f) {
+                            float inv = 1.0f / freq_ptr[r];
+                            for (int64_t j = 0; j < embedding_dim_; ++j)
+                                gw_ptr[r * embedding_dim_ + j] *= inv;
+                        }
+                    }
+                } else if (grad_dtype == DType::Float64) {
+                    auto* gw_ptr = grad_weight.data<double>();
+                    for (int64_t r = 0; r < num_embeddings_; ++r) {
+                        if (freq_ptr[r] > 0.0f) {
+                            double inv = 1.0 / static_cast<double>(freq_ptr[r]);
+                            for (int64_t j = 0; j < embedding_dim_; ++j)
+                                gw_ptr[r * embedding_dim_ + j] *= inv;
+                        }
+                    }
+                }
+            }
+
+            // Zero padding row
+            if (padding_idx_ >= 0 && padding_idx_ < num_embeddings_) {
+                DType grad_dtype = grad_output.dtype();
+                if (grad_dtype == DType::Float32) {
+                    auto* ptr = grad_weight.data<float>();
+                    for (int64_t j = 0; j < embedding_dim_; ++j)
+                        ptr[padding_idx_ * embedding_dim_ + j] = 0.0f;
+                } else if (grad_dtype == DType::Float64) {
+                    auto* ptr = grad_weight.data<double>();
+                    for (int64_t j = 0; j < embedding_dim_; ++j)
+                        ptr[padding_idx_ * embedding_dim_ + j] = 0.0;
+                }
+            }
+            return {grad_weight};
+        }
+
+        // Dense gradient accumulation path
 
         // Use grad_output's dtype for gradient
         DType grad_dtype = grad_output.dtype();
@@ -178,6 +246,51 @@ public:
             grad_weight = grad_weight_f32.to(DType::Float16);
         } else {
             throw std::runtime_error("EmbeddingBackward: Unsupported gradient dtype");
+        }
+
+        // Scale gradients by inverse frequency of each index
+        if (scale_grad_by_freq_) {
+            // Count frequency of each index
+            auto freq = zeros({num_embeddings_}, DType::Float32);
+            auto freq_ptr = freq.data<float>();
+            for (int64_t i = 0; i < num_indices; ++i) {
+                freq_ptr[input_ptr[i]] += 1.0f;
+            }
+            // Divide each row of grad_weight by its frequency (skip zero-freq rows)
+            if (grad_dtype == DType::Float32) {
+                auto* gw_ptr = grad_weight.data<float>();
+                for (int64_t r = 0; r < num_embeddings_; ++r) {
+                    if (freq_ptr[r] > 0.0f) {
+                        float inv_freq = 1.0f / freq_ptr[r];
+                        for (int64_t j = 0; j < embedding_dim_; ++j) {
+                            gw_ptr[r * embedding_dim_ + j] *= inv_freq;
+                        }
+                    }
+                }
+            } else if (grad_dtype == DType::Float64) {
+                auto* gw_ptr = grad_weight.data<double>();
+                for (int64_t r = 0; r < num_embeddings_; ++r) {
+                    if (freq_ptr[r] > 0.0f) {
+                        double inv_freq = 1.0 / static_cast<double>(freq_ptr[r]);
+                        for (int64_t j = 0; j < embedding_dim_; ++j) {
+                            gw_ptr[r * embedding_dim_ + j] *= inv_freq;
+                        }
+                    }
+                }
+            } else if (grad_dtype == DType::Float16) {
+                // grad_weight was computed in Float32 and converted — reconvert for scaling
+                auto gw_f32 = grad_weight.to(DType::Float32);
+                auto* gw_ptr = gw_f32.data<float>();
+                for (int64_t r = 0; r < num_embeddings_; ++r) {
+                    if (freq_ptr[r] > 0.0f) {
+                        float inv_freq = 1.0f / freq_ptr[r];
+                        for (int64_t j = 0; j < embedding_dim_; ++j) {
+                            gw_ptr[r * embedding_dim_ + j] *= inv_freq;
+                        }
+                    }
+                }
+                grad_weight = gw_f32.to(DType::Float16);
+            }
         }
 
         // Zero out padding_idx row so padding embeddings receive no gradient
@@ -223,6 +336,8 @@ private:
     int64_t num_embeddings_;
     int64_t embedding_dim_;
     int64_t padding_idx_;
+    bool scale_grad_by_freq_;
+    bool sparse_;
 };
 
 // ============================================================================
@@ -455,12 +570,7 @@ Embedding::Embedding(int64_t num_embeddings, int64_t embedding_dim,
     if (padding_idx >= num_embeddings || padding_idx < -1) {
         throw std::invalid_argument("padding_idx must be in range [-1, num_embeddings)");
     }
-    if (scale_grad_by_freq) {
-        throw std::runtime_error("Embedding: scale_grad_by_freq not implemented");
-    }
-    if (sparse) {
-        throw std::runtime_error("Embedding: sparse not implemented");
-    }
+    // scale_grad_by_freq and sparse are handled in EmbeddingBackward::backward()
 
     // Initialize embedding weight matrix
     initialize_weights();
@@ -565,7 +675,7 @@ auto Embedding::forward_impl(const Variable& input) -> Variable {
 
         // Set up autograd for GPU path
         Tensor indices_for_grad = input_tensor;
-        auto grad_fn = std::make_shared<EmbeddingBackward>(indices_for_grad, num_embeddings_, embedding_dim_, padding_idx_);
+        auto grad_fn = std::make_shared<EmbeddingBackward>(indices_for_grad, num_embeddings_, embedding_dim_, padding_idx_, scale_grad_by_freq_, sparse_);
 
         auto result = Variable(output, true);
 
@@ -657,7 +767,7 @@ auto Embedding::forward_impl(const Variable& input) -> Variable {
     }
 
     // Use EmbeddingBackward function to preserve gradient graph
-    auto grad_fn = std::make_shared<EmbeddingBackward>(input_cpu, num_embeddings_, embedding_dim_, padding_idx_);
+    auto grad_fn = std::make_shared<EmbeddingBackward>(input_cpu, num_embeddings_, embedding_dim_, padding_idx_, scale_grad_by_freq_, sparse_);
 
     // Perform forward pass (CPU path)
     auto outputs = grad_fn->forward({*parameters_["weight"]});

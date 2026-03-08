@@ -1,0 +1,33 @@
+#version 450
+
+// Strided Fill: fill a tensor with a value, respecting non-contiguous strides
+// Works on the logical element layout, computing physical offset per element
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Data { float data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;     // Total logical elements
+    uint ndim;           // Number of dimensions (max 8)
+    float fill_value;    // Value to fill
+    // Interleaved shape[i], stride[i] pairs for compact push constant layout
+    uint shape_stride[16]; // shape_stride[2*d] = shape[d], shape_stride[2*d+1] = stride[d]
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    // Decompose flat index into multi-dim coordinates, compute strided offset
+    uint physical_offset = 0;
+    uint rem = idx;
+    for (int d = int(params.ndim) - 1; d >= 0; d--) {
+        uint dim_size = params.shape_stride[2 * d];
+        uint dim_stride = params.shape_stride[2 * d + 1];
+        uint coord = rem % dim_size;
+        rem /= dim_size;
+        physical_offset += coord * dim_stride;
+    }
+
+    data[physical_offset] = params.fill_value;
+}

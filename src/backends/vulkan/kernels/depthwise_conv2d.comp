@@ -1,0 +1,65 @@
+#version 450
+
+// Depthwise Convolution 2D Forward Pass
+// Each output channel maps to exactly one input channel (groups == in_channels)
+// Weight shape: [channels, 1, kH, kW]
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Weight { float weight_data[]; };
+layout(binding = 2) buffer Bias { float bias_data[]; };
+layout(binding = 3) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;      // Total output elements (N * C * out_h * out_w)
+    uint batch;
+    uint channels;        // Number of channels (== in_channels == out_channels)
+    uint in_height;
+    uint in_width;
+    uint kernel_h;
+    uint kernel_w;
+    uint stride;
+    uint padding;
+    uint dilation;
+    uint out_h;
+    uint out_w;
+    uint has_bias;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    // Decode to (n, c, oh, ow)
+    uint ow = idx % params.out_w;
+    uint temp = idx / params.out_w;
+    uint oh = temp % params.out_h;
+    temp /= params.out_h;
+    uint c = temp % params.channels;
+    uint n = temp / params.channels;
+
+    float sum = 0.0;
+
+    for (uint kh = 0; kh < params.kernel_h; kh++) {
+        for (uint kw = 0; kw < params.kernel_w; kw++) {
+            int ih = int(oh * params.stride) - int(params.padding) + int(kh * params.dilation);
+            int iw = int(ow * params.stride) - int(params.padding) + int(kw * params.dilation);
+
+            if (ih >= 0 && ih < int(params.in_height) && iw >= 0 && iw < int(params.in_width)) {
+                uint input_idx = n * (params.channels * params.in_height * params.in_width) +
+                                 c * (params.in_height * params.in_width) +
+                                 uint(ih) * params.in_width + uint(iw);
+                // Weight layout: [c, 1, kh, kw] = [c, kh*kw]
+                uint weight_idx = c * (params.kernel_h * params.kernel_w) +
+                                  kh * params.kernel_w + kw;
+                sum += input_data[input_idx] * weight_data[weight_idx];
+            }
+        }
+    }
+
+    if (params.has_bias == 1) {
+        sum += bias_data[c];
+    }
+
+    output_data[idx] = sum;
+}

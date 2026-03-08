@@ -1169,5 +1169,139 @@ auto argsort_kernel(const Tensor& input, int64_t dim, bool descending, sycl::que
     return output;
 }
 
+// ============================================================================
+// ScatterAdd kernel - scatter with addition
+// ============================================================================
+class ScatterAddKernelFloat32;
+class ScatterAddKernelFloat64;
+class ScatterAddKernelInt32;
+class ScatterAddKernelInt64;
+
+auto scatter_add_kernel(const Tensor& self, int64_t dim, const Tensor& index, const Tensor& src,
+                        sycl::queue& queue) -> Tensor {
+    auto self_shape_span = self.shape();
+    std::vector<int64_t> shape(self_shape_span.begin(), self_shape_span.end());
+    int64_t ndim = shape.size();
+    if (dim < 0) dim += ndim;
+
+    // Clone self as output (scatter_add modifies in-place semantically)
+    Tensor output(shape, self.dtype(), self.device());
+    queue.memcpy(const_cast<void*>(output.data_ptr()), self.data_ptr(),
+                 self.numel() * self.dtype_size()).wait();
+
+    // Host-side implementation for atomicity correctness
+    int64_t idx_numel = index.numel();
+    if (idx_numel == 0) return output;
+
+    auto idx_shape = index.shape();
+    std::vector<int64_t> idx_shape_vec(idx_shape.begin(), idx_shape.end());
+
+    // Compute strides for self/output
+    std::vector<int64_t> out_strides(ndim);
+    { int64_t s = 1; for (int64_t i = ndim - 1; i >= 0; --i) { out_strides[i] = s; s *= shape[i]; } }
+    std::vector<int64_t> idx_strides(ndim);
+    { int64_t s = 1; for (int64_t i = ndim - 1; i >= 0; --i) { idx_strides[i] = s; s *= idx_shape_vec[i]; } }
+
+    if (self.dtype() == DType::Float32) {
+        std::vector<float> h_out(self.numel());
+        std::vector<float> h_src(src.numel());
+        std::vector<int64_t> h_idx(idx_numel);
+        queue.memcpy(h_out.data(), output.data_ptr(), self.numel() * sizeof(float)).wait();
+        queue.memcpy(h_src.data(), src.data_ptr(), src.numel() * sizeof(float)).wait();
+        queue.memcpy(h_idx.data(), index.data_ptr(), idx_numel * sizeof(int64_t)).wait();
+
+        for (int64_t flat = 0; flat < idx_numel; ++flat) {
+            // Decompose flat index to multi-dim
+            int64_t remaining = flat;
+            int64_t out_offset = 0;
+            int64_t src_offset = flat;
+            for (int64_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / idx_strides[d];
+                remaining %= idx_strides[d];
+                if (d == dim) {
+                    out_offset += h_idx[flat] * out_strides[d];
+                } else {
+                    out_offset += coord * out_strides[d];
+                }
+            }
+            h_out[out_offset] += h_src[src_offset];
+        }
+        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), self.numel() * sizeof(float)).wait();
+    } else if (self.dtype() == DType::Float64) {
+        std::vector<double> h_out(self.numel());
+        std::vector<double> h_src(src.numel());
+        std::vector<int64_t> h_idx(idx_numel);
+        queue.memcpy(h_out.data(), output.data_ptr(), self.numel() * sizeof(double)).wait();
+        queue.memcpy(h_src.data(), src.data_ptr(), src.numel() * sizeof(double)).wait();
+        queue.memcpy(h_idx.data(), index.data_ptr(), idx_numel * sizeof(int64_t)).wait();
+
+        for (int64_t flat = 0; flat < idx_numel; ++flat) {
+            int64_t remaining = flat;
+            int64_t out_offset = 0;
+            for (int64_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / idx_strides[d];
+                remaining %= idx_strides[d];
+                if (d == dim) {
+                    out_offset += h_idx[flat] * out_strides[d];
+                } else {
+                    out_offset += coord * out_strides[d];
+                }
+            }
+            h_out[out_offset] += h_src[flat];
+        }
+        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), self.numel() * sizeof(double)).wait();
+    } else if (self.dtype() == DType::Int32) {
+        std::vector<int32_t> h_out(self.numel());
+        std::vector<int32_t> h_src(src.numel());
+        std::vector<int64_t> h_idx(idx_numel);
+        queue.memcpy(h_out.data(), output.data_ptr(), self.numel() * sizeof(int32_t)).wait();
+        queue.memcpy(h_src.data(), src.data_ptr(), src.numel() * sizeof(int32_t)).wait();
+        queue.memcpy(h_idx.data(), index.data_ptr(), idx_numel * sizeof(int64_t)).wait();
+
+        for (int64_t flat = 0; flat < idx_numel; ++flat) {
+            int64_t remaining = flat;
+            int64_t out_offset = 0;
+            for (int64_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / idx_strides[d];
+                remaining %= idx_strides[d];
+                if (d == dim) {
+                    out_offset += h_idx[flat] * out_strides[d];
+                } else {
+                    out_offset += coord * out_strides[d];
+                }
+            }
+            h_out[out_offset] += h_src[flat];
+        }
+        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), self.numel() * sizeof(int32_t)).wait();
+    } else if (self.dtype() == DType::Int64) {
+        std::vector<int64_t> h_out(self.numel());
+        std::vector<int64_t> h_src(src.numel());
+        std::vector<int64_t> h_idx(idx_numel);
+        queue.memcpy(h_out.data(), output.data_ptr(), self.numel() * sizeof(int64_t)).wait();
+        queue.memcpy(h_src.data(), src.data_ptr(), src.numel() * sizeof(int64_t)).wait();
+        queue.memcpy(h_idx.data(), index.data_ptr(), idx_numel * sizeof(int64_t)).wait();
+
+        for (int64_t flat = 0; flat < idx_numel; ++flat) {
+            int64_t remaining = flat;
+            int64_t out_offset = 0;
+            for (int64_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / idx_strides[d];
+                remaining %= idx_strides[d];
+                if (d == dim) {
+                    out_offset += h_idx[flat] * out_strides[d];
+                } else {
+                    out_offset += coord * out_strides[d];
+                }
+            }
+            h_out[out_offset] += h_src[flat];
+        }
+        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), self.numel() * sizeof(int64_t)).wait();
+    } else {
+        throw std::runtime_error("scatter_add: unsupported dtype");
+    }
+
+    return output;
+}
+
 } // namespace oneapi
 } // namespace tenzor

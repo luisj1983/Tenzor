@@ -877,6 +877,767 @@ auto fused_attention_hip(
     return output;
 }
 
+// ==============================================================================
+// Fused RMSNorm HIP Kernel
+// ==============================================================================
+
+template<typename T, int BLOCK_SIZE>
+__global__ void fused_rms_norm_kernel(
+    const T* __restrict__ input,
+    const T* __restrict__ weight,
+    T* __restrict__ output,
+    T* __restrict__ rrms_out,
+    int64_t batch_size,
+    int64_t norm_size,
+    T eps
+) {
+    int64_t b = blockIdx.x;
+    if (b >= batch_size) return;
+
+    const T* batch_in = input + b * norm_size;
+    T* batch_out = output + b * norm_size;
+
+    __shared__ T shared_data[BLOCK_SIZE];
+
+    // Compute sum of squares
+    T sum_sq = 0;
+    for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+        T val = batch_in[i];
+        sum_sq += val * val;
+    }
+
+    shared_data[threadIdx.x] = sum_sq;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) {
+            shared_data[threadIdx.x] += shared_data[threadIdx.x + s];
+        }
+        __syncthreads();
+    }
+
+    // Compute reciprocal RMS
+    __shared__ T shared_rrms;
+    if (threadIdx.x == 0) {
+        T mean_sq = shared_data[0] / norm_size;
+        shared_rrms = rsqrtf(mean_sq + eps);
+        rrms_out[b] = shared_rrms;
+    }
+    __syncthreads();
+    T rrms = shared_rrms;
+
+    // Apply normalization
+    for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+        batch_out[i] = batch_in[i] * rrms * weight[i];
+    }
+}
+
+auto fused_rms_norm_hip(
+    const Tensor& input,
+    const Tensor& weight,
+    float eps
+) -> std::pair<Tensor, Tensor> {
+    auto shape = input.shape();
+    int64_t norm_size = shape[shape.size() - 1];
+
+    int64_t batch_size = 1;
+    for (size_t i = 0; i < shape.size() - 1; ++i) {
+        batch_size *= shape[i];
+    }
+
+    Tensor output = zeros(input.shape(), input.dtype(), input.device());
+    Tensor rrms = zeros({batch_size}, input.dtype(), input.device());
+
+    constexpr int BLOCK_SIZE = 256;
+    int blocks = batch_size;
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(fused_rms_norm_kernel<float, BLOCK_SIZE>),
+            dim3(blocks), dim3(BLOCK_SIZE), 0, 0,
+            input.data<float>(),
+            weight.data<float>(),
+            output.data<float>(),
+            rrms.data<float>(),
+            batch_size,
+            norm_size,
+            eps
+        );
+    } else {
+        throw std::runtime_error("fused_rms_norm_hip: Only Float32 supported");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    HIP_CHECK(hipDeviceSynchronize());
+
+    return {output, rrms};
+}
+
+// ==============================================================================
+// Fused Conv2D + BatchNorm + ReLU HIP Kernel (Full: conv + BN + ReLU)
+// ==============================================================================
+
+template<typename T>
+__global__ void fused_conv2d_bn_relu_full_kernel(
+    const T* input,
+    const T* weight,
+    const T* bias,
+    const T* bn_mean,
+    const T* bn_var,
+    const T* bn_gamma,
+    const T* bn_beta,
+    T* output,
+    int64_t batch_size,
+    int64_t in_channels,
+    int64_t out_channels,
+    int64_t in_h,
+    int64_t in_w,
+    int64_t out_h,
+    int64_t out_w,
+    int64_t kernel_h,
+    int64_t kernel_w,
+    int64_t stride,
+    int64_t padding,
+    T eps,
+    bool has_bias
+) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total_elements = batch_size * out_channels * out_h * out_w;
+    int64_t stride_loop = blockDim.x * gridDim.x;
+
+    for (int64_t idx = tid; idx < total_elements; idx += stride_loop) {
+        int64_t w_out = idx % out_w;
+        int64_t h_out = (idx / out_w) % out_h;
+        int64_t c_out = (idx / (out_w * out_h)) % out_channels;
+        int64_t n = idx / (out_w * out_h * out_channels);
+
+        // Compute convolution
+        T conv_sum = 0;
+        for (int64_t c_in = 0; c_in < in_channels; ++c_in) {
+            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                    int64_t h_in = h_out * stride - padding + kh;
+                    int64_t w_in = w_out * stride - padding + kw;
+
+                    if (h_in >= 0 && h_in < in_h && w_in >= 0 && w_in < in_w) {
+                        int64_t input_idx = ((n * in_channels + c_in) * in_h + h_in) * in_w + w_in;
+                        int64_t weight_idx = ((c_out * in_channels + c_in) * kernel_h + kh) * kernel_w + kw;
+                        conv_sum += input[input_idx] * weight[weight_idx];
+                    }
+                }
+            }
+        }
+
+        if (has_bias) {
+            conv_sum += bias[c_out];
+        }
+
+        // Apply batch normalization
+        T normalized = (conv_sum - bn_mean[c_out]) * rsqrtf(bn_var[c_out] + eps);
+        T bn_out = normalized * bn_gamma[c_out] + bn_beta[c_out];
+
+        // Apply ReLU
+        output[idx] = (bn_out > T(0)) ? bn_out : T(0);
+    }
+}
+
+auto fused_conv2d_bn_relu_full_hip(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    const Tensor& bn_mean,
+    const Tensor& bn_var,
+    const Tensor& bn_gamma,
+    const Tensor& bn_beta,
+    int64_t stride,
+    int64_t padding,
+    float eps
+) -> Tensor {
+    int64_t batch_size = input.shape()[0];
+    int64_t in_channels = input.shape()[1];
+    int64_t in_h = input.shape()[2];
+    int64_t in_w = input.shape()[3];
+
+    int64_t out_channels = weight.shape()[0];
+    int64_t kernel_h = weight.shape()[2];
+    int64_t kernel_w = weight.shape()[3];
+
+    int64_t out_h = (in_h + 2 * padding - kernel_h) / stride + 1;
+    int64_t out_w = (in_w + 2 * padding - kernel_w) / stride + 1;
+
+    Tensor output = zeros({batch_size, out_channels, out_h, out_w}, input.dtype(), input.device());
+
+    int64_t total_elements = batch_size * out_channels * out_h * out_w;
+    int threads = 256;
+    int blocks = (total_elements + threads - 1) / threads;
+    blocks = std::min(blocks, static_cast<int64_t>(65535));
+
+    if (input.dtype() == DType::Float32) {
+        const float* bias_ptr = bias ? bias->data<float>() : nullptr;
+        hipLaunchKernelGGL(fused_conv2d_bn_relu_full_kernel<float>,
+            dim3(blocks), dim3(threads), 0, 0,
+            input.data<float>(),
+            weight.data<float>(),
+            bias_ptr,
+            bn_mean.data<float>(),
+            bn_var.data<float>(),
+            bn_gamma.data<float>(),
+            bn_beta.data<float>(),
+            output.data<float>(),
+            batch_size,
+            in_channels,
+            out_channels,
+            in_h,
+            in_w,
+            out_h,
+            out_w,
+            kernel_h,
+            kernel_w,
+            stride,
+            padding,
+            eps,
+            bias != nullptr
+        );
+    } else {
+        throw std::runtime_error("fused_conv2d_bn_relu_full_hip: Only Float32 supported");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    HIP_CHECK(hipDeviceSynchronize());
+
+    return output;
+}
+
+// ==============================================================================
+// Fused SGD with Momentum HIP Kernel
+// ==============================================================================
+
+template<typename T>
+__global__ void fused_sgd_kernel(
+    T* __restrict__ param,
+    const T* __restrict__ grad,
+    T* __restrict__ momentum_buffer,
+    int64_t numel,
+    float lr,
+    float momentum,
+    float weight_decay,
+    float dampening,
+    bool nesterov,
+    bool has_momentum_buffer
+) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numel) return;
+
+    T g = grad[idx];
+    T p = param[idx];
+
+    // Apply weight decay
+    if (weight_decay > 0.0f) {
+        g = g + T(weight_decay) * p;
+    }
+
+    if (has_momentum_buffer && momentum > 0.0f) {
+        T v = momentum_buffer[idx];
+
+        // Update momentum buffer
+        v = T(momentum) * v + T(1.0f - dampening) * g;
+        momentum_buffer[idx] = v;
+
+        if (nesterov) {
+            g = g + T(momentum) * v;
+        } else {
+            g = v;
+        }
+    }
+
+    // Update parameter
+    param[idx] = p - T(lr) * g;
+}
+
+auto fused_sgd_step_hip(
+    Tensor& param,
+    const Tensor& grad,
+    Tensor* momentum_buffer,
+    float lr,
+    float momentum,
+    float weight_decay,
+    float dampening,
+    bool nesterov,
+    hipStream_t stream
+) -> void {
+    int64_t numel = param.numel();
+    constexpr int BLOCK_SIZE = 256;
+    int blocks = (numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    blocks = std::min(blocks, static_cast<int64_t>(65535));
+
+    if (param.dtype() == DType::Float32) {
+        float* momentum_ptr = momentum_buffer ? momentum_buffer->data<float>() : nullptr;
+
+        hipLaunchKernelGGL(fused_sgd_kernel<float>,
+            dim3(blocks), dim3(BLOCK_SIZE), 0, stream,
+            param.data<float>(),
+            grad.data<float>(),
+            momentum_ptr,
+            numel, lr, momentum, weight_decay, dampening,
+            nesterov, momentum_buffer != nullptr
+        );
+    } else if (param.dtype() == DType::Float64) {
+        double* momentum_ptr = momentum_buffer ? momentum_buffer->data<double>() : nullptr;
+
+        hipLaunchKernelGGL(fused_sgd_kernel<double>,
+            dim3(blocks), dim3(BLOCK_SIZE), 0, stream,
+            param.data<double>(),
+            grad.data<double>(),
+            momentum_ptr,
+            numel, lr, momentum, weight_decay, dampening,
+            nesterov, momentum_buffer != nullptr
+        );
+    } else {
+        throw std::runtime_error("fused_sgd_step_hip: Only Float32 and Float64 supported");
+    }
+
+    HIP_CHECK(hipGetLastError());
+}
+
+// ==============================================================================
+// Fused Adam Optimizer HIP Kernel
+// ==============================================================================
+
+template<typename T>
+__global__ void fused_adam_kernel(
+    T* __restrict__ param,
+    const T* __restrict__ grad,
+    T* __restrict__ exp_avg,
+    T* __restrict__ exp_avg_sq,
+    T* __restrict__ max_exp_avg_sq,
+    int64_t numel,
+    double lr,
+    double beta1,
+    double beta2,
+    double eps,
+    double weight_decay,
+    double bias_correction1,
+    double bias_correction2,
+    bool amsgrad,
+    bool decoupled_weight_decay
+) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numel) return;
+
+    T g = grad[idx];
+    T p = param[idx];
+    T m = exp_avg[idx];
+    T v = exp_avg_sq[idx];
+
+    double step_size = lr / bias_correction1;
+    double bc2_inv = 1.0 / bias_correction2;
+
+    // L2 regularization (added to grad)
+    if (weight_decay > 0.0 && !decoupled_weight_decay) {
+        g = g + T(weight_decay) * p;
+    }
+
+    // Update biased first moment estimate
+    m = T(beta1) * m + T(1.0 - beta1) * g;
+
+    // Update biased second raw moment estimate
+    v = T(beta2) * v + T(1.0 - beta2) * g * g;
+
+    // Bias-corrected second moment
+    T v_hat = v * T(bc2_inv);
+
+    if (amsgrad && max_exp_avg_sq) {
+        T max_v = max_exp_avg_sq[idx];
+        if (v_hat > max_v) max_v = v_hat;
+        max_exp_avg_sq[idx] = max_v;
+        v_hat = max_v;
+    }
+
+    // Decoupled weight decay (AdamW)
+    if (weight_decay > 0.0 && decoupled_weight_decay) {
+        p = p * T(1.0 - lr * weight_decay);
+    }
+
+    // Update parameter
+    p = p - T(step_size) * m / (sqrt(v_hat) + T(eps));
+
+    // Store
+    param[idx] = p;
+    exp_avg[idx] = m;
+    exp_avg_sq[idx] = v;
+}
+
+auto fused_adam_step_hip(
+    Tensor& param,
+    const Tensor& grad,
+    Tensor& exp_avg,
+    Tensor& exp_avg_sq,
+    double lr,
+    double beta1,
+    double beta2,
+    double eps,
+    double weight_decay,
+    int64_t step,
+    bool decoupled_weight_decay,
+    hipStream_t stream,
+    Tensor* max_exp_avg_sq,
+    bool amsgrad
+) -> void {
+    int64_t numel = param.numel();
+    constexpr int BLOCK_SIZE = 256;
+    int blocks = (numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    blocks = std::min(blocks, static_cast<int64_t>(65535));
+
+    double bias_correction1 = 1.0 - std::pow(beta1, static_cast<double>(step));
+    double bias_correction2 = 1.0 - std::pow(beta2, static_cast<double>(step));
+
+    if (param.dtype() == DType::Float32) {
+        float* max_sq_ptr = (amsgrad && max_exp_avg_sq) ? max_exp_avg_sq->data<float>() : nullptr;
+
+        hipLaunchKernelGGL(fused_adam_kernel<float>,
+            dim3(blocks), dim3(BLOCK_SIZE), 0, stream,
+            param.data<float>(),
+            grad.data<float>(),
+            exp_avg.data<float>(),
+            exp_avg_sq.data<float>(),
+            max_sq_ptr,
+            numel, lr, beta1, beta2, eps, weight_decay,
+            bias_correction1, bias_correction2,
+            amsgrad, decoupled_weight_decay
+        );
+    } else if (param.dtype() == DType::Float64) {
+        double* max_sq_ptr = (amsgrad && max_exp_avg_sq) ? max_exp_avg_sq->data<double>() : nullptr;
+
+        hipLaunchKernelGGL(fused_adam_kernel<double>,
+            dim3(blocks), dim3(BLOCK_SIZE), 0, stream,
+            param.data<double>(),
+            grad.data<double>(),
+            exp_avg.data<double>(),
+            exp_avg_sq.data<double>(),
+            max_sq_ptr,
+            numel, lr, beta1, beta2, eps, weight_decay,
+            bias_correction1, bias_correction2,
+            amsgrad, decoupled_weight_decay
+        );
+    } else {
+        throw std::runtime_error("fused_adam_step_hip: Only Float32 and Float64 supported");
+    }
+
+    HIP_CHECK(hipGetLastError());
+}
+
+// ==============================================================================
+// Fused RMSProp Optimizer HIP Kernel
+// ==============================================================================
+
+template<typename T>
+__global__ void fused_rmsprop_step_kernel(
+    T* __restrict__ param,
+    const T* __restrict__ grad,
+    T* __restrict__ square_avg,
+    T* __restrict__ grad_avg,
+    T* __restrict__ momentum_buffer,
+    float lr, float alpha, float eps,
+    float weight_decay, float momentum,
+    bool centered,
+    int64_t n
+) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+
+    T g = grad[idx];
+
+    if (weight_decay != 0.0f) {
+        g = g + T(weight_decay) * param[idx];
+    }
+
+    T sq = square_avg[idx];
+    sq = T(alpha) * sq + T(1.0f - alpha) * g * g;
+    square_avg[idx] = sq;
+
+    T avg;
+    if (centered && grad_avg) {
+        T ga = grad_avg[idx];
+        ga = T(alpha) * ga + T(1.0f - alpha) * g;
+        grad_avg[idx] = ga;
+        avg = sqrt(sq - ga * ga + T(eps));
+    } else {
+        avg = sqrt(sq + T(eps));
+    }
+
+    if (momentum > 0.0f && momentum_buffer) {
+        T buf = momentum_buffer[idx];
+        buf = T(momentum) * buf + g / avg;
+        momentum_buffer[idx] = buf;
+        param[idx] = param[idx] - T(lr) * buf;
+    } else {
+        param[idx] = param[idx] - T(lr) * g / avg;
+    }
+}
+
+auto fused_rmsprop_step_hip(
+    Tensor& param,
+    const Tensor& grad,
+    Tensor& square_avg,
+    Tensor* grad_avg,
+    Tensor* momentum_buffer,
+    float lr, float alpha, float eps,
+    float weight_decay, float momentum,
+    bool centered,
+    hipStream_t stream
+) -> void {
+    int64_t n = param.numel();
+    int block_size = 256;
+    int num_blocks = (n + block_size - 1) / block_size;
+
+    if (param.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(fused_rmsprop_step_kernel<float>,
+            dim3(num_blocks), dim3(block_size), 0, stream,
+            param.data<float>(), grad.data<float>(), square_avg.data<float>(),
+            (centered && grad_avg) ? grad_avg->data<float>() : nullptr,
+            (momentum > 0.0f && momentum_buffer) ? momentum_buffer->data<float>() : nullptr,
+            lr, alpha, eps, weight_decay, momentum, centered, n);
+    } else if (param.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(fused_rmsprop_step_kernel<double>,
+            dim3(num_blocks), dim3(block_size), 0, stream,
+            param.data<double>(), grad.data<double>(), square_avg.data<double>(),
+            (centered && grad_avg) ? grad_avg->data<double>() : nullptr,
+            (momentum > 0.0f && momentum_buffer) ? momentum_buffer->data<double>() : nullptr,
+            lr, alpha, eps, weight_decay, momentum, centered, n);
+    } else {
+        throw std::runtime_error("fused_rmsprop_step_hip: unsupported dtype");
+    }
+
+    HIP_CHECK(hipGetLastError());
+}
+
+// ==============================================================================
+// Fused Adadelta Optimizer HIP Kernel
+// ==============================================================================
+
+template<typename T>
+__global__ void fused_adadelta_step_kernel(
+    T* __restrict__ param,
+    const T* __restrict__ grad,
+    T* __restrict__ square_avg,
+    T* __restrict__ acc_delta,
+    float rho, float eps, float lr, float weight_decay,
+    int64_t n
+) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+
+    T g = grad[idx];
+    if (weight_decay != 0.0f) {
+        g = g + T(weight_decay) * param[idx];
+    }
+
+    T sq = square_avg[idx];
+    sq = T(rho) * sq + T(1.0f - rho) * g * g;
+    square_avg[idx] = sq;
+
+    T std_val = sqrt(sq + T(eps));
+    T delta = sqrt(acc_delta[idx] + T(eps)) / std_val * g;
+
+    acc_delta[idx] = T(rho) * acc_delta[idx] + T(1.0f - rho) * delta * delta;
+
+    param[idx] = param[idx] - T(lr) * delta;
+}
+
+auto fused_adadelta_step_hip(
+    Tensor& param,
+    const Tensor& grad,
+    Tensor& square_avg,
+    Tensor& acc_delta,
+    float rho, float eps, float lr, float weight_decay,
+    hipStream_t stream
+) -> void {
+    int64_t n = param.numel();
+    int block_size = 256;
+    int num_blocks = (n + block_size - 1) / block_size;
+
+    if (param.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(fused_adadelta_step_kernel<float>,
+            dim3(num_blocks), dim3(block_size), 0, stream,
+            param.data<float>(), grad.data<float>(), square_avg.data<float>(), acc_delta.data<float>(),
+            rho, eps, lr, weight_decay, n);
+    } else if (param.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(fused_adadelta_step_kernel<double>,
+            dim3(num_blocks), dim3(block_size), 0, stream,
+            param.data<double>(), grad.data<double>(), square_avg.data<double>(), acc_delta.data<double>(),
+            rho, eps, lr, weight_decay, n);
+    } else {
+        throw std::runtime_error("fused_adadelta_step_hip: unsupported dtype");
+    }
+
+    HIP_CHECK(hipGetLastError());
+}
+
+// ==============================================================================
+// Fused Adagrad Optimizer HIP Kernel
+// ==============================================================================
+
+template<typename T>
+__global__ void fused_adagrad_step_kernel(
+    T* __restrict__ param,
+    const T* __restrict__ grad,
+    T* __restrict__ sum_sq,
+    float lr, float lr_decay, float eps, float weight_decay,
+    int64_t step, int64_t n
+) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+
+    T g = grad[idx];
+    if (weight_decay != 0.0f) {
+        g = g + T(weight_decay) * param[idx];
+    }
+
+    float clr = lr / (T(1) + T(step - 1) * T(lr_decay));
+
+    T sq = sum_sq[idx] + g * g;
+    sum_sq[idx] = sq;
+
+    param[idx] = param[idx] - T(clr) * g / (sqrt(sq) + T(eps));
+}
+
+auto fused_adagrad_step_hip(
+    Tensor& param,
+    const Tensor& grad,
+    Tensor& sum_sq,
+    float lr, float lr_decay, float eps, float weight_decay,
+    int64_t step,
+    hipStream_t stream
+) -> void {
+    int64_t n = param.numel();
+    int block_size = 256;
+    int num_blocks = (n + block_size - 1) / block_size;
+
+    if (param.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(fused_adagrad_step_kernel<float>,
+            dim3(num_blocks), dim3(block_size), 0, stream,
+            param.data<float>(), grad.data<float>(), sum_sq.data<float>(),
+            lr, lr_decay, eps, weight_decay, step, n);
+    } else if (param.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(fused_adagrad_step_kernel<double>,
+            dim3(num_blocks), dim3(block_size), 0, stream,
+            param.data<double>(), grad.data<double>(), sum_sq.data<double>(),
+            lr, lr_decay, eps, weight_decay, step, n);
+    } else {
+        throw std::runtime_error("fused_adagrad_step_hip: unsupported dtype");
+    }
+
+    HIP_CHECK(hipGetLastError());
+}
+
+// ==============================================================================
+// Fused Adam-Atan2 Optimizer HIP Kernel
+// ==============================================================================
+
+template<typename T>
+__global__ void fused_adam_atan2_kernel(
+    T* __restrict__ param,
+    const T* __restrict__ grad,
+    T* __restrict__ exp_avg,
+    T* __restrict__ exp_avg_sq,
+    T* __restrict__ max_exp_avg_sq,
+    int64_t numel,
+    float lr,
+    float beta1,
+    float beta2,
+    float eps,
+    float weight_decay,
+    float bias_correction1,
+    float bias_correction2,
+    bool amsgrad
+) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numel) return;
+
+    T g = grad[idx];
+    T p = param[idx];
+    T m = exp_avg[idx];
+    T v = exp_avg_sq[idx];
+
+    m = T(beta1) * m + T(1.0f - beta1) * g;
+    v = T(beta2) * v + T(1.0f - beta2) * g * g;
+
+    T m_hat = m / T(bias_correction1);
+    T v_hat = v / T(bias_correction2);
+
+    if (amsgrad && max_exp_avg_sq != nullptr) {
+        T max_v = max_exp_avg_sq[idx];
+        if (v_hat > max_v) max_v = v_hat;
+        max_exp_avg_sq[idx] = max_v;
+        v_hat = max_v;
+    }
+
+    if (weight_decay > 0.0f) {
+        p = p * (T(1) - T(lr) * T(weight_decay));
+    }
+
+    T denom = sqrt(v_hat) + T(eps);
+    T update = atan2(m_hat, denom);
+
+    p = p - T(lr) * update;
+
+    param[idx] = p;
+    exp_avg[idx] = m;
+    exp_avg_sq[idx] = v;
+}
+
+auto fused_adam_atan2_step_hip(
+    Tensor& param,
+    const Tensor& grad,
+    Tensor& exp_avg,
+    Tensor& exp_avg_sq,
+    Tensor* max_exp_avg_sq,
+    float lr,
+    float beta1,
+    float beta2,
+    float eps,
+    float weight_decay,
+    int64_t step,
+    bool amsgrad,
+    hipStream_t stream
+) -> void {
+    int64_t numel = param.numel();
+    constexpr int BLOCK_SIZE = 256;
+    int blocks = (numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    blocks = std::min(blocks, static_cast<int64_t>(65535));
+
+    float bias_correction1 = 1.0f - std::pow(beta1, static_cast<float>(step));
+    float bias_correction2 = 1.0f - std::pow(beta2, static_cast<float>(step));
+
+    if (param.dtype() == DType::Float32) {
+        float* max_sq_ptr = (amsgrad && max_exp_avg_sq) ? max_exp_avg_sq->data<float>() : nullptr;
+
+        hipLaunchKernelGGL(fused_adam_atan2_kernel<float>,
+            dim3(blocks), dim3(BLOCK_SIZE), 0, stream,
+            param.data<float>(), grad.data<float>(),
+            exp_avg.data<float>(), exp_avg_sq.data<float>(),
+            max_sq_ptr, numel,
+            lr, beta1, beta2, eps, weight_decay,
+            bias_correction1, bias_correction2, amsgrad
+        );
+    } else if (param.dtype() == DType::Float64) {
+        double* max_sq_ptr = (amsgrad && max_exp_avg_sq) ? max_exp_avg_sq->data<double>() : nullptr;
+
+        hipLaunchKernelGGL(fused_adam_atan2_kernel<double>,
+            dim3(blocks), dim3(BLOCK_SIZE), 0, stream,
+            param.data<double>(), grad.data<double>(),
+            exp_avg.data<double>(), exp_avg_sq.data<double>(),
+            max_sq_ptr, numel,
+            lr, beta1, beta2, eps, weight_decay,
+            bias_correction1, bias_correction2, amsgrad
+        );
+    } else {
+        throw std::runtime_error("fused_adam_atan2_step_hip: Only Float32 and Float64 supported");
+    }
+
+    HIP_CHECK(hipGetLastError());
+}
+
 } // namespace rocm
 } // namespace tenzor
 

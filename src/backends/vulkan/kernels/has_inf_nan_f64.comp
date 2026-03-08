@@ -1,0 +1,38 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Reduction shader: check if tensor contains any inf or nan values (Float64)
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { double input_data[]; };
+layout(binding = 1) buffer Output { uint result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+} params;
+
+shared uint shared_flag;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint lid = gl_LocalInvocationID.x;
+
+    if (lid == 0) {
+        shared_flag = 0;
+    }
+    barrier();
+
+    if (idx < params.n) {
+        double val = input_data[idx];
+        // Double-precision NaN/Inf check
+        if (val != val || val == 1.0/0.0 || val == -1.0/0.0) {
+            atomicOr(shared_flag, 1u);
+        }
+    }
+
+    barrier();
+
+    if (lid == 0 && shared_flag != 0) {
+        atomicOr(result[0], 1u);
+    }
+}

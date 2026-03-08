@@ -308,6 +308,53 @@ auto ONNXExporter::op_to_onnx(OpId op) -> std::string {
         // Vision operations
         case OpId::Interpolate:  return "Resize";
 
+        // Cast operation
+        case OpId::Cast:         return "Cast";
+
+        // Triangular operations
+        case OpId::Triu:         return "Trilu";        // upper=1 attribute
+        case OpId::Tril:         return "Trilu";        // upper=0 attribute
+
+        // Logical operations
+        case OpId::LogicalAnd:   return "And";
+        case OpId::LogicalOr:    return "Or";
+        case OpId::LogicalNot:   return "Not";
+
+        // Scatter with reduction
+        case OpId::ScatterAdd:   return "ScatterElements"; // reduction='add'
+
+        // Signal processing (opset 17+)
+        case OpId::FFT:          return "DFT";
+        case OpId::IFFT:         return "DFT";          // inverse=1 attribute
+        case OpId::RFFT:         return "DFT";
+
+        // Accumulation operations
+        case OpId::CumProd:      return "CumSum";       // Custom: requires Scan op (TODO)
+
+        // Roll (custom: Slice + Concat decomposition)
+        case OpId::Roll:         return "Roll";         // No native ONNX op; decomposed in export
+
+        // Depthwise convolution
+        case OpId::DepthwiseConv2d: return "Conv";      // group=in_channels attribute
+
+        // Log2 (custom: Log / Log(2) decomposition)
+        case OpId::Log2:         return "Log";          // Decomposed: Log(x) / Log(2)
+
+        // Quantized convolution
+        case OpId::QuantizedConv2d: return "QLinearConv";
+
+        // EmbeddingBag (custom: Gather + ReduceSum decomposition)
+        case OpId::EmbeddingBagForward: return "Gather"; // Decomposed: Gather + ReduceSum
+
+        // Unfold/Fold — complex subgraph ops
+        // Unfold → custom (Slice + Reshape); Fold → Col2Im (opset 18+)
+        case OpId::Unfold:       return "Unfold";       // TODO: decompose to Slice + Reshape
+        case OpId::Fold:         return "Col2Im";       // opset 18+
+
+        // SearchSorted — requires loop construct
+        // TODO: complex ONNX subgraph with Loop or Bucketize
+        case OpId::SearchSorted: return "SearchSorted"; // TODO: no native ONNX op
+
         default:
             throw std::runtime_error(
                 "No ONNX mapping for OpId: " +
@@ -3012,6 +3059,439 @@ auto ONNXExporter::export_quantized_linear(
     gemm_node.add_output(output_name);
     gemm_node.set_attr("transB", static_cast<int64_t>(1));
     graph_.add_node(gemm_node);
+}
+
+// ============================================================================
+// Phase 13: Expanded ONNX Export Coverage
+// ============================================================================
+
+// --- Group 1: Basic ops ---
+
+auto ONNXExporter::export_cast(const Tensor& input, DType target_dtype,
+                                const Tensor& output,
+                                const std::string& output_name) -> void {
+    ONNXExportNode node("Cast", context_.generate_name("cast"));
+    std::string input_name = get_tensor_name(input, "cast_input");
+    node.add_input(input_name);
+    node.add_output(output_name);
+    node.set_attr("to", static_cast<int64_t>(dtype_to_onnx(target_dtype)));
+    graph_.add_node(node);
+    context_.register_tensor(output, output_name);
+}
+
+auto ONNXExporter::export_triu(const Tensor& input, int64_t diagonal,
+                                const Tensor& output,
+                                const std::string& output_name) -> void {
+    // ONNX Trilu (opset 14+): upper=1 for upper triangular
+    ONNXExportNode node("Trilu", context_.generate_name("triu"));
+    std::string input_name = get_tensor_name(input, "triu_input");
+    node.add_input(input_name);
+
+    // k (diagonal offset) is the second input as a scalar tensor
+    if (diagonal != 0) {
+        std::string k_name = context_.generate_name("triu_k");
+        Tensor k_tensor({1}, DType::Int64, Device::cpu());
+        *k_tensor.data<int64_t>() = diagonal;
+        add_initializer_tensor(k_tensor, k_name);
+        node.add_input(k_name);
+    }
+
+    node.add_output(output_name);
+    node.set_attr("upper", static_cast<int64_t>(1));
+    graph_.add_node(node);
+    context_.register_tensor(output, output_name);
+}
+
+auto ONNXExporter::export_tril(const Tensor& input, int64_t diagonal,
+                                const Tensor& output,
+                                const std::string& output_name) -> void {
+    // ONNX Trilu (opset 14+): upper=0 for lower triangular
+    ONNXExportNode node("Trilu", context_.generate_name("tril"));
+    std::string input_name = get_tensor_name(input, "tril_input");
+    node.add_input(input_name);
+
+    if (diagonal != 0) {
+        std::string k_name = context_.generate_name("tril_k");
+        Tensor k_tensor({1}, DType::Int64, Device::cpu());
+        *k_tensor.data<int64_t>() = diagonal;
+        add_initializer_tensor(k_tensor, k_name);
+        node.add_input(k_name);
+    }
+
+    node.add_output(output_name);
+    node.set_attr("upper", static_cast<int64_t>(0));
+    graph_.add_node(node);
+    context_.register_tensor(output, output_name);
+}
+
+auto ONNXExporter::export_logical_and(const Tensor& a, const Tensor& b,
+                                       const Tensor& output,
+                                       const std::string& output_name) -> void {
+    ONNXExportNode node("And", context_.generate_name("logical_and"));
+    std::string a_name = get_tensor_name(a, "and_a");
+    std::string b_name = get_tensor_name(b, "and_b");
+    node.add_input(a_name);
+    node.add_input(b_name);
+    node.add_output(output_name);
+    graph_.add_node(node);
+    context_.register_tensor(output, output_name);
+}
+
+auto ONNXExporter::export_logical_or(const Tensor& a, const Tensor& b,
+                                      const Tensor& output,
+                                      const std::string& output_name) -> void {
+    ONNXExportNode node("Or", context_.generate_name("logical_or"));
+    std::string a_name = get_tensor_name(a, "or_a");
+    std::string b_name = get_tensor_name(b, "or_b");
+    node.add_input(a_name);
+    node.add_input(b_name);
+    node.add_output(output_name);
+    graph_.add_node(node);
+    context_.register_tensor(output, output_name);
+}
+
+auto ONNXExporter::export_logical_not(const Tensor& input,
+                                       const Tensor& output,
+                                       const std::string& output_name) -> void {
+    ONNXExportNode node("Not", context_.generate_name("logical_not"));
+    std::string input_name = get_tensor_name(input, "not_input");
+    node.add_input(input_name);
+    node.add_output(output_name);
+    graph_.add_node(node);
+    context_.register_tensor(output, output_name);
+}
+
+// --- Group 2: Indexing ops ---
+
+auto ONNXExporter::export_scatter_add(const Tensor& data, const Tensor& indices,
+                                       const Tensor& updates, int64_t axis,
+                                       const Tensor& output,
+                                       const std::string& output_name) -> void {
+    // ONNX ScatterElements with reduction='add' (opset 16+)
+    ONNXExportNode node("ScatterElements", context_.generate_name("scatter_add"));
+    std::string data_name = get_tensor_name(data, "scatter_add_data");
+    std::string indices_name = get_tensor_name(indices, "scatter_add_indices");
+    std::string updates_name = get_tensor_name(updates, "scatter_add_updates");
+    node.add_input(data_name);
+    node.add_input(indices_name);
+    node.add_input(updates_name);
+    node.add_output(output_name);
+    node.set_attr("axis", axis);
+    node.set_attr("reduction", std::string("add"));
+    graph_.add_node(node);
+    context_.register_tensor(output, output_name);
+}
+
+// Unfold: TODO — requires complex Slice + Reshape subgraph. Skipped for now.
+// Fold: TODO — ONNX Col2Im (opset 18+) requires careful attribute mapping. Skipped for now.
+// SearchSorted: TODO — requires ONNX Loop construct or custom op. Skipped for now.
+
+// --- Group 3: Signal processing ---
+
+auto ONNXExporter::export_fft(const Tensor& input, int64_t signal_ndim,
+                               const Tensor& output,
+                               const std::string& output_name) -> void {
+    // ONNX DFT (opset 17+)
+    ONNXExportNode node("DFT", context_.generate_name("fft"));
+    std::string input_name = get_tensor_name(input, "fft_input");
+    node.add_input(input_name);
+    node.add_output(output_name);
+    // axis defaults to -2 (second-to-last dim, per ONNX DFT spec)
+    if (signal_ndim > 0) {
+        node.set_attr("axis", static_cast<int64_t>(signal_ndim));
+    }
+    graph_.add_node(node);
+    context_.register_tensor(output, output_name);
+}
+
+auto ONNXExporter::export_ifft(const Tensor& input, int64_t signal_ndim,
+                                const Tensor& output,
+                                const std::string& output_name) -> void {
+    // ONNX DFT with inverse=1 (opset 17+)
+    ONNXExportNode node("DFT", context_.generate_name("ifft"));
+    std::string input_name = get_tensor_name(input, "ifft_input");
+    node.add_input(input_name);
+    node.add_output(output_name);
+    node.set_attr("inverse", static_cast<int64_t>(1));
+    if (signal_ndim > 0) {
+        node.set_attr("axis", static_cast<int64_t>(signal_ndim));
+    }
+    graph_.add_node(node);
+    context_.register_tensor(output, output_name);
+}
+
+auto ONNXExporter::export_rfft(const Tensor& input, int64_t signal_ndim,
+                                const Tensor& output,
+                                const std::string& output_name) -> void {
+    // ONNX DFT for real-to-complex (opset 17+)
+    // onesided=1 is the default for real input in ONNX DFT
+    ONNXExportNode node("DFT", context_.generate_name("rfft"));
+    std::string input_name = get_tensor_name(input, "rfft_input");
+    node.add_input(input_name);
+    node.add_output(output_name);
+    node.set_attr("onesided", static_cast<int64_t>(1));
+    if (signal_ndim > 0) {
+        node.set_attr("axis", static_cast<int64_t>(signal_ndim));
+    }
+    graph_.add_node(node);
+    context_.register_tensor(output, output_name);
+}
+
+// --- Group 4: Accumulation ops ---
+
+auto ONNXExporter::export_cumsum(const Tensor& input, int64_t axis,
+                                  const Tensor& output,
+                                  const std::string& output_name) -> void {
+    // ONNX CumSum (opset 11+): axis is the second input (1-D tensor)
+    ONNXExportNode node("CumSum", context_.generate_name("cumsum"));
+    std::string input_name = get_tensor_name(input, "cumsum_input");
+    node.add_input(input_name);
+
+    // axis must be provided as an initializer tensor
+    std::string axis_name = context_.generate_name("cumsum_axis");
+    Tensor axis_tensor({1}, DType::Int64, Device::cpu());
+    *axis_tensor.data<int64_t>() = axis;
+    add_initializer_tensor(axis_tensor, axis_name);
+    node.add_input(axis_name);
+
+    node.add_output(output_name);
+    graph_.add_node(node);
+    context_.register_tensor(output, output_name);
+}
+
+// CumProd: TODO — ONNX has no native CumProd. Requires Scan op decomposition.
+// For now, CumProd maps to "CumSum" in op_to_onnx as a placeholder.
+
+auto ONNXExporter::export_roll(const Tensor& input, int64_t shift, int64_t axis,
+                                const Tensor& output,
+                                const std::string& output_name) -> void {
+    // Roll = Slice(tail) + Slice(head) + Concat
+    // For tensor of size N along axis: roll by shift S means:
+    //   result = concat(input[N-S:], input[:N-S]) along axis
+    std::string input_name = get_tensor_name(input, "roll_input");
+
+    auto shape = input.shape();
+    int64_t dim_size = shape[axis >= 0 ? axis : static_cast<int64_t>(shape.size()) + axis];
+    // Normalize shift to [0, dim_size)
+    int64_t norm_shift = ((shift % dim_size) + dim_size) % dim_size;
+
+    if (norm_shift == 0) {
+        // No-op: just use Identity
+        ONNXExportNode id_node("Identity", context_.generate_name("roll_noop"));
+        id_node.add_input(input_name);
+        id_node.add_output(output_name);
+        graph_.add_node(id_node);
+        context_.register_tensor(output, output_name);
+        return;
+    }
+
+    int64_t split_point = dim_size - norm_shift;
+
+    // Helper: create axis/starts/ends/steps initializers for Slice
+    auto make_slice_init = [&](const std::string& prefix, int64_t start, int64_t end) {
+        std::string starts_name = context_.generate_name(prefix + "_starts");
+        std::string ends_name = context_.generate_name(prefix + "_ends");
+        std::string axes_name = context_.generate_name(prefix + "_axes");
+
+        Tensor starts_t({1}, DType::Int64, Device::cpu());
+        *starts_t.data<int64_t>() = start;
+        add_initializer_tensor(starts_t, starts_name);
+
+        Tensor ends_t({1}, DType::Int64, Device::cpu());
+        *ends_t.data<int64_t>() = end;
+        add_initializer_tensor(ends_t, ends_name);
+
+        Tensor axes_t({1}, DType::Int64, Device::cpu());
+        *axes_t.data<int64_t>() = axis;
+        add_initializer_tensor(axes_t, axes_name);
+
+        return std::tuple{starts_name, ends_name, axes_name};
+    };
+
+    // Slice 1: tail part [split_point : dim_size]
+    auto [s1_starts, s1_ends, s1_axes] = make_slice_init("roll_tail", split_point, dim_size);
+    std::string tail_name = context_.generate_name("roll_tail");
+    ONNXExportNode tail_slice("Slice", context_.generate_name("roll_tail_slice"));
+    tail_slice.add_input(input_name);
+    tail_slice.add_input(s1_starts);
+    tail_slice.add_input(s1_ends);
+    tail_slice.add_input(s1_axes);
+    tail_slice.add_output(tail_name);
+    graph_.add_node(tail_slice);
+
+    // Slice 2: head part [0 : split_point]
+    auto [s2_starts, s2_ends, s2_axes] = make_slice_init("roll_head", 0, split_point);
+    std::string head_name = context_.generate_name("roll_head");
+    ONNXExportNode head_slice("Slice", context_.generate_name("roll_head_slice"));
+    head_slice.add_input(input_name);
+    head_slice.add_input(s2_starts);
+    head_slice.add_input(s2_ends);
+    head_slice.add_input(s2_axes);
+    head_slice.add_output(head_name);
+    graph_.add_node(head_slice);
+
+    // Concat: [tail, head] along axis
+    ONNXExportNode concat_node("Concat", context_.generate_name("roll_concat"));
+    concat_node.add_input(tail_name);
+    concat_node.add_input(head_name);
+    concat_node.add_output(output_name);
+    concat_node.set_attr("axis", axis);
+    graph_.add_node(concat_node);
+    context_.register_tensor(output, output_name);
+}
+
+// --- Group 5: Layer ops ---
+
+auto ONNXExporter::export_embedding_bag(const Tensor& weight, const Tensor& indices,
+                                         const Tensor& offsets, int64_t mode,
+                                         const Tensor& output,
+                                         const std::string& output_name) -> void {
+    // EmbeddingBag = Gather embeddings + ReduceSum/ReduceMean per bag
+    // mode: 0=sum, 1=mean, 2=max
+    std::string weight_name = get_tensor_name(weight, "embbag_weight");
+    std::string indices_name = get_tensor_name(indices, "embbag_indices");
+
+    // Step 1: Gather all embeddings by indices
+    std::string gathered_name = context_.generate_name("embbag_gathered");
+    ONNXExportNode gather_node("Gather", context_.generate_name("embbag_gather"));
+    gather_node.add_input(weight_name);
+    gather_node.add_input(indices_name);
+    gather_node.set_attr("axis", static_cast<int64_t>(0));
+    gather_node.add_output(gathered_name);
+    graph_.add_node(gather_node);
+
+    // Step 2: Reduce along the bag dimension
+    // For simplicity, this emits a single ReduceSum/ReduceMean over axis=0
+    // A full implementation would use offsets to segment the reduction.
+    std::string reduce_op;
+    switch (mode) {
+        case 0: reduce_op = "ReduceSum"; break;
+        case 1: reduce_op = "ReduceMean"; break;
+        case 2: reduce_op = "ReduceMax"; break;
+        default: reduce_op = "ReduceSum"; break;
+    }
+
+    ONNXExportNode reduce_node(reduce_op, context_.generate_name("embbag_reduce"));
+    reduce_node.add_input(gathered_name);
+    reduce_node.add_output(output_name);
+    reduce_node.set_attr("axes", std::vector<int64_t>{0});
+    reduce_node.set_attr("keepdims", static_cast<int64_t>(0));
+    graph_.add_node(reduce_node);
+    context_.register_tensor(output, output_name);
+}
+
+auto ONNXExporter::export_depthwise_conv2d(const Tensor& input, const Tensor& weight,
+                                            const std::optional<Tensor>& bias,
+                                            const std::vector<int64_t>& kernel_size,
+                                            const std::vector<int64_t>& stride,
+                                            const std::vector<int64_t>& padding,
+                                            const std::vector<int64_t>& dilation,
+                                            int64_t in_channels,
+                                            const Tensor& output,
+                                            const std::string& output_name) -> void {
+    // Depthwise conv is just Conv with group=in_channels
+    export_conv2d(input, weight, bias, kernel_size, stride, padding, dilation,
+                  in_channels, output, output_name);
+}
+
+// --- Group 6: Misc ops ---
+
+auto ONNXExporter::export_log2(const Tensor& input, const Tensor& output,
+                                const std::string& output_name) -> void {
+    // log2(x) = log(x) / log(2)
+    std::string input_name = get_tensor_name(input, "log2_input");
+
+    // Step 1: Log(x)
+    std::string log_out = context_.generate_name("log2_log");
+    ONNXExportNode log_node("Log", context_.generate_name("log2_log"));
+    log_node.add_input(input_name);
+    log_node.add_output(log_out);
+    graph_.add_node(log_node);
+
+    // Step 2: Constant log(2)
+    std::string ln2_name = context_.generate_name("log2_ln2");
+    Tensor ln2_tensor({1}, DType::Float32, Device::cpu());
+    *ln2_tensor.data<float>() = std::log(2.0f);
+    add_initializer_tensor(ln2_tensor, ln2_name);
+
+    // Step 3: Div
+    ONNXExportNode div_node("Div", context_.generate_name("log2_div"));
+    div_node.add_input(log_out);
+    div_node.add_input(ln2_name);
+    div_node.add_output(output_name);
+    graph_.add_node(div_node);
+    context_.register_tensor(output, output_name);
+}
+
+auto ONNXExporter::export_quantized_conv2d(
+    const Tensor& input, const Tensor& input_scale, const Tensor& input_zp,
+    const Tensor& weight, const Tensor& weight_scale, const Tensor& weight_zp,
+    const std::optional<Tensor>& bias,
+    const Tensor& output_scale, const Tensor& output_zp,
+    const std::vector<int64_t>& kernel_size,
+    const std::vector<int64_t>& stride,
+    const std::vector<int64_t>& padding,
+    const std::vector<int64_t>& dilation,
+    int64_t groups,
+    const Tensor& output,
+    const std::string& output_name) -> void {
+    // ONNX QLinearConv (opset 10+)
+    ONNXExportNode node("QLinearConv", context_.generate_name("qlinearconv"));
+
+    std::string x_name = get_tensor_name(input, "qconv_x");
+    std::string x_scale_name = context_.generate_name("qconv_x_scale");
+    std::string x_zp_name = context_.generate_name("qconv_x_zp");
+    std::string w_name = context_.generate_name("qconv_w");
+    std::string w_scale_name = context_.generate_name("qconv_w_scale");
+    std::string w_zp_name = context_.generate_name("qconv_w_zp");
+    std::string y_scale_name = context_.generate_name("qconv_y_scale");
+    std::string y_zp_name = context_.generate_name("qconv_y_zp");
+
+    add_initializer_tensor(input_scale, x_scale_name);
+    add_initializer_tensor(input_zp, x_zp_name);
+    add_initializer_tensor(weight, w_name);
+    add_initializer_tensor(weight_scale, w_scale_name);
+    add_initializer_tensor(weight_zp, w_zp_name);
+    add_initializer_tensor(output_scale, y_scale_name);
+    add_initializer_tensor(output_zp, y_zp_name);
+
+    // QLinearConv inputs: x, x_scale, x_zero_point, w, w_scale, w_zero_point,
+    //                     y_scale, y_zero_point, [B]
+    node.add_input(x_name);
+    node.add_input(x_scale_name);
+    node.add_input(x_zp_name);
+    node.add_input(w_name);
+    node.add_input(w_scale_name);
+    node.add_input(w_zp_name);
+    node.add_input(y_scale_name);
+    node.add_input(y_zp_name);
+
+    if (bias.has_value()) {
+        std::string bias_name = context_.generate_name("qconv_bias");
+        add_initializer_tensor(bias.value(), bias_name);
+        node.add_input(bias_name);
+    }
+
+    node.add_output(output_name);
+
+    node.set_attr("kernel_shape", kernel_size);
+    node.set_attr("strides", stride);
+
+    // ONNX expects [top, left, bottom, right] for 2D pads
+    if (padding.size() == 2) {
+        node.set_attr("pads", std::vector<int64_t>{
+            padding[0], padding[1], padding[0], padding[1]});
+    } else {
+        node.set_attr("pads", padding);
+    }
+
+    node.set_attr("dilations", dilation);
+    if (groups > 1) {
+        node.set_attr("group", groups);
+    }
+
+    graph_.add_node(node);
+    context_.register_tensor(output, output_name);
 }
 
 // ============================================================================

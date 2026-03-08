@@ -1,0 +1,75 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Dropout forward for Float64
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { double input_data[]; };
+layout(binding = 1) buffer Output { double output_data[]; };
+layout(binding = 2) buffer Mask { double mask_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint seed;
+    uint offset;
+    float p;
+    float scale;
+} params;
+
+const uint PHILOX_M0 = 0xD2511F53u;
+const uint PHILOX_M1 = 0xCD9E8D57u;
+const uint PHILOX_W0 = 0x9E3779B9u;
+const uint PHILOX_W1 = 0xBB67AE85u;
+
+uint mulhi(uint a, uint b) {
+    uint a_lo = a & 0xFFFFu;
+    uint a_hi = a >> 16;
+    uint b_lo = b & 0xFFFFu;
+    uint b_hi = b >> 16;
+    uint p0 = a_lo * b_lo;
+    uint p1 = a_lo * b_hi;
+    uint p2 = a_hi * b_lo;
+    uint p3 = a_hi * b_hi;
+    uint carry = ((p0 >> 16) + (p1 & 0xFFFFu) + (p2 & 0xFFFFu)) >> 16;
+    return p3 + (p1 >> 16) + (p2 >> 16) + carry;
+}
+
+void philox_round(inout uvec4 ctr, uvec2 key) {
+    uint hi0 = mulhi(ctr.x, PHILOX_M0);
+    uint lo0 = ctr.x * PHILOX_M0;
+    uint hi1 = mulhi(ctr.z, PHILOX_M1);
+    uint lo1 = ctr.z * PHILOX_M1;
+    ctr = uvec4(hi1 ^ ctr.y ^ key.x, lo1, hi0 ^ ctr.w ^ key.y, lo0);
+}
+
+uvec4 philox4x32(uvec4 ctr, uvec2 key) {
+    for (int i = 0; i < 10; i++) {
+        philox_round(ctr, key);
+        key.x += PHILOX_W0;
+        key.y += PHILOX_W1;
+    }
+    return ctr;
+}
+
+float uint_to_float01(uint x) {
+    return float(x >> 8) * (1.0 / 16777216.0);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n_elements) {
+        return;
+    }
+
+    uint element_idx = idx + params.offset;
+    uvec4 ctr = uvec4(element_idx, element_idx >> 16, 0, 0);
+    uvec2 key = uvec2(params.seed, params.seed ^ 0xDEADBEEF);
+    uvec4 rand_vals = philox4x32(ctr, key);
+
+    float rand_val = uint_to_float01(rand_vals.x);
+
+    double keep = (rand_val >= params.p) ? 1.0 : 0.0;
+    mask_data[idx] = keep;
+    output_data[idx] = input_data[idx] * keep * double(params.scale);
+}

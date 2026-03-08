@@ -5,6 +5,7 @@
 #ifdef TENZOR_HAS_HIPRAND
 #include <hiprand_kernel.h>
 #endif
+#include <hipcub/hipcub.hpp>
 #include <cmath>
 #include <stdexcept>
 #include <algorithm>
@@ -2787,6 +2788,269 @@ auto eye_kernel(int64_t n, int64_t m, int64_t k, DType dtype, Device device, hip
 
     HIP_CHECK(hipGetLastError());
     return result;
+}
+
+// ============================================================================
+// CumSum kernel — inclusive prefix sum along a dimension
+// ============================================================================
+
+template<typename T>
+__global__ void extract_strided_slice_kernel(const T* __restrict__ input, T* __restrict__ output,
+                                              int64_t dim_size, int64_t inner_size,
+                                              int64_t outer, int64_t inner)
+{
+    HIP_KERNEL_LOOP(i, dim_size) {
+        output[i] = input[outer * dim_size * inner_size + i * inner_size + inner];
+    }
+}
+
+template<typename T>
+__global__ void scatter_strided_slice_kernel(const T* __restrict__ input, T* __restrict__ output,
+                                              int64_t dim_size, int64_t inner_size,
+                                              int64_t outer, int64_t inner)
+{
+    HIP_KERNEL_LOOP(i, dim_size) {
+        output[outer * dim_size * inner_size + i * inner_size + inner] = input[i];
+    }
+}
+
+template<typename T>
+static void cumsum_slice_hipcub(const T* d_in, T* d_out, int64_t n, hipStream_t stream)
+{
+    void* d_temp = nullptr;
+    size_t temp_bytes = 0;
+    hipcub::DeviceScan::InclusiveSum(d_temp, temp_bytes, d_in, d_out,
+                                     static_cast<int>(n), stream);
+    HIP_CHECK(hipMalloc(&d_temp, temp_bytes));
+    hipcub::DeviceScan::InclusiveSum(d_temp, temp_bytes, d_in, d_out,
+                                     static_cast<int>(n), stream);
+    HIP_CHECK(hipFree(d_temp));
+}
+
+auto cumsum_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Tensor
+{
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    const auto& shape = input_cont.shape();
+    const int64_t ndim = input.ndim();
+    const int64_t dim_size = shape[dim];
+    const auto dtype = input.dtype();
+    const auto device = input.device();
+
+    Tensor output(std::vector<int64_t>(shape.begin(), shape.end()), dtype, device);
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
+
+    auto launch = [&]<typename T>() {
+        if (inner_size == 1) {
+            for (int64_t outer = 0; outer < outer_size; ++outer) {
+                const T* d_in = input_cont.data<T>() + outer * dim_size;
+                T* d_out = output.data<T>() + outer * dim_size;
+                cumsum_slice_hipcub<T>(d_in, d_out, dim_size, stream);
+            }
+        } else {
+            T* d_slice_in = nullptr;
+            T* d_slice_out = nullptr;
+            HIP_CHECK(hipMalloc(&d_slice_in, dim_size * sizeof(T)));
+            HIP_CHECK(hipMalloc(&d_slice_out, dim_size * sizeof(T)));
+
+            dim3 grid, block;
+            compute_launch_config_1d(dim_size, grid, block);
+
+            for (int64_t outer = 0; outer < outer_size; ++outer) {
+                for (int64_t inner = 0; inner < inner_size; ++inner) {
+                    hipLaunchKernelGGL(extract_strided_slice_kernel<T>,
+                        grid, block, 0, stream,
+                        input_cont.data<T>(), d_slice_in, dim_size, inner_size, outer, inner);
+                    HIP_CHECK(hipGetLastError());
+                    cumsum_slice_hipcub<T>(d_slice_in, d_slice_out, dim_size, stream);
+                    hipLaunchKernelGGL(scatter_strided_slice_kernel<T>,
+                        grid, block, 0, stream,
+                        d_slice_out, output.data<T>(), dim_size, inner_size, outer, inner);
+                    HIP_CHECK(hipGetLastError());
+                }
+            }
+
+            HIP_CHECK(hipFree(d_slice_in));
+            HIP_CHECK(hipFree(d_slice_out));
+        }
+    };
+
+    switch (dtype) {
+        case DType::Float32: launch.template operator()<float>(); break;
+        case DType::Float64: launch.template operator()<double>(); break;
+        case DType::Int32:   launch.template operator()<int32_t>(); break;
+        case DType::Int64:   launch.template operator()<int64_t>(); break;
+        default: throw std::runtime_error("cumsum ROCm: unsupported dtype");
+    }
+
+    return output;
+}
+
+// ============================================================================
+// CumProd kernel — inclusive prefix product along a dimension
+// ============================================================================
+
+struct HipMultOp {
+    template<typename T>
+    __device__ __forceinline__ T operator()(const T& a, const T& b) const { return a * b; }
+};
+
+template<typename T>
+static void cumprod_slice_hipcub(const T* d_in, T* d_out, int64_t n, hipStream_t stream)
+{
+    void* d_temp = nullptr;
+    size_t temp_bytes = 0;
+    hipcub::DeviceScan::InclusiveScan(d_temp, temp_bytes, d_in, d_out,
+                                      HipMultOp(), static_cast<int>(n), stream);
+    HIP_CHECK(hipMalloc(&d_temp, temp_bytes));
+    hipcub::DeviceScan::InclusiveScan(d_temp, temp_bytes, d_in, d_out,
+                                      HipMultOp(), static_cast<int>(n), stream);
+    HIP_CHECK(hipFree(d_temp));
+}
+
+auto cumprod_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Tensor
+{
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    const auto& shape = input_cont.shape();
+    const int64_t ndim = input.ndim();
+    const int64_t dim_size = shape[dim];
+    const auto dtype = input.dtype();
+    const auto device = input.device();
+
+    Tensor output(std::vector<int64_t>(shape.begin(), shape.end()), dtype, device);
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
+
+    auto launch = [&]<typename T>() {
+        if (inner_size == 1) {
+            for (int64_t outer = 0; outer < outer_size; ++outer) {
+                const T* d_in = input_cont.data<T>() + outer * dim_size;
+                T* d_out = output.data<T>() + outer * dim_size;
+                cumprod_slice_hipcub<T>(d_in, d_out, dim_size, stream);
+            }
+        } else {
+            T* d_slice_in = nullptr;
+            T* d_slice_out = nullptr;
+            HIP_CHECK(hipMalloc(&d_slice_in, dim_size * sizeof(T)));
+            HIP_CHECK(hipMalloc(&d_slice_out, dim_size * sizeof(T)));
+
+            dim3 grid, block;
+            compute_launch_config_1d(dim_size, grid, block);
+
+            for (int64_t outer = 0; outer < outer_size; ++outer) {
+                for (int64_t inner = 0; inner < inner_size; ++inner) {
+                    hipLaunchKernelGGL(extract_strided_slice_kernel<T>,
+                        grid, block, 0, stream,
+                        input_cont.data<T>(), d_slice_in, dim_size, inner_size, outer, inner);
+                    HIP_CHECK(hipGetLastError());
+                    cumprod_slice_hipcub<T>(d_slice_in, d_slice_out, dim_size, stream);
+                    hipLaunchKernelGGL(scatter_strided_slice_kernel<T>,
+                        grid, block, 0, stream,
+                        d_slice_out, output.data<T>(), dim_size, inner_size, outer, inner);
+                    HIP_CHECK(hipGetLastError());
+                }
+            }
+
+            HIP_CHECK(hipFree(d_slice_in));
+            HIP_CHECK(hipFree(d_slice_out));
+        }
+    };
+
+    switch (dtype) {
+        case DType::Float32: launch.template operator()<float>(); break;
+        case DType::Float64: launch.template operator()<double>(); break;
+        case DType::Int32:   launch.template operator()<int32_t>(); break;
+        case DType::Int64:   launch.template operator()<int64_t>(); break;
+        default: throw std::runtime_error("cumprod ROCm: unsupported dtype");
+    }
+
+    return output;
+}
+
+// ============================================================================
+// HasInfNan kernel — check if tensor contains inf or nan
+// ============================================================================
+
+template<typename T>
+__global__ void check_inf_nan_kernel(const T* data, int64_t n, int* result) {
+    HIP_KERNEL_LOOP(idx, n) {
+        T val = data[idx];
+        if (isinf(static_cast<float>(val)) || isnan(static_cast<float>(val))) {
+            atomicExch(result, 1);
+        }
+    }
+}
+
+// Float64 specialization — use double-precision isinf/isnan
+template<>
+__global__ void check_inf_nan_kernel<double>(const double* data, int64_t n, int* result) {
+    HIP_KERNEL_LOOP(idx, n) {
+        double val = data[idx];
+        if (isinf(val) || isnan(val)) {
+            atomicExch(result, 1);
+        }
+    }
+}
+
+auto has_inf_nan_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    const int64_t numel = input.numel();
+
+    // Helper to create a CPU Bool scalar
+    auto make_bool_scalar = [](bool value, Device device) -> Tensor {
+        Tensor result({}, DType::Bool, Device::cpu());
+        result.data<bool>()[0] = value;
+        return result;
+    };
+
+    if (numel == 0) {
+        return make_bool_scalar(false, input.device());
+    }
+
+    // Allocate device flag
+    int* d_flag = nullptr;
+    HIP_CHECK(hipMalloc(&d_flag, sizeof(int)));
+    HIP_CHECK(hipMemsetAsync(d_flag, 0, sizeof(int), stream));
+
+    // Handle BFloat16/Float16 by casting to Float32
+    Tensor scan = input;
+    if (scan.dtype() == DType::BFloat16 || scan.dtype() == DType::Float16) {
+        scan = scan.to(DType::Float32);
+    }
+
+    dim3 grid, block;
+    compute_launch_config_1d(numel, grid, block);
+
+    switch (scan.dtype()) {
+        case DType::Float32:
+            hipLaunchKernelGGL(check_inf_nan_kernel<float>,
+                grid, block, 0, stream,
+                scan.data<float>(), numel, d_flag);
+            break;
+        case DType::Float64:
+            hipLaunchKernelGGL(check_inf_nan_kernel<double>,
+                grid, block, 0, stream,
+                scan.data<double>(), numel, d_flag);
+            break;
+        default:
+            // Integer types can't have inf/nan
+            HIP_CHECK(hipFree(d_flag));
+            return make_bool_scalar(false, input.device());
+    }
+    HIP_CHECK(hipGetLastError());
+
+    int h_flag = 0;
+    HIP_CHECK(hipMemcpyAsync(&h_flag, d_flag, sizeof(int),
+                             hipMemcpyDeviceToHost, stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipFree(d_flag));
+
+    return make_bool_scalar(h_flag != 0, input.device());
 }
 
 } // namespace rocm

@@ -1627,5 +1627,93 @@ auto conv_transpose2d_forward(
 
 #endif // TENZOR_HAS_ONEDNN
 
+// ============================================================================
+// DepthwiseConv2d kernel
+// ============================================================================
+class DepthwiseConv2dKernelF32;
+class DepthwiseConv2dKernelF64;
+
+auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                              int64_t stride, int64_t padding, int64_t dilation,
+                              sycl::queue& queue) -> Tensor {
+    auto in_shape = input.shape();
+    auto w_shape = weight.shape();
+
+    int64_t N = in_shape[0];
+    int64_t C = in_shape[1];
+    int64_t H_in = in_shape[2];
+    int64_t W_in = in_shape[3];
+    int64_t kH = w_shape[2];
+    int64_t kW = w_shape[3];
+
+    int64_t H_out = (H_in + 2 * padding - dilation * (kH - 1) - 1) / stride + 1;
+    int64_t W_out = (W_in + 2 * padding - dilation * (kW - 1) - 1) / stride + 1;
+
+    Tensor output({N, C, H_out, W_out}, input.dtype(), input.device());
+    int64_t total = N * C * H_out * W_out;
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_ptr = static_cast<const float*>(input.data_ptr());
+        const float* w_ptr = static_cast<const float*>(weight.data_ptr());
+        float* out_ptr = static_cast<float*>(const_cast<void*>(output.data_ptr()));
+        bool has_bias = (bias != nullptr && bias->numel() > 0);
+        const float* b_ptr = has_bias ? static_cast<const float*>(bias->data_ptr()) : nullptr;
+
+        queue.parallel_for<DepthwiseConv2dKernelF32>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            int64_t w_out = idx % W_out;
+            int64_t h_out = (idx / W_out) % H_out;
+            int64_t c = (idx / (W_out * H_out)) % C;
+            int64_t n = idx / (W_out * H_out * C);
+
+            float sum = 0.0f;
+            for (int64_t kh = 0; kh < kH; ++kh) {
+                for (int64_t kw = 0; kw < kW; ++kw) {
+                    int64_t h_in = h_out * stride - padding + kh * dilation;
+                    int64_t w_in = w_out * stride - padding + kw * dilation;
+                    if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
+                        float in_val = in_ptr[n * C * H_in * W_in + c * H_in * W_in + h_in * W_in + w_in];
+                        float w_val = w_ptr[c * kH * kW + kh * kW + kw];
+                        sum += in_val * w_val;
+                    }
+                }
+            }
+            if (has_bias) sum += b_ptr[c];
+            out_ptr[idx] = sum;
+        }).wait();
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_ptr = static_cast<const double*>(input.data_ptr());
+        const double* w_ptr = static_cast<const double*>(weight.data_ptr());
+        double* out_ptr = static_cast<double*>(const_cast<void*>(output.data_ptr()));
+        bool has_bias = (bias != nullptr && bias->numel() > 0);
+        const double* b_ptr = has_bias ? static_cast<const double*>(bias->data_ptr()) : nullptr;
+
+        queue.parallel_for<DepthwiseConv2dKernelF64>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            int64_t w_out = idx % W_out;
+            int64_t h_out = (idx / W_out) % H_out;
+            int64_t c = (idx / (W_out * H_out)) % C;
+            int64_t n = idx / (W_out * H_out * C);
+
+            double sum = 0.0;
+            for (int64_t kh = 0; kh < kH; ++kh) {
+                for (int64_t kw = 0; kw < kW; ++kw) {
+                    int64_t h_in = h_out * stride - padding + kh * dilation;
+                    int64_t w_in = w_out * stride - padding + kw * dilation;
+                    if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
+                        double in_val = in_ptr[n * C * H_in * W_in + c * H_in * W_in + h_in * W_in + w_in];
+                        double w_val = w_ptr[c * kH * kW + kh * kW + kw];
+                        sum += in_val * w_val;
+                    }
+                }
+            }
+            if (has_bias) sum += b_ptr[c];
+            out_ptr[idx] = sum;
+        }).wait();
+    } else {
+        throw std::runtime_error("depthwise_conv2d: unsupported dtype");
+    }
+
+    return output;
+}
+
 } // namespace oneapi
 } // namespace tenzor

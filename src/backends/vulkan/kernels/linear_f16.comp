@@ -1,0 +1,118 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Linear layer for Float16: output = input @ weight^T + bias
+// Float16 elements packed 2 per 32-bit word
+// Each thread computes 2 adjacent output columns
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };
+layout(binding = 1) buffer Weight { uint weight_data[]; };
+layout(binding = 2) buffer Bias { uint bias_data[]; };
+layout(binding = 3) buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint M;
+    uint N;
+    uint K;
+    uint has_bias;
+} params;
+
+shared float16_t tileA[16][16];
+shared float16_t tileB[16][32];
+
+float16_t readInput(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = input_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
+}
+
+float16_t readWeight(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = weight_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
+}
+
+float16_t readBias(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = bias_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
+}
+
+void main() {
+    uint row = gl_GlobalInvocationID.y;
+    uint col_pair = gl_GlobalInvocationID.x;
+    uint col0 = col_pair * 2;
+    uint col1 = col_pair * 2 + 1;
+
+    uint local_row = gl_LocalInvocationID.y;
+    uint local_col = gl_LocalInvocationID.x;
+
+    // Accumulate in float32 for precision
+    float sum0 = 0.0;
+    float sum1 = 0.0;
+
+    uint num_tiles = (params.K + 15) / 16;
+
+    for (uint t = 0; t < num_tiles; t++) {
+        // Load tile from input
+        uint a_col = t * 16 + local_col;
+        if (row < params.M && a_col < params.K) {
+            tileA[local_row][local_col] = readInput(row * params.K + a_col);
+        } else {
+            tileA[local_row][local_col] = float16_t(0.0);
+        }
+
+        // Load tile from weight (transposed: weight[col, k])
+        uint b_row = t * 16 + local_row;
+        if (b_row < params.K) {
+            if (col0 < params.N) {
+                tileB[local_row][local_col * 2] = readWeight(col0 * params.K + b_row);
+            } else {
+                tileB[local_row][local_col * 2] = float16_t(0.0);
+            }
+            if (col1 < params.N) {
+                tileB[local_row][local_col * 2 + 1] = readWeight(col1 * params.K + b_row);
+            } else {
+                tileB[local_row][local_col * 2 + 1] = float16_t(0.0);
+            }
+        } else {
+            tileB[local_row][local_col * 2] = float16_t(0.0);
+            tileB[local_row][local_col * 2 + 1] = float16_t(0.0);
+        }
+
+        barrier();
+
+        for (uint k = 0; k < 16; k++) {
+            float a_val = float(tileA[local_row][k]);
+            sum0 += a_val * float(tileB[k][local_col * 2]);
+            sum1 += a_val * float(tileB[k][local_col * 2 + 1]);
+        }
+
+        barrier();
+    }
+
+    // Add bias if present
+    if (row < params.M && col0 < params.N) {
+        if (params.has_bias != 0) {
+            sum0 += float(readBias(col0));
+            if (col1 < params.N) {
+                sum1 += float(readBias(col1));
+            }
+        }
+
+        uint out_idx = row * params.N + col0;
+        uint word_idx = out_idx / 2;
+
+        uint bits0 = packHalf2x16(vec2(sum0, 0.0)).x & 0xFFFFu;
+        uint bits1 = (col1 < params.N) ? (packHalf2x16(vec2(sum1, 0.0)).x & 0xFFFFu) : 0u;
+
+        output_data[word_idx] = bits0 | (bits1 << 16);
+    }
+}

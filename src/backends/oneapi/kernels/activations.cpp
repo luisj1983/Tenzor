@@ -1,12 +1,19 @@
 #include "tenzor/core/tensor.hpp"
 #include <sycl/sycl.hpp>
 #include <cmath>
+#include <cstring>
+#include <random>
 #include <stdexcept>
+#include <tuple>
+#include <vector>
 
-// Forward declaration for contiguous kernel
+// Forward declarations for kernels in other files
 namespace tenzor {
 namespace oneapi {
     auto contiguous_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto fused_layer_norm_kernel(const Tensor& input, const Tensor& weight, const Tensor& bias,
+                                 const std::vector<int64_t>& normalized_shape, float epsilon,
+                                 sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor>;
 }
 }
 
@@ -1658,6 +1665,1173 @@ auto gelu_inplace_kernel(Tensor& input, sycl::queue& queue) -> void {
     else {
         throw std::runtime_error("gelu_inplace: unsupported dtype");
     }
+}
+
+// ============================================================================
+// ELU Activation: elu(x) = x if x > 0, alpha * (exp(x) - 1) if x <= 0
+// ============================================================================
+
+// Kernel name classes
+class EluKernelFloat32;
+class EluKernelFloat64;
+class EluKernelFloat16;
+class EluKernelBFloat16;
+class EluBackwardKernelFloat32;
+class EluBackwardKernelFloat64;
+class EluBackwardKernelFloat16;
+class EluBackwardKernelBFloat16;
+
+auto elu_kernel(const Tensor& input, float alpha, sycl::queue& queue) -> Tensor {
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    Tensor output(std::vector<int64_t>(in_cont.shape().begin(), in_cont.shape().end()),
+                  in_cont.dtype(), in_cont.device());
+    const int64_t numel = in_cont.numel();
+
+    if (in_cont.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for<EluKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = in_ptr[idx];
+            out_ptr[idx] = (x > 0.0f) ? x : alpha * (sycl::exp(x) - 1.0f);
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+        double alpha_d = static_cast<double>(alpha);
+        queue.parallel_for<EluKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double x = in_ptr[idx];
+            out_ptr[idx] = (x > 0.0) ? x : alpha_d * (sycl::exp(x) - 1.0);
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<EluKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = static_cast<float>(in_ptr[idx]);
+            out_ptr[idx] = sycl::half((x > 0.0f) ? x : alpha * (sycl::exp(x) - 1.0f));
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for<EluKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = bf16_to_f32(in_ptr[idx]);
+            out_ptr[idx] = f32_to_bf16((x > 0.0f) ? x : alpha * (sycl::exp(x) - 1.0f));
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for elu");
+    }
+    return output;
+}
+
+auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha, sycl::queue& queue) -> Tensor {
+    Tensor grad_cont = grad_output.is_contiguous() ? grad_output : contiguous_kernel(grad_output, queue);
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    Tensor output(std::vector<int64_t>(in_cont.shape().begin(), in_cont.shape().end()),
+                  in_cont.dtype(), in_cont.device());
+    const int64_t numel = in_cont.numel();
+
+    if (in_cont.dtype() == DType::Float32) {
+        const float* grad_ptr = get_data_ptr<const float>(grad_cont);
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for<EluBackwardKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = in_ptr[idx];
+            out_ptr[idx] = grad_ptr[idx] * ((x > 0.0f) ? 1.0f : alpha * sycl::exp(x));
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* grad_ptr = get_data_ptr<const double>(grad_cont);
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+        double alpha_d = static_cast<double>(alpha);
+        queue.parallel_for<EluBackwardKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double x = in_ptr[idx];
+            out_ptr[idx] = grad_ptr[idx] * ((x > 0.0) ? 1.0 : alpha_d * sycl::exp(x));
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::Float16) {
+        const sycl::half* grad_ptr = get_data_ptr<const sycl::half>(grad_cont);
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<EluBackwardKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = static_cast<float>(in_ptr[idx]);
+            float g = static_cast<float>(grad_ptr[idx]);
+            out_ptr[idx] = sycl::half(g * ((x > 0.0f) ? 1.0f : alpha * sycl::exp(x)));
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* grad_ptr = get_data_ptr<const uint16_t>(grad_cont);
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for<EluBackwardKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = bf16_to_f32(in_ptr[idx]);
+            float g = bf16_to_f32(grad_ptr[idx]);
+            out_ptr[idx] = f32_to_bf16(g * ((x > 0.0f) ? 1.0f : alpha * sycl::exp(x)));
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for elu_backward");
+    }
+    return output;
+}
+
+// ============================================================================
+// SELU Activation: selu(x) = scale * (x if x > 0 else alpha * (exp(x) - 1))
+// ============================================================================
+
+class SeluKernelFloat32;
+class SeluKernelFloat64;
+class SeluKernelFloat16;
+class SeluKernelBFloat16;
+class SeluBackwardKernelFloat32;
+class SeluBackwardKernelFloat64;
+class SeluBackwardKernelFloat16;
+class SeluBackwardKernelBFloat16;
+
+auto selu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    Tensor output(std::vector<int64_t>(in_cont.shape().begin(), in_cont.shape().end()),
+                  in_cont.dtype(), in_cont.device());
+    const int64_t numel = in_cont.numel();
+    constexpr float SELU_ALPHA = 1.6732632423543772848170429916717f;
+    constexpr float SELU_SCALE = 1.0507009873554804934193349852946f;
+
+    if (in_cont.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for<SeluKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = in_ptr[idx];
+            out_ptr[idx] = SELU_SCALE * ((x > 0.0f) ? x : SELU_ALPHA * (sycl::exp(x) - 1.0f));
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+        constexpr double SELU_ALPHA_D = 1.6732632423543772848170429916717;
+        constexpr double SELU_SCALE_D = 1.0507009873554804934193349852946;
+        queue.parallel_for<SeluKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double x = in_ptr[idx];
+            out_ptr[idx] = SELU_SCALE_D * ((x > 0.0) ? x : SELU_ALPHA_D * (sycl::exp(x) - 1.0));
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<SeluKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = static_cast<float>(in_ptr[idx]);
+            out_ptr[idx] = sycl::half(SELU_SCALE * ((x > 0.0f) ? x : SELU_ALPHA * (sycl::exp(x) - 1.0f)));
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for<SeluKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = bf16_to_f32(in_ptr[idx]);
+            out_ptr[idx] = f32_to_bf16(SELU_SCALE * ((x > 0.0f) ? x : SELU_ALPHA * (sycl::exp(x) - 1.0f)));
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for selu");
+    }
+    return output;
+}
+
+auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::queue& queue) -> Tensor {
+    Tensor grad_cont = grad_output.is_contiguous() ? grad_output : contiguous_kernel(grad_output, queue);
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    Tensor output(std::vector<int64_t>(in_cont.shape().begin(), in_cont.shape().end()),
+                  in_cont.dtype(), in_cont.device());
+    const int64_t numel = in_cont.numel();
+    constexpr float SELU_ALPHA = 1.6732632423543772848170429916717f;
+    constexpr float SELU_SCALE = 1.0507009873554804934193349852946f;
+
+    if (in_cont.dtype() == DType::Float32) {
+        const float* grad_ptr = get_data_ptr<const float>(grad_cont);
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for<SeluBackwardKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = in_ptr[idx];
+            out_ptr[idx] = grad_ptr[idx] * SELU_SCALE * ((x > 0.0f) ? 1.0f : SELU_ALPHA * sycl::exp(x));
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* grad_ptr = get_data_ptr<const double>(grad_cont);
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+        constexpr double SELU_ALPHA_D = 1.6732632423543772848170429916717;
+        constexpr double SELU_SCALE_D = 1.0507009873554804934193349852946;
+        queue.parallel_for<SeluBackwardKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double x = in_ptr[idx];
+            out_ptr[idx] = grad_ptr[idx] * SELU_SCALE_D * ((x > 0.0) ? 1.0 : SELU_ALPHA_D * sycl::exp(x));
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::Float16) {
+        const sycl::half* grad_ptr = get_data_ptr<const sycl::half>(grad_cont);
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<SeluBackwardKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = static_cast<float>(in_ptr[idx]);
+            float g = static_cast<float>(grad_ptr[idx]);
+            out_ptr[idx] = sycl::half(g * SELU_SCALE * ((x > 0.0f) ? 1.0f : SELU_ALPHA * sycl::exp(x)));
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* grad_ptr = get_data_ptr<const uint16_t>(grad_cont);
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for<SeluBackwardKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = bf16_to_f32(in_ptr[idx]);
+            float g = bf16_to_f32(grad_ptr[idx]);
+            out_ptr[idx] = f32_to_bf16(g * SELU_SCALE * ((x > 0.0f) ? 1.0f : SELU_ALPHA * sycl::exp(x)));
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for selu_backward");
+    }
+    return output;
+}
+
+// ============================================================================
+// Mish Activation: mish(x) = x * tanh(softplus(x)) = x * tanh(ln(1 + exp(x)))
+// ============================================================================
+
+class MishKernelFloat32;
+class MishKernelFloat64;
+class MishKernelFloat16;
+class MishKernelBFloat16;
+class MishBackwardKernelFloat32;
+class MishBackwardKernelFloat64;
+class MishBackwardKernelFloat16;
+class MishBackwardKernelBFloat16;
+
+auto mish_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    Tensor output(std::vector<int64_t>(in_cont.shape().begin(), in_cont.shape().end()),
+                  in_cont.dtype(), in_cont.device());
+    const int64_t numel = in_cont.numel();
+
+    if (in_cont.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for<MishKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = in_ptr[idx];
+            float sp = (x > 20.0f) ? x : ((x < -20.0f) ? sycl::exp(x) : sycl::log1p(sycl::exp(x)));
+            out_ptr[idx] = x * sycl::tanh(sp);
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+        queue.parallel_for<MishKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double x = in_ptr[idx];
+            double sp = (x > 20.0) ? x : ((x < -20.0) ? sycl::exp(x) : sycl::log1p(sycl::exp(x)));
+            out_ptr[idx] = x * sycl::tanh(sp);
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<MishKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = static_cast<float>(in_ptr[idx]);
+            float sp = (x > 20.0f) ? x : ((x < -20.0f) ? sycl::exp(x) : sycl::log1p(sycl::exp(x)));
+            out_ptr[idx] = sycl::half(x * sycl::tanh(sp));
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for<MishKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = bf16_to_f32(in_ptr[idx]);
+            float sp = (x > 20.0f) ? x : ((x < -20.0f) ? sycl::exp(x) : sycl::log1p(sycl::exp(x)));
+            out_ptr[idx] = f32_to_bf16(x * sycl::tanh(sp));
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for mish");
+    }
+    return output;
+}
+
+auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::queue& queue) -> Tensor {
+    Tensor grad_cont = grad_output.is_contiguous() ? grad_output : contiguous_kernel(grad_output, queue);
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    Tensor output(std::vector<int64_t>(in_cont.shape().begin(), in_cont.shape().end()),
+                  in_cont.dtype(), in_cont.device());
+    const int64_t numel = in_cont.numel();
+
+    if (in_cont.dtype() == DType::Float32) {
+        const float* grad_ptr = get_data_ptr<const float>(grad_cont);
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for<MishBackwardKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = in_ptr[idx];
+            float sp = (x > 20.0f) ? x : ((x < -20.0f) ? sycl::exp(x) : sycl::log1p(sycl::exp(x)));
+            float tanh_sp = sycl::tanh(sp);
+            float sigmoid_x = 1.0f / (1.0f + sycl::exp(-x));
+            float sech2 = 1.0f - tanh_sp * tanh_sp;
+            out_ptr[idx] = grad_ptr[idx] * (tanh_sp + x * sech2 * sigmoid_x);
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* grad_ptr = get_data_ptr<const double>(grad_cont);
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+        queue.parallel_for<MishBackwardKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double x = in_ptr[idx];
+            double sp = (x > 20.0) ? x : ((x < -20.0) ? sycl::exp(x) : sycl::log1p(sycl::exp(x)));
+            double tanh_sp = sycl::tanh(sp);
+            double sigmoid_x = 1.0 / (1.0 + sycl::exp(-x));
+            double sech2 = 1.0 - tanh_sp * tanh_sp;
+            out_ptr[idx] = grad_ptr[idx] * (tanh_sp + x * sech2 * sigmoid_x);
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::Float16) {
+        const sycl::half* grad_ptr = get_data_ptr<const sycl::half>(grad_cont);
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<MishBackwardKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = static_cast<float>(in_ptr[idx]);
+            float g = static_cast<float>(grad_ptr[idx]);
+            float sp = (x > 20.0f) ? x : ((x < -20.0f) ? sycl::exp(x) : sycl::log1p(sycl::exp(x)));
+            float tanh_sp = sycl::tanh(sp);
+            float sigmoid_x = 1.0f / (1.0f + sycl::exp(-x));
+            float sech2 = 1.0f - tanh_sp * tanh_sp;
+            out_ptr[idx] = sycl::half(g * (tanh_sp + x * sech2 * sigmoid_x));
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* grad_ptr = get_data_ptr<const uint16_t>(grad_cont);
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for<MishBackwardKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = bf16_to_f32(in_ptr[idx]);
+            float g = bf16_to_f32(grad_ptr[idx]);
+            float sp = (x > 20.0f) ? x : ((x < -20.0f) ? sycl::exp(x) : sycl::log1p(sycl::exp(x)));
+            float tanh_sp = sycl::tanh(sp);
+            float sigmoid_x = 1.0f / (1.0f + sycl::exp(-x));
+            float sech2 = 1.0f - tanh_sp * tanh_sp;
+            out_ptr[idx] = f32_to_bf16(g * (tanh_sp + x * sech2 * sigmoid_x));
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for mish_backward");
+    }
+    return output;
+}
+
+// ============================================================================
+// Softplus Activation: softplus(x) = ln(1 + exp(beta * x)) / beta
+// ============================================================================
+
+class SoftplusKernelFloat32;
+class SoftplusKernelFloat64;
+class SoftplusKernelFloat16;
+class SoftplusKernelBFloat16;
+class SoftplusBackwardKernelFloat32;
+class SoftplusBackwardKernelFloat64;
+class SoftplusBackwardKernelFloat16;
+class SoftplusBackwardKernelBFloat16;
+
+auto softplus_kernel(const Tensor& input, float beta, float threshold, sycl::queue& queue) -> Tensor {
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    Tensor output(std::vector<int64_t>(in_cont.shape().begin(), in_cont.shape().end()),
+                  in_cont.dtype(), in_cont.device());
+    const int64_t numel = in_cont.numel();
+
+    if (in_cont.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for<SoftplusKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = in_ptr[idx] * beta;
+            if (x > threshold) out_ptr[idx] = in_ptr[idx];
+            else if (x < -threshold) out_ptr[idx] = sycl::exp(x) / beta;
+            else out_ptr[idx] = sycl::log1p(sycl::exp(x)) / beta;
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+        double beta_d = static_cast<double>(beta);
+        double threshold_d = static_cast<double>(threshold);
+        queue.parallel_for<SoftplusKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double x = in_ptr[idx] * beta_d;
+            if (x > threshold_d) out_ptr[idx] = in_ptr[idx];
+            else if (x < -threshold_d) out_ptr[idx] = sycl::exp(x) / beta_d;
+            else out_ptr[idx] = sycl::log1p(sycl::exp(x)) / beta_d;
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<SoftplusKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float val = static_cast<float>(in_ptr[idx]);
+            float x = val * beta;
+            float result;
+            if (x > threshold) result = val;
+            else if (x < -threshold) result = sycl::exp(x) / beta;
+            else result = sycl::log1p(sycl::exp(x)) / beta;
+            out_ptr[idx] = sycl::half(result);
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for<SoftplusKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float val = bf16_to_f32(in_ptr[idx]);
+            float x = val * beta;
+            float result;
+            if (x > threshold) result = val;
+            else if (x < -threshold) result = sycl::exp(x) / beta;
+            else result = sycl::log1p(sycl::exp(x)) / beta;
+            out_ptr[idx] = f32_to_bf16(result);
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for softplus");
+    }
+    return output;
+}
+
+auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, float beta, float threshold, sycl::queue& queue) -> Tensor {
+    Tensor grad_cont = grad_output.is_contiguous() ? grad_output : contiguous_kernel(grad_output, queue);
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    Tensor output(std::vector<int64_t>(in_cont.shape().begin(), in_cont.shape().end()),
+                  in_cont.dtype(), in_cont.device());
+    const int64_t numel = in_cont.numel();
+
+    if (in_cont.dtype() == DType::Float32) {
+        const float* grad_ptr = get_data_ptr<const float>(grad_cont);
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for<SoftplusBackwardKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = in_ptr[idx] * beta;
+            float sigmoid_x;
+            if (x > threshold) sigmoid_x = 1.0f;
+            else if (x < -threshold) sigmoid_x = sycl::exp(x);
+            else sigmoid_x = 1.0f / (1.0f + sycl::exp(-x));
+            out_ptr[idx] = grad_ptr[idx] * sigmoid_x;
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* grad_ptr = get_data_ptr<const double>(grad_cont);
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+        double beta_d = static_cast<double>(beta);
+        double threshold_d = static_cast<double>(threshold);
+        queue.parallel_for<SoftplusBackwardKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double x = in_ptr[idx] * beta_d;
+            double sigmoid_x;
+            if (x > threshold_d) sigmoid_x = 1.0;
+            else if (x < -threshold_d) sigmoid_x = sycl::exp(x);
+            else sigmoid_x = 1.0 / (1.0 + sycl::exp(-x));
+            out_ptr[idx] = grad_ptr[idx] * sigmoid_x;
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::Float16) {
+        const sycl::half* grad_ptr = get_data_ptr<const sycl::half>(grad_cont);
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<SoftplusBackwardKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float val = static_cast<float>(in_ptr[idx]);
+            float x = val * beta;
+            float sigmoid_x;
+            if (x > threshold) sigmoid_x = 1.0f;
+            else if (x < -threshold) sigmoid_x = sycl::exp(x);
+            else sigmoid_x = 1.0f / (1.0f + sycl::exp(-x));
+            out_ptr[idx] = sycl::half(static_cast<float>(grad_ptr[idx]) * sigmoid_x);
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* grad_ptr = get_data_ptr<const uint16_t>(grad_cont);
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for<SoftplusBackwardKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float val = bf16_to_f32(in_ptr[idx]);
+            float x = val * beta;
+            float sigmoid_x;
+            if (x > threshold) sigmoid_x = 1.0f;
+            else if (x < -threshold) sigmoid_x = sycl::exp(x);
+            else sigmoid_x = 1.0f / (1.0f + sycl::exp(-x));
+            out_ptr[idx] = f32_to_bf16(bf16_to_f32(grad_ptr[idx]) * sigmoid_x);
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for softplus_backward");
+    }
+    return output;
+}
+
+// ============================================================================
+// TanhActivation - same as tanh_kernel but registered under TanhActivation OpId
+// ============================================================================
+
+auto tanh_activation_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+    return tanh_kernel(input, queue);
+}
+
+// ============================================================================
+// Linear Forward: output = input @ weight^T + bias
+// ============================================================================
+
+class LinearKernelFloat32;
+class LinearKernelFloat64;
+class LinearKernelFloat16;
+class LinearKernelBFloat16;
+
+auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, sycl::queue& queue) -> Tensor {
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    Tensor w_cont = weight.is_contiguous() ? weight : contiguous_kernel(weight, queue);
+
+    auto in_shape = in_cont.shape();
+    auto w_shape = w_cont.shape();
+    int64_t out_features = w_shape[0];
+    int64_t in_features = w_shape[1];
+
+    int64_t batch_size = 1;
+    for (size_t i = 0; i < in_shape.size() - 1; ++i) {
+        batch_size *= in_shape[i];
+    }
+
+    std::vector<int64_t> out_shape(in_shape.begin(), in_shape.end() - 1);
+    out_shape.push_back(out_features);
+
+    Tensor output(out_shape, in_cont.dtype(), in_cont.device());
+
+    if (in_cont.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
+        const float* w_ptr = get_data_ptr<const float>(w_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+        const float* b_ptr = bias ? get_data_ptr<const float>(*bias) : nullptr;
+
+        queue.parallel_for<LinearKernelFloat32>(
+            sycl::range<2>(batch_size, out_features), [=](sycl::id<2> id) {
+            int64_t b = id[0];
+            int64_t o = id[1];
+            float sum = 0.0f;
+            for (int64_t i = 0; i < in_features; ++i) {
+                sum += in_ptr[b * in_features + i] * w_ptr[o * in_features + i];
+            }
+            out_ptr[b * out_features + o] = sum + (b_ptr ? b_ptr[o] : 0.0f);
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
+        const double* w_ptr = get_data_ptr<const double>(w_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+        const double* b_ptr = bias ? get_data_ptr<const double>(*bias) : nullptr;
+
+        queue.parallel_for<LinearKernelFloat64>(
+            sycl::range<2>(batch_size, out_features), [=](sycl::id<2> id) {
+            int64_t b = id[0];
+            int64_t o = id[1];
+            double sum = 0.0;
+            for (int64_t i = 0; i < in_features; ++i) {
+                sum += in_ptr[b * in_features + i] * w_ptr[o * in_features + i];
+            }
+            out_ptr[b * out_features + o] = sum + (b_ptr ? b_ptr[o] : 0.0);
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::Float16) {
+        // Compute in float32 for precision
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
+        const sycl::half* w_ptr = get_data_ptr<const sycl::half>(w_cont);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        const sycl::half* b_ptr = bias ? get_data_ptr<const sycl::half>(*bias) : nullptr;
+
+        queue.parallel_for<LinearKernelFloat16>(
+            sycl::range<2>(batch_size, out_features), [=](sycl::id<2> id) {
+            int64_t b = id[0];
+            int64_t o = id[1];
+            float sum = 0.0f;
+            for (int64_t i = 0; i < in_features; ++i) {
+                sum += static_cast<float>(in_ptr[b * in_features + i]) *
+                       static_cast<float>(w_ptr[o * in_features + i]);
+            }
+            sum += b_ptr ? static_cast<float>(b_ptr[o]) : 0.0f;
+            out_ptr[b * out_features + o] = sycl::half(sum);
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+        const uint16_t* w_ptr = get_data_ptr<const uint16_t>(w_cont);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        const uint16_t* b_ptr = bias ? get_data_ptr<const uint16_t>(*bias) : nullptr;
+
+        queue.parallel_for<LinearKernelBFloat16>(
+            sycl::range<2>(batch_size, out_features), [=](sycl::id<2> id) {
+            int64_t b = id[0];
+            int64_t o = id[1];
+            float sum = 0.0f;
+            for (int64_t i = 0; i < in_features; ++i) {
+                sum += bf16_to_f32(in_ptr[b * in_features + i]) *
+                       bf16_to_f32(w_ptr[o * in_features + i]);
+            }
+            sum += b_ptr ? bf16_to_f32(b_ptr[o]) : 0.0f;
+            out_ptr[b * out_features + o] = f32_to_bf16(sum);
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for linear");
+    }
+    return output;
+}
+
+// ============================================================================
+// Linear Backward: grad_input, grad_weight, grad_bias
+// ============================================================================
+
+class LinearBackwardGradInputFloat32;
+class LinearBackwardGradInputFloat64;
+class LinearBackwardGradWeightFloat32;
+class LinearBackwardGradWeightFloat64;
+class LinearBackwardGradBiasFloat32;
+class LinearBackwardGradBiasFloat64;
+
+auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input,
+                             const Tensor& weight, sycl::queue& queue) -> std::vector<Tensor> {
+    Tensor grad_cont = grad_output.is_contiguous() ? grad_output : contiguous_kernel(grad_output, queue);
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    Tensor w_cont = weight.is_contiguous() ? weight : contiguous_kernel(weight, queue);
+
+    auto in_shape = in_cont.shape();
+    auto w_shape = w_cont.shape();
+    int64_t out_features = w_shape[0];
+    int64_t in_features = w_shape[1];
+
+    int64_t batch_size = 1;
+    for (size_t i = 0; i < in_shape.size() - 1; ++i) {
+        batch_size *= in_shape[i];
+    }
+
+    // For FP16/BF16, compute in FP32
+    if (grad_cont.dtype() == DType::Float16 || grad_cont.dtype() == DType::BFloat16) {
+        DType orig = grad_cont.dtype();
+        // Convert all to float32, use matmul, convert back
+        Tensor g32 = contiguous_kernel(grad_cont, queue);
+        Tensor i32 = contiguous_kernel(in_cont, queue);
+        Tensor w32 = contiguous_kernel(w_cont, queue);
+        // For simplicity, fall back to host compute for half types
+        // (The matmul kernel handles this via oneMKL on OneAPI devices)
+        auto grad_input = Tensor(std::vector<int64_t>(in_shape.begin(), in_shape.end()), orig, in_cont.device());
+        auto grad_weight = Tensor(std::vector<int64_t>(w_shape.begin(), w_shape.end()), orig, weight.device());
+        auto grad_bias = Tensor({out_features}, orig, grad_output.device());
+
+        // Simple host-side fallback for half precision backward
+        std::vector<float> g_host(batch_size * out_features);
+        std::vector<float> i_host(batch_size * in_features);
+        std::vector<float> w_host(out_features * in_features);
+        queue.memcpy(g_host.data(), grad_cont.data_ptr(), batch_size * out_features * grad_cont.dtype_size()).wait();
+        queue.memcpy(i_host.data(), in_cont.data_ptr(), batch_size * in_features * in_cont.dtype_size()).wait();
+        queue.memcpy(w_host.data(), w_cont.data_ptr(), out_features * in_features * w_cont.dtype_size()).wait();
+        // This is a simplified fallback; for production use oneMKL
+        throw std::runtime_error("linear_backward for FP16/BF16 not yet optimized on OneAPI; use FP32");
+    }
+
+    Tensor grad_input(std::vector<int64_t>(in_shape.begin(), in_shape.end()),
+                      in_cont.dtype(), in_cont.device());
+    Tensor grad_weight(std::vector<int64_t>(w_shape.begin(), w_shape.end()),
+                       weight.dtype(), weight.device());
+    Tensor grad_bias({out_features}, grad_output.dtype(), grad_output.device());
+
+    if (grad_cont.dtype() == DType::Float32) {
+        const float* g_ptr = get_data_ptr<const float>(grad_cont);
+        const float* i_ptr = get_data_ptr<const float>(in_cont);
+        const float* w_ptr = get_data_ptr<const float>(w_cont);
+        float* gi_ptr = get_data_ptr<float>(grad_input);
+        float* gw_ptr = get_data_ptr<float>(grad_weight);
+        float* gb_ptr = get_data_ptr<float>(grad_bias);
+
+        // grad_input = grad_output @ weight
+        queue.parallel_for<LinearBackwardGradInputFloat32>(
+            sycl::range<2>(batch_size, in_features), [=](sycl::id<2> id) {
+            int64_t b = id[0];
+            int64_t i = id[1];
+            float sum = 0.0f;
+            for (int64_t o = 0; o < out_features; ++o) {
+                sum += g_ptr[b * out_features + o] * w_ptr[o * in_features + i];
+            }
+            gi_ptr[b * in_features + i] = sum;
+        }).wait();
+
+        // grad_weight = grad_output^T @ input (accumulate)
+        queue.parallel_for<LinearBackwardGradWeightFloat32>(
+            sycl::range<2>(out_features, in_features), [=](sycl::id<2> id) {
+            int64_t o = id[0];
+            int64_t i = id[1];
+            float sum = 0.0f;
+            for (int64_t b = 0; b < batch_size; ++b) {
+                sum += g_ptr[b * out_features + o] * i_ptr[b * in_features + i];
+            }
+            gw_ptr[o * in_features + i] = sum;
+        }).wait();
+
+        // grad_bias = sum(grad_output, dim=0)
+        queue.parallel_for<LinearBackwardGradBiasFloat32>(
+            sycl::range<1>(out_features), [=](sycl::id<1> o) {
+            float sum = 0.0f;
+            for (int64_t b = 0; b < batch_size; ++b) {
+                sum += g_ptr[b * out_features + o];
+            }
+            gb_ptr[o] = sum;
+        }).wait();
+    }
+    else if (grad_cont.dtype() == DType::Float64) {
+        const double* g_ptr = get_data_ptr<const double>(grad_cont);
+        const double* i_ptr = get_data_ptr<const double>(in_cont);
+        const double* w_ptr = get_data_ptr<const double>(w_cont);
+        double* gi_ptr = get_data_ptr<double>(grad_input);
+        double* gw_ptr = get_data_ptr<double>(grad_weight);
+        double* gb_ptr = get_data_ptr<double>(grad_bias);
+
+        queue.parallel_for<LinearBackwardGradInputFloat64>(
+            sycl::range<2>(batch_size, in_features), [=](sycl::id<2> id) {
+            int64_t b = id[0];
+            int64_t i = id[1];
+            double sum = 0.0;
+            for (int64_t o = 0; o < out_features; ++o) {
+                sum += g_ptr[b * out_features + o] * w_ptr[o * in_features + i];
+            }
+            gi_ptr[b * in_features + i] = sum;
+        }).wait();
+
+        queue.parallel_for<LinearBackwardGradWeightFloat64>(
+            sycl::range<2>(out_features, in_features), [=](sycl::id<2> id) {
+            int64_t o = id[0];
+            int64_t i = id[1];
+            double sum = 0.0;
+            for (int64_t b = 0; b < batch_size; ++b) {
+                sum += g_ptr[b * out_features + o] * i_ptr[b * in_features + i];
+            }
+            gw_ptr[o * in_features + i] = sum;
+        }).wait();
+
+        queue.parallel_for<LinearBackwardGradBiasFloat64>(
+            sycl::range<1>(out_features), [=](sycl::id<1> o) {
+            double sum = 0.0;
+            for (int64_t b = 0; b < batch_size; ++b) {
+                sum += g_ptr[b * out_features + o];
+            }
+            gb_ptr[o] = sum;
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for linear_backward");
+    }
+
+    return {grad_input, grad_weight, grad_bias};
+}
+
+// ============================================================================
+// Dropout Forward: randomly zero elements with probability p, scale by 1/(1-p)
+// ============================================================================
+
+class DropoutKernelFloat32;
+class DropoutKernelFloat64;
+class DropoutKernelFloat16;
+class DropoutKernelBFloat16;
+class DropoutBackwardKernelFloat32;
+class DropoutBackwardKernelFloat64;
+class DropoutBackwardKernelFloat16;
+class DropoutBackwardKernelBFloat16;
+
+auto dropout_kernel(const Tensor& input, float p, bool training, sycl::queue& queue)
+    -> std::pair<Tensor, Tensor> {
+    if (!training || p == 0.0f) {
+        return {input, Tensor()};
+    }
+
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    Tensor output(std::vector<int64_t>(in_cont.shape().begin(), in_cont.shape().end()),
+                  in_cont.dtype(), in_cont.device());
+    Tensor mask(std::vector<int64_t>(in_cont.shape().begin(), in_cont.shape().end()),
+                DType::Float32, in_cont.device());
+
+    const int64_t numel = in_cont.numel();
+    float scale = 1.0f / (1.0f - p);
+
+    // Generate random mask on host, copy to device
+    std::vector<float> host_mask(numel);
+    std::mt19937 rng(std::random_device{}());
+    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+    for (int64_t i = 0; i < numel; ++i) {
+        host_mask[i] = (dist(rng) < p) ? 0.0f : scale;
+    }
+    float* mask_ptr = get_data_ptr<float>(mask);
+    queue.memcpy(mask_ptr, host_mask.data(), numel * sizeof(float)).wait();
+
+    if (in_cont.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for<DropoutKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = in_ptr[idx] * mask_ptr[idx];
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+        queue.parallel_for<DropoutKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = in_ptr[idx] * static_cast<double>(mask_ptr[idx]);
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<DropoutKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = sycl::half(static_cast<float>(in_ptr[idx]) * mask_ptr[idx]);
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for<DropoutKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = f32_to_bf16(bf16_to_f32(in_ptr[idx]) * mask_ptr[idx]);
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for dropout");
+    }
+
+    return {output, mask};
+}
+
+auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, float p, sycl::queue& queue) -> Tensor {
+    if (!mask.impl() || p == 0.0f) {
+        return grad_output;
+    }
+
+    Tensor grad_cont = grad_output.is_contiguous() ? grad_output : contiguous_kernel(grad_output, queue);
+    Tensor output(std::vector<int64_t>(grad_cont.shape().begin(), grad_cont.shape().end()),
+                  grad_cont.dtype(), grad_cont.device());
+    const int64_t numel = grad_cont.numel();
+    const float* mask_ptr = get_data_ptr<const float>(mask);
+
+    if (grad_cont.dtype() == DType::Float32) {
+        const float* grad_ptr = get_data_ptr<const float>(grad_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for<DropoutBackwardKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = grad_ptr[idx] * mask_ptr[idx];
+        }).wait();
+    }
+    else if (grad_cont.dtype() == DType::Float64) {
+        const double* grad_ptr = get_data_ptr<const double>(grad_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+        queue.parallel_for<DropoutBackwardKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = grad_ptr[idx] * static_cast<double>(mask_ptr[idx]);
+        }).wait();
+    }
+    else if (grad_cont.dtype() == DType::Float16) {
+        const sycl::half* grad_ptr = get_data_ptr<const sycl::half>(grad_cont);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<DropoutBackwardKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = sycl::half(static_cast<float>(grad_ptr[idx]) * mask_ptr[idx]);
+        }).wait();
+    }
+    else if (grad_cont.dtype() == DType::BFloat16) {
+        const uint16_t* grad_ptr = get_data_ptr<const uint16_t>(grad_cont);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for<DropoutBackwardKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = f32_to_bf16(bf16_to_f32(grad_ptr[idx]) * mask_ptr[idx]);
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for dropout_backward");
+    }
+    return output;
+}
+
+// ============================================================================
+// LayerNorm Forward
+// ============================================================================
+
+class LayerNormKernelFloat32;
+class LayerNormKernelFloat64;
+
+auto layer_norm_kernel(const Tensor& input, const std::vector<int64_t>& normalized_shape,
+                       const Tensor& weight, const Tensor& bias, float eps,
+                       sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor> {
+    // Delegate to fused_layer_norm_kernel which already exists
+    return fused_layer_norm_kernel(input, weight, bias, normalized_shape, eps, queue);
+}
+
+// ============================================================================
+// InstanceNorm Forward
+// ============================================================================
+
+class InstanceNormKernelFloat32;
+class InstanceNormKernelFloat64;
+
+auto instance_norm_kernel(const Tensor& input, const Tensor& weight,
+                           const Tensor& bias, float eps,
+                           sycl::queue& queue) -> std::vector<Tensor> {
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    auto shape = in_cont.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t spatial_size = 1;
+    for (size_t i = 2; i < shape.size(); ++i) {
+        spatial_size *= shape[i];
+    }
+
+    Tensor output(std::vector<int64_t>(shape.begin(), shape.end()),
+                  in_cont.dtype(), in_cont.device());
+    Tensor mean_t({N, C}, DType::Float32, in_cont.device());
+    Tensor inv_std_t({N, C}, DType::Float32, in_cont.device());
+
+    bool has_weight = weight.impl() != nullptr;
+    bool has_bias = bias.impl() != nullptr;
+
+    if (in_cont.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+        float* mean_ptr = get_data_ptr<float>(mean_t);
+        float* inv_std_ptr = get_data_ptr<float>(inv_std_t);
+        const float* w_ptr = has_weight ? get_data_ptr<const float>(weight) : nullptr;
+        const float* b_ptr = has_bias ? get_data_ptr<const float>(bias) : nullptr;
+
+        // Each work-item handles one (n, c) pair
+        queue.parallel_for<InstanceNormKernelFloat32>(
+            sycl::range<2>(N, C), [=](sycl::id<2> id) {
+            int64_t n = id[0];
+            int64_t c = id[1];
+            int64_t base = (n * C + c) * spatial_size;
+
+            // Compute mean
+            float sum = 0.0f;
+            for (int64_t s = 0; s < spatial_size; ++s) {
+                sum += in_ptr[base + s];
+            }
+            float m = sum / static_cast<float>(spatial_size);
+
+            // Compute variance
+            float var = 0.0f;
+            for (int64_t s = 0; s < spatial_size; ++s) {
+                float diff = in_ptr[base + s] - m;
+                var += diff * diff;
+            }
+            var /= static_cast<float>(spatial_size);
+            float istd = 1.0f / sycl::sqrt(var + eps);
+
+            mean_ptr[n * C + c] = m;
+            inv_std_ptr[n * C + c] = istd;
+
+            float w = w_ptr ? w_ptr[c] : 1.0f;
+            float b = b_ptr ? b_ptr[c] : 0.0f;
+            for (int64_t s = 0; s < spatial_size; ++s) {
+                out_ptr[base + s] = (in_ptr[base + s] - m) * istd * w + b;
+            }
+        }).wait();
+    }
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+        float* mean_ptr = get_data_ptr<float>(mean_t);
+        float* inv_std_ptr = get_data_ptr<float>(inv_std_t);
+        const double* w_ptr = has_weight ? get_data_ptr<const double>(weight) : nullptr;
+        const double* b_ptr = has_bias ? get_data_ptr<const double>(bias) : nullptr;
+
+        queue.parallel_for<InstanceNormKernelFloat64>(
+            sycl::range<2>(N, C), [=](sycl::id<2> id) {
+            int64_t n = id[0];
+            int64_t c = id[1];
+            int64_t base = (n * C + c) * spatial_size;
+
+            double sum = 0.0;
+            for (int64_t s = 0; s < spatial_size; ++s) {
+                sum += in_ptr[base + s];
+            }
+            double m = sum / static_cast<double>(spatial_size);
+
+            double var = 0.0;
+            for (int64_t s = 0; s < spatial_size; ++s) {
+                double diff = in_ptr[base + s] - m;
+                var += diff * diff;
+            }
+            var /= static_cast<double>(spatial_size);
+            double istd = 1.0 / sycl::sqrt(var + static_cast<double>(eps));
+
+            mean_ptr[n * C + c] = static_cast<float>(m);
+            inv_std_ptr[n * C + c] = static_cast<float>(istd);
+
+            double w = w_ptr ? w_ptr[c] : 1.0;
+            double b = b_ptr ? b_ptr[c] : 0.0;
+            for (int64_t s = 0; s < spatial_size; ++s) {
+                out_ptr[base + s] = (in_ptr[base + s] - m) * istd * w + b;
+            }
+        }).wait();
+    }
+    else {
+        // Float16/BFloat16: compute in float32 via conversion
+        throw std::runtime_error("instance_norm on OneAPI only supports Float32/Float64; convert input first");
+    }
+
+    return {output, mean_t, inv_std_t};
+}
+
+// ============================================================================
+// InstanceNorm Backward
+// ============================================================================
+
+class InstanceNormBackwardKernelFloat32;
+class InstanceNormBackwardKernelFloat64;
+
+auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
+                                    const Tensor& mean, const Tensor& rstd,
+                                    const Tensor& weight,
+                                    sycl::queue& queue) -> std::vector<Tensor> {
+    auto shape = input.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t spatial_size = 1;
+    for (size_t i = 2; i < shape.size(); ++i) {
+        spatial_size *= shape[i];
+    }
+
+    Tensor grad_input(std::vector<int64_t>(shape.begin(), shape.end()),
+                      input.dtype(), input.device());
+    // grad_weight and grad_bias need atomic reduction across N
+    // Allocate on host, compute, copy back
+    Tensor grad_weight({C}, weight.dtype(), weight.device());
+    Tensor grad_bias({C}, weight.dtype(), weight.device());
+
+    bool has_weight = weight.impl() != nullptr;
+    const float* mean_ptr = get_data_ptr<const float>(mean);
+    const float* rstd_ptr = get_data_ptr<const float>(rstd);
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(input);
+        const float* g_ptr = get_data_ptr<const float>(grad_output);
+        const float* w_ptr = has_weight ? get_data_ptr<const float>(weight) : nullptr;
+        float* gi_ptr = get_data_ptr<float>(grad_input);
+
+        // Compute grad_input on device
+        queue.parallel_for<InstanceNormBackwardKernelFloat32>(
+            sycl::range<2>(N, C), [=](sycl::id<2> id) {
+            int64_t n = id[0];
+            int64_t c = id[1];
+            int64_t base = (n * C + c) * spatial_size;
+            float m = mean_ptr[n * C + c];
+            float r = rstd_ptr[n * C + c];
+            float w = w_ptr ? w_ptr[c] : 1.0f;
+
+            float ds = 0.0f, db = 0.0f;
+            for (int64_t s = 0; s < spatial_size; ++s) {
+                float dy = g_ptr[base + s];
+                float x_hat = (in_ptr[base + s] - m) * r;
+                ds += dy * w * x_hat;
+                db += dy * w;
+            }
+
+            float inv_ss = 1.0f / static_cast<float>(spatial_size);
+            for (int64_t s = 0; s < spatial_size; ++s) {
+                float dy = g_ptr[base + s];
+                float x_hat = (in_ptr[base + s] - m) * r;
+                gi_ptr[base + s] = r * (dy * w - inv_ss * (db + x_hat * ds));
+            }
+        }).wait();
+
+        // Compute grad_weight and grad_bias on host (requires reduction across N)
+        std::vector<float> gw_host(C, 0.0f);
+        std::vector<float> gb_host(C, 0.0f);
+        std::vector<float> in_host(N * C * spatial_size);
+        std::vector<float> g_host(N * C * spatial_size);
+        std::vector<float> mean_host(N * C);
+        std::vector<float> rstd_host(N * C);
+
+        queue.memcpy(in_host.data(), in_ptr, in_host.size() * sizeof(float)).wait();
+        queue.memcpy(g_host.data(), g_ptr, g_host.size() * sizeof(float)).wait();
+        queue.memcpy(mean_host.data(), mean_ptr, mean_host.size() * sizeof(float)).wait();
+        queue.memcpy(rstd_host.data(), rstd_ptr, rstd_host.size() * sizeof(float)).wait();
+
+        for (int64_t n = 0; n < N; ++n) {
+            for (int64_t c = 0; c < C; ++c) {
+                int64_t base_idx = (n * C + c) * spatial_size;
+                float m = mean_host[n * C + c];
+                float r = rstd_host[n * C + c];
+                for (int64_t s = 0; s < spatial_size; ++s) {
+                    float x_hat = (in_host[base_idx + s] - m) * r;
+                    gw_host[c] += g_host[base_idx + s] * x_hat;
+                    gb_host[c] += g_host[base_idx + s];
+                }
+            }
+        }
+
+        float* gw_ptr = get_data_ptr<float>(grad_weight);
+        float* gb_ptr = get_data_ptr<float>(grad_bias);
+        queue.memcpy(gw_ptr, gw_host.data(), C * sizeof(float)).wait();
+        queue.memcpy(gb_ptr, gb_host.data(), C * sizeof(float)).wait();
+    }
+    else if (input.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(input);
+        const double* g_ptr = get_data_ptr<const double>(grad_output);
+        const double* w_ptr = has_weight ? get_data_ptr<const double>(weight) : nullptr;
+        double* gi_ptr = get_data_ptr<double>(grad_input);
+
+        queue.parallel_for<InstanceNormBackwardKernelFloat64>(
+            sycl::range<2>(N, C), [=](sycl::id<2> id) {
+            int64_t n = id[0];
+            int64_t c = id[1];
+            int64_t base = (n * C + c) * spatial_size;
+            float mf = mean_ptr[n * C + c];
+            float rf = rstd_ptr[n * C + c];
+            double m = static_cast<double>(mf);
+            double r = static_cast<double>(rf);
+            double w = w_ptr ? w_ptr[c] : 1.0;
+
+            double ds = 0.0, db = 0.0;
+            for (int64_t s = 0; s < spatial_size; ++s) {
+                double dy = g_ptr[base + s];
+                double x_hat = (in_ptr[base + s] - m) * r;
+                ds += dy * w * x_hat;
+                db += dy * w;
+            }
+
+            double inv_ss = 1.0 / static_cast<double>(spatial_size);
+            for (int64_t s = 0; s < spatial_size; ++s) {
+                double dy = g_ptr[base + s];
+                double x_hat = (in_ptr[base + s] - m) * r;
+                gi_ptr[base + s] = r * (dy * w - inv_ss * (db + x_hat * ds));
+            }
+        }).wait();
+
+        // grad_weight/bias reduction on host
+        std::vector<double> gw_host(C, 0.0);
+        std::vector<double> gb_host(C, 0.0);
+        std::vector<double> in_host(N * C * spatial_size);
+        std::vector<double> g_host(N * C * spatial_size);
+        std::vector<float> mean_host(N * C);
+        std::vector<float> rstd_host(N * C);
+
+        queue.memcpy(in_host.data(), in_ptr, in_host.size() * sizeof(double)).wait();
+        queue.memcpy(g_host.data(), g_ptr, g_host.size() * sizeof(double)).wait();
+        queue.memcpy(mean_host.data(), mean_ptr, mean_host.size() * sizeof(float)).wait();
+        queue.memcpy(rstd_host.data(), rstd_ptr, rstd_host.size() * sizeof(float)).wait();
+
+        for (int64_t n = 0; n < N; ++n) {
+            for (int64_t c = 0; c < C; ++c) {
+                int64_t base_idx = (n * C + c) * spatial_size;
+                double m = static_cast<double>(mean_host[n * C + c]);
+                double r = static_cast<double>(rstd_host[n * C + c]);
+                for (int64_t s = 0; s < spatial_size; ++s) {
+                    double x_hat = (in_host[base_idx + s] - m) * r;
+                    gw_host[c] += g_host[base_idx + s] * x_hat;
+                    gb_host[c] += g_host[base_idx + s];
+                }
+            }
+        }
+
+        double* gw_ptr = get_data_ptr<double>(grad_weight);
+        double* gb_ptr = get_data_ptr<double>(grad_bias);
+        queue.memcpy(gw_ptr, gw_host.data(), C * sizeof(double)).wait();
+        queue.memcpy(gb_ptr, gb_host.data(), C * sizeof(double)).wait();
+    }
+    else {
+        throw std::runtime_error("instance_norm_backward on OneAPI only supports Float32/Float64");
+    }
+
+    return {grad_input, grad_weight, grad_bias};
 }
 
 } // namespace oneapi

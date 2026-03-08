@@ -20,6 +20,7 @@
 #include <random>
 #include <charconv>  // For std::from_chars (dispatch wrappers)
 #include <span>      // For std::span (dispatch wrappers)
+#include "cuda_stream_pool.hpp"
 
 namespace tenzor {
 namespace cuda {
@@ -4424,35 +4425,36 @@ auto eye_kernel(int64_t n, int64_t m, DType dtype, Device device, cudaStream_t s
 // These wrappers match Tensor(*)(std::span<const Tensor>, const OpAttributes&)
 // for direct registration with register_single_output_kernel()
 
-Tensor add_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
+// Helper to extract stream from attrs or acquire from pool
+static std::pair<cudaStream_t, cuda::StreamGuard> get_dispatch_stream(
+    const OpAttributes& attrs, const Tensor& ref_tensor) {
     if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
+        auto stream = reinterpret_cast<cudaStream_t>(
+            static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
+        return {stream, cuda::StreamGuard{}};
     }
+    int device_id = ref_tensor.device().index;
+    auto guard = cuda::CUDAStreamPool::instance().acquire_guard(device_id);
+    return {guard.get(), std::move(guard)};
+}
+
+Tensor add_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return add_kernel(inputs[0], inputs[1], stream);
 }
 
 Tensor sub_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return sub_kernel(inputs[0], inputs[1], stream);
 }
 
 Tensor mul_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return mul_kernel(inputs[0], inputs[1], stream);
 }
 
 Tensor div_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return div_kernel(inputs[0], inputs[1], stream);
 }
 
@@ -4461,241 +4463,154 @@ Tensor div_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
 
 // Inplace dispatch wrappers (InplaceKernelFn signature)
 Tensor& add_inplace_dispatch(Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, target);
     add_inplace_kernel(target, others[0], stream);
     return target;
 }
 
 Tensor& sub_inplace_dispatch(Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, target);
     sub_inplace_kernel(target, others[0], stream);
     return target;
 }
 
 Tensor& mul_inplace_dispatch(Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, target);
     mul_inplace_kernel(target, others[0], stream);
     return target;
 }
 
 Tensor& div_inplace_dispatch(Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, target);
     div_inplace_kernel(target, others[0], stream);
     return target;
 }
 
 // Unary operation dispatch wrappers
 Tensor sqrt_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return sqrt_kernel(inputs[0], stream);
 }
 
 Tensor neg_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return neg_kernel(inputs[0], stream);
 }
 
 Tensor abs_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return abs_kernel(inputs[0], stream);
 }
 
 Tensor sign_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return sign_kernel(inputs[0], stream);
 }
 
 Tensor log_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return log_kernel(inputs[0], stream);
 }
 
 Tensor exp_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return exp_kernel(inputs[0], stream);
 }
 
 Tensor reciprocal_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return reciprocal_kernel(inputs[0], stream);
 }
 
 Tensor floor_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return floor_kernel(inputs[0], stream);
 }
 
 Tensor ceil_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return ceil_kernel(inputs[0], stream);
 }
 
 Tensor round_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return round_kernel(inputs[0], stream);
 }
 
 Tensor trunc_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return trunc_kernel(inputs[0], stream);
 }
 
 // Trigonometric dispatch wrappers
 Tensor sin_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return sin_kernel(inputs[0], stream);
 }
 
 Tensor cos_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return cos_kernel(inputs[0], stream);
 }
 
 Tensor tan_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return tan_kernel(inputs[0], stream);
 }
 
 Tensor asin_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return asin_kernel(inputs[0], stream);
 }
 
 Tensor acos_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return acos_kernel(inputs[0], stream);
 }
 
 Tensor atan_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return atan_kernel(inputs[0], stream);
 }
 
 Tensor sinh_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return sinh_kernel(inputs[0], stream);
 }
 
 Tensor cosh_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return cosh_kernel(inputs[0], stream);
 }
 
 // Comparison dispatch wrappers
 Tensor eq_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return eq_kernel(inputs[0], inputs[1], stream);
 }
 
 Tensor ne_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return ne_kernel(inputs[0], inputs[1], stream);
 }
 
 Tensor lt_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return lt_kernel(inputs[0], inputs[1], stream);
 }
 
 Tensor le_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return le_kernel(inputs[0], inputs[1], stream);
 }
 
 Tensor gt_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return gt_kernel(inputs[0], inputs[1], stream);
 }
 
 Tensor ge_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return ge_kernel(inputs[0], inputs[1], stream);
 }
 
@@ -4973,10 +4888,7 @@ auto cuda_cast_kernel(const Tensor& input, DType target_dtype, cudaStream_t stre
 }
 
 Tensor cast_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
-    cudaStream_t stream = nullptr;
-    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
-        stream = reinterpret_cast<cudaStream_t>(static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
-    }
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     // Target dtype is passed via attributes
     if (!attrs.has(AttrKey::TargetDtype)) {
         throw std::runtime_error("cast: missing 'target_dtype' attribute");

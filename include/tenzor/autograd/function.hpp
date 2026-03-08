@@ -10,9 +10,11 @@
 
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <vector>
 #include <atomic>
 #include "../core/tensor.hpp"
+#include "../sparse/sparse_tensor.hpp"
 #include "variable.hpp"
 
 namespace tenzor {
@@ -1349,34 +1351,50 @@ public:
  * @brief Backward function for sparse-dense matrix multiplication (spmm).
  *
  * For Y = S @ D where S is sparse (M,K) and D is dense (K,N):
- * - grad_D = S^T @ grad_Y  (only the dense input receives a gradient)
- * - The sparse matrix S is not differentiated.
+ * - grad_D = S^T @ grad_Y  (uses sparse::spmm with transposed sparse matrix)
+ * - The sparse matrix S is not differentiated (treated as constant).
  *
- * saved_tensors_[0]: the sparse matrix converted to dense (M,K), transposed to (K,M).
- * The backward computes matmul(S^T, grad_output) = matmul(saved, grad_output).
+ * The transposed sparse matrix S^T is stored directly as a SparseTensor,
+ * avoiding the memory cost of converting to dense.
  */
 class SpMMBackward : public Function {
 public:
+    /// Set the transposed sparse matrix for backward computation.
+    void set_sparse_transposed(SparseTensor sparse_t) {
+        sparse_transposed_.emplace(std::move(sparse_t));
+    }
+
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto name() const -> std::string override { return "SpMMBackward"; }
+
+private:
+    std::optional<SparseTensor> sparse_transposed_;  ///< S^T stored in sparse format
 };
 
 /**
  * @brief Backward function for sparse-dense matrix-vector multiplication (spmv).
  *
  * For y = S @ v where S is sparse (M,K) and v is dense (K,):
- * - grad_v = S^T @ grad_y
- * - The sparse matrix S is not differentiated.
+ * - grad_v = S^T @ grad_y  (uses sparse::spmv with transposed sparse matrix)
+ * - The sparse matrix S is not differentiated (treated as constant).
  *
- * saved_tensors_[0]: the sparse matrix converted to dense (M,K), transposed to (K,M).
- * The backward computes matmul(S^T, grad_y) = matmul(saved, grad_y).
+ * The transposed sparse matrix S^T is stored directly as a SparseTensor,
+ * avoiding the memory cost of converting to dense.
  */
 class SpMVBackward : public Function {
 public:
+    /// Set the transposed sparse matrix for backward computation.
+    void set_sparse_transposed(SparseTensor sparse_t) {
+        sparse_transposed_.emplace(std::move(sparse_t));
+    }
+
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto name() const -> std::string override { return "SpMVBackward"; }
+
+private:
+    std::optional<SparseTensor> sparse_transposed_;  ///< S^T stored in sparse format
 };
 
 } // namespace tenzor

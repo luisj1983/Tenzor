@@ -1017,5 +1017,51 @@ auto gru_forward_kernel(
     return {output, h_n};
 }
 
+// ============================================================================
+// Multi-layer GRU Forward
+// ============================================================================
+
+auto gru_multi_layer_forward_kernel(
+    const Tensor& input,
+    const std::vector<Tensor>& W_ih_list,
+    const std::vector<Tensor>& W_hh_list,
+    const std::vector<Tensor>& bias_list,
+    const Tensor& h0,    // (num_layers, batch, hidden)
+    hipStream_t stream) -> std::vector<Tensor> {
+
+    int64_t num_layers = static_cast<int64_t>(W_ih_list.size());
+    auto shape = input.shape();
+    int64_t seq_len = shape[0];
+    int64_t batch = shape[1];
+    int64_t hidden = h0.shape()[2];
+
+    Tensor h_n({num_layers, batch, hidden}, input.dtype(), input.device());
+    Tensor layer_input = input;
+    size_t layer_bytes = batch * hidden * dtype_size(input.dtype());
+
+    for (int64_t l = 0; l < num_layers; ++l) {
+        // Extract h0 for this layer
+        Tensor h_l({batch, hidden}, input.dtype(), input.device());
+        hipMemcpyAsync(h_l.data<void>(),
+                       static_cast<const char*>(h0.data<void>()) + l * layer_bytes,
+                       layer_bytes, hipMemcpyDeviceToDevice, stream);
+
+        auto result = gru_forward_kernel(
+            layer_input, W_ih_list[l], W_hh_list[l],
+            bias_list[l], h_l, stream);
+
+        layer_input = result[0];
+
+        hipMemcpyAsync(
+            static_cast<char*>(h_n.data<void>()) + l * layer_bytes,
+            result[1].data<void>(), layer_bytes,
+            hipMemcpyDeviceToDevice, stream);
+    }
+
+    HIP_CHECK(hipGetLastError());
+
+    return {layer_input, h_n};
+}
+
 } // namespace rocm
 } // namespace tenzor

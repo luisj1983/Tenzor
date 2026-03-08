@@ -1,5 +1,6 @@
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/sparse/sparse_ops.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/creation.hpp"
@@ -3269,13 +3270,14 @@ auto SpMMBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Vari
 
 auto SpMMBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     // Y = S @ D  =>  grad_D = S^T @ grad_Y
-    // saved_tensors_[0] = S^T (the sparse matrix, transposed and stored as dense)
-    require_saved_tensors(1);
-    const auto& sparse_t = saved_tensors_[0];  // shape (K, M)
+    // sparse_transposed_ = S^T stored as SparseTensor (K, M)
+    if (!sparse_transposed_.has_value()) {
+        throw std::runtime_error("SpMMBackward: sparse_transposed_ not set");
+    }
     const auto& grad_output = grad_outputs[0];  // shape (M, N)
 
-    // grad_D = S^T @ grad_Y = sparse_t @ grad_output, shape (K, N)
-    auto grad_dense = matmul(sparse_t, grad_output);
+    // grad_D = S^T @ grad_Y using sparse::spmm, shape (K, N)
+    auto grad_dense = sparse::spmm(*sparse_transposed_, grad_output);
 
     return {grad_dense};
 }
@@ -3290,17 +3292,14 @@ auto SpMVBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Vari
 
 auto SpMVBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     // y = S @ v  =>  grad_v = S^T @ grad_y
-    // saved_tensors_[0] = S^T (the sparse matrix, transposed and stored as dense)
-    require_saved_tensors(1);
-    const auto& sparse_t = saved_tensors_[0];  // shape (K, M)
-    const auto& grad_y = grad_outputs[0];      // shape (M,)
+    // sparse_transposed_ = S^T stored as SparseTensor (K, M)
+    if (!sparse_transposed_.has_value()) {
+        throw std::runtime_error("SpMVBackward: sparse_transposed_ not set");
+    }
+    const auto& grad_y = grad_outputs[0];  // shape (M,)
 
-    // grad_v = S^T @ grad_y
-    // S^T is (K, M), grad_y is (M,) -> matmul needs 2D inputs
-    // Reshape to (M, 1), matmul -> (K, 1), reshape to (K,)
-    auto grad_y_col = grad_y.reshape({grad_y.shape()[0], 1});  // (M, 1)
-    auto grad_v_col = matmul(sparse_t, grad_y_col);             // (K, 1)
-    auto grad_v = grad_v_col.reshape({grad_v_col.shape()[0]});  // (K,)
+    // grad_v = S^T @ grad_y using sparse::spmv, shape (K,)
+    auto grad_v = sparse::spmv(*sparse_transposed_, grad_y);
 
     return {grad_v};
 }

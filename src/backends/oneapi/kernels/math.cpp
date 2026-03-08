@@ -2640,5 +2640,214 @@ auto div_inplace_kernel(Tensor& inout, const Tensor& other, sycl::queue& queue) 
     return inout;
 }
 
+// ============================================================================
+// HasInfNan kernel - check if tensor contains Inf or NaN
+// ============================================================================
+class HasInfNanKernelF32;
+class HasInfNanKernelF64;
+
+auto has_inf_nan_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+    // Returns a scalar Bool tensor: true if any Inf or NaN
+    Tensor output({1}, DType::Bool, input.device());
+    bool* out_ptr = static_cast<bool*>(const_cast<void*>(output.data_ptr()));
+    int64_t numel = input.numel();
+
+    if (numel == 0) {
+        bool false_val = false;
+        queue.memcpy(out_ptr, &false_val, sizeof(bool)).wait();
+        return output;
+    }
+
+    // Use host-side check via memcpy (simpler than atomic reduction on device)
+    if (input.dtype() == DType::Float32) {
+        std::vector<float> host_data(numel);
+        queue.memcpy(host_data.data(), input.data_ptr(), numel * sizeof(float)).wait();
+        bool found = false;
+        for (int64_t i = 0; i < numel && !found; ++i) {
+            if (std::isinf(host_data[i]) || std::isnan(host_data[i])) found = true;
+        }
+        queue.memcpy(out_ptr, &found, sizeof(bool)).wait();
+    } else if (input.dtype() == DType::Float64) {
+        std::vector<double> host_data(numel);
+        queue.memcpy(host_data.data(), input.data_ptr(), numel * sizeof(double)).wait();
+        bool found = false;
+        for (int64_t i = 0; i < numel && !found; ++i) {
+            if (std::isinf(host_data[i]) || std::isnan(host_data[i])) found = true;
+        }
+        queue.memcpy(out_ptr, &found, sizeof(bool)).wait();
+    } else {
+        // Integer/bool types never have inf/nan
+        bool false_val = false;
+        queue.memcpy(out_ptr, &false_val, sizeof(bool)).wait();
+    }
+
+    return output;
+}
+
+// ============================================================================
+// CumSum kernel - cumulative sum along a dimension
+// ============================================================================
+auto cumsum_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor {
+    auto shape_span = input.shape();
+    std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+    int64_t ndim = shape.size();
+    if (dim < 0) dim += ndim;
+
+    Tensor output(shape, input.dtype(), input.device());
+    int64_t numel = input.numel();
+
+    if (numel == 0) return output;
+
+    // Host-side implementation for correctness (sequential scan along dim)
+    int64_t outer_size = 1, inner_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
+    int64_t dim_size = shape[dim];
+
+    if (input.dtype() == DType::Float32) {
+        std::vector<float> h_in(numel), h_out(numel);
+        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(float)).wait();
+        for (int64_t o = 0; o < outer_size; ++o) {
+            for (int64_t i = 0; i < inner_size; ++i) {
+                float sum = 0.0f;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
+                    sum += h_in[idx];
+                    h_out[idx] = sum;
+                }
+            }
+        }
+        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), numel * sizeof(float)).wait();
+    } else if (input.dtype() == DType::Float64) {
+        std::vector<double> h_in(numel), h_out(numel);
+        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(double)).wait();
+        for (int64_t o = 0; o < outer_size; ++o) {
+            for (int64_t i = 0; i < inner_size; ++i) {
+                double sum = 0.0;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
+                    sum += h_in[idx];
+                    h_out[idx] = sum;
+                }
+            }
+        }
+        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), numel * sizeof(double)).wait();
+    } else if (input.dtype() == DType::Int32) {
+        std::vector<int32_t> h_in(numel), h_out(numel);
+        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(int32_t)).wait();
+        for (int64_t o = 0; o < outer_size; ++o) {
+            for (int64_t i = 0; i < inner_size; ++i) {
+                int32_t sum = 0;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
+                    sum += h_in[idx];
+                    h_out[idx] = sum;
+                }
+            }
+        }
+        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), numel * sizeof(int32_t)).wait();
+    } else if (input.dtype() == DType::Int64) {
+        std::vector<int64_t> h_in(numel), h_out(numel);
+        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(int64_t)).wait();
+        for (int64_t o = 0; o < outer_size; ++o) {
+            for (int64_t i = 0; i < inner_size; ++i) {
+                int64_t sum = 0;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
+                    sum += h_in[idx];
+                    h_out[idx] = sum;
+                }
+            }
+        }
+        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), numel * sizeof(int64_t)).wait();
+    } else {
+        throw std::runtime_error("cumsum: unsupported dtype");
+    }
+
+    return output;
+}
+
+// ============================================================================
+// CumProd kernel - cumulative product along a dimension
+// ============================================================================
+auto cumprod_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor {
+    auto shape_span = input.shape();
+    std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+    int64_t ndim = shape.size();
+    if (dim < 0) dim += ndim;
+
+    Tensor output(shape, input.dtype(), input.device());
+    int64_t numel = input.numel();
+
+    if (numel == 0) return output;
+
+    int64_t outer_size = 1, inner_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
+    int64_t dim_size = shape[dim];
+
+    if (input.dtype() == DType::Float32) {
+        std::vector<float> h_in(numel), h_out(numel);
+        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(float)).wait();
+        for (int64_t o = 0; o < outer_size; ++o) {
+            for (int64_t i = 0; i < inner_size; ++i) {
+                float prod = 1.0f;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
+                    prod *= h_in[idx];
+                    h_out[idx] = prod;
+                }
+            }
+        }
+        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), numel * sizeof(float)).wait();
+    } else if (input.dtype() == DType::Float64) {
+        std::vector<double> h_in(numel), h_out(numel);
+        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(double)).wait();
+        for (int64_t o = 0; o < outer_size; ++o) {
+            for (int64_t i = 0; i < inner_size; ++i) {
+                double prod = 1.0;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
+                    prod *= h_in[idx];
+                    h_out[idx] = prod;
+                }
+            }
+        }
+        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), numel * sizeof(double)).wait();
+    } else if (input.dtype() == DType::Int32) {
+        std::vector<int32_t> h_in(numel), h_out(numel);
+        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(int32_t)).wait();
+        for (int64_t o = 0; o < outer_size; ++o) {
+            for (int64_t i = 0; i < inner_size; ++i) {
+                int32_t prod = 1;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
+                    prod *= h_in[idx];
+                    h_out[idx] = prod;
+                }
+            }
+        }
+        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), numel * sizeof(int32_t)).wait();
+    } else if (input.dtype() == DType::Int64) {
+        std::vector<int64_t> h_in(numel), h_out(numel);
+        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(int64_t)).wait();
+        for (int64_t o = 0; o < outer_size; ++o) {
+            for (int64_t i = 0; i < inner_size; ++i) {
+                int64_t prod = 1;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
+                    prod *= h_in[idx];
+                    h_out[idx] = prod;
+                }
+            }
+        }
+        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), numel * sizeof(int64_t)).wait();
+    } else {
+        throw std::runtime_error("cumprod: unsupported dtype");
+    }
+
+    return output;
+}
+
 } // namespace oneapi
 } // namespace tenzor

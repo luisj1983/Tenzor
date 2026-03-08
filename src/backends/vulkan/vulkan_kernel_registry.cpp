@@ -882,6 +882,63 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     // ========================================================================
+    // Linear/FC Operations
+    // ========================================================================
+    table.register_single_output_kernel(OpId::Linear, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        // inputs: input, weight, [bias]
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        return get_vulkan_backend()->dispatchLinear(inputs[0], inputs[1], bias);
+    });
+
+    table.register_kernel(OpId::LinearBackward, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        // inputs: grad_output, input, weight
+        return get_vulkan_backend()->dispatchLinearBackward(inputs[0], inputs[1], inputs[2]);
+    });
+
+    // ========================================================================
+    // Dropout Operations
+    // ========================================================================
+    table.register_kernel(OpId::Dropout, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float p = static_cast<float>(attrs.get_float(AttrKey::P, 0.5));
+        bool training = attrs.get_bool(AttrKey::Training, true);
+        auto [output, mask] = get_vulkan_backend()->dispatchDropout(inputs[0], p, training);
+        return std::vector<Tensor>{output, mask};
+    });
+
+    table.register_single_output_kernel(OpId::DropoutBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        float p = static_cast<float>(attrs.get_float(AttrKey::P, 0.5));
+        return get_vulkan_backend()->dispatchDropoutBackward(inputs[0], inputs[1], p);
+    });
+
+    // ========================================================================
+    // Slice/Split/Chunk/Flatten Operations
+    // ========================================================================
+    table.register_single_output_kernel(OpId::Slice, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto starts = attrs.get_int_list(AttrKey::Starts);
+        auto ends = attrs.get_int_list(AttrKey::Ends);
+        auto steps = attrs.get_int_list(AttrKey::Steps);
+        return get_vulkan_backend()->dispatchSlice(inputs[0], starts, ends, steps);
+    });
+
+    table.register_kernel(OpId::Split, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t split_size = attrs.get_int(AttrKey::SplitSize, 1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        return get_vulkan_backend()->dispatchSplit(inputs[0], split_size, dim);
+    });
+
+    table.register_kernel(OpId::Chunk, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t chunks = attrs.get_int(AttrKey::Chunks, 1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        return get_vulkan_backend()->dispatchChunk(inputs[0], chunks, dim);
+    });
+
+    table.register_single_output_kernel(OpId::Flatten, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t start_dim = attrs.get_int(AttrKey::StartDim, 0);
+        int64_t end_dim = attrs.get_int(AttrKey::EndDim, -1);
+        return get_vulkan_backend()->dispatchFlatten(inputs[0], start_dim, end_dim);
+    });
+
+    // ========================================================================
     // Type Conversion (Cast)
     // ========================================================================
     table.register_single_output_kernel(OpId::Cast, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -890,6 +947,118 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         }
         DType target_dtype = static_cast<DType>(attrs.get_int(AttrKey::TargetDtype));
         return get_vulkan_backend()->dispatchCast(inputs[0], target_dtype);
+    });
+
+    // ========================================================================
+    // Phase 11.3: RNN Operations
+    // ========================================================================
+    table.register_kernel(OpId::LSTMForward, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return get_vulkan_backend()->dispatchLSTMForward(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5], inputs[6]);
+    });
+
+    table.register_kernel(OpId::GRUForward, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return get_vulkan_backend()->dispatchGRUForward(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]);
+    });
+
+    table.register_kernel(OpId::LSTMMultiLayerForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t num_layers = attrs.get_int(AttrKey::NumLayers, 1);
+        const Tensor& input = inputs[0];
+        const Tensor& h0 = inputs[1];
+        const Tensor& c0 = inputs[2];
+
+        std::vector<Tensor> W_ih_list, W_hh_list, bias_list;
+        for (int64_t l = 0; l < num_layers; ++l) {
+            size_t base_idx = 3 + l * 3;
+            W_ih_list.push_back(inputs[base_idx]);
+            W_hh_list.push_back(inputs[base_idx + 1]);
+            bias_list.push_back(inputs[base_idx + 2]);
+        }
+
+        return get_vulkan_backend()->dispatchLSTMMultiLayerForward(
+            input, W_ih_list, W_hh_list, bias_list, h0, c0);
+    });
+
+    table.register_kernel(OpId::GRUMultiLayerForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t num_layers = attrs.get_int(AttrKey::NumLayers, 1);
+        const Tensor& input = inputs[0];
+        const Tensor& h0 = inputs[1];
+
+        std::vector<Tensor> W_ih_list, W_hh_list, bias_list;
+        for (int64_t l = 0; l < num_layers; ++l) {
+            size_t base_idx = 2 + l * 3;
+            W_ih_list.push_back(inputs[base_idx]);
+            W_hh_list.push_back(inputs[base_idx + 1]);
+            bias_list.push_back(inputs[base_idx + 2]);
+        }
+
+        return get_vulkan_backend()->dispatchGRUMultiLayerForward(
+            input, W_ih_list, W_hh_list, bias_list, h0);
+    });
+
+    table.register_kernel(OpId::BiLSTMForward, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return get_vulkan_backend()->dispatchBiLSTMForward(
+            inputs[0], inputs[1], inputs[2],
+            inputs[3], inputs[4], inputs[5], inputs[6],
+            inputs[7], inputs[8], inputs[9], inputs[10]);
+    });
+
+    // ========================================================================
+    // Phase 11.4: Sorting Operations
+    // ========================================================================
+    table.register_kernel(OpId::Sort, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        bool descending = attrs.get_bool(AttrKey::Descending, false);
+        auto [values, indices] = get_vulkan_backend()->dispatchSort(inputs[0], dim, descending);
+        return std::vector<Tensor>{values, indices};
+    });
+
+    table.register_kernel(OpId::TopK, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t k = attrs.get_int(AttrKey::K, 1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        bool largest = attrs.get_bool(AttrKey::Largest, true);
+        bool sorted = attrs.get_bool(AttrKey::Sorted, true);
+        auto [values, indices] = get_vulkan_backend()->dispatchTopK(inputs[0], k, dim, largest, sorted);
+        return std::vector<Tensor>{values, indices};
+    });
+
+    table.register_kernel(OpId::Unique, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        bool sorted = attrs.get_bool(AttrKey::Sorted, true);
+        bool return_inverse = attrs.get_bool(AttrKey::ReturnInverse, false);
+        bool return_counts = attrs.get_bool(AttrKey::ReturnCounts, false);
+        return get_vulkan_backend()->dispatchUnique(inputs[0], sorted, return_inverse, return_counts);
+    });
+
+    // ========================================================================
+    // Phase 11.5: Misc Operations
+    // ========================================================================
+    table.register_inplace_kernel(OpId::StridedFill, [](Tensor& self, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
+        float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
+        get_vulkan_backend()->dispatchStridedFill(self, value);
+        return self;
+    });
+
+    table.register_single_output_kernel(OpId::ToMemoryFormat, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int format_int = static_cast<int>(attrs.get_int(AttrKey::MemoryFormat, 0));
+        return get_vulkan_backend()->dispatchToMemoryFormat(inputs[0], format_int);
+    });
+
+    table.register_kernel(OpId::HasInfNan, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchHasInfNan(inputs[0])};
+    });
+
+    table.register_single_output_kernel(OpId::DepthwiseConv2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        return get_vulkan_backend()->dispatchDepthwiseConv2d(inputs[0], inputs[1], bias, stride, padding, dilation);
+    });
+
+    table.register_single_output_kernel(OpId::AdaptiveMaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return get_vulkan_backend()->dispatchAdaptiveMaxPool2dBackward(inputs[0], inputs[1], input_shape);
     });
 
     std::cout << "Vulkan dispatch table initialized with O(1) lookup" << std::endl;

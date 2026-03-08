@@ -964,5 +964,342 @@ auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim, hipStream_t st
     return output;
 }
 
+// ============================================================================
+// Cast kernel — dtype conversion
+// ============================================================================
+
+template<typename SrcT, typename DstT>
+__global__ void cast_kernel_impl(const SrcT* input, DstT* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        output[idx] = static_cast<DstT>(input[idx]);
+    }
+}
+
+// Specialization for __half source
+template<typename DstT>
+__global__ void cast_from_f16_kernel(const __half* input, DstT* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        output[idx] = static_cast<DstT>(__half2float(input[idx]));
+    }
+}
+
+// Specialization for __half target
+template<typename SrcT>
+__global__ void cast_to_f16_kernel(const SrcT* input, __half* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        output[idx] = __float2half(static_cast<float>(input[idx]));
+    }
+}
+
+template<typename SrcT>
+static Tensor cast_from_standard(const Tensor& input, DType target_dtype, int64_t n,
+                                  int num_blocks, int block_size, hipStream_t stream) {
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, target_dtype, input.device());
+    const SrcT* src = input.data<SrcT>();
+
+    #define CAST_CASE(DTYPE, CppType) \
+        case DTYPE: \
+            hipLaunchKernelGGL((cast_kernel_impl<SrcT, CppType>), \
+                dim3(num_blocks), dim3(block_size), 0, stream, \
+                src, result.data<CppType>(), n); \
+            break
+
+    switch (target_dtype) {
+        CAST_CASE(DType::Float32, float);
+        CAST_CASE(DType::Float64, double);
+        CAST_CASE(DType::Int8, int8_t);
+        CAST_CASE(DType::Int32, int32_t);
+        CAST_CASE(DType::Int64, int64_t);
+        CAST_CASE(DType::UInt8, uint8_t);
+        CAST_CASE(DType::Bool, bool);
+        case DType::Float16:
+            hipLaunchKernelGGL((cast_to_f16_kernel<SrcT>),
+                dim3(num_blocks), dim3(block_size), 0, stream,
+                src, reinterpret_cast<__half*>(result.data<Float16>()), n);
+            break;
+        default:
+            throw std::runtime_error("cast: unsupported target dtype");
+    }
+    #undef CAST_CASE
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto cast_kernel(const Tensor& input, DType target_dtype, hipStream_t stream) -> Tensor {
+    if (input.dtype() == target_dtype) {
+        return input;
+    }
+
+    int64_t n = input.numel();
+    int num_blocks = get_num_blocks(n);
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+
+    DType src_dtype = input.dtype();
+
+    // Float16 source
+    if (src_dtype == DType::Float16) {
+        Tensor result(shape, target_dtype, input.device());
+        const __half* src = reinterpret_cast<const __half*>(input.data<Float16>());
+
+        switch (target_dtype) {
+            case DType::Float32:
+                hipLaunchKernelGGL((cast_from_f16_kernel<float>),
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, result.data<float>(), n);
+                break;
+            case DType::Float64:
+                hipLaunchKernelGGL((cast_from_f16_kernel<double>),
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, result.data<double>(), n);
+                break;
+            case DType::Int32:
+                hipLaunchKernelGGL((cast_from_f16_kernel<int32_t>),
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, result.data<int32_t>(), n);
+                break;
+            case DType::Int64:
+                hipLaunchKernelGGL((cast_from_f16_kernel<int64_t>),
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, result.data<int64_t>(), n);
+                break;
+            case DType::Int8:
+                hipLaunchKernelGGL((cast_from_f16_kernel<int8_t>),
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, result.data<int8_t>(), n);
+                break;
+            case DType::UInt8:
+                hipLaunchKernelGGL((cast_from_f16_kernel<uint8_t>),
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, result.data<uint8_t>(), n);
+                break;
+            case DType::Bool:
+                hipLaunchKernelGGL((cast_from_f16_kernel<bool>),
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, result.data<bool>(), n);
+                break;
+            default:
+                throw std::runtime_error("cast: unsupported target dtype for Float16 source");
+        }
+        HIP_CHECK(hipGetLastError());
+        return result;
+    }
+
+    // Standard source types
+    Tensor result;
+    switch (src_dtype) {
+        case DType::Float32:
+            result = cast_from_standard<float>(input, target_dtype, n, num_blocks, BLOCK_SIZE, stream); break;
+        case DType::Float64:
+            result = cast_from_standard<double>(input, target_dtype, n, num_blocks, BLOCK_SIZE, stream); break;
+        case DType::Int8:
+            result = cast_from_standard<int8_t>(input, target_dtype, n, num_blocks, BLOCK_SIZE, stream); break;
+        case DType::Int32:
+            result = cast_from_standard<int32_t>(input, target_dtype, n, num_blocks, BLOCK_SIZE, stream); break;
+        case DType::Int64:
+            result = cast_from_standard<int64_t>(input, target_dtype, n, num_blocks, BLOCK_SIZE, stream); break;
+        case DType::UInt8:
+            result = cast_from_standard<uint8_t>(input, target_dtype, n, num_blocks, BLOCK_SIZE, stream); break;
+        case DType::Bool:
+            result = cast_from_standard<bool>(input, target_dtype, n, num_blocks, BLOCK_SIZE, stream); break;
+        default:
+            throw std::runtime_error("cast: unsupported source dtype");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ============================================================================
+// StridedFill kernel — fill non-contiguous tensor with a value
+// ============================================================================
+
+template<typename T>
+__global__ void strided_fill_kernel_device(
+    T* base, T value, int64_t n,
+    const int64_t* shape, const int64_t* strides, int32_t ndims) {
+    HIP_GRID_STRIDE_LOOP(flat_idx, n) {
+        int64_t remaining = flat_idx;
+        int64_t offset = 0;
+        for (int32_t d = ndims - 1; d >= 0; --d) {
+            int64_t coord = remaining % shape[d];
+            remaining /= shape[d];
+            offset += coord * strides[d];
+        }
+        base[offset] = value;
+    }
+}
+
+auto strided_fill_kernel(Tensor& self, float value, hipStream_t stream) -> void {
+    int64_t n = self.numel();
+    if (n == 0) return;
+
+    auto ndims = self.ndim();
+    auto shp = self.shape();
+    auto str = self.strides();
+
+    // Copy shape and strides to device
+    std::vector<int64_t> meta(ndims * 2);
+    for (int64_t d = 0; d < ndims; ++d) {
+        meta[d] = shp[d];
+        meta[ndims + d] = str[d];
+    }
+    int64_t* d_meta = nullptr;
+    HIP_CHECK(hipMalloc(&d_meta, meta.size() * sizeof(int64_t)));
+    HIP_CHECK(hipMemcpyAsync(d_meta, meta.data(), meta.size() * sizeof(int64_t),
+                             hipMemcpyHostToDevice, stream));
+
+    int num_blocks = get_num_blocks(n);
+
+    auto launch = [&](auto* ptr, auto typed_value) {
+        using T = std::remove_pointer_t<decltype(ptr)>;
+        hipLaunchKernelGGL(strided_fill_kernel_device<T>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            ptr, typed_value, n, d_meta, d_meta + ndims, static_cast<int32_t>(ndims));
+        HIP_CHECK(hipGetLastError());
+    };
+
+    if (self.dtype() == DType::Float32) {
+        launch(self.data<float>(), static_cast<float>(value));
+    } else if (self.dtype() == DType::Float64) {
+        launch(self.data<double>(), static_cast<double>(value));
+    } else if (self.dtype() == DType::Int32) {
+        launch(self.data<int32_t>(), static_cast<int32_t>(value));
+    } else if (self.dtype() == DType::Int64) {
+        launch(self.data<int64_t>(), static_cast<int64_t>(value));
+    } else if (self.dtype() == DType::Float16) {
+        __half h_value = __float2half(value);
+        launch(reinterpret_cast<__half*>(self.data<Float16>()), h_value);
+    } else if (self.dtype() == DType::Int8) {
+        launch(self.data<int8_t>(), static_cast<int8_t>(value));
+    } else if (self.dtype() == DType::UInt8) {
+        launch(self.data<uint8_t>(), static_cast<uint8_t>(value));
+    } else if (self.dtype() == DType::Bool) {
+        launch(self.data<bool>(), value != 0.0f);
+    } else {
+        HIP_CHECK(hipFree(d_meta));
+        throw std::runtime_error("strided_fill: unsupported dtype");
+    }
+
+    HIP_CHECK(hipFree(d_meta));
+}
+
+// ============================================================================
+// ToMemoryFormat kernel — NCHW <-> NHWC conversion
+// ============================================================================
+
+template<typename T>
+__global__ void nchw_to_nhwc_transform(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    int64_t batch, int64_t channels, int64_t height, int64_t width
+) {
+    const int64_t hw = height * width;
+    const int64_t chw = channels * hw;
+    const int64_t hwc = hw * channels;
+    const int64_t total = batch * chw;
+
+    HIP_GRID_STRIDE_LOOP(idx, total) {
+        int64_t n = idx / chw;
+        int64_t rem = idx % chw;
+        int64_t c = rem / hw;
+        rem = rem % hw;
+        int64_t h = rem / width;
+        int64_t w = rem % width;
+
+        int64_t out_idx = n * hwc + h * width * channels + w * channels + c;
+        output[out_idx] = input[idx];
+    }
+}
+
+template<typename T>
+__global__ void nhwc_to_nchw_transform(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    int64_t batch, int64_t channels, int64_t height, int64_t width
+) {
+    const int64_t hw = height * width;
+    const int64_t chw = channels * hw;
+    const int64_t hwc = hw * channels;
+    const int64_t total = batch * hwc;
+
+    HIP_GRID_STRIDE_LOOP(idx, total) {
+        int64_t n = idx / hwc;
+        int64_t rem = idx % hwc;
+        int64_t h = rem / (width * channels);
+        rem = rem % (width * channels);
+        int64_t w = rem / channels;
+        int64_t c = rem % channels;
+
+        int64_t out_idx = n * chw + c * hw + h * width + w;
+        output[out_idx] = input[idx];
+    }
+}
+
+auto to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* stream_ptr) -> Tensor {
+    hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+
+    auto shape = input.shape();
+
+    if (shape.size() != 4) {
+        if (format == MemoryFormat::ChannelsLast) {
+            return input;
+        }
+        return input.contiguous();
+    }
+
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t H = shape[2];
+    int64_t W = shape[3];
+
+    Tensor output = Tensor::empty_uninitialized(
+        std::vector<int64_t>{N, C, H, W},
+        input.dtype(),
+        input.device()
+    );
+
+    std::vector<int64_t> target_strides;
+    if (format == MemoryFormat::ChannelsLast) {
+        target_strides = {H * W * C, 1, W * C, C};
+    } else {
+        target_strides = {C * H * W, H * W, W, 1};
+    }
+
+    output.mutable_strides() = target_strides;
+
+    const int64_t total = N * C * H * W;
+    int num_blocks = get_num_blocks(total);
+
+    auto launch_nchw_nhwc = [&](auto* in_ptr, auto* out_ptr) {
+        using T = std::remove_pointer_t<decltype(in_ptr)>;
+        if (format == MemoryFormat::ChannelsLast) {
+            hipLaunchKernelGGL(nchw_to_nhwc_transform<T>,
+                dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                in_ptr, out_ptr, N, C, H, W);
+        } else {
+            hipLaunchKernelGGL(nhwc_to_nchw_transform<T>,
+                dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                in_ptr, out_ptr, N, C, H, W);
+        }
+        HIP_CHECK(hipGetLastError());
+    };
+
+    if (input.dtype() == DType::Float32) {
+        launch_nchw_nhwc(input.data<float>(), output.data<float>());
+    } else if (input.dtype() == DType::Float64) {
+        launch_nchw_nhwc(input.data<double>(), output.data<double>());
+    } else if (input.dtype() == DType::Float16) {
+        launch_nchw_nhwc(input.data<Float16>(), output.data<Float16>());
+    } else if (input.dtype() == DType::Int32) {
+        launch_nchw_nhwc(input.data<int32_t>(), output.data<int32_t>());
+    } else {
+        throw std::runtime_error("to_memory_format_kernel: unsupported dtype");
+    }
+
+    return output;
+}
+
 } // namespace rocm
 } // namespace tenzor

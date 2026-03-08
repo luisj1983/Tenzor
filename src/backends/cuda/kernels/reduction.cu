@@ -13,9 +13,23 @@
 #include "../cuda_error.hpp"
 #include "cuda_launch_utils.cuh"
 #include "cuda_common.cuh"
+#include "../cuda_stream_pool.hpp"
 
 namespace tenzor {
 namespace cuda {
+
+// Resolve a CUDA stream: if `stream` is non-null (caller-provided), use it
+// directly; otherwise acquire one from the per-device stream pool.
+// Returns the stream to use and an RAII guard that keeps the pool stream alive.
+static std::pair<cudaStream_t, StreamGuard> resolve_stream(
+    cudaStream_t stream, const Tensor& ref_tensor) {
+    if (stream != nullptr) {
+        return {stream, StreamGuard{}};
+    }
+    int device_id = ref_tensor.device().index;
+    auto guard = CUDAStreamPool::instance().acquire_guard(device_id);
+    return {guard.get(), std::move(guard)};
+}
 
 // Constants
 constexpr int WARP_SIZE = 32;
@@ -1414,6 +1428,9 @@ static void launch_dim_reduction_min_bf16(
 // ============================================================================
 
 auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+    auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
+    stream = resolved_stream;
+
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();
@@ -1574,6 +1591,9 @@ __global__ void scale_kernel<__nv_bfloat16>(__nv_bfloat16* data, int64_t n, __nv
 }
 
 auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+    auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
+    stream = resolved_stream;
+
     const auto dtype = input.dtype();
 
     if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
@@ -1630,6 +1650,9 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t st
 }
 
 auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+    auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
+    stream = resolved_stream;
+
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();
@@ -1749,6 +1772,9 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
 }
 
 auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+    auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
+    stream = resolved_stream;
+
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();
@@ -3006,6 +3032,9 @@ static void launch_dim_argmin_bf16(
 
 // Public API for argmax
 auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+    auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
+    stream = resolved_stream;
+
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();
@@ -3136,6 +3165,9 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
 
 // Public API for argmin
 auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+    auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
+    stream = resolved_stream;
+
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();
@@ -3422,6 +3454,9 @@ static void launch_dim_reduction_prod(
 
 // Public API for prod (product reduction)
 auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+    auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
+    stream = resolved_stream;
+
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();
@@ -3684,6 +3719,9 @@ static void launch_variance_computation(const T* d_input, T* d_output, int64_t n
 
 // Public API for variance
 auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction, cudaStream_t stream) -> Tensor {
+    auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
+    stream = resolved_stream;
+
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();
@@ -3782,6 +3820,9 @@ __global__ void sum_reduce_pow_kernel(const T* input, T* output, int64_t n, T ex
 
 // Public API for standard deviation
 auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction, cudaStream_t stream) -> Tensor {
+    auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
+    stream = resolved_stream;
+
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();
@@ -4023,6 +4064,9 @@ __global__ void norm_along_dim_kernel(
 
 // Norm kernel implementation
 auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+    auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
+    stream = resolved_stream;
+
     // INT64_MIN is the sentinel for "reduce all dimensions"
     if (dim != INT64_MIN && dim != -1) {
         // Per-dimension norm reduction
@@ -4340,6 +4384,9 @@ static void launch_argsort(const T* d_input, int64_t* d_output, int64_t n, bool 
 
 
 auto argsort_kernel(const Tensor& input, int64_t dim, bool descending, cudaStream_t stream) -> Tensor {
+    auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
+    stream = resolved_stream;
+
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();

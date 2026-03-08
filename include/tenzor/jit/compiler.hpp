@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <vector>
 #include <string>
@@ -23,6 +24,7 @@
 #include "graph.hpp"
 #include "memory_planner.hpp"
 #include "../nn/module.hpp"
+#include "../backend/cuda_graph.hpp"
 
 namespace tenzor {
 namespace jit {
@@ -747,6 +749,53 @@ public:
     auto all_metadata() const -> const std::unordered_map<std::string, std::string>&;
 
     /**
+     * @brief Capture a CUDA graph from the compiled module's forward pass.
+     *
+     * Records all GPU operations during a forward pass with the given sample
+     * inputs into a CUDA graph that can be replayed for faster execution.
+     * Input tensor shapes are recorded; subsequent replays must use the same shapes.
+     *
+     * All GPU memory allocations must happen before capture (use the caching
+     * allocator). The sample inputs must reside on a CUDA device.
+     *
+     * @param sample_inputs Sample input tensors for shape/type inference
+     * @throws std::runtime_error if CUDA is unavailable or capture fails
+     */
+    auto capture_cuda_graph(std::vector<Tensor> sample_inputs) -> void;
+
+    /**
+     * @brief Replay the captured CUDA graph with new input data.
+     *
+     * The input tensors must have the same shapes as those used during capture.
+     * If no graph has been captured, returns false without executing.
+     *
+     * @param inputs Input tensors (data is read from these buffers)
+     * @return true if the graph was replayed, false if no graph is captured
+     * @throws std::runtime_error if input shapes don't match captured shapes
+     */
+    auto replay_cuda_graph(std::vector<Tensor>& inputs) -> bool;
+
+    /**
+     * @brief Invalidate the captured CUDA graph.
+     *
+     * Call this when input shapes change or when the graph is no longer needed.
+     * After invalidation, capture_cuda_graph() must be called again before replay.
+     */
+    auto invalidate_cuda_graph() -> void;
+
+    /**
+     * @brief Check if a CUDA graph has been captured and is ready for replay.
+     *
+     * @return true if a graph is captured
+     */
+    auto has_cuda_graph() const -> bool;
+
+    /**
+     * @brief Destructor.
+     */
+    ~CompiledModule();
+
+    /**
      * @brief Constructor (prefer using static trace/load methods).
      */
     CompiledModule() = default;
@@ -762,6 +811,8 @@ private:
     std::shared_ptr<Graph> graph_;                                   ///< IR graph
     std::unordered_map<std::string, std::string> metadata_;          ///< Metadata storage
     MemoryPlan memory_plan_;                                         ///< Memory plan for buffer reuse
+    std::unique_ptr<CUDAGraph> cuda_graph_;                          ///< Captured CUDA graph for replay
+    std::vector<std::vector<int64_t>> captured_shapes_;              ///< Input shapes at capture time
 };
 
 // ============================================================================

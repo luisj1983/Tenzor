@@ -1,0 +1,24 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Dropout backward for Float64: grad_input = grad_output * mask * scale
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { double grad_output[]; };
+layout(binding = 1) buffer Mask { double mask_data[]; };
+layout(binding = 2) buffer GradInput { double grad_input[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    float scale;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n_elements) {
+        return;
+    }
+
+    grad_input[idx] = grad_output[idx] * mask_data[idx] * double(params.scale);
+}

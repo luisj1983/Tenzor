@@ -1,0 +1,31 @@
+#version 450
+#extension GL_EXT_shader_atomic_float : require
+
+// Adaptive Max Pool 2D Backward Pass
+// Routes gradients back to the positions recorded by forward pass indices
+// Uses atomicAdd for potentially overlapping gradient routing
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { float grad_output[]; };  // [N, C, out_h, out_w]
+layout(binding = 1) buffer Indices { int indices[]; };            // [N, C, out_h, out_w] — flat index into input
+layout(binding = 2) buffer GradInput { float grad_input[]; };    // [N, C, in_h, in_w] — output
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;      // Total elements in grad_output (N * C * out_h * out_w)
+    uint grad_input_size; // Total elements in grad_input (N * C * in_h * in_w)
+    uint channels;
+    uint in_h;
+    uint in_w;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    float grad = grad_output[idx];
+    int target_idx = indices[idx];
+
+    if (target_idx >= 0 && target_idx < int(params.grad_input_size)) {
+        atomicAdd(grad_input[target_idx], grad);
+    }
+}

@@ -1,0 +1,37 @@
+#version 450
+
+// Reduction shader: check if tensor contains any inf or nan values
+// Output: single uint — 0 if clean, 1 if inf/nan found
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Output { uint result[]; };  // result[0] = flag
+
+layout(push_constant) uniform PushConstants {
+    uint n;  // Number of elements
+} params;
+
+shared uint shared_flag;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint lid = gl_LocalInvocationID.x;
+
+    if (lid == 0) {
+        shared_flag = 0;
+    }
+    barrier();
+
+    if (idx < params.n) {
+        float val = input_data[idx];
+        if (isinf(val) || isnan(val)) {
+            atomicOr(shared_flag, 1u);
+        }
+    }
+
+    barrier();
+
+    if (lid == 0 && shared_flag != 0) {
+        atomicOr(result[0], 1u);
+    }
+}

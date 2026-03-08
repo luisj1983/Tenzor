@@ -1,0 +1,23 @@
+#version 450
+
+// Dropout backward: grad_input = grad_output * mask * scale
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { float grad_output[]; };
+layout(binding = 1) buffer Mask { float mask_data[]; };
+layout(binding = 2) buffer GradInput { float grad_input[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    float scale;       // 1.0 / (1.0 - p)
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n_elements) {
+        return;
+    }
+
+    grad_input[idx] = grad_output[idx] * mask_data[idx] * params.scale;
+}

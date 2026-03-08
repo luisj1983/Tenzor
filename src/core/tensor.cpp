@@ -147,12 +147,12 @@ auto Tensor::requires_grad() const noexcept -> bool {
 
 auto Tensor::version() const noexcept -> uint64_t {
     if (!impl_) return 0;
-    return impl_->version_counter_.load(std::memory_order_relaxed);
+    return impl_->version_counter_.load(std::memory_order_acquire);
 }
 
 auto Tensor::bump_version() -> void {
     if (impl_) {
-        impl_->version_counter_.fetch_add(1, std::memory_order_relaxed);
+        impl_->version_counter_.fetch_add(1, std::memory_order_release);
     }
 }
 

@@ -264,7 +264,7 @@ auto MultiheadAttention::scaled_dot_product_attention(
                                    head_dim <= 256 &&
                                    (is_causal_ || !attn_mask.is_valid() || attn_mask.shape().size() == 0);
 
-    if (can_use_flash_attention && !is_grad_enabled()) {
+    if (can_use_flash_attention && !is_training()) {
         try {
             float scale_f = 1.0f / std::sqrt(static_cast<float>(head_dim));
 

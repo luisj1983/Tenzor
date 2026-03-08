@@ -382,6 +382,58 @@ public:
     // Type cast operations
     auto dispatchCast(const Tensor& input, DType target_dtype) -> Tensor;
 
+    // RNN operations (Phase 11.3)
+    auto dispatchLSTMForward(const Tensor& input, const Tensor& W_ih, const Tensor& W_hh,
+                             const Tensor& bias_ih, const Tensor& bias_hh,
+                             const Tensor& h0, const Tensor& c0) -> std::vector<Tensor>;
+    auto dispatchGRUForward(const Tensor& input, const Tensor& W_ih, const Tensor& W_hh,
+                            const Tensor& bias, const Tensor& h0) -> std::vector<Tensor>;
+    auto dispatchLSTMMultiLayerForward(const Tensor& input,
+                                       const std::vector<Tensor>& W_ih_list,
+                                       const std::vector<Tensor>& W_hh_list,
+                                       const std::vector<Tensor>& bias_list,
+                                       const Tensor& h0, const Tensor& c0) -> std::vector<Tensor>;
+    auto dispatchGRUMultiLayerForward(const Tensor& input,
+                                      const std::vector<Tensor>& W_ih_list,
+                                      const std::vector<Tensor>& W_hh_list,
+                                      const std::vector<Tensor>& bias_list,
+                                      const Tensor& h0) -> std::vector<Tensor>;
+    auto dispatchBiLSTMForward(const Tensor& input, const Tensor& h0, const Tensor& c0,
+                                const Tensor& W_ih_fwd, const Tensor& W_hh_fwd,
+                                const Tensor& bias_ih_fwd, const Tensor& bias_hh_fwd,
+                                const Tensor& W_ih_bwd, const Tensor& W_hh_bwd,
+                                const Tensor& bias_ih_bwd, const Tensor& bias_hh_bwd) -> std::vector<Tensor>;
+
+    // Sorting operations (Phase 11.4)
+    auto dispatchSort(const Tensor& input, int64_t dim, bool descending) -> std::pair<Tensor, Tensor>;
+    auto dispatchTopK(const Tensor& input, int64_t k, int64_t dim, bool largest, bool sorted) -> std::pair<Tensor, Tensor>;
+    auto dispatchUnique(const Tensor& input, bool sorted, bool return_inverse, bool return_counts) -> std::vector<Tensor>;
+
+    // Misc operations (Phase 11.5)
+    auto dispatchStridedFill(Tensor& input, float value) -> void;
+    auto dispatchToMemoryFormat(const Tensor& input, int format) -> Tensor;
+    auto dispatchHasInfNan(const Tensor& input) -> Tensor;
+    auto dispatchDepthwiseConv2d(const Tensor& input, const Tensor& weight,
+                                  const Tensor* bias, int64_t stride,
+                                  int64_t padding, int64_t dilation) -> Tensor;
+    auto dispatchAdaptiveMaxPool2dBackward(const Tensor& grad_output, const Tensor& indices,
+                                            const std::vector<int64_t>& input_shape) -> Tensor;
+
+    // Linear/FC operations
+    auto dispatchLinear(const Tensor& input, const Tensor& weight, const Tensor* bias) -> Tensor;
+    auto dispatchLinearBackward(const Tensor& grad_output, const Tensor& input, const Tensor& weight) -> std::vector<Tensor>;
+
+    // Dropout operations
+    auto dispatchDropout(const Tensor& input, float p, bool training) -> std::pair<Tensor, Tensor>;
+    auto dispatchDropoutBackward(const Tensor& grad_output, const Tensor& mask, float p) -> Tensor;
+
+    // Slice/Split/Chunk/Flatten operations
+    auto dispatchSlice(const Tensor& input, const std::vector<int64_t>& starts,
+                       const std::vector<int64_t>& ends, const std::vector<int64_t>& steps) -> Tensor;
+    auto dispatchSplit(const Tensor& input, int64_t split_size, int64_t dim) -> std::vector<Tensor>;
+    auto dispatchChunk(const Tensor& input, int64_t chunks, int64_t dim) -> std::vector<Tensor>;
+    auto dispatchFlatten(const Tensor& input, int64_t start_dim, int64_t end_dim) -> Tensor;
+
     // Repeat and masked operations
     auto dispatchRepeat(const Tensor& input, const std::vector<int64_t>& repeats) -> Tensor;
     auto dispatchMaskedSelect(const Tensor& input, const Tensor& mask) -> Tensor;

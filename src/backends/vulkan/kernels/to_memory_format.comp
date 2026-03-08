@@ -1,0 +1,52 @@
+#version 450
+
+// Memory format conversion: NCHW <-> NHWC
+// format=0: NCHW->NHWC, format=1: NHWC->NCHW
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;  // Total elements
+    uint N;           // Batch size
+    uint C;           // Channels
+    uint H;           // Height
+    uint W;           // Width
+    uint format;      // 0 = NCHW->NHWC, 1 = NHWC->NCHW
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    uint src_idx;
+
+    if (params.format == 0) {
+        // NCHW -> NHWC: output[n,h,w,c] = input[n,c,h,w]
+        uint c = idx % params.C;
+        uint temp = idx / params.C;
+        uint w = temp % params.W;
+        temp /= params.W;
+        uint h = temp % params.H;
+        uint n = temp / params.H;
+
+        src_idx = n * (params.C * params.H * params.W) +
+                  c * (params.H * params.W) +
+                  h * params.W + w;
+    } else {
+        // NHWC -> NCHW: output[n,c,h,w] = input[n,h,w,c]
+        uint w = idx % params.W;
+        uint temp = idx / params.W;
+        uint h = temp % params.H;
+        temp /= params.H;
+        uint c = temp % params.C;
+        uint n = temp / params.C;
+
+        src_idx = n * (params.H * params.W * params.C) +
+                  h * (params.W * params.C) +
+                  w * params.C + c;
+    }
+
+    output_data[idx] = input_data[src_idx];
+}

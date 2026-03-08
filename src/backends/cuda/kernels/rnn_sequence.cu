@@ -17,6 +17,7 @@
 #include <cublas_v2.h>
 #include <vector>
 #include <stdexcept>
+#include "cuda_stream_pool.hpp"
 
 namespace tenzor {
 namespace cuda {
@@ -142,7 +143,9 @@ auto lstm_forward_cuda(
     int64_t hidden = h0.shape()[1];
     int64_t gate_size = 4 * hidden;
 
-    cudaStream_t stream = nullptr;
+    int device_id = input.device().index;
+    auto stream_guard = CUDAStreamPool::instance().acquire_guard(device_id);
+    cudaStream_t stream = stream_guard.get();
 
     // Output: (seq_len, batch, hidden)
     Tensor output({seq_len, batch, hidden}, input.dtype(), input.device());
@@ -232,7 +235,9 @@ auto gru_forward_cuda(
     int64_t hidden = h0.shape()[1];
     int64_t gate_size = 3 * hidden;
 
-    cudaStream_t stream = nullptr;
+    int device_id = input.device().index;
+    auto stream_guard = CUDAStreamPool::instance().acquire_guard(device_id);
+    cudaStream_t stream = stream_guard.get();
 
     Tensor output({seq_len, batch, hidden}, input.dtype(), input.device());
     Tensor h_prev = h0.contiguous();
@@ -327,6 +332,10 @@ auto lstm_multi_layer_forward_cuda(
     int64_t batch = shape[1];
     int64_t hidden = h0.shape()[2];
 
+    int device_id = input.device().index;
+    auto stream_guard = CUDAStreamPool::instance().acquire_guard(device_id);
+    cudaStream_t stream = stream_guard.get();
+
     // Final hidden/cell states: (num_layers, batch, hidden)
     Tensor h_n({num_layers, batch, hidden}, input.dtype(), input.device());
     Tensor c_n({num_layers, batch, hidden}, input.dtype(), input.device());
@@ -358,11 +367,11 @@ auto lstm_multi_layer_forward_cuda(
         cudaMemcpyAsync(
             static_cast<char*>(h_n.data_ptr()) + l * layer_bytes,
             result[1].data_ptr(), layer_bytes,
-            cudaMemcpyDeviceToDevice, nullptr);
+            cudaMemcpyDeviceToDevice, stream);
         cudaMemcpyAsync(
             static_cast<char*>(c_n.data_ptr()) + l * layer_bytes,
             result[2].data_ptr(), layer_bytes,
-            cudaMemcpyDeviceToDevice, nullptr);
+            cudaMemcpyDeviceToDevice, stream);
     }
 
     return {layer_input, h_n, c_n};
@@ -385,6 +394,10 @@ auto gru_multi_layer_forward_cuda(
     int64_t batch = shape[1];
     int64_t hidden = h0.shape()[2];
 
+    int device_id = input.device().index;
+    auto stream_guard = CUDAStreamPool::instance().acquire_guard(device_id);
+    cudaStream_t stream = stream_guard.get();
+
     Tensor h_n({num_layers, batch, hidden}, input.dtype(), input.device());
     Tensor layer_input = input;
     size_t layer_bytes = batch * hidden * dtype_size(input.dtype());
@@ -401,7 +414,7 @@ auto gru_multi_layer_forward_cuda(
         cudaMemcpyAsync(
             static_cast<char*>(h_n.data_ptr()) + l * layer_bytes,
             result[1].data_ptr(), layer_bytes,
-            cudaMemcpyDeviceToDevice, nullptr);
+            cudaMemcpyDeviceToDevice, stream);
     }
 
     return {layer_input, h_n};
@@ -472,7 +485,9 @@ auto bilstm_forward_cuda(
     int64_t batch = shape[1];
     int64_t hidden = h0.shape()[2];
 
-    cudaStream_t stream = nullptr;
+    int device_id = input.device().index;
+    auto stream_guard = CUDAStreamPool::instance().acquire_guard(device_id);
+    cudaStream_t stream = stream_guard.get();
 
     // Forward direction
     Tensor h0_fwd = h0.slice(0, 0, 1).squeeze(0).contiguous();

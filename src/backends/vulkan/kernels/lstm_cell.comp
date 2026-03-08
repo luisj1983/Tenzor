@@ -1,0 +1,50 @@
+#version 450
+
+// LSTM Cell compute shader — processes one timestep
+// Computes: gates = x*W_ih^T + h*W_hh^T + bias_ih + bias_hh
+// Then applies sigmoid/tanh gating
+//
+// Inputs:
+//   binding 0: gates buffer (pre-computed linear: x*W_ih^T + h*W_hh^T + biases)
+//              shape: [batch_size, 4 * hidden_size] — layout: [i|f|g|o]
+//   binding 1: c_prev — previous cell state [batch_size, hidden_size]
+//   binding 2: h_out — output hidden state [batch_size, hidden_size]
+//   binding 3: c_out — output cell state [batch_size, hidden_size]
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Gates { float gates[]; };
+layout(binding = 1) buffer CellPrev { float c_prev[]; };
+layout(binding = 2) buffer HiddenOut { float h_out[]; };
+layout(binding = 3) buffer CellOut { float c_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint hidden_size;
+} params;
+
+float sigmoid(float x) {
+    return 1.0 / (1.0 + exp(-x));
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = params.batch_size * params.hidden_size;
+
+    if (idx >= total) return;
+
+    uint b = idx / params.hidden_size;
+    uint h = idx % params.hidden_size;
+
+    uint gate_base = b * (4 * params.hidden_size);
+
+    float i_gate = sigmoid(gates[gate_base + h]);                              // input gate
+    float f_gate = sigmoid(gates[gate_base + params.hidden_size + h]);         // forget gate
+    float g_gate = tanh(gates[gate_base + 2 * params.hidden_size + h]);        // cell gate
+    float o_gate = sigmoid(gates[gate_base + 3 * params.hidden_size + h]);     // output gate
+
+    float c_new = f_gate * c_prev[idx] + i_gate * g_gate;
+    float h_new = o_gate * tanh(c_new);
+
+    c_out[idx] = c_new;
+    h_out[idx] = h_new;
+}

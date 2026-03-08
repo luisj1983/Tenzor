@@ -438,6 +438,54 @@ auto SparseTensor::to_csr() const -> SparseTensor {
     return sparse_csr(crow, col, vals, shape_);
 }
 
+auto SparseTensor::transpose() const -> SparseTensor {
+    if (shape_.size() != 2) {
+        throw std::runtime_error("SparseTensor::transpose: only 2D sparse tensors supported");
+    }
+
+    int64_t nrows = shape_[0];
+    int64_t ncols = shape_[1];
+    std::vector<int64_t> transposed_shape = {ncols, nrows};
+
+    if (layout_ == SparseLayout::COO) {
+        // Swap row and column indices: indices_ is [2, nnz]
+        // Row 0 = row indices, Row 1 = col indices
+        auto idx = indices_.contiguous();
+        auto* idx_ptr = idx.data<int64_t>();
+
+        auto new_indices = Tensor({int64_t(2), nnz_}, DType::Int64, values_.device());
+        auto* new_ptr = new_indices.data<int64_t>();
+
+        // New row indices = old col indices, new col indices = old row indices
+        for (int64_t i = 0; i < nnz_; ++i) {
+            new_ptr[i] = idx_ptr[nnz_ + i];          // new row = old col
+            new_ptr[nnz_ + i] = idx_ptr[i];           // new col = old row
+        }
+
+        // The transposed COO is not coalesced (ordering changed)
+        auto result = sparse_coo(new_indices, values_, transposed_shape);
+        return result.coalesce();
+    }
+
+    if (layout_ == SparseLayout::CSC) {
+        // CSC of (nrows, ncols) is equivalent to CSR of (ncols, nrows)
+        // ccol_indices -> crow_indices, row_indices -> col_indices
+        return sparse_csr(ccol_indices_, row_indices_, values_, transposed_shape);
+    }
+
+    if (layout_ == SparseLayout::CSR) {
+        // CSR transpose: reinterpret as CSC of transposed shape, then convert
+        // CSR of (nrows, ncols) with crow/col is CSC of (ncols, nrows) with ccol=crow, row=col
+        auto transposed_csc = sparse_csc(crow_indices_, col_indices_, values_,
+                                          transposed_shape);
+        return transposed_csc.to_csr();
+    }
+
+    // BSR: convert to COO, transpose, convert back
+    auto coo = to_coo();
+    return coo.transpose();
+}
+
 auto SparseTensor::coalesce() const -> SparseTensor {
     if (coalesced_ || layout_ != SparseLayout::COO) return *this;
     if (nnz_ == 0) {
