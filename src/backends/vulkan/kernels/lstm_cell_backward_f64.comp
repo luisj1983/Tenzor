@@ -1,0 +1,119 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// LSTM Cell backward compute shader — Float64 variant
+// Computes gradients for one timestep, recomputing forward gate activations
+// from saved pre-activation gates.
+//
+// Inputs:
+//   binding 0: grad_h — gradient of hidden state [batch, hidden]
+//   binding 1: grad_c_next — gradient of cell state from next step [batch, hidden]
+//   binding 2: gates — pre-activation combined gates [batch, 4*hidden]
+//   binding 3: c_prev — previous cell state [batch, hidden]
+//   binding 4: c_out — output cell state (from forward) [batch, hidden]
+// Outputs:
+//   binding 5: grad_gates — gradient w.r.t. gates [batch, 4*hidden]
+//   binding 6: grad_c_prev — gradient w.r.t. c_prev [batch, hidden]
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradH     { double grad_h[]; };
+layout(binding = 1) buffer GradCNext { double grad_c_next[]; };
+layout(binding = 2) buffer Gates     { double gates[]; };
+layout(binding = 3) buffer CPrev     { double c_prev[]; };
+layout(binding = 4) buffer COut      { double c_out[]; };
+layout(binding = 5) buffer GradGates { double grad_gates[]; };
+layout(binding = 6) buffer GradCPrev { double grad_c_prev[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint hidden_size;
+} params;
+
+// Double-precision exp using range reduction
+double exp_d(double x) {
+    if (x != x) return x;
+    if (x > 709.0) return 1.0e308;
+    if (x < -745.0) return 0.0;
+    double ln2 = 0.6931471805599453;
+    double k_dbl = floor(x / ln2 + 0.5);
+    double r = x - k_dbl * ln2;
+    int k = int(clamp(k_dbl, -1100.0, 1100.0));
+    double exp_r = 1.0 + r * (1.0 + r * (0.5 + r * (1.0/6.0 + r * (1.0/24.0 + r * (1.0/120.0 +
+        r * (1.0/720.0 + r * (1.0/5040.0 + r * (1.0/40320.0 + r * (1.0/362880.0 +
+        r * (1.0/3628800.0 + r * (1.0/39916800.0 + r * (1.0/479001600.0))))))))))));
+    double pow2 = 1.0;
+    int abs_k = (k >= 0) ? k : -k;
+    double base = 2.0;
+    while (abs_k > 0) {
+        if ((abs_k & 1) != 0) pow2 *= base;
+        base *= base;
+        abs_k >>= 1;
+    }
+    return (k >= 0) ? (exp_r * pow2) : (exp_r / pow2);
+}
+
+double tanh_d(double x) {
+    if (x != x) return x;
+    if (x > 20.0) return 1.0;
+    if (x < -20.0) return -1.0;
+    if (x >= -9.0 && x <= 9.0) return double(tanh(float(x)));
+    double e2x = exp_d(2.0 * x);
+    return (e2x - 1.0) / (e2x + 1.0);
+}
+
+double sigmoid_d(double x) {
+    return 1.0 / (1.0 + exp_d(-x));
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = params.batch_size * params.hidden_size;
+
+    if (idx >= total) return;
+
+    uint b = idx / params.hidden_size;
+    uint h = idx % params.hidden_size;
+
+    uint H = params.hidden_size;
+    uint gate_base = b * (4 * H);
+
+    // Indices into the gate array: [i | f | g | o]
+    uint i_idx = gate_base + h;
+    uint f_idx = gate_base + H + h;
+    uint g_idx = gate_base + 2 * H + h;
+    uint o_idx = gate_base + 3 * H + h;
+
+    // ---- Recompute forward gate activations ----
+    double i_gate = sigmoid_d(gates[i_idx]);
+    double f_gate = sigmoid_d(gates[f_idx]);
+    double g_gate = tanh_d(gates[g_idx]);
+    double o_gate = sigmoid_d(gates[o_idx]);
+
+    double tanh_c = tanh_d(c_out[idx]);
+
+    // ---- Backward through h_out = o * tanh(c_out) ----
+    double dh = grad_h[idx];
+    double d_o = dh * tanh_c;
+    double dc = dh * o_gate * (1.0 - tanh_c * tanh_c) + grad_c_next[idx];
+
+    // ---- Backward through c_out = f * c_prev + i * g ----
+    double d_f = dc * c_prev[idx];
+    double d_i = dc * g_gate;
+    double d_g = dc * i_gate;
+    double dc_prev = dc * f_gate;
+
+    // ---- Gate gradients (through sigmoid/tanh nonlinearities) ----
+    double di_gate = d_i * i_gate * (1.0 - i_gate);
+    double df_gate = d_f * f_gate * (1.0 - f_gate);
+    double dg_gate = d_g * (1.0 - g_gate * g_gate);
+    double do_gate = d_o * o_gate * (1.0 - o_gate);
+
+    // ---- Write grad_gates: [di_gate, df_gate, dg_gate, do_gate] ----
+    grad_gates[i_idx] = di_gate;
+    grad_gates[f_idx] = df_gate;
+    grad_gates[g_idx] = dg_gate;
+    grad_gates[o_idx] = do_gate;
+
+    // ---- Write grad_c_prev ----
+    grad_c_prev[idx] = dc_prev;
+}

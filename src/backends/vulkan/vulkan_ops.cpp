@@ -1884,7 +1884,8 @@ auto VulkanBackend::dispatchIm2Col(const Tensor& input, const OpAttributes& attr
     Tensor output(out_shape, input.dtype(), input.device());
 
     int32_t device_id = input.device().index;
-    std::string im2col_shader = (input.dtype() == DType::Float16) ? "im2col_f16" : "im2col";
+    std::string im2col_shader = (input.dtype() == DType::Float64) ? "im2col_f64"
+                              : (input.dtype() == DType::Float16) ? "im2col_f16" : "im2col";
     auto* pipeline = getPipeline(im2col_shader, device_id);
 
     // Total elements to process
@@ -11781,16 +11782,31 @@ auto VulkanBackend::dispatchBatchNorm2dUpdateRunningStats(
 
 auto VulkanBackend::dispatchFusedRMSPropStep(
     std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+    if (!inputs.empty() && (inputs[0].dtype() == DType::Float64 || inputs[0].dtype() == DType::BFloat16)) {
+        throw std::runtime_error("Vulkan fused RMSProp step does not support " +
+            std::string(inputs[0].dtype() == DType::Float64 ? "Float64" : "BFloat16") +
+            ". Use CPU backend or cast to Float32.");
+    }
     return dispatch("fused_rmsprop_step", inputs, attrs);
 }
 
 auto VulkanBackend::dispatchFusedAdadeltaStep(
     std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+    if (!inputs.empty() && (inputs[0].dtype() == DType::Float64 || inputs[0].dtype() == DType::BFloat16)) {
+        throw std::runtime_error("Vulkan fused Adadelta step does not support " +
+            std::string(inputs[0].dtype() == DType::Float64 ? "Float64" : "BFloat16") +
+            ". Use CPU backend or cast to Float32.");
+    }
     return dispatch("fused_adadelta_step", inputs, attrs);
 }
 
 auto VulkanBackend::dispatchFusedAdagradStep(
     std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+    if (!inputs.empty() && (inputs[0].dtype() == DType::Float64 || inputs[0].dtype() == DType::BFloat16)) {
+        throw std::runtime_error("Vulkan fused Adagrad step does not support " +
+            std::string(inputs[0].dtype() == DType::Float64 ? "Float64" : "BFloat16") +
+            ". Use CPU backend or cast to Float32.");
+    }
     return dispatch("fused_adagrad_step", inputs, attrs);
 }
 
@@ -12007,6 +12023,17 @@ auto VulkanBackend::dispatchLSTMCellBackward(const Tensor& grad_h, const Tensor&
                                               const Tensor& gates, const Tensor& c_prev,
                                               const Tensor& c_out,
                                               int64_t batch_size, int64_t hidden_size) -> std::vector<Tensor> {
+    // Float16/BFloat16: upcast to Float32, compute, downcast
+    if (grad_h.dtype() == DType::Float16 || grad_h.dtype() == DType::BFloat16) {
+        DType orig = grad_h.dtype();
+        auto results = dispatchLSTMCellBackward(
+            grad_h.to(DType::Float32), grad_c_next.to(DType::Float32),
+            gates.to(DType::Float32), c_prev.to(DType::Float32),
+            c_out.to(DType::Float32), batch_size, hidden_size);
+        for (auto& r : results) r = r.to(orig);
+        return results;
+    }
+
     int32_t device_id = grad_h.device().index;
     bool is_f64 = (grad_h.dtype() == DType::Float64);
     std::string shader = is_f64 ? "lstm_cell_backward_f64" : "lstm_cell_backward";
@@ -12063,6 +12090,17 @@ auto VulkanBackend::dispatchLSTMCellBackward(const Tensor& grad_h, const Tensor&
 auto VulkanBackend::dispatchGRUCellBackward(const Tensor& grad_h, const Tensor& gates_x,
                                              const Tensor& gates_h, const Tensor& h_prev,
                                              int64_t batch_size, int64_t hidden_size) -> std::vector<Tensor> {
+    // Float16/BFloat16: upcast to Float32, compute, downcast
+    if (grad_h.dtype() == DType::Float16 || grad_h.dtype() == DType::BFloat16) {
+        DType orig = grad_h.dtype();
+        auto results = dispatchGRUCellBackward(
+            grad_h.to(DType::Float32), gates_x.to(DType::Float32),
+            gates_h.to(DType::Float32), h_prev.to(DType::Float32),
+            batch_size, hidden_size);
+        for (auto& r : results) r = r.to(orig);
+        return results;
+    }
+
     int32_t device_id = grad_h.device().index;
     bool is_f64 = (grad_h.dtype() == DType::Float64);
     std::string shader = is_f64 ? "gru_cell_backward_f64" : "gru_cell_backward";
@@ -14397,6 +14435,12 @@ auto VulkanBackend::dispatchFusedSGDStep(std::span<const Tensor> inputs,
     float dampening = static_cast<float>(attrs.get_float(AttrKey::Dampening, 0.0));
     bool nesterov = attrs.get_bool(AttrKey::Nesterov, false);
 
+    if (inputs[0].dtype() == DType::Float64 || inputs[0].dtype() == DType::BFloat16) {
+        throw std::runtime_error("Vulkan fused SGD step does not support " +
+            std::string(inputs[0].dtype() == DType::Float64 ? "Float64" : "BFloat16") +
+            ". Use CPU backend or cast to Float32.");
+    }
+
     int64_t numel = inputs[0].numel();
     int32_t device_id = inputs[0].device().index;
     bool is_float16 = (inputs[0].dtype() == DType::Float16);
@@ -14482,6 +14526,12 @@ auto VulkanBackend::dispatchFusedAdamStep(std::span<const Tensor> inputs,
     int64_t step = attrs.get_int(AttrKey::Step, 1);
     bool decoupled = attrs.get_bool(AttrKey::Decoupled, false);
     bool amsgrad = attrs.get_bool(AttrKey::Amsgrad, false);
+
+    if (inputs[0].dtype() == DType::Float64 || inputs[0].dtype() == DType::BFloat16) {
+        throw std::runtime_error("Vulkan fused Adam step does not support " +
+            std::string(inputs[0].dtype() == DType::Float64 ? "Float64" : "BFloat16") +
+            ". Use CPU backend or cast to Float32.");
+    }
 
     // Precompute bias corrections on host
     float bias_correction1 = static_cast<float>(1.0 - std::pow(beta1, step));

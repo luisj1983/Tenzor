@@ -75,6 +75,13 @@ set_source_files_properties(
     PROPERTIES LANGUAGE HIP
 )
 
+# Workaround: ROCm clang-22 ICE (segfault in correlated-propagation pass)
+# on rocprim::radix_sort_single_helper template at -O3 -ffast-math.
+# Disable fast-math for sort.hip.cpp to avoid triggering the compiler bug.
+set_source_files_properties(kernels/sort.hip.cpp
+    PROPERTIES COMPILE_FLAGS "-fno-fast-math"
+)
+
 # Create HIP kernels library (static, internal use only)
 add_library(tenzor_rocm_kernels STATIC ${ROCM_HIP_SOURCES})
 

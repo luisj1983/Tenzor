@@ -1,0 +1,105 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Group Normalization — Float64 variant
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer Input { double input_data[]; };
+layout(binding = 1) buffer Output { double output_data[]; };
+layout(binding = 2) buffer Gamma { double gamma_data[]; };
+layout(binding = 3) buffer Beta { double beta_data[]; };
+layout(binding = 4) buffer MeanOut { double mean_out[]; };
+layout(binding = 5) buffer InvStdOut { double inv_std_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint num_channels;
+    uint height;
+    uint width;
+    uint num_groups;
+    float epsilon;
+    uint affine;
+} params;
+
+shared double shared_sum[WORKGROUP_SIZE];
+shared double shared_sum_sq[WORKGROUP_SIZE];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint batch_idx = gl_WorkGroupID.x / params.num_groups;
+    uint group_idx = gl_WorkGroupID.x % params.num_groups;
+
+    if (batch_idx >= params.batch_size) {
+        return;
+    }
+
+    uint channels_per_group = params.num_channels / params.num_groups;
+    uint spatial_size = params.height * params.width;
+    uint group_size = channels_per_group * spatial_size;
+
+    uint group_start = batch_idx * params.num_channels * spatial_size +
+                       group_idx * channels_per_group * spatial_size;
+
+    // Step 1: Compute mean
+    double local_sum = 0.0;
+    for (uint i = tid; i < group_size; i += WORKGROUP_SIZE) {
+        local_sum += input_data[group_start + i];
+    }
+    shared_sum[tid] = local_sum;
+    barrier();
+
+    // Parallel reduction for sum
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_sum[tid] += shared_sum[tid + s];
+        }
+        barrier();
+    }
+
+    double mean = shared_sum[0] / double(group_size);
+    barrier();
+
+    // Step 2: Compute variance
+    double local_sum_sq = 0.0;
+    for (uint i = tid; i < group_size; i += WORKGROUP_SIZE) {
+        double diff = input_data[group_start + i] - mean;
+        local_sum_sq += diff * diff;
+    }
+    shared_sum_sq[tid] = local_sum_sq;
+    barrier();
+
+    // Parallel reduction for sum of squares
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_sum_sq[tid] += shared_sum_sq[tid + s];
+        }
+        barrier();
+    }
+
+    double variance = shared_sum_sq[0] / double(group_size);
+    double inv_std = 1.0 / sqrt(variance + double(params.epsilon));
+    barrier();
+
+    // Write mean and inv_std (one thread per workgroup)
+    if (tid == 0) {
+        uint stats_idx = batch_idx * params.num_groups + group_idx;
+        mean_out[stats_idx] = mean;
+        inv_std_out[stats_idx] = inv_std;
+    }
+
+    // Step 3: Normalize and apply affine transformation
+    for (uint i = tid; i < group_size; i += WORKGROUP_SIZE) {
+        uint idx = group_start + i;
+        double normalized = (input_data[idx] - mean) * inv_std;
+
+        if (params.affine > 0) {
+            // Compute channel index for affine parameters
+            uint local_channel = (i / spatial_size);
+            uint global_channel = group_idx * channels_per_group + local_channel;
+            normalized = normalized * gamma_data[global_channel] + beta_data[global_channel];
+        }
+
+        output_data[idx] = normalized;
+    }
+}

@@ -15,8 +15,18 @@
 #include <algorithm>
 #include <numeric>
 #include <stdexcept>
+#include <limits>
 
 namespace tenzor {
+
+namespace detail {
+inline auto checked_mul(int64_t a, int64_t b) -> int64_t {
+    if (b != 0 && std::abs(a) > std::numeric_limits<int64_t>::max() / std::abs(b)) {
+        throw std::overflow_error("Shape stride/numel computation overflow");
+    }
+    return a * b;
+}
+} // namespace detail
 
 /**
  * @brief Represents the shape (dimensions) of a tensor.
@@ -147,8 +157,11 @@ public:
      * @endcode
      */
     auto numel() const -> size_type {
-        return std::accumulate(dims_.begin(), dims_.end(), size_type{1},
-                             std::multiplies<size_type>{});
+        size_type result = 1;
+        for (auto dim : dims_) {
+            result = detail::checked_mul(result, dim);
+        }
+        return result;
     }
 
     /**
@@ -189,7 +202,7 @@ inline auto compute_strides(std::span<const int64_t> shape) -> std::vector<int64
 
     strides.back() = 1;
     for (int64_t i = static_cast<int64_t>(shape.size()) - 2; i >= 0; --i) {
-        strides[i] = strides[i + 1] * shape[i + 1];
+        strides[i] = detail::checked_mul(strides[i + 1], shape[i + 1]);
     }
     return strides;
 }
@@ -219,7 +232,9 @@ inline auto compute_channels_last_strides(std::span<const int64_t> shape)
     }
     // Shape is [N, C, H, W], compute NHWC strides
     int64_t C = shape[1], H = shape[2], W = shape[3];
-    return {H * W * C, 1, W * C, C};
+    int64_t WC = detail::checked_mul(W, C);
+    int64_t HWC = detail::checked_mul(H, WC);
+    return {HWC, 1, WC, C};
 }
 
 /**
@@ -240,7 +255,10 @@ inline auto compute_channels_last_3d_strides(std::span<const int64_t> shape)
     }
     // Shape is [N, C, D, H, W], compute NDHWC strides
     int64_t C = shape[1], D = shape[2], H = shape[3], W = shape[4];
-    return {D * H * W * C, 1, H * W * C, W * C, C};
+    int64_t WC = detail::checked_mul(W, C);
+    int64_t HWC = detail::checked_mul(H, WC);
+    int64_t DHWC = detail::checked_mul(D, HWC);
+    return {DHWC, 1, HWC, WC, C};
 }
 
 /**
