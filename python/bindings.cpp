@@ -3114,6 +3114,25 @@ PYBIND11_MODULE(tenzor_core, m) {
              "Register a child module")
 
         // ====================================================================
+        // Individual parameter/buffer access and unregistration
+        // ====================================================================
+        .def("get_parameter", &tenzor::nn::Module::get_parameter,
+             py::arg("name"),
+             "Get a single parameter by name")
+        .def("get_buffer", &tenzor::nn::Module::get_buffer,
+             py::arg("name"),
+             "Get a single buffer by name")
+        .def("unregister_parameter", &tenzor::nn::Module::unregister_parameter,
+             py::arg("name"),
+             "Remove a registered parameter by name")
+        .def("unregister_buffer", &tenzor::nn::Module::unregister_buffer,
+             py::arg("name"),
+             "Remove a registered buffer by name")
+        .def("unregister_module", &tenzor::nn::Module::unregister_module,
+             py::arg("name"),
+             "Remove a registered submodule by name")
+
+        // ====================================================================
         // Training mode
         // ====================================================================
         .def("train", &tenzor::nn::Module::train,

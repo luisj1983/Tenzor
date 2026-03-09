@@ -443,6 +443,13 @@ public:
                              const Tensor& h0, const Tensor& c0) -> std::vector<Tensor>;
     auto dispatchGRUForward(const Tensor& input, const Tensor& W_ih, const Tensor& W_hh,
                             const Tensor& bias, const Tensor& h0) -> std::vector<Tensor>;
+    auto dispatchLSTMCellBackward(const Tensor& grad_h, const Tensor& grad_c_next,
+                                  const Tensor& gates, const Tensor& c_prev,
+                                  const Tensor& c_out,
+                                  int64_t batch_size, int64_t hidden_size) -> std::vector<Tensor>;
+    auto dispatchGRUCellBackward(const Tensor& grad_h, const Tensor& gates_x,
+                                 const Tensor& gates_h, const Tensor& h_prev,
+                                 int64_t batch_size, int64_t hidden_size) -> std::vector<Tensor>;
     auto dispatchLSTMMultiLayerForward(const Tensor& input,
                                        const std::vector<Tensor>& W_ih_list,
                                        const std::vector<Tensor>& W_hh_list,

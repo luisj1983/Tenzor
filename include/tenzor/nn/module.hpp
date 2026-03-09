@@ -210,6 +210,48 @@ public:
     auto named_buffers() -> std::vector<std::pair<std::string, std::shared_ptr<Variable>>>;
 
     /**
+     * @brief Get a single parameter by name.
+     *
+     * @param name Parameter name (e.g. "weight", "bias")
+     * @return Shared pointer to the parameter Variable
+     * @throws std::out_of_range if parameter not found
+     */
+    auto get_parameter(const std::string& name) const -> std::shared_ptr<Variable>;
+
+    /**
+     * @brief Get a single buffer by name.
+     *
+     * @param name Buffer name (e.g. "running_mean", "running_var")
+     * @return Shared pointer to the buffer Variable
+     * @throws std::out_of_range if buffer not found
+     */
+    auto get_buffer(const std::string& name) const -> std::shared_ptr<Variable>;
+
+    /**
+     * @brief Unregister a parameter by name.
+     *
+     * @param name Parameter name to remove
+     * @throws std::out_of_range if parameter not found
+     */
+    auto unregister_parameter(const std::string& name) -> void;
+
+    /**
+     * @brief Unregister a buffer by name.
+     *
+     * @param name Buffer name to remove
+     * @throws std::out_of_range if buffer not found
+     */
+    auto unregister_buffer(const std::string& name) -> void;
+
+    /**
+     * @brief Unregister a submodule by name.
+     *
+     * @param name Submodule name to remove
+     * @throws std::out_of_range if submodule not found
+     */
+    auto unregister_module(const std::string& name) -> void;
+
+    /**
      * @brief Get all direct submodules.
      *
      * @return Map of (name -> submodule) pairs

@@ -868,19 +868,26 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
 
             // For row-major: result[m] = vector[n] × matrix[n, m]
             // In oneMKL column-major: C^T[m] = B^T[m, n] × A^T[n]
-            ::oneapi::mkl::blas::column_major::gemm(
-                queue,
-                ::oneapi::mkl::transpose::nontrans,
-                ::oneapi::mkl::transpose::nontrans,
-                m,        // rows of result
-                1,        // cols of result (single vector)
-                n,        // inner dimension
-                alpha,
-                b_ptr, m, // B matrix
-                a_ptr, n, // A vector
-                beta,
-                out_ptr, m // output
-            );
+            try {
+                ::oneapi::mkl::blas::column_major::gemm(
+                    queue,
+                    ::oneapi::mkl::transpose::nontrans,
+                    ::oneapi::mkl::transpose::nontrans,
+                    m,        // rows of result
+                    1,        // cols of result (single vector)
+                    n,        // inner dimension
+                    alpha,
+                    b_ptr, m, // B matrix
+                    a_ptr, n, // A vector
+                    beta,
+                    out_ptr, m // output
+                );
+                queue.wait_and_throw();
+            } catch (const ::oneapi::mkl::exception& e) {
+                throw std::runtime_error(std::string("oneMKL GEMM (F32 vec) failed: ") + e.what());
+            } catch (const sycl::exception& e) {
+                throw std::runtime_error(std::string("SYCL error in GEMM (F32 vec): ") + e.what());
+            }
         }
         else if (a_cont.dtype() == DType::Float64) {
             const double* a_ptr = get_data_ptr<const double>(a_cont);
@@ -890,17 +897,24 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
             const double alpha = 1.0;
             const double beta = 0.0;
 
-            ::oneapi::mkl::blas::column_major::gemm(
-                queue,
-                ::oneapi::mkl::transpose::nontrans,
-                ::oneapi::mkl::transpose::nontrans,
-                m, 1, n,
-                alpha,
-                b_ptr, m,
-                a_ptr, n,
-                beta,
-                out_ptr, m
-            );
+            try {
+                ::oneapi::mkl::blas::column_major::gemm(
+                    queue,
+                    ::oneapi::mkl::transpose::nontrans,
+                    ::oneapi::mkl::transpose::nontrans,
+                    m, 1, n,
+                    alpha,
+                    b_ptr, m,
+                    a_ptr, n,
+                    beta,
+                    out_ptr, m
+                );
+                queue.wait_and_throw();
+            } catch (const ::oneapi::mkl::exception& e) {
+                throw std::runtime_error(std::string("oneMKL GEMM (F64 vec) failed: ") + e.what());
+            } catch (const sycl::exception& e) {
+                throw std::runtime_error(std::string("SYCL error in GEMM (F64 vec): ") + e.what());
+            }
         }
         else if (a_cont.dtype() == DType::BFloat16) {
             const uint16_t* a_ptr = get_data_ptr<const uint16_t>(a_cont);

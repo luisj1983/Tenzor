@@ -362,7 +362,8 @@ VkCommandBuffer VulkanBackend::getOrCreateBatchCommandBuffer(int32_t device_id) 
         ctx.activeCommandBuffer = ctx.frameCommandBuffers[ctx.currentFrame];
 
         // Reset and begin the command buffer
-        vkResetCommandBuffer(ctx.activeCommandBuffer, 0);
+        vulkan::checkVk(vkResetCommandBuffer(ctx.activeCommandBuffer, 0),
+                        "Failed to reset batch command buffer");
 
         VkCommandBufferBeginInfo beginInfo{};
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;

@@ -29,6 +29,11 @@
 #include <vector>
 #include <string>
 #include <cmath>
+#include <mutex>
+#include <memory>
+#include <list>
+#include <unordered_map>
+#include <functional>
 
 namespace tenzor {
 namespace rocm {
@@ -63,19 +68,126 @@ namespace {
 // RAII wrappers for rocFFT objects
 // ============================================================================
 
-struct RocFFTPlan {
+/// RAII wrapper for a raw rocfft_plan handle.  Used both standalone (for
+/// one-shot plans) and inside std::shared_ptr (for cached plans).
+struct RocFFTPlanHandle {
     rocfft_plan handle = nullptr;
 
-    RocFFTPlan() = default;
-    ~RocFFTPlan() { if (handle) rocfft_plan_destroy(handle); }
+    RocFFTPlanHandle() = default;
+    explicit RocFFTPlanHandle(rocfft_plan h) : handle(h) {}
+    ~RocFFTPlanHandle() { if (handle) rocfft_plan_destroy(handle); }
 
-    RocFFTPlan(const RocFFTPlan&) = delete;
-    RocFFTPlan& operator=(const RocFFTPlan&) = delete;
+    RocFFTPlanHandle(const RocFFTPlanHandle&) = delete;
+    RocFFTPlanHandle& operator=(const RocFFTPlanHandle&) = delete;
 
-    RocFFTPlan(RocFFTPlan&& other) noexcept : handle(other.handle) {
+    RocFFTPlanHandle(RocFFTPlanHandle&& other) noexcept : handle(other.handle) {
         other.handle = nullptr;
     }
 };
+
+// ============================================================================
+// FFT Plan Cache — mutex-protected global LRU, max 32 entries
+// ============================================================================
+
+/// Transform categories for the cache key.
+enum class FFTTransformKind : uint8_t {
+    C2C_Forward,
+    C2C_Inverse,
+    R2C,
+    C2R,
+};
+
+/// Cache key that uniquely identifies a rocFFT plan configuration.
+struct PlanKey {
+    FFTTransformKind kind;
+    rocfft_precision precision;
+    std::vector<size_t> lengths;
+    size_t batch;
+    // Stride / dist info (needed because identical lengths + batch can have
+    // different memory layouts).
+    std::vector<size_t> in_strides;
+    size_t in_dist;
+    std::vector<size_t> out_strides;
+    size_t out_dist;
+    rocfft_result_placement placement;
+
+    bool operator==(const PlanKey& o) const {
+        return kind == o.kind && precision == o.precision &&
+               lengths == o.lengths && batch == o.batch &&
+               in_strides == o.in_strides && in_dist == o.in_dist &&
+               out_strides == o.out_strides && out_dist == o.out_dist &&
+               placement == o.placement;
+    }
+};
+
+struct PlanKeyHash {
+    size_t operator()(const PlanKey& k) const {
+        // FNV-1a style hash combining
+        size_t h = 14695981039346656037ULL;
+        auto mix = [&](size_t v) {
+            h ^= v;
+            h *= 1099511628211ULL;
+        };
+        mix(static_cast<size_t>(k.kind));
+        mix(static_cast<size_t>(k.precision));
+        mix(k.batch);
+        mix(k.in_dist);
+        mix(k.out_dist);
+        mix(static_cast<size_t>(k.placement));
+        for (auto v : k.lengths) mix(v);
+        for (auto v : k.in_strides) mix(v);
+        for (auto v : k.out_strides) mix(v);
+        return h;
+    }
+};
+
+class PlanCache {
+public:
+    static constexpr size_t kMaxEntries = 32;
+
+    /// Return a cached plan or create one via \p create_fn.
+    std::shared_ptr<RocFFTPlanHandle>
+    get_or_create(const PlanKey& key,
+                  const std::function<rocfft_plan()>& create_fn) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        auto it = map_.find(key);
+        if (it != map_.end()) {
+            // Move to front of LRU list (most recently used).
+            lru_.splice(lru_.begin(), lru_, it->second.lru_it);
+            return it->second.plan;
+        }
+
+        // Evict LRU entry if at capacity.
+        if (map_.size() >= kMaxEntries) {
+            const PlanKey& evict_key = lru_.back();
+            map_.erase(evict_key);
+            lru_.pop_back();
+        }
+
+        // Create the plan and insert.
+        rocfft_plan raw = create_fn();
+        auto sp = std::make_shared<RocFFTPlanHandle>(raw);
+        lru_.push_front(key);
+        map_[key] = CacheEntry{sp, lru_.begin()};
+        return sp;
+    }
+
+private:
+    struct CacheEntry {
+        std::shared_ptr<RocFFTPlanHandle> plan;
+        std::list<PlanKey>::iterator lru_it;
+    };
+
+    std::mutex mutex_;
+    std::unordered_map<PlanKey, CacheEntry, PlanKeyHash> map_;
+    std::list<PlanKey> lru_;  // front = most recently used
+};
+
+PlanCache& get_plan_cache() {
+    static PlanCache cache;
+    return cache;
+}
 
 struct RocFFTDescription {
     rocfft_plan_description handle = nullptr;
@@ -180,37 +292,45 @@ void apply_normalization_real(Tensor& output, double scale, bool is_float32, hip
     HIP_CHECK(hipGetLastError());
 }
 
-/// Create a rocFFT plan for complex-to-complex transforms.
-/// @param rank Number of FFT dimensions (1, 2, or N).
-/// @param lengths Array of FFT sizes for each dimension.
-/// @param batch Number of batches.
-/// @param is_forward True for forward, false for inverse.
-/// @param is_float32 True for single precision, false for double.
-/// @param stride Stride between elements along FFT dim.
-/// @param dist Distance between batches.
-rocfft_plan create_c2c_plan(int rank, const size_t* lengths, size_t batch,
-                            bool is_forward, bool is_float32,
-                            const size_t* in_strides, size_t in_dist,
-                            const size_t* out_strides, size_t out_dist) {
+/// Create (or fetch from cache) a rocFFT plan for complex-to-complex transforms.
+/// Returns a shared_ptr to a cached RocFFTPlanHandle.
+std::shared_ptr<RocFFTPlanHandle>
+create_c2c_plan(int rank, const size_t* lengths, size_t batch,
+                bool is_forward, bool is_float32,
+                const size_t* in_strides, size_t in_dist,
+                const size_t* out_strides, size_t out_dist) {
     auto transform_type = is_forward ? rocfft_transform_type_complex_forward
                                      : rocfft_transform_type_complex_inverse;
     auto precision = is_float32 ? rocfft_precision_single : rocfft_precision_double;
 
-    RocFFTDescription desc;
-    ROCFFT_CHECK(rocfft_plan_description_set_data_layout(
-        desc.handle,
-        rocfft_array_type_complex_interleaved,   // input layout
-        rocfft_array_type_complex_interleaved,   // output layout
-        nullptr, nullptr,                         // offsets (unused)
-        static_cast<size_t>(rank), in_strides, in_dist,
-        static_cast<size_t>(rank), out_strides, out_dist));
+    PlanKey key;
+    key.kind = is_forward ? FFTTransformKind::C2C_Forward : FFTTransformKind::C2C_Inverse;
+    key.precision = precision;
+    key.lengths.assign(lengths, lengths + rank);
+    key.batch = batch;
+    key.in_strides.assign(in_strides, in_strides + rank);
+    key.in_dist = in_dist;
+    key.out_strides.assign(out_strides, out_strides + rank);
+    key.out_dist = out_dist;
+    key.placement = rocfft_placement_inplace;
 
-    rocfft_plan plan = nullptr;
-    ROCFFT_CHECK(rocfft_plan_create(&plan, rocfft_placement_inplace,
-                                    transform_type, precision,
-                                    static_cast<size_t>(rank), lengths, batch,
-                                    desc.handle));
-    return plan;
+    return get_plan_cache().get_or_create(key, [&]() -> rocfft_plan {
+        RocFFTDescription desc;
+        ROCFFT_CHECK(rocfft_plan_description_set_data_layout(
+            desc.handle,
+            rocfft_array_type_complex_interleaved,
+            rocfft_array_type_complex_interleaved,
+            nullptr, nullptr,
+            static_cast<size_t>(rank), in_strides, in_dist,
+            static_cast<size_t>(rank), out_strides, out_dist));
+
+        rocfft_plan plan = nullptr;
+        ROCFFT_CHECK(rocfft_plan_create(&plan, rocfft_placement_inplace,
+                                        transform_type, precision,
+                                        static_cast<size_t>(rank), lengths, batch,
+                                        desc.handle));
+        return plan;
+    });
 }
 
 /// Copy input data into output buffer with optional padding/truncation along dim.
@@ -338,15 +458,13 @@ auto rocm_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
         odist = 1;
     }
 
-    // Create plan
-    rocfft_plan plan = create_c2c_plan(1, lengths, static_cast<size_t>(batch),
+    // Create or fetch cached plan
+    auto cached_plan = create_c2c_plan(1, lengths, static_cast<size_t>(batch),
                                        /*is_forward=*/true, is_float32,
                                        istride, idist, ostride, odist);
-    RocFFTPlan plan_guard;
-    plan_guard.handle = plan;
 
     // Execute in-place
-    execute_plan(plan, output.data_ptr(), output.data_ptr(), stream);
+    execute_plan(cached_plan->handle, output.data_ptr(), output.data_ptr(), stream);
 
     // Apply normalization
     double scale = get_norm_factor(N_out, norm, /*is_forward=*/true);
@@ -403,13 +521,11 @@ auto rocm_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
         odist = 1;
     }
 
-    rocfft_plan plan = create_c2c_plan(1, lengths, static_cast<size_t>(batch),
+    auto cached_plan = create_c2c_plan(1, lengths, static_cast<size_t>(batch),
                                        /*is_forward=*/false, is_float32,
                                        istride, idist, ostride, odist);
-    RocFFTPlan plan_guard;
-    plan_guard.handle = plan;
 
-    execute_plan(plan, output.data_ptr(), output.data_ptr(), stream);
+    execute_plan(cached_plan->handle, output.data_ptr(), output.data_ptr(), stream);
 
     double scale = get_norm_factor(N_out, norm, /*is_forward=*/false);
     apply_normalization_complex(output, scale, is_float32, stream);
@@ -483,7 +599,6 @@ auto rocm_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
     size_t lengths[1] = { static_cast<size_t>(n) };
 
     // For R2C, use default strides (contiguous last-dim)
-    RocFFTDescription desc;
     // Input: real, contiguous along last dim, batch stride = n
     size_t in_strides[1] = { 1 };
     size_t in_dist = static_cast<size_t>(n);
@@ -491,24 +606,38 @@ auto rocm_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
     size_t out_strides[1] = { 1 };
     size_t out_dist = static_cast<size_t>(N_out_complex);
 
-    ROCFFT_CHECK(rocfft_plan_description_set_data_layout(
-        desc.handle,
-        rocfft_array_type_real,
-        rocfft_array_type_complex_interleaved,
-        nullptr, nullptr,
-        1, in_strides, in_dist,
-        1, out_strides, out_dist));
+    // Build cache key for R2C plan
+    PlanKey r2c_key;
+    r2c_key.kind = FFTTransformKind::R2C;
+    r2c_key.precision = precision;
+    r2c_key.lengths.assign(lengths, lengths + 1);
+    r2c_key.batch = static_cast<size_t>(batch);
+    r2c_key.in_strides.assign(in_strides, in_strides + 1);
+    r2c_key.in_dist = in_dist;
+    r2c_key.out_strides.assign(out_strides, out_strides + 1);
+    r2c_key.out_dist = out_dist;
+    r2c_key.placement = rocfft_placement_notinplace;
 
-    rocfft_plan plan = nullptr;
-    ROCFFT_CHECK(rocfft_plan_create(&plan, rocfft_placement_notinplace,
-                                    rocfft_transform_type_real_forward,
-                                    precision, 1, lengths,
-                                    static_cast<size_t>(batch), desc.handle));
-    RocFFTPlan plan_guard;
-    plan_guard.handle = plan;
+    auto cached_plan = get_plan_cache().get_or_create(r2c_key, [&]() -> rocfft_plan {
+        RocFFTDescription desc;
+        ROCFFT_CHECK(rocfft_plan_description_set_data_layout(
+            desc.handle,
+            rocfft_array_type_real,
+            rocfft_array_type_complex_interleaved,
+            nullptr, nullptr,
+            1, in_strides, in_dist,
+            1, out_strides, out_dist));
+
+        rocfft_plan plan = nullptr;
+        ROCFFT_CHECK(rocfft_plan_create(&plan, rocfft_placement_notinplace,
+                                        rocfft_transform_type_real_forward,
+                                        precision, 1, lengths,
+                                        static_cast<size_t>(batch), desc.handle));
+        return plan;
+    });
 
     // Execute out-of-place R2C
-    execute_plan(plan, real_buf.data_ptr(), output.data_ptr(), stream);
+    execute_plan(cached_plan->handle, real_buf.data_ptr(), output.data_ptr(), stream);
 
     // Apply normalization
     double scale = get_norm_factor(n, norm, /*is_forward=*/true);
@@ -583,7 +712,6 @@ auto rocm_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
     auto precision = is_float32 ? rocfft_precision_single : rocfft_precision_double;
     size_t lengths[1] = { static_cast<size_t>(n) };
 
-    RocFFTDescription desc;
     // Input: complex interleaved, batch stride = n/2+1
     size_t in_strides[1] = { 1 };
     size_t in_dist = static_cast<size_t>(expected_complex);
@@ -591,24 +719,38 @@ auto rocm_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
     size_t out_strides[1] = { 1 };
     size_t out_dist = static_cast<size_t>(n);
 
-    ROCFFT_CHECK(rocfft_plan_description_set_data_layout(
-        desc.handle,
-        rocfft_array_type_complex_interleaved,
-        rocfft_array_type_real,
-        nullptr, nullptr,
-        1, in_strides, in_dist,
-        1, out_strides, out_dist));
+    // Build cache key for C2R plan
+    PlanKey c2r_key;
+    c2r_key.kind = FFTTransformKind::C2R;
+    c2r_key.precision = precision;
+    c2r_key.lengths.assign(lengths, lengths + 1);
+    c2r_key.batch = static_cast<size_t>(batch);
+    c2r_key.in_strides.assign(in_strides, in_strides + 1);
+    c2r_key.in_dist = in_dist;
+    c2r_key.out_strides.assign(out_strides, out_strides + 1);
+    c2r_key.out_dist = out_dist;
+    c2r_key.placement = rocfft_placement_notinplace;
 
-    rocfft_plan plan = nullptr;
-    ROCFFT_CHECK(rocfft_plan_create(&plan, rocfft_placement_notinplace,
-                                    rocfft_transform_type_real_inverse,
-                                    precision, 1, lengths,
-                                    static_cast<size_t>(batch), desc.handle));
-    RocFFTPlan plan_guard;
-    plan_guard.handle = plan;
+    auto cached_plan = get_plan_cache().get_or_create(c2r_key, [&]() -> rocfft_plan {
+        RocFFTDescription desc;
+        ROCFFT_CHECK(rocfft_plan_description_set_data_layout(
+            desc.handle,
+            rocfft_array_type_complex_interleaved,
+            rocfft_array_type_real,
+            nullptr, nullptr,
+            1, in_strides, in_dist,
+            1, out_strides, out_dist));
+
+        rocfft_plan plan = nullptr;
+        ROCFFT_CHECK(rocfft_plan_create(&plan, rocfft_placement_notinplace,
+                                        rocfft_transform_type_real_inverse,
+                                        precision, 1, lengths,
+                                        static_cast<size_t>(batch), desc.handle));
+        return plan;
+    });
 
     // Execute out-of-place C2R
-    execute_plan(plan, complex_buf.data_ptr(), output.data_ptr(), stream);
+    execute_plan(cached_plan->handle, complex_buf.data_ptr(), output.data_ptr(), stream);
 
     // Apply normalization
     double scale = get_norm_factor(n, norm, /*is_forward=*/false);
@@ -688,13 +830,11 @@ auto rocm_fft2_kernel(const Tensor& input, const std::vector<int64_t>& dims,
     size_t istride[2] = { static_cast<size_t>(N1), 1 };
     size_t ostride[2] = { static_cast<size_t>(N1), 1 };
 
-    rocfft_plan plan = create_c2c_plan(2, lengths, static_cast<size_t>(batch),
+    auto cached_plan = create_c2c_plan(2, lengths, static_cast<size_t>(batch),
                                        /*is_forward=*/true, is_float32,
                                        istride, fft_size, ostride, fft_size);
-    RocFFTPlan plan_guard;
-    plan_guard.handle = plan;
 
-    execute_plan(plan, output.data_ptr(), output.data_ptr(), stream);
+    execute_plan(cached_plan->handle, output.data_ptr(), output.data_ptr(), stream);
 
     double scale = get_norm_factor_nd(n_vec, norm, /*is_forward=*/true);
     apply_normalization_complex(output, scale, is_float32, stream);
@@ -768,13 +908,11 @@ auto rocm_ifft2_kernel(const Tensor& input, const std::vector<int64_t>& dims,
     size_t istride[2] = { static_cast<size_t>(N1), 1 };
     size_t ostride[2] = { static_cast<size_t>(N1), 1 };
 
-    rocfft_plan plan = create_c2c_plan(2, lengths, static_cast<size_t>(batch),
+    auto cached_plan = create_c2c_plan(2, lengths, static_cast<size_t>(batch),
                                        /*is_forward=*/false, is_float32,
                                        istride, fft_size, ostride, fft_size);
-    RocFFTPlan plan_guard;
-    plan_guard.handle = plan;
 
-    execute_plan(plan, output.data_ptr(), output.data_ptr(), stream);
+    execute_plan(cached_plan->handle, output.data_ptr(), output.data_ptr(), stream);
 
     double scale = get_norm_factor_nd(n_vec, norm, /*is_forward=*/false);
     apply_normalization_complex(output, scale, is_float32, stream);
@@ -876,14 +1014,12 @@ auto rocm_fftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
     }
     size_t dist = static_cast<size_t>(out_fft_size);
 
-    rocfft_plan plan = create_c2c_plan(static_cast<int>(rank), lengths.data(),
+    auto cached_plan = create_c2c_plan(static_cast<int>(rank), lengths.data(),
                                        static_cast<size_t>(batch),
                                        /*is_forward=*/true, is_float32,
                                        strides.data(), dist, strides.data(), dist);
-    RocFFTPlan plan_guard;
-    plan_guard.handle = plan;
 
-    execute_plan(plan, output.data_ptr(), output.data_ptr(), stream);
+    execute_plan(cached_plan->handle, output.data_ptr(), output.data_ptr(), stream);
 
     double scale = get_norm_factor_nd(n_vec, norm, /*is_forward=*/true);
     apply_normalization_complex(output, scale, is_float32, stream);
@@ -978,14 +1114,12 @@ auto rocm_ifftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
     }
     size_t dist = static_cast<size_t>(out_fft_size);
 
-    rocfft_plan plan = create_c2c_plan(static_cast<int>(rank), lengths.data(),
+    auto cached_plan = create_c2c_plan(static_cast<int>(rank), lengths.data(),
                                        static_cast<size_t>(batch),
                                        /*is_forward=*/false, is_float32,
                                        strides.data(), dist, strides.data(), dist);
-    RocFFTPlan plan_guard;
-    plan_guard.handle = plan;
 
-    execute_plan(plan, output.data_ptr(), output.data_ptr(), stream);
+    execute_plan(cached_plan->handle, output.data_ptr(), output.data_ptr(), stream);
 
     double scale = get_norm_factor_nd(n_vec, norm, /*is_forward=*/false);
     apply_normalization_complex(output, scale, is_float32, stream);

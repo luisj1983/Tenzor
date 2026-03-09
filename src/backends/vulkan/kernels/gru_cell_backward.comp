@@ -1,0 +1,93 @@
+#version 450
+
+// GRU Cell backward compute shader — computes gradients for one timestep
+// Recomputes forward activations from saved pre-activation gates, then
+// backpropagates through the GRU equations:
+//   r = sigmoid(gates_x[0:H] + gates_h[0:H])
+//   z = sigmoid(gates_x[H:2H] + gates_h[H:2H])
+//   n = tanh(gates_x[2H:3H] + r * gates_h[2H:3H])
+//   h_out = (1 - z) * n + z * h_prev
+//
+// Inputs:
+//   binding 0: grad_h — gradient from next layer [batch, hidden]
+//   binding 1: gates_x — pre-activation input gates [batch, 3*hidden]
+//   binding 2: gates_h — pre-activation hidden gates [batch, 3*hidden]
+//   binding 3: h_prev — previous hidden state [batch, hidden]
+// Outputs:
+//   binding 4: grad_gates_x — gradient w.r.t. gates_x [batch, 3*hidden]
+//   binding 5: grad_gates_h — gradient w.r.t. gates_h [batch, 3*hidden]
+//   binding 6: grad_h_prev — gradient w.r.t. h_prev [batch, hidden]
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradH     { float grad_h[]; };
+layout(binding = 1) buffer GatesX    { float gates_x[]; };
+layout(binding = 2) buffer GatesH    { float gates_h[]; };
+layout(binding = 3) buffer HPrev     { float h_prev[]; };
+layout(binding = 4) buffer GradGX    { float grad_gates_x[]; };
+layout(binding = 5) buffer GradGH    { float grad_gates_h[]; };
+layout(binding = 6) buffer GradHPrev { float grad_h_prev[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint hidden_size;
+} params;
+
+float sigmoid(float x) {
+    return 1.0 / (1.0 + exp(-x));
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = params.batch_size * params.hidden_size;
+
+    if (idx >= total) return;
+
+    uint b = idx / params.hidden_size;
+    uint h = idx % params.hidden_size;
+
+    uint H = params.hidden_size;
+    uint gate_base = b * (3 * H);
+
+    // Indices into the gate arrays
+    uint r_idx = gate_base + h;
+    uint z_idx = gate_base + H + h;
+    uint n_idx = gate_base + 2 * H + h;
+
+    // ---- Recompute forward activations ----
+    float r = sigmoid(gates_x[r_idx] + gates_h[r_idx]);
+    float z = sigmoid(gates_x[z_idx] + gates_h[z_idx]);
+    float gh_n = gates_h[n_idx];
+    float n_combined = gates_x[n_idx] + r * gh_n;
+    float n = tanh(n_combined);
+
+    // ---- Backward through h_out = (1 - z) * n + z * h_prev ----
+    float dh = grad_h[idx];
+    float dn = dh * (1.0 - z);
+    float dz = dh * (h_prev[idx] - n);
+    float dh_p = dh * z;
+
+    // ---- Backward through tanh: n = tanh(n_combined) ----
+    float dn_comb = dn * (1.0 - n * n);
+
+    // ---- Backward through n_combined = gx_n + r * gh_n ----
+    float d_gx_n = dn_comb;
+    float d_gh_n = dn_comb * r;
+    float dr = dn_comb * gh_n;
+
+    // ---- Backward through sigmoid gates ----
+    float dz_raw = dz * z * (1.0 - z);
+    float dr_raw = dr * r * (1.0 - r);
+
+    // ---- Write grad_gates_x: [dr_raw, dz_raw, d_gx_n] ----
+    grad_gates_x[r_idx] = dr_raw;
+    grad_gates_x[z_idx] = dz_raw;
+    grad_gates_x[n_idx] = d_gx_n;
+
+    // ---- Write grad_gates_h: [dr_raw, dz_raw, d_gh_n] ----
+    grad_gates_h[r_idx] = dr_raw;
+    grad_gates_h[z_idx] = dz_raw;
+    grad_gates_h[n_idx] = d_gh_n;
+
+    // ---- Write grad_h_prev ----
+    grad_h_prev[idx] = dh_p;
+}

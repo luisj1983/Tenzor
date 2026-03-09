@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.15)
 
 # Find Vulkan SDK
-find_package(Vulkan REQUIRED)
+find_package(Vulkan)
 
 if(NOT Vulkan_FOUND)
     message(WARNING "Vulkan SDK not found. Vulkan backend will not be built.")

@@ -5,8 +5,12 @@
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
+#ifdef TENZOR_USE_MKL
 #include <mkl.h>
 #include <mkl_lapacke.h>
+#elif defined(TENZOR_USE_LAPACKE)
+#include <lapacke.h>
+#endif
 #include <stdexcept>
 #include <cstring>
 #include <cmath>
@@ -50,6 +54,14 @@ bool try_gpu_dispatch_multi(OpId op, std::span<const Tensor> inputs,
 bool needs_upcast(DType dt) {
     return dt == DType::Float16 || dt == DType::BFloat16;
 }
+
+#if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
+[[noreturn]] void throw_no_lapack(const char* fn) {
+    throw std::runtime_error(
+        std::string("linalg::") + fn + ": requires MKL or LAPACKE. "
+        "Build with TENZOR_USE_MKL or install liblapacke-dev.");
+}
+#endif
 
 // Ensure tensor is contiguous Float32 or Float64 on CPU, return a working copy.
 // Float16 and BFloat16 inputs are upcast to Float32.
@@ -110,7 +122,9 @@ auto det(const Tensor& A) -> Tensor {
         std::array<Tensor, 1> inputs = {A};
         if (try_gpu_dispatch(OpId::LinalgDet, inputs, {}, result)) return result;
     }
-
+#if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
+    throw_no_lapack("det");
+#else
     auto original_dtype = A.dtype();
     auto work = prepare_matrix(A);
     auto [n, ndim] = check_square(work);
@@ -169,6 +183,7 @@ auto det(const Tensor& A) -> Tensor {
     }
 
     return maybe_downcast(result, original_dtype);
+#endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 
 auto inv(const Tensor& A) -> Tensor {
@@ -179,6 +194,9 @@ auto inv(const Tensor& A) -> Tensor {
         if (try_gpu_dispatch(OpId::LinalgInv, inputs, {}, result)) return result;
     }
 
+#if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
+    throw_no_lapack("inv");
+#else
     auto original_dtype = A.dtype();
     auto work = prepare_matrix(A);
     auto [n, ndim] = check_square(work);
@@ -215,6 +233,7 @@ auto inv(const Tensor& A) -> Tensor {
     }
 
     return maybe_downcast(work, original_dtype);
+#endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 
 auto solve(const Tensor& A, const Tensor& B) -> Tensor {
@@ -225,6 +244,9 @@ auto solve(const Tensor& A, const Tensor& B) -> Tensor {
         if (try_gpu_dispatch(OpId::LinalgSolve, inputs, {}, result)) return result;
     }
 
+#if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
+    throw_no_lapack("solve");
+#else
     auto original_dtype = A.dtype();
     auto work_a = prepare_matrix(A);
     auto work_b = prepare_matrix(B);
@@ -270,6 +292,7 @@ auto solve(const Tensor& A, const Tensor& B) -> Tensor {
     }
 
     return maybe_downcast(work_b, original_dtype);
+#endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 
 auto cholesky(const Tensor& A, bool upper) -> Tensor {
@@ -282,6 +305,9 @@ auto cholesky(const Tensor& A, bool upper) -> Tensor {
         if (try_gpu_dispatch(OpId::LinalgCholesky, inputs, attrs, result)) return result;
     }
 
+#if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
+    throw_no_lapack("cholesky");
+#else
     auto original_dtype = A.dtype();
     auto work = prepare_matrix(A);
     auto [n, ndim] = check_square(work);
@@ -329,6 +355,7 @@ auto cholesky(const Tensor& A, bool upper) -> Tensor {
     }
 
     return maybe_downcast(work, original_dtype);
+#endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 
 auto norm(const Tensor& A, const std::string& ord) -> Tensor {
@@ -348,6 +375,9 @@ auto norm(const Tensor& A, const std::string& ord) -> Tensor {
 }
 
 auto slogdet(const Tensor& A) -> std::tuple<Tensor, Tensor> {
+#if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
+    throw_no_lapack("slogdet");
+#else
     auto original_dtype = A.dtype();
     auto work = prepare_matrix(A);
     auto [n, ndim] = check_square(work);
@@ -431,6 +461,7 @@ auto slogdet(const Tensor& A) -> std::tuple<Tensor, Tensor> {
 
     return {maybe_downcast(sign_result, original_dtype),
             maybe_downcast(logabsdet_result, original_dtype)};
+#endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 
 auto svd(const Tensor& A, bool full_matrices) -> std::tuple<Tensor, Tensor, Tensor> {
@@ -445,6 +476,9 @@ auto svd(const Tensor& A, bool full_matrices) -> std::tuple<Tensor, Tensor, Tens
         }
     }
 
+#if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
+    throw_no_lapack("svd");
+#else
     auto original_dtype = A.dtype();
     auto work = prepare_matrix(A);
     auto shape = A.shape();
@@ -538,6 +572,7 @@ auto svd(const Tensor& A, bool full_matrices) -> std::tuple<Tensor, Tensor, Tens
     return {maybe_downcast(U, original_dtype),
             maybe_downcast(S, original_dtype),
             maybe_downcast(Vt, original_dtype)};
+#endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 
 auto qr(const Tensor& A) -> std::tuple<Tensor, Tensor> {
@@ -550,6 +585,9 @@ auto qr(const Tensor& A) -> std::tuple<Tensor, Tensor> {
         }
     }
 
+#if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
+    throw_no_lapack("qr");
+#else
     auto original_dtype = A.dtype();
     auto work = prepare_matrix(A);
     auto shape = A.shape();
@@ -646,6 +684,7 @@ auto qr(const Tensor& A) -> std::tuple<Tensor, Tensor> {
     }
 
     return {maybe_downcast(Q, original_dtype), maybe_downcast(R, original_dtype)};
+#endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 
 auto eigh(const Tensor& A) -> std::tuple<Tensor, Tensor> {
@@ -658,6 +697,9 @@ auto eigh(const Tensor& A) -> std::tuple<Tensor, Tensor> {
         }
     }
 
+#if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
+    throw_no_lapack("eigh");
+#else
     auto original_dtype = A.dtype();
     auto work = prepare_matrix(A);
     auto [n, ndim] = check_square(work);
@@ -702,6 +744,7 @@ auto eigh(const Tensor& A) -> std::tuple<Tensor, Tensor> {
 
     // work now contains eigenvectors (columns of orthogonal matrix)
     return {maybe_downcast(W, original_dtype), maybe_downcast(work, original_dtype)};
+#endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 
 auto eigvalsh(const Tensor& A) -> Tensor {
@@ -714,6 +757,9 @@ auto eigvalsh(const Tensor& A) -> Tensor {
         }
     }
 
+#if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
+    throw_no_lapack("eigvalsh");
+#else
     auto original_dtype = A.dtype();
     auto work = prepare_matrix(A);
     auto [n, ndim] = check_square(work);
@@ -754,6 +800,7 @@ auto eigvalsh(const Tensor& A) -> Tensor {
     }
 
     return maybe_downcast(W, original_dtype);
+#endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 
 auto eig(const Tensor& A) -> std::tuple<Tensor, Tensor, Tensor> {
@@ -766,6 +813,9 @@ auto eig(const Tensor& A) -> std::tuple<Tensor, Tensor, Tensor> {
         }
     }
 
+#if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
+    throw_no_lapack("eig");
+#else
     auto original_dtype = A.dtype();
     auto work = prepare_matrix(A);
     auto [n, ndim] = check_square(work);
@@ -836,6 +886,7 @@ auto eig(const Tensor& A) -> std::tuple<Tensor, Tensor, Tensor> {
     return {maybe_downcast(Wr, original_dtype),
             maybe_downcast(Wi, original_dtype),
             maybe_downcast(Vr, original_dtype)};
+#endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 
 auto matrix_power(const Tensor& A, int64_t n) -> Tensor {

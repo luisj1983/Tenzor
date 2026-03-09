@@ -1,0 +1,92 @@
+#version 450
+
+// LSTM Cell backward compute shader — computes gradients for one timestep
+// Recomputes forward gate activations from saved pre-activation gates, then
+// backpropagates through the LSTM equations:
+//   i = sigmoid(gates[0:H])       — input gate
+//   f = sigmoid(gates[H:2H])      — forget gate
+//   g = tanh(gates[2H:3H])        — cell gate
+//   o = sigmoid(gates[3H:4H])     — output gate
+//   c_out = f * c_prev + i * g
+//   h_out = o * tanh(c_out)
+//
+// Inputs:
+//   binding 0: grad_h — gradient of hidden state [batch, hidden]
+//   binding 1: grad_c_next — gradient of cell state from next step [batch, hidden]
+//   binding 2: gates — pre-activation combined gates [batch, 4*hidden]
+//   binding 3: c_prev — previous cell state [batch, hidden]
+//   binding 4: c_out — output cell state (from forward) [batch, hidden]
+// Outputs:
+//   binding 5: grad_gates — gradient w.r.t. gates [batch, 4*hidden]
+//   binding 6: grad_c_prev — gradient w.r.t. c_prev [batch, hidden]
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradH     { float grad_h[]; };
+layout(binding = 1) buffer GradCNext { float grad_c_next[]; };
+layout(binding = 2) buffer Gates     { float gates[]; };
+layout(binding = 3) buffer CPrev     { float c_prev[]; };
+layout(binding = 4) buffer COut      { float c_out[]; };
+layout(binding = 5) buffer GradGates { float grad_gates[]; };
+layout(binding = 6) buffer GradCPrev { float grad_c_prev[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint hidden_size;
+} params;
+
+float sigmoid(float x) {
+    return 1.0 / (1.0 + exp(-x));
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = params.batch_size * params.hidden_size;
+
+    if (idx >= total) return;
+
+    uint b = idx / params.hidden_size;
+    uint h = idx % params.hidden_size;
+
+    uint H = params.hidden_size;
+    uint gate_base = b * (4 * H);
+
+    // Indices into the gate array: [i | f | g | o]
+    uint i_idx = gate_base + h;
+    uint f_idx = gate_base + H + h;
+    uint g_idx = gate_base + 2 * H + h;
+    uint o_idx = gate_base + 3 * H + h;
+
+    // ---- Recompute forward gate activations ----
+    float i_gate = sigmoid(gates[i_idx]);
+    float f_gate = sigmoid(gates[f_idx]);
+    float g_gate = tanh(gates[g_idx]);
+    float o_gate = sigmoid(gates[o_idx]);
+
+    float tanh_c = tanh(c_out[idx]);
+
+    // ---- Backward through h_out = o * tanh(c_out) ----
+    float dh = grad_h[idx];
+    float d_o = dh * tanh_c;
+    float dc = dh * o_gate * (1.0 - tanh_c * tanh_c) + grad_c_next[idx];
+
+    // ---- Backward through c_out = f * c_prev + i * g ----
+    float d_f = dc * c_prev[idx];
+    float d_i = dc * g_gate;
+    float d_g = dc * i_gate;
+    float dc_prev = dc * f_gate;
+
+    // ---- Gate gradients (through sigmoid/tanh nonlinearities) ----
+    float di_gate = d_i * i_gate * (1.0 - i_gate);
+    float df_gate = d_f * f_gate * (1.0 - f_gate);
+    float dg_gate = d_g * (1.0 - g_gate * g_gate);
+    float do_gate = d_o * o_gate * (1.0 - o_gate);
+
+    // ---- Write grad_gates: [di_gate, df_gate, dg_gate, do_gate] ----
+    grad_gates[i_idx] = di_gate;
+    grad_gates[f_idx] = df_gate;
+    grad_gates[g_idx] = dg_gate;
+    grad_gates[o_idx] = do_gate;
+
+    // ---- Write grad_c_prev ----
+    grad_c_prev[idx] = dc_prev;
+}

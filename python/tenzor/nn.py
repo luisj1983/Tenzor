@@ -194,23 +194,26 @@ class Module(_CppModule):
     def __delattr__(self, name: str) -> None:
         """Remove attribute from appropriate registry.
 
-        C++ does not expose unregister methods for parameters, buffers,
-        or submodules. Raises NotImplementedError for registered C++ state.
+        Calls C++ unregister methods for parameters, buffers, and submodules.
         For regular Python attributes, delegates to object.__delattr__.
         """
         submodules = self.get_submodules()
         if name in submodules:
-            raise NotImplementedError(
-                f"Cannot delete registered submodule '{name}'. "
-                "Use register_module('{name}', None) to clear it if supported.")
+            self.unregister_module(name)
+            # Invalidate caches
+            self._param_cache = None
+            self._buffer_cache = None
+            return
         own_params = self._get_own_named_params()
         if name in own_params:
-            raise NotImplementedError(
-                f"Cannot delete registered parameter '{name}'.")
+            self.unregister_parameter(name)
+            self._param_cache = None
+            return
         own_buffers = self._get_own_named_buffers()
         if name in own_buffers:
-            raise NotImplementedError(
-                f"Cannot delete registered buffer '{name}'.")
+            self.unregister_buffer(name)
+            self._buffer_cache = None
+            return
         object.__delattr__(self, name)
 
     def __dir__(self):

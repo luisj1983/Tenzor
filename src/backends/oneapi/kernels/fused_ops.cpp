@@ -1,6 +1,7 @@
 #include "tenzor/core/tensor.hpp"
 #include <sycl/sycl.hpp>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <tuple>
 
@@ -41,6 +42,10 @@ struct FusedRMSNormKernelFloat32 {};
 struct FusedRMSNormKernelFloat64 {};
 struct FusedRMSNormBackwardKernelFloat32 {};
 struct FusedRMSNormBackwardKernelFloat64 {};
+struct FlashAttentionKernelFloat32 {};
+struct FlashAttentionKernelFloat64 {};
+struct FlashAttentionKernelFloat16 {};
+struct FlashAttentionKernelBFloat16 {};
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -1898,6 +1903,245 @@ auto fused_adagrad_step_kernel(
         });
     } else {
         throw std::runtime_error("fused_adagrad_step_kernel: Only Float32 and Float64 supported");
+    }
+}
+
+// ============================================================================
+// Flash Attention (memory-efficient tiled attention with online softmax)
+// ============================================================================
+
+// Templated implementation: ComputeT is the accumulation type (always float for half types),
+// DataT is the storage type, KernelName is the SYCL kernel tag.
+// IsBFloat16 enables the bf16 conversion path.
+template<typename DataT, typename ComputeT, typename KernelName, bool IsBFloat16 = false>
+auto flash_attention_impl(
+    const Tensor& Q,    // [batch_heads, seq_len_q, head_dim]
+    const Tensor& K,    // [batch_heads, seq_len_k, head_dim]
+    const Tensor& V,    // [batch_heads, seq_len_k, head_dim]
+    const Tensor* mask,  // optional [batch_heads, seq_len_q, seq_len_k] or broadcastable
+    ComputeT scale,
+    bool is_causal,
+    sycl::queue& queue
+) -> Tensor {
+    auto q_shape = Q.shape();
+    auto k_shape = K.shape();
+
+    const int64_t batch_heads = q_shape[0];
+    const int64_t seq_len_q   = q_shape[1];
+    const int64_t head_dim    = q_shape[2];
+    const int64_t seq_len_k   = k_shape[1];
+
+    Tensor output(std::vector<int64_t>{batch_heads, seq_len_q, head_dim},
+                  Q.dtype(), Q.device());
+
+    // Tile size for K/V blocks
+    constexpr int Bc = 32;
+    // Padding stride to avoid bank conflicts in local memory
+    const int K_STRIDE = static_cast<int>(head_dim) + 4;
+    const int BLOCK_SIZE = 128;
+
+    // Local memory: K_tile[Bc][K_STRIDE] + V_tile[Bc][K_STRIDE] + scores[Bc]
+    const size_t local_mem_size = static_cast<size_t>(
+        2 * Bc * K_STRIDE + Bc) * sizeof(ComputeT);
+
+    const DataT* q_ptr = get_data_ptr<const DataT>(Q);
+    const DataT* k_ptr = get_data_ptr<const DataT>(K);
+    const DataT* v_ptr = get_data_ptr<const DataT>(V);
+    DataT* o_ptr = get_data_ptr<DataT>(output);
+
+    // 2D grid: (batch_heads, seq_len_q) — one work-group per query row
+    queue.submit([&](sycl::handler& cgh) {
+        sycl::local_accessor<ComputeT, 1> local_mem(local_mem_size / sizeof(ComputeT), cgh);
+
+        const int hd = static_cast<int>(head_dim);
+        const int slq = static_cast<int>(seq_len_q);
+        const int slk = static_cast<int>(seq_len_k);
+        const int ks = K_STRIDE;
+        const bool causal = is_causal;
+        const ComputeT sc = scale;
+
+        cgh.parallel_for<KernelName>(
+            sycl::nd_range<2>(
+                sycl::range<2>(static_cast<size_t>(batch_heads),
+                               static_cast<size_t>(seq_len_q) * BLOCK_SIZE),
+                sycl::range<2>(1, BLOCK_SIZE)
+            ),
+            [=](sycl::nd_item<2> item) {
+                const int batch_head = static_cast<int>(item.get_global_id(0));
+                const int query_idx  = static_cast<int>(item.get_global_id(1)) / BLOCK_SIZE;
+                const int tid        = static_cast<int>(item.get_local_id(1));
+
+                if (query_idx >= slq) return;
+
+                // Local memory pointers
+                ComputeT* lmem = local_mem.get_pointer();
+                ComputeT* K_tile = lmem;                     // [Bc][ks]
+                ComputeT* V_tile = lmem + Bc * ks;           // [Bc][ks]
+                ComputeT* scores  = lmem + 2 * Bc * ks;      // [Bc]
+
+                // Base pointers for this batch_head
+                const DataT* Q_row  = q_ptr + batch_head * slq * hd + query_idx * hd;
+                const DataT* K_base = k_ptr + batch_head * slk * hd;
+                const DataT* V_base = v_ptr + batch_head * slk * hd;
+                DataT* O_row        = o_ptr + batch_head * slq * hd + query_idx * hd;
+
+                // Each thread handles multiple output dimensions
+                // Max elements per thread: ceil(head_dim / BLOCK_SIZE)
+                constexpr int MAX_D_PER_THREAD = 8;  // Supports head_dim up to 1024
+                ComputeT o_local[MAX_D_PER_THREAD];
+                for (int i = 0; i < MAX_D_PER_THREAD; ++i) o_local[i] = ComputeT(0);
+
+                // Online softmax state
+                ComputeT m_prev = -std::numeric_limits<ComputeT>::infinity();
+                ComputeT l_prev = ComputeT(0);
+
+                const int num_kv_blocks = (slk + Bc - 1) / Bc;
+
+                for (int kv_block = 0; kv_block < num_kv_blocks; ++kv_block) {
+                    const int k_start = kv_block * Bc;
+
+                    // For causal masking: skip blocks entirely past the causal boundary
+                    if (causal && k_start > query_idx) break;
+
+                    const int actual_Bc = sycl::min(Bc, slk - k_start);
+
+                    // Load K/V tile cooperatively into local memory
+                    for (int idx = tid; idx < actual_Bc * hd; idx += BLOCK_SIZE) {
+                        int row = idx / hd;
+                        int col = idx % hd;
+                        DataT kval = K_base[(k_start + row) * hd + col];
+                        DataT vval = V_base[(k_start + row) * hd + col];
+                        if constexpr (IsBFloat16) {
+                            K_tile[row * ks + col] = bf16_to_f32(kval);
+                            V_tile[row * ks + col] = bf16_to_f32(vval);
+                        } else {
+                            K_tile[row * ks + col] = static_cast<ComputeT>(kval);
+                            V_tile[row * ks + col] = static_cast<ComputeT>(vval);
+                        }
+                    }
+                    sycl::group_barrier(item.get_group());
+
+                    // Step 1: Compute Q·K^T scores and find block max
+                    ComputeT local_max = -std::numeric_limits<ComputeT>::infinity();
+
+                    for (int j = tid; j < actual_Bc; j += BLOCK_SIZE) {
+                        ComputeT score = ComputeT(0);
+                        for (int d = 0; d < hd; ++d) {
+                            ComputeT q_val;
+                            if constexpr (IsBFloat16) {
+                                q_val = bf16_to_f32(Q_row[d]);
+                            } else {
+                                q_val = static_cast<ComputeT>(Q_row[d]);
+                            }
+                            score += q_val * sc * K_tile[j * ks + d];
+                        }
+                        // Apply causal mask
+                        if (causal && (k_start + j) > query_idx) {
+                            score = -std::numeric_limits<ComputeT>::infinity();
+                        }
+                        scores[j] = score;
+                        local_max = sycl::fmax(local_max, score);
+                    }
+
+                    // Reduce max across work-group
+                    ComputeT block_max = sycl::reduce_over_group(
+                        item.get_group(), local_max,
+                        sycl::maximum<ComputeT>());
+
+                    // Step 2: Compute exp(score - max) and sum
+                    ComputeT local_sum = ComputeT(0);
+                    for (int j = tid; j < actual_Bc; j += BLOCK_SIZE) {
+                        ComputeT exp_score = sycl::exp(scores[j] - block_max);
+                        scores[j] = exp_score;
+                        local_sum += exp_score;
+                    }
+                    sycl::group_barrier(item.get_group());
+
+                    // Reduce sum across work-group
+                    ComputeT block_sum = sycl::reduce_over_group(
+                        item.get_group(), local_sum,
+                        sycl::plus<ComputeT>());
+
+                    // Step 3: Online softmax rescaling
+                    ComputeT m_new = sycl::fmax(m_prev, block_max);
+                    ComputeT exp_prev = sycl::exp(m_prev - m_new);
+                    ComputeT exp_curr = sycl::exp(block_max - m_new);
+                    ComputeT l_new = exp_prev * l_prev + exp_curr * block_sum;
+
+                    // Step 4: Rescale previous output and accumulate P @ V
+                    for (int i = 0; i < MAX_D_PER_THREAD; ++i) {
+                        int d = tid + i * BLOCK_SIZE;
+                        if (d < hd) {
+                            // Rescale previous accumulator
+                            o_local[i] *= exp_prev;
+
+                            // Add new contribution: sum_j P[j] * V[j, d]
+                            ComputeT pv_sum = ComputeT(0);
+                            for (int j = 0; j < actual_Bc; ++j) {
+                                pv_sum += scores[j] * V_tile[j * ks + d];
+                            }
+                            o_local[i] += exp_curr * pv_sum;
+                        }
+                    }
+
+                    m_prev = m_new;
+                    l_prev = l_new;
+
+                    sycl::group_barrier(item.get_group());
+                }
+
+                // Final normalization and write output
+                ComputeT l_inv = (l_prev > ComputeT(0))
+                    ? (ComputeT(1) / l_prev) : ComputeT(0);
+
+                for (int i = 0; i < MAX_D_PER_THREAD; ++i) {
+                    int d = tid + i * BLOCK_SIZE;
+                    if (d < hd) {
+                        if constexpr (IsBFloat16) {
+                            O_row[d] = f32_to_bf16(o_local[i] * l_inv);
+                        } else {
+                            O_row[d] = static_cast<DataT>(o_local[i] * l_inv);
+                        }
+                    }
+                }
+            }
+        );
+    });
+
+    return output;
+}
+
+auto flash_attention_kernel(
+    const Tensor& Q,
+    const Tensor& K,
+    const Tensor& V,
+    const Tensor* mask,
+    float scale,
+    bool is_causal,
+    sycl::queue& queue
+) -> Tensor {
+    if (Q.shape().size() != 3 || K.shape().size() != 3 || V.shape().size() != 3) {
+        throw std::invalid_argument(
+            "flash_attention_kernel: Q, K, V must be 3D [batch_heads, seq_len, head_dim]");
+    }
+    if (Q.dtype() != K.dtype() || Q.dtype() != V.dtype()) {
+        throw std::invalid_argument("flash_attention_kernel: Q, K, V must have the same dtype");
+    }
+
+    if (Q.dtype() == DType::Float32) {
+        return flash_attention_impl<float, float, FlashAttentionKernelFloat32>(
+            Q, K, V, mask, scale, is_causal, queue);
+    } else if (Q.dtype() == DType::Float64) {
+        return flash_attention_impl<double, double, FlashAttentionKernelFloat64>(
+            Q, K, V, mask, scale, is_causal, queue);
+    } else if (Q.dtype() == DType::Float16) {
+        return flash_attention_impl<sycl::half, float, FlashAttentionKernelFloat16>(
+            Q, K, V, mask, scale, is_causal, queue);
+    } else if (Q.dtype() == DType::BFloat16) {
+        return flash_attention_impl<uint16_t, float, FlashAttentionKernelBFloat16, true>(
+            Q, K, V, mask, scale, is_causal, queue);
+    } else {
+        throw std::runtime_error("flash_attention_kernel: unsupported dtype");
     }
 }
 

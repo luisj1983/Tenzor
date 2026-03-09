@@ -1,0 +1,139 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_atomic_float : enable
+
+// Instance Normalization Backward Pass for Float16
+// Grad_output/input/grad_input are packed F16; mean/rstd/weight/grad_weight/grad_bias are Float32
+// One workgroup per (N, C) pair
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer GradOutput { uint grad_output[]; };    // Packed F16
+layout(binding = 1) buffer Input { uint input_data[]; };           // Packed F16
+layout(binding = 2) buffer Mean { float mean_data[]; };            // Float32
+layout(binding = 3) buffer Rstd { float rstd_data[]; };            // Float32
+layout(binding = 4) buffer Weight { float weight_data[]; };        // Float32
+layout(binding = 5) buffer GradInput { uint grad_input[]; };       // Packed F16
+layout(binding = 6) buffer GradWeight { float grad_weight[]; };    // Float32
+layout(binding = 7) buffer GradBias { float grad_bias[]; };        // Float32
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint channels;
+    uint spatial_size;
+    uint affine;
+} params;
+
+shared float shared_sum_dy_w[WORKGROUP_SIZE];
+shared float shared_sum_dy_w_xhat[WORKGROUP_SIZE];
+
+float readF16From(uint flat_idx, uint buf_sel) {
+    uint word_idx = flat_idx / 2;
+    uint half_idx = flat_idx % 2;
+    uint packed;
+    if (buf_sel == 0) packed = grad_output[word_idx];
+    else packed = input_data[word_idx];
+    return (half_idx == 0) ? unpackHalf2x16(packed).x : unpackHalf2x16(packed >> 16).x;
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint nc_idx = gl_WorkGroupID.x;
+
+    uint total_nc = params.batch_size * params.channels;
+    if (nc_idx >= total_nc) return;
+
+    uint c = nc_idx % params.channels;
+    uint base = nc_idx * params.spatial_size;
+
+    float mean = mean_data[nc_idx];
+    float rstd = rstd_data[nc_idx];
+
+    bool zero_variance = (rstd > 100.0);
+
+    if (zero_variance) {
+        uint num_words = (params.spatial_size + 1) / 2;
+        for (uint w = tid; w < num_words; w += WORKGROUP_SIZE) {
+            uint elem0 = w * 2;
+            uint elem1 = w * 2 + 1;
+            // grad_input = 0
+            uint out_word_idx = (base + elem0) / 2;
+            grad_input[out_word_idx] = packHalf2x16(vec2(0.0, 0.0));
+
+            if (params.affine > 0) {
+                if (elem0 < params.spatial_size) {
+                    float dy = readF16From(base + elem0, 0);
+                    atomicAdd(grad_bias[c], dy);
+                }
+                if (elem1 < params.spatial_size) {
+                    float dy = readF16From(base + elem1, 0);
+                    atomicAdd(grad_bias[c], dy);
+                }
+            }
+        }
+        return;
+    }
+
+    // Step 1: Compute reductions
+    float local_sum_dy_w = 0.0;
+    float local_sum_dy_w_xhat = 0.0;
+    for (uint i = tid; i < params.spatial_size; i += WORKGROUP_SIZE) {
+        float dy = readF16From(base + i, 0);
+        float w = (params.affine > 0) ? weight_data[c] : 1.0;
+        float xhat = (readF16From(base + i, 1) - mean) * rstd;
+
+        local_sum_dy_w += dy * w;
+        local_sum_dy_w_xhat += dy * w * xhat;
+    }
+    shared_sum_dy_w[tid] = local_sum_dy_w;
+    shared_sum_dy_w_xhat[tid] = local_sum_dy_w_xhat;
+    barrier();
+
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_sum_dy_w[tid] += shared_sum_dy_w[tid + s];
+            shared_sum_dy_w_xhat[tid] += shared_sum_dy_w_xhat[tid + s];
+        }
+        barrier();
+    }
+
+    float sum_dy_w = shared_sum_dy_w[0];
+    float sum_dy_w_xhat = shared_sum_dy_w_xhat[0];
+    float inv_n = 1.0 / float(params.spatial_size);
+    barrier();
+
+    // Step 2: Compute grad_input and accumulate grad_weight, grad_bias
+    uint num_words = (params.spatial_size + 1) / 2;
+    for (uint w_idx = tid; w_idx < num_words; w_idx += WORKGROUP_SIZE) {
+        uint elem0 = w_idx * 2;
+        uint elem1 = w_idx * 2 + 1;
+        float r0 = 0.0, r1 = 0.0;
+
+        if (elem0 < params.spatial_size) {
+            float dy = readF16From(base + elem0, 0);
+            float w = (params.affine > 0) ? weight_data[c] : 1.0;
+            float xhat = (readF16From(base + elem0, 1) - mean) * rstd;
+            r0 = rstd * (dy * w - sum_dy_w * inv_n - xhat * sum_dy_w_xhat * inv_n);
+            if (params.affine > 0) {
+                atomicAdd(grad_weight[c], dy * xhat);
+                atomicAdd(grad_bias[c], dy);
+            }
+        }
+
+        if (elem1 < params.spatial_size) {
+            float dy = readF16From(base + elem1, 0);
+            float w = (params.affine > 0) ? weight_data[c] : 1.0;
+            float xhat = (readF16From(base + elem1, 1) - mean) * rstd;
+            r1 = rstd * (dy * w - sum_dy_w * inv_n - xhat * sum_dy_w_xhat * inv_n);
+            if (params.affine > 0) {
+                atomicAdd(grad_weight[c], dy * xhat);
+                atomicAdd(grad_bias[c], dy);
+            }
+        }
+
+        uint out_word_idx = (base + elem0) / 2;
+        uint bits0 = packHalf2x16(vec2(r0, 0.0)) & 0xFFFFu;
+        uint bits1 = packHalf2x16(vec2(r1, 0.0)) & 0xFFFFu;
+        grad_input[out_word_idx] = bits0 | (bits1 << 16);
+    }
+}

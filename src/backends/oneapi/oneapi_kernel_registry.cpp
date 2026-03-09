@@ -412,6 +412,9 @@ namespace oneapi {
     auto rms_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
                                    const Tensor& weight, const Tensor& rrms,
                                    sycl::queue& queue) -> std::tuple<Tensor, Tensor>;
+    auto flash_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
+                                const Tensor* mask, float scale, bool is_causal,
+                                sycl::queue& queue) -> Tensor;
 
     // ---- Fused optimizer steps (kernels/fused_ops.cpp) ----
     auto fused_adam_step_kernel(
@@ -2208,6 +2211,28 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
             // Step 5: attn_weights @ V
             Tensor output = oneapi::matmul_kernel(attn_weights, inputs[2], queue);
+            return {output};
+        });
+
+    // =========================================================================
+    // Flash Attention (memory-efficient tiled attention with online softmax)
+    // =========================================================================
+
+    table.register_kernel(OpId::FlashAttention,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // inputs: [Q, K, V] or [Q, K, V, mask]
+            auto& queue = get_q(inputs);
+
+            // Infer head_dim from Q shape (last dimension)
+            int64_t head_dim = inputs[0].shape().back();
+            float default_scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+            float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, default_scale));
+            bool is_causal = attrs.get_bool(AttrKey::Causal, false);
+
+            const Tensor* mask = (inputs.size() > 3) ? &inputs[3] : nullptr;
+
+            Tensor output = oneapi::flash_attention_kernel(
+                inputs[0], inputs[1], inputs[2], mask, scale, is_causal, queue);
             return {output};
         });
 

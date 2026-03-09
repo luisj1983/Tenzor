@@ -252,8 +252,20 @@ else()
         message(FATAL_ERROR "MKL required (TENZOR_REQUIRE_MKL=ON) but not found. "
                 "Set MKLROOT or install Intel oneAPI MKL.")
     else()
-        message(WARNING "MKL not found — linalg operations (det, inv, solve, svd, etc.) "
-                "will be unavailable. Set MKLROOT or install Intel oneAPI MKL.")
+        # Try system LAPACKE as fallback
+        find_package(LAPACK QUIET)
+        include(CheckIncludeFile)
+        check_include_file(lapacke.h HAVE_LAPACKE_H)
+        if(LAPACK_FOUND AND HAVE_LAPACKE_H)
+            message(STATUS "MKL not found, using system LAPACKE for linalg operations")
+            target_link_libraries(tenzor_core PRIVATE ${LAPACK_LIBRARIES} lapacke)
+            target_compile_definitions(tenzor_core PRIVATE TENZOR_USE_LAPACKE)
+        else()
+            message(WARNING "Neither MKL nor LAPACKE found — CPU linalg operations "
+                    "(det, inv, solve, svd, etc.) will be unavailable. "
+                    "GPU backends can still dispatch linalg ops. "
+                    "Install Intel MKL or liblapacke-dev for CPU support.")
+        endif()
     endif()
 endif()
 

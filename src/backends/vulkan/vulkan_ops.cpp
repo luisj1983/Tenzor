@@ -3250,8 +3250,9 @@ auto VulkanBackend::dispatchGroupNorm(const Tensor& input, int64_t num_groups,
         throw std::invalid_argument("group_norm requires at least 2D input");
     }
 
-    // For non-Float32 types, convert to Float32, compute, convert back
-    if (input.dtype() != DType::Float32) {
+    // For BFloat16 or other unsupported types, convert to Float32
+    if (input.dtype() != DType::Float32 && input.dtype() != DType::Float16 &&
+        input.dtype() != DType::Float64) {
         DType orig_dtype = input.dtype();
         auto input_f32 = input.to(DType::Float32);
         Tensor gamma_f32, beta_f32;
@@ -3264,14 +3265,18 @@ auto VulkanBackend::dispatchGroupNorm(const Tensor& input, int64_t num_groups,
             beta_ptr = &beta_f32;
         }
         auto results = dispatchGroupNorm(input_f32, num_groups, gamma_ptr, beta_ptr, epsilon);
-        // Output in original dtype, mean/inv_std stay Float32 (used for backward)
         return {results[0].to(orig_dtype), results[1], results[2]};
     }
 
     int32_t device_id = input.device().index;
 
-    // GroupNorm shader operates on Float32
+    // Select shader variant by dtype
     std::string shader_name = "group_norm";
+    if (input.dtype() == DType::Float64) {
+        shader_name = "group_norm_f64";
+    } else if (input.dtype() == DType::Float16) {
+        shader_name = "group_norm_f16";
+    }
     auto* pipeline = getPipeline(shader_name, device_id);
 
     int64_t N = input_shape[0];
@@ -3299,8 +3304,10 @@ auto VulkanBackend::dispatchGroupNorm(const Tensor& input, int64_t num_groups,
     const void* buf_mean = mean_out.data_ptr();
     const void* buf_inv_std = inv_std_out.data_ptr();
 
-    size_t input_buf_size = input.numel() * elem_size;
-    size_t output_buf_size = output.numel() * elem_size;
+    bool is_float16 = (input.dtype() == DType::Float16);
+    // For F16: packed uint32 words, 4-byte aligned
+    size_t input_buf_size = is_float16 ? ((input.numel() + 1) / 2) * 4 : input.numel() * elem_size;
+    size_t output_buf_size = is_float16 ? ((output.numel() + 1) / 2) * 4 : output.numel() * elem_size;
     size_t stats_buf_size = N * num_groups * sizeof(float);
 
     // Bindings: input(0), output(1), gamma(2), beta(3), mean(4), inv_std(5)
@@ -3315,8 +3322,10 @@ auto VulkanBackend::dispatchGroupNorm(const Tensor& input, int64_t num_groups,
         const void* buf_beta = beta->data_ptr();
         bindings.push_back({2, buf_gamma});
         bindings.push_back({3, buf_beta});
-        sizes.push_back(C * elem_size);
-        sizes.push_back(C * elem_size);
+        // Gamma/beta are always Float32 for F16 shader, elem_size for F32/F64
+        size_t affine_elem_size = is_float16 ? sizeof(float) : elem_size;
+        sizes.push_back(C * affine_elem_size);
+        sizes.push_back(C * affine_elem_size);
     } else {
         // Bind dummy buffers for unused bindings
         bindings.push_back({2, buf_output});
@@ -11988,6 +11997,120 @@ auto VulkanBackend::dispatchGRUForward(const Tensor& input, const Tensor& W_ih, 
 }
 
 /**
+ * @brief LSTM cell backward — computes gate and cell state gradients.
+ *
+ * Inputs: grad_h [batch, hidden], grad_c_next [batch, hidden],
+ *         gates [batch, 4*hidden], c_prev [batch, hidden], c_out [batch, hidden]
+ * Returns: [grad_gates, grad_c_prev]
+ */
+auto VulkanBackend::dispatchLSTMCellBackward(const Tensor& grad_h, const Tensor& grad_c_next,
+                                              const Tensor& gates, const Tensor& c_prev,
+                                              const Tensor& c_out,
+                                              int64_t batch_size, int64_t hidden_size) -> std::vector<Tensor> {
+    int32_t device_id = grad_h.device().index;
+    bool is_f64 = (grad_h.dtype() == DType::Float64);
+    std::string shader = is_f64 ? "lstm_cell_backward_f64" : "lstm_cell_backward";
+
+    size_t elem_size = grad_h.dtype_size();
+    size_t state_bytes = batch_size * hidden_size * elem_size;
+    size_t gate_bytes = batch_size * 4 * hidden_size * elem_size;
+
+    // Allocate outputs
+    Tensor grad_gates({batch_size, 4 * hidden_size}, grad_h.dtype(), grad_h.device());
+    Tensor grad_c_prev({batch_size, hidden_size}, grad_h.dtype(), grad_h.device());
+
+    struct { uint32_t batch_size; uint32_t hidden_size; } pc;
+    pc.batch_size = static_cast<uint32_t>(batch_size);
+    pc.hidden_size = static_cast<uint32_t>(hidden_size);
+
+    auto* pipeline = getPipeline(shader, device_id);
+    uint32_t total = static_cast<uint32_t>(batch_size * hidden_size);
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, grad_h.data_ptr()},      {1, grad_c_next.data_ptr()},
+        {2, gates.data_ptr()},        {3, c_prev.data_ptr()},
+        {4, c_out.data_ptr()},        {5, grad_gates.data_ptr()},
+        {6, grad_c_prev.data_ptr()}
+    };
+    std::vector<size_t> sizes = {
+        state_bytes, state_bytes, gate_bytes, state_bytes,
+        state_bytes, gate_bytes, state_bytes
+    };
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(total, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    synchronize(device_id);
+
+    return {grad_gates, grad_c_prev};
+}
+
+/**
+ * @brief GRU cell backward — computes gate and hidden state gradients.
+ *
+ * Inputs: grad_h [batch, hidden], gates_x [batch, 3*hidden],
+ *         gates_h [batch, 3*hidden], h_prev [batch, hidden]
+ * Returns: [grad_gates_x, grad_gates_h, grad_h_prev]
+ */
+auto VulkanBackend::dispatchGRUCellBackward(const Tensor& grad_h, const Tensor& gates_x,
+                                             const Tensor& gates_h, const Tensor& h_prev,
+                                             int64_t batch_size, int64_t hidden_size) -> std::vector<Tensor> {
+    int32_t device_id = grad_h.device().index;
+    bool is_f64 = (grad_h.dtype() == DType::Float64);
+    std::string shader = is_f64 ? "gru_cell_backward_f64" : "gru_cell_backward";
+
+    size_t elem_size = grad_h.dtype_size();
+    size_t state_bytes = batch_size * hidden_size * elem_size;
+    size_t gate_bytes = batch_size * 3 * hidden_size * elem_size;
+
+    // Allocate outputs
+    Tensor grad_gates_x({batch_size, 3 * hidden_size}, grad_h.dtype(), grad_h.device());
+    Tensor grad_gates_h({batch_size, 3 * hidden_size}, grad_h.dtype(), grad_h.device());
+    Tensor grad_h_prev({batch_size, hidden_size}, grad_h.dtype(), grad_h.device());
+
+    struct { uint32_t batch_size; uint32_t hidden_size; } pc;
+    pc.batch_size = static_cast<uint32_t>(batch_size);
+    pc.hidden_size = static_cast<uint32_t>(hidden_size);
+
+    auto* pipeline = getPipeline(shader, device_id);
+    uint32_t total = static_cast<uint32_t>(batch_size * hidden_size);
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, grad_h.data_ptr()},       {1, gates_x.data_ptr()},
+        {2, gates_h.data_ptr()},      {3, h_prev.data_ptr()},
+        {4, grad_gates_x.data_ptr()}, {5, grad_gates_h.data_ptr()},
+        {6, grad_h_prev.data_ptr()}
+    };
+    std::vector<size_t> sizes = {
+        state_bytes, gate_bytes, gate_bytes, state_bytes,
+        gate_bytes, gate_bytes, state_bytes
+    };
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(total, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    synchronize(device_id);
+
+    return {grad_gates_x, grad_gates_h, grad_h_prev};
+}
+
+/**
  * @brief Multi-layer LSTM forward — chains single-layer LSTM calls.
  */
 auto VulkanBackend::dispatchLSTMMultiLayerForward(const Tensor& input,
@@ -13929,21 +14052,21 @@ auto VulkanBackend::dispatchInstanceNorm(const Tensor& input, const Tensor& weig
                                     std::to_string(input.ndim()) + "D");
     }
 
-    // For Float16/BFloat16, upcast to Float32 for numerical stability
-    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+    // For BFloat16, upcast to Float32
+    if (input.dtype() == DType::BFloat16) {
         DType orig_dtype = input.dtype();
         auto input_f32 = input.to(DType::Float32);
         Tensor weight_f32, bias_f32;
         if (weight.numel() > 0) weight_f32 = weight.to(DType::Float32);
         if (bias.numel() > 0) bias_f32 = bias.to(DType::Float32);
         auto results = dispatchInstanceNorm(input_f32, weight_f32, bias_f32, epsilon);
-        // Convert output back, keep mean/rstd as Float32
         results[0] = results[0].to(orig_dtype);
         return results;
     }
 
     bool is_float64 = (input.dtype() == DType::Float64);
-    std::string shader_name = is_float64 ? "instance_norm_f64" : "instance_norm";
+    bool is_float16 = (input.dtype() == DType::Float16);
+    std::string shader_name = is_float64 ? "instance_norm_f64" : (is_float16 ? "instance_norm_f16" : "instance_norm");
     auto* pipeline = getPipeline(shader_name, device_id);
 
     int64_t N = input_shape[0];
@@ -13956,17 +14079,21 @@ auto VulkanBackend::dispatchInstanceNorm(const Tensor& input, const Tensor& weig
 
     bool has_affine = (weight.numel() > 0 && bias.numel() > 0);
 
-    // Output tensors
+    // Output tensors — mean/rstd are always Float32 for F16 shader
     std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
     Tensor output(out_shape, input.dtype(), input.device());
-    Tensor mean_out({total_nc}, input.dtype(), input.device());
-    Tensor rstd_out({total_nc}, input.dtype(), input.device());
+    DType stats_dtype = is_float16 ? DType::Float32 : input.dtype();
+    Tensor mean_out({total_nc}, stats_dtype, input.device());
+    Tensor rstd_out({total_nc}, stats_dtype, input.device());
 
     size_t elem_size = input.dtype_size();
-    size_t input_buf_size = input.numel() * elem_size;
-    size_t output_buf_size = output.numel() * elem_size;
-    size_t nc_buf_size = total_nc * elem_size;
-    size_t channel_buf_size = C * elem_size;
+    // For F16: packed uint32 words, 4-byte aligned
+    size_t input_buf_size = is_float16 ? ((input.numel() + 1) / 2) * 4 : input.numel() * elem_size;
+    size_t output_buf_size = is_float16 ? ((output.numel() + 1) / 2) * 4 : output.numel() * elem_size;
+    size_t stats_elem_size = is_float16 ? sizeof(float) : elem_size;
+    size_t nc_buf_size = total_nc * stats_elem_size;
+    // Weight/bias are Float32 for F16 shader
+    size_t channel_buf_size = C * (is_float16 ? sizeof(float) : elem_size);
 
     // Build bindings: input(0), output(1), weight(2), bias(3), mean(4), var(5)
     std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -13981,7 +14108,6 @@ auto VulkanBackend::dispatchInstanceNorm(const Tensor& input, const Tensor& weig
         sizes.push_back(channel_buf_size);
         sizes.push_back(channel_buf_size);
     } else {
-        // Dummy bindings
         bindings.push_back({2, output.data_ptr()});
         bindings.push_back({3, output.data_ptr()});
         sizes.push_back(output_buf_size);
@@ -14036,8 +14162,8 @@ auto VulkanBackend::dispatchInstanceNormBackward(const Tensor& grad_output, cons
     auto input_shape = input.shape();
     int32_t device_id = input.device().index;
 
-    // Float16/BFloat16 upcast
-    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+    // BFloat16 upcast (Float16 has native shader)
+    if (input.dtype() == DType::BFloat16) {
         DType orig_dtype = input.dtype();
         auto go_f32 = grad_output.to(DType::Float32);
         auto in_f32 = input.to(DType::Float32);
@@ -14050,7 +14176,8 @@ auto VulkanBackend::dispatchInstanceNormBackward(const Tensor& grad_output, cons
     }
 
     bool is_float64 = (input.dtype() == DType::Float64);
-    std::string shader_name = is_float64 ? "instance_norm_backward_f64" : "instance_norm_backward";
+    bool is_float16 = (input.dtype() == DType::Float16);
+    std::string shader_name = is_float64 ? "instance_norm_backward_f64" : (is_float16 ? "instance_norm_backward_f16" : "instance_norm_backward");
     auto* pipeline = getPipeline(shader_name, device_id);
 
     int64_t N = input_shape[0];
@@ -14065,19 +14192,23 @@ auto VulkanBackend::dispatchInstanceNormBackward(const Tensor& grad_output, cons
 
     size_t elem_size = input.dtype_size();
 
-    // Allocate outputs
+    // Allocate outputs — grad_weight/grad_bias always Float32 for F16 shader
     std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
     Tensor grad_input(out_shape, input.dtype(), input.device());
-    Tensor grad_weight({C}, input.dtype(), input.device());
-    Tensor grad_bias({C}, input.dtype(), input.device());
+    DType accum_dtype = is_float16 ? DType::Float32 : input.dtype();
+    size_t accum_elem_size = is_float16 ? sizeof(float) : elem_size;
+    Tensor grad_weight({C}, accum_dtype, input.device());
+    Tensor grad_bias({C}, accum_dtype, input.device());
 
     // Zero-init grad_weight and grad_bias for atomic accumulation
-    memset(grad_weight.data_ptr(), 0, C * elem_size, device_id);
-    memset(grad_bias.data_ptr(), 0, C * elem_size, device_id);
+    memset(grad_weight.data_ptr(), 0, C * accum_elem_size, device_id);
+    memset(grad_bias.data_ptr(), 0, C * accum_elem_size, device_id);
 
-    size_t input_buf_size = input.numel() * elem_size;
-    size_t nc_buf_size = total_nc * elem_size;
-    size_t channel_buf_size = C * elem_size;
+    // For F16: packed uint32 words
+    size_t input_buf_size = is_float16 ? ((input.numel() + 1) / 2) * 4 : input.numel() * elem_size;
+    // mean/rstd are Float32 for F16
+    size_t nc_buf_size = total_nc * (is_float16 ? sizeof(float) : elem_size);
+    size_t channel_buf_size = C * accum_elem_size;
 
     // Bindings: grad_output(0), input(1), mean(2), rstd(3), weight(4),
     //           grad_input(5), grad_weight(6), grad_bias(7)
@@ -14268,11 +14399,15 @@ auto VulkanBackend::dispatchFusedSGDStep(std::span<const Tensor> inputs,
 
     int64_t numel = inputs[0].numel();
     int32_t device_id = inputs[0].device().index;
-    auto* pipeline = getPipeline("fused_sgd_step", device_id);
+    bool is_float16 = (inputs[0].dtype() == DType::Float16);
+    std::string sgd_shader = is_float16 ? "fused_sgd_step_f16" : "fused_sgd_step";
+    auto* pipeline = getPipeline(sgd_shader, device_id);
 
     bool has_momentum = (inputs.size() > 2 && momentum > 0.0f);
 
-    size_t buf_size = numel * inputs[0].dtype_size();
+    // For F16: param/grad are packed uint32, momentum is Float32
+    size_t buf_size = is_float16 ? ((numel + 1) / 2) * 4 : numel * inputs[0].dtype_size();
+    size_t state_buf_size = is_float16 ? numel * sizeof(float) : buf_size;
 
     // Bindings: grad(0), param(1), momentum_buf(2)
     std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -14283,7 +14418,7 @@ auto VulkanBackend::dispatchFusedSGDStep(std::span<const Tensor> inputs,
 
     if (has_momentum) {
         bindings.push_back({2, inputs[2].data_ptr()});
-        sizes.push_back(buf_size);
+        sizes.push_back(state_buf_size);
     } else {
         // Dummy binding
         bindings.push_back({2, inputs[0].data_ptr()});
@@ -14312,7 +14447,9 @@ auto VulkanBackend::dispatchFusedSGDStep(std::span<const Tensor> inputs,
     pc.has_momentum = has_momentum ? 1u : 0u;
     pc.padding = 0;
 
-    uint32_t workgroups = div_wg(numel, devices_[device_id].workgroupSize);
+    // F16 shader processes pairs (1 thread per word), F32 processes 1 element per thread
+    int64_t dispatch_count = is_float16 ? (numel + 1) / 2 : numel;
+    uint32_t workgroups = div_wg(dispatch_count, devices_[device_id].workgroupSize);
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -14352,9 +14489,14 @@ auto VulkanBackend::dispatchFusedAdamStep(std::span<const Tensor> inputs,
 
     int64_t numel = inputs[0].numel();
     int32_t device_id = inputs[0].device().index;
-    auto* pipeline = getPipeline("fused_adam_step", device_id);
+    bool is_float16 = (inputs[0].dtype() == DType::Float16);
+    std::string adam_shader = is_float16 ? "fused_adam_step_f16" : "fused_adam_step";
+    auto* pipeline = getPipeline(adam_shader, device_id);
 
-    size_t buf_size = numel * inputs[0].dtype_size();
+    // For F16: param/grad are packed uint32, state buffers are Float32
+    size_t f16_buf_size = ((numel + 1) / 2) * 4;
+    size_t param_buf_size = is_float16 ? f16_buf_size : numel * inputs[0].dtype_size();
+    size_t state_buf_size = is_float16 ? numel * sizeof(float) : param_buf_size;
 
     // Bindings: grad(0), param(1), exp_avg(2), exp_avg_sq(3), max_exp_avg_sq(4)
     std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -14363,15 +14505,14 @@ auto VulkanBackend::dispatchFusedAdamStep(std::span<const Tensor> inputs,
         {2, inputs[2].data_ptr()},  // exp_avg
         {3, inputs[3].data_ptr()},  // exp_avg_sq
     };
-    std::vector<size_t> sizes = {buf_size, buf_size, buf_size, buf_size};
+    std::vector<size_t> sizes = {param_buf_size, param_buf_size, state_buf_size, state_buf_size};
 
     if (amsgrad && inputs.size() > 4) {
         bindings.push_back({4, inputs[4].data_ptr()});
-        sizes.push_back(buf_size);
+        sizes.push_back(state_buf_size);
     } else {
-        // Dummy binding
         bindings.push_back({4, inputs[0].data_ptr()});
-        sizes.push_back(buf_size);
+        sizes.push_back(param_buf_size);
     }
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
@@ -14404,7 +14545,8 @@ auto VulkanBackend::dispatchFusedAdamStep(std::span<const Tensor> inputs,
     pc.padding0 = 0;
     pc.padding1 = 0;
 
-    uint32_t workgroups = div_wg(numel, devices_[device_id].workgroupSize);
+    int64_t dispatch_count = is_float16 ? (numel + 1) / 2 : numel;
+    uint32_t workgroups = div_wg(dispatch_count, devices_[device_id].workgroupSize);
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,

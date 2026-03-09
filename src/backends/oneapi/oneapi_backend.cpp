@@ -246,6 +246,9 @@ namespace oneapi {
     auto rms_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
                                    const Tensor& weight, const Tensor& rrms,
                                    sycl::queue& queue) -> std::tuple<Tensor, Tensor>;
+    auto flash_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
+                                const Tensor* mask, float scale, bool is_causal,
+                                sycl::queue& queue) -> Tensor;
 
     // LSTM operations
     auto lstm_cell_forward_kernel(const Tensor& gates, const Tensor& c_prev,

@@ -1581,9 +1581,23 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     VULKAN_CPU_FALLBACK(QuantizedLinear);
     VULKAN_CPU_FALLBACK(QuantizedConv2d);
     VULKAN_CPU_FALLBACK(LSTMCellForward);
-    VULKAN_CPU_FALLBACK(LSTMCellBackward);
+    table.register_kernel(OpId::LSTMCellBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [grad_h, grad_c_next, gates, c_prev, c_out]
+        int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 0);
+        int64_t hidden_size = attrs.get_int(AttrKey::HiddenSize, 0);
+        return get_vulkan_backend()->dispatchLSTMCellBackward(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+            batch_size, hidden_size);
+    });
     VULKAN_CPU_FALLBACK(GRUCellForward);
-    VULKAN_CPU_FALLBACK(GRUCellBackward);
+    table.register_kernel(OpId::GRUCellBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [grad_h, gates_x, gates_h, h_prev]
+        int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 0);
+        int64_t hidden_size = attrs.get_int(AttrKey::HiddenSize, 0);
+        return get_vulkan_backend()->dispatchGRUCellBackward(
+            inputs[0], inputs[1], inputs[2], inputs[3],
+            batch_size, hidden_size);
+    });
     // Complex number ops
     VULKAN_CPU_FALLBACK(Conj);
     VULKAN_CPU_FALLBACK(Real);

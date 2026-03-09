@@ -279,6 +279,12 @@ public:
     /**
      * @brief Check if tensor has been initialized with valid storage.
      *
+     * Call this before accessing tensor properties on potentially-uninitialized
+     * tensors. Non-noexcept accessors (shape(), dtype(), device(), etc.) throw
+     * std::runtime_error on invalid tensors. Noexcept accessors
+     * (requires_grad(), version(), is_contiguous()) return safe defaults
+     * (false, 0, true) on invalid tensors without throwing.
+     *
      * @return true if tensor has a valid implementation, false if default-constructed
      */
     auto is_valid() const noexcept -> bool { return impl_ != nullptr; }

@@ -173,6 +173,46 @@ auto Module::register_module(std::string name, std::shared_ptr<Module> module) -
     submodules_[std::move(name)] = std::move(module);
 }
 
+auto Module::get_parameter(const std::string& name) const -> std::shared_ptr<Variable> {
+    auto it = parameters_.find(name);
+    if (it == parameters_.end()) {
+        throw std::out_of_range("Parameter not found: " + name);
+    }
+    return it->second;
+}
+
+auto Module::get_buffer(const std::string& name) const -> std::shared_ptr<Variable> {
+    auto it = buffers_.find(name);
+    if (it == buffers_.end()) {
+        throw std::out_of_range("Buffer not found: " + name);
+    }
+    return it->second;
+}
+
+auto Module::unregister_parameter(const std::string& name) -> void {
+    auto it = parameters_.find(name);
+    if (it == parameters_.end()) {
+        throw std::out_of_range("Parameter not found: " + name);
+    }
+    parameters_.erase(it);
+}
+
+auto Module::unregister_buffer(const std::string& name) -> void {
+    auto it = buffers_.find(name);
+    if (it == buffers_.end()) {
+        throw std::out_of_range("Buffer not found: " + name);
+    }
+    buffers_.erase(it);
+}
+
+auto Module::unregister_module(const std::string& name) -> void {
+    auto it = submodules_.find(name);
+    if (it == submodules_.end()) {
+        throw std::out_of_range("Module not found: " + name);
+    }
+    submodules_.erase(it);
+}
+
 auto Module::buffers() -> std::vector<std::shared_ptr<Variable>> {
     std::vector<std::shared_ptr<Variable>> bufs;
 
