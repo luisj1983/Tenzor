@@ -765,5 +765,1052 @@ auto adaptive_maxpool2d_backward_kernel(const Tensor& grad_output, const Tensor&
     return grad_input;
 }
 
+// ============================================================================
+// 1D Pooling Kernels
+// ============================================================================
+
+template<typename T>
+void maxpool1d_forward_impl(const T* in_data, T* out_data, int64_t* idx_data,
+                             int64_t N, int64_t C, int64_t L,
+                             int64_t L_out,
+                             int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation) {
+    #pragma omp parallel for collapse(3)
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            for (int64_t ol = 0; ol < L_out; ++ol) {
+                int64_t l_start = ol * stride - padding;
+
+                float max_val = -std::numeric_limits<float>::infinity();
+                int64_t max_idx = 0;
+
+                for (int64_t k = 0; k < kernel_size; ++k) {
+                    int64_t l = l_start + k * dilation;
+                    if (l >= 0 && l < L) {
+                        int64_t in_idx = (n * C + c) * L + l;
+                        float val = static_cast<float>(in_data[in_idx]);
+                        if (val > max_val) {
+                            max_val = val;
+                            max_idx = l;
+                        }
+                    }
+                }
+
+                int64_t out_idx = (n * C + c) * L_out + ol;
+                out_data[out_idx] = static_cast<T>(max_val);
+                idx_data[out_idx] = max_idx;
+            }
+        }
+    }
+}
+
+auto maxpool1d_forward_kernel(const Tensor& input, int64_t kernel_size,
+                               int64_t stride, int64_t padding, int64_t dilation)
+    -> std::pair<Tensor, Tensor> {
+    auto shape = input.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t L = shape[2];
+
+    int64_t L_out = (L + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+
+    auto output = Tensor::empty_uninitialized({N, C, L_out}, input.dtype(), input.device());
+    auto indices = Tensor::empty_uninitialized({N, C, L_out}, DType::Int64, input.device());
+    int64_t* idx_data = indices.data<int64_t>();
+
+    if (input.dtype() == DType::Float32) {
+        maxpool1d_forward_impl<float>(input.data<float>(), output.data<float>(), idx_data,
+                                      N, C, L, L_out, kernel_size, stride, padding, dilation);
+    } else if (input.dtype() == DType::Float64) {
+        maxpool1d_forward_impl<double>(input.data<double>(), output.data<double>(), idx_data,
+                                       N, C, L, L_out, kernel_size, stride, padding, dilation);
+    } else if (input.dtype() == DType::Float16) {
+        maxpool1d_forward_impl<Float16>(input.data<Float16>(), output.data<Float16>(), idx_data,
+                                        N, C, L, L_out, kernel_size, stride, padding, dilation);
+    } else if (input.dtype() == DType::BFloat16) {
+        maxpool1d_forward_impl<BFloat16>(input.data<BFloat16>(), output.data<BFloat16>(), idx_data,
+                                         N, C, L, L_out, kernel_size, stride, padding, dilation);
+    } else {
+        throw std::runtime_error("Unsupported dtype for maxpool1d_forward");
+    }
+
+    return {output, indices};
+}
+
+template<typename T>
+void maxpool1d_backward_impl(const T* grad_out_data, const int64_t* idx_data, T* grad_in_data,
+                              int64_t N, int64_t C, int64_t L,
+                              int64_t L_out) {
+    #pragma omp parallel for collapse(2) if(N * C > 4)
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            for (int64_t ol = 0; ol < L_out; ++ol) {
+                int64_t out_idx = (n * C + c) * L_out + ol;
+                int64_t max_idx = idx_data[out_idx];
+                int64_t in_idx = (n * C + c) * L + max_idx;
+                float val = static_cast<float>(grad_in_data[in_idx]) + static_cast<float>(grad_out_data[out_idx]);
+                grad_in_data[in_idx] = static_cast<T>(val);
+            }
+        }
+    }
+}
+
+auto maxpool1d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
+                                const std::vector<int64_t>& input_shape) -> Tensor {
+    int64_t N = input_shape[0];
+    int64_t C = input_shape[1];
+    int64_t L = input_shape[2];
+
+    auto grad_shape = grad_output.shape();
+    int64_t L_out = grad_shape[2];
+
+    auto grad_input = zeros(input_shape, grad_output.dtype(), grad_output.device());
+    const int64_t* idx_data = indices.data<int64_t>();
+
+    if (grad_output.dtype() == DType::Float32) {
+        maxpool1d_backward_impl<float>(grad_output.data<float>(), idx_data, grad_input.data<float>(),
+                                       N, C, L, L_out);
+    } else if (grad_output.dtype() == DType::Float64) {
+        maxpool1d_backward_impl<double>(grad_output.data<double>(), idx_data, grad_input.data<double>(),
+                                        N, C, L, L_out);
+    } else if (grad_output.dtype() == DType::Float16) {
+        maxpool1d_backward_impl<Float16>(grad_output.data<Float16>(), idx_data, grad_input.data<Float16>(),
+                                         N, C, L, L_out);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        maxpool1d_backward_impl<BFloat16>(grad_output.data<BFloat16>(), idx_data, grad_input.data<BFloat16>(),
+                                          N, C, L, L_out);
+    } else {
+        throw std::runtime_error("Unsupported dtype for maxpool1d_backward");
+    }
+
+    return grad_input;
+}
+
+template<typename T>
+void avgpool1d_forward_impl(const T* in_data, T* out_data,
+                             int64_t N, int64_t C, int64_t L,
+                             int64_t L_out,
+                             int64_t kernel_size, int64_t stride, int64_t padding) {
+    #pragma omp parallel for collapse(3)
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            for (int64_t ol = 0; ol < L_out; ++ol) {
+                int64_t l_start = ol * stride - padding;
+
+                float sum = 0.0f;
+                int64_t count = 0;
+
+                for (int64_t k = 0; k < kernel_size; ++k) {
+                    int64_t l = l_start + k;
+                    if (l >= 0 && l < L) {
+                        sum += static_cast<float>(in_data[(n * C + c) * L + l]);
+                        count++;
+                    }
+                }
+
+                out_data[(n * C + c) * L_out + ol] = static_cast<T>(sum / count);
+            }
+        }
+    }
+}
+
+auto avgpool1d_forward_kernel(const Tensor& input, int64_t kernel_size,
+                               int64_t stride, int64_t padding) -> Tensor {
+    auto shape = input.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t L = shape[2];
+
+    int64_t L_out = (L + 2 * padding - kernel_size) / stride + 1;
+
+    auto output = Tensor::empty_uninitialized({N, C, L_out}, input.dtype(), input.device());
+
+    if (input.dtype() == DType::Float32) {
+        avgpool1d_forward_impl<float>(input.data<float>(), output.data<float>(),
+                                      N, C, L, L_out, kernel_size, stride, padding);
+    } else if (input.dtype() == DType::Float64) {
+        avgpool1d_forward_impl<double>(input.data<double>(), output.data<double>(),
+                                       N, C, L, L_out, kernel_size, stride, padding);
+    } else if (input.dtype() == DType::Float16) {
+        avgpool1d_forward_impl<Float16>(input.data<Float16>(), output.data<Float16>(),
+                                        N, C, L, L_out, kernel_size, stride, padding);
+    } else if (input.dtype() == DType::BFloat16) {
+        avgpool1d_forward_impl<BFloat16>(input.data<BFloat16>(), output.data<BFloat16>(),
+                                         N, C, L, L_out, kernel_size, stride, padding);
+    } else {
+        throw std::runtime_error("Unsupported dtype for avgpool1d_forward");
+    }
+
+    return output;
+}
+
+template<typename T>
+void avgpool1d_backward_impl(const T* grad_out_data, T* grad_in_data,
+                              int64_t N, int64_t C, int64_t L,
+                              int64_t L_out,
+                              int64_t kernel_size, int64_t stride, int64_t padding) {
+    #pragma omp parallel for collapse(2) if(N * C > 4)
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            for (int64_t ol = 0; ol < L_out; ++ol) {
+                int64_t l_start = ol * stride - padding;
+
+                int64_t count = 0;
+                for (int64_t k = 0; k < kernel_size; ++k) {
+                    int64_t l = l_start + k;
+                    if (l >= 0 && l < L) count++;
+                }
+
+                float grad_val = static_cast<float>(grad_out_data[(n * C + c) * L_out + ol]) / count;
+
+                for (int64_t k = 0; k < kernel_size; ++k) {
+                    int64_t l = l_start + k;
+                    if (l >= 0 && l < L) {
+                        int64_t idx = (n * C + c) * L + l;
+                        float val = static_cast<float>(grad_in_data[idx]) + grad_val;
+                        grad_in_data[idx] = static_cast<T>(val);
+                    }
+                }
+            }
+        }
+    }
+}
+
+auto avgpool1d_backward_kernel(const Tensor& grad_output,
+                                const std::vector<int64_t>& input_shape,
+                                int64_t kernel_size, int64_t stride,
+                                int64_t padding) -> Tensor {
+    int64_t N = input_shape[0];
+    int64_t C = input_shape[1];
+    int64_t L = input_shape[2];
+
+    auto grad_shape = grad_output.shape();
+    int64_t L_out = grad_shape[2];
+
+    auto grad_input = zeros(input_shape, grad_output.dtype(), grad_output.device());
+
+    if (grad_output.dtype() == DType::Float32) {
+        avgpool1d_backward_impl<float>(grad_output.data<float>(), grad_input.data<float>(),
+                                       N, C, L, L_out, kernel_size, stride, padding);
+    } else if (grad_output.dtype() == DType::Float64) {
+        avgpool1d_backward_impl<double>(grad_output.data<double>(), grad_input.data<double>(),
+                                        N, C, L, L_out, kernel_size, stride, padding);
+    } else if (grad_output.dtype() == DType::Float16) {
+        avgpool1d_backward_impl<Float16>(grad_output.data<Float16>(), grad_input.data<Float16>(),
+                                         N, C, L, L_out, kernel_size, stride, padding);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        avgpool1d_backward_impl<BFloat16>(grad_output.data<BFloat16>(), grad_input.data<BFloat16>(),
+                                          N, C, L, L_out, kernel_size, stride, padding);
+    } else {
+        throw std::runtime_error("Unsupported dtype for avgpool1d_backward");
+    }
+
+    return grad_input;
+}
+
+// ============================================================================
+// Adaptive 1D Pooling Kernels
+// ============================================================================
+
+template<typename T>
+void adaptive_avgpool1d_impl(const T* in_data, T* out_data,
+                              int64_t N, int64_t C, int64_t L,
+                              int64_t L_out) {
+    #pragma omp parallel for collapse(3)
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            for (int64_t ol = 0; ol < L_out; ++ol) {
+                int64_t l_start = (ol * L) / L_out;
+                int64_t l_end = ((ol + 1) * L) / L_out;
+
+                float sum = 0.0f;
+                int64_t count = l_end - l_start;
+
+                for (int64_t l = l_start; l < l_end; ++l) {
+                    sum += static_cast<float>(in_data[(n * C + c) * L + l]);
+                }
+
+                out_data[(n * C + c) * L_out + ol] = static_cast<T>(sum / count);
+            }
+        }
+    }
+}
+
+auto adaptive_avgpool1d_kernel(const Tensor& input, int64_t output_size) -> Tensor {
+    auto shape = input.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t L = shape[2];
+
+    auto output = Tensor::empty_uninitialized({N, C, output_size}, input.dtype(), input.device());
+
+    if (input.dtype() == DType::Float32) {
+        adaptive_avgpool1d_impl<float>(input.data<float>(), output.data<float>(), N, C, L, output_size);
+    } else if (input.dtype() == DType::Float64) {
+        adaptive_avgpool1d_impl<double>(input.data<double>(), output.data<double>(), N, C, L, output_size);
+    } else if (input.dtype() == DType::Float16) {
+        adaptive_avgpool1d_impl<Float16>(input.data<Float16>(), output.data<Float16>(), N, C, L, output_size);
+    } else if (input.dtype() == DType::BFloat16) {
+        adaptive_avgpool1d_impl<BFloat16>(input.data<BFloat16>(), output.data<BFloat16>(), N, C, L, output_size);
+    } else {
+        throw std::runtime_error("Unsupported dtype for adaptive_avgpool1d");
+    }
+
+    return output;
+}
+
+template<typename T>
+void adaptive_avgpool1d_backward_impl(const T* grad_out_data, T* grad_in_data,
+                                       int64_t N, int64_t C, int64_t L,
+                                       int64_t L_out) {
+    #pragma omp parallel for collapse(2) if(N * C > 4)
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            for (int64_t ol = 0; ol < L_out; ++ol) {
+                int64_t l_start = (ol * L) / L_out;
+                int64_t l_end = ((ol + 1) * L) / L_out;
+
+                int64_t count = l_end - l_start;
+                float grad_val = static_cast<float>(grad_out_data[(n * C + c) * L_out + ol]) / count;
+
+                for (int64_t l = l_start; l < l_end; ++l) {
+                    int64_t idx = (n * C + c) * L + l;
+                    float val = static_cast<float>(grad_in_data[idx]) + grad_val;
+                    grad_in_data[idx] = static_cast<T>(val);
+                }
+            }
+        }
+    }
+}
+
+auto adaptive_avgpool1d_backward_kernel(const Tensor& grad_output,
+                                         const std::vector<int64_t>& input_shape) -> Tensor {
+    int64_t N = input_shape[0];
+    int64_t C = input_shape[1];
+    int64_t L = input_shape[2];
+
+    auto grad_shape = grad_output.shape();
+    int64_t L_out = grad_shape[2];
+
+    auto grad_input = zeros(input_shape, grad_output.dtype(), grad_output.device());
+
+    if (grad_output.dtype() == DType::Float32) {
+        adaptive_avgpool1d_backward_impl<float>(grad_output.data<float>(), grad_input.data<float>(),
+                                                N, C, L, L_out);
+    } else if (grad_output.dtype() == DType::Float64) {
+        adaptive_avgpool1d_backward_impl<double>(grad_output.data<double>(), grad_input.data<double>(),
+                                                 N, C, L, L_out);
+    } else if (grad_output.dtype() == DType::Float16) {
+        adaptive_avgpool1d_backward_impl<Float16>(grad_output.data<Float16>(), grad_input.data<Float16>(),
+                                                  N, C, L, L_out);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        adaptive_avgpool1d_backward_impl<BFloat16>(grad_output.data<BFloat16>(), grad_input.data<BFloat16>(),
+                                                   N, C, L, L_out);
+    } else {
+        throw std::runtime_error("Unsupported dtype for adaptive_avgpool1d_backward");
+    }
+
+    return grad_input;
+}
+
+template<typename T>
+void adaptive_maxpool1d_impl(const T* in_data, T* out_data, int64_t* idx_data,
+                              int64_t N, int64_t C, int64_t L,
+                              int64_t L_out) {
+    #pragma omp parallel for collapse(3)
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            for (int64_t ol = 0; ol < L_out; ++ol) {
+                int64_t l_start = (ol * L) / L_out;
+                int64_t l_end = ((ol + 1) * L) / L_out;
+
+                float max_val = -std::numeric_limits<float>::infinity();
+                int64_t max_idx = 0;
+
+                for (int64_t l = l_start; l < l_end; ++l) {
+                    int64_t in_idx = (n * C + c) * L + l;
+                    float val = static_cast<float>(in_data[in_idx]);
+                    if (val > max_val) {
+                        max_val = val;
+                        max_idx = l;
+                    }
+                }
+
+                int64_t out_idx = (n * C + c) * L_out + ol;
+                out_data[out_idx] = static_cast<T>(max_val);
+                idx_data[out_idx] = max_idx;
+            }
+        }
+    }
+}
+
+auto adaptive_maxpool1d_kernel(const Tensor& input, int64_t output_size)
+    -> std::pair<Tensor, Tensor> {
+    auto shape = input.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t L = shape[2];
+
+    auto output = Tensor::empty_uninitialized({N, C, output_size}, input.dtype(), input.device());
+    auto indices = Tensor::empty_uninitialized({N, C, output_size}, DType::Int64, input.device());
+    int64_t* idx_data = indices.data<int64_t>();
+
+    if (input.dtype() == DType::Float32) {
+        adaptive_maxpool1d_impl<float>(input.data<float>(), output.data<float>(), idx_data,
+                                       N, C, L, output_size);
+    } else if (input.dtype() == DType::Float64) {
+        adaptive_maxpool1d_impl<double>(input.data<double>(), output.data<double>(), idx_data,
+                                        N, C, L, output_size);
+    } else if (input.dtype() == DType::Float16) {
+        adaptive_maxpool1d_impl<Float16>(input.data<Float16>(), output.data<Float16>(), idx_data,
+                                         N, C, L, output_size);
+    } else if (input.dtype() == DType::BFloat16) {
+        adaptive_maxpool1d_impl<BFloat16>(input.data<BFloat16>(), output.data<BFloat16>(), idx_data,
+                                          N, C, L, output_size);
+    } else {
+        throw std::runtime_error("Unsupported dtype for adaptive_maxpool1d");
+    }
+
+    return {output, indices};
+}
+
+template<typename T>
+void adaptive_maxpool1d_backward_impl(const T* grad_out_data, const int64_t* idx_data, T* grad_in_data,
+                                       int64_t N, int64_t C, int64_t L,
+                                       int64_t L_out) {
+    #pragma omp parallel for collapse(2) if(N * C > 4)
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            for (int64_t ol = 0; ol < L_out; ++ol) {
+                int64_t out_idx = (n * C + c) * L_out + ol;
+                int64_t max_idx = idx_data[out_idx];
+                int64_t in_idx = (n * C + c) * L + max_idx;
+                float val = static_cast<float>(grad_in_data[in_idx]) + static_cast<float>(grad_out_data[out_idx]);
+                grad_in_data[in_idx] = static_cast<T>(val);
+            }
+        }
+    }
+}
+
+auto adaptive_maxpool1d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
+                                         const std::vector<int64_t>& input_shape) -> Tensor {
+    int64_t N = input_shape[0];
+    int64_t C = input_shape[1];
+    int64_t L = input_shape[2];
+
+    auto grad_shape = grad_output.shape();
+    int64_t L_out = grad_shape[2];
+
+    auto grad_input = zeros(input_shape, grad_output.dtype(), grad_output.device());
+    const int64_t* idx_data = indices.data<int64_t>();
+
+    if (grad_output.dtype() == DType::Float32) {
+        adaptive_maxpool1d_backward_impl<float>(grad_output.data<float>(), idx_data, grad_input.data<float>(),
+                                                N, C, L, L_out);
+    } else if (grad_output.dtype() == DType::Float64) {
+        adaptive_maxpool1d_backward_impl<double>(grad_output.data<double>(), idx_data, grad_input.data<double>(),
+                                                 N, C, L, L_out);
+    } else if (grad_output.dtype() == DType::Float16) {
+        adaptive_maxpool1d_backward_impl<Float16>(grad_output.data<Float16>(), idx_data, grad_input.data<Float16>(),
+                                                  N, C, L, L_out);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        adaptive_maxpool1d_backward_impl<BFloat16>(grad_output.data<BFloat16>(), idx_data, grad_input.data<BFloat16>(),
+                                                   N, C, L, L_out);
+    } else {
+        throw std::runtime_error("Unsupported dtype for adaptive_maxpool1d_backward");
+    }
+
+    return grad_input;
+}
+
+// ============================================================================
+// 3D Pooling Kernels
+// ============================================================================
+
+template<typename T>
+void maxpool3d_forward_impl(const T* in_data, T* out_data, int64_t* idx_data,
+                             int64_t N, int64_t C,
+                             int64_t D, int64_t H, int64_t W,
+                             int64_t D_out, int64_t H_out, int64_t W_out,
+                             int64_t kernel_size, int64_t stride, int64_t padding) {
+    #pragma omp parallel for collapse(2) if(N * C > 4)
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            for (int64_t od = 0; od < D_out; ++od) {
+                for (int64_t oh = 0; oh < H_out; ++oh) {
+                    for (int64_t ow = 0; ow < W_out; ++ow) {
+                        int64_t d_start = od * stride - padding;
+                        int64_t h_start = oh * stride - padding;
+                        int64_t w_start = ow * stride - padding;
+
+                        float max_val = -std::numeric_limits<float>::infinity();
+                        int64_t max_idx = 0;
+
+                        for (int64_t kd = 0; kd < kernel_size; ++kd) {
+                            for (int64_t kh = 0; kh < kernel_size; ++kh) {
+                                for (int64_t kw = 0; kw < kernel_size; ++kw) {
+                                    int64_t d = d_start + kd;
+                                    int64_t h = h_start + kh;
+                                    int64_t w = w_start + kw;
+                                    if (d >= 0 && d < D && h >= 0 && h < H && w >= 0 && w < W) {
+                                        int64_t in_idx = ((n * C + c) * D + d) * H * W + h * W + w;
+                                        float val = static_cast<float>(in_data[in_idx]);
+                                        if (val > max_val) {
+                                            max_val = val;
+                                            max_idx = d * H * W + h * W + w;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        int64_t out_idx = ((n * C + c) * D_out + od) * H_out * W_out + oh * W_out + ow;
+                        out_data[out_idx] = static_cast<T>(max_val);
+                        idx_data[out_idx] = max_idx;
+                    }
+                }
+            }
+        }
+    }
+}
+
+auto maxpool3d_forward_kernel(const Tensor& input, int64_t kernel_size,
+                               int64_t stride, int64_t padding)
+    -> std::pair<Tensor, Tensor> {
+    auto shape = input.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t D = shape[2];
+    int64_t H = shape[3];
+    int64_t W = shape[4];
+
+    int64_t D_out = (D + 2 * padding - kernel_size) / stride + 1;
+    int64_t H_out = (H + 2 * padding - kernel_size) / stride + 1;
+    int64_t W_out = (W + 2 * padding - kernel_size) / stride + 1;
+
+    auto output = Tensor::empty_uninitialized({N, C, D_out, H_out, W_out}, input.dtype(), input.device());
+    auto indices = Tensor::empty_uninitialized({N, C, D_out, H_out, W_out}, DType::Int64, input.device());
+    int64_t* idx_data = indices.data<int64_t>();
+
+    if (input.dtype() == DType::Float32) {
+        maxpool3d_forward_impl<float>(input.data<float>(), output.data<float>(), idx_data,
+                                      N, C, D, H, W, D_out, H_out, W_out, kernel_size, stride, padding);
+    } else if (input.dtype() == DType::Float64) {
+        maxpool3d_forward_impl<double>(input.data<double>(), output.data<double>(), idx_data,
+                                       N, C, D, H, W, D_out, H_out, W_out, kernel_size, stride, padding);
+    } else if (input.dtype() == DType::Float16) {
+        maxpool3d_forward_impl<Float16>(input.data<Float16>(), output.data<Float16>(), idx_data,
+                                        N, C, D, H, W, D_out, H_out, W_out, kernel_size, stride, padding);
+    } else if (input.dtype() == DType::BFloat16) {
+        maxpool3d_forward_impl<BFloat16>(input.data<BFloat16>(), output.data<BFloat16>(), idx_data,
+                                         N, C, D, H, W, D_out, H_out, W_out, kernel_size, stride, padding);
+    } else {
+        throw std::runtime_error("Unsupported dtype for maxpool3d_forward");
+    }
+
+    return {output, indices};
+}
+
+template<typename T>
+void maxpool3d_backward_impl(const T* grad_out_data, const int64_t* idx_data, T* grad_in_data,
+                              int64_t N, int64_t C,
+                              int64_t D, int64_t H, int64_t W,
+                              int64_t D_out, int64_t H_out, int64_t W_out) {
+    #pragma omp parallel for collapse(2) if(N * C > 4)
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            for (int64_t od = 0; od < D_out; ++od) {
+                for (int64_t oh = 0; oh < H_out; ++oh) {
+                    for (int64_t ow = 0; ow < W_out; ++ow) {
+                        int64_t out_idx = ((n * C + c) * D_out + od) * H_out * W_out + oh * W_out + ow;
+                        int64_t max_idx = idx_data[out_idx];
+                        // max_idx = d * H * W + h * W + w (spatial index within single channel)
+                        int64_t in_idx = (n * C + c) * D * H * W + max_idx;
+                        float val = static_cast<float>(grad_in_data[in_idx]) + static_cast<float>(grad_out_data[out_idx]);
+                        grad_in_data[in_idx] = static_cast<T>(val);
+                    }
+                }
+            }
+        }
+    }
+}
+
+auto maxpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
+                                const std::vector<int64_t>& input_shape) -> Tensor {
+    int64_t N = input_shape[0];
+    int64_t C = input_shape[1];
+    int64_t D = input_shape[2];
+    int64_t H = input_shape[3];
+    int64_t W = input_shape[4];
+
+    auto grad_shape = grad_output.shape();
+    int64_t D_out = grad_shape[2];
+    int64_t H_out = grad_shape[3];
+    int64_t W_out = grad_shape[4];
+
+    auto grad_input = zeros(input_shape, grad_output.dtype(), grad_output.device());
+    const int64_t* idx_data = indices.data<int64_t>();
+
+    if (grad_output.dtype() == DType::Float32) {
+        maxpool3d_backward_impl<float>(grad_output.data<float>(), idx_data, grad_input.data<float>(),
+                                       N, C, D, H, W, D_out, H_out, W_out);
+    } else if (grad_output.dtype() == DType::Float64) {
+        maxpool3d_backward_impl<double>(grad_output.data<double>(), idx_data, grad_input.data<double>(),
+                                        N, C, D, H, W, D_out, H_out, W_out);
+    } else if (grad_output.dtype() == DType::Float16) {
+        maxpool3d_backward_impl<Float16>(grad_output.data<Float16>(), idx_data, grad_input.data<Float16>(),
+                                         N, C, D, H, W, D_out, H_out, W_out);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        maxpool3d_backward_impl<BFloat16>(grad_output.data<BFloat16>(), idx_data, grad_input.data<BFloat16>(),
+                                          N, C, D, H, W, D_out, H_out, W_out);
+    } else {
+        throw std::runtime_error("Unsupported dtype for maxpool3d_backward");
+    }
+
+    return grad_input;
+}
+
+template<typename T>
+void avgpool3d_forward_impl(const T* in_data, T* out_data,
+                             int64_t N, int64_t C,
+                             int64_t D, int64_t H, int64_t W,
+                             int64_t D_out, int64_t H_out, int64_t W_out,
+                             int64_t kernel_size, int64_t stride, int64_t padding) {
+    #pragma omp parallel for collapse(2) if(N * C > 4)
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            for (int64_t od = 0; od < D_out; ++od) {
+                for (int64_t oh = 0; oh < H_out; ++oh) {
+                    for (int64_t ow = 0; ow < W_out; ++ow) {
+                        int64_t d_start = od * stride - padding;
+                        int64_t h_start = oh * stride - padding;
+                        int64_t w_start = ow * stride - padding;
+
+                        float sum = 0.0f;
+                        int64_t count = 0;
+
+                        for (int64_t kd = 0; kd < kernel_size; ++kd) {
+                            for (int64_t kh = 0; kh < kernel_size; ++kh) {
+                                for (int64_t kw = 0; kw < kernel_size; ++kw) {
+                                    int64_t d = d_start + kd;
+                                    int64_t h = h_start + kh;
+                                    int64_t w = w_start + kw;
+                                    if (d >= 0 && d < D && h >= 0 && h < H && w >= 0 && w < W) {
+                                        sum += static_cast<float>(in_data[((n * C + c) * D + d) * H * W + h * W + w]);
+                                        count++;
+                                    }
+                                }
+                            }
+                        }
+
+                        int64_t out_idx = ((n * C + c) * D_out + od) * H_out * W_out + oh * W_out + ow;
+                        out_data[out_idx] = static_cast<T>(count > 0 ? sum / count : 0.0f);
+                    }
+                }
+            }
+        }
+    }
+}
+
+auto avgpool3d_forward_kernel(const Tensor& input, int64_t kernel_size,
+                               int64_t stride, int64_t padding) -> Tensor {
+    auto shape = input.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t D = shape[2];
+    int64_t H = shape[3];
+    int64_t W = shape[4];
+
+    int64_t D_out = (D + 2 * padding - kernel_size) / stride + 1;
+    int64_t H_out = (H + 2 * padding - kernel_size) / stride + 1;
+    int64_t W_out = (W + 2 * padding - kernel_size) / stride + 1;
+
+    auto output = Tensor::empty_uninitialized({N, C, D_out, H_out, W_out}, input.dtype(), input.device());
+
+    if (input.dtype() == DType::Float32) {
+        avgpool3d_forward_impl<float>(input.data<float>(), output.data<float>(),
+                                      N, C, D, H, W, D_out, H_out, W_out, kernel_size, stride, padding);
+    } else if (input.dtype() == DType::Float64) {
+        avgpool3d_forward_impl<double>(input.data<double>(), output.data<double>(),
+                                       N, C, D, H, W, D_out, H_out, W_out, kernel_size, stride, padding);
+    } else if (input.dtype() == DType::Float16) {
+        avgpool3d_forward_impl<Float16>(input.data<Float16>(), output.data<Float16>(),
+                                        N, C, D, H, W, D_out, H_out, W_out, kernel_size, stride, padding);
+    } else if (input.dtype() == DType::BFloat16) {
+        avgpool3d_forward_impl<BFloat16>(input.data<BFloat16>(), output.data<BFloat16>(),
+                                         N, C, D, H, W, D_out, H_out, W_out, kernel_size, stride, padding);
+    } else {
+        throw std::runtime_error("Unsupported dtype for avgpool3d_forward");
+    }
+
+    return output;
+}
+
+template<typename T>
+void avgpool3d_backward_impl(const T* grad_out_data, T* grad_in_data,
+                              int64_t N, int64_t C,
+                              int64_t D, int64_t H, int64_t W,
+                              int64_t D_out, int64_t H_out, int64_t W_out,
+                              int64_t kernel_size, int64_t stride, int64_t padding) {
+    #pragma omp parallel for collapse(2) if(N * C > 4)
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            for (int64_t od = 0; od < D_out; ++od) {
+                for (int64_t oh = 0; oh < H_out; ++oh) {
+                    for (int64_t ow = 0; ow < W_out; ++ow) {
+                        int64_t d_start = od * stride - padding;
+                        int64_t h_start = oh * stride - padding;
+                        int64_t w_start = ow * stride - padding;
+
+                        int64_t count = 0;
+                        for (int64_t kd = 0; kd < kernel_size; ++kd) {
+                            for (int64_t kh = 0; kh < kernel_size; ++kh) {
+                                for (int64_t kw = 0; kw < kernel_size; ++kw) {
+                                    int64_t d = d_start + kd;
+                                    int64_t h = h_start + kh;
+                                    int64_t w = w_start + kw;
+                                    if (d >= 0 && d < D && h >= 0 && h < H && w >= 0 && w < W) count++;
+                                }
+                            }
+                        }
+
+                        int64_t out_idx = ((n * C + c) * D_out + od) * H_out * W_out + oh * W_out + ow;
+                        float grad_val = static_cast<float>(grad_out_data[out_idx]) / count;
+
+                        for (int64_t kd = 0; kd < kernel_size; ++kd) {
+                            for (int64_t kh = 0; kh < kernel_size; ++kh) {
+                                for (int64_t kw = 0; kw < kernel_size; ++kw) {
+                                    int64_t d = d_start + kd;
+                                    int64_t h = h_start + kh;
+                                    int64_t w = w_start + kw;
+                                    if (d >= 0 && d < D && h >= 0 && h < H && w >= 0 && w < W) {
+                                        int64_t idx = ((n * C + c) * D + d) * H * W + h * W + w;
+                                        float val = static_cast<float>(grad_in_data[idx]) + grad_val;
+                                        grad_in_data[idx] = static_cast<T>(val);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+auto avgpool3d_backward_kernel(const Tensor& grad_output,
+                                const std::vector<int64_t>& input_shape,
+                                int64_t kernel_size, int64_t stride,
+                                int64_t padding) -> Tensor {
+    int64_t N = input_shape[0];
+    int64_t C = input_shape[1];
+    int64_t D = input_shape[2];
+    int64_t H = input_shape[3];
+    int64_t W = input_shape[4];
+
+    auto grad_shape = grad_output.shape();
+    int64_t D_out = grad_shape[2];
+    int64_t H_out = grad_shape[3];
+    int64_t W_out = grad_shape[4];
+
+    auto grad_input = zeros(input_shape, grad_output.dtype(), grad_output.device());
+
+    if (grad_output.dtype() == DType::Float32) {
+        avgpool3d_backward_impl<float>(grad_output.data<float>(), grad_input.data<float>(),
+                                       N, C, D, H, W, D_out, H_out, W_out, kernel_size, stride, padding);
+    } else if (grad_output.dtype() == DType::Float64) {
+        avgpool3d_backward_impl<double>(grad_output.data<double>(), grad_input.data<double>(),
+                                        N, C, D, H, W, D_out, H_out, W_out, kernel_size, stride, padding);
+    } else if (grad_output.dtype() == DType::Float16) {
+        avgpool3d_backward_impl<Float16>(grad_output.data<Float16>(), grad_input.data<Float16>(),
+                                         N, C, D, H, W, D_out, H_out, W_out, kernel_size, stride, padding);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        avgpool3d_backward_impl<BFloat16>(grad_output.data<BFloat16>(), grad_input.data<BFloat16>(),
+                                          N, C, D, H, W, D_out, H_out, W_out, kernel_size, stride, padding);
+    } else {
+        throw std::runtime_error("Unsupported dtype for avgpool3d_backward");
+    }
+
+    return grad_input;
+}
+
+// ============================================================================
+// Adaptive 3D Pooling Kernels
+// ============================================================================
+
+template<typename T>
+void adaptive_maxpool3d_impl(const T* in_data, T* out_data, int64_t* idx_data,
+                              int64_t N, int64_t C,
+                              int64_t D, int64_t H, int64_t W,
+                              int64_t D_out, int64_t H_out, int64_t W_out) {
+    #pragma omp parallel for collapse(2) if(N * C > 4)
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            for (int64_t od = 0; od < D_out; ++od) {
+                int64_t d_start = (od * D) / D_out;
+                int64_t d_end = ((od + 1) * D) / D_out;
+                for (int64_t oh = 0; oh < H_out; ++oh) {
+                    int64_t h_start = (oh * H) / H_out;
+                    int64_t h_end = ((oh + 1) * H) / H_out;
+                    for (int64_t ow = 0; ow < W_out; ++ow) {
+                        int64_t w_start = (ow * W) / W_out;
+                        int64_t w_end = ((ow + 1) * W) / W_out;
+
+                        float max_val = -std::numeric_limits<float>::infinity();
+                        int64_t max_idx = 0;
+
+                        for (int64_t di = d_start; di < d_end; ++di) {
+                            for (int64_t hi = h_start; hi < h_end; ++hi) {
+                                for (int64_t wi = w_start; wi < w_end; ++wi) {
+                                    int64_t in_idx = ((n * C + c) * D + di) * H * W + hi * W + wi;
+                                    float val = static_cast<float>(in_data[in_idx]);
+                                    if (val > max_val) {
+                                        max_val = val;
+                                        max_idx = di * H * W + hi * W + wi;
+                                    }
+                                }
+                            }
+                        }
+
+                        int64_t out_idx = ((n * C + c) * D_out + od) * H_out * W_out + oh * W_out + ow;
+                        out_data[out_idx] = static_cast<T>(max_val);
+                        idx_data[out_idx] = max_idx;
+                    }
+                }
+            }
+        }
+    }
+}
+
+auto adaptive_maxpool3d_kernel(const Tensor& input,
+                                int64_t output_d, int64_t output_h, int64_t output_w)
+    -> std::pair<Tensor, Tensor> {
+    auto shape = input.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t D = shape[2];
+    int64_t H = shape[3];
+    int64_t W = shape[4];
+
+    auto output = Tensor::empty_uninitialized({N, C, output_d, output_h, output_w}, input.dtype(), input.device());
+    auto indices = Tensor::empty_uninitialized({N, C, output_d, output_h, output_w}, DType::Int64, input.device());
+    int64_t* idx_data = indices.data<int64_t>();
+
+    if (input.dtype() == DType::Float32) {
+        adaptive_maxpool3d_impl<float>(input.data<float>(), output.data<float>(), idx_data,
+                                       N, C, D, H, W, output_d, output_h, output_w);
+    } else if (input.dtype() == DType::Float64) {
+        adaptive_maxpool3d_impl<double>(input.data<double>(), output.data<double>(), idx_data,
+                                        N, C, D, H, W, output_d, output_h, output_w);
+    } else if (input.dtype() == DType::Float16) {
+        adaptive_maxpool3d_impl<Float16>(input.data<Float16>(), output.data<Float16>(), idx_data,
+                                         N, C, D, H, W, output_d, output_h, output_w);
+    } else if (input.dtype() == DType::BFloat16) {
+        adaptive_maxpool3d_impl<BFloat16>(input.data<BFloat16>(), output.data<BFloat16>(), idx_data,
+                                          N, C, D, H, W, output_d, output_h, output_w);
+    } else {
+        throw std::runtime_error("Unsupported dtype for adaptive_maxpool3d");
+    }
+
+    return {output, indices};
+}
+
+template<typename T>
+void adaptive_maxpool3d_backward_impl(const T* grad_out_data, const int64_t* idx_data, T* grad_in_data,
+                                       int64_t N, int64_t C,
+                                       int64_t D, int64_t H, int64_t W,
+                                       int64_t D_out, int64_t H_out, int64_t W_out) {
+    #pragma omp parallel for collapse(2) if(N * C > 4)
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            for (int64_t od = 0; od < D_out; ++od) {
+                for (int64_t oh = 0; oh < H_out; ++oh) {
+                    for (int64_t ow = 0; ow < W_out; ++ow) {
+                        int64_t out_idx = ((n * C + c) * D_out + od) * H_out * W_out + oh * W_out + ow;
+                        int64_t max_idx = idx_data[out_idx];
+                        int64_t in_idx = (n * C + c) * D * H * W + max_idx;
+                        float val = static_cast<float>(grad_in_data[in_idx]) + static_cast<float>(grad_out_data[out_idx]);
+                        grad_in_data[in_idx] = static_cast<T>(val);
+                    }
+                }
+            }
+        }
+    }
+}
+
+auto adaptive_maxpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
+                                         const std::vector<int64_t>& input_shape) -> Tensor {
+    int64_t N = input_shape[0];
+    int64_t C = input_shape[1];
+    int64_t D = input_shape[2];
+    int64_t H = input_shape[3];
+    int64_t W = input_shape[4];
+
+    auto grad_shape = grad_output.shape();
+    int64_t D_out = grad_shape[2];
+    int64_t H_out = grad_shape[3];
+    int64_t W_out = grad_shape[4];
+
+    auto grad_input = zeros(input_shape, grad_output.dtype(), grad_output.device());
+    const int64_t* idx_data = indices.data<int64_t>();
+
+    if (grad_output.dtype() == DType::Float32) {
+        adaptive_maxpool3d_backward_impl<float>(grad_output.data<float>(), idx_data, grad_input.data<float>(),
+                                                N, C, D, H, W, D_out, H_out, W_out);
+    } else if (grad_output.dtype() == DType::Float64) {
+        adaptive_maxpool3d_backward_impl<double>(grad_output.data<double>(), idx_data, grad_input.data<double>(),
+                                                 N, C, D, H, W, D_out, H_out, W_out);
+    } else if (grad_output.dtype() == DType::Float16) {
+        adaptive_maxpool3d_backward_impl<Float16>(grad_output.data<Float16>(), idx_data, grad_input.data<Float16>(),
+                                                  N, C, D, H, W, D_out, H_out, W_out);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        adaptive_maxpool3d_backward_impl<BFloat16>(grad_output.data<BFloat16>(), idx_data, grad_input.data<BFloat16>(),
+                                                   N, C, D, H, W, D_out, H_out, W_out);
+    } else {
+        throw std::runtime_error("Unsupported dtype for adaptive_maxpool3d_backward");
+    }
+
+    return grad_input;
+}
+
+template<typename T>
+void adaptive_avgpool3d_impl(const T* in_data, T* out_data,
+                              int64_t N, int64_t C,
+                              int64_t D, int64_t H, int64_t W,
+                              int64_t D_out, int64_t H_out, int64_t W_out) {
+    #pragma omp parallel for collapse(2) if(N * C > 4)
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            for (int64_t od = 0; od < D_out; ++od) {
+                int64_t d_start = (od * D) / D_out;
+                int64_t d_end = ((od + 1) * D) / D_out;
+                for (int64_t oh = 0; oh < H_out; ++oh) {
+                    int64_t h_start = (oh * H) / H_out;
+                    int64_t h_end = ((oh + 1) * H) / H_out;
+                    for (int64_t ow = 0; ow < W_out; ++ow) {
+                        int64_t w_start = (ow * W) / W_out;
+                        int64_t w_end = ((ow + 1) * W) / W_out;
+
+                        float sum = 0.0f;
+                        int64_t count = (d_end - d_start) * (h_end - h_start) * (w_end - w_start);
+
+                        for (int64_t di = d_start; di < d_end; ++di) {
+                            for (int64_t hi = h_start; hi < h_end; ++hi) {
+                                for (int64_t wi = w_start; wi < w_end; ++wi) {
+                                    sum += static_cast<float>(in_data[((n * C + c) * D + di) * H * W + hi * W + wi]);
+                                }
+                            }
+                        }
+
+                        int64_t out_idx = ((n * C + c) * D_out + od) * H_out * W_out + oh * W_out + ow;
+                        out_data[out_idx] = static_cast<T>(count > 0 ? sum / count : 0.0f);
+                    }
+                }
+            }
+        }
+    }
+}
+
+auto adaptive_avgpool3d_kernel(const Tensor& input,
+                                int64_t output_d, int64_t output_h, int64_t output_w) -> Tensor {
+    auto shape = input.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t D = shape[2];
+    int64_t H = shape[3];
+    int64_t W = shape[4];
+
+    auto output = Tensor::empty_uninitialized({N, C, output_d, output_h, output_w}, input.dtype(), input.device());
+
+    if (input.dtype() == DType::Float32) {
+        adaptive_avgpool3d_impl<float>(input.data<float>(), output.data<float>(),
+                                       N, C, D, H, W, output_d, output_h, output_w);
+    } else if (input.dtype() == DType::Float64) {
+        adaptive_avgpool3d_impl<double>(input.data<double>(), output.data<double>(),
+                                        N, C, D, H, W, output_d, output_h, output_w);
+    } else if (input.dtype() == DType::Float16) {
+        adaptive_avgpool3d_impl<Float16>(input.data<Float16>(), output.data<Float16>(),
+                                         N, C, D, H, W, output_d, output_h, output_w);
+    } else if (input.dtype() == DType::BFloat16) {
+        adaptive_avgpool3d_impl<BFloat16>(input.data<BFloat16>(), output.data<BFloat16>(),
+                                          N, C, D, H, W, output_d, output_h, output_w);
+    } else {
+        throw std::runtime_error("Unsupported dtype for adaptive_avgpool3d");
+    }
+
+    return output;
+}
+
+template<typename T>
+void adaptive_avgpool3d_backward_impl(const T* grad_out_data, T* grad_in_data,
+                                       int64_t N, int64_t C,
+                                       int64_t D, int64_t H, int64_t W,
+                                       int64_t D_out, int64_t H_out, int64_t W_out) {
+    #pragma omp parallel for collapse(2) if(N * C > 4)
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            for (int64_t od = 0; od < D_out; ++od) {
+                int64_t d_start = (od * D) / D_out;
+                int64_t d_end = ((od + 1) * D) / D_out;
+                for (int64_t oh = 0; oh < H_out; ++oh) {
+                    int64_t h_start = (oh * H) / H_out;
+                    int64_t h_end = ((oh + 1) * H) / H_out;
+                    for (int64_t ow = 0; ow < W_out; ++ow) {
+                        int64_t w_start = (ow * W) / W_out;
+                        int64_t w_end = ((ow + 1) * W) / W_out;
+
+                        int64_t count = (d_end - d_start) * (h_end - h_start) * (w_end - w_start);
+                        int64_t out_idx = ((n * C + c) * D_out + od) * H_out * W_out + oh * W_out + ow;
+                        float grad_val = static_cast<float>(grad_out_data[out_idx]) / count;
+
+                        for (int64_t di = d_start; di < d_end; ++di) {
+                            for (int64_t hi = h_start; hi < h_end; ++hi) {
+                                for (int64_t wi = w_start; wi < w_end; ++wi) {
+                                    int64_t idx = ((n * C + c) * D + di) * H * W + hi * W + wi;
+                                    float val = static_cast<float>(grad_in_data[idx]) + grad_val;
+                                    grad_in_data[idx] = static_cast<T>(val);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+auto adaptive_avgpool3d_backward_kernel(const Tensor& grad_output,
+                                         const std::vector<int64_t>& input_shape) -> Tensor {
+    int64_t N = input_shape[0];
+    int64_t C = input_shape[1];
+    int64_t D = input_shape[2];
+    int64_t H = input_shape[3];
+    int64_t W = input_shape[4];
+
+    auto grad_shape = grad_output.shape();
+    int64_t D_out = grad_shape[2];
+    int64_t H_out = grad_shape[3];
+    int64_t W_out = grad_shape[4];
+
+    auto grad_input = zeros(input_shape, grad_output.dtype(), grad_output.device());
+
+    if (grad_output.dtype() == DType::Float32) {
+        adaptive_avgpool3d_backward_impl<float>(grad_output.data<float>(), grad_input.data<float>(),
+                                                N, C, D, H, W, D_out, H_out, W_out);
+    } else if (grad_output.dtype() == DType::Float64) {
+        adaptive_avgpool3d_backward_impl<double>(grad_output.data<double>(), grad_input.data<double>(),
+                                                 N, C, D, H, W, D_out, H_out, W_out);
+    } else if (grad_output.dtype() == DType::Float16) {
+        adaptive_avgpool3d_backward_impl<Float16>(grad_output.data<Float16>(), grad_input.data<Float16>(),
+                                                  N, C, D, H, W, D_out, H_out, W_out);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        adaptive_avgpool3d_backward_impl<BFloat16>(grad_output.data<BFloat16>(), grad_input.data<BFloat16>(),
+                                                   N, C, D, H, W, D_out, H_out, W_out);
+    } else {
+        throw std::runtime_error("Unsupported dtype for adaptive_avgpool3d_backward");
+    }
+
+    return grad_input;
+}
+
 } // namespace cpu
 } // namespace tenzor

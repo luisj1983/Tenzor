@@ -10,6 +10,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #include "../module.hpp"
@@ -78,6 +79,7 @@ private:
     int64_t max_len_;        ///< Maximum sequence length
     Tensor pe_;              ///< Precomputed positional encodings (CPU, Float32)
     mutable Tensor pe_cached_;  ///< PE cached on target device/dtype (lazily populated)
+    mutable std::mutex pe_mutex_;  ///< Guards pe_cached_ for thread safety
     std::shared_ptr<Dropout> dropout_;  ///< Dropout layer
 
     /**

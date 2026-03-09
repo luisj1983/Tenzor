@@ -324,6 +324,14 @@ set(SHADERS
     has_inf_nan_f64
     depthwise_conv2d
     depthwise_conv2d_f64
+    depthwise_conv2d_f16
+    # Cumulative ops
+    cumsum
+    cumsum_f64
+    cumsum_f16
+    cumprod
+    cumprod_f64
+    cumprod_f16
     adaptive_max_pool2d_backward
     adaptive_max_pool2d_backward_f64
     strided_fill

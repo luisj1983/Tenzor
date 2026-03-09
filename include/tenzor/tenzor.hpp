@@ -102,6 +102,8 @@
 #include "tenzor/nn/layers/dropout.hpp"
 #include "tenzor/nn/layers/pooling.hpp"
 #include "tenzor/nn/layers/flatten.hpp"
+#include "tenzor/nn/layers/padding.hpp"
+#include "tenzor/nn/layers/upsample.hpp"
 #include "tenzor/nn/layers/identity.hpp"
 #include "tenzor/nn/layers/rnn.hpp"
 #include "tenzor/nn/layers/embedding.hpp"

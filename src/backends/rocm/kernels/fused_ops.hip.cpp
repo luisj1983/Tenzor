@@ -5,6 +5,7 @@
 #include "tenzor/core/tensor.hpp"
 #include <stdexcept>
 #include <cmath>
+#include <tuple>
 
 namespace tenzor {
 namespace rocm {
@@ -1636,6 +1637,133 @@ auto fused_adam_atan2_step_hip(
     }
 
     HIP_CHECK(hipGetLastError());
+}
+
+// ==============================================================================
+// Fused RMSNorm Backward HIP Kernel
+// ==============================================================================
+
+/**
+ * @brief Fused RMSNorm backward kernel.
+ *
+ * Computes gradients for input and weight.
+ * grad_input = weight * rrms * (grad_out - x * rrms^2 * mean(grad_out * x * weight))
+ */
+template<typename T, int BLOCK_SZ>
+__global__ void fused_rms_norm_backward_kernel_hip(
+    const T* grad_output,
+    const T* input,
+    const T* weight,
+    const T* rrms,
+    T* grad_input,
+    T* grad_weight,
+    int64_t batch_size,
+    int64_t norm_size
+) {
+    int64_t b = blockIdx.x;
+    if (b >= batch_size) return;
+
+    const T* batch_grad_out = grad_output + b * norm_size;
+    const T* batch_in = input + b * norm_size;
+    T* batch_grad_in = grad_input + b * norm_size;
+
+    T batch_rrms = rrms[b];
+
+    __shared__ T shared_sum[BLOCK_SZ];
+
+    // Compute sum(grad_out * x * weight) / norm_size for input gradient
+    T sum_grad_x_w = 0;
+    for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+        sum_grad_x_w += batch_grad_out[i] * batch_in[i] * weight[i];
+    }
+
+    shared_sum[threadIdx.x] = sum_grad_x_w;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) {
+            shared_sum[threadIdx.x] += shared_sum[threadIdx.x + s];
+        }
+        __syncthreads();
+    }
+
+    T mean_grad_x_w = shared_sum[0] / norm_size;
+
+    // Compute input gradient and accumulate weight gradient
+    for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+        T x_i = batch_in[i];
+        T w_i = weight[i];
+        T grad_out_i = batch_grad_out[i];
+
+        // grad_input = rrms * (grad_out * weight - x * rrms^2 * mean_grad_x_w)
+        batch_grad_in[i] = batch_rrms * (grad_out_i * w_i - x_i * batch_rrms * batch_rrms * mean_grad_x_w);
+
+        // grad_weight accumulation (atomic for thread safety across batches)
+        atomicAdd(&grad_weight[i], grad_out_i * x_i * batch_rrms);
+    }
+}
+
+auto fused_rms_norm_backward_hip(
+    const Tensor& grad_output,
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor& rrms
+) -> std::tuple<Tensor, Tensor> {
+    auto shape = input.shape();
+    int64_t norm_size = shape.back();
+
+    int64_t batch_size = 1;
+    for (size_t i = 0; i < shape.size() - 1; ++i) {
+        batch_size *= shape[i];
+    }
+
+    // Create zero-initialized output tensors
+    std::vector<int64_t> input_shape(input.shape().begin(), input.shape().end());
+    Tensor grad_input(input_shape, input.dtype(), input.device());
+    Tensor grad_weight({norm_size}, input.dtype(), input.device());
+
+    // Zero-initialize
+    HIP_CHECK(hipMemset(grad_input.data_ptr(), 0,
+        grad_input.numel() * dtype_size(input.dtype())));
+    HIP_CHECK(hipMemset(grad_weight.data_ptr(), 0,
+        norm_size * dtype_size(input.dtype())));
+
+    constexpr int BLOCK_SIZE = 256;
+    int blocks = batch_size;
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(
+            (fused_rms_norm_backward_kernel_hip<float, BLOCK_SIZE>),
+            dim3(blocks), dim3(BLOCK_SIZE), 0, 0,
+            grad_output.data<float>(),
+            input.data<float>(),
+            weight.data<float>(),
+            rrms.data<float>(),
+            grad_input.data<float>(),
+            grad_weight.data<float>(),
+            batch_size,
+            norm_size
+        );
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(
+            (fused_rms_norm_backward_kernel_hip<double, BLOCK_SIZE>),
+            dim3(blocks), dim3(BLOCK_SIZE), 0, 0,
+            grad_output.data<double>(),
+            input.data<double>(),
+            weight.data<double>(),
+            rrms.data<double>(),
+            grad_input.data<double>(),
+            grad_weight.data<double>(),
+            batch_size,
+            norm_size
+        );
+    } else {
+        throw std::runtime_error("fused_rms_norm_backward_hip: Only Float32 and Float64 supported");
+    }
+
+    HIP_CHECK(hipGetLastError());
+
+    return std::make_tuple(grad_input, grad_weight);
 }
 
 } // namespace rocm

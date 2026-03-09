@@ -2,6 +2,8 @@
 #include <hip/hip_fp16.h>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include <hipcub/hipcub.hpp>
+#include <thrust/counting_iterator.h>
 #include <stdexcept>
 #include <vector>
 
@@ -2075,6 +2077,198 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
     }
 
     HIP_CHECK(hipGetLastError());
+    return output;
+}
+
+// ==============================================================================
+// OneHot Operation
+// ==============================================================================
+
+template<typename IndexT>
+__global__ void one_hot_kernel_impl(
+    const IndexT* indices,
+    float* output,
+    int64_t batch_size,
+    int64_t num_classes) {
+
+    int64_t total = batch_size * num_classes;
+    HIP_KERNEL_LOOP(idx, total) {
+        int64_t batch = idx / num_classes;
+        int64_t cls = idx % num_classes;
+        output[idx] = (static_cast<int64_t>(indices[batch]) == cls) ? 1.0f : 0.0f;
+    }
+}
+
+auto one_hot_kernel(const Tensor& indices, int64_t num_classes,
+                    hipStream_t stream) -> Tensor {
+    int64_t batch_size = indices.numel();
+
+    Tensor output({batch_size, num_classes}, DType::Float32, indices.device());
+
+    if (batch_size == 0) return output;
+
+    int64_t total = batch_size * num_classes;
+    constexpr int BLOCK_SIZE = 256;
+    int num_blocks = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    switch (indices.dtype()) {
+        case DType::Int32:
+            hipLaunchKernelGGL(one_hot_kernel_impl<int32_t>,
+                dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                indices.data<int32_t>(), output.data<float>(), batch_size, num_classes);
+            break;
+        case DType::Int64:
+            hipLaunchKernelGGL(one_hot_kernel_impl<int64_t>,
+                dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                indices.data<int64_t>(), output.data<float>(), batch_size, num_classes);
+            break;
+        default:
+            throw std::runtime_error("one_hot: unsupported index dtype (expected Int32 or Int64)");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return output;
+}
+
+// ==============================================================================
+// Nonzero Operation
+// ==============================================================================
+
+template<typename T>
+__global__ void nonzero_flag_kernel_hip(
+    const T* input,
+    int64_t* flags,
+    int64_t n) {
+
+    HIP_KERNEL_LOOP(i, n) {
+        flags[i] = (input[i] != static_cast<T>(0)) ? 1 : 0;
+    }
+}
+
+// Specialization for __half
+template<>
+__global__ void nonzero_flag_kernel_hip<__half>(
+    const __half* input,
+    int64_t* flags,
+    int64_t n) {
+
+    HIP_KERNEL_LOOP(i, n) {
+        flags[i] = (__hne(input[i], __float2half(0.0f))) ? 1 : 0;
+    }
+}
+
+// Decompose compacted flat indices into multi-dimensional indices
+__global__ void decompose_flat_indices_kernel_hip(
+    const int64_t* flat_indices,
+    int64_t* output,
+    const int64_t* shape,
+    int64_t num_indices,
+    int64_t ndim) {
+
+    HIP_KERNEL_LOOP(i, num_indices) {
+        int64_t flat = flat_indices[i];
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            output[i * ndim + d] = flat % shape[d];
+            flat /= shape[d];
+        }
+    }
+}
+
+auto nonzero_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    int64_t ndim = input.ndim();
+
+    if (n == 0) {
+        return Tensor({0, ndim}, DType::Int64, input.device());
+    }
+
+    constexpr int BLOCK_SIZE = 256;
+    int num_blocks = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    // Allocate flags array
+    int64_t* d_flags = nullptr;
+    HIP_CHECK(hipMalloc(&d_flags, n * sizeof(int64_t)));
+
+    // Launch flag kernel based on dtype
+    #define LAUNCH_NONZERO_FLAG_HIP(T) \
+        hipLaunchKernelGGL(nonzero_flag_kernel_hip<T>, \
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream, \
+            input.data<T>(), d_flags, n); \
+        HIP_CHECK(hipGetLastError())
+
+    switch (input.dtype()) {
+        case DType::Float32: LAUNCH_NONZERO_FLAG_HIP(float); break;
+        case DType::Float64: LAUNCH_NONZERO_FLAG_HIP(double); break;
+        case DType::Int32:   LAUNCH_NONZERO_FLAG_HIP(int32_t); break;
+        case DType::Int64:   LAUNCH_NONZERO_FLAG_HIP(int64_t); break;
+        case DType::Int8:    LAUNCH_NONZERO_FLAG_HIP(int8_t); break;
+        case DType::UInt8:   LAUNCH_NONZERO_FLAG_HIP(uint8_t); break;
+        case DType::Bool:    LAUNCH_NONZERO_FLAG_HIP(bool); break;
+        case DType::Float16:
+            hipLaunchKernelGGL(nonzero_flag_kernel_hip<__half>,
+                dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                reinterpret_cast<const __half*>(input.data_ptr()), d_flags, n);
+            HIP_CHECK(hipGetLastError());
+            break;
+        default:
+            HIP_CHECK(hipFree(d_flags));
+            throw std::runtime_error("nonzero: unsupported dtype");
+    }
+
+    #undef LAUNCH_NONZERO_FLAG_HIP
+
+    // Use hipcub DeviceSelect::Flagged with CountingInputIterator to compact
+    // nonzero flat indices in a single pass
+    thrust::counting_iterator<int64_t> iota(0);
+
+    int64_t* d_flat_indices = nullptr;
+    HIP_CHECK(hipMalloc(&d_flat_indices, n * sizeof(int64_t)));
+
+    int* d_num_selected = nullptr;
+    HIP_CHECK(hipMalloc(&d_num_selected, sizeof(int)));
+
+    void* d_temp = nullptr;
+    size_t temp_bytes = 0;
+    hipcub::DeviceSelect::Flagged(d_temp, temp_bytes,
+        iota, d_flags, d_flat_indices, d_num_selected,
+        static_cast<int>(n), stream);
+    HIP_CHECK(hipMalloc(&d_temp, temp_bytes));
+    hipcub::DeviceSelect::Flagged(d_temp, temp_bytes,
+        iota, d_flags, d_flat_indices, d_num_selected,
+        static_cast<int>(n), stream);
+
+    // D2H sync to get count
+    int total_nonzero;
+    HIP_CHECK(hipMemcpyAsync(&total_nonzero, d_num_selected, sizeof(int), hipMemcpyDeviceToHost, stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
+
+    HIP_CHECK(hipFree(d_flags));
+    HIP_CHECK(hipFree(d_temp));
+    HIP_CHECK(hipFree(d_num_selected));
+
+    if (total_nonzero == 0) {
+        HIP_CHECK(hipFree(d_flat_indices));
+        return Tensor({0, ndim}, DType::Int64, input.device());
+    }
+
+    // Allocate output tensor and decompose flat indices to multi-dim
+    Tensor output({static_cast<int64_t>(total_nonzero), ndim}, DType::Int64, input.device());
+
+    int64_t* d_shape = nullptr;
+    HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
+    HIP_CHECK(hipMemcpyAsync(d_shape, input.shape().data(),
+                              ndim * sizeof(int64_t), hipMemcpyHostToDevice, stream));
+
+    int decompose_blocks = (total_nonzero + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    hipLaunchKernelGGL(decompose_flat_indices_kernel_hip,
+        dim3(decompose_blocks), dim3(BLOCK_SIZE), 0, stream,
+        d_flat_indices, output.data<int64_t>(), d_shape, total_nonzero, ndim);
+
+    HIP_CHECK(hipGetLastError());
+
+    HIP_CHECK(hipFree(d_flat_indices));
+    HIP_CHECK(hipFree(d_shape));
+
     return output;
 }
 

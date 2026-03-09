@@ -1303,5 +1303,160 @@ auto scatter_add_kernel(const Tensor& self, int64_t dim, const Tensor& index, co
     return output;
 }
 
+// ============================================================================
+// Put Operation
+// ============================================================================
+// Kernel name classes
+class PutKernelFloat32;
+class PutKernelFloat64;
+class PutKernelInt32;
+class PutKernelInt64;
+class PutKernelFloat32Acc;
+class PutKernelFloat64Acc;
+class PutKernelInt32Acc;
+class PutKernelInt64Acc;
+
+auto put_kernel(
+    const Tensor& input,
+    const Tensor& indices,
+    const Tensor& source,
+    bool accumulate,
+    sycl::queue& queue
+) -> Tensor {
+    Tensor output = input.clone();
+
+    int64_t num_indices = indices.numel();
+    int64_t total_size = input.numel();
+
+    if (num_indices == 0) return output;
+
+    if (accumulate) {
+        // Accumulate mode: must use host-side loop to avoid data races
+        // (SYCL atomics on float are limited)
+        if (input.dtype() == DType::Float32) {
+            std::vector<float> h_out(total_size);
+            std::vector<float> h_src(source.numel());
+            std::vector<int64_t> h_idx(num_indices);
+            queue.memcpy(h_out.data(), output.data_ptr(), total_size * sizeof(float)).wait();
+            queue.memcpy(h_src.data(), source.data_ptr(), source.numel() * sizeof(float)).wait();
+            queue.memcpy(h_idx.data(), indices.data_ptr(), num_indices * sizeof(int64_t)).wait();
+
+            for (int64_t i = 0; i < num_indices; ++i) {
+                int64_t target_idx = h_idx[i];
+                if (target_idx < 0) target_idx += total_size;
+                if (target_idx >= 0 && target_idx < total_size) {
+                    h_out[target_idx] += h_src[i];
+                }
+            }
+            queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), total_size * sizeof(float)).wait();
+        } else if (input.dtype() == DType::Float64) {
+            std::vector<double> h_out(total_size);
+            std::vector<double> h_src(source.numel());
+            std::vector<int64_t> h_idx(num_indices);
+            queue.memcpy(h_out.data(), output.data_ptr(), total_size * sizeof(double)).wait();
+            queue.memcpy(h_src.data(), source.data_ptr(), source.numel() * sizeof(double)).wait();
+            queue.memcpy(h_idx.data(), indices.data_ptr(), num_indices * sizeof(int64_t)).wait();
+
+            for (int64_t i = 0; i < num_indices; ++i) {
+                int64_t target_idx = h_idx[i];
+                if (target_idx < 0) target_idx += total_size;
+                if (target_idx >= 0 && target_idx < total_size) {
+                    h_out[target_idx] += h_src[i];
+                }
+            }
+            queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), total_size * sizeof(double)).wait();
+        } else if (input.dtype() == DType::Int32) {
+            std::vector<int32_t> h_out(total_size);
+            std::vector<int32_t> h_src(source.numel());
+            std::vector<int64_t> h_idx(num_indices);
+            queue.memcpy(h_out.data(), output.data_ptr(), total_size * sizeof(int32_t)).wait();
+            queue.memcpy(h_src.data(), source.data_ptr(), source.numel() * sizeof(int32_t)).wait();
+            queue.memcpy(h_idx.data(), indices.data_ptr(), num_indices * sizeof(int64_t)).wait();
+
+            for (int64_t i = 0; i < num_indices; ++i) {
+                int64_t target_idx = h_idx[i];
+                if (target_idx < 0) target_idx += total_size;
+                if (target_idx >= 0 && target_idx < total_size) {
+                    h_out[target_idx] += h_src[i];
+                }
+            }
+            queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), total_size * sizeof(int32_t)).wait();
+        } else if (input.dtype() == DType::Int64) {
+            std::vector<int64_t> h_out(total_size);
+            std::vector<int64_t> h_src(source.numel());
+            std::vector<int64_t> h_idx(num_indices);
+            queue.memcpy(h_out.data(), output.data_ptr(), total_size * sizeof(int64_t)).wait();
+            queue.memcpy(h_src.data(), source.data_ptr(), source.numel() * sizeof(int64_t)).wait();
+            queue.memcpy(h_idx.data(), indices.data_ptr(), num_indices * sizeof(int64_t)).wait();
+
+            for (int64_t i = 0; i < num_indices; ++i) {
+                int64_t target_idx = h_idx[i];
+                if (target_idx < 0) target_idx += total_size;
+                if (target_idx >= 0 && target_idx < total_size) {
+                    h_out[target_idx] += h_src[i];
+                }
+            }
+            queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), total_size * sizeof(int64_t)).wait();
+        } else {
+            throw std::runtime_error("put_kernel: unsupported dtype for accumulate mode");
+        }
+    } else {
+        // Non-accumulate mode: safe to use parallel_for (last write wins semantics)
+        if (input.dtype() == DType::Float32) {
+            float* out_ptr = get_data_ptr<float>(output);
+            const int64_t* idx_ptr = get_data_ptr<const int64_t>(indices);
+            const float* src_ptr = get_data_ptr<const float>(source);
+
+            queue.parallel_for<PutKernelFloat32>(sycl::range<1>(num_indices), [=](sycl::id<1> i) {
+                int64_t target_idx = idx_ptr[i];
+                if (target_idx < 0) target_idx += total_size;
+                if (target_idx >= 0 && target_idx < total_size) {
+                    out_ptr[target_idx] = src_ptr[i];
+                }
+            }).wait();
+        } else if (input.dtype() == DType::Float64) {
+            double* out_ptr = get_data_ptr<double>(output);
+            const int64_t* idx_ptr = get_data_ptr<const int64_t>(indices);
+            const double* src_ptr = get_data_ptr<const double>(source);
+
+            queue.parallel_for<PutKernelFloat64>(sycl::range<1>(num_indices), [=](sycl::id<1> i) {
+                int64_t target_idx = idx_ptr[i];
+                if (target_idx < 0) target_idx += total_size;
+                if (target_idx >= 0 && target_idx < total_size) {
+                    out_ptr[target_idx] = src_ptr[i];
+                }
+            }).wait();
+        } else if (input.dtype() == DType::Int32) {
+            int32_t* out_ptr = get_data_ptr<int32_t>(output);
+            const int64_t* idx_ptr = get_data_ptr<const int64_t>(indices);
+            const int32_t* src_ptr = get_data_ptr<const int32_t>(source);
+
+            queue.parallel_for<PutKernelInt32>(sycl::range<1>(num_indices), [=](sycl::id<1> i) {
+                int64_t target_idx = idx_ptr[i];
+                if (target_idx < 0) target_idx += total_size;
+                if (target_idx >= 0 && target_idx < total_size) {
+                    out_ptr[target_idx] = src_ptr[i];
+                }
+            }).wait();
+        } else if (input.dtype() == DType::Int64) {
+            int64_t* out_ptr = get_data_ptr<int64_t>(output);
+            const int64_t* idx_ptr = get_data_ptr<const int64_t>(indices);
+            const int64_t* src_ptr = get_data_ptr<const int64_t>(source);
+
+            queue.parallel_for<PutKernelInt64>(sycl::range<1>(num_indices), [=](sycl::id<1> i) {
+                int64_t target_idx = idx_ptr[i];
+                if (target_idx < 0) target_idx += total_size;
+                if (target_idx >= 0 && target_idx < total_size) {
+                    out_ptr[target_idx] = src_ptr[i];
+                }
+            }).wait();
+        } else {
+            throw std::runtime_error("put_kernel: unsupported dtype");
+        }
+    }
+
+    return output;
+}
+
 } // namespace oneapi
 } // namespace tenzor

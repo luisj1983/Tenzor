@@ -1,0 +1,31 @@
+#version 450
+
+// Cumulative Product along a dimension
+// Each workgroup handles one "line" along the reduction dimension
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint total_lines;     // Number of lines to process (outer_size * inner_size)
+    uint reduce_size;     // Size of the dimension to cumprod over
+    uint inner_size;      // Product of dimensions after the cumprod dim
+} params;
+
+void main() {
+    uint line_idx = gl_GlobalInvocationID.x;
+    if (line_idx >= params.total_lines) return;
+
+    uint outer_idx = line_idx / params.inner_size;
+    uint inner_idx = line_idx % params.inner_size;
+
+    uint base = outer_idx * params.reduce_size * params.inner_size + inner_idx;
+
+    float running_prod = 1.0;
+    for (uint i = 0; i < params.reduce_size; i++) {
+        uint idx = base + i * params.inner_size;
+        running_prod *= input_data[idx];
+        output_data[idx] = running_prod;
+    }
+}

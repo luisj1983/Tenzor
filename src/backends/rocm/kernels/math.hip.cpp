@@ -1593,6 +1593,19 @@ __global__ void round_kernel_device(const T* input, T* output, int64_t n) {
     }
 }
 
+template<typename T>
+__global__ void trunc_kernel_device(const T* input, T* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = trunc(input[idx]);
+    }
+}
+
+__global__ void trunc_kernel_f16(const __half* input, __half* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = __float2half(truncf(__half2float(input[idx])));
+    }
+}
+
 // ============================================================================
 // In-place Binary Operations
 // ============================================================================
@@ -1994,6 +2007,34 @@ auto round_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
             reinterpret_cast<__half*>(result.data<Float16>()), n);
     } else {
         throw std::runtime_error("round operation only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto trunc_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(trunc_kernel_device<float>, grid, block, 0, stream,
+            input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(trunc_kernel_device<double>, grid, block, 0, stream,
+            input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(trunc_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else {
+        throw std::runtime_error("trunc operation only supports Float32, Float64, and Float16 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());

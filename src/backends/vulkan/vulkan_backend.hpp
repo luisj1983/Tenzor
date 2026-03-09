@@ -416,6 +416,8 @@ public:
     auto dispatchDepthwiseConv2d(const Tensor& input, const Tensor& weight,
                                   const Tensor* bias, int64_t stride,
                                   int64_t padding, int64_t dilation) -> Tensor;
+    auto dispatchCumSum(const Tensor& input, int64_t dim) -> Tensor;
+    auto dispatchCumProd(const Tensor& input, int64_t dim) -> Tensor;
     auto dispatchAdaptiveMaxPool2dBackward(const Tensor& grad_output, const Tensor& indices,
                                             const std::vector<int64_t>& input_shape) -> Tensor;
 

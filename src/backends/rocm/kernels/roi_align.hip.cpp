@@ -5,6 +5,18 @@
 
 #include <hip/hip_runtime.h>
 #include <cstdint>
+#include "tenzor/core/tensor.hpp"
+
+#define HIP_ROI_CHECK(call) \
+    do { \
+        hipError_t err = call; \
+        if (err != hipSuccess) { \
+            throw std::runtime_error( \
+                std::string("HIP error at ") + __FILE__ + ":" + \
+                std::to_string(__LINE__) + " - " + hipGetErrorString(err) \
+            ); \
+        } \
+    } while(0)
 
 namespace tenzor {
 namespace rocm {
@@ -225,39 +237,81 @@ __global__ void roi_align_backward_kernel(
     }
 }
 
-// Host function for forward pass
-extern "C" void roi_align_forward_hip(
-    const float* features, const float* rois, float* output, int64_t num_rois,
-    int64_t channels, int64_t feat_height, int64_t feat_width, int64_t output_h,
-    int64_t output_w, float spatial_scale, int64_t sampling_ratio, bool aligned) {
+// ============================================================================
+// Tensor-Level Host Wrappers
+// ============================================================================
 
-    const int64_t total_outputs = num_rois * channels * output_h * output_w;
+auto roi_align_forward(const Tensor& features, const Tensor& rois,
+                       int64_t output_h, int64_t output_w,
+                       float spatial_scale, int64_t sampling_ratio,
+                       bool aligned) -> Tensor {
+    auto shape = features.shape();
+    int64_t batch_size = shape[0];
+    int64_t channels = shape[1];
+    int64_t feat_height = shape[2];
+    int64_t feat_width = shape[3];
+    int64_t num_rois = rois.shape()[0];
+
+    std::vector<int64_t> output_shape = {num_rois, channels, output_h, output_w};
+    Tensor output(output_shape, DType::Float32, features.device());
+
+    int64_t total_outputs = num_rois * channels * output_h * output_w;
+    if (total_outputs == 0) return output;
+
+    // ROI coordinates always processed as Float32
+    const Tensor rois_f32 = (rois.dtype() == DType::Float32) ? rois : rois.to(DType::Float32);
+    const float* rois_ptr = rois_f32.data<float>();
+
+    // Ensure features are Float32 (ROI Align operates on float)
+    const Tensor feat_f32 = (features.dtype() == DType::Float32) ? features : features.to(DType::Float32);
+
     const int threads = 512;
     const int blocks = (total_outputs + threads - 1) / threads;
 
     hipLaunchKernelGGL(roi_align_forward_kernel, dim3(blocks), dim3(threads), 0, 0,
-                      features, rois, output, num_rois, channels, feat_height, feat_width,
+                      feat_f32.data<float>(), rois_ptr, output.data<float>(),
+                      num_rois, channels, feat_height, feat_width,
                       output_h, output_w, spatial_scale, sampling_ratio, aligned);
+
+    HIP_ROI_CHECK(hipGetLastError());
+    return output;
 }
 
-// Host function for backward pass
-extern "C" void roi_align_backward_hip(
-    const float* grad_output, const float* rois, float* grad_features,
-    int64_t num_rois, int64_t channels, int64_t feat_height, int64_t feat_width,
-    int64_t output_h, int64_t output_w, float spatial_scale,
-    int64_t sampling_ratio, bool aligned) {
+auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
+                        int64_t batch_size, int64_t feat_height, int64_t feat_width,
+                        float spatial_scale, int64_t sampling_ratio,
+                        bool aligned) -> Tensor {
+    int64_t num_rois = rois.shape()[0];
+    int64_t channels = grad_output.shape()[1];
+    int64_t output_h = grad_output.shape()[2];
+    int64_t output_w = grad_output.shape()[3];
 
-    // Zero out gradient features
-    const int64_t total_features = channels * feat_height * feat_width;
-    hipMemset(grad_features, 0, total_features * sizeof(float));
+    std::vector<int64_t> grad_shape = {batch_size, channels, feat_height, feat_width};
+    int64_t total_features = batch_size * channels * feat_height * feat_width;
+    int64_t total_grads = num_rois * channels * output_h * output_w;
 
-    const int64_t total_grads = num_rois * channels * output_h * output_w;
+    Tensor grad_features(grad_shape, DType::Float32, grad_output.device());
+    HIP_ROI_CHECK(hipMemset(grad_features.data<float>(), 0, total_features * sizeof(float)));
+
+    if (total_grads == 0) return grad_features;
+
+    // ROI coordinates always processed as Float32
+    const Tensor rois_f32 = (rois.dtype() == DType::Float32) ? rois : rois.to(DType::Float32);
+    const float* rois_ptr = rois_f32.data<float>();
+
+    // Ensure grad_output is Float32
+    const Tensor grad_f32 = (grad_output.dtype() == DType::Float32) ? grad_output : grad_output.to(DType::Float32);
+
     const int threads = 512;
     const int blocks = (total_grads + threads - 1) / threads;
 
     hipLaunchKernelGGL(roi_align_backward_kernel, dim3(blocks), dim3(threads), 0, 0,
-                      grad_output, rois, grad_features, num_rois, channels, feat_height,
-                      feat_width, output_h, output_w, spatial_scale, sampling_ratio, aligned);
+                      grad_f32.data<float>(), rois_ptr, grad_features.data<float>(),
+                      num_rois, channels, feat_height, feat_width,
+                      output_h, output_w, spatial_scale, sampling_ratio, aligned);
+
+    HIP_ROI_CHECK(hipGetLastError());
+    return grad_features;
 }
 
 } // namespace rocm

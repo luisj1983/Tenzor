@@ -1358,5 +1358,133 @@ auto interpolate_kernel(
     return output;
 }
 
+// ============================================================================
+// Box IoU Operation
+// ============================================================================
+// Kernel name classes
+struct BoxIoUKernelFloat32 {};
+struct BoxIoUKernelFloat64 {};
+
+// Helper function to get typed pointer from tensor
+template<typename T>
+inline auto get_vision_data_ptr(const Tensor& t) -> T* {
+    return static_cast<T*>(const_cast<void*>(t.data_ptr()));
+}
+
+auto box_iou_kernel(
+    const Tensor& boxes1,
+    const Tensor& boxes2,
+    int iou_type,
+    sycl::queue& queue
+) -> Tensor {
+    int64_t N = boxes1.shape()[0];
+    int64_t M = boxes2.shape()[0];
+
+    Tensor output({N, M}, boxes1.dtype(), boxes1.device());
+
+    int64_t total = N * M;
+    if (total == 0) return output;
+
+    if (boxes1.dtype() == DType::Float32) {
+        const float* b1_ptr = get_vision_data_ptr<const float>(boxes1);
+        const float* b2_ptr = get_vision_data_ptr<const float>(boxes2);
+        float* out_ptr = get_vision_data_ptr<float>(output);
+
+        queue.parallel_for<BoxIoUKernelFloat32>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            int64_t i = idx / M;
+            int64_t j = idx % M;
+
+            // Box format: [x1, y1, x2, y2]
+            float x1_1 = b1_ptr[i * 4 + 0];
+            float y1_1 = b1_ptr[i * 4 + 1];
+            float x2_1 = b1_ptr[i * 4 + 2];
+            float y2_1 = b1_ptr[i * 4 + 3];
+
+            float x1_2 = b2_ptr[j * 4 + 0];
+            float y1_2 = b2_ptr[j * 4 + 1];
+            float x2_2 = b2_ptr[j * 4 + 2];
+            float y2_2 = b2_ptr[j * 4 + 3];
+
+            // Intersection
+            float inter_x1 = sycl::fmax(x1_1, x1_2);
+            float inter_y1 = sycl::fmax(y1_1, y1_2);
+            float inter_x2 = sycl::fmin(x2_1, x2_2);
+            float inter_y2 = sycl::fmin(y2_1, y2_2);
+
+            float inter_w = sycl::fmax(0.0f, inter_x2 - inter_x1);
+            float inter_h = sycl::fmax(0.0f, inter_y2 - inter_y1);
+            float inter_area = inter_w * inter_h;
+
+            // Areas
+            float area1 = (x2_1 - x1_1) * (y2_1 - y1_1);
+            float area2 = (x2_2 - x1_2) * (y2_2 - y1_2);
+            float union_area = area1 + area2 - inter_area;
+
+            float iou = inter_area / (union_area + 1e-7f);
+
+            if (iou_type == 1) {
+                // GIoU
+                float enc_x1 = sycl::fmin(x1_1, x1_2);
+                float enc_y1 = sycl::fmin(y1_1, y1_2);
+                float enc_x2 = sycl::fmax(x2_1, x2_2);
+                float enc_y2 = sycl::fmax(y2_1, y2_2);
+                float enc_area = (enc_x2 - enc_x1) * (enc_y2 - enc_y1);
+                iou = iou - (enc_area - union_area) / (enc_area + 1e-7f);
+            }
+
+            out_ptr[i * M + j] = iou;
+        }).wait();
+    } else if (boxes1.dtype() == DType::Float64) {
+        const double* b1_ptr = get_vision_data_ptr<const double>(boxes1);
+        const double* b2_ptr = get_vision_data_ptr<const double>(boxes2);
+        double* out_ptr = get_vision_data_ptr<double>(output);
+
+        queue.parallel_for<BoxIoUKernelFloat64>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            int64_t i = idx / M;
+            int64_t j = idx % M;
+
+            double x1_1 = b1_ptr[i * 4 + 0];
+            double y1_1 = b1_ptr[i * 4 + 1];
+            double x2_1 = b1_ptr[i * 4 + 2];
+            double y2_1 = b1_ptr[i * 4 + 3];
+
+            double x1_2 = b2_ptr[j * 4 + 0];
+            double y1_2 = b2_ptr[j * 4 + 1];
+            double x2_2 = b2_ptr[j * 4 + 2];
+            double y2_2 = b2_ptr[j * 4 + 3];
+
+            double inter_x1 = sycl::fmax(x1_1, x1_2);
+            double inter_y1 = sycl::fmax(y1_1, y1_2);
+            double inter_x2 = sycl::fmin(x2_1, x2_2);
+            double inter_y2 = sycl::fmin(y2_1, y2_2);
+
+            double inter_w = sycl::fmax(0.0, inter_x2 - inter_x1);
+            double inter_h = sycl::fmax(0.0, inter_y2 - inter_y1);
+            double inter_area = inter_w * inter_h;
+
+            double area1 = (x2_1 - x1_1) * (y2_1 - y1_1);
+            double area2 = (x2_2 - x1_2) * (y2_2 - y1_2);
+            double union_area = area1 + area2 - inter_area;
+
+            double iou = inter_area / (union_area + 1e-7);
+
+            if (iou_type == 1) {
+                double enc_x1 = sycl::fmin(x1_1, x1_2);
+                double enc_y1 = sycl::fmin(y1_1, y1_2);
+                double enc_x2 = sycl::fmax(x2_1, x2_2);
+                double enc_y2 = sycl::fmax(y2_1, y2_2);
+                double enc_area = (enc_x2 - enc_x1) * (enc_y2 - enc_y1);
+                iou = iou - (enc_area - union_area) / (enc_area + 1e-7);
+            }
+
+            out_ptr[i * M + j] = iou;
+        }).wait();
+    } else {
+        throw std::runtime_error("box_iou_kernel: unsupported dtype (need Float32 or Float64)");
+    }
+
+    return output;
+}
+
 } // namespace oneapi
 } // namespace tenzor

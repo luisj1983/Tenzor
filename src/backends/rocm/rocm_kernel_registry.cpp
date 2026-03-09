@@ -473,6 +473,29 @@ namespace rocm {
     auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offsets,
                                        const std::string& mode, int64_t embedding_dim,
                                        bool include_last_offset, hipStream_t stream) -> Tensor;
+
+    // Trunc (math.hip.cpp)
+    auto trunc_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+
+    // OneHot, Nonzero (indexing.hip.cpp)
+    auto one_hot_kernel(const Tensor& indices, int64_t num_classes,
+                        hipStream_t stream) -> Tensor;
+    auto nonzero_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+
+    // ROI Align (roi_align.hip.cpp)
+    auto roi_align_forward(const Tensor& features, const Tensor& rois,
+                           int64_t output_h, int64_t output_w,
+                           float spatial_scale, int64_t sampling_ratio,
+                           bool aligned) -> Tensor;
+    auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
+                            int64_t batch_size, int64_t feat_height, int64_t feat_width,
+                            float spatial_scale, int64_t sampling_ratio,
+                            bool aligned) -> Tensor;
+
+    // RMSNorm backward (fused_ops.hip.cpp)
+    auto fused_rms_norm_backward_hip(const Tensor& grad_output, const Tensor& input,
+                                      const Tensor& weight, const Tensor& rrms)
+        -> std::tuple<Tensor, Tensor>;
 }
 
 /**
@@ -2038,6 +2061,102 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             stride, padding, dilation, groups, get_hip_stream(attrs));
 
         return std::vector<Tensor>{output};
+    });
+
+    // ========================================================================
+    // Trunc Operation
+    // ========================================================================
+    table.register_kernel(OpId::Trunc, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::trunc_kernel(inputs[0], get_hip_stream(attrs))};
+    });
+
+    // ========================================================================
+    // Nonzero Operation
+    // ========================================================================
+    table.register_kernel(OpId::Nonzero, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::nonzero_kernel(inputs[0], get_hip_stream(attrs))};
+    });
+
+    // ========================================================================
+    // OneHot Operation
+    // ========================================================================
+    table.register_kernel(OpId::OneHot, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t num_classes = attrs.get_int(AttrKey::NumClasses, 0);
+        return std::vector<Tensor>{rocm::one_hot_kernel(inputs[0], num_classes, get_hip_stream(attrs))};
+    });
+
+    // ========================================================================
+    // ROI Align Operations
+    // ========================================================================
+    table.register_kernel(OpId::ROIAlignForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        int64_t output_h = attrs.get_int(AttrKey::OutputSizeH, 7);
+        int64_t output_w = attrs.get_int(AttrKey::OutputSizeW, 7);
+        float spatial_scale = static_cast<float>(attrs.get_float(AttrKey::SpatialScale, 1.0 / 16.0));
+        int64_t sampling_ratio = attrs.get_int(AttrKey::SamplingRatio, 0);
+        bool aligned = attrs.get_bool(AttrKey::Aligned, true);
+
+        return {rocm::roi_align_forward(inputs[0], inputs[1],
+                                        output_h, output_w, spatial_scale,
+                                        sampling_ratio, aligned)};
+    });
+
+    table.register_kernel(OpId::ROIAlignBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 1);
+        int64_t feat_height = attrs.get_int(AttrKey::FeatHeight, 0);
+        int64_t feat_width = attrs.get_int(AttrKey::FeatWidth, 0);
+        float spatial_scale = static_cast<float>(attrs.get_float(AttrKey::SpatialScale, 1.0 / 16.0));
+        int64_t sampling_ratio = attrs.get_int(AttrKey::SamplingRatio, 0);
+        bool aligned = attrs.get_bool(AttrKey::Aligned, true);
+
+        return {rocm::roi_align_backward(inputs[0], inputs[1],
+                                         batch_size, feat_height, feat_width,
+                                         spatial_scale, sampling_ratio, aligned)};
+    });
+
+    // ========================================================================
+    // RMSNorm Backward
+    // ========================================================================
+    table.register_kernel(OpId::RMSNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [grad_output, input, weight, rrms]
+        auto [grad_input, grad_weight] = rocm::fused_rms_norm_backward_hip(
+            inputs[0], inputs[1], inputs[2], inputs[3]);
+        return std::vector<Tensor>{grad_input, grad_weight};
+    });
+
+    // ========================================================================
+    // Fused Conv2D + Activation Variants (compose conv2d + activation)
+    // ========================================================================
+    table.register_kernel(OpId::FusedConv2dSigmoid, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        Tensor result = rocm::conv2d_forward_kernel(inputs[0], inputs[1], bias,
+            stride, padding, dilation, groups, get_hip_stream(attrs));
+        return std::vector<Tensor>{rocm::sigmoid_kernel(result, get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::FusedConv2dTanh, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        Tensor result = rocm::conv2d_forward_kernel(inputs[0], inputs[1], bias,
+            stride, padding, dilation, groups, get_hip_stream(attrs));
+        return std::vector<Tensor>{rocm::tanh_kernel(result, get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::FusedConv2dSwish, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        Tensor result = rocm::conv2d_forward_kernel(inputs[0], inputs[1], bias,
+            stride, padding, dilation, groups, get_hip_stream(attrs));
+        return std::vector<Tensor>{rocm::swish_kernel(result, get_hip_stream(attrs))};
     });
 
     std::cout << "ROCm dispatch table initialized with O(1) lookup" << std::endl;

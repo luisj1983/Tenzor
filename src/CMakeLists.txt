@@ -59,6 +59,8 @@ set(TENZOR_CORE_SOURCES
     nn/layers/pooling.cpp
     nn/layers/normalization.cpp
     nn/layers/flatten.cpp
+    nn/layers/padding.cpp
+    nn/layers/upsample.cpp
     nn/layers/embedding.cpp
     nn/layers/sparse_linear.cpp
     nn/layers/sparse_embedding.cpp

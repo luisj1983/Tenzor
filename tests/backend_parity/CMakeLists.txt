@@ -64,6 +64,9 @@ add_parity_test(test_numerical_stability test_numerical_stability.cpp)
 # Performance regression baseline tests
 add_parity_test(test_performance_regression test_performance_regression.cpp)
 
+# Vulkan backend parity tests (Float64 shaders, Float16 buffer rounding, slice views)
+add_parity_test(test_vulkan_parity test_vulkan_parity.cpp)
+
 # ==============================================================================
 # Test Groups
 # ==============================================================================
@@ -86,6 +89,7 @@ add_custom_target(test_parity_full
         test_backend_stress
         test_numerical_stability
         test_performance_regression
+        test_vulkan_parity
     COMMENT "Running full backend parity test suite..."
 )
 
@@ -123,6 +127,7 @@ message(STATUS "  - DType parity tests: test_dtype_parity")
 message(STATUS "  - Stress tests: test_backend_stress")
 message(STATUS "  - Numerical stability tests: test_numerical_stability")
 message(STATUS "  - Performance regression tests: test_performance_regression")
+message(STATUS "  - Vulkan parity tests: test_vulkan_parity")
 message(STATUS "")
 message(STATUS "Run test groups with:")
 message(STATUS "  - make test_parity_quick      # Quick tests only")

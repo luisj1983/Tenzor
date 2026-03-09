@@ -1,0 +1,107 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Depthwise Convolution 2D Forward Pass — Float16 variant
+// Uses packed uint32 words (2 float16 elements per word)
+// Each output channel maps to exactly one input channel (groups == in_channels)
+// Weight shape: [channels, 1, kH, kW]
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };
+layout(binding = 1) buffer Weight { uint weight_data[]; };
+layout(binding = 2) buffer Bias { uint bias_data[]; };
+layout(binding = 3) buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;      // Total output elements (N * C * out_h * out_w)
+    uint batch;
+    uint channels;        // Number of channels (== in_channels == out_channels)
+    uint in_height;
+    uint in_width;
+    uint kernel_h;
+    uint kernel_w;
+    uint stride;
+    uint padding;
+    uint dilation;
+    uint out_h;
+    uint out_w;
+    uint has_bias;
+} params;
+
+float16_t readF16Input(uint flat_idx) {
+    uint word_idx = flat_idx / 2;
+    uint half_idx = flat_idx % 2;
+    uint packed = input_data[word_idx];
+    uint bits = (packed >> (half_idx * 16)) & 0xFFFFu;
+    return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
+}
+
+float16_t readF16Weight(uint flat_idx) {
+    uint word_idx = flat_idx / 2;
+    uint half_idx = flat_idx % 2;
+    uint packed = weight_data[word_idx];
+    uint bits = (packed >> (half_idx * 16)) & 0xFFFFu;
+    return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
+}
+
+float16_t readF16Bias(uint flat_idx) {
+    uint word_idx = flat_idx / 2;
+    uint half_idx = flat_idx % 2;
+    uint packed = bias_data[word_idx];
+    uint bits = (packed >> (half_idx * 16)) & 0xFFFFu;
+    return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
+}
+
+void writeF16Output(uint flat_idx, float16_t val) {
+    uint word_idx = flat_idx / 2;
+    uint half_offset = (flat_idx % 2) * 16;
+    uint new_bits = packHalf2x16(vec2(float(val), 0.0)) & 0xFFFFu;
+    uint mask = 0xFFFFu << half_offset;
+
+    uint old_word = output_data[word_idx];
+    for (int attempt = 0; attempt < 1024; ++attempt) {
+        uint new_word = (old_word & ~mask) | (new_bits << half_offset);
+        uint result = atomicCompSwap(output_data[word_idx], old_word, new_word);
+        if (result == old_word) return;
+        old_word = result;
+    }
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    // Decode to (n, c, oh, ow)
+    uint ow = idx % params.out_w;
+    uint temp = idx / params.out_w;
+    uint oh = temp % params.out_h;
+    temp /= params.out_h;
+    uint c = temp % params.channels;
+    uint n = temp / params.channels;
+
+    // Accumulate in float32 for precision
+    float sum = 0.0;
+
+    for (uint kh = 0; kh < params.kernel_h; kh++) {
+        for (uint kw = 0; kw < params.kernel_w; kw++) {
+            int ih = int(oh * params.stride) - int(params.padding) + int(kh * params.dilation);
+            int iw = int(ow * params.stride) - int(params.padding) + int(kw * params.dilation);
+
+            if (ih >= 0 && ih < int(params.in_height) && iw >= 0 && iw < int(params.in_width)) {
+                uint input_idx = n * (params.channels * params.in_height * params.in_width) +
+                                 c * (params.in_height * params.in_width) +
+                                 uint(ih) * params.in_width + uint(iw);
+                // Weight layout: [c, 1, kh, kw] = [c, kh*kw]
+                uint weight_idx = c * (params.kernel_h * params.kernel_w) +
+                                  kh * params.kernel_w + kw;
+                sum += float(readF16Input(input_idx)) * float(readF16Weight(weight_idx));
+            }
+        }
+    }
+
+    if (params.has_bias == 1) {
+        sum += float(readF16Bias(c));
+    }
+
+    writeF16Output(idx, float16_t(sum));
+}

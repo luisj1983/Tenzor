@@ -1426,5 +1426,480 @@ auto rms_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
     return {grad_input, grad_weight};
 }
 
+// ============================================================================
+// Fused Adam Optimizer Step
+// ============================================================================
+
+// SYCL Kernel name classes for fused optimizer kernels
+struct FusedAdamStepKernelFloat32 {};
+struct FusedAdamStepKernelFloat64 {};
+struct FusedSGDStepKernelFloat32 {};
+struct FusedSGDStepKernelFloat64 {};
+struct FusedRMSPropStepKernelFloat32 {};
+struct FusedRMSPropStepKernelFloat64 {};
+struct FusedAdadeltaStepKernelFloat32 {};
+struct FusedAdadeltaStepKernelFloat64 {};
+struct FusedAdagradStepKernelFloat32 {};
+struct FusedAdagradStepKernelFloat64 {};
+
+auto fused_adam_step_kernel(
+    Tensor& param,
+    const Tensor& grad,
+    Tensor& exp_avg,
+    Tensor& exp_avg_sq,
+    double lr,
+    double beta1,
+    double beta2,
+    double eps,
+    double weight_decay,
+    int64_t step,
+    bool decoupled_weight_decay,
+    sycl::queue& queue,
+    Tensor* max_exp_avg_sq,
+    bool amsgrad
+) -> void {
+    const int64_t numel = param.numel();
+    if (numel == 0) return;
+
+    // Compute bias corrections in double precision for accuracy
+    double bias_correction1 = 1.0 - std::pow(beta1, static_cast<double>(step));
+    double bias_correction2 = 1.0 - std::pow(beta2, static_cast<double>(step));
+
+    if (param.dtype() == DType::Float32) {
+        float* param_ptr = get_data_ptr<float>(param);
+        const float* grad_ptr = get_data_ptr<const float>(grad);
+        float* m_ptr = get_data_ptr<float>(exp_avg);
+        float* v_ptr = get_data_ptr<float>(exp_avg_sq);
+        float* max_v_ptr = (amsgrad && max_exp_avg_sq) ? get_data_ptr<float>(*max_exp_avg_sq) : nullptr;
+
+        float f_lr = static_cast<float>(lr);
+        float f_beta1 = static_cast<float>(beta1);
+        float f_beta2 = static_cast<float>(beta2);
+        float f_eps = static_cast<float>(eps);
+        float f_wd = static_cast<float>(weight_decay);
+        float f_bc1 = static_cast<float>(bias_correction1);
+        float f_bc2 = static_cast<float>(bias_correction2);
+        bool f_decoupled = decoupled_weight_decay;
+        bool f_amsgrad = amsgrad;
+
+        queue.parallel_for<FusedAdamStepKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float g = grad_ptr[idx];
+            float p = param_ptr[idx];
+            float m = m_ptr[idx];
+            float v = v_ptr[idx];
+
+            // Apply weight decay
+            if (f_wd != 0.0f) {
+                if (f_decoupled) {
+                    p = p * (1.0f - f_lr * f_wd);
+                } else {
+                    g = g + f_wd * p;
+                }
+            }
+
+            // Update biased first moment estimate
+            m = f_beta1 * m + (1.0f - f_beta1) * g;
+            // Update biased second raw moment estimate
+            v = f_beta2 * v + (1.0f - f_beta2) * g * g;
+
+            m_ptr[idx] = m;
+            v_ptr[idx] = v;
+
+            // Bias-corrected estimates
+            float m_hat = m / f_bc1;
+            float v_hat = v / f_bc2;
+
+            // AMSGrad
+            if (f_amsgrad && max_v_ptr) {
+                float max_v = max_v_ptr[idx];
+                if (v_hat > max_v) max_v = v_hat;
+                max_v_ptr[idx] = max_v;
+                v_hat = max_v;
+            }
+
+            // Update parameters
+            param_ptr[idx] = p - f_lr * m_hat / (sycl::sqrt(v_hat) + f_eps);
+        }).wait();
+    } else if (param.dtype() == DType::Float64) {
+        double* param_ptr = get_data_ptr<double>(param);
+        const double* grad_ptr = get_data_ptr<const double>(grad);
+        double* m_ptr = get_data_ptr<double>(exp_avg);
+        double* v_ptr = get_data_ptr<double>(exp_avg_sq);
+        double* max_v_ptr = (amsgrad && max_exp_avg_sq) ? get_data_ptr<double>(*max_exp_avg_sq) : nullptr;
+
+        double d_bc1 = bias_correction1;
+        double d_bc2 = bias_correction2;
+        bool d_decoupled = decoupled_weight_decay;
+        bool d_amsgrad = amsgrad;
+
+        queue.parallel_for<FusedAdamStepKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double g = grad_ptr[idx];
+            double p = param_ptr[idx];
+            double m = m_ptr[idx];
+            double v = v_ptr[idx];
+
+            if (weight_decay != 0.0) {
+                if (d_decoupled) {
+                    p = p * (1.0 - lr * weight_decay);
+                } else {
+                    g = g + weight_decay * p;
+                }
+            }
+
+            m = beta1 * m + (1.0 - beta1) * g;
+            v = beta2 * v + (1.0 - beta2) * g * g;
+
+            m_ptr[idx] = m;
+            v_ptr[idx] = v;
+
+            double m_hat = m / d_bc1;
+            double v_hat = v / d_bc2;
+
+            if (d_amsgrad && max_v_ptr) {
+                double max_v = max_v_ptr[idx];
+                if (v_hat > max_v) max_v = v_hat;
+                max_v_ptr[idx] = max_v;
+                v_hat = max_v;
+            }
+
+            param_ptr[idx] = p - lr * m_hat / (sycl::sqrt(v_hat) + eps);
+        }).wait();
+    } else {
+        throw std::runtime_error("fused_adam_step_kernel: Only Float32 and Float64 supported");
+    }
+}
+
+// ============================================================================
+// Fused SGD with Momentum
+// ============================================================================
+
+auto fused_sgd_step_kernel(
+    Tensor& param,
+    const Tensor& grad,
+    Tensor* momentum_buffer,
+    float lr,
+    float momentum,
+    float weight_decay,
+    float dampening,
+    bool nesterov,
+    sycl::queue& queue
+) -> void {
+    const int64_t numel = param.numel();
+    if (numel == 0) return;
+
+    bool has_momentum_buffer = (momentum_buffer != nullptr && momentum > 0.0f);
+
+    if (param.dtype() == DType::Float32) {
+        float* param_ptr = get_data_ptr<float>(param);
+        const float* grad_ptr = get_data_ptr<const float>(grad);
+        float* mom_ptr = has_momentum_buffer ? get_data_ptr<float>(*momentum_buffer) : nullptr;
+
+        queue.parallel_for<FusedSGDStepKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float g = grad_ptr[idx];
+            float p = param_ptr[idx];
+
+            // Apply weight decay
+            if (weight_decay > 0.0f) {
+                g = g + weight_decay * p;
+            }
+
+            if (has_momentum_buffer && mom_ptr) {
+                float v = mom_ptr[idx];
+                v = momentum * v + (1.0f - dampening) * g;
+                mom_ptr[idx] = v;
+
+                if (nesterov) {
+                    g = g + momentum * v;
+                } else {
+                    g = v;
+                }
+            }
+
+            param_ptr[idx] = p - lr * g;
+        }).wait();
+    } else if (param.dtype() == DType::Float64) {
+        double* param_ptr = get_data_ptr<double>(param);
+        const double* grad_ptr = get_data_ptr<const double>(grad);
+        double* mom_ptr = has_momentum_buffer ? get_data_ptr<double>(*momentum_buffer) : nullptr;
+
+        double d_lr = static_cast<double>(lr);
+        double d_momentum = static_cast<double>(momentum);
+        double d_weight_decay = static_cast<double>(weight_decay);
+        double d_dampening = static_cast<double>(dampening);
+
+        queue.parallel_for<FusedSGDStepKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double g = grad_ptr[idx];
+            double p = param_ptr[idx];
+
+            if (d_weight_decay > 0.0) {
+                g = g + d_weight_decay * p;
+            }
+
+            if (has_momentum_buffer && mom_ptr) {
+                double v = mom_ptr[idx];
+                v = d_momentum * v + (1.0 - d_dampening) * g;
+                mom_ptr[idx] = v;
+
+                if (nesterov) {
+                    g = g + d_momentum * v;
+                } else {
+                    g = v;
+                }
+            }
+
+            param_ptr[idx] = p - d_lr * g;
+        }).wait();
+    } else {
+        throw std::runtime_error("fused_sgd_step_kernel: Only Float32 and Float64 supported");
+    }
+}
+
+// ============================================================================
+// Fused RMSProp Optimizer Step
+// ============================================================================
+
+auto fused_rmsprop_step_kernel(
+    Tensor& param,
+    const Tensor& grad,
+    Tensor& square_avg,
+    Tensor* grad_avg,
+    Tensor* momentum_buffer,
+    float lr,
+    float alpha,
+    float eps,
+    float weight_decay,
+    float momentum,
+    bool centered,
+    sycl::queue& queue
+) -> void {
+    const int64_t numel = param.numel();
+    if (numel == 0) return;
+
+    if (param.dtype() == DType::Float32) {
+        float* param_ptr = get_data_ptr<float>(param);
+        const float* grad_ptr = get_data_ptr<const float>(grad);
+        float* sq_ptr = get_data_ptr<float>(square_avg);
+        float* ga_ptr = (centered && grad_avg) ? get_data_ptr<float>(*grad_avg) : nullptr;
+        float* mom_ptr = (momentum > 0.0f && momentum_buffer) ? get_data_ptr<float>(*momentum_buffer) : nullptr;
+
+        queue.parallel_for<FusedRMSPropStepKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float g = grad_ptr[idx];
+
+            if (weight_decay != 0.0f) {
+                g = g + weight_decay * param_ptr[idx];
+            }
+
+            // Update square average: v = alpha * v + (1 - alpha) * g^2
+            float sq = sq_ptr[idx];
+            sq = alpha * sq + (1.0f - alpha) * g * g;
+            sq_ptr[idx] = sq;
+
+            float avg;
+            if (centered && ga_ptr) {
+                float ga = ga_ptr[idx];
+                ga = alpha * ga + (1.0f - alpha) * g;
+                ga_ptr[idx] = ga;
+                avg = sycl::sqrt(sq - ga * ga + eps);
+            } else {
+                avg = sycl::sqrt(sq + eps);
+            }
+
+            if (momentum > 0.0f && mom_ptr) {
+                float buf = mom_ptr[idx];
+                buf = momentum * buf + g / avg;
+                mom_ptr[idx] = buf;
+                param_ptr[idx] = param_ptr[idx] - lr * buf;
+            } else {
+                param_ptr[idx] = param_ptr[idx] - lr * g / avg;
+            }
+        }).wait();
+    } else if (param.dtype() == DType::Float64) {
+        double* param_ptr = get_data_ptr<double>(param);
+        const double* grad_ptr = get_data_ptr<const double>(grad);
+        double* sq_ptr = get_data_ptr<double>(square_avg);
+        double* ga_ptr = (centered && grad_avg) ? get_data_ptr<double>(*grad_avg) : nullptr;
+        double* mom_ptr = (momentum > 0.0f && momentum_buffer) ? get_data_ptr<double>(*momentum_buffer) : nullptr;
+
+        double d_lr = static_cast<double>(lr);
+        double d_alpha = static_cast<double>(alpha);
+        double d_eps = static_cast<double>(eps);
+        double d_wd = static_cast<double>(weight_decay);
+        double d_momentum = static_cast<double>(momentum);
+
+        queue.parallel_for<FusedRMSPropStepKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double g = grad_ptr[idx];
+
+            if (d_wd != 0.0) {
+                g = g + d_wd * param_ptr[idx];
+            }
+
+            double sq = sq_ptr[idx];
+            sq = d_alpha * sq + (1.0 - d_alpha) * g * g;
+            sq_ptr[idx] = sq;
+
+            double avg;
+            if (centered && ga_ptr) {
+                double ga = ga_ptr[idx];
+                ga = d_alpha * ga + (1.0 - d_alpha) * g;
+                ga_ptr[idx] = ga;
+                avg = sycl::sqrt(sq - ga * ga + d_eps);
+            } else {
+                avg = sycl::sqrt(sq + d_eps);
+            }
+
+            if (d_momentum > 0.0 && mom_ptr) {
+                double buf = mom_ptr[idx];
+                buf = d_momentum * buf + g / avg;
+                mom_ptr[idx] = buf;
+                param_ptr[idx] = param_ptr[idx] - d_lr * buf;
+            } else {
+                param_ptr[idx] = param_ptr[idx] - d_lr * g / avg;
+            }
+        }).wait();
+    } else {
+        throw std::runtime_error("fused_rmsprop_step_kernel: Only Float32 and Float64 supported");
+    }
+}
+
+// ============================================================================
+// Fused Adadelta Optimizer Step
+// ============================================================================
+
+auto fused_adadelta_step_kernel(
+    Tensor& param,
+    const Tensor& grad,
+    Tensor& square_avg,
+    Tensor& acc_delta,
+    float rho,
+    float eps,
+    float lr,
+    float weight_decay,
+    sycl::queue& queue
+) -> void {
+    const int64_t numel = param.numel();
+    if (numel == 0) return;
+
+    if (param.dtype() == DType::Float32) {
+        float* param_ptr = get_data_ptr<float>(param);
+        const float* grad_ptr = get_data_ptr<const float>(grad);
+        float* sq_ptr = get_data_ptr<float>(square_avg);
+        float* ad_ptr = get_data_ptr<float>(acc_delta);
+
+        queue.parallel_for<FusedAdadeltaStepKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float g = grad_ptr[idx];
+            if (weight_decay != 0.0f) {
+                g = g + weight_decay * param_ptr[idx];
+            }
+
+            // v = rho * v + (1 - rho) * g^2
+            float sq = sq_ptr[idx];
+            sq = rho * sq + (1.0f - rho) * g * g;
+            sq_ptr[idx] = sq;
+
+            // delta = sqrt(acc_delta + eps) / sqrt(sq + eps) * g
+            float std_val = sycl::sqrt(sq + eps);
+            float delta = sycl::sqrt(ad_ptr[idx] + eps) / std_val * g;
+
+            // acc_delta = rho * acc_delta + (1 - rho) * delta^2
+            ad_ptr[idx] = rho * ad_ptr[idx] + (1.0f - rho) * delta * delta;
+
+            param_ptr[idx] = param_ptr[idx] - lr * delta;
+        }).wait();
+    } else if (param.dtype() == DType::Float64) {
+        double* param_ptr = get_data_ptr<double>(param);
+        const double* grad_ptr = get_data_ptr<const double>(grad);
+        double* sq_ptr = get_data_ptr<double>(square_avg);
+        double* ad_ptr = get_data_ptr<double>(acc_delta);
+
+        double d_rho = static_cast<double>(rho);
+        double d_eps = static_cast<double>(eps);
+        double d_lr = static_cast<double>(lr);
+        double d_wd = static_cast<double>(weight_decay);
+
+        queue.parallel_for<FusedAdadeltaStepKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double g = grad_ptr[idx];
+            if (d_wd != 0.0) {
+                g = g + d_wd * param_ptr[idx];
+            }
+
+            double sq = sq_ptr[idx];
+            sq = d_rho * sq + (1.0 - d_rho) * g * g;
+            sq_ptr[idx] = sq;
+
+            double std_val = sycl::sqrt(sq + d_eps);
+            double delta = sycl::sqrt(ad_ptr[idx] + d_eps) / std_val * g;
+
+            ad_ptr[idx] = d_rho * ad_ptr[idx] + (1.0 - d_rho) * delta * delta;
+
+            param_ptr[idx] = param_ptr[idx] - d_lr * delta;
+        }).wait();
+    } else {
+        throw std::runtime_error("fused_adadelta_step_kernel: Only Float32 and Float64 supported");
+    }
+}
+
+// ============================================================================
+// Fused Adagrad Optimizer Step
+// ============================================================================
+
+auto fused_adagrad_step_kernel(
+    Tensor& param,
+    const Tensor& grad,
+    Tensor& sum_sq,
+    float lr,
+    float lr_decay,
+    float eps,
+    float weight_decay,
+    int64_t step,
+    sycl::queue& queue
+) -> void {
+    const int64_t numel = param.numel();
+    if (numel == 0) return;
+
+    if (param.dtype() == DType::Float32) {
+        float* param_ptr = get_data_ptr<float>(param);
+        const float* grad_ptr = get_data_ptr<const float>(grad);
+        float* sq_ptr = get_data_ptr<float>(sum_sq);
+        float clr = lr / (1.0f + static_cast<float>(step - 1) * lr_decay);
+
+        queue.parallel_for<FusedAdagradStepKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float g = grad_ptr[idx];
+            if (weight_decay != 0.0f) {
+                g = g + weight_decay * param_ptr[idx];
+            }
+
+            // sum_sq += g^2
+            float sq = sq_ptr[idx] + g * g;
+            sq_ptr[idx] = sq;
+
+            // param -= clr * g / (sqrt(sum_sq) + eps)
+            param_ptr[idx] = param_ptr[idx] - clr * g / (sycl::sqrt(sq) + eps);
+        }).wait();
+    } else if (param.dtype() == DType::Float64) {
+        double* param_ptr = get_data_ptr<double>(param);
+        const double* grad_ptr = get_data_ptr<const double>(grad);
+        double* sq_ptr = get_data_ptr<double>(sum_sq);
+        double d_lr = static_cast<double>(lr);
+        double d_lr_decay = static_cast<double>(lr_decay);
+        double d_eps = static_cast<double>(eps);
+        double d_wd = static_cast<double>(weight_decay);
+        double clr = d_lr / (1.0 + static_cast<double>(step - 1) * d_lr_decay);
+
+        queue.parallel_for<FusedAdagradStepKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double g = grad_ptr[idx];
+            if (d_wd != 0.0) {
+                g = g + d_wd * param_ptr[idx];
+            }
+
+            double sq = sq_ptr[idx] + g * g;
+            sq_ptr[idx] = sq;
+
+            param_ptr[idx] = param_ptr[idx] - clr * g / (sycl::sqrt(sq) + d_eps);
+        }).wait();
+    } else {
+        throw std::runtime_error("fused_adagrad_step_kernel: Only Float32 and Float64 supported");
+    }
+}
+
 } // namespace oneapi
 } // namespace tenzor

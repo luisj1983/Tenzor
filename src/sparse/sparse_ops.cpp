@@ -2,6 +2,17 @@
 #include "tenzor/ops/creation.hpp"
 #include <cstring>
 #include <stdexcept>
+#include <vector>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+// MKL sparse BLAS for accelerated SpMV/SpMM
+#ifdef TENZOR_USE_MKL
+#include <mkl.h>
+#include <mkl_spblas.h>
+#endif
 
 // Forward declarations for CUDA sparse kernels (defined in kernels/sparse.cu)
 #ifdef TENZOR_HAS_CUSPARSE
@@ -65,6 +76,405 @@ DType compute_dtype_for(DType dtype) {
 #endif
 }
 
+// ============================================================================
+// MKL Sparse Helpers
+// ============================================================================
+
+#ifdef TENZOR_USE_MKL
+
+/// RAII wrapper for MKL sparse matrix handle.
+struct MklSparseGuard {
+    sparse_matrix_t handle = nullptr;
+    explicit MklSparseGuard(sparse_matrix_t h) : handle(h) {}
+    ~MklSparseGuard() { if (handle) mkl_sparse_destroy(handle); }
+    MklSparseGuard(const MklSparseGuard&) = delete;
+    MklSparseGuard& operator=(const MklSparseGuard&) = delete;
+};
+
+/// Convert Int64 indices to MKL_INT.
+/// With MKL_ILP64, MKL_INT is long long (64-bit), so this is a reinterpret.
+std::vector<MKL_INT> to_mkl_int(const int64_t* src, int64_t n) {
+    std::vector<MKL_INT> dst(n);
+    for (int64_t i = 0; i < n; ++i) {
+        dst[i] = static_cast<MKL_INT>(src[i]);
+    }
+    return dst;
+}
+
+/// Create MKL Float32 CSR handle from SparseTensor.
+sparse_matrix_t create_mkl_csr_f32(const SparseTensor& sparse, MKL_INT nrows, MKL_INT ncols,
+                                     std::vector<MKL_INT>& crow_buf,
+                                     std::vector<MKL_INT>& col_buf) {
+    auto crow = sparse.crow_indices().contiguous();
+    auto col = sparse.col_indices().contiguous();
+    auto vals = sparse.values().contiguous();
+
+    crow_buf = to_mkl_int(crow.data<int64_t>(), nrows + 1);
+    col_buf = to_mkl_int(col.data<int64_t>(), sparse.nnz());
+
+    sparse_matrix_t handle = nullptr;
+    sparse_status_t status = mkl_sparse_s_create_csr(
+        &handle,
+        SPARSE_INDEX_BASE_ZERO,
+        nrows, ncols,
+        crow_buf.data(),
+        crow_buf.data() + 1,
+        col_buf.data(),
+        const_cast<float*>(vals.data<float>())
+    );
+
+    if (status != SPARSE_STATUS_SUCCESS) {
+        throw std::runtime_error("mkl_sparse_s_create_csr failed with status " +
+                                 std::to_string(static_cast<int>(status)));
+    }
+    return handle;
+}
+
+/// Create MKL Float64 CSR handle from SparseTensor.
+sparse_matrix_t create_mkl_csr_f64(const SparseTensor& sparse, MKL_INT nrows, MKL_INT ncols,
+                                     std::vector<MKL_INT>& crow_buf,
+                                     std::vector<MKL_INT>& col_buf) {
+    auto crow = sparse.crow_indices().contiguous();
+    auto col = sparse.col_indices().contiguous();
+    auto vals = sparse.values().contiguous();
+
+    crow_buf = to_mkl_int(crow.data<int64_t>(), nrows + 1);
+    col_buf = to_mkl_int(col.data<int64_t>(), sparse.nnz());
+
+    sparse_matrix_t handle = nullptr;
+    sparse_status_t status = mkl_sparse_d_create_csr(
+        &handle,
+        SPARSE_INDEX_BASE_ZERO,
+        nrows, ncols,
+        crow_buf.data(),
+        crow_buf.data() + 1,
+        col_buf.data(),
+        const_cast<double*>(vals.data<double>())
+    );
+
+    if (status != SPARSE_STATUS_SUCCESS) {
+        throw std::runtime_error("mkl_sparse_d_create_csr failed with status " +
+                                 std::to_string(static_cast<int>(status)));
+    }
+    return handle;
+}
+
+/// MKL SpMV for Float32 CSR.
+Tensor mkl_csr_spmv_f32(const SparseTensor& sparse, const Tensor& vec,
+                          int64_t M, int64_t K) {
+    std::vector<MKL_INT> crow_buf, col_buf;
+    auto handle = create_mkl_csr_f32(sparse, M, K, crow_buf, col_buf);
+    MklSparseGuard guard(handle);
+
+    struct matrix_descr descr;
+    descr.type = SPARSE_MATRIX_TYPE_GENERAL;
+
+    auto result = zeros({M}, DType::Float32, Device::cpu());
+    float alpha = 1.0f, beta = 0.0f;
+    sparse_status_t status = mkl_sparse_s_mv(
+        SPARSE_OPERATION_NON_TRANSPOSE,
+        alpha, handle, descr,
+        vec.data<float>(),
+        beta,
+        result.data<float>()
+    );
+    if (status != SPARSE_STATUS_SUCCESS) {
+        throw std::runtime_error("mkl_sparse_s_mv failed with status " +
+                                 std::to_string(static_cast<int>(status)));
+    }
+    return result;
+}
+
+/// MKL SpMV for Float64 CSR.
+Tensor mkl_csr_spmv_f64(const SparseTensor& sparse, const Tensor& vec,
+                          int64_t M, int64_t K) {
+    std::vector<MKL_INT> crow_buf, col_buf;
+    auto handle = create_mkl_csr_f64(sparse, M, K, crow_buf, col_buf);
+    MklSparseGuard guard(handle);
+
+    struct matrix_descr descr;
+    descr.type = SPARSE_MATRIX_TYPE_GENERAL;
+
+    auto result = zeros({M}, DType::Float64, Device::cpu());
+    double alpha = 1.0, beta = 0.0;
+    sparse_status_t status = mkl_sparse_d_mv(
+        SPARSE_OPERATION_NON_TRANSPOSE,
+        alpha, handle, descr,
+        vec.data<double>(),
+        beta,
+        result.data<double>()
+    );
+    if (status != SPARSE_STATUS_SUCCESS) {
+        throw std::runtime_error("mkl_sparse_d_mv failed with status " +
+                                 std::to_string(static_cast<int>(status)));
+    }
+    return result;
+}
+
+/// MKL SpMM for Float32 CSR.
+Tensor mkl_csr_spmm_f32(const SparseTensor& sparse, const Tensor& dense,
+                          int64_t M, int64_t K, int64_t N) {
+    std::vector<MKL_INT> crow_buf, col_buf;
+    auto handle = create_mkl_csr_f32(sparse, M, K, crow_buf, col_buf);
+    MklSparseGuard guard(handle);
+
+    struct matrix_descr descr;
+    descr.type = SPARSE_MATRIX_TYPE_GENERAL;
+
+    auto result = zeros({M, N}, DType::Float32, Device::cpu());
+    float alpha = 1.0f, beta = 0.0f;
+    sparse_status_t status = mkl_sparse_s_mm(
+        SPARSE_OPERATION_NON_TRANSPOSE,
+        alpha, handle, descr,
+        SPARSE_LAYOUT_ROW_MAJOR,
+        dense.data<float>(),
+        static_cast<MKL_INT>(N),   // columns of B
+        static_cast<MKL_INT>(N),   // leading dimension of B (row-major: ldB = N)
+        beta,
+        result.data<float>(),
+        static_cast<MKL_INT>(N)    // leading dimension of C
+    );
+    if (status != SPARSE_STATUS_SUCCESS) {
+        throw std::runtime_error("mkl_sparse_s_mm failed with status " +
+                                 std::to_string(static_cast<int>(status)));
+    }
+    return result;
+}
+
+/// MKL SpMM for Float64 CSR.
+Tensor mkl_csr_spmm_f64(const SparseTensor& sparse, const Tensor& dense,
+                          int64_t M, int64_t K, int64_t N) {
+    std::vector<MKL_INT> crow_buf, col_buf;
+    auto handle = create_mkl_csr_f64(sparse, M, K, crow_buf, col_buf);
+    MklSparseGuard guard(handle);
+
+    struct matrix_descr descr;
+    descr.type = SPARSE_MATRIX_TYPE_GENERAL;
+
+    auto result = zeros({M, N}, DType::Float64, Device::cpu());
+    double alpha = 1.0, beta = 0.0;
+    sparse_status_t status = mkl_sparse_d_mm(
+        SPARSE_OPERATION_NON_TRANSPOSE,
+        alpha, handle, descr,
+        SPARSE_LAYOUT_ROW_MAJOR,
+        dense.data<double>(),
+        static_cast<MKL_INT>(N),
+        static_cast<MKL_INT>(N),
+        beta,
+        result.data<double>(),
+        static_cast<MKL_INT>(N)
+    );
+    if (status != SPARSE_STATUS_SUCCESS) {
+        throw std::runtime_error("mkl_sparse_d_mm failed with status " +
+                                 std::to_string(static_cast<int>(status)));
+    }
+    return result;
+}
+
+#endif // TENZOR_USE_MKL
+
+// ============================================================================
+// Fallback (non-MKL) scalar implementations
+// ============================================================================
+
+/// Fallback SpMV: CSR format, y = A * x
+template<typename T>
+void fallback_csr_spmv(const int64_t* crow_ptr, const int64_t* col_ptr,
+                        const T* vals, const T* x, T* y,
+                        int64_t nrows) {
+    #pragma omp parallel for schedule(static) if(nrows > 128)
+    for (int64_t row = 0; row < nrows; ++row) {
+        T sum = T(0);
+        for (int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
+            sum += vals[j] * x[col_ptr[j]];
+        }
+        y[row] = sum;
+    }
+}
+
+/// Fallback SpMM: CSR format, C = A * B where B is (K, N) row-major
+template<typename T>
+void fallback_csr_spmm(const int64_t* crow_ptr, const int64_t* col_ptr,
+                        const T* vals, const T* B, T* C,
+                        int64_t M, int64_t N) {
+    #pragma omp parallel for schedule(static) if(M > 64)
+    for (int64_t row = 0; row < M; ++row) {
+        T* c_row = C + row * N;
+        std::memset(c_row, 0, N * sizeof(T));
+        for (int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
+            int64_t col = col_ptr[j];
+            T val = vals[j];
+            const T* b_row = B + col * N;
+            for (int64_t n = 0; n < N; ++n) {
+                c_row[n] += val * b_row[n];
+            }
+        }
+    }
+}
+
+/// Fallback COO SpMV: y = A * x (cannot be parallelized due to race on y)
+template<typename T>
+void fallback_coo_spmv(const int64_t* idx_ptr, const T* vals, const T* x, T* y,
+                        int64_t nnz) {
+    for (int64_t i = 0; i < nnz; ++i) {
+        int64_t row = idx_ptr[i];
+        int64_t col = idx_ptr[nnz + i];
+        y[row] += vals[i] * x[col];
+    }
+}
+
+/// Fallback COO SpMM: C = A * B (cannot be parallelized due to race on C)
+template<typename T>
+void fallback_coo_spmm(const int64_t* idx_ptr, const T* vals, const T* B, T* C,
+                        int64_t nnz, int64_t N) {
+    for (int64_t i = 0; i < nnz; ++i) {
+        int64_t row = idx_ptr[i];
+        int64_t col = idx_ptr[nnz + i];
+        T val = vals[i];
+        for (int64_t n = 0; n < N; ++n) {
+            C[row * N + n] += val * B[col * N + n];
+        }
+    }
+}
+
+// ============================================================================
+// Internal CPU SpMM/SpMV dispatchers
+// ============================================================================
+
+/// CPU SpMM implementation: tries MKL for CSR, falls back to scalar loops.
+Tensor cpu_spmm(const SparseTensor& sparse, const Tensor& dense,
+                int64_t M, int64_t K, int64_t N) {
+    DType dtype = dense.dtype();
+    auto dense_c = dense.contiguous();
+
+    // For CSR, try MKL first
+    if (sparse.layout() == SparseLayout::CSR) {
+#ifdef TENZOR_USE_MKL
+        if (dtype == DType::Float32) {
+            return mkl_csr_spmm_f32(sparse, dense_c, M, K, N);
+        } else if (dtype == DType::Float64) {
+            return mkl_csr_spmm_f64(sparse, dense_c, M, K, N);
+        }
+#endif
+        // Fallback scalar CSR
+        auto result = zeros({M, N}, dtype, Device::cpu());
+        auto crow = sparse.crow_indices().contiguous();
+        auto col = sparse.col_indices().contiguous();
+        auto vals = sparse.values().contiguous();
+
+        if (dtype == DType::Float32) {
+            fallback_csr_spmm<float>(crow.data<int64_t>(), col.data<int64_t>(),
+                                      vals.data<float>(), dense_c.data<float>(),
+                                      result.data<float>(), M, N);
+        } else if (dtype == DType::Float64) {
+            fallback_csr_spmm<double>(crow.data<int64_t>(), col.data<int64_t>(),
+                                       vals.data<double>(), dense_c.data<double>(),
+                                       result.data<double>(), M, N);
+        }
+        return result;
+    }
+
+    if (sparse.layout() == SparseLayout::COO) {
+        // For COO with MKL: convert to CSR first, then use MKL
+#ifdef TENZOR_USE_MKL
+        if (dtype == DType::Float32 || dtype == DType::Float64) {
+            auto csr = sparse.to_csr();
+            if (dtype == DType::Float32) {
+                return mkl_csr_spmm_f32(csr, dense_c, M, K, N);
+            } else {
+                return mkl_csr_spmm_f64(csr, dense_c, M, K, N);
+            }
+        }
+#endif
+        // Fallback scalar COO
+        auto coo = sparse.is_coalesced() ? sparse : sparse.coalesce();
+        auto result = zeros({M, N}, dtype, Device::cpu());
+        auto idx = coo.indices().contiguous();
+        auto vals = coo.values().contiguous();
+        int64_t nnz = coo.nnz();
+
+        if (dtype == DType::Float32) {
+            fallback_coo_spmm<float>(idx.data<int64_t>(), vals.data<float>(),
+                                      dense_c.data<float>(), result.data<float>(), nnz, N);
+        } else if (dtype == DType::Float64) {
+            fallback_coo_spmm<double>(idx.data<int64_t>(), vals.data<double>(),
+                                       dense_c.data<double>(), result.data<double>(), nnz, N);
+        }
+        return result;
+    }
+
+    // CSC/BSR: convert to CSR and recurse
+    auto csr = sparse.to_csr();
+    return cpu_spmm(csr, dense, M, K, N);
+}
+
+/// CPU SpMV implementation: tries MKL for CSR, falls back to scalar loops.
+Tensor cpu_spmv(const SparseTensor& sparse, const Tensor& vec,
+                int64_t M, int64_t K) {
+    DType dtype = vec.dtype();
+    auto vec_c = vec.contiguous();
+
+    // For CSR, try MKL first
+    if (sparse.layout() == SparseLayout::CSR) {
+#ifdef TENZOR_USE_MKL
+        if (dtype == DType::Float32) {
+            return mkl_csr_spmv_f32(sparse, vec_c, M, K);
+        } else if (dtype == DType::Float64) {
+            return mkl_csr_spmv_f64(sparse, vec_c, M, K);
+        }
+#endif
+        // Fallback scalar CSR
+        auto result = zeros({M}, dtype, Device::cpu());
+        auto crow = sparse.crow_indices().contiguous();
+        auto col = sparse.col_indices().contiguous();
+        auto vals = sparse.values().contiguous();
+
+        if (dtype == DType::Float32) {
+            fallback_csr_spmv<float>(crow.data<int64_t>(), col.data<int64_t>(),
+                                      vals.data<float>(), vec_c.data<float>(),
+                                      result.data<float>(), M);
+        } else if (dtype == DType::Float64) {
+            fallback_csr_spmv<double>(crow.data<int64_t>(), col.data<int64_t>(),
+                                       vals.data<double>(), vec_c.data<double>(),
+                                       result.data<double>(), M);
+        }
+        return result;
+    }
+
+    if (sparse.layout() == SparseLayout::COO) {
+        // For COO with MKL: convert to CSR first
+#ifdef TENZOR_USE_MKL
+        if (dtype == DType::Float32 || dtype == DType::Float64) {
+            auto csr = sparse.to_csr();
+            if (dtype == DType::Float32) {
+                return mkl_csr_spmv_f32(csr, vec_c, M, K);
+            } else {
+                return mkl_csr_spmv_f64(csr, vec_c, M, K);
+            }
+        }
+#endif
+        // Fallback scalar COO
+        auto coo = sparse.is_coalesced() ? sparse : sparse.coalesce();
+        auto result = zeros({M}, dtype, Device::cpu());
+        auto idx = coo.indices().contiguous();
+        auto vals = coo.values().contiguous();
+        int64_t nnz = coo.nnz();
+
+        if (dtype == DType::Float32) {
+            fallback_coo_spmv<float>(idx.data<int64_t>(), vals.data<float>(),
+                                      vec_c.data<float>(), result.data<float>(), nnz);
+        } else if (dtype == DType::Float64) {
+            fallback_coo_spmv<double>(idx.data<int64_t>(), vals.data<double>(),
+                                       vec_c.data<double>(), result.data<double>(), nnz);
+        }
+        return result;
+    }
+
+    // CSC/BSR: convert to CSR and recurse
+    auto csr = sparse.to_csr();
+    return cpu_spmv(csr, vec, M, K);
+}
+
 } // anonymous namespace
 
 // ============================================================================
@@ -107,78 +517,8 @@ auto spmm(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
     }
 #endif
 
-    // CPU path
-    auto result = zeros({M, N}, comp_dtype, dense_compute.device());
-    auto dense_c = dense_compute.contiguous();
-
-    if (sparse_compute.layout() == SparseLayout::COO) {
-        auto coo = sparse_compute.is_coalesced() ? sparse_compute : sparse_compute.coalesce();
-        auto idx = coo.indices().contiguous();
-        auto vals = coo.values().contiguous();
-        auto* idx_ptr = idx.data<int64_t>();
-        int64_t nnz = coo.nnz();
-
-        if (comp_dtype == DType::Float32) {
-            auto* v = vals.data<float>();
-            auto* d = dense_c.data<float>();
-            auto* r = result.data<float>();
-            for (int64_t i = 0; i < nnz; ++i) {
-                int64_t row = idx_ptr[i];
-                int64_t col = idx_ptr[nnz + i];
-                float val = v[i];
-                for (int64_t j = 0; j < N; ++j) {
-                    r[row * N + j] += val * d[col * N + j];
-                }
-            }
-        } else if (comp_dtype == DType::Float64) {
-            auto* v = vals.data<double>();
-            auto* d = dense_c.data<double>();
-            auto* r = result.data<double>();
-            for (int64_t i = 0; i < nnz; ++i) {
-                int64_t row = idx_ptr[i];
-                int64_t col = idx_ptr[nnz + i];
-                double val = v[i];
-                for (int64_t j = 0; j < N; ++j) {
-                    r[row * N + j] += val * d[col * N + j];
-                }
-            }
-        }
-    } else {
-        // CSR format
-        auto crow = sparse_compute.crow_indices().contiguous();
-        auto col = sparse_compute.col_indices().contiguous();
-        auto vals = sparse_compute.values().contiguous();
-        auto* crow_ptr = crow.data<int64_t>();
-        auto* col_ptr = col.data<int64_t>();
-
-        if (comp_dtype == DType::Float32) {
-            auto* v = vals.data<float>();
-            auto* d = dense_c.data<float>();
-            auto* r = result.data<float>();
-            for (int64_t row = 0; row < M; ++row) {
-                for (int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
-                    int64_t c = col_ptr[j];
-                    float val = v[j];
-                    for (int64_t n = 0; n < N; ++n) {
-                        r[row * N + n] += val * d[c * N + n];
-                    }
-                }
-            }
-        } else if (comp_dtype == DType::Float64) {
-            auto* v = vals.data<double>();
-            auto* d = dense_c.data<double>();
-            auto* r = result.data<double>();
-            for (int64_t row = 0; row < M; ++row) {
-                for (int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
-                    int64_t c = col_ptr[j];
-                    double val = v[j];
-                    for (int64_t n = 0; n < N; ++n) {
-                        r[row * N + n] += val * d[c * N + n];
-                    }
-                }
-            }
-        }
-    }
+    // CPU path: MKL-accelerated with scalar fallback
+    auto result = cpu_spmm(sparse_compute, dense_compute, M, K, N);
 
     // Cast result back to original dtype if needed
     return (orig_dtype != comp_dtype) ? result.to(orig_dtype) : result;
@@ -222,63 +562,8 @@ auto spmv(const SparseTensor& sparse, const Tensor& vec) -> Tensor {
     }
 #endif
 
-    // CPU path
-    auto result = zeros({M}, comp_dtype, vec_compute.device());
-    auto vec_c = vec_compute.contiguous();
-
-    if (sparse_compute.layout() == SparseLayout::COO) {
-        auto coo = sparse_compute.is_coalesced() ? sparse_compute : sparse_compute.coalesce();
-        auto idx = coo.indices().contiguous();
-        auto vals = coo.values().contiguous();
-        auto* idx_ptr = idx.data<int64_t>();
-        int64_t nnz = coo.nnz();
-
-        if (comp_dtype == DType::Float32) {
-            auto* v = vals.data<float>();
-            auto* x = vec_c.data<float>();
-            auto* r = result.data<float>();
-            for (int64_t i = 0; i < nnz; ++i) {
-                r[idx_ptr[i]] += v[i] * x[idx_ptr[nnz + i]];
-            }
-        } else if (comp_dtype == DType::Float64) {
-            auto* v = vals.data<double>();
-            auto* x = vec_c.data<double>();
-            auto* r = result.data<double>();
-            for (int64_t i = 0; i < nnz; ++i) {
-                r[idx_ptr[i]] += v[i] * x[idx_ptr[nnz + i]];
-            }
-        }
-    } else {
-        auto crow = sparse_compute.crow_indices().contiguous();
-        auto col = sparse_compute.col_indices().contiguous();
-        auto vals = sparse_compute.values().contiguous();
-        auto* crow_ptr = crow.data<int64_t>();
-        auto* col_ptr = col.data<int64_t>();
-
-        if (comp_dtype == DType::Float32) {
-            auto* v = vals.data<float>();
-            auto* x = vec_c.data<float>();
-            auto* r = result.data<float>();
-            for (int64_t row = 0; row < M; ++row) {
-                float sum = 0;
-                for (int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
-                    sum += v[j] * x[col_ptr[j]];
-                }
-                r[row] = sum;
-            }
-        } else if (comp_dtype == DType::Float64) {
-            auto* v = vals.data<double>();
-            auto* x = vec_c.data<double>();
-            auto* r = result.data<double>();
-            for (int64_t row = 0; row < M; ++row) {
-                double sum = 0;
-                for (int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
-                    sum += v[j] * x[col_ptr[j]];
-                }
-                r[row] = sum;
-            }
-        }
-    }
+    // CPU path: MKL-accelerated with scalar fallback
+    auto result = cpu_spmv(sparse_compute, vec_compute, M, K);
 
     return (orig_dtype != comp_dtype) ? result.to(orig_dtype) : result;
 }
@@ -300,12 +585,14 @@ auto add(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
     if (result_c.dtype() == DType::Float32) {
         auto* r = result_c.data<float>();
         auto* d = dense_c.data<float>();
+        #pragma omp parallel for schedule(static) if(n > 65536)
         for (int64_t i = 0; i < n; ++i) {
             r[i] += d[i];
         }
     } else if (result_c.dtype() == DType::Float64) {
         auto* r = result_c.data<double>();
         auto* d = dense_c.data<double>();
+        #pragma omp parallel for schedule(static) if(n > 65536)
         for (int64_t i = 0; i < n; ++i) {
             r[i] += d[i];
         }
@@ -404,12 +691,14 @@ auto mul(const SparseTensor& sparse, double scalar) -> SparseTensor {
             auto* src = vals.data<float>();
             auto* dst = new_values.data<float>();
             float s = static_cast<float>(scalar);
+            #pragma omp parallel for schedule(static) if(nnz > 65536)
             for (int64_t i = 0; i < nnz; ++i) {
                 dst[i] = src[i] * s;
             }
         } else if (vals.dtype() == DType::Float64) {
             auto* src = vals.data<double>();
             auto* dst = new_values.data<double>();
+            #pragma omp parallel for schedule(static) if(nnz > 65536)
             for (int64_t i = 0; i < nnz; ++i) {
                 dst[i] = src[i] * scalar;
             }
@@ -428,12 +717,14 @@ auto mul(const SparseTensor& sparse, double scalar) -> SparseTensor {
             auto* src = vals.data<float>();
             auto* dst = new_values.data<float>();
             float s = static_cast<float>(scalar);
+            #pragma omp parallel for schedule(static) if(nnz > 65536)
             for (int64_t i = 0; i < nnz; ++i) {
                 dst[i] = src[i] * s;
             }
         } else if (vals.dtype() == DType::Float64) {
             auto* src = vals.data<double>();
             auto* dst = new_values.data<double>();
+            #pragma omp parallel for schedule(static) if(nnz > 65536)
             for (int64_t i = 0; i < nnz; ++i) {
                 dst[i] = src[i] * scalar;
             }

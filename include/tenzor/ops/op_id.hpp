@@ -456,6 +456,15 @@ enum class OpId : uint16_t {
     RNNForward,                // Generic RNN forward (vanilla/Elman)
 
     // =========================================================================
+    // Sparse Tensor Operations (460-469)
+    // =========================================================================
+    SparseSpMM = 460,          // Sparse-Dense matrix multiplication
+    SparseSpMV,                // Sparse-Dense matrix-vector multiplication
+    SparseToDense,             // Convert sparse tensor to dense
+    DenseToSparse,             // Convert dense tensor to sparse (CSR)
+    SparseAdd,                 // Sparse + Dense addition
+
+    // =========================================================================
     // Sentinel (MUST BE LAST)
     // =========================================================================
     OP_COUNT

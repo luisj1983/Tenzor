@@ -291,6 +291,30 @@ namespace oneapi {
                                    const Tensor& weight, const Tensor& rrms,
                                    sycl::queue& queue) -> std::tuple<Tensor, Tensor>;
 
+    // ---- Fused optimizer steps (kernels/fused_ops.cpp) ----
+    auto fused_adam_step_kernel(
+        Tensor& param, const Tensor& grad, Tensor& exp_avg, Tensor& exp_avg_sq,
+        double lr, double beta1, double beta2, double eps, double weight_decay,
+        int64_t step, bool decoupled_weight_decay, sycl::queue& queue,
+        Tensor* max_exp_avg_sq, bool amsgrad) -> void;
+    auto fused_sgd_step_kernel(
+        Tensor& param, const Tensor& grad, Tensor* momentum_buffer,
+        float lr, float momentum, float weight_decay, float dampening,
+        bool nesterov, sycl::queue& queue) -> void;
+    auto fused_rmsprop_step_kernel(
+        Tensor& param, const Tensor& grad, Tensor& square_avg,
+        Tensor* grad_avg, Tensor* momentum_buffer,
+        float lr, float alpha, float eps, float weight_decay, float momentum,
+        bool centered, sycl::queue& queue) -> void;
+    auto fused_adadelta_step_kernel(
+        Tensor& param, const Tensor& grad, Tensor& square_avg, Tensor& acc_delta,
+        float rho, float eps, float lr, float weight_decay,
+        sycl::queue& queue) -> void;
+    auto fused_adagrad_step_kernel(
+        Tensor& param, const Tensor& grad, Tensor& sum_sq,
+        float lr, float lr_decay, float eps, float weight_decay,
+        int64_t step, sycl::queue& queue) -> void;
+
     // ---- LSTM operations (kernels/lstm.cpp) ----
     auto lstm_cell_forward_kernel(const Tensor& gates, const Tensor& c_prev,
                                   int64_t batch_size, int64_t hidden_size,
@@ -336,6 +360,8 @@ namespace oneapi {
     auto interpolate_kernel(const Tensor& input, const std::vector<int64_t>& size,
                             const std::string& mode, bool align_corners,
                             sycl::queue& queue) -> Tensor;
+    auto box_iou_kernel(const Tensor& boxes1, const Tensor& boxes2, int iou_type,
+                        sycl::queue& queue) -> Tensor;
 
     // ---- Quantization operations (kernels/quantization.cpp) ----
     auto quantize_kernel(const Tensor& input, float scale, int32_t zero_point,
@@ -393,9 +419,11 @@ namespace oneapi {
     auto strided_fill_kernel(Tensor& self, double value, sycl::queue& queue) -> void;
     auto to_memory_format_kernel(const Tensor& input, int format_int, sycl::queue& queue) -> Tensor;
 
-    // ---- ScatterAdd (kernels/indexing.cpp) ----
+    // ---- ScatterAdd, Put (kernels/indexing.cpp) ----
     auto scatter_add_kernel(const Tensor& self, int64_t dim, const Tensor& index, const Tensor& src,
                             sycl::queue& queue) -> Tensor;
+    auto put_kernel(const Tensor& input, const Tensor& indices, const Tensor& source,
+                    bool accumulate, sycl::queue& queue) -> Tensor;
 
     // ---- HasInfNan, CumSum, CumProd (kernels/math.cpp) ----
     auto has_inf_nan_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
@@ -1461,6 +1489,127 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         });
 
     // =========================================================================
+    // Fused Optimizer Steps
+    // =========================================================================
+
+    table.register_kernel(OpId::FusedSGDStep,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // inputs: [param, grad, momentum_buffer (optional)]
+            float lr = static_cast<float>(attrs.get_float(AttrKey::Lr, 0.01));
+            float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.0));
+            float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
+            float dampening = static_cast<float>(attrs.get_float(AttrKey::Dampening, 0.0));
+            bool nesterov = attrs.get_bool(AttrKey::Nesterov, false);
+
+            Tensor& param = const_cast<Tensor&>(inputs[0]);
+            Tensor* momentum_buffer = (inputs.size() > 2 && momentum > 0.0f)
+                ? &const_cast<Tensor&>(inputs[2]) : nullptr;
+
+            oneapi::fused_sgd_step_kernel(
+                param, inputs[1], momentum_buffer,
+                lr, momentum, weight_decay, dampening, nesterov,
+                get_q(inputs));
+            return std::vector<Tensor>{param};
+        });
+
+    table.register_kernel(OpId::FusedAdamStep,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // inputs: [param, grad, exp_avg, exp_avg_sq, packed_params, max_exp_avg_sq (optional)]
+            double lr, beta1, beta2, eps, weight_decay;
+            int64_t step;
+            bool decoupled, amsgrad;
+
+            if (inputs.size() >= 5 && inputs[4].dtype() == DType::Float64 && inputs[4].numel() == 8) {
+                // New packed-tensor path
+                const double* p = inputs[4].data<double>();
+                lr = p[0];
+                beta1 = p[1];
+                beta2 = p[2];
+                eps = p[3];
+                weight_decay = p[4];
+                step = static_cast<int64_t>(p[5]);
+                decoupled = p[6] != 0.0;
+                amsgrad = p[7] != 0.0;
+            } else {
+                // Legacy attribute path
+                lr = attrs.get_float(AttrKey::Lr, 0.001);
+                beta1 = attrs.get_float(AttrKey::Beta1, 0.9);
+                beta2 = attrs.get_float(AttrKey::Beta2, 0.999);
+                eps = attrs.get_float(AttrKey::Eps, 1e-8);
+                weight_decay = attrs.get_float(AttrKey::WeightDecay, 0.0);
+                step = attrs.get_int(AttrKey::Step, 1);
+                decoupled = attrs.get_bool(AttrKey::Decoupled, false);
+                amsgrad = attrs.get_bool(AttrKey::Amsgrad, false);
+            }
+
+            Tensor& param = const_cast<Tensor&>(inputs[0]);
+            Tensor& exp_avg = const_cast<Tensor&>(inputs[2]);
+            Tensor& exp_avg_sq = const_cast<Tensor&>(inputs[3]);
+            Tensor* max_exp_avg_sq = (amsgrad && inputs.size() > 5)
+                ? &const_cast<Tensor&>(inputs[5]) : nullptr;
+
+            oneapi::fused_adam_step_kernel(
+                param, inputs[1], exp_avg, exp_avg_sq,
+                lr, beta1, beta2, eps, weight_decay, step, decoupled,
+                get_q(inputs), max_exp_avg_sq, amsgrad);
+            return std::vector<Tensor>{param};
+        });
+
+    table.register_kernel(OpId::FusedRMSPropStep,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // inputs: [param, grad, square_avg, grad_avg (optional), momentum_buffer (optional)]
+            float lr = static_cast<float>(attrs.get_float(AttrKey::Lr, 0.01));
+            float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.99));
+            float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-8));
+            float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
+            float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.0));
+            bool centered = attrs.get_bool(AttrKey::Centered, false);
+
+            Tensor& param = const_cast<Tensor&>(inputs[0]);
+            Tensor& square_avg = const_cast<Tensor&>(inputs[2]);
+            Tensor* grad_avg = (centered && inputs.size() > 3) ? &const_cast<Tensor&>(inputs[3]) : nullptr;
+            Tensor* momentum_buffer = (momentum > 0.0f && inputs.size() > 4) ? &const_cast<Tensor&>(inputs[4]) : nullptr;
+
+            oneapi::fused_rmsprop_step_kernel(param, inputs[1], square_avg, grad_avg, momentum_buffer,
+                lr, alpha, eps, weight_decay, momentum, centered, get_q(inputs));
+            return std::vector<Tensor>{param};
+        });
+
+    table.register_kernel(OpId::FusedAdadeltaStep,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // inputs: [param, grad, square_avg, acc_delta]
+            float rho = static_cast<float>(attrs.get_float(AttrKey::Rho, 0.9));
+            float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-6));
+            float lr = static_cast<float>(attrs.get_float(AttrKey::Lr, 1.0));
+            float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
+
+            Tensor& param = const_cast<Tensor&>(inputs[0]);
+            Tensor& square_avg = const_cast<Tensor&>(inputs[2]);
+            Tensor& acc_delta = const_cast<Tensor&>(inputs[3]);
+
+            oneapi::fused_adadelta_step_kernel(param, inputs[1], square_avg, acc_delta,
+                rho, eps, lr, weight_decay, get_q(inputs));
+            return std::vector<Tensor>{param};
+        });
+
+    table.register_kernel(OpId::FusedAdagradStep,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // inputs: [param, grad, sum_sq]
+            float lr = static_cast<float>(attrs.get_float(AttrKey::Lr, 0.01));
+            float lr_decay = static_cast<float>(attrs.get_float(AttrKey::LrDecay, 0.0));
+            float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-10));
+            float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
+            int64_t step = attrs.get_int(AttrKey::Step, 1);
+
+            Tensor& param = const_cast<Tensor&>(inputs[0]);
+            Tensor& sum_sq = const_cast<Tensor&>(inputs[2]);
+
+            oneapi::fused_adagrad_step_kernel(param, inputs[1], sum_sq,
+                lr, lr_decay, eps, weight_decay, step, get_q(inputs));
+            return std::vector<Tensor>{param};
+        });
+
+    // =========================================================================
     // Vision Operations
     // =========================================================================
 
@@ -1982,6 +2131,62 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         });
 
 #endif // TENZOR_HAS_ONEMKL
+
+    // =========================================================================
+    // Put Operation (Phase 3.1)
+    // =========================================================================
+
+    table.register_kernel(OpId::Put,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            bool accumulate = attrs.get_bool(AttrKey::Accumulate, false);
+            return {oneapi::put_kernel(inputs[0], inputs[1], inputs[2], accumulate, get_q(inputs))};
+        });
+
+    // =========================================================================
+    // Box IoU Operation (Phase 3.1)
+    // =========================================================================
+
+    table.register_kernel(OpId::BoxIoU,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int iou_type = static_cast<int>(attrs.get_int(AttrKey::IouType, 0));
+            return {oneapi::box_iou_kernel(inputs[0], inputs[1], iou_type, get_q(inputs))};
+        });
+
+    // =========================================================================
+    // Quantized Operations (Phase 3.1)
+    // =========================================================================
+
+    table.register_kernel(OpId::QuantizedLinear,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale, 1.0));
+            int32_t input_zp = static_cast<int32_t>(attrs.get_int(AttrKey::InputZeroPoint, 0));
+            float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ, 1.0));
+            int32_t weight_zp = static_cast<int32_t>(attrs.get_int(AttrKey::WeightZeroPoint, 0));
+            float output_scale = static_cast<float>(attrs.get_float(AttrKey::OutputScale, 1.0));
+            int32_t output_zp = static_cast<int32_t>(attrs.get_int(AttrKey::OutputZeroPoint, 0));
+            const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+            return {oneapi::quantized_linear_kernel(inputs[0], inputs[1], bias,
+                                                     input_scale, input_zp,
+                                                     weight_scale, weight_zp,
+                                                     output_scale, output_zp, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::QuantizedConv2d,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+            float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale, 1.0));
+            int32_t input_zp = static_cast<int32_t>(attrs.get_int(AttrKey::InputZeroPoint, 0));
+            float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ, 1.0));
+            int32_t weight_zp = static_cast<int32_t>(attrs.get_int(AttrKey::WeightZeroPoint, 0));
+            const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+            return {oneapi::quantized_conv2d_kernel(inputs[0], inputs[1], bias,
+                                                     stride, padding, dilation, groups,
+                                                     input_scale, input_zp,
+                                                     weight_scale, weight_zp, get_q(inputs))};
+        });
 
 } // register_oneapi_kernels
 

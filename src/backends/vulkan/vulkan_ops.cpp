@@ -11147,9 +11147,24 @@ auto VulkanBackend::dispatchDepthwiseConv2d(const Tensor& input, const Tensor& w
     int64_t out_w = (W + 2 * padding - dilation * (kW - 1) - 1) / stride + 1;
     int64_t out_elements = N * C * out_h * out_w;
 
+    // BFloat16: upcast to Float32, compute, downcast
+    if (input.dtype() == DType::BFloat16) {
+        auto in_f32 = input.to(DType::Float32);
+        auto w_f32 = weight.to(DType::Float32);
+        Tensor bias_f32;
+        const Tensor* bias_f32_ptr = nullptr;
+        if (bias && bias->numel() > 0) {
+            bias_f32 = bias->to(DType::Float32);
+            bias_f32_ptr = &bias_f32;
+        }
+        auto result = dispatchDepthwiseConv2d(in_f32, w_f32, bias_f32_ptr, stride, padding, dilation);
+        return result.to(DType::BFloat16);
+    }
+
     int32_t device_id = input.device().index;
     bool is_f64 = (input.dtype() == DType::Float64);
-    std::string shader = is_f64 ? "depthwise_conv2d_f64" : "depthwise_conv2d";
+    bool is_f16 = (input.dtype() == DType::Float16);
+    std::string shader = is_f64 ? "depthwise_conv2d_f64" : (is_f16 ? "depthwise_conv2d_f16" : "depthwise_conv2d");
     auto* pipeline = getPipeline(shader, device_id);
 
     Tensor output({N, C, out_h, out_w}, input.dtype(), input.device());
@@ -11193,15 +11208,25 @@ auto VulkanBackend::dispatchDepthwiseConv2d(const Tensor& input, const Tensor& w
     pc.has_bias = (bias && bias->numel() > 0) ? 1 : 0;
 
     size_t elem = input.dtype_size();
+
+    // For Float16, descriptor buffer ranges must be rounded up to 4-byte boundaries
+    auto f16_buf_size = [&](int64_t numel) -> size_t {
+        if (is_f16) {
+            size_t num_pairs = (static_cast<size_t>(numel) + 1) / 2;
+            return num_pairs * 4;
+        }
+        return static_cast<size_t>(numel) * elem;
+    };
+
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, input.data_ptr()}, {1, weight.data_ptr()},
         {2, bias_tensor.data_ptr()}, {3, output.data_ptr()}
     };
     std::vector<size_t> sizes = {
-        static_cast<size_t>(N * C * H * W) * elem,
-        static_cast<size_t>(C * kH * kW) * elem,
-        static_cast<size_t>(bias_tensor.numel()) * elem,
-        static_cast<size_t>(out_elements) * elem
+        f16_buf_size(N * C * H * W),
+        f16_buf_size(C * kH * kW),
+        f16_buf_size(bias_tensor.numel()),
+        f16_buf_size(out_elements)
     };
 
     VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
@@ -11277,6 +11302,161 @@ auto VulkanBackend::dispatchAdaptiveMaxPool2dBackward(const Tensor& grad_output,
     endSingleTimeCommands(cmd, device_id);
 
     return grad_input;
+}
+
+/**
+ * @brief Cumulative sum (prefix sum) along a dimension.
+ */
+auto VulkanBackend::dispatchCumSum(const Tensor& input, int64_t dim) -> Tensor {
+    auto in_shape = input.shape();
+    int64_t ndim = static_cast<int64_t>(in_shape.size());
+
+    // Normalize negative dim
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("cumsum: dimension out of range (got " +
+                                 std::to_string(dim) + " for tensor with " +
+                                 std::to_string(ndim) + " dimensions)");
+    }
+
+    // BFloat16: upcast to Float32, compute, downcast
+    if (input.dtype() == DType::BFloat16) {
+        auto f32 = input.to(DType::Float32);
+        auto result = dispatchCumSum(f32, dim);
+        return result.to(DType::BFloat16);
+    }
+
+    int32_t device_id = input.device().index;
+    bool is_f64 = (input.dtype() == DType::Float64);
+    bool is_f16 = (input.dtype() == DType::Float16);
+    std::string shader = is_f64 ? "cumsum_f64" : (is_f16 ? "cumsum_f16" : "cumsum");
+    auto* pipeline = getPipeline(shader, device_id);
+
+    Tensor output(std::vector<int64_t>(in_shape.begin(), in_shape.end()),
+                  input.dtype(), input.device());
+
+    // Compute outer_size (product of dims before dim) and inner_size (product of dims after dim)
+    uint32_t outer_size = 1;
+    for (int64_t i = 0; i < dim; i++) {
+        outer_size *= static_cast<uint32_t>(in_shape[i]);
+    }
+    uint32_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; i++) {
+        inner_size *= static_cast<uint32_t>(in_shape[i]);
+    }
+    uint32_t reduce_size = static_cast<uint32_t>(in_shape[dim]);
+    uint32_t total_lines = outer_size * inner_size;
+
+    struct {
+        uint32_t total_lines;
+        uint32_t reduce_size;
+        uint32_t inner_size;
+    } pc;
+    pc.total_lines = total_lines;
+    pc.reduce_size = reduce_size;
+    pc.inner_size = inner_size;
+
+    size_t elem = input.dtype_size();
+    size_t buf_size = static_cast<size_t>(input.numel()) * elem;
+    if (is_f16) {
+        size_t num_pairs = (input.numel() + 1) / 2;
+        buf_size = num_pairs * 4;
+    }
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, input.data_ptr()}, {1, output.data_ptr()}
+    };
+    std::vector<size_t> sizes = {buf_size, buf_size};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(total_lines, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return output;
+}
+
+/**
+ * @brief Cumulative product along a dimension.
+ */
+auto VulkanBackend::dispatchCumProd(const Tensor& input, int64_t dim) -> Tensor {
+    auto in_shape = input.shape();
+    int64_t ndim = static_cast<int64_t>(in_shape.size());
+
+    // Normalize negative dim
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("cumprod: dimension out of range (got " +
+                                 std::to_string(dim) + " for tensor with " +
+                                 std::to_string(ndim) + " dimensions)");
+    }
+
+    // BFloat16: upcast to Float32, compute, downcast
+    if (input.dtype() == DType::BFloat16) {
+        auto f32 = input.to(DType::Float32);
+        auto result = dispatchCumProd(f32, dim);
+        return result.to(DType::BFloat16);
+    }
+
+    int32_t device_id = input.device().index;
+    bool is_f64 = (input.dtype() == DType::Float64);
+    bool is_f16 = (input.dtype() == DType::Float16);
+    std::string shader = is_f64 ? "cumprod_f64" : (is_f16 ? "cumprod_f16" : "cumprod");
+    auto* pipeline = getPipeline(shader, device_id);
+
+    Tensor output(std::vector<int64_t>(in_shape.begin(), in_shape.end()),
+                  input.dtype(), input.device());
+
+    uint32_t outer_size = 1;
+    for (int64_t i = 0; i < dim; i++) {
+        outer_size *= static_cast<uint32_t>(in_shape[i]);
+    }
+    uint32_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; i++) {
+        inner_size *= static_cast<uint32_t>(in_shape[i]);
+    }
+    uint32_t reduce_size = static_cast<uint32_t>(in_shape[dim]);
+    uint32_t total_lines = outer_size * inner_size;
+
+    struct {
+        uint32_t total_lines;
+        uint32_t reduce_size;
+        uint32_t inner_size;
+    } pc;
+    pc.total_lines = total_lines;
+    pc.reduce_size = reduce_size;
+    pc.inner_size = inner_size;
+
+    size_t elem = input.dtype_size();
+    size_t buf_size = static_cast<size_t>(input.numel()) * elem;
+    if (is_f16) {
+        size_t num_pairs = (input.numel() + 1) / 2;
+        buf_size = num_pairs * 4;
+    }
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, input.data_ptr()}, {1, output.data_ptr()}
+    };
+    std::vector<size_t> sizes = {buf_size, buf_size};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(total_lines, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return output;
 }
 
 } // namespace tenzor

@@ -3,6 +3,8 @@
 
 include(FetchContent)
 
+option(TENZOR_CUDA_FUTURE_ARCHS "Include future CUDA architectures (e.g. sm_120) in default arch list" OFF)
+
 # Enable CUDA language
 enable_language(CUDA)
 
@@ -160,7 +162,7 @@ if(CUDNN_FOUND)
         FetchContent_Declare(
             cudnn_frontend
             GIT_REPOSITORY https://github.com/NVIDIA/cudnn-frontend.git
-            GIT_TAG v1.17.0
+            GIT_TAG 9dbe7e0cfb31780301e3e5eb10c871a22945ead6  # v1.17.0 pinned
             GIT_SHALLOW TRUE
         )
         # Disable samples and tests to avoid Catch2 C++23 compatibility issues
@@ -209,12 +211,20 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
                 message(STATUS "CUDA Backend: Detected GPU architecture(s) via nvidia-smi: ${CMAKE_CUDA_ARCHITECTURES}")
             else()
                 # nvidia-smi failed (e.g., no GPU present at build time)
-                set(CMAKE_CUDA_ARCHITECTURES "70;75;80;86;89;90;120")
+                set(TENZOR_CUDA_DEFAULT_ARCHS "70;75;80;86;89;90")
+                if(TENZOR_CUDA_FUTURE_ARCHS)
+                    list(APPEND TENZOR_CUDA_DEFAULT_ARCHS "120")
+                endif()
+                set(CMAKE_CUDA_ARCHITECTURES "${TENZOR_CUDA_DEFAULT_ARCHS}")
                 message(STATUS "CUDA Backend: nvidia-smi failed, using default architectures: ${CMAKE_CUDA_ARCHITECTURES}")
             endif()
         else()
             # Priority 3: Fallback to common architectures
-            set(CMAKE_CUDA_ARCHITECTURES "70;75;80;86;89;90;120")
+            set(TENZOR_CUDA_DEFAULT_ARCHS "70;75;80;86;89;90")
+            if(TENZOR_CUDA_FUTURE_ARCHS)
+                list(APPEND TENZOR_CUDA_DEFAULT_ARCHS "120")
+            endif()
+            set(CMAKE_CUDA_ARCHITECTURES "${TENZOR_CUDA_DEFAULT_ARCHS}")
             message(STATUS "CUDA Backend: No detection available, using default architectures: ${CMAKE_CUDA_ARCHITECTURES}")
         endif()
     endif()

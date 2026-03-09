@@ -372,6 +372,18 @@ namespace cuda {
     auto avgpool2d_forward_kernel(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, cudaStream_t stream) -> Tensor;
     auto avgpool2d_backward_kernel(const Tensor& grad_output, const std::vector<int64_t>& input_shape, int64_t kernel_size, int64_t stride, int64_t padding, cudaStream_t stream) -> Tensor;
 
+    // 1D Pooling operations
+    auto maxpool1d_forward_kernel(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
+    auto maxpool1d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape, cudaStream_t stream) -> Tensor;
+    auto avgpool1d_forward_kernel(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, cudaStream_t stream) -> Tensor;
+    auto avgpool1d_backward_kernel(const Tensor& grad_output, const std::vector<int64_t>& input_shape, int64_t kernel_size, int64_t stride, int64_t padding, cudaStream_t stream) -> Tensor;
+
+    // 3D Pooling operations
+    auto maxpool3d_forward_kernel(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
+    auto maxpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape, cudaStream_t stream) -> Tensor;
+    auto avgpool3d_forward_kernel(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, cudaStream_t stream) -> Tensor;
+    auto avgpool3d_backward_kernel(const Tensor& grad_output, const std::vector<int64_t>& input_shape, int64_t kernel_size, int64_t stride, int64_t padding, cudaStream_t stream) -> Tensor;
+
 #ifdef TENZOR_HAS_CUDNN
     // cuDNN pooling operations (faster than custom kernels)
     auto cudnn_maxpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
@@ -434,6 +446,18 @@ namespace cuda {
     auto adaptive_avg_pool2d_backward(const Tensor& grad_output, int64_t H_in, int64_t W_in, cudaStream_t stream) -> Tensor;
     auto adaptive_max_pool2d_forward(const Tensor& input, int64_t output_h, int64_t output_w, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
     auto adaptive_max_pool2d_backward(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape, cudaStream_t stream) -> Tensor;
+
+    // Adaptive 1D pooling operations
+    auto adaptive_maxpool1d_forward(const Tensor& input, int64_t output_size, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
+    auto adaptive_maxpool1d_backward(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape, cudaStream_t stream) -> Tensor;
+    auto adaptive_avgpool1d_forward(const Tensor& input, int64_t output_size, cudaStream_t stream) -> Tensor;
+    auto adaptive_avgpool1d_backward(const Tensor& grad_output, const std::vector<int64_t>& input_shape, cudaStream_t stream) -> Tensor;
+
+    // Adaptive 3D pooling operations
+    auto adaptive_maxpool3d_forward(const Tensor& input, int64_t output_d, int64_t output_h, int64_t output_w, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
+    auto adaptive_maxpool3d_backward(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape, cudaStream_t stream) -> Tensor;
+    auto adaptive_avgpool3d_forward(const Tensor& input, int64_t output_d, int64_t output_h, int64_t output_w, cudaStream_t stream) -> Tensor;
+    auto adaptive_avgpool3d_backward(const Tensor& grad_output, const std::vector<int64_t>& input_shape, cudaStream_t stream) -> Tensor;
 
     // GroupNorm / InstanceNorm operations
     auto group_norm_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor& bias, int64_t num_groups, float eps, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
@@ -1617,6 +1641,115 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::AdaptiveMaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
         return cuda::adaptive_max_pool2d_backward(inputs[0], inputs[1], input_shape, get_cuda_stream(attrs));
+    });
+
+    // =========================================================================
+    // 1D Pooling Operations
+    // =========================================================================
+    table.register_kernel(OpId::MaxPool1dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
+        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        auto [output, indices] = cuda::maxpool1d_forward_kernel(inputs[0], kernel_size, stride, padding, dilation, get_cuda_stream(attrs));
+        return std::vector<Tensor>{output, indices};
+    });
+
+    table.register_single_output_kernel(OpId::MaxPool1dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return cuda::maxpool1d_backward_kernel(inputs[0], inputs[1], input_shape, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::AvgPool1dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
+        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        return cuda::avgpool1d_forward_kernel(inputs[0], kernel_size, stride, padding, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::AvgPool1dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
+        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        return cuda::avgpool1d_backward_kernel(inputs[0], input_shape, kernel_size, stride, padding, get_cuda_stream(attrs));
+    });
+
+    table.register_kernel(OpId::AdaptiveMaxPool1d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t output_size = attrs.get_int(AttrKey::OutputSize, 1);
+        auto [output, indices] = cuda::adaptive_maxpool1d_forward(inputs[0], output_size, get_cuda_stream(attrs));
+        return std::vector<Tensor>{output, indices};
+    });
+
+    table.register_single_output_kernel(OpId::AdaptiveMaxPool1dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return cuda::adaptive_maxpool1d_backward(inputs[0], inputs[1], input_shape, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::AdaptiveAvgPool1d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t output_size = attrs.get_int(AttrKey::OutputSize, 1);
+        return cuda::adaptive_avgpool1d_forward(inputs[0], output_size, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::AdaptiveAvgPool1dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return cuda::adaptive_avgpool1d_backward(inputs[0], input_shape, get_cuda_stream(attrs));
+    });
+
+    // =========================================================================
+    // 3D Pooling Operations
+    // =========================================================================
+    table.register_kernel(OpId::MaxPool3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
+        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        auto [output, indices] = cuda::maxpool3d_forward_kernel(inputs[0], kernel_size, stride, padding, get_cuda_stream(attrs));
+        return std::vector<Tensor>{output, indices};
+    });
+
+    table.register_single_output_kernel(OpId::MaxPool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return cuda::maxpool3d_backward_kernel(inputs[0], inputs[1], input_shape, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::AvgPool3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
+        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        return cuda::avgpool3d_forward_kernel(inputs[0], kernel_size, stride, padding, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::AvgPool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
+        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        return cuda::avgpool3d_backward_kernel(inputs[0], input_shape, kernel_size, stride, padding, get_cuda_stream(attrs));
+    });
+
+    table.register_kernel(OpId::AdaptiveMaxPool3d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t output_d = attrs.get_int(AttrKey::OutputSizeD, 1);
+        int64_t output_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t output_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        auto [output, indices] = cuda::adaptive_maxpool3d_forward(inputs[0], output_d, output_h, output_w, get_cuda_stream(attrs));
+        return std::vector<Tensor>{output, indices};
+    });
+
+    table.register_single_output_kernel(OpId::AdaptiveMaxPool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return cuda::adaptive_maxpool3d_backward(inputs[0], inputs[1], input_shape, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::AdaptiveAvgPool3d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t output_d = attrs.get_int(AttrKey::OutputSizeD, 1);
+        int64_t output_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t output_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        return cuda::adaptive_avgpool3d_forward(inputs[0], output_d, output_h, output_w, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::AdaptiveAvgPool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return cuda::adaptive_avgpool3d_backward(inputs[0], input_shape, get_cuda_stream(attrs));
     });
 
     // =========================================================================

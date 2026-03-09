@@ -45,6 +45,7 @@ set(CPU_BACKEND_SOURCES
     kernels/advanced.cpp
     kernels/flash_attention.cpp
     kernels/fft.cpp
+    kernels/sparse.cpp
 )
 
 # Create CPU backend shared library

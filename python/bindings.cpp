@@ -3904,6 +3904,88 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def(py::init<int64_t>(), py::arg("downscale_factor"))
         .def("__repr__", [](const tenzor::nn::PixelUnshuffle&) { return "PixelUnshuffle()"; });
 
+    // Padding layers
+    py::class_<tenzor::nn::ConstantPad1d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::ConstantPad1d>>(nn, "ConstantPad1d")
+        .def(py::init<int64_t, int64_t, double>(),
+             py::arg("padding_left"), py::arg("padding_right"), py::arg("value") = 0.0)
+        .def(py::init<int64_t, double>(),
+             py::arg("padding"), py::arg("value") = 0.0)
+        .def("__repr__", [](const tenzor::nn::ConstantPad1d&) { return "ConstantPad1d()"; });
+
+    py::class_<tenzor::nn::ConstantPad2d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::ConstantPad2d>>(nn, "ConstantPad2d")
+        .def(py::init<int64_t, int64_t, int64_t, int64_t, double>(),
+             py::arg("padding_left"), py::arg("padding_right"),
+             py::arg("padding_top"), py::arg("padding_bottom"),
+             py::arg("value") = 0.0)
+        .def(py::init<int64_t, double>(),
+             py::arg("padding"), py::arg("value") = 0.0)
+        .def("__repr__", [](const tenzor::nn::ConstantPad2d&) { return "ConstantPad2d()"; });
+
+    py::class_<tenzor::nn::ConstantPad3d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::ConstantPad3d>>(nn, "ConstantPad3d")
+        .def(py::init<std::vector<int64_t>, double>(),
+             py::arg("padding"), py::arg("value") = 0.0)
+        .def(py::init<int64_t, double>(),
+             py::arg("padding"), py::arg("value") = 0.0)
+        .def("__repr__", [](const tenzor::nn::ConstantPad3d&) { return "ConstantPad3d()"; });
+
+    py::class_<tenzor::nn::ReflectionPad1d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::ReflectionPad1d>>(nn, "ReflectionPad1d")
+        .def(py::init<int64_t, int64_t>(),
+             py::arg("padding_left"), py::arg("padding_right"))
+        .def(py::init<int64_t>(), py::arg("padding"))
+        .def("__repr__", [](const tenzor::nn::ReflectionPad1d&) { return "ReflectionPad1d()"; });
+
+    py::class_<tenzor::nn::ReflectionPad2d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::ReflectionPad2d>>(nn, "ReflectionPad2d")
+        .def(py::init<int64_t, int64_t, int64_t, int64_t>(),
+             py::arg("padding_left"), py::arg("padding_right"),
+             py::arg("padding_top"), py::arg("padding_bottom"))
+        .def(py::init<int64_t>(), py::arg("padding"))
+        .def("__repr__", [](const tenzor::nn::ReflectionPad2d&) { return "ReflectionPad2d()"; });
+
+    py::class_<tenzor::nn::ReplicationPad1d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::ReplicationPad1d>>(nn, "ReplicationPad1d")
+        .def(py::init<int64_t, int64_t>(),
+             py::arg("padding_left"), py::arg("padding_right"))
+        .def(py::init<int64_t>(), py::arg("padding"))
+        .def("__repr__", [](const tenzor::nn::ReplicationPad1d&) { return "ReplicationPad1d()"; });
+
+    py::class_<tenzor::nn::ReplicationPad2d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::ReplicationPad2d>>(nn, "ReplicationPad2d")
+        .def(py::init<int64_t, int64_t, int64_t, int64_t>(),
+             py::arg("padding_left"), py::arg("padding_right"),
+             py::arg("padding_top"), py::arg("padding_bottom"))
+        .def(py::init<int64_t>(), py::arg("padding"))
+        .def("__repr__", [](const tenzor::nn::ReplicationPad2d&) { return "ReplicationPad2d()"; });
+
+    py::class_<tenzor::nn::ReplicationPad3d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::ReplicationPad3d>>(nn, "ReplicationPad3d")
+        .def(py::init<std::vector<int64_t>>(), py::arg("padding"))
+        .def(py::init<int64_t>(), py::arg("padding"))
+        .def("__repr__", [](const tenzor::nn::ReplicationPad3d&) { return "ReplicationPad3d()"; });
+
+    py::class_<tenzor::nn::ZeroPad2d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::ZeroPad2d>>(nn, "ZeroPad2d")
+        .def(py::init<int64_t, int64_t, int64_t, int64_t>(),
+             py::arg("padding_left"), py::arg("padding_right"),
+             py::arg("padding_top"), py::arg("padding_bottom"))
+        .def(py::init<int64_t>(), py::arg("padding"))
+        .def("__repr__", [](const tenzor::nn::ZeroPad2d&) { return "ZeroPad2d()"; });
+
+    // Upsample layer
+    py::class_<tenzor::nn::Upsample, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::Upsample>>(nn, "Upsample")
+        .def(py::init<std::optional<std::vector<int64_t>>, std::optional<double>,
+                       const std::string&, bool>(),
+             py::arg("size") = py::none(),
+             py::arg("scale_factor") = py::none(),
+             py::arg("mode") = "nearest",
+             py::arg("align_corners") = false)
+        .def("__repr__", [](const tenzor::nn::Upsample&) { return "Upsample()"; });
+
     // ParameterList / ParameterDict
     py::class_<tenzor::nn::ParameterList, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::ParameterList>>(nn, "ParameterList")

@@ -83,16 +83,21 @@ auto PositionalEncoding::forward_impl(const Variable& x) -> Variable {
 
     // Cache PE on the input's device and dtype to avoid repeated CPU→GPU transfers.
     // Invalidate cache if device or dtype changed since last forward.
-    if (!pe_cached_.is_valid() ||
-        pe_cached_.device() != input_device ||
-        pe_cached_.dtype() != input_dtype) {
-        // Transfer full PE to target device and dtype once
-        pe_cached_ = pe_.to(input_device, input_dtype);
+    Tensor pe_local;
+    {
+        std::lock_guard<std::mutex> lock(pe_mutex_);
+        if (!pe_cached_.is_valid() ||
+            pe_cached_.device() != input_device ||
+            pe_cached_.dtype() != input_dtype) {
+            // Transfer full PE to target device and dtype once
+            pe_cached_ = pe_.to(input_device, input_dtype);
+        }
+        pe_local = pe_cached_;
     }
 
-    // Slice first seq_len rows: pe_cached_ shape is (max_len_, d_model_)
+    // Slice first seq_len rows: pe_local shape is (max_len_, d_model_)
     // Use slice view (zero-copy) then reshape to (1, seq_len, d_model)
-    Tensor pe_slice = pe_cached_.slice(0, 0, seq_len);
+    Tensor pe_slice = pe_local.slice(0, 0, seq_len);
     Tensor pe_for_seq = reshape(pe_slice, {1, seq_len, d_model_});
 
     // Broadcast positional encoding to match batch size

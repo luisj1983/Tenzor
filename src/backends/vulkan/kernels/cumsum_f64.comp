@@ -1,0 +1,31 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Cumulative Sum (prefix sum) along a dimension — Float64 variant
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { float64_t input_data[]; };
+layout(binding = 1) buffer Output { float64_t output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint total_lines;
+    uint reduce_size;
+    uint inner_size;
+} params;
+
+void main() {
+    uint line_idx = gl_GlobalInvocationID.x;
+    if (line_idx >= params.total_lines) return;
+
+    uint outer_idx = line_idx / params.inner_size;
+    uint inner_idx = line_idx % params.inner_size;
+
+    uint base = outer_idx * params.reduce_size * params.inner_size + inner_idx;
+
+    float64_t running_sum = 0.0LF;
+    for (uint i = 0; i < params.reduce_size; i++) {
+        uint idx = base + i * params.inner_size;
+        running_sum += input_data[idx];
+        output_data[idx] = running_sum;
+    }
+}
