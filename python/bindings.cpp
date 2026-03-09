@@ -619,40 +619,47 @@ PYBIND11_MODULE(tenzor_core, m) {
             if (t.numel() != 1) {
                 throw std::runtime_error("item() only works for scalar tensors");
             }
-            switch (t.dtype()) {
-                case tenzor::DType::Float32:
-                    return py::cast(t.item<float>());
-                case tenzor::DType::Float64:
-                    return py::cast(t.item<double>());
-                case tenzor::DType::Int8:
-                    return py::cast(t.item<int8_t>());
-                case tenzor::DType::Int16:
-                    return py::cast(t.item<int16_t>());
-                case tenzor::DType::Int32:
-                    return py::cast(t.item<int32_t>());
-                case tenzor::DType::Int64:
-                    return py::cast(t.item<int64_t>());
-                case tenzor::DType::UInt8:
-                    return py::cast(t.item<uint8_t>());
-                case tenzor::DType::UInt16:
-                    return py::cast(t.item<uint16_t>());
-                case tenzor::DType::UInt32:
-                    return py::cast(t.item<uint32_t>());
-                case tenzor::DType::UInt64:
-                    return py::cast(t.item<uint64_t>());
-                case tenzor::DType::Bool:
-                    return py::cast(t.item<bool>());
-                case tenzor::DType::Complex64:
-                    return py::cast(t.item<std::complex<float>>());
-                case tenzor::DType::Complex128:
-                    return py::cast(t.item<std::complex<double>>());
-                case tenzor::DType::Float16:
-                    return py::cast(static_cast<float>(t.data<tenzor::Float16>()[0]));
-                case tenzor::DType::BFloat16:
-                    return py::cast(static_cast<float>(t.data<tenzor::BFloat16>()[0]));
-                default:
-                    throw std::runtime_error("Unsupported dtype for item()");
+            // Extract scalar value with GIL released (may involve device sync)
+            auto dtype = t.dtype();
+            double dval = 0;
+            int64_t ival = 0;
+            uint64_t uval = 0;
+            bool bval = false;
+            std::complex<double> cval{};
+            bool is_float = false, is_int = false, is_uint = false, is_bool = false, is_complex = false;
+            {
+                py::gil_scoped_release release;
+                switch (dtype) {
+                    case tenzor::DType::Float32:  dval = t.item<float>(); is_float = true; break;
+                    case tenzor::DType::Float64:  dval = t.item<double>(); is_float = true; break;
+                    case tenzor::DType::Float16:  dval = static_cast<float>(t.data<tenzor::Float16>()[0]); is_float = true; break;
+                    case tenzor::DType::BFloat16: dval = static_cast<float>(t.data<tenzor::BFloat16>()[0]); is_float = true; break;
+                    case tenzor::DType::Int8:     ival = t.item<int8_t>(); is_int = true; break;
+                    case tenzor::DType::Int16:    ival = t.item<int16_t>(); is_int = true; break;
+                    case tenzor::DType::Int32:    ival = t.item<int32_t>(); is_int = true; break;
+                    case tenzor::DType::Int64:    ival = t.item<int64_t>(); is_int = true; break;
+                    case tenzor::DType::UInt8:    uval = t.item<uint8_t>(); is_uint = true; break;
+                    case tenzor::DType::UInt16:   uval = t.item<uint16_t>(); is_uint = true; break;
+                    case tenzor::DType::UInt32:   uval = t.item<uint32_t>(); is_uint = true; break;
+                    case tenzor::DType::UInt64:   uval = t.item<uint64_t>(); is_uint = true; break;
+                    case tenzor::DType::Bool:     bval = t.item<bool>(); is_bool = true; break;
+                    case tenzor::DType::Complex64: {
+                        auto c = t.item<std::complex<float>>();
+                        cval = {c.real(), c.imag()};
+                        is_complex = true; break;
+                    }
+                    case tenzor::DType::Complex128: cval = t.item<std::complex<double>>(); is_complex = true; break;
+                    default:
+                        throw std::runtime_error("Unsupported dtype for item()");
+                }
             }
+            // Create Python object with GIL held
+            if (is_float)   return py::cast(dval);
+            if (is_int)     return py::cast(ival);
+            if (is_uint)    return py::cast(uval);
+            if (is_bool)    return py::cast(bval);
+            if (is_complex) return py::cast(cval);
+            throw std::runtime_error("Unsupported dtype for item()");
         }, "Extract scalar value from single-element tensor")
         // Arithmetic operators - Tensor-Tensor (GIL released for compute)
         .def("__add__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return a + b; },
@@ -4143,6 +4150,12 @@ PYBIND11_MODULE(tenzor_core, m) {
     nn.def("swish", &tenzor::nn::swish, "Swish activation function");
     nn.def("mish", &tenzor::nn::mish, "Mish activation function");
 
+    nn.def("softplus", [](const tenzor::Variable& input, float beta) -> tenzor::Variable {
+        return tenzor::softplus(input, beta);
+    }, py::arg("input"), py::arg("beta") = 1.0f,
+       "Softplus activation: log(1 + exp(beta*x))/beta",
+       py::call_guard<py::gil_scoped_release>());
+
     // Reduction enum for loss functions
     py::enum_<tenzor::nn::Reduction>(nn, "Reduction",
         "Specifies the reduction to apply to the output: 'none' | 'mean' | 'sum'")
@@ -4308,6 +4321,29 @@ PYBIND11_MODULE(tenzor_core, m) {
           py::arg("input"), py::arg("target"),
           py::arg("reduction") = tenzor::nn::Reduction::Mean);
 
+    nn.def("kl_div_loss", &tenzor::nn::kl_div_loss,
+          "KL divergence loss function",
+          py::arg("input"), py::arg("target"),
+          py::arg("reduction") = "mean", py::arg("log_target") = false,
+          py::call_guard<py::gil_scoped_release>());
+
+    nn.def("huber_loss", &tenzor::nn::huber_loss,
+          "Huber loss function",
+          py::arg("input"), py::arg("target"),
+          py::arg("delta") = 1.0, py::arg("reduction") = "mean",
+          py::call_guard<py::gil_scoped_release>());
+
+    nn.def("smooth_l1_loss",
+          [](const tenzor::Variable& input, const tenzor::Variable& target,
+             tenzor::nn::Reduction reduction, double beta) -> tenzor::Variable {
+        tenzor::nn::SmoothL1Loss loss(reduction, beta);
+        return loss.forward(input, target);
+    }, py::arg("input"), py::arg("target"),
+       py::arg("reduction") = tenzor::nn::Reduction::Mean,
+       py::arg("beta") = 1.0,
+       "Smooth L1 loss function",
+       py::call_guard<py::gil_scoped_release>());
+
     // =========================================================================
     // Functional API — stateless operation wrappers (F.dropout, F.linear, etc.)
     // =========================================================================
@@ -4344,6 +4380,22 @@ PYBIND11_MODULE(tenzor_core, m) {
     }, py::arg("input"), py::arg("kernel_size"), py::arg("stride") = -1, py::arg("padding") = 0,
        "Apply 2D average pooling");
 
+    nn.def("functional_adaptive_avg_pool2d",
+          [](const tenzor::Variable& input, int64_t output_h, int64_t output_w) -> tenzor::Variable {
+        tenzor::nn::AdaptiveAvgPool2d layer(output_h, output_w);
+        return layer.forward_impl(input);
+    }, py::arg("input"), py::arg("output_h"), py::arg("output_w"),
+       "Apply 2D adaptive average pooling",
+       py::call_guard<py::gil_scoped_release>());
+
+    nn.def("functional_adaptive_max_pool2d",
+          [](const tenzor::Variable& input, int64_t output_h, int64_t output_w) -> tenzor::Variable {
+        tenzor::nn::AdaptiveMaxPool2d layer(output_h, output_w);
+        return layer.forward_impl(input);
+    }, py::arg("input"), py::arg("output_h"), py::arg("output_w"),
+       "Apply 2D adaptive max pooling",
+       py::call_guard<py::gil_scoped_release>());
+
     nn.def("functional_batch_norm", [](const tenzor::Variable& input, int64_t num_features,
                                         bool training, double momentum, double eps) -> tenzor::Variable {
         tenzor::nn::BatchNorm2d layer(num_features, eps, momentum, true, true);
@@ -4369,6 +4421,26 @@ PYBIND11_MODULE(tenzor_core, m) {
     }, py::arg("input"), py::arg("num_groups"), py::arg("num_channels"),
        py::arg("eps") = 1e-5,
        "Apply group normalization");
+
+    nn.def("functional_instance_norm",
+          [](const tenzor::Variable& input, int64_t num_features,
+             double eps, bool affine) -> tenzor::Variable {
+        tenzor::nn::InstanceNorm2d layer(num_features, eps, affine);
+        return layer.forward_impl(input);
+    }, py::arg("input"), py::arg("num_features"),
+       py::arg("eps") = 1e-5, py::arg("affine") = false,
+       "Apply instance normalization",
+       py::call_guard<py::gil_scoped_release>());
+
+    nn.def("functional_rms_norm",
+          [](const tenzor::Variable& input, int64_t normalized_shape,
+             double eps) -> tenzor::Variable {
+        tenzor::nn::RMSNorm layer(normalized_shape, eps);
+        return layer.forward_impl(input);
+    }, py::arg("input"), py::arg("normalized_shape"),
+       py::arg("eps") = 1e-6,
+       "Apply RMS normalization",
+       py::call_guard<py::gil_scoped_release>());
 
     nn.def("functional_interpolate", [](const tenzor::Variable& input,
                                          std::vector<int64_t> size,

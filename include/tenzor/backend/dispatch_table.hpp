@@ -18,6 +18,7 @@
 #include <atomic>
 #include <span>
 #include <vector>
+#include <cstdio>
 #include <stdexcept>
 #include <string>
 #include "../core/tensor.hpp"
@@ -119,6 +120,15 @@ struct alignas(64) BackendDispatchTable {
      * @param fn Kernel function pointer
      */
     void register_kernel(OpId op, KernelFn fn) noexcept {
+#ifndef NDEBUG
+        auto idx = static_cast<size_t>(op);
+        if (kernels[idx] != nullptr) {
+            fprintf(stderr, "[dispatch_table] WARNING: overwriting kernel for OpId %zu\n", idx);
+        }
+        if (single_output_kernels[idx] != nullptr || inplace_kernels[idx] != nullptr) {
+            fprintf(stderr, "[dispatch_table] WARNING: OpId %zu already registered in a different kernel array\n", idx);
+        }
+#endif
         kernels[static_cast<size_t>(op)] = fn;
     }
 
@@ -132,6 +142,15 @@ struct alignas(64) BackendDispatchTable {
      * @param fn Single-output kernel function pointer
      */
     void register_single_output_kernel(OpId op, SingleOutputKernelFn fn) noexcept {
+#ifndef NDEBUG
+        auto idx = static_cast<size_t>(op);
+        if (single_output_kernels[idx] != nullptr) {
+            fprintf(stderr, "[dispatch_table] WARNING: overwriting single_output kernel for OpId %zu\n", idx);
+        }
+        if (kernels[idx] != nullptr || inplace_kernels[idx] != nullptr) {
+            fprintf(stderr, "[dispatch_table] WARNING: OpId %zu already registered in a different kernel array\n", idx);
+        }
+#endif
         single_output_kernels[static_cast<size_t>(op)] = fn;
     }
 
@@ -145,6 +164,15 @@ struct alignas(64) BackendDispatchTable {
      * @param fn Inplace kernel function pointer
      */
     void register_inplace_kernel(OpId op, InplaceKernelFn fn) noexcept {
+#ifndef NDEBUG
+        auto idx = static_cast<size_t>(op);
+        if (inplace_kernels[idx] != nullptr) {
+            fprintf(stderr, "[dispatch_table] WARNING: overwriting inplace kernel for OpId %zu\n", idx);
+        }
+        if (kernels[idx] != nullptr || single_output_kernels[idx] != nullptr) {
+            fprintf(stderr, "[dispatch_table] WARNING: OpId %zu already registered in a different kernel array\n", idx);
+        }
+#endif
         inplace_kernels[static_cast<size_t>(op)] = fn;
     }
 

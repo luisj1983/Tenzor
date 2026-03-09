@@ -128,6 +128,13 @@ auto Linear::forward_impl(const Variable& input) -> Variable {
     // output: [*, out_features]
 
     auto input_shape = input.shape();
+    if (input_shape.empty()) {
+        throw std::invalid_argument("Linear: input tensor must have at least 1 dimension");
+    }
+    if (input_shape.back() != in_features_) {
+        throw std::invalid_argument("Linear: expected input last dim=" +
+            std::to_string(in_features_) + ", got " + std::to_string(input_shape.back()));
+    }
     const bool is_2d = (input_shape.size() == 2);
 
     auto& weight = *parameters_.at("weight");

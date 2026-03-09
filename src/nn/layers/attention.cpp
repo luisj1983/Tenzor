@@ -500,10 +500,20 @@ auto MultiheadAttention::forward(const Variable& query,
     }
 
     auto q_shape = q_ptr->shape();
+    if (q_shape.size() != 3) {
+        throw std::invalid_argument("MultiheadAttention: query must be 3D [batch, seq, embed], got " +
+            std::to_string(q_shape.size()) + "D");
+    }
+    auto k_shape = k_ptr->shape();
+    if (k_shape.size() != 3 || v_ptr->shape().size() != 3) {
+        throw std::invalid_argument("MultiheadAttention: key/value must be 3D");
+    }
+    if (q_shape[2] != embed_dim_) {
+        throw std::invalid_argument("MultiheadAttention: query embed_dim (" +
+            std::to_string(q_shape[2]) + ") != expected (" + std::to_string(embed_dim_) + ")");
+    }
     int64_t batch_size = q_shape[0];
     int64_t seq_len_q = q_shape[1];
-
-    auto k_shape = k_ptr->shape();
     int64_t seq_len_k = k_shape[1];
 
     // Ensure projection weights are on the same device as input

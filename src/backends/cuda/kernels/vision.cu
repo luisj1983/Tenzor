@@ -26,10 +26,6 @@ inline void compute_launch_config_1d(int64_t n, dim3& grid, dim3& block) {
     grid = dim3(static_cast<unsigned int>(num_blocks), 1, 1);
 }
 
-#define CUDA_KERNEL_LOOP(i, n) \
-    for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; \
-         i < (n); \
-         i += blockDim.x * gridDim.x)
 
 // ============================================================================
 // Unfold CUDA Kernel
@@ -53,7 +49,7 @@ __global__ void unfold_kernel(
     int64_t num_blocks = out_h * out_w;
     int64_t total_elements = batch * channels * kernel_size * kernel_size * num_blocks;
 
-    CUDA_KERNEL_LOOP(idx, total_elements) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_elements) {
         // Decode flat index to (b, c, kh, kw, block_idx)
         int64_t temp = idx;
         int64_t block_idx = temp % num_blocks; temp /= num_blocks;
@@ -113,7 +109,7 @@ __global__ void fold_kernel(
     int64_t col_channels = channels * kernel_size * kernel_size;
     int64_t total_elements = batch * col_channels * num_blocks;
 
-    CUDA_KERNEL_LOOP(idx, total_elements) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_elements) {
         // Decode flat index to (b, col_c, block_idx)
         int64_t temp = idx;
         int64_t block_idx = temp % num_blocks; temp /= num_blocks;
@@ -167,7 +163,7 @@ __global__ void interpolate_nearest_kernel(
 ) {
     int64_t total_elements = batch * channels * out_h * out_w;
 
-    CUDA_KERNEL_LOOP(idx, total_elements) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_elements) {
         // Decode flat index to (b, c, oh, ow)
         int64_t temp = idx;
         int64_t ow = temp % out_w; temp /= out_w;
@@ -209,7 +205,7 @@ __global__ void interpolate_bilinear_kernel(
 ) {
     int64_t total_elements = batch * channels * out_h * out_w;
 
-    CUDA_KERNEL_LOOP(idx, total_elements) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_elements) {
         // Decode flat index to (b, c, oh, ow)
         int64_t temp = idx;
         int64_t ow = temp % out_w; temp /= out_w;
@@ -289,7 +285,7 @@ __global__ void interpolate_bicubic_kernel(
         return 0.0f;
     };
 
-    CUDA_KERNEL_LOOP(idx, total_elements) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_elements) {
         // Decode flat index to (b, c, oh, ow)
         int64_t temp = idx;
         int64_t ow = temp % out_w; temp /= out_w;
@@ -362,7 +358,7 @@ __global__ void interpolate_trilinear_kernel(
     bool align_corners
 ) {
     int64_t total = batch * channels * out_d * out_h * out_w;
-    CUDA_KERNEL_LOOP(idx, total) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total) {
         int64_t temp = idx;
         int64_t ow = temp % out_w; temp /= out_w;
         int64_t oh = temp % out_h; temp /= out_h;
@@ -442,7 +438,7 @@ __global__ void interpolate_nearest_5d_kernel(
     float scale_w = static_cast<float>(in_w) / out_w;
     int64_t total = batch * channels * out_d * out_h * out_w;
 
-    CUDA_KERNEL_LOOP(idx, total) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total) {
         int64_t temp = idx;
         int64_t ow = temp % out_w; temp /= out_w;
         int64_t oh = temp % out_h; temp /= out_h;

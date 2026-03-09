@@ -48,10 +48,6 @@ inline void compute_launch_config_2d(int64_t rows, int64_t cols, dim3& grid, dim
     grid = dim3(grid_x > 0 ? grid_x : 1, grid_y > 0 ? grid_y : 1, 1);
 }
 
-#define CUDA_KERNEL_LOOP(i, n) \
-    for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; \
-         i < (n); \
-         i += blockDim.x * gridDim.x)
 
 // FP16 saturating conversion: use float2half_sat() from cuda_common.cuh
 using tenzor::cuda::float2half_sat;
@@ -113,7 +109,7 @@ __global__ void nhwc_to_nchw_kernel(
     // Each thread handles one element
     int64_t total_spatial = batch * out_h * out_w;
 
-    CUDA_KERNEL_LOOP(idx, total_spatial * channels_per_group) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_spatial * channels_per_group) {
         // Decode flat index to (spatial_idx, c)
         int64_t c = idx % channels_per_group;
         int64_t spatial_idx = idx / channels_per_group;
@@ -160,7 +156,7 @@ __global__ void im2col_kernel(
 ) {
     int64_t total_elements = batch * out_h * out_w * channels * kernel_h * kernel_w;
 
-    CUDA_KERNEL_LOOP(idx, total_elements) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_elements) {
         // Decode flat index to (b, oh, ow, c, kh, kw)
         int64_t temp = idx;
         int64_t kw = temp % kernel_w; temp /= kernel_w;
@@ -215,7 +211,7 @@ __global__ void im2col_kernel_f16(
 ) {
     int64_t total_elements = batch * out_h * out_w * channels * kernel_h * kernel_w;
 
-    CUDA_KERNEL_LOOP(idx, total_elements) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_elements) {
         // Decode flat index to (b, oh, ow, c, kh, kw)
         int64_t temp = idx;
         int64_t kw = temp % kernel_w; temp /= kernel_w;
@@ -348,7 +344,7 @@ __global__ void col2im_kernel_output_centric(
     // Each thread processes one output element
     int64_t total_output = batch * channels * height * width;
 
-    CUDA_KERNEL_LOOP(output_idx, total_output) {
+    TENZOR_CUDA_KERNEL_LOOP(output_idx, total_output) {
         // Decode output index to (b, c, ih, iw)
         int64_t temp = output_idx;
         int64_t iw = temp % width; temp /= width;
@@ -430,7 +426,7 @@ __global__ void col2im_kernel(
     // Each thread processes one output element
     int64_t total_output = batch * channels * height * width;
 
-    CUDA_KERNEL_LOOP(output_idx, total_output) {
+    TENZOR_CUDA_KERNEL_LOOP(output_idx, total_output) {
         // Decode output index to (b, c, ih, iw)
         int64_t temp = output_idx;
         int64_t iw = temp % width; temp /= width;
@@ -502,7 +498,7 @@ __global__ void col2im_kernel_f16(
     // Each thread processes one output element
     int64_t total_output = batch * channels * height * width;
 
-    CUDA_KERNEL_LOOP(output_idx, total_output) {
+    TENZOR_CUDA_KERNEL_LOOP(output_idx, total_output) {
         // Decode output index to (b, c, ih, iw)
         int64_t temp = output_idx;
         int64_t iw = temp % width; temp /= width;
@@ -557,7 +553,7 @@ __global__ void add_bias_kernel(
     int64_t spatial_size,
     int64_t n
 ) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         int64_t c = (idx / spatial_size) % channels;
         output[idx] += bias[c];
     }
@@ -572,7 +568,7 @@ __global__ void add_bias_kernel_f64(
     int64_t spatial_size,
     int64_t n
 ) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         int64_t c = (idx / spatial_size) % channels;
         output[idx] += bias[c];
     }
@@ -587,7 +583,7 @@ __global__ void add_bias_kernel_f16(
     int64_t spatial_size,
     int64_t n
 ) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         int64_t c = (idx / spatial_size) % channels;
         output[idx] = __hadd(output[idx], bias[c]);
     }
@@ -1698,7 +1694,7 @@ __global__ void conv_transpose2d_forward_kernel_impl(
 ) {
     int64_t total_output = batch * out_channels * out_h * out_w;
 
-    CUDA_KERNEL_LOOP(idx, total_output) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_output) {
         // Decode output position
         int64_t w = idx % out_w;
         int64_t h = (idx / out_w) % out_h;
@@ -1788,7 +1784,7 @@ __global__ void conv_transpose2d_forward_kernel_f16(
 ) {
     int64_t total_output = batch * out_channels * out_h * out_w;
 
-    CUDA_KERNEL_LOOP(idx, total_output) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_output) {
         // Decode output position
         int64_t w = idx % out_w;
         int64_t h = (idx / out_w) % out_h;

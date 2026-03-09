@@ -1181,7 +1181,12 @@ private:
     DType dtype;                         ///< Element data type
     Device device;                       ///< Device location
     bool requires_grad{false};           ///< Gradient computation flag
+    // SAFETY: Stale reads are harmless (triggers recomputation). No ordering
+    // dependency on other fields — relaxed load/store is sufficient.
     mutable std::atomic<int8_t> is_contiguous_cache_{-1};  ///< Cached contiguity: -1=unset, 0=false, 1=true
+    // SAFETY: Relaxed only in copy construction (snapshot of current version).
+    // Mutation paths (increment_version()) use release ordering; version checks
+    // in autograd use acquire ordering to observe the mutated tensor state.
     std::atomic<uint64_t> version_counter_{0};  ///< Mutation version for autograd in-place detection
 };
 

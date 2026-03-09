@@ -5,6 +5,7 @@
 #include "tenzor/backend/caching_allocator.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/shape.hpp"
+#include "cuda_common.cuh"
 #include "cuda_launch_utils.cuh"
 #include "launch_config.cuh"
 #include <stdexcept>
@@ -29,23 +30,7 @@ public:
 // Use centralized CUDA error handling
 #include "../cuda_error.hpp"
 
-#define CUDA_KERNEL_LOOP(i, n) \
-    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < (n); i += blockDim.x * gridDim.x)
 
-// Delegates to compute_grid_size() from cuda_launch_utils.cuh to avoid
-// duplicating the block-size logic. For per-kernel occupancy-optimized
-// launches use optimal_launch_config() or the LAUNCH_KERNEL macro instead.
-inline void compute_launch_config_1d(int64_t n, dim3& grid, dim3& block) {
-    constexpr int block_size = 256;
-    block = dim3(block_size);
-    int num_blocks = compute_grid_size(n, block_size);
-    grid = dim3(static_cast<unsigned int>(num_blocks));
-}
-
-#define CUDA_GRID_STRIDE_LOOP(i, n) \
-    for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; \
-         i < (n); \
-         i += blockDim.x * gridDim.x)
 
 constexpr int BLOCK_SIZE = 256;
 
@@ -82,7 +67,7 @@ template<typename T>
 __global__ void contiguous_kernel_impl(const T* input, T* output,
                                        TransformMeta meta,
                                        int64_t ndim, int64_t total_elements) {
-    CUDA_GRID_STRIDE_LOOP(idx, total_elements) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_elements) {
         // Convert linear index to multi-dimensional indices
         int64_t temp_idx = idx;
         int64_t src_offset = 0;
@@ -303,7 +288,7 @@ __global__ void cat_kernel_impl(T** input_ptrs, T* output,
                                  const int64_t* offsets_at_dim,
                                  int64_t num_tensors, int64_t ndim,
                                  int64_t concat_dim, int64_t total_elements) {
-    CUDA_GRID_STRIDE_LOOP(idx, total_elements) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_elements) {
         // Convert linear output index to multi-dimensional coordinates
         int64_t temp_idx = idx;
         int64_t coords[8];  // Support up to 8 dimensions
@@ -543,7 +528,7 @@ __global__ void repeat_kernel_device(
     const int64_t* input_shape, const int64_t* input_strides,
     const int64_t* repeats, int64_t ndim, int64_t n) {
 
-    CUDA_KERNEL_LOOP(out_idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(out_idx, n) {
         // Calculate output coordinates
         int64_t temp = out_idx;
         int64_t in_idx = 0;
@@ -607,20 +592,20 @@ auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, cud
     int64_t* d_repeats       = reinterpret_cast<int64_t*>(d_meta + 2 * array_bytes);
 
     // Launch kernel
-    dim3 grid, block;
-    compute_launch_config_1d(n, grid, block);
-
     if (input.dtype() == DType::Float32) {
+        auto [grid, block] = optimal_launch_config(repeat_kernel_device<float>, n);
         repeat_kernel_device<<<grid, block, 0, stream>>>(
             input.data<float>(), output.data<float>(),
             d_input_shape, d_input_strides, d_repeats, ndim, n);
             CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
+        auto [grid, block] = optimal_launch_config(repeat_kernel_device<double>, n);
         repeat_kernel_device<<<grid, block, 0, stream>>>(
             input.data<double>(), output.data<double>(),
             d_input_shape, d_input_strides, d_repeats, ndim, n);
             CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
+        auto [grid, block] = optimal_launch_config(repeat_kernel_device<Float16>, n);
         repeat_kernel_device<<<grid, block, 0, stream>>>(
             input.data<Float16>(), output.data<Float16>(),
             d_input_shape, d_input_strides, d_repeats, ndim, n);
@@ -1057,7 +1042,7 @@ __global__ void roll_kernel_impl(
     int64_t shift,
     int64_t inner_size  // product of sizes of dims after the roll dim
 ) {
-    CUDA_GRID_STRIDE_LOOP(i, total_elements) {
+    TENZOR_CUDA_KERNEL_LOOP(i, total_elements) {
         // Decompose flat index into (outer, dim_idx, inner)
         int64_t inner_idx = i % inner_size;
         int64_t dim_idx = (i / inner_size) % dim_size;
@@ -1088,40 +1073,49 @@ auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim, cudaStream_t s
         inner_size *= shape[d];
     }
 
-    dim3 grid, block;
-    compute_launch_config_1d(total, grid, block);
-
     switch (input.dtype()) {
-        case DType::Float32:
+        case DType::Float32: {
+            auto [grid, block] = optimal_launch_config(roll_kernel_impl<float>, total);
             roll_kernel_impl<<<grid, block, 0, stream>>>(
                 cont.data<float>(), output.data<float>(),
                 total, dim_size, shift, inner_size);
             break;
-        case DType::Float64:
+        }
+        case DType::Float64: {
+            auto [grid, block] = optimal_launch_config(roll_kernel_impl<double>, total);
             roll_kernel_impl<<<grid, block, 0, stream>>>(
                 cont.data<double>(), output.data<double>(),
                 total, dim_size, shift, inner_size);
             break;
-        case DType::Int32:
+        }
+        case DType::Int32: {
+            auto [grid, block] = optimal_launch_config(roll_kernel_impl<int32_t>, total);
             roll_kernel_impl<<<grid, block, 0, stream>>>(
                 cont.data<int32_t>(), output.data<int32_t>(),
                 total, dim_size, shift, inner_size);
             break;
-        case DType::Int64:
+        }
+        case DType::Int64: {
+            auto [grid, block] = optimal_launch_config(roll_kernel_impl<int64_t>, total);
             roll_kernel_impl<<<grid, block, 0, stream>>>(
                 cont.data<int64_t>(), output.data<int64_t>(),
                 total, dim_size, shift, inner_size);
             break;
-        case DType::Float16:
+        }
+        case DType::Float16: {
+            auto [grid, block] = optimal_launch_config(roll_kernel_impl<Float16>, total);
             roll_kernel_impl<<<grid, block, 0, stream>>>(
                 cont.data<Float16>(), output.data<Float16>(),
                 total, dim_size, shift, inner_size);
             break;
-        case DType::BFloat16:
+        }
+        case DType::BFloat16: {
+            auto [grid, block] = optimal_launch_config(roll_kernel_impl<BFloat16>, total);
             roll_kernel_impl<<<grid, block, 0, stream>>>(
                 cont.data<BFloat16>(), output.data<BFloat16>(),
                 total, dim_size, shift, inner_size);
             break;
+        }
         default:
             throw std::runtime_error("roll_kernel: unsupported dtype");
     }

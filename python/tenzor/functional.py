@@ -33,6 +33,7 @@ mish = _nn.mish
 hardswish = _nn.hardswish
 hardsigmoid = _nn.hardsigmoid
 glu = _nn.glu
+softplus = _nn.softplus
 
 # Loss functions
 mse_loss = _nn.mse_loss
@@ -40,15 +41,22 @@ l1_loss = _nn.l1_loss
 cross_entropy = _nn.cross_entropy
 nll_loss = _nn.nll_loss
 bce_loss = _nn.bce_loss
+kl_div = _nn.kl_div_loss
+huber_loss = _nn.huber_loss
+smooth_l1_loss = _nn.smooth_l1_loss
 
 # Functional operations (stateless wrappers)
 dropout = _nn.functional_dropout
 linear = _nn.functional_linear
 max_pool2d = _nn.functional_max_pool2d
 avg_pool2d = _nn.functional_avg_pool2d
+adaptive_avg_pool2d = _nn.functional_adaptive_avg_pool2d
+adaptive_max_pool2d = _nn.functional_adaptive_max_pool2d
 batch_norm = _nn.functional_batch_norm
 layer_norm = _nn.functional_layer_norm
 group_norm = _nn.functional_group_norm
+instance_norm = _nn.functional_instance_norm
+rms_norm = _nn.functional_rms_norm
 interpolate = _nn.functional_interpolate
 embedding = _nn.functional_embedding
 binary_cross_entropy_with_logits = _nn.functional_binary_cross_entropy_with_logits
@@ -73,20 +81,28 @@ __all__ = [
     "hardswish",
     "hardsigmoid",
     "glu",
+    "softplus",
     # Losses
     "mse_loss",
     "l1_loss",
     "cross_entropy",
     "nll_loss",
     "bce_loss",
+    "kl_div",
+    "huber_loss",
+    "smooth_l1_loss",
     # Functional operations
     "dropout",
     "linear",
     "max_pool2d",
     "avg_pool2d",
+    "adaptive_avg_pool2d",
+    "adaptive_max_pool2d",
     "batch_norm",
     "layer_norm",
     "group_norm",
+    "instance_norm",
+    "rms_norm",
     "interpolate",
     "embedding",
     "binary_cross_entropy_with_logits",

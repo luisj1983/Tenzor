@@ -5,6 +5,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/shape.hpp"
 #include "cuda_error.hpp"
+#include "kernels/cuda_launch_utils.cuh"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
@@ -36,8 +37,7 @@ __global__ void fp16_saturate_kernel(__half* data, int64_t n) {
 // Launch FP16 saturation on a tensor
 static void fp16_saturate(Float16* data, int64_t n, cudaStream_t stream) {
     if (n <= 0) return;
-    const int block = 256;
-    const int grid = std::min((int)((n + block - 1) / block), 2147483647);
+    auto [grid, block] = optimal_launch_config(fp16_saturate_kernel, n);
     fp16_saturate_kernel<<<grid, block, 0, stream>>>(reinterpret_cast<__half*>(data), n);
     CUDA_CHECK(cudaGetLastError());
 }
@@ -184,20 +184,21 @@ auto nchw_to_nhwc(const Tensor& input, cudaStream_t stream) -> Tensor {
     Tensor output(out_shape, input.dtype(), input.device());
 
     const int64_t total = batch * channels * height * width;
-    const int block_size = 256;
-    const int grid_size = std::min(static_cast<int>((total + block_size - 1) / block_size), 2147483647);
 
     if (input.dtype() == DType::Float32) {
+        auto [grid_size, block_size] = optimal_launch_config(nchw_to_nhwc_kernel<float>, total);
         nchw_to_nhwc_kernel<float><<<grid_size, block_size, 0, stream>>>(
             input.data<float>(), output.data<float>(),
             batch, channels, height, width
         );
     } else if (input.dtype() == DType::Float16) {
+        auto [grid_size, block_size] = optimal_launch_config(nchw_to_nhwc_kernel<Float16>, total);
         nchw_to_nhwc_kernel<Float16><<<grid_size, block_size, 0, stream>>>(
             input.data<Float16>(), output.data<Float16>(),
             batch, channels, height, width
         );
     } else if (input.dtype() == DType::Float64) {
+        auto [grid_size, block_size] = optimal_launch_config(nchw_to_nhwc_kernel<double>, total);
         nchw_to_nhwc_kernel<double><<<grid_size, block_size, 0, stream>>>(
             input.data<double>(), output.data<double>(),
             batch, channels, height, width
@@ -229,20 +230,21 @@ auto nhwc_to_nchw(const Tensor& input, int64_t channels, cudaStream_t stream) ->
     Tensor output(out_shape, input.dtype(), input.device());
 
     const int64_t total = batch * channels * height * width;
-    const int block_size = 256;
-    const int grid_size = std::min(static_cast<int>((total + block_size - 1) / block_size), 2147483647);
 
     if (input.dtype() == DType::Float32) {
+        auto [grid_size, block_size] = optimal_launch_config(nhwc_to_nchw_kernel<float>, total);
         nhwc_to_nchw_kernel<float><<<grid_size, block_size, 0, stream>>>(
             input.data<float>(), output.data<float>(),
             batch, channels, height, width
         );
     } else if (input.dtype() == DType::Float16) {
+        auto [grid_size, block_size] = optimal_launch_config(nhwc_to_nchw_kernel<Float16>, total);
         nhwc_to_nchw_kernel<Float16><<<grid_size, block_size, 0, stream>>>(
             input.data<Float16>(), output.data<Float16>(),
             batch, channels, height, width
         );
     } else if (input.dtype() == DType::Float64) {
+        auto [grid_size, block_size] = optimal_launch_config(nhwc_to_nchw_kernel<double>, total);
         nhwc_to_nchw_kernel<double><<<grid_size, block_size, 0, stream>>>(
             input.data<double>(), output.data<double>(),
             batch, channels, height, width
@@ -274,20 +276,21 @@ auto filter_nchw_to_nhwc(const Tensor& weight, cudaStream_t stream) -> Tensor {
     Tensor output(out_shape, weight.dtype(), weight.device());
 
     const int64_t total = out_channels * in_channels * kernel_h * kernel_w;
-    const int block_size = 256;
-    const int grid_size = std::min(static_cast<int>((total + block_size - 1) / block_size), 2147483647);
 
     if (weight.dtype() == DType::Float32) {
+        auto [grid_size, block_size] = optimal_launch_config(filter_nchw_to_nhwc_kernel<float>, total);
         filter_nchw_to_nhwc_kernel<float><<<grid_size, block_size, 0, stream>>>(
             weight.data<float>(), output.data<float>(),
             out_channels, in_channels, kernel_h, kernel_w
         );
     } else if (weight.dtype() == DType::Float16) {
+        auto [grid_size, block_size] = optimal_launch_config(filter_nchw_to_nhwc_kernel<Float16>, total);
         filter_nchw_to_nhwc_kernel<Float16><<<grid_size, block_size, 0, stream>>>(
             weight.data<Float16>(), output.data<Float16>(),
             out_channels, in_channels, kernel_h, kernel_w
         );
     } else if (weight.dtype() == DType::Float64) {
+        auto [grid_size, block_size] = optimal_launch_config(filter_nchw_to_nhwc_kernel<double>, total);
         filter_nchw_to_nhwc_kernel<double><<<grid_size, block_size, 0, stream>>>(
             weight.data<double>(), output.data<double>(),
             out_channels, in_channels, kernel_h, kernel_w
@@ -370,28 +373,30 @@ auto to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* str
     }
 
     const int64_t total = N * C * H * W;
-    const int block_size = 256;
-    const int grid_size = std::min(static_cast<int>((total + block_size - 1) / block_size), 2147483647);
 
     // Choose conversion direction based on actual input layout
     if (format == MemoryFormat::ChannelsLast) {
         // NCHW -> NHWC (but keeping logical shape [N,C,H,W])
         if (input.dtype() == DType::Float32) {
+            auto [grid_size, block_size] = optimal_launch_config(nchw_to_nhwc_kernel<float>, total);
             nchw_to_nhwc_kernel<float><<<grid_size, block_size, 0, stream>>>(
                 input.data<float>(), output.data<float>(),
                 N, C, H, W
             );
         } else if (input.dtype() == DType::Float16) {
+            auto [grid_size, block_size] = optimal_launch_config(nchw_to_nhwc_kernel<Float16>, total);
             nchw_to_nhwc_kernel<Float16><<<grid_size, block_size, 0, stream>>>(
                 input.data<Float16>(), output.data<Float16>(),
                 N, C, H, W
             );
         } else if (input.dtype() == DType::Float64) {
+            auto [grid_size, block_size] = optimal_launch_config(nchw_to_nhwc_kernel<double>, total);
             nchw_to_nhwc_kernel<double><<<grid_size, block_size, 0, stream>>>(
                 input.data<double>(), output.data<double>(),
                 N, C, H, W
             );
         } else if (input.dtype() == DType::BFloat16) {
+            auto [grid_size, block_size] = optimal_launch_config(nchw_to_nhwc_kernel<BFloat16>, total);
             nchw_to_nhwc_kernel<BFloat16><<<grid_size, block_size, 0, stream>>>(
                 input.data<BFloat16>(), output.data<BFloat16>(),
                 N, C, H, W
@@ -402,21 +407,25 @@ auto to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* str
     } else {
         // NHWC -> NCHW (but keeping logical shape [N,C,H,W])
         if (input.dtype() == DType::Float32) {
+            auto [grid_size, block_size] = optimal_launch_config(nhwc_to_nchw_kernel<float>, total);
             nhwc_to_nchw_kernel<float><<<grid_size, block_size, 0, stream>>>(
                 input.data<float>(), output.data<float>(),
                 N, C, H, W
             );
         } else if (input.dtype() == DType::Float16) {
+            auto [grid_size, block_size] = optimal_launch_config(nhwc_to_nchw_kernel<Float16>, total);
             nhwc_to_nchw_kernel<Float16><<<grid_size, block_size, 0, stream>>>(
                 input.data<Float16>(), output.data<Float16>(),
                 N, C, H, W
             );
         } else if (input.dtype() == DType::Float64) {
+            auto [grid_size, block_size] = optimal_launch_config(nhwc_to_nchw_kernel<double>, total);
             nhwc_to_nchw_kernel<double><<<grid_size, block_size, 0, stream>>>(
                 input.data<double>(), output.data<double>(),
                 N, C, H, W
             );
         } else if (input.dtype() == DType::BFloat16) {
+            auto [grid_size, block_size] = optimal_launch_config(nhwc_to_nchw_kernel<BFloat16>, total);
             nhwc_to_nchw_kernel<BFloat16><<<grid_size, block_size, 0, stream>>>(
                 input.data<BFloat16>(), output.data<BFloat16>(),
                 N, C, H, W
@@ -2052,23 +2061,24 @@ auto cudnn_conv2d_backward_nhwc(
         auto gw_shape = grad_weight_nhwc.shape();
         int64_t gw_k = gw_shape[0], gw_kh = gw_shape[1], gw_kw = gw_shape[2], gw_c = gw_shape[3];
         const int64_t total = gw_k * gw_c * gw_kh * gw_kw;
-        const int block_size = 256;
-        const int grid_size = std::min(static_cast<int>((total + block_size - 1) / block_size), 2147483647);
 
         // Reuse existing kernel with swapped interpretation
         if (weight.dtype() == DType::Float32) {
             // NHWC to NCHW for filter: [K, kH, kW, C] -> [K, C, kH, kW]
             // This is same as nhwc_to_nchw but with different dims
+            auto [grid_size, block_size] = optimal_launch_config(nhwc_to_nchw_kernel<float>, total);
             nhwc_to_nchw_kernel<float><<<grid_size, block_size, 0, stream>>>(
                 grad_weight_nhwc.data<float>(), grad_weight.data<float>(),
                 gw_k, gw_c, gw_kh, gw_kw
             );
         } else if (weight.dtype() == DType::Float16) {
+            auto [grid_size, block_size] = optimal_launch_config(nhwc_to_nchw_kernel<Float16>, total);
             nhwc_to_nchw_kernel<Float16><<<grid_size, block_size, 0, stream>>>(
                 grad_weight_nhwc.data<Float16>(), grad_weight.data<Float16>(),
                 gw_k, gw_c, gw_kh, gw_kw
             );
         } else if (weight.dtype() == DType::Float64) {
+            auto [grid_size, block_size] = optimal_launch_config(nhwc_to_nchw_kernel<double>, total);
             nhwc_to_nchw_kernel<double><<<grid_size, block_size, 0, stream>>>(
                 grad_weight_nhwc.data<double>(), grad_weight.data<double>(),
                 gw_k, gw_c, gw_kh, gw_kw

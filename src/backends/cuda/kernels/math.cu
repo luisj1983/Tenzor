@@ -2,6 +2,7 @@
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/backend/caching_allocator.hpp"
 #include "tenzor/backend/backend.hpp"  // For OpAttributes (dispatch wrappers)
+#include "cuda_common.cuh"
 #include "cuda_launch_utils.cuh"
 #include "launch_config.cuh"
 #include <cuda_runtime.h>
@@ -88,11 +89,6 @@ inline void compute_launch_config_1d(int64_t n, dim3& grid, dim3& block) {
     grid  = dim3(static_cast<unsigned int>(num_blocks), 1, 1);
 }
 
-// Grid-stride loop pattern for better scalability
-#define CUDA_KERNEL_LOOP(i, n) \
-    for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; \
-         i < (n); \
-         i += blockDim.x * gridDim.x)
 
 // Convenience: compute occupancy-based grid/block from a kernel pointer
 // and element count, storing into the provided dim3 variables.
@@ -110,7 +106,7 @@ inline void compute_launch_config_1d(int64_t n, dim3& grid, dim3& block) {
 // Kernel to check if any element is zero (for integer division check)
 template<typename T>
 __global__ void check_for_zeros_kernel(const T* data, int64_t n, int* has_zero) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         if (data[idx] == T(0)) {
             atomicExch(has_zero, 1);
         }
@@ -318,7 +314,7 @@ inline bool can_broadcast_to(const std::vector<int64_t>& shape_a,
 // Fast path: element-wise addition (same shape)
 template<typename T>
 __global__ void add_kernel_device(const T* a, const T* b, T* c, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         c[idx] = a[idx] + b[idx];
     }
 }
@@ -352,7 +348,7 @@ __global__ void broadcast_kernel(
     const T* __restrict__ a, const T* __restrict__ b, T* __restrict__ c,
     BroadcastMeta meta, int64_t ndim, int64_t n, Op op) {
 
-    CUDA_KERNEL_LOOP(out_idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(out_idx, n) {
         int64_t idx_a = 0;
         int64_t idx_b = 0;
         int64_t tmp = out_idx;
@@ -370,8 +366,8 @@ __global__ void broadcast_kernel(
     }
 }
 
-// Forward declarations - defined below
-__device__ __forceinline__ __half float2half_sat(float x);
+// float2half_sat is defined in cuda_common.cuh
+// Forward declaration for float2bfloat16_sat - defined below
 __device__ __forceinline__ __nv_bfloat16 float2bfloat16_sat(float x);
 
 // Device-side operation functors with FP16/BF16 saturating specializations
@@ -449,7 +445,7 @@ __global__ void broadcast_inplace_kernel(
     T* a, const T* b,
     BroadcastMeta meta, int64_t ndim, int64_t n, Op op) {
 
-    CUDA_KERNEL_LOOP(out_idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(out_idx, n) {
         int64_t idx_b = 0;
         int64_t tmp = out_idx;
 
@@ -468,7 +464,7 @@ __global__ void broadcast_inplace_kernel(
 // Subtract kernel - element-wise subtraction
 template<typename T>
 __global__ void sub_kernel_device(const T* a, const T* b, T* c, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         c[idx] = a[idx] - b[idx];
     }
 }
@@ -476,7 +472,7 @@ __global__ void sub_kernel_device(const T* a, const T* b, T* c, int64_t n) {
 // Multiply kernel - element-wise multiplication
 template<typename T>
 __global__ void mul_kernel_device(const T* a, const T* b, T* c, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         c[idx] = a[idx] * b[idx];
     }
 }
@@ -487,7 +483,7 @@ __global__ void mul_kernel_device(const T* a, const T* b, T* c, int64_t n) {
 template<typename T>
 __global__ void div_kernel_device(const T* a, const T* b, T* c, int64_t n) {
     DivOp op;
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         c[idx] = op(a[idx], b[idx]);
     }
 }
@@ -496,14 +492,7 @@ __global__ void div_kernel_device(const T* a, const T* b, T* c, int64_t n) {
 // FP16 Saturating Conversion
 // ============================================================================
 
-// Saturating Float32 → Float16 conversion: clamps to max finite Float16 value
-// instead of producing Inf. This matches CPU Float16 operator behavior where
-// per-element clamping naturally limits value growth through deep networks.
-__device__ __forceinline__ __half float2half_sat(float x) {
-    constexpr float kHalfMax = 65504.0f;
-    x = fminf(fmaxf(x, -kHalfMax), kHalfMax);
-    return __float2half(x);
-}
+// float2half_sat is provided by cuda_common.cuh
 
 // Saturating Float32 -> BFloat16 conversion: clamps to max finite BFloat16
 // value (~3.39e38) instead of producing Inf.  BFloat16 has the same exponent
@@ -521,28 +510,28 @@ __device__ __forceinline__ __nv_bfloat16 float2bfloat16_sat(float x) {
 
 // FP16 addition kernel (compute in Float32, saturating conversion)
 __global__ void add_kernel_f16(const __half* a, const __half* b, __half* c, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         c[idx] = float2half_sat(__half2float(a[idx]) + __half2float(b[idx]));
     }
 }
 
 // FP16 subtraction kernel (compute in Float32, saturating conversion)
 __global__ void sub_kernel_f16(const __half* a, const __half* b, __half* c, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         c[idx] = float2half_sat(__half2float(a[idx]) - __half2float(b[idx]));
     }
 }
 
 // FP16 multiplication kernel (compute in Float32, saturating conversion)
 __global__ void mul_kernel_f16(const __half* a, const __half* b, __half* c, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         c[idx] = float2half_sat(__half2float(a[idx]) * __half2float(b[idx]));
     }
 }
 
 // FP16 division kernel (compute in Float32, saturating conversion)
 __global__ void div_kernel_f16(const __half* a, const __half* b, __half* c, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         c[idx] = float2half_sat(__half2float(a[idx]) / __half2float(b[idx]));
     }
 }
@@ -553,28 +542,28 @@ __global__ void div_kernel_f16(const __half* a, const __half* b, __half* c, int6
 
 // BFloat16 addition kernel
 __global__ void add_kernel_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b, __nv_bfloat16* c, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         c[idx] = float2bfloat16_sat(__bfloat162float(a[idx]) + __bfloat162float(b[idx]));
     }
 }
 
 // BFloat16 subtraction kernel
 __global__ void sub_kernel_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b, __nv_bfloat16* c, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         c[idx] = float2bfloat16_sat(__bfloat162float(a[idx]) - __bfloat162float(b[idx]));
     }
 }
 
 // BFloat16 multiplication kernel
 __global__ void mul_kernel_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b, __nv_bfloat16* c, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         c[idx] = float2bfloat16_sat(__bfloat162float(a[idx]) * __bfloat162float(b[idx]));
     }
 }
 
 // BFloat16 division kernel (with div-by-zero protection, matching FP16 pattern)
 __global__ void div_kernel_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b, __nv_bfloat16* c, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float fb = __bfloat162float(b[idx]);
         if (fb == 0.0f) {
             c[idx] = __float2bfloat16(INFINITY);
@@ -591,7 +580,7 @@ __global__ void div_kernel_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b, 
 // Negate kernel
 template<typename T>
 __global__ void neg_kernel_device(const T* input, T* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = -input[idx];
     }
 }
@@ -599,7 +588,7 @@ __global__ void neg_kernel_device(const T* input, T* output, int64_t n) {
 // Absolute value kernel
 template<typename T>
 __global__ void abs_kernel_device(const T* input, T* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         T val = input[idx];
         output[idx] = val >= T(0) ? val : -val;
     }
@@ -607,14 +596,14 @@ __global__ void abs_kernel_device(const T* input, T* output, int64_t n) {
 
 // Absolute value kernel (specialized for float)
 __global__ void abs_kernel_f32(const float* input, float* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = fabsf(input[idx]);
     }
 }
 
 // Absolute value kernel (specialized for double)
 __global__ void abs_kernel_f64(const double* input, double* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = fabs(input[idx]);
     }
 }
@@ -625,14 +614,14 @@ __global__ void abs_kernel_f64(const double* input, double* output, int64_t n) {
 
 // FP16 negate kernel
 __global__ void neg_kernel_f16(const __half* input, __half* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = __hneg(input[idx]);
     }
 }
 
 // FP16 absolute value kernel
 __global__ void abs_kernel_f16(const __half* input, __half* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = __habs(input[idx]);
     }
 }
@@ -643,14 +632,14 @@ __global__ void abs_kernel_f16(const __half* input, __half* output, int64_t n) {
 
 // BFloat16 negate kernel
 __global__ void neg_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = __hneg(input[idx]);
     }
 }
 
 // BFloat16 absolute value kernel
 __global__ void abs_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = __habs(input[idx]);
     }
 }
@@ -661,63 +650,63 @@ __global__ void abs_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* outpu
 
 // Square root kernel (float)
 __global__ void sqrt_kernel_f32(const float* input, float* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = sqrtf(input[idx]);
     }
 }
 
 // Square root kernel (double)
 __global__ void sqrt_kernel_f64(const double* input, double* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = sqrt(input[idx]);
     }
 }
 
 // Exponential kernel (float)
 __global__ void exp_kernel_f32(const float* input, float* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = expf(input[idx]);
     }
 }
 
 // Exponential kernel (double)
 __global__ void exp_kernel_f64(const double* input, double* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = exp(input[idx]);
     }
 }
 
 // Natural logarithm kernel (float)
 __global__ void log_kernel_f32(const float* input, float* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = logf(input[idx]);
     }
 }
 
 // Natural logarithm kernel (double)
 __global__ void log_kernel_f64(const double* input, double* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = log(input[idx]);
     }
 }
 
 // Power kernel (float)
 __global__ void pow_kernel_f32(const float* input, float* output, float exponent, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = powf(input[idx], exponent);
     }
 }
 
 // Power kernel (double)
 __global__ void pow_kernel_f64(const double* input, double* output, double exponent, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = pow(input[idx], exponent);
     }
 }
 
 // Clamp kernel (float)
 __global__ void clamp_kernel_f32(const float* input, float* output, float min_val, float max_val, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float val = input[idx];
         output[idx] = fminf(fmaxf(val, min_val), max_val);
     }
@@ -725,7 +714,7 @@ __global__ void clamp_kernel_f32(const float* input, float* output, float min_va
 
 // Clamp kernel (double)
 __global__ void clamp_kernel_f64(const double* input, double* output, double min_val, double max_val, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         double val = input[idx];
         output[idx] = fmin(fmax(val, min_val), max_val);
     }
@@ -733,7 +722,7 @@ __global__ void clamp_kernel_f64(const double* input, double* output, double min
 
 // Sign kernel (float)
 __global__ void sign_kernel_f32(const float* input, float* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float val = input[idx];
         // Sign function: -1 if x < 0, 0 if x == 0, +1 if x > 0
         output[idx] = (val > 0.0f) - (val < 0.0f);
@@ -742,7 +731,7 @@ __global__ void sign_kernel_f32(const float* input, float* output, int64_t n) {
 
 // Sign kernel (double)
 __global__ void sign_kernel_f64(const double* input, double* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         double val = input[idx];
         output[idx] = (val > 0.0) - (val < 0.0);
     }
@@ -754,28 +743,28 @@ __global__ void sign_kernel_f64(const double* input, double* output, int64_t n) 
 
 // FP16 square root kernel
 __global__ void sqrt_kernel_f16(const __half* input, __half* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = hsqrt(input[idx]);
     }
 }
 
 // FP16 exponential kernel
 __global__ void exp_kernel_f16(const __half* input, __half* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = hexp(input[idx]);
     }
 }
 
 // FP16 natural logarithm kernel
 __global__ void log_kernel_f16(const __half* input, __half* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = hlog(input[idx]);
     }
 }
 
 // FP16 power kernel
 __global__ void pow_kernel_f16(const __half* input, __half* output, __half exponent, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float val = __half2float(input[idx]);
         float exp_val = __half2float(exponent);
         output[idx] = __float2half(powf(val, exp_val));
@@ -784,7 +773,7 @@ __global__ void pow_kernel_f16(const __half* input, __half* output, __half expon
 
 // FP16 clamp kernel
 __global__ void clamp_kernel_f16(const __half* input, __half* output, __half min_val, __half max_val, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         __half val = input[idx];
         output[idx] = __hmax(__hmin(val, max_val), min_val);
     }
@@ -792,7 +781,7 @@ __global__ void clamp_kernel_f16(const __half* input, __half* output, __half min
 
 // FP16 sign kernel
 __global__ void sign_kernel_f16(const __half* input, __half* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         __half val = input[idx];
         __half zero = __float2half(0.0f);
         __half one = __float2half(1.0f);
@@ -810,28 +799,28 @@ __global__ void sign_kernel_f16(const __half* input, __half* output, int64_t n) 
 
 // BFloat16 square root kernel
 __global__ void sqrt_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = hsqrt(input[idx]);
     }
 }
 
 // BFloat16 exponential kernel
 __global__ void exp_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = hexp(input[idx]);
     }
 }
 
 // BFloat16 natural logarithm kernel
 __global__ void log_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = hlog(input[idx]);
     }
 }
 
 // BFloat16 power kernel
 __global__ void pow_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* output, __nv_bfloat16 exponent, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float val = __bfloat162float(input[idx]);
         float exp_val = __bfloat162float(exponent);
         output[idx] = __float2bfloat16(powf(val, exp_val));
@@ -840,7 +829,7 @@ __global__ void pow_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* outpu
 
 // BFloat16 clamp kernel
 __global__ void clamp_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* output, __nv_bfloat16 min_val, __nv_bfloat16 max_val, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         __nv_bfloat16 val = input[idx];
         output[idx] = __hmax(__hmin(val, max_val), min_val);
     }
@@ -848,7 +837,7 @@ __global__ void clamp_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* out
 
 // BFloat16 sign kernel
 __global__ void sign_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         __nv_bfloat16 val = input[idx];
         __nv_bfloat16 zero = __float2bfloat16(0.0f);
         __nv_bfloat16 one = __float2bfloat16(1.0f);
@@ -1756,56 +1745,56 @@ auto sign_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
 // Trigonometric functions
 template<typename T>
 __global__ void sin_kernel_impl(const T* input, T* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = sin(input[idx]);
     }
 }
 
 template<typename T>
 __global__ void cos_kernel_impl(const T* input, T* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = cos(input[idx]);
     }
 }
 
 template<typename T>
 __global__ void tan_kernel_impl(const T* input, T* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = tan(input[idx]);
     }
 }
 
 template<typename T>
 __global__ void asin_kernel_impl(const T* input, T* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = asin(input[idx]);
     }
 }
 
 template<typename T>
 __global__ void acos_kernel_impl(const T* input, T* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = acos(input[idx]);
     }
 }
 
 template<typename T>
 __global__ void atan_kernel_impl(const T* input, T* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = atan(input[idx]);
     }
 }
 
 template<typename T>
 __global__ void sinh_kernel_impl(const T* input, T* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = sinh(input[idx]);
     }
 }
 
 template<typename T>
 __global__ void cosh_kernel_impl(const T* input, T* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = cosh(input[idx]);
     }
 }
@@ -1813,35 +1802,35 @@ __global__ void cosh_kernel_impl(const T* input, T* output, int64_t n) {
 // Rounding functions
 template<typename T>
 __global__ void ceil_kernel_impl(const T* input, T* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = ceil(input[idx]);
     }
 }
 
 template<typename T>
 __global__ void floor_kernel_impl(const T* input, T* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = floor(input[idx]);
     }
 }
 
 template<typename T>
 __global__ void round_kernel_impl(const T* input, T* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = round(input[idx]);
     }
 }
 
 template<typename T>
 __global__ void trunc_kernel_impl(const T* input, T* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = trunc(input[idx]);
     }
 }
 
 template<typename T>
 __global__ void reciprocal_kernel_impl(const T* input, T* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = T(1.0) / input[idx];
     }
 }
@@ -1882,14 +1871,14 @@ DEFINE_TRIG_KERNEL(reciprocal)
 // Clamp min/max functions
 template<typename T>
 __global__ void clamp_min_kernel_impl(const T* input, T* output, T min_val, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = input[idx] < min_val ? min_val : input[idx];
     }
 }
 
 template<typename T>
 __global__ void clamp_max_kernel_impl(const T* input, T* output, T max_val, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = input[idx] > max_val ? max_val : input[idx];
     }
 }
@@ -1943,53 +1932,53 @@ auto clamp_max_kernel(const Tensor& input, float max_val, cudaStream_t stream) -
 // In-place operations
 template<typename T>
 __global__ void add_inplace_kernel_impl(T* data, const T* other, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         data[idx] += other[idx];
     }
 }
 
 template<typename T>
 __global__ void sub_inplace_kernel_impl(T* data, const T* other, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         data[idx] -= other[idx];
     }
 }
 
 template<typename T>
 __global__ void mul_inplace_kernel_impl(T* data, const T* other, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         data[idx] *= other[idx];
     }
 }
 
 template<typename T>
 __global__ void div_inplace_kernel_impl(T* data, const T* other, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         data[idx] /= other[idx];
     }
 }
 
 // Float16 in-place kernels
 __global__ void add_inplace_kernel_f16(__half* data, const __half* other, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         data[idx] = __hadd(data[idx], other[idx]);
     }
 }
 
 __global__ void sub_inplace_kernel_f16(__half* data, const __half* other, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         data[idx] = __hsub(data[idx], other[idx]);
     }
 }
 
 __global__ void mul_inplace_kernel_f16(__half* data, const __half* other, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         data[idx] = __hmul(data[idx], other[idx]);
     }
 }
 
 __global__ void div_inplace_kernel_f16(__half* data, const __half* other, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         data[idx] = __hdiv(data[idx], other[idx]);
     }
 }
@@ -2270,7 +2259,7 @@ __global__ void expand_kernel_device(
     const T* input, T* output,
     ExpandMeta meta, int64_t input_ndim, int64_t output_ndim, int64_t n) {
 
-    CUDA_KERNEL_LOOP(out_idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(out_idx, n) {
         int64_t temp = out_idx;
         int64_t in_idx = 0;
 
@@ -2408,7 +2397,7 @@ auto expand_kernel(const Tensor& input, const std::vector<int64_t>& shape, void*
 // synchronize the stream before reading the tensor on the host.
 template<typename T>
 __global__ void fill_kernel_device(T* output, T value, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = value;
     }
 }
@@ -2481,7 +2470,7 @@ template<typename T>
 __global__ void strided_fill_kernel_device(
     T* base, T value, int64_t n,
     const int64_t* shape, const int64_t* strides, int32_t ndims) {
-    CUDA_KERNEL_LOOP(flat_idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(flat_idx, n) {
         int64_t remaining = flat_idx;
         int64_t offset = 0;
         for (int32_t d = ndims - 1; d >= 0; --d) {
@@ -2783,7 +2772,7 @@ auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, De
 
 // Kernel to initialize cuRAND states
 __global__ void init_curand_states(curandState* states, unsigned long long seed, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         // Each thread gets different seed, a different sequence number, no offset
         curand_init(seed, idx, 0, &states[idx]);
     }
@@ -2791,21 +2780,21 @@ __global__ void init_curand_states(curandState* states, unsigned long long seed,
 
 // Kernel for uniform random [0, 1) generation
 __global__ void rand_kernel_device(float* output, curandState* states, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = curand_uniform(&states[idx]);
     }
 }
 
 // Kernel for normal distribution N(0,1) generation
 __global__ void randn_kernel_device(float* output, curandState* states, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = curand_normal(&states[idx]);
     }
 }
 
 // FP16 uniform random kernel
 __global__ void rand_kernel_f16(__half* output, curandState* states, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float val = curand_uniform(&states[idx]);
         output[idx] = __float2half(val);
     }
@@ -2813,7 +2802,7 @@ __global__ void rand_kernel_f16(__half* output, curandState* states, int64_t n) 
 
 // FP16 normal distribution kernel
 __global__ void randn_kernel_f16(__half* output, curandState* states, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float val = curand_normal(&states[idx]);
         output[idx] = __float2half(val);
     }
@@ -2821,7 +2810,7 @@ __global__ void randn_kernel_f16(__half* output, curandState* states, int64_t n)
 
 // BFloat16 uniform random kernel
 __global__ void rand_kernel_bf16(__nv_bfloat16* output, curandState* states, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float val = curand_uniform(&states[idx]);
         output[idx] = __float2bfloat16(val);
     }
@@ -2829,7 +2818,7 @@ __global__ void rand_kernel_bf16(__nv_bfloat16* output, curandState* states, int
 
 // BFloat16 normal distribution kernel
 __global__ void randn_kernel_bf16(__nv_bfloat16* output, curandState* states, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float val = curand_normal(&states[idx]);
         output[idx] = __float2bfloat16(val);
     }
@@ -2837,7 +2826,7 @@ __global__ void randn_kernel_bf16(__nv_bfloat16* output, curandState* states, in
 
 // Float-to-double conversion kernel for proper type conversion
 __global__ void convert_float_to_double_kernel(const float* input, double* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = static_cast<double>(input[idx]);
     }
 }
@@ -3064,7 +3053,7 @@ __device__ inline bool GeOp::operator()<__half>(__half a, __half b) const {
 // Fast path: element-wise comparison (same shape)
 template<typename T, typename Op>
 __global__ void compare_kernel_device(const T* a, const T* b, bool* c, int64_t n, Op op) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         c[idx] = op(a[idx], b[idx]);
     }
 }
@@ -3075,7 +3064,7 @@ __global__ void broadcast_compare_kernel(
     const T* a, const T* b, bool* c,
     BroadcastMeta meta, int64_t ndim, int64_t n, Op op) {
 
-    CUDA_KERNEL_LOOP(out_idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(out_idx, n) {
         int64_t idx_a = 0;
         int64_t idx_b = 0;
         int64_t tmp = out_idx;
@@ -4663,7 +4652,7 @@ Tensor ge_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
 
 template<typename From, typename To>
 __global__ void cast_element_kernel(const From* input, To* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = static_cast<To>(input[idx]);
     }
 }
@@ -4671,7 +4660,7 @@ __global__ void cast_element_kernel(const From* input, To* output, int64_t n) {
 // Specializations for Float16 source (convert via float)
 template<typename To>
 __global__ void cast_from_f16_kernel(const __half* input, To* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = static_cast<To>(__half2float(input[idx]));
     }
 }
@@ -4679,14 +4668,14 @@ __global__ void cast_from_f16_kernel(const __half* input, To* output, int64_t n)
 // Specialization for Float16 destination (convert via float)
 template<typename From>
 __global__ void cast_to_f16_kernel(const From* input, __half* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = __float2half(static_cast<float>(input[idx]));
     }
 }
 
 // Float16 -> Float16 (no-op copy)
 __global__ void cast_f16_to_f16_kernel(const __half* input, __half* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = input[idx];
     }
 }
@@ -4694,7 +4683,7 @@ __global__ void cast_f16_to_f16_kernel(const __half* input, __half* output, int6
 // Specializations for BFloat16 source (convert via float)
 template<typename To>
 __global__ void cast_from_bf16_kernel(const __nv_bfloat16* input, To* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = static_cast<To>(__bfloat162float(input[idx]));
     }
 }
@@ -4702,28 +4691,28 @@ __global__ void cast_from_bf16_kernel(const __nv_bfloat16* input, To* output, in
 // Specialization for BFloat16 destination (convert via float)
 template<typename From>
 __global__ void cast_to_bf16_kernel(const From* input, __nv_bfloat16* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = __float2bfloat16(static_cast<float>(input[idx]));
     }
 }
 
 // BFloat16 -> BFloat16 (no-op copy)
 __global__ void cast_bf16_to_bf16_kernel(const __nv_bfloat16* input, __nv_bfloat16* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = input[idx];
     }
 }
 
 // Float16 -> BFloat16
 __global__ void cast_f16_to_bf16_kernel(const __half* input, __nv_bfloat16* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = __float2bfloat16(__half2float(input[idx]));
     }
 }
 
 // BFloat16 -> Float16
 __global__ void cast_bf16_to_f16_kernel(const __nv_bfloat16* input, __half* output, int64_t n) {
-    CUDA_KERNEL_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = __float2half(__bfloat162float(input[idx]));
     }
 }
