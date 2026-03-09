@@ -616,9 +616,9 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
     // Support Float32, Float64, Float16, Int32, and Int64
     // Integer types use native HIP kernels since rocBLAS doesn't support integer GEMM
     if (a_contig.dtype() != DType::Float32 && a_contig.dtype() != DType::Float64 &&
-        a_contig.dtype() != DType::Float16 && a_contig.dtype() != DType::Int32 &&
-        a_contig.dtype() != DType::Int64) {
-        throw std::runtime_error("matmul: only Float32, Float64, Float16, Int32, and Int64 dtypes are supported");
+        a_contig.dtype() != DType::Float16 && a_contig.dtype() != DType::BFloat16 &&
+        a_contig.dtype() != DType::Int32 && a_contig.dtype() != DType::Int64) {
+        throw std::runtime_error("matmul: only Float32, Float64, Float16, BFloat16, Int32, and Int64 dtypes are supported");
     }
 
     // For integer types, use native HIP kernel directly (rocBLAS doesn't support integer GEMM)
@@ -733,6 +733,30 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
                     rocblas_gemm_algo_standard,
                     0, 0  // solution index, flags
                 ));
+            } else if (a_contig.dtype() == DType::BFloat16) {
+                // BFloat16: convert to Float32, compute, convert back
+                auto a_f32 = a_contig.to(DType::Float32);
+                auto b_f32 = b_contig.to(DType::Float32);
+                Tensor result_f32({N}, DType::Float32, a_contig.device());
+
+                const float* a_data = a_f32.data<float>();
+                const float* b_data = b_f32.data<float>();
+                float* c_data = result_f32.data<float>();
+
+                float alpha = 1.0f;
+                float beta = 0.0f;
+
+                ROCBLAS_CHECK(rocblas_sgemm(
+                    handle.get(),
+                    trans_a, trans_b,
+                    m, n, k,
+                    &alpha,
+                    b_data, ldb,
+                    a_data, lda,
+                    &beta,
+                    c_data, ldc
+                ));
+                return result_f32.to(DType::BFloat16);
             }
 
             return result;
@@ -849,6 +873,32 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
                     rocblas_gemm_algo_standard,
                     0, 0
                 ));
+            } else if (a_contig.dtype() == DType::BFloat16) {
+                auto a_f32 = a_contig.to(DType::Float32);
+                auto b_f32 = b_contig.to(DType::Float32);
+
+                const float* a_data = a_f32.data<float>();
+                const float* b_data = b_f32.data<float>();
+                float* c_data = result.data<float>();
+
+                float alpha = 1.0f;
+                float beta = 0.0f;
+
+                // Need Float32 result tensor for computation
+                Tensor result_f32({M}, DType::Float32, a_contig.device());
+                c_data = result_f32.data<float>();
+
+                ROCBLAS_CHECK(rocblas_sgemm(
+                    handle.get(),
+                    trans_a, trans_b,
+                    m, n, k,
+                    &alpha,
+                    b_data, ldb,
+                    a_data, lda,
+                    &beta,
+                    c_data, ldc
+                ));
+                return result_f32.to(DType::BFloat16);
             }
 
             return result;
@@ -1087,6 +1137,48 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
                     0, 0
                 ));
             }
+        } else if (a_contig.dtype() == DType::BFloat16) {
+            // BFloat16: convert to Float32, compute via rocBLAS, convert back
+            auto a_f32 = a_contig.to(DType::Float32);
+            auto b_f32 = b_contig.to(DType::Float32);
+            Tensor result_f32(out_shape, DType::Float32, a_contig.device());
+
+            const float* a_data = a_f32.data<float>();
+            const float* b_data = b_f32.data<float>();
+            float* c_data = result_f32.data<float>();
+
+            float alpha = 1.0f;
+            float beta = 0.0f;
+
+            if (batch_size == 1) {
+                ROCBLAS_CHECK(rocblas_sgemm(
+                    handle.get(),
+                    trans_a, trans_b,
+                    m, n, k,
+                    &alpha,
+                    b_data, ldb,
+                    a_data, lda,
+                    &beta,
+                    c_data, ldc
+                ));
+            } else {
+                rocblas_int batch_count = static_cast<rocblas_int>(batch_size);
+                rocblas_stride actual_stride_a = (batch_size_a == 1) ? 0 : stride_a;
+                rocblas_stride actual_stride_b = (batch_size_b == 1) ? 0 : stride_b;
+
+                ROCBLAS_CHECK(rocblas_sgemm_strided_batched(
+                    handle.get(),
+                    trans_a, trans_b,
+                    m, n, k,
+                    &alpha,
+                    b_data, ldb, actual_stride_b,
+                    a_data, lda, actual_stride_a,
+                    &beta,
+                    c_data, ldc, stride_c,
+                    batch_count
+                ));
+            }
+            result = result_f32.to(DType::BFloat16);
         }
     } catch (const std::exception& e) {
         // rocBLAS failed (e.g., unsupported architecture like gfx90c)

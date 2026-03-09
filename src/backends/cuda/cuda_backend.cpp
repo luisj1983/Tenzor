@@ -501,11 +501,11 @@ private:
                 if (can_access) {
                     cudaSetDevice(i);
                     cudaError_t err = cudaDeviceEnablePeerAccess(j, 0);
-                    if (err == cudaSuccess || err == cudaErrorPeerAccessAlreadyEnabled) {
+                    if (err == cudaSuccess) {
                         peer_access_[i][j] = true;
-                        if (err == cudaErrorPeerAccessAlreadyEnabled) {
-                            cudaGetLastError();  // Clear the error
-                        }
+                    } else if (err == cudaErrorPeerAccessAlreadyEnabled) {
+                        peer_access_[i][j] = true;
+                        cudaGetLastError();  // Clear the sticky error
                     }
                 }
             }

@@ -225,7 +225,8 @@ __global__ void gather_kernel_impl(
     int64_t dim_size,
     int64_t inner_size,
     int64_t index_dim_size,
-    int64_t total_output) {
+    int64_t total_output,
+    int* error_flag) {
 
     CUDA_GRID_STRIDE_LOOP(idx, total_output) {
         // Decompose output index into (outer, index_pos, inner)
@@ -238,6 +239,11 @@ __global__ void gather_kernel_impl(
         int64_t index_offset = outer_idx * index_dim_size * inner_size +
                                index_pos * inner_size + inner_idx;
         int64_t gather_idx = static_cast<int64_t>(indices[index_offset]);
+        if (gather_idx < 0) gather_idx += dim_size;
+        if (gather_idx < 0 || gather_idx >= dim_size) {
+            atomicExch(error_flag, 1);
+            continue;
+        }
 
         // Compute input offset
         int64_t input_offset = outer_idx * dim_size * inner_size +
@@ -265,6 +271,9 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index,
     int64_t total_output = output.numel();
     if (total_output == 0) return output;
 
+    CudaBuffer error_buf(sizeof(int));
+    CUDA_CHECK(cudaMemsetAsync(error_buf.as<int>(), 0, sizeof(int), stream));
+
     // Compute sizes
     int64_t outer_size = 1;
     for (int64_t i = 0; i < dim; ++i) {
@@ -291,11 +300,13 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index,
         if (idx_is_int32) \
             gather_kernel_impl<T, int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
                 input.data<T>(), index.data<int32_t>(), output.data<T>(), \
-                outer_size, dim_size, inner_size, index_dim_size, total_output); \
+                outer_size, dim_size, inner_size, index_dim_size, total_output, \
+                error_buf.as<int>()); \
         else \
             gather_kernel_impl<T, int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
                 input.data<T>(), index.data<int64_t>(), output.data<T>(), \
-                outer_size, dim_size, inner_size, index_dim_size, total_output); \
+                outer_size, dim_size, inner_size, index_dim_size, total_output, \
+                error_buf.as<int>()); \
         CUDA_CHECK(cudaGetLastError())
 
     switch (input.dtype()) {
@@ -311,13 +322,15 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                     reinterpret_cast<const __half*>(input.data_ptr()),
                     index.data<int32_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
-                    outer_size, dim_size, inner_size, index_dim_size, total_output);
+                    outer_size, dim_size, inner_size, index_dim_size, total_output,
+                    error_buf.as<int>());
             else
                 gather_kernel_impl<__half, int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                     reinterpret_cast<const __half*>(input.data_ptr()),
                     index.data<int64_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
-                    outer_size, dim_size, inner_size, index_dim_size, total_output);
+                    outer_size, dim_size, inner_size, index_dim_size, total_output,
+                    error_buf.as<int>());
             CUDA_CHECK(cudaGetLastError());
             break;
         case DType::BFloat16:
@@ -326,13 +339,15 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                     reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
                     index.data<int32_t>(),
                     reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
-                    outer_size, dim_size, inner_size, index_dim_size, total_output);
+                    outer_size, dim_size, inner_size, index_dim_size, total_output,
+                    error_buf.as<int>());
             else
                 gather_kernel_impl<__nv_bfloat16, int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
                     reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
                     index.data<int64_t>(),
                     reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
-                    outer_size, dim_size, inner_size, index_dim_size, total_output);
+                    outer_size, dim_size, inner_size, index_dim_size, total_output,
+                    error_buf.as<int>());
             CUDA_CHECK(cudaGetLastError());
             break;
         default:
@@ -342,6 +357,15 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index,
     #undef LAUNCH_GATHER
 
     CUDA_CHECK(cudaGetLastError());
+
+    int host_error = 0;
+    CUDA_CHECK(cudaMemcpyAsync(&host_error, error_buf.as<int>(), sizeof(int),
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    if (host_error) {
+        throw std::out_of_range("gather: index out of range");
+    }
+
     return output;
 }
 
@@ -387,7 +411,7 @@ __global__ void scatter_values_kernel_impl(
         if (scatter_idx < 0) scatter_idx += dim_size;
         if (scatter_idx < 0 || scatter_idx >= dim_size) {
             atomicExch(error_flag, 1);
-            return;
+            continue;
         }
 
         int64_t output_offset = outer_idx * dim_size * inner_size +
@@ -580,7 +604,7 @@ __device__ void warp_reduce_atomic_add(T* output, int64_t output_offset, T value
                     atomicAdd(&output[output_offset], reduced);
                 }
             }
-            return;
+            break;
         }
         // Advance past all lanes matching this leader
         peer_offset = 32 - __clz(match_mask);
@@ -611,7 +635,7 @@ __global__ void scatter_add_kernel_impl(
         if (scatter_idx < 0) scatter_idx += dim_size;
         if (scatter_idx < 0 || scatter_idx >= dim_size) {
             atomicExch(error_flag, 1);
-            return;
+            continue;
         }
 
         int64_t output_offset = outer_idx * dim_size * inner_size +

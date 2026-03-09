@@ -59,7 +59,8 @@ VkCommandBuffer VulkanBackend::acquireCommandBuffer(int32_t device_id) {
         // This is more targeted — only waits for our own submissions, not
         // all device work (which would serialize unrelated queues).
         ensurePendingWorkComplete(device_id);
-        vkResetCommandPool(ctx.device, ctx.commandPool, 0);
+        vulkan::checkVk(vkResetCommandPool(ctx.device, ctx.commandPool, 0),
+                        "Failed to reset command pool");
         ctx.nextCommandBufferIndex = 0;
         ctx.submittedFrames = 0;
         ctx.currentFrame = 0;
@@ -117,6 +118,9 @@ void VulkanBackend::ensurePendingWorkComplete(int32_t device_id) {
                 } else if (status == VK_ERROR_DEVICE_LOST) {
                     ctx.device_lost = true;
                     throw std::runtime_error("Vulkan device lost (fence status check)");
+                } else if (status != VK_SUCCESS) {
+                    throw std::runtime_error("Vulkan fence status check failed with VkResult " +
+                                             std::to_string(static_cast<int>(status)));
                 }
             }
         }
@@ -244,7 +248,8 @@ auto VulkanBackend::synchronize(int32_t device_id) -> void {
     ctx.hasPendingWork = false;
 
     // Reset command pool and pool index
-    vkResetCommandPool(ctx.device, ctx.commandPool, 0);
+    vulkan::checkVk(vkResetCommandPool(ctx.device, ctx.commandPool, 0),
+                    "Failed to reset command pool during synchronize");
     ctx.nextCommandBufferIndex = 0;
 
     // Reset batching state
@@ -295,7 +300,14 @@ auto VulkanBackend::try_reset_device(int32_t device_id) -> bool {
     ctx.operationsInBatch = 0;
 
     // Reset command pool (all prior command buffers are now invalid)
-    vkResetCommandPool(ctx.device, ctx.commandPool, VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT);
+    {
+        VkResult resetResult = vkResetCommandPool(ctx.device, ctx.commandPool, VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT);
+        if (resetResult == VK_ERROR_DEVICE_LOST) {
+            // Can't recover — leave device_lost set and bail
+            return false;
+        }
+        // Other errors during recovery are non-fatal — we already checked vkDeviceWaitIdle
+    }
     ctx.nextCommandBufferIndex = 0;
 
     // Reinitialize command buffer pool

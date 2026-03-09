@@ -146,7 +146,10 @@ auto FocalLoss::forward(const Variable& input, const Variable& target) -> Variab
     // Power term - compute (1-p)^gamma using exp(gamma * log(1-p))
     // This correctly handles fractional gamma values
     auto gamma_var = scalar_var(static_cast<float>(gamma_), one_minus_p);
-    Variable modulating_factor = exp(gamma_var * log(one_minus_p));
+    auto one_minus_p_safe = clamp(one_minus_p, 1e-7f, 1.0f);
+    auto exponent = gamma_var * log(one_minus_p_safe);
+    auto exponent_safe = clamp(exponent, -50.0f, 50.0f);
+    Variable modulating_factor = exp(exponent_safe);
 
     // Recompute log_probs from clamped probs for consistency
     auto log_probs_clamped = log(probs_clamped);

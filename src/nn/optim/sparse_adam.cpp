@@ -65,7 +65,10 @@ auto SparseAdam::step_impl() -> void {
             // Write updated moments back using scatter
             // scatter(input, dim, index, src): places src values into input at index positions along dim
             // We need to expand row_indices to match the shape of m_rows for scatter
-            auto idx_expanded = row_indices.reshape({row_indices.shape()[0], 1});
+            // Build index shape with trailing 1s for N-dimensional parameters
+            std::vector<int64_t> idx_shape = {row_indices.shape()[0]};
+            for (int64_t d = 1; d < m_rows.ndim(); ++d) idx_shape.push_back(1);
+            auto idx_expanded = row_indices.reshape(idx_shape);
             // Broadcast index to match moment row shape
             auto shape_span = m_rows.shape();
             std::vector<int64_t> expand_shape(shape_span.begin(), shape_span.end());

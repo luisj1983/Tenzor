@@ -55,8 +55,10 @@ VulkanBackend::~VulkanBackend() {
     }
 
     // Flush any deferred frees now that all GPU work is complete
-    for (size_t i = 0; i < deferred_frees_.size(); ++i) {
-        flush_deferred_frees(static_cast<int32_t>(i));
+    if (is_backend_registry_alive()) {
+        for (size_t i = 0; i < deferred_frees_.size(); ++i) {
+            flush_deferred_frees(static_cast<int32_t>(i));
+        }
     }
 
     // IMPORTANT: Shutdown the caching allocator BEFORE destroying the Vulkan device
@@ -539,7 +541,12 @@ void VulkanBackend::createLogicalDevices() {
                 // Retry with empty cache
                 cacheCreateInfo.initialDataSize = 0;
                 cacheCreateInfo.pInitialData = nullptr;
-                vkCreatePipelineCache(ctx.device, &cacheCreateInfo, nullptr, &ctx.pipelineCache);
+                VkResult retryResult = vkCreatePipelineCache(ctx.device, &cacheCreateInfo, nullptr, &ctx.pipelineCache);
+                if (retryResult != VK_SUCCESS) {
+                    std::cerr << "[Vulkan] Warning: pipeline cache retry also failed. "
+                              << "Proceeding without pipeline cache.\n";
+                    ctx.pipelineCache = VK_NULL_HANDLE;
+                }
             }
         }
 

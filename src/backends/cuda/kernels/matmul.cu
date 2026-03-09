@@ -853,7 +853,7 @@ __global__ void batched_matmul_tensor_core_f16_kernel(
     const int64_t cRow = warpM * WMMA_M;
     const int64_t cCol = warpN * WMMA_N;
 
-    if (cRow < M && cCol < N && cRow + WMMA_M <= M && cCol + WMMA_N <= N) {
+    if (cRow < M && cCol < N) {
         // Store float accumulator to shared memory first
         __shared__ float Cs_float[WMMA_M][WMMA_N + 1];
         store_matrix_sync(&Cs_float[0][0], acc_frag, WMMA_N + 1, mem_row_major);
@@ -1317,7 +1317,8 @@ void matmul_f32(
 
     // Use custom tiled kernel for smaller matrices
     // Select architecture-appropriate tile sizes
-    auto tc = get_tile_config();
+    int dev = 0; cudaGetDevice(&dev);
+    auto tc = get_tile_config(dev);
     if (tc.tile_m == 16) {
         dim3 block(16, 16);
         dim3 grid((N + 15) / 16, (M + 15) / 16);
@@ -1354,7 +1355,8 @@ void matmul_f64(
 
     // Use custom tiled kernel for smaller matrices
     // Select architecture-appropriate tile sizes
-    auto tc = get_tile_config();
+    int dev = 0; cudaGetDevice(&dev);
+    auto tc = get_tile_config(dev);
     if (tc.tile_m == 16) {
         dim3 block(16, 16);
         dim3 grid((N + 15) / 16, (M + 15) / 16);
@@ -1383,7 +1385,8 @@ void matmul_i32(
 
     // Custom kernel (no cuBLAS for int32)
     // Select architecture-appropriate tile sizes
-    auto tc = get_tile_config();
+    int dev = 0; cudaGetDevice(&dev);
+    auto tc = get_tile_config(dev);
     if (tc.tile_m == 16) {
         dim3 block(16, 16);
         dim3 grid((N + 15) / 16, (M + 15) / 16);
@@ -1575,7 +1578,8 @@ void batched_matmul_f32(
 #else
     // Fallback to custom batched kernel when cuBLAS is not available
     // Select architecture-appropriate tile sizes
-    auto tc = get_tile_config();
+    int dev = 0; cudaGetDevice(&dev);
+    auto tc = get_tile_config(dev);
     if (tc.tile_m == 16) {
         dim3 block(16, 16);
         dim3 grid((N + 15) / 16, (M + 15) / 16, batch_size);
@@ -1622,7 +1626,8 @@ void batched_matmul_f64(
 #else
     // Fallback to custom batched kernel when cuBLAS is not available
     // Select architecture-appropriate tile sizes
-    auto tc = get_tile_config();
+    int dev = 0; cudaGetDevice(&dev);
+    auto tc = get_tile_config(dev);
     if (tc.tile_m == 16) {
         dim3 block(16, 16);
         dim3 grid((N + 15) / 16, (M + 15) / 16, batch_size);

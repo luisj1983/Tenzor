@@ -51,10 +51,16 @@ private:
     CuBLASHandlePool() {
         CUBLAS_CHECK(cublasCreate(&handle_));
 #if CUDA_VERSION >= 11000
-        // TF32 Tensor Core math requires CUDA 11.0+ (Ampere and later GPUs).
-        // The previous guard (>= 9000) was incorrect: CUBLAS_TF32_TENSOR_OP_MATH
-        // is only defined starting with CUDA 11.0.
-        CUBLAS_CHECK(cublasSetMathMode(handle_, CUBLAS_TF32_TENSOR_OP_MATH));
+        // TF32 Tensor Core math requires CUDA 11.0+ and Ampere (SM 80+) GPUs.
+        {
+            int dev = 0;
+            cudaGetDevice(&dev);
+            int major = 0;
+            cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
+            if (major >= 8) {
+                CUBLAS_CHECK(cublasSetMathMode(handle_, CUBLAS_TF32_TENSOR_OP_MATH));
+            }
+        }
 #endif
     }
 

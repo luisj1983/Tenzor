@@ -1370,7 +1370,8 @@ PYBIND11_MODULE(tenzor_core, m) {
                 is_integer_scalar = true;
                 int_scalar_value = py::cast<int64_t>(value);
                 scalar_value = static_cast<double>(int_scalar_value);
-            } else if (py::isinstance<py::float_>(value) || py::isinstance<py::int_>(value)) {
+            } else if (py::isinstance<py::float_>(value) ||
+                       (py::isinstance<py::int_>(value) && !py::isinstance<py::bool_>(value))) {
                 is_scalar_value = true;
                 scalar_value = py::cast<double>(value);
             } else {

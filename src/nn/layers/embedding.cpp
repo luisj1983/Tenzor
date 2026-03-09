@@ -71,6 +71,14 @@ public:
 
         int64_t num_indices = indices_.numel();
 
+        for (int64_t i = 0; i < num_indices; ++i) {
+            auto idx = input_ptr[i];
+            if (idx < 0 || idx >= num_embeddings_) {
+                throw std::out_of_range("Embedding index " + std::to_string(idx) +
+                                        " out of range [0, " + std::to_string(num_embeddings_) + ")");
+            }
+        }
+
         // Perform lookup using weight's dtype
         if (weight_dtype == DType::Float32) {
             auto weight_ptr = weight_tensor.data<float>();
@@ -140,6 +148,14 @@ public:
         // CPU path
         auto input_ptr = indices_.data<int64_t>();
         int64_t num_indices = indices_.numel();
+
+        for (int64_t i = 0; i < num_indices; ++i) {
+            auto idx = input_ptr[i];
+            if (idx < 0 || idx >= num_embeddings_) {
+                throw std::out_of_range("Embedding index " + std::to_string(idx) +
+                                        " out of range [0, " + std::to_string(num_embeddings_) + ")");
+            }
+        }
 
         // Sparse gradient path: build COO sparse tensor and convert to dense
         // (full sparse autograd support is in Phase 12; for now, to_dense() ensures
