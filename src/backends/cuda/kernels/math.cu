@@ -9,6 +9,7 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include <curand_kernel.h>
+#include <cuComplex.h>
 #include <cmath>
 #include <cstdio>
 #include <stdexcept>
@@ -5938,6 +5939,271 @@ Tensor minimum_dispatch(std::span<const Tensor> inputs, const OpAttributes& attr
 Tensor maximum_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
     auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
     return maximum_kernel(inputs[0], inputs[1], stream);
+}
+
+// =========================================================================
+// Complex Number Operations
+// =========================================================================
+
+// --- Conj ---
+__global__ void conj_kernel_c64(const float* input, float* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[2 * idx]     =  input[2 * idx];      // real
+        output[2 * idx + 1] = -input[2 * idx + 1];  // -imag
+    }
+}
+__global__ void conj_kernel_c128(const double* input, double* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[2 * idx]     =  input[2 * idx];
+        output[2 * idx + 1] = -input[2 * idx + 1];
+    }
+}
+
+auto conj_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+
+    if (input.dtype() == DType::Complex64) {
+        Tensor result(shape, DType::Complex64, input.device());
+        dim3 grid, block;
+        compute_launch_config_1d(n, grid, block);
+        conj_kernel_c64<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const float*>(input.data_ptr()),
+            reinterpret_cast<float*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
+        return result;
+    } else if (input.dtype() == DType::Complex128) {
+        Tensor result(shape, DType::Complex128, input.device());
+        dim3 grid, block;
+        compute_launch_config_1d(n, grid, block);
+        conj_kernel_c128<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const double*>(input.data_ptr()),
+            reinterpret_cast<double*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
+        return result;
+    }
+    // For real dtypes, conjugate is identity
+    // Clone via a simple copy
+    Tensor result(shape, input.dtype(), input.device());
+    cudaMemcpyAsync(result.data_ptr(), input.data_ptr(),
+                    n * dtype_size(input.dtype()), cudaMemcpyDeviceToDevice, stream);
+    return result;
+}
+
+// --- Real ---
+__global__ void real_kernel_c64(const float* input, float* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = input[2 * idx];
+    }
+}
+__global__ void real_kernel_c128(const double* input, double* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = input[2 * idx];
+    }
+}
+
+auto real_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+
+    if (input.dtype() == DType::Complex64) {
+        Tensor result(shape, DType::Float32, input.device());
+        dim3 grid, block;
+        compute_launch_config_1d(n, grid, block);
+        real_kernel_c64<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const float*>(input.data_ptr()),
+            result.data<float>(), n);
+        CUDA_CHECK(cudaGetLastError());
+        return result;
+    } else if (input.dtype() == DType::Complex128) {
+        Tensor result(shape, DType::Float64, input.device());
+        dim3 grid, block;
+        compute_launch_config_1d(n, grid, block);
+        real_kernel_c128<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const double*>(input.data_ptr()),
+            result.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
+        return result;
+    }
+    // For real dtypes, real() is identity
+    Tensor result(shape, input.dtype(), input.device());
+    cudaMemcpyAsync(result.data_ptr(), input.data_ptr(),
+                    n * dtype_size(input.dtype()), cudaMemcpyDeviceToDevice, stream);
+    return result;
+}
+
+// --- Imag ---
+__global__ void imag_kernel_c64(const float* input, float* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = input[2 * idx + 1];
+    }
+}
+__global__ void imag_kernel_c128(const double* input, double* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = input[2 * idx + 1];
+    }
+}
+
+auto imag_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+
+    if (input.dtype() == DType::Complex64) {
+        Tensor result(shape, DType::Float32, input.device());
+        dim3 grid, block;
+        compute_launch_config_1d(n, grid, block);
+        imag_kernel_c64<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const float*>(input.data_ptr()),
+            result.data<float>(), n);
+        CUDA_CHECK(cudaGetLastError());
+        return result;
+    } else if (input.dtype() == DType::Complex128) {
+        Tensor result(shape, DType::Float64, input.device());
+        dim3 grid, block;
+        compute_launch_config_1d(n, grid, block);
+        imag_kernel_c128<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const double*>(input.data_ptr()),
+            result.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
+        return result;
+    }
+    // For real dtypes, imaginary part is zero
+    Tensor result(shape, input.dtype(), input.device());
+    cudaMemsetAsync(result.data_ptr(), 0, n * dtype_size(input.dtype()), stream);
+    return result;
+}
+
+// --- Angle ---
+__global__ void angle_kernel_c64(const float* input, float* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = atan2f(input[2 * idx + 1], input[2 * idx]);
+    }
+}
+__global__ void angle_kernel_c128(const double* input, double* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = atan2(input[2 * idx + 1], input[2 * idx]);
+    }
+}
+__global__ void angle_kernel_f32(const float* input, float* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = atan2f(0.0f, input[idx]);
+    }
+}
+__global__ void angle_kernel_f64(const double* input, double* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = atan2(0.0, input[idx]);
+    }
+}
+
+auto angle_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (input.dtype() == DType::Complex64) {
+        Tensor result(shape, DType::Float32, input.device());
+        angle_kernel_c64<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const float*>(input.data_ptr()),
+            result.data<float>(), n);
+        CUDA_CHECK(cudaGetLastError());
+        return result;
+    } else if (input.dtype() == DType::Complex128) {
+        Tensor result(shape, DType::Float64, input.device());
+        angle_kernel_c128<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const double*>(input.data_ptr()),
+            result.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
+        return result;
+    } else if (input.dtype() == DType::Float32) {
+        Tensor result(shape, DType::Float32, input.device());
+        angle_kernel_f32<<<grid, block, 0, stream>>>(
+            input.data<float>(), result.data<float>(), n);
+        CUDA_CHECK(cudaGetLastError());
+        return result;
+    } else if (input.dtype() == DType::Float64) {
+        Tensor result(shape, DType::Float64, input.device());
+        angle_kernel_f64<<<grid, block, 0, stream>>>(
+            input.data<double>(), result.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
+        return result;
+    }
+    throw std::runtime_error("angle: unsupported dtype");
+}
+
+// --- Polar ---
+__global__ void polar_kernel_f32(const float* abs_in, const float* angle_in,
+                                  float* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        float r = abs_in[idx];
+        float theta = angle_in[idx];
+        output[2 * idx]     = r * cosf(theta);
+        output[2 * idx + 1] = r * sinf(theta);
+    }
+}
+__global__ void polar_kernel_f64(const double* abs_in, const double* angle_in,
+                                  double* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        double r = abs_in[idx];
+        double theta = angle_in[idx];
+        output[2 * idx]     = r * cos(theta);
+        output[2 * idx + 1] = r * sin(theta);
+    }
+}
+
+auto polar_kernel(const Tensor& abs_t, const Tensor& angle_t, cudaStream_t stream) -> Tensor {
+    if (abs_t.dtype() != angle_t.dtype()) {
+        throw std::runtime_error("polar: abs and angle must have the same dtype");
+    }
+    auto shape_a = abs_t.shape();
+    auto shape_b = angle_t.shape();
+    if (!std::equal(shape_a.begin(), shape_a.end(), shape_b.begin(), shape_b.end())) {
+        throw std::runtime_error("polar: abs and angle must have the same shape");
+    }
+
+    int64_t n = abs_t.numel();
+    std::vector<int64_t> shape(shape_a.begin(), shape_a.end());
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (abs_t.dtype() == DType::Float32) {
+        Tensor result(shape, DType::Complex64, abs_t.device());
+        polar_kernel_f32<<<grid, block, 0, stream>>>(
+            abs_t.data<float>(), angle_t.data<float>(),
+            reinterpret_cast<float*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
+        return result;
+    } else if (abs_t.dtype() == DType::Float64) {
+        Tensor result(shape, DType::Complex128, abs_t.device());
+        polar_kernel_f64<<<grid, block, 0, stream>>>(
+            abs_t.data<double>(), angle_t.data<double>(),
+            reinterpret_cast<double*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
+        return result;
+    }
+    throw std::runtime_error("polar: only Float32 and Float64 inputs are supported");
+}
+
+// Complex number dispatch wrappers
+Tensor conj_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
+    return conj_kernel(inputs[0], stream);
+}
+Tensor real_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
+    return real_kernel(inputs[0], stream);
+}
+Tensor imag_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
+    return imag_kernel(inputs[0], stream);
+}
+Tensor angle_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
+    return angle_kernel(inputs[0], stream);
+}
+Tensor polar_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
+    return polar_kernel(inputs[0], inputs[1], stream);
 }
 
 } // namespace cuda

@@ -15,6 +15,7 @@
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/core/tensor.hpp"
 #include <climits>
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <tuple>
@@ -90,6 +91,13 @@ namespace oneapi {
     // Element-wise min/max
     auto minimum_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
     auto maximum_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+
+    // Complex number operations
+    auto conj_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto real_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto imag_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto angle_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto polar_kernel(const Tensor& abs_t, const Tensor& angle_t, sycl::queue& queue) -> Tensor;
 
     // Additional math
     auto clamp_min_kernel(const Tensor& input, float min_val, sycl::queue& queue) -> Tensor;
@@ -933,6 +941,35 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::Maximum,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
             return {oneapi::maximum_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    // =========================================================================
+    // Complex Number Operations
+    // =========================================================================
+
+    table.register_kernel(OpId::Conj,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::conj_kernel(inputs[0], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Real,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::real_kernel(inputs[0], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Imag,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::imag_kernel(inputs[0], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Angle,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::angle_kernel(inputs[0], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Polar,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::polar_kernel(inputs[0], inputs[1], get_q(inputs))};
         });
 
     // =========================================================================
@@ -2051,6 +2088,217 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
             oneapi::fused_adagrad_step_kernel(param, inputs[1], sum_sq,
                 lr, lr_decay, eps, weight_decay, step, get_q(inputs));
+            return std::vector<Tensor>{param};
+        });
+
+    // =========================================================================
+    // Fused Conv2D + Activation Variants (compose conv2d + activation)
+    // =========================================================================
+
+    table.register_single_output_kernel(OpId::FusedConv2dReLU,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+            const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+            auto& queue = get_q(inputs);
+            Tensor conv_out = oneapi::conv2d_forward(inputs[0], inputs[1], bias,
+                stride, padding, dilation, groups, queue);
+            return oneapi::relu_kernel(conv_out, queue);
+        });
+
+    table.register_single_output_kernel(OpId::FusedConv2dSigmoid,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+            const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+            auto& queue = get_q(inputs);
+            Tensor conv_out = oneapi::conv2d_forward(inputs[0], inputs[1], bias,
+                stride, padding, dilation, groups, queue);
+            return oneapi::sigmoid_kernel(conv_out, queue);
+        });
+
+    table.register_single_output_kernel(OpId::FusedConv2dTanh,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+            const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+            auto& queue = get_q(inputs);
+            Tensor conv_out = oneapi::conv2d_forward(inputs[0], inputs[1], bias,
+                stride, padding, dilation, groups, queue);
+            return oneapi::tanh_kernel(conv_out, queue);
+        });
+
+    table.register_single_output_kernel(OpId::FusedConv2dSwish,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+            const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+            auto& queue = get_q(inputs);
+            Tensor conv_out = oneapi::conv2d_forward(inputs[0], inputs[1], bias,
+                stride, padding, dilation, groups, queue);
+            return oneapi::swish_kernel(conv_out, queue);
+        });
+
+    // =========================================================================
+    // Fused Conv2D + BatchNorm + ReLU (full pipeline)
+    // =========================================================================
+
+    table.register_single_output_kernel(OpId::FusedConv2dBnReLU,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            // inputs: [input, weight, conv_bias, bn_gamma, bn_beta, bn_running_mean, bn_running_var]
+            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+            const Tensor* bias = inputs.size() > 2 && inputs[2].numel() > 0 ? &inputs[2] : nullptr;
+            auto& queue = get_q(inputs);
+
+            // Step 1: Conv2d forward
+            Tensor conv_out = oneapi::conv2d_forward(inputs[0], inputs[1], bias,
+                stride, padding, 1, 1, queue);
+
+            // Step 2: BatchNorm forward with affine (using bn_running_mean/var as mean/var for inference-style)
+            Tensor bn_out = oneapi::batchnorm2d_forward_affine(
+                conv_out, inputs[5], inputs[6], inputs[3], inputs[4], eps, queue);
+
+            // Step 3: ReLU
+            return oneapi::relu_kernel(bn_out, queue);
+        });
+
+    // =========================================================================
+    // Fused Attention (Q*K^T/scale -> softmax -> *V)
+    // =========================================================================
+
+    table.register_kernel(OpId::FusedAttention,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // inputs: [Q, K, V]
+            float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+            auto& queue = get_q(inputs);
+
+            // Step 1: QK^T via batched matmul — transpose K by permuting last two dims
+            auto k_shape = inputs[1].shape();
+            int64_t ndim = static_cast<int64_t>(k_shape.size());
+            Tensor kt = oneapi::transpose_kernel(inputs[1], ndim - 2, ndim - 1, queue);
+
+            // Step 2: scores = Q @ K^T
+            Tensor scores = oneapi::matmul_kernel(inputs[0], kt, queue);
+
+            // Step 3: Scale by 1/scale (scale attr is typically sqrt(d_k))
+            Tensor scale_tensor = oneapi::full_kernel({1}, scale, scores.dtype(), scores.device(), queue);
+            scores = oneapi::div_kernel(scores, scale_tensor, queue);
+
+            // Step 4: Softmax over last dimension
+            Tensor attn_weights = oneapi::softmax_kernel(scores, -1, queue);
+
+            // Step 5: attn_weights @ V
+            Tensor output = oneapi::matmul_kernel(attn_weights, inputs[2], queue);
+            return {output};
+        });
+
+    // =========================================================================
+    // BatchNorm2d Fused Training (compose mean_var + forward_affine + update_running_stats)
+    // =========================================================================
+
+    table.register_kernel(OpId::BatchNorm2dFusedTraining,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // inputs: [input, running_mean, running_var, gamma, beta]
+            float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+            float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.1));
+            auto& queue = get_q(inputs);
+
+            // Step 1: Compute batch mean and variance
+            auto mean_var = oneapi::batchnorm2d_mean_var(inputs[0], queue);
+            Tensor& mean = mean_var[0];
+            Tensor& variance = mean_var[1];
+
+            // Step 2: Normalize with affine transform
+            Tensor output = oneapi::batchnorm2d_forward_affine(
+                inputs[0], mean, variance, inputs[3], inputs[4], epsilon, queue);
+
+            // Step 3: Update running stats
+            Tensor running_mean = inputs[1];
+            Tensor running_var = inputs[2];
+            oneapi::batchnorm2d_update_running_stats(
+                running_mean, running_var, mean, variance, momentum, queue);
+
+            return {output, mean, variance, running_mean, running_var};
+        });
+
+    // =========================================================================
+    // Fused Adam-Atan2 Optimizer Step
+    // =========================================================================
+
+    table.register_kernel(OpId::FusedAdamAtan2Step,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // inputs: [param, grad, exp_avg, exp_avg_sq, max_exp_avg_sq (optional)]
+            float lr = static_cast<float>(attrs.get_float(AttrKey::Lr, 0.001));
+            float beta1 = static_cast<float>(attrs.get_float(AttrKey::Beta1, 0.9));
+            float beta2 = static_cast<float>(attrs.get_float(AttrKey::Beta2, 0.999));
+            float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-8));
+            float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
+            int64_t step = attrs.get_int(AttrKey::Step, 1);
+            bool amsgrad = attrs.get_bool(AttrKey::Amsgrad, false);
+
+            Tensor& param = const_cast<Tensor&>(inputs[0]);
+            Tensor& exp_avg = const_cast<Tensor&>(inputs[2]);
+            Tensor& exp_avg_sq = const_cast<Tensor&>(inputs[3]);
+            Tensor* max_exp_avg_sq = (amsgrad && inputs.size() > 4)
+                ? &const_cast<Tensor&>(inputs[4]) : nullptr;
+            auto& queue = get_q(inputs);
+
+            // Bias correction
+            float bc1 = 1.0f - std::pow(beta1, static_cast<float>(step));
+            float bc2 = 1.0f - std::pow(beta2, static_cast<float>(step));
+
+            // Weight decay (decoupled)
+            if (weight_decay != 0.0f) {
+                Tensor wd_scale = oneapi::full_kernel({1}, 1.0f - lr * weight_decay,
+                    param.dtype(), param.device(), queue);
+                oneapi::mul_inplace_kernel(param, wd_scale, queue);
+            }
+
+            // Update biased first moment estimate: exp_avg = beta1 * exp_avg + (1 - beta1) * grad
+            Tensor beta1_t = oneapi::full_kernel({1}, beta1, exp_avg.dtype(), exp_avg.device(), queue);
+            Tensor one_minus_beta1_t = oneapi::full_kernel({1}, 1.0f - beta1, exp_avg.dtype(), exp_avg.device(), queue);
+            Tensor scaled_avg = oneapi::mul_kernel(exp_avg, beta1_t, queue);
+            Tensor scaled_grad = oneapi::mul_kernel(inputs[1], one_minus_beta1_t, queue);
+            exp_avg = oneapi::add_kernel(scaled_avg, scaled_grad, queue);
+
+            // Update biased second moment estimate: exp_avg_sq = beta2 * exp_avg_sq + (1 - beta2) * grad^2
+            Tensor beta2_t = oneapi::full_kernel({1}, beta2, exp_avg_sq.dtype(), exp_avg_sq.device(), queue);
+            Tensor one_minus_beta2_t = oneapi::full_kernel({1}, 1.0f - beta2, exp_avg_sq.dtype(), exp_avg_sq.device(), queue);
+            Tensor grad_sq = oneapi::mul_kernel(inputs[1], inputs[1], queue);
+            Tensor scaled_sq = oneapi::mul_kernel(exp_avg_sq, beta2_t, queue);
+            Tensor scaled_grad_sq = oneapi::mul_kernel(grad_sq, one_minus_beta2_t, queue);
+            exp_avg_sq = oneapi::add_kernel(scaled_sq, scaled_grad_sq, queue);
+
+            // Bias-corrected estimates
+            Tensor bc1_t = oneapi::full_kernel({1}, bc1, exp_avg.dtype(), exp_avg.device(), queue);
+            Tensor bc2_t = oneapi::full_kernel({1}, bc2, exp_avg_sq.dtype(), exp_avg_sq.device(), queue);
+            Tensor m_hat = oneapi::div_kernel(exp_avg, bc1_t, queue);
+            Tensor v_hat = oneapi::div_kernel(exp_avg_sq, bc2_t, queue);
+
+            if (amsgrad && max_exp_avg_sq) {
+                *max_exp_avg_sq = oneapi::maximum_kernel(*max_exp_avg_sq, v_hat, queue);
+                v_hat = *max_exp_avg_sq;
+            }
+
+            // Adam-Atan2 update: param -= lr * atan2(m_hat, sqrt(v_hat) + eps)
+            Tensor sqrt_v = oneapi::sqrt_kernel(v_hat, queue);
+            Tensor eps_t = oneapi::full_kernel({1}, eps, sqrt_v.dtype(), sqrt_v.device(), queue);
+            Tensor denom = oneapi::add_kernel(sqrt_v, eps_t, queue);
+            Tensor update = oneapi::atan2_kernel(m_hat, denom, queue);
+            Tensor lr_t = oneapi::full_kernel({1}, lr, param.dtype(), param.device(), queue);
+            Tensor step_update = oneapi::mul_kernel(update, lr_t, queue);
+            oneapi::sub_inplace_kernel(param, step_update, queue);
+
             return std::vector<Tensor>{param};
         });
 

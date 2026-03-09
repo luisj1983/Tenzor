@@ -184,6 +184,20 @@ struct MaximumKernelFloat64 {};
 struct MaximumKernelFloat16 {};
 struct MaximumKernelBFloat16 {};
 
+// Complex number kernel name classes
+struct ConjKernelComplex64 {};
+struct ConjKernelComplex128 {};
+struct RealKernelComplex64 {};
+struct RealKernelComplex128 {};
+struct ImagKernelComplex64 {};
+struct ImagKernelComplex128 {};
+struct AngleKernelComplex64 {};
+struct AngleKernelComplex128 {};
+struct AngleKernelFloat32 {};
+struct AngleKernelFloat64 {};
+struct PolarKernelFloat32 {};
+struct PolarKernelFloat64 {};
+
 // Rounding kernel name classes
 struct RoundKernelFloat32 {};
 struct RoundKernelFloat64 {};
@@ -3650,6 +3664,174 @@ auto maximum_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Ten
         throw std::runtime_error("maximum: unsupported dtype");
     }
     return output;
+}
+
+// =========================================================================
+// Complex Number Operations
+// =========================================================================
+
+auto conj_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+
+    if (input.dtype() == DType::Complex64) {
+        Tensor result(shape, DType::Complex64, input.device());
+        const float* in_ptr = get_data_ptr<const float>(input);
+        float* out_ptr = get_data_ptr<float>(result);
+        queue.parallel_for<ConjKernelComplex64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            out_ptr[2 * idx]     =  in_ptr[2 * idx];
+            out_ptr[2 * idx + 1] = -in_ptr[2 * idx + 1];
+        }).wait();
+        return result;
+    } else if (input.dtype() == DType::Complex128) {
+        Tensor result(shape, DType::Complex128, input.device());
+        const double* in_ptr = get_data_ptr<const double>(input);
+        double* out_ptr = get_data_ptr<double>(result);
+        queue.parallel_for<ConjKernelComplex128>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            out_ptr[2 * idx]     =  in_ptr[2 * idx];
+            out_ptr[2 * idx + 1] = -in_ptr[2 * idx + 1];
+        }).wait();
+        return result;
+    }
+    // For real dtypes, conjugate is identity
+    Tensor result(shape, input.dtype(), input.device());
+    queue.memcpy(result.data_ptr(), input.data_ptr(), n * dtype_size(input.dtype())).wait();
+    return result;
+}
+
+auto real_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+
+    if (input.dtype() == DType::Complex64) {
+        Tensor result(shape, DType::Float32, input.device());
+        const float* in_ptr = get_data_ptr<const float>(input);
+        float* out_ptr = get_data_ptr<float>(result);
+        queue.parallel_for<RealKernelComplex64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            out_ptr[idx] = in_ptr[2 * idx];
+        }).wait();
+        return result;
+    } else if (input.dtype() == DType::Complex128) {
+        Tensor result(shape, DType::Float64, input.device());
+        const double* in_ptr = get_data_ptr<const double>(input);
+        double* out_ptr = get_data_ptr<double>(result);
+        queue.parallel_for<RealKernelComplex128>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            out_ptr[idx] = in_ptr[2 * idx];
+        }).wait();
+        return result;
+    }
+    // For real dtypes, real() is identity
+    Tensor result(shape, input.dtype(), input.device());
+    queue.memcpy(result.data_ptr(), input.data_ptr(), n * dtype_size(input.dtype())).wait();
+    return result;
+}
+
+auto imag_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+
+    if (input.dtype() == DType::Complex64) {
+        Tensor result(shape, DType::Float32, input.device());
+        const float* in_ptr = get_data_ptr<const float>(input);
+        float* out_ptr = get_data_ptr<float>(result);
+        queue.parallel_for<ImagKernelComplex64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            out_ptr[idx] = in_ptr[2 * idx + 1];
+        }).wait();
+        return result;
+    } else if (input.dtype() == DType::Complex128) {
+        Tensor result(shape, DType::Float64, input.device());
+        const double* in_ptr = get_data_ptr<const double>(input);
+        double* out_ptr = get_data_ptr<double>(result);
+        queue.parallel_for<ImagKernelComplex128>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            out_ptr[idx] = in_ptr[2 * idx + 1];
+        }).wait();
+        return result;
+    }
+    // For real dtypes, imaginary part is zero
+    Tensor result(shape, input.dtype(), input.device());
+    queue.memset(result.data_ptr(), 0, n * dtype_size(input.dtype())).wait();
+    return result;
+}
+
+auto angle_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+
+    if (input.dtype() == DType::Complex64) {
+        Tensor result(shape, DType::Float32, input.device());
+        const float* in_ptr = get_data_ptr<const float>(input);
+        float* out_ptr = get_data_ptr<float>(result);
+        queue.parallel_for<AngleKernelComplex64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            out_ptr[idx] = sycl::atan2(in_ptr[2 * idx + 1], in_ptr[2 * idx]);
+        }).wait();
+        return result;
+    } else if (input.dtype() == DType::Complex128) {
+        Tensor result(shape, DType::Float64, input.device());
+        const double* in_ptr = get_data_ptr<const double>(input);
+        double* out_ptr = get_data_ptr<double>(result);
+        queue.parallel_for<AngleKernelComplex128>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            out_ptr[idx] = sycl::atan2(in_ptr[2 * idx + 1], in_ptr[2 * idx]);
+        }).wait();
+        return result;
+    } else if (input.dtype() == DType::Float32) {
+        Tensor result(shape, DType::Float32, input.device());
+        const float* in_ptr = get_data_ptr<const float>(input);
+        float* out_ptr = get_data_ptr<float>(result);
+        queue.parallel_for<AngleKernelFloat32>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            out_ptr[idx] = sycl::atan2(0.0f, in_ptr[idx]);
+        }).wait();
+        return result;
+    } else if (input.dtype() == DType::Float64) {
+        Tensor result(shape, DType::Float64, input.device());
+        const double* in_ptr = get_data_ptr<const double>(input);
+        double* out_ptr = get_data_ptr<double>(result);
+        queue.parallel_for<AngleKernelFloat64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            out_ptr[idx] = sycl::atan2(0.0, in_ptr[idx]);
+        }).wait();
+        return result;
+    }
+    throw std::runtime_error("angle: unsupported dtype");
+}
+
+auto polar_kernel(const Tensor& abs_t, const Tensor& angle_t, sycl::queue& queue) -> Tensor {
+    if (abs_t.dtype() != angle_t.dtype()) {
+        throw std::runtime_error("polar: abs and angle must have the same dtype");
+    }
+    auto shape_a = abs_t.shape();
+    auto shape_b = angle_t.shape();
+    if (!std::equal(shape_a.begin(), shape_a.end(), shape_b.begin(), shape_b.end())) {
+        throw std::runtime_error("polar: abs and angle must have the same shape");
+    }
+
+    int64_t n = abs_t.numel();
+    std::vector<int64_t> shape(shape_a.begin(), shape_a.end());
+
+    if (abs_t.dtype() == DType::Float32) {
+        Tensor result(shape, DType::Complex64, abs_t.device());
+        const float* r_ptr = get_data_ptr<const float>(abs_t);
+        const float* theta_ptr = get_data_ptr<const float>(angle_t);
+        float* out_ptr = get_data_ptr<float>(result);
+        queue.parallel_for<PolarKernelFloat32>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            float r = r_ptr[idx];
+            float theta = theta_ptr[idx];
+            out_ptr[2 * idx]     = r * sycl::cos(theta);
+            out_ptr[2 * idx + 1] = r * sycl::sin(theta);
+        }).wait();
+        return result;
+    } else if (abs_t.dtype() == DType::Float64) {
+        Tensor result(shape, DType::Complex128, abs_t.device());
+        const double* r_ptr = get_data_ptr<const double>(abs_t);
+        const double* theta_ptr = get_data_ptr<const double>(angle_t);
+        double* out_ptr = get_data_ptr<double>(result);
+        queue.parallel_for<PolarKernelFloat64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            double r = r_ptr[idx];
+            double theta = theta_ptr[idx];
+            out_ptr[2 * idx]     = r * sycl::cos(theta);
+            out_ptr[2 * idx + 1] = r * sycl::sin(theta);
+        }).wait();
+        return result;
+    }
+    throw std::runtime_error("polar: only Float32 and Float64 inputs are supported");
 }
 
 } // namespace oneapi

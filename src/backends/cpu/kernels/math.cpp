@@ -4601,6 +4601,28 @@ auto ceil_kernel(const Tensor& input) -> Tensor {
     return output;
 }
 
+auto trunc_kernel(const Tensor& input) -> Tensor {
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto f32 = input.to(DType::Float32);
+        auto result = trunc_kernel(f32);
+        return result.to(input.dtype());
+    }
+
+    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
+    auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
+    int64_t n = input.numel();
+
+    TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "trunc", [&]() {
+        const scalar_t* in_data = input.data<scalar_t>();
+        scalar_t* out_data = output.data<scalar_t>();
+        _Pragma("omp parallel for if(n > 10000)")
+        for (int64_t i = 0; i < n; i++) {
+            out_data[i] = std::trunc(in_data[i]);
+        }
+    });
+    return output;
+}
+
 // Reciprocal
 auto reciprocal_kernel(const Tensor& input) -> Tensor {
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());

@@ -8,6 +8,7 @@
 
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/backend/dtype_dispatch.hpp"
 #include <cmath>
 #include <cstring>
 #include <algorithm>
@@ -1089,6 +1090,38 @@ auto fold_kernel(const Tensor& input, const std::vector<int64_t>& output_size,
         throw std::runtime_error("fold: unsupported dtype");
     }
 
+    return output;
+}
+
+auto gather_relative_position_bias_kernel(const Tensor& bias_table, const Tensor& rel_pos_index,
+                                           int64_t num_positions, int64_t num_heads) -> Tensor {
+    // Convert half precision to float
+    if (bias_table.dtype() == DType::Float16 || bias_table.dtype() == DType::BFloat16) {
+        auto bt_f32 = bias_table.to(DType::Float32);
+        auto result = gather_relative_position_bias_kernel(bt_f32, rel_pos_index, num_positions, num_heads);
+        return result.to(bias_table.dtype());
+    }
+
+    auto idx_shape = rel_pos_index.shape();
+    int64_t seq_len = idx_shape[0];
+    // Output: [num_heads, seq_len, seq_len]
+    Tensor output({num_heads, seq_len, seq_len}, bias_table.dtype(), bias_table.device());
+
+    const int64_t* idx_data = rel_pos_index.data<int64_t>();
+    int64_t table_stride = bias_table.shape()[1]; // second dim of bias table
+
+    TENZOR_DISPATCH_FLOATING_TYPES(bias_table.dtype(), "gather_rel_pos_bias", [&]() {
+        const scalar_t* table_data = bias_table.data<scalar_t>();
+        scalar_t* out_data = output.data<scalar_t>();
+        int64_t total = num_heads * seq_len * seq_len;
+        _Pragma("omp parallel for if(total > 10000)")
+        for (int64_t i = 0; i < total; i++) {
+            int64_t h = i / (seq_len * seq_len);
+            int64_t pos = i % (seq_len * seq_len);
+            int64_t idx = idx_data[pos];
+            out_data[i] = table_data[h * table_stride + idx];
+        }
+    });
     return output;
 }
 

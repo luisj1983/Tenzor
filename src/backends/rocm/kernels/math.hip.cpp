@@ -4168,5 +4168,247 @@ auto maximum_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Ten
     return result;
 }
 
+// =========================================================================
+// Complex Number Operations
+// =========================================================================
+
+// --- Conj ---
+__global__ void conj_kernel_c64(const float* input, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[2 * idx]     =  input[2 * idx];
+        output[2 * idx + 1] = -input[2 * idx + 1];
+    }
+}
+__global__ void conj_kernel_c128(const double* input, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[2 * idx]     =  input[2 * idx];
+        output[2 * idx + 1] = -input[2 * idx + 1];
+    }
+}
+
+auto conj_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+
+    if (input.dtype() == DType::Complex64) {
+        Tensor result(shape, DType::Complex64, input.device());
+        dim3 grid, block;
+        compute_launch_config_1d(n, grid, block);
+        hipLaunchKernelGGL(conj_kernel_c64, grid, block, 0, stream,
+            reinterpret_cast<const float*>(input.data_ptr()),
+            reinterpret_cast<float*>(result.data_ptr()), n);
+        HIP_CHECK(hipGetLastError());
+        return result;
+    } else if (input.dtype() == DType::Complex128) {
+        Tensor result(shape, DType::Complex128, input.device());
+        dim3 grid, block;
+        compute_launch_config_1d(n, grid, block);
+        hipLaunchKernelGGL(conj_kernel_c128, grid, block, 0, stream,
+            reinterpret_cast<const double*>(input.data_ptr()),
+            reinterpret_cast<double*>(result.data_ptr()), n);
+        HIP_CHECK(hipGetLastError());
+        return result;
+    }
+    // For real dtypes, conjugate is identity
+    Tensor result(shape, input.dtype(), input.device());
+    hipMemcpyAsync(result.data_ptr(), input.data_ptr(),
+                   n * dtype_size(input.dtype()), hipMemcpyDeviceToDevice, stream);
+    return result;
+}
+
+// --- Real ---
+__global__ void real_kernel_c64(const float* input, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = input[2 * idx];
+    }
+}
+__global__ void real_kernel_c128(const double* input, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = input[2 * idx];
+    }
+}
+
+auto real_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+
+    if (input.dtype() == DType::Complex64) {
+        Tensor result(shape, DType::Float32, input.device());
+        dim3 grid, block;
+        compute_launch_config_1d(n, grid, block);
+        hipLaunchKernelGGL(real_kernel_c64, grid, block, 0, stream,
+            reinterpret_cast<const float*>(input.data_ptr()),
+            result.data<float>(), n);
+        HIP_CHECK(hipGetLastError());
+        return result;
+    } else if (input.dtype() == DType::Complex128) {
+        Tensor result(shape, DType::Float64, input.device());
+        dim3 grid, block;
+        compute_launch_config_1d(n, grid, block);
+        hipLaunchKernelGGL(real_kernel_c128, grid, block, 0, stream,
+            reinterpret_cast<const double*>(input.data_ptr()),
+            result.data<double>(), n);
+        HIP_CHECK(hipGetLastError());
+        return result;
+    }
+    // For real dtypes, real() is identity
+    Tensor result(shape, input.dtype(), input.device());
+    hipMemcpyAsync(result.data_ptr(), input.data_ptr(),
+                   n * dtype_size(input.dtype()), hipMemcpyDeviceToDevice, stream);
+    return result;
+}
+
+// --- Imag ---
+__global__ void imag_kernel_c64(const float* input, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = input[2 * idx + 1];
+    }
+}
+__global__ void imag_kernel_c128(const double* input, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = input[2 * idx + 1];
+    }
+}
+
+auto imag_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+
+    if (input.dtype() == DType::Complex64) {
+        Tensor result(shape, DType::Float32, input.device());
+        dim3 grid, block;
+        compute_launch_config_1d(n, grid, block);
+        hipLaunchKernelGGL(imag_kernel_c64, grid, block, 0, stream,
+            reinterpret_cast<const float*>(input.data_ptr()),
+            result.data<float>(), n);
+        HIP_CHECK(hipGetLastError());
+        return result;
+    } else if (input.dtype() == DType::Complex128) {
+        Tensor result(shape, DType::Float64, input.device());
+        dim3 grid, block;
+        compute_launch_config_1d(n, grid, block);
+        hipLaunchKernelGGL(imag_kernel_c128, grid, block, 0, stream,
+            reinterpret_cast<const double*>(input.data_ptr()),
+            result.data<double>(), n);
+        HIP_CHECK(hipGetLastError());
+        return result;
+    }
+    // For real dtypes, imaginary part is zero
+    Tensor result(shape, input.dtype(), input.device());
+    hipMemsetAsync(result.data_ptr(), 0, n * dtype_size(input.dtype()), stream);
+    return result;
+}
+
+// --- Angle ---
+__global__ void angle_kernel_c64(const float* input, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = atan2f(input[2 * idx + 1], input[2 * idx]);
+    }
+}
+__global__ void angle_kernel_c128(const double* input, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = atan2(input[2 * idx + 1], input[2 * idx]);
+    }
+}
+__global__ void angle_kernel_f32(const float* input, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = atan2f(0.0f, input[idx]);
+    }
+}
+__global__ void angle_kernel_f64(const double* input, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = atan2(0.0, input[idx]);
+    }
+}
+
+auto angle_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (input.dtype() == DType::Complex64) {
+        Tensor result(shape, DType::Float32, input.device());
+        hipLaunchKernelGGL(angle_kernel_c64, grid, block, 0, stream,
+            reinterpret_cast<const float*>(input.data_ptr()),
+            result.data<float>(), n);
+        HIP_CHECK(hipGetLastError());
+        return result;
+    } else if (input.dtype() == DType::Complex128) {
+        Tensor result(shape, DType::Float64, input.device());
+        hipLaunchKernelGGL(angle_kernel_c128, grid, block, 0, stream,
+            reinterpret_cast<const double*>(input.data_ptr()),
+            result.data<double>(), n);
+        HIP_CHECK(hipGetLastError());
+        return result;
+    } else if (input.dtype() == DType::Float32) {
+        Tensor result(shape, DType::Float32, input.device());
+        hipLaunchKernelGGL(angle_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<float>(), n);
+        HIP_CHECK(hipGetLastError());
+        return result;
+    } else if (input.dtype() == DType::Float64) {
+        Tensor result(shape, DType::Float64, input.device());
+        hipLaunchKernelGGL(angle_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<double>(), n);
+        HIP_CHECK(hipGetLastError());
+        return result;
+    }
+    throw std::runtime_error("angle: unsupported dtype");
+}
+
+// --- Polar ---
+__global__ void polar_kernel_f32(const float* abs_in, const float* angle_in,
+                                  float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float r = abs_in[idx];
+        float theta = angle_in[idx];
+        output[2 * idx]     = r * cosf(theta);
+        output[2 * idx + 1] = r * sinf(theta);
+    }
+}
+__global__ void polar_kernel_f64(const double* abs_in, const double* angle_in,
+                                  double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        double r = abs_in[idx];
+        double theta = angle_in[idx];
+        output[2 * idx]     = r * cos(theta);
+        output[2 * idx + 1] = r * sin(theta);
+    }
+}
+
+auto polar_kernel(const Tensor& abs_t, const Tensor& angle_t, hipStream_t stream) -> Tensor {
+    if (abs_t.dtype() != angle_t.dtype()) {
+        throw std::runtime_error("polar: abs and angle must have the same dtype");
+    }
+    auto shape_a = abs_t.shape();
+    auto shape_b = angle_t.shape();
+    if (!std::equal(shape_a.begin(), shape_a.end(), shape_b.begin(), shape_b.end())) {
+        throw std::runtime_error("polar: abs and angle must have the same shape");
+    }
+
+    int64_t n = abs_t.numel();
+    std::vector<int64_t> shape(shape_a.begin(), shape_a.end());
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (abs_t.dtype() == DType::Float32) {
+        Tensor result(shape, DType::Complex64, abs_t.device());
+        hipLaunchKernelGGL(polar_kernel_f32, grid, block, 0, stream,
+            abs_t.data<float>(), angle_t.data<float>(),
+            reinterpret_cast<float*>(result.data_ptr()), n);
+        HIP_CHECK(hipGetLastError());
+        return result;
+    } else if (abs_t.dtype() == DType::Float64) {
+        Tensor result(shape, DType::Complex128, abs_t.device());
+        hipLaunchKernelGGL(polar_kernel_f64, grid, block, 0, stream,
+            abs_t.data<double>(), angle_t.data<double>(),
+            reinterpret_cast<double*>(result.data_ptr()), n);
+        HIP_CHECK(hipGetLastError());
+        return result;
+    }
+    throw std::runtime_error("polar: only Float32 and Float64 inputs are supported");
+}
+
 } // namespace rocm
 } // namespace tenzor

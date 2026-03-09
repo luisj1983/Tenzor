@@ -1400,6 +1400,183 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return get_vulkan_backend()->dispatchFlip(inputs[0], dim);
     });
 
+    // ========================================================================
+    // Fused Conv2d + Activation Operations (composition pattern)
+    // ========================================================================
+    table.register_single_output_kernel(OpId::FusedConv2dReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto vk = get_vulkan_backend();
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        auto conv_result = vk->dispatchConv2dForward(inputs[0], inputs[1], bias, attrs);
+        return vk->dispatchActivation("relu", conv_result, 0, 0.0f);
+    });
+
+    table.register_single_output_kernel(OpId::FusedConv2dSigmoid, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto vk = get_vulkan_backend();
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        auto conv_result = vk->dispatchConv2dForward(inputs[0], inputs[1], bias, attrs);
+        return vk->dispatchActivation("sigmoid", conv_result, 1, 0.0f);
+    });
+
+    table.register_single_output_kernel(OpId::FusedConv2dTanh, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto vk = get_vulkan_backend();
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        auto conv_result = vk->dispatchConv2dForward(inputs[0], inputs[1], bias, attrs);
+        return vk->dispatchActivation("tanh", conv_result, 2, 0.0f);
+    });
+
+    table.register_single_output_kernel(OpId::FusedConv2dSwish, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto vk = get_vulkan_backend();
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        auto conv_result = vk->dispatchConv2dForward(inputs[0], inputs[1], bias, attrs);
+        // Swish = x * sigmoid(x)
+        auto sigmoid_result = vk->dispatchActivation("sigmoid", conv_result, 1, 0.0f);
+        return vk->dispatchBinaryOp("mul", conv_result, sigmoid_result);
+    });
+
+    table.register_single_output_kernel(OpId::FusedConv2dBnReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // inputs: [input, weight, conv_bias, bn_gamma, bn_beta, bn_running_mean, bn_running_var]
+        auto vk = get_vulkan_backend();
+        const Tensor* conv_bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        auto conv_result = vk->dispatchConv2dForward(inputs[0], inputs[1], conv_bias, attrs);
+        float bn_eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+        auto bn_result = vk->dispatchBatchNorm2dForward(conv_result, inputs[5], inputs[6],
+                                                         &inputs[3], &inputs[4], bn_eps);
+        return vk->dispatchActivation("relu", bn_result, 0, 0.0f);
+    });
+
+    // ========================================================================
+    // Fused Softmax + Cross Entropy
+    // ========================================================================
+    table.register_kernel(OpId::FusedSoftmaxCrossEntropy, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // Compose: softmax -> cross_entropy
+        auto vk = get_vulkan_backend();
+        int64_t dim = -1; // Softmax over last dim (class dim)
+        auto log_probs = vk->dispatchLogSoftmax(inputs[0], dim);
+        int64_t reduction = 1; // mean by default
+        auto loss = vk->dispatchCrossEntropy(log_probs, inputs[1], reduction);
+        return std::vector<Tensor>{loss};
+    });
+
+    // ========================================================================
+    // Fused Adam-Atan2 Optimizer Step (compose from Adam step with atan2 update)
+    // ========================================================================
+    table.register_kernel(OpId::FusedAdamAtan2Step, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // CPU fallback: copy to CPU, run CPU kernel, copy back
+        auto device = inputs[0].device();
+        std::vector<Tensor> cpu_inputs;
+        cpu_inputs.reserve(inputs.size());
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            cpu_inputs.push_back(inputs[i].to(Device::cpu()));
+        }
+        auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
+        auto cpu_results = cpu_table.dispatch(OpId::FusedAdamAtan2Step, cpu_inputs, attrs);
+        std::vector<Tensor> results;
+        results.reserve(cpu_results.size());
+        for (auto& r : cpu_results) {
+            results.push_back(r.to(device));
+        }
+        return results;
+    });
+
+    // ========================================================================
+    // Fused Attention (Q, K, V -> output)
+    // ========================================================================
+    table.register_kernel(OpId::FusedAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // Compose: scaled dot-product attention via dispatch methods
+        // inputs: [query, key, value]
+        auto vk = get_vulkan_backend();
+        float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+
+        // scores = Q @ K^T
+        auto key_t = vk->dispatchTranspose(inputs[1], -2, -1);
+        auto scores = vk->dispatchBmm(inputs[0], key_t);
+
+        // scores *= scale
+        if (scale != 1.0f) {
+            auto scale_tensor = vk->dispatchFull({1}, scale, scores.dtype());
+            scores = vk->dispatchBinaryOp("mul", scores, scale_tensor);
+        }
+
+        // attn_weights = softmax(scores, dim=-1)
+        auto attn_weights = vk->dispatchSoftmax(scores, -1);
+
+        // output = attn_weights @ V
+        auto output = vk->dispatchBmm(attn_weights, inputs[2]);
+        return std::vector<Tensor>{output};
+    });
+
+    // ========================================================================
+    // BatchNorm2d Fused Training
+    // ========================================================================
+    table.register_kernel(OpId::BatchNorm2dFusedTraining, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [input, running_mean, running_var, gamma, beta]
+        auto vk = get_vulkan_backend();
+        float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+        float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.1));
+
+        // Compute batch mean and variance
+        auto [batch_mean, batch_var] = vk->dispatchBatchNorm2dMeanVar(inputs[0]);
+
+        // Normalize using batch statistics
+        auto output = vk->dispatchBatchNorm2dForward(inputs[0], batch_mean, batch_var,
+                                                      &inputs[3], &inputs[4], epsilon);
+
+        // Update running stats: running = (1 - momentum) * running + momentum * batch
+        OpAttributes update_attrs;
+        update_attrs.set(AttrKey::Momentum, static_cast<double>(momentum));
+        std::vector<Tensor> update_inputs = {inputs[1], inputs[2], batch_mean, batch_var};
+        auto updated = vk->dispatchBatchNorm2dUpdateRunningStats(update_inputs, update_attrs);
+
+        // Return: [output, updated_running_mean, updated_running_var, batch_mean, batch_var]
+        return std::vector<Tensor>{output, updated[0], updated[1], batch_mean, batch_var};
+    });
+
+    // ========================================================================
+    // Fused LayerNorm Backward
+    // ========================================================================
+    table.register_kernel(OpId::FusedLayerNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [grad_output, input, weight, mean, inv_std]
+        auto vk = get_vulkan_backend();
+        auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
+        int64_t normalized_size = 1;
+        for (auto s : normalized_shape) normalized_size *= s;
+        if (normalized_size <= 0) normalized_size = inputs[0].shape().back();
+        auto [grad_input, grad_weight, grad_bias] = vk->dispatchLayerNormBackward(
+            inputs[0], inputs[1], inputs[3], inputs[4], &inputs[2], normalized_size);
+        return std::vector<Tensor>{grad_input, grad_weight, grad_bias};
+    });
+
+    // ========================================================================
+    // FFT Operations (CPU fallback — FFT is impractical in native Vulkan)
+    // ========================================================================
+
+    // Helper: copy inputs to CPU, dispatch FFT on CPU, copy result back to Vulkan
+    #define VULKAN_FFT_CPU_FALLBACK(OP_ID) \
+    table.register_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes& attrs) \
+        -> std::vector<Tensor> { \
+        auto device = inputs[0].device(); \
+        std::vector<Tensor> cpu_inputs; \
+        cpu_inputs.reserve(inputs.size()); \
+        for (size_t i = 0; i < inputs.size(); ++i) { \
+            cpu_inputs.push_back(inputs[i].to(Device::cpu())); \
+        } \
+        auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU); \
+        auto results = cpu_table.dispatch(OpId::OP_ID, cpu_inputs, attrs); \
+        for (auto& r : results) r = r.to(device); \
+        return results; \
+    })
+
+    VULKAN_FFT_CPU_FALLBACK(FFT);
+    VULKAN_FFT_CPU_FALLBACK(IFFT);
+    VULKAN_FFT_CPU_FALLBACK(RFFT);
+    VULKAN_FFT_CPU_FALLBACK(IRFFT);
+    VULKAN_FFT_CPU_FALLBACK(FFT2);
+    VULKAN_FFT_CPU_FALLBACK(IFFT2);
+    VULKAN_FFT_CPU_FALLBACK(FFTN);
+    VULKAN_FFT_CPU_FALLBACK(IFFTN);
+
+    #undef VULKAN_FFT_CPU_FALLBACK
+
     std::cout << "Vulkan dispatch table initialized with O(1) lookup" << std::endl;
 }
 

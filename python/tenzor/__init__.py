@@ -23,6 +23,15 @@ Basic usage:
 
     model = MyNet()
     model.cuda()  # Move to GPU if available
+
+Thread safety:
+    The GIL is released during most C++ operations (matmul, conv2d, etc.),
+    so Python threads can overlap computation with I/O. However:
+    - Variables (autograd tensors) are NOT thread-safe by default.
+    - Call var.make_thread_safe() before concurrent gradient accumulation.
+    - NoGradGuard is thread-local and does NOT propagate to spawned threads.
+    - For data-parallel training, use separate Variable instances per thread
+      or call make_thread_safe() on shared parameters.
 """
 
 # Import sys and importlib for module registration

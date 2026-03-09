@@ -449,14 +449,28 @@ enum class OpId : uint16_t {
 
     // =========================================================================
     // RNN Backward / Extended RNN Operations (450-459)
+    //
+    // NOTE: These OpIds are RESERVED but NOT registered in any backend.
+    // Autograd handles RNN backward by unrolling the sequence and calling
+    // cell-level backward ops (LSTMCellBackward, GRUCellBackward), which
+    // ARE registered on all backends. The sequence-level backward OpIds
+    // exist for potential future fused backward implementations but are
+    // currently unused. RNNForward is reserved for vanilla/Elman RNN.
     // =========================================================================
-    LSTMBackward = 450,        // LSTM backward (single layer)
-    GRUBackward,               // GRU backward (single layer)
-    BiLSTMBackward,            // Bidirectional LSTM backward
-    RNNForward,                // Generic RNN forward (vanilla/Elman)
+    LSTMBackward = 450,        // LSTM backward (single layer) — RESERVED, unused
+    GRUBackward,               // GRU backward (single layer) — RESERVED, unused
+    BiLSTMBackward,            // Bidirectional LSTM backward — RESERVED, unused
+    RNNForward,                // Generic RNN forward (vanilla/Elman) — RESERVED, unused
 
     // =========================================================================
     // Sparse Tensor Operations (460-469)
+    //
+    // NOTE: These OpIds are RESERVED but NOT registered via the dispatch table.
+    // Sparse operations use a separate dispatch path through SparseTensor
+    // (see src/sparse/sparse_ops.cpp) which calls MKL SpMV/SpMM on CPU and
+    // cuSPARSE/rocSPARSE on GPU directly, bypassing the Tensor-based OpId
+    // dispatch. These OpIds exist for potential future unification of sparse
+    // and dense dispatch but are currently unused.
     // =========================================================================
     SparseSpMM = 460,          // Sparse-Dense matrix multiplication
     SparseSpMV,                // Sparse-Dense matrix-vector multiplication

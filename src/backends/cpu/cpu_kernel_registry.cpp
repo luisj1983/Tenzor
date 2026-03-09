@@ -43,6 +43,7 @@ namespace cpu {
     auto floor_kernel(const Tensor& input) -> Tensor;
     auto ceil_kernel(const Tensor& input) -> Tensor;
     auto round_kernel(const Tensor& input) -> Tensor;
+    auto trunc_kernel(const Tensor& input) -> Tensor;
 
     // Trigonometric
     auto sin_kernel(const Tensor& input) -> Tensor;
@@ -323,6 +324,8 @@ namespace cpu {
                                     float spatial_scale, int64_t sampling_ratio,
                                     bool aligned) -> Tensor;
     auto box_iou_kernel(const Tensor& boxes1, const Tensor& boxes2, int iou_type) -> Tensor;
+    auto gather_relative_position_bias_kernel(const Tensor& bias_table, const Tensor& rel_pos_index,
+                                               int64_t num_positions, int64_t num_heads) -> Tensor;
     auto unfold_kernel(const Tensor& input, int64_t kernel_size,
                        int64_t stride, int64_t padding, int64_t dilation) -> Tensor;
     auto fold_kernel(const Tensor& input, const std::vector<int64_t>& output_size,
@@ -569,6 +572,15 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Floor, cpu::floor_kernel);
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Ceil, cpu::ceil_kernel);
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Round, cpu::round_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Trunc, cpu::trunc_kernel);
+
+    table.register_single_output_kernel(OpId::Cast, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        if (!attrs.has(AttrKey::TargetDtype)) {
+            throw std::runtime_error("cast: missing 'target_dtype' attribute");
+        }
+        DType target_dtype = static_cast<DType>(attrs.get_int(AttrKey::TargetDtype));
+        return inputs[0].to(target_dtype);
+    });
 
     table.register_single_output_kernel(OpId::Pow, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         float exponent = static_cast<float>(attrs.get_float(AttrKey::Exponent, 2.0));
@@ -1430,6 +1442,13 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         int iou_type = static_cast<int>(attrs.get_int(AttrKey::IouType, 0));
         return cpu::box_iou_kernel(inputs[0], inputs[1], iou_type);
     });
+
+    table.register_kernel(OpId::GatherRelativePositionBias,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t num_positions = attrs.get_int(AttrKey::NumPositions, 0);
+            int64_t num_heads = attrs.get_int(AttrKey::NumHeads, 0);
+            return {cpu::gather_relative_position_bias_kernel(inputs[0], inputs[1], num_positions, num_heads)};
+        });
 
     // =========================================================================
     // Unfold / Fold Operations

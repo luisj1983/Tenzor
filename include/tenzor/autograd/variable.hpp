@@ -157,10 +157,13 @@ struct VariableImpl {
  * While shared_ptr reference counting is atomic, the Tensor data, gradient
  * state, and computation graph are NOT. In particular:
  * - Forward/backward passes sharing Variables must run on the same thread
- * - Gradient accumulation is NOT atomic
+ * - Gradient accumulation is NOT atomic unless make_thread_safe() is called
  * - Hook registration/invocation is serialized via shared_mutex
  * - NoGradGuard is thread-local (does NOT propagate to spawned threads)
- * For concurrent training, use separate Variable instances per thread.
+ * - The backward engine uses a per-thread singleton model
+ * For concurrent training, use separate Variable instances per thread,
+ * or call make_thread_safe() on shared parameters before concurrent
+ * gradient accumulation (e.g., data-parallel training).
  *
  * @code
  * // Create variables that require gradients

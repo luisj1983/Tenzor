@@ -131,6 +131,13 @@ namespace rocm {
     auto minimum_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor;
     auto maximum_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor;
 
+    // Complex number operations
+    auto conj_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto real_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto imag_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto angle_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto polar_kernel(const Tensor& abs_t, const Tensor& angle_t, hipStream_t stream) -> Tensor;
+
     // Dot product
     auto dot_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor;
 
@@ -2549,6 +2556,29 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Maximum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return std::vector<Tensor>{rocm::maximum_kernel(inputs[0], inputs[1], get_hip_stream(attrs))};
+    });
+
+    // ========================================================================
+    // Complex Number Operations
+    // ========================================================================
+    table.register_kernel(OpId::Conj, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::conj_kernel(inputs[0], get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::Real, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::real_kernel(inputs[0], get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::Imag, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::imag_kernel(inputs[0], get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::Angle, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::angle_kernel(inputs[0], get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::Polar, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::polar_kernel(inputs[0], inputs[1], get_hip_stream(attrs))};
     });
 
     // ========================================================================

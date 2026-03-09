@@ -645,6 +645,13 @@ namespace cuda {
     Tensor minimum_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor maximum_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
 
+    // Complex number dispatch wrappers
+    Tensor conj_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor real_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor imag_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor angle_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor polar_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+
 } // namespace cuda
 
 // Forward declarations for quantized CUDA kernels (in nn::quantization::kernels namespace)
@@ -872,6 +879,15 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // =========================================================================
     table.register_single_output_kernel(OpId::Minimum, cuda::minimum_dispatch);
     table.register_single_output_kernel(OpId::Maximum, cuda::maximum_dispatch);
+
+    // =========================================================================
+    // Complex Number Operations
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Conj, cuda::conj_dispatch);
+    table.register_single_output_kernel(OpId::Real, cuda::real_dispatch);
+    table.register_single_output_kernel(OpId::Imag, cuda::imag_dispatch);
+    table.register_single_output_kernel(OpId::Angle, cuda::angle_dispatch);
+    table.register_single_output_kernel(OpId::Polar, cuda::polar_dispatch);
 
     // =========================================================================
     // Comparison Operations (using direct function pointers)
