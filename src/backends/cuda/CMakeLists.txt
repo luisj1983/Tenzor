@@ -162,7 +162,7 @@ if(CUDNN_FOUND)
         FetchContent_Declare(
             cudnn_frontend
             GIT_REPOSITORY https://github.com/NVIDIA/cudnn-frontend.git
-            GIT_TAG 9dbe7e0cfb31780301e3e5eb10c871a22945ead6  # v1.17.0 pinned
+            GIT_TAG v1.17.0
             GIT_SHALLOW TRUE
         )
         # Disable samples and tests to avoid Catch2 C++23 compatibility issues

@@ -3,7 +3,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include <hipcub/hipcub.hpp>
-#include <thrust/counting_iterator.h>
+#include <thrust/iterator/counting_iterator.h>
 #include <stdexcept>
 #include <vector>
 

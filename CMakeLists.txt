@@ -17,7 +17,7 @@ endif()
 # Set TENZOR_BUILD_ROCM before project() - use cache to preserve user preference
 # Default to ON only if ROCm is available on the system
 if(NOT DEFINED TENZOR_BUILD_ROCM)
-    option(TENZOR_BUILD_ROCM "Build ROCm backend" OFF)
+    option(TENZOR_BUILD_ROCM "Build ROCm backend" on)
 endif()
 
 # Set up HIP architectures if building ROCm backend

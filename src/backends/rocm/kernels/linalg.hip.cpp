@@ -79,10 +79,10 @@ struct DeviceInfo {
     rocblas_int* ptr = nullptr;
     DeviceInfo() {
         ptr = static_cast<rocblas_int*>(
-            backend::RocmCachingAllocator::get().allocate(sizeof(rocblas_int)));
+            backend::rocm::RocmCachingAllocator::get().allocate(sizeof(rocblas_int)));
     }
     ~DeviceInfo() {
-        if (ptr) backend::RocmCachingAllocator::get().free(ptr);
+        if (ptr) backend::rocm::RocmCachingAllocator::get().free(ptr);
     }
     DeviceInfo(const DeviceInfo&) = delete;
     DeviceInfo& operator=(const DeviceInfo&) = delete;
@@ -263,7 +263,7 @@ auto linalg_det_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
     // Allocate pivot array on device (via caching allocator)
     size_t ipiv_bytes = nbatch * n * sizeof(rocblas_int);
     auto* d_ipiv = static_cast<rocblas_int*>(
-        backend::RocmCachingAllocator::get().allocate(ipiv_bytes));
+        backend::rocm::RocmCachingAllocator::get().allocate(ipiv_bytes));
     DeviceInfo d_info;
 
     if (A.dtype() == DType::Float32) {
@@ -298,7 +298,7 @@ auto linalg_det_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : 0));
-    backend::RocmCachingAllocator::get().free(d_ipiv);
+    backend::rocm::RocmCachingAllocator::get().free(d_ipiv);
     return result;
 }
 
@@ -317,7 +317,7 @@ auto linalg_inv_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
 
     size_t ipiv_bytes = n * sizeof(rocblas_int);
     auto* d_ipiv = static_cast<rocblas_int*>(
-        backend::RocmCachingAllocator::get().allocate(ipiv_bytes));
+        backend::rocm::RocmCachingAllocator::get().allocate(ipiv_bytes));
     DeviceInfo d_info;
 
     // Create identity matrix on device for getrs-based inversion
@@ -375,7 +375,7 @@ auto linalg_inv_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : 0));
-    backend::RocmCachingAllocator::get().free(d_ipiv);
+    backend::rocm::RocmCachingAllocator::get().free(d_ipiv);
     return identity;
 }
 
@@ -402,7 +402,7 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, hipStream_t stream) -
 
     size_t ipiv_bytes = n * sizeof(rocblas_int);
     auto* d_ipiv = static_cast<rocblas_int*>(
-        backend::RocmCachingAllocator::get().allocate(ipiv_bytes));
+        backend::rocm::RocmCachingAllocator::get().allocate(ipiv_bytes));
     DeviceInfo d_info;
 
     if (A.dtype() == DType::Float32) {
@@ -436,7 +436,7 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, hipStream_t stream) -
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : 0));
-    backend::RocmCachingAllocator::get().free(d_ipiv);
+    backend::rocm::RocmCachingAllocator::get().free(d_ipiv);
     return work_b;
 }
 
@@ -492,7 +492,7 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, hipStream_t stream)
 
     // Allocate E (superdiagonal) on device — required by rocSOLVER gesvd
     size_t e_bytes = (k > 1 ? k - 1 : 1) * (A.dtype() == DType::Float32 ? sizeof(float) : sizeof(double));
-    void* d_e = backend::RocmCachingAllocator::get().allocate(e_bytes);
+    void* d_e = backend::rocm::RocmCachingAllocator::get().allocate(e_bytes);
 
     if (A.dtype() == DType::Float32) {
         float* a_data = work.data<float>();
@@ -555,7 +555,7 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, hipStream_t stream)
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : 0));
-    backend::RocmCachingAllocator::get().free(d_e);
+    backend::rocm::RocmCachingAllocator::get().free(d_e);
     return {U, S, Vt};
 }
 
@@ -600,7 +600,7 @@ auto linalg_qr_kernel(const Tensor& A, hipStream_t stream)
         // Allocate tau on device
         size_t tau_bytes = k * sizeof(float);
         auto* d_tau = static_cast<float*>(
-            backend::RocmCachingAllocator::get().allocate(tau_bytes));
+            backend::rocm::RocmCachingAllocator::get().allocate(tau_bytes));
 
         for (int64_t b = 0; b < nbatch; b++) {
             float* a_mat = a_data + b * m * n_cols;
@@ -628,7 +628,7 @@ auto linalg_qr_kernel(const Tensor& A, hipStream_t stream)
                 a_mat, q_data + b * m * k, m, n_cols, k, 1);
         }
 
-        backend::RocmCachingAllocator::get().free(d_tau);
+        backend::rocm::RocmCachingAllocator::get().free(d_tau);
     } else {
         double* a_data = work.data<double>();
         double* q_data = Q.data<double>();
@@ -636,7 +636,7 @@ auto linalg_qr_kernel(const Tensor& A, hipStream_t stream)
 
         size_t tau_bytes = k * sizeof(double);
         auto* d_tau = static_cast<double*>(
-            backend::RocmCachingAllocator::get().allocate(tau_bytes));
+            backend::rocm::RocmCachingAllocator::get().allocate(tau_bytes));
 
         for (int64_t b = 0; b < nbatch; b++) {
             double* a_mat = a_data + b * m * n_cols;
@@ -659,7 +659,7 @@ auto linalg_qr_kernel(const Tensor& A, hipStream_t stream)
                 a_mat, q_data + b * m * k, m, n_cols, k, 1);
         }
 
-        backend::RocmCachingAllocator::get().free(d_tau);
+        backend::rocm::RocmCachingAllocator::get().free(d_tau);
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : 0));
@@ -697,7 +697,7 @@ auto linalg_eigh_kernel(const Tensor& A, hipStream_t stream)
 
     // Allocate E (off-diagonal) on device — required by rocSOLVER syevd
     size_t e_bytes = (n > 1 ? n - 1 : 1) * (A.dtype() == DType::Float32 ? sizeof(float) : sizeof(double));
-    void* d_e = backend::RocmCachingAllocator::get().allocate(e_bytes);
+    void* d_e = backend::rocm::RocmCachingAllocator::get().allocate(e_bytes);
 
     if (A.dtype() == DType::Float32) {
         float* a_data = work.data<float>();
@@ -726,7 +726,7 @@ auto linalg_eigh_kernel(const Tensor& A, hipStream_t stream)
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : 0));
-    backend::RocmCachingAllocator::get().free(d_e);
+    backend::rocm::RocmCachingAllocator::get().free(d_e);
     // work now contains eigenvectors (columns of orthogonal matrix)
     return {W, work};
 }

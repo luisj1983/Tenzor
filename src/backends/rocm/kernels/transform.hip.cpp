@@ -1273,7 +1273,7 @@ auto to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* str
     int num_blocks = get_num_blocks(total);
 
     auto launch_nchw_nhwc = [&](auto* in_ptr, auto* out_ptr) {
-        using T = std::remove_pointer_t<decltype(in_ptr)>;
+        using T = std::remove_pointer_t<decltype(out_ptr)>;
         if (format == MemoryFormat::ChannelsLast) {
             hipLaunchKernelGGL(nchw_to_nhwc_transform<T>,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
