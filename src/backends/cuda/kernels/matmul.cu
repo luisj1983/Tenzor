@@ -59,6 +59,40 @@ constexpr int TILE_SIZE_K = 16;  // K-dimension tile for better memory coalescin
 constexpr int TILE_SIZE_F16 = 16;  // Smaller tile size for FP16 to reduce resource usage
 
 // ============================================================================
+// Architecture-Aware Tile Configuration
+// ============================================================================
+
+struct TileConfig {
+    int tile_m, tile_n, tile_k;
+};
+
+// Get architecture-appropriate tile config based on GPU compute capability.
+// Cached per-device to avoid repeated queries.
+inline TileConfig get_tile_config(int device_id = 0) {
+    // Cache per device (max 16 GPUs)
+    static TileConfig configs[16] = {};
+    static bool initialized[16] = {};
+
+    if (device_id < 0 || device_id >= 16) device_id = 0;
+    if (initialized[device_id]) return configs[device_id];
+
+    int major = 0, minor = 0;
+    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device_id);
+    cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device_id);
+    int sm = major * 10 + minor;
+
+    if (sm < 70) {
+        configs[device_id] = {16, 16, 16};       // Pascal: smaller tiles
+    } else if (sm < 80) {
+        configs[device_id] = {32, 32, 16};        // Volta/Turing: current default
+    } else {
+        configs[device_id] = {32, 32, 32};        // Ampere+: more shared mem, bigger K tile
+    }
+    initialized[device_id] = true;
+    return configs[device_id];
+}
+
+// ============================================================================
 // Float32 Tiled MatMul Kernel
 // ============================================================================
 
@@ -1282,12 +1316,25 @@ void matmul_f32(
 #endif
 
     // Use custom tiled kernel for smaller matrices
-    dim3 block(TILE_SIZE, TILE_SIZE);
-    dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE,
-              (M + TILE_SIZE - 1) / TILE_SIZE);
-
-    matmul_tiled_f32_kernel<TILE_SIZE, TILE_SIZE, TILE_SIZE_K>
-        <<<grid, block, 0, stream>>>(A, B, C, M, N, K, K, N, N);
+    // Select architecture-appropriate tile sizes
+    auto tc = get_tile_config();
+    if (tc.tile_m == 16) {
+        dim3 block(16, 16);
+        dim3 grid((N + 15) / 16, (M + 15) / 16);
+        matmul_tiled_f32_kernel<16, 16, 16>
+            <<<grid, block, 0, stream>>>(A, B, C, M, N, K, K, N, N);
+    } else if (tc.tile_k == 32) {
+        dim3 block(32, 32);
+        dim3 grid((N + 31) / 32, (M + 31) / 32);
+        matmul_tiled_f32_kernel<32, 32, 32>
+            <<<grid, block, 0, stream>>>(A, B, C, M, N, K, K, N, N);
+    } else {
+        dim3 block(TILE_SIZE, TILE_SIZE);
+        dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE,
+                  (M + TILE_SIZE - 1) / TILE_SIZE);
+        matmul_tiled_f32_kernel<TILE_SIZE, TILE_SIZE, TILE_SIZE_K>
+            <<<grid, block, 0, stream>>>(A, B, C, M, N, K, K, N, N);
+    }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
 }
@@ -1306,12 +1353,25 @@ void matmul_f64(
 #endif
 
     // Use custom tiled kernel for smaller matrices
-    dim3 block(TILE_SIZE, TILE_SIZE);
-    dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE,
-              (M + TILE_SIZE - 1) / TILE_SIZE);
-
-    matmul_tiled_f64_kernel<TILE_SIZE, TILE_SIZE, TILE_SIZE_K>
-        <<<grid, block, 0, stream>>>(A, B, C, M, N, K, K, N, N);
+    // Select architecture-appropriate tile sizes
+    auto tc = get_tile_config();
+    if (tc.tile_m == 16) {
+        dim3 block(16, 16);
+        dim3 grid((N + 15) / 16, (M + 15) / 16);
+        matmul_tiled_f64_kernel<16, 16, 16>
+            <<<grid, block, 0, stream>>>(A, B, C, M, N, K, K, N, N);
+    } else if (tc.tile_k == 32) {
+        dim3 block(32, 32);
+        dim3 grid((N + 31) / 32, (M + 31) / 32);
+        matmul_tiled_f64_kernel<32, 32, 32>
+            <<<grid, block, 0, stream>>>(A, B, C, M, N, K, K, N, N);
+    } else {
+        dim3 block(TILE_SIZE, TILE_SIZE);
+        dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE,
+                  (M + TILE_SIZE - 1) / TILE_SIZE);
+        matmul_tiled_f64_kernel<TILE_SIZE, TILE_SIZE, TILE_SIZE_K>
+            <<<grid, block, 0, stream>>>(A, B, C, M, N, K, K, N, N);
+    }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
 }
@@ -1322,12 +1382,25 @@ void matmul_i32(
     cudaStream_t stream = 0) {
 
     // Custom kernel (no cuBLAS for int32)
-    dim3 block(TILE_SIZE, TILE_SIZE);
-    dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE,
-              (M + TILE_SIZE - 1) / TILE_SIZE);
-
-    matmul_tiled_i32_kernel<TILE_SIZE, TILE_SIZE, TILE_SIZE_K>
-        <<<grid, block, 0, stream>>>(A, B, C, M, N, K, K, N, N);
+    // Select architecture-appropriate tile sizes
+    auto tc = get_tile_config();
+    if (tc.tile_m == 16) {
+        dim3 block(16, 16);
+        dim3 grid((N + 15) / 16, (M + 15) / 16);
+        matmul_tiled_i32_kernel<16, 16, 16>
+            <<<grid, block, 0, stream>>>(A, B, C, M, N, K, K, N, N);
+    } else if (tc.tile_k == 32) {
+        dim3 block(32, 32);
+        dim3 grid((N + 31) / 32, (M + 31) / 32);
+        matmul_tiled_i32_kernel<32, 32, 32>
+            <<<grid, block, 0, stream>>>(A, B, C, M, N, K, K, N, N);
+    } else {
+        dim3 block(TILE_SIZE, TILE_SIZE);
+        dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE,
+                  (M + TILE_SIZE - 1) / TILE_SIZE);
+        matmul_tiled_i32_kernel<TILE_SIZE, TILE_SIZE, TILE_SIZE_K>
+            <<<grid, block, 0, stream>>>(A, B, C, M, N, K, K, N, N);
+    }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
 }
@@ -1501,15 +1574,32 @@ void batched_matmul_f32(
                                stride_a, stride_b, stride_c, stream);
 #else
     // Fallback to custom batched kernel when cuBLAS is not available
-    dim3 block(TILE_SIZE, TILE_SIZE);
-    dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE,
-              (M + TILE_SIZE - 1) / TILE_SIZE,
-              batch_size);
-
-    batched_matmul_tiled_f32_kernel<TILE_SIZE, TILE_SIZE, TILE_SIZE_K>
-        <<<grid, block, 0, stream>>>(
-            A, B, C, batch_size, M, N, K,
-            stride_a, stride_b, stride_c);
+    // Select architecture-appropriate tile sizes
+    auto tc = get_tile_config();
+    if (tc.tile_m == 16) {
+        dim3 block(16, 16);
+        dim3 grid((N + 15) / 16, (M + 15) / 16, batch_size);
+        batched_matmul_tiled_f32_kernel<16, 16, 16>
+            <<<grid, block, 0, stream>>>(
+                A, B, C, batch_size, M, N, K,
+                stride_a, stride_b, stride_c);
+    } else if (tc.tile_k == 32) {
+        dim3 block(32, 32);
+        dim3 grid((N + 31) / 32, (M + 31) / 32, batch_size);
+        batched_matmul_tiled_f32_kernel<32, 32, 32>
+            <<<grid, block, 0, stream>>>(
+                A, B, C, batch_size, M, N, K,
+                stride_a, stride_b, stride_c);
+    } else {
+        dim3 block(TILE_SIZE, TILE_SIZE);
+        dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE,
+                  (M + TILE_SIZE - 1) / TILE_SIZE,
+                  batch_size);
+        batched_matmul_tiled_f32_kernel<TILE_SIZE, TILE_SIZE, TILE_SIZE_K>
+            <<<grid, block, 0, stream>>>(
+                A, B, C, batch_size, M, N, K,
+                stride_a, stride_b, stride_c);
+    }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
 #endif
@@ -1531,15 +1621,32 @@ void batched_matmul_f64(
                                stride_a, stride_b, stride_c, stream);
 #else
     // Fallback to custom batched kernel when cuBLAS is not available
-    dim3 block(TILE_SIZE, TILE_SIZE);
-    dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE,
-              (M + TILE_SIZE - 1) / TILE_SIZE,
-              batch_size);
-
-    batched_matmul_tiled_f64_kernel<TILE_SIZE, TILE_SIZE, TILE_SIZE_K>
-        <<<grid, block, 0, stream>>>(
-            A, B, C, batch_size, M, N, K,
-            stride_a, stride_b, stride_c);
+    // Select architecture-appropriate tile sizes
+    auto tc = get_tile_config();
+    if (tc.tile_m == 16) {
+        dim3 block(16, 16);
+        dim3 grid((N + 15) / 16, (M + 15) / 16, batch_size);
+        batched_matmul_tiled_f64_kernel<16, 16, 16>
+            <<<grid, block, 0, stream>>>(
+                A, B, C, batch_size, M, N, K,
+                stride_a, stride_b, stride_c);
+    } else if (tc.tile_k == 32) {
+        dim3 block(32, 32);
+        dim3 grid((N + 31) / 32, (M + 31) / 32, batch_size);
+        batched_matmul_tiled_f64_kernel<32, 32, 32>
+            <<<grid, block, 0, stream>>>(
+                A, B, C, batch_size, M, N, K,
+                stride_a, stride_b, stride_c);
+    } else {
+        dim3 block(TILE_SIZE, TILE_SIZE);
+        dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE,
+                  (M + TILE_SIZE - 1) / TILE_SIZE,
+                  batch_size);
+        batched_matmul_tiled_f64_kernel<TILE_SIZE, TILE_SIZE, TILE_SIZE_K>
+            <<<grid, block, 0, stream>>>(
+                A, B, C, batch_size, M, N, K,
+                stride_a, stride_b, stride_c);
+    }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
 #endif

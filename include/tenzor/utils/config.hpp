@@ -62,4 +62,10 @@ private:
     std::unordered_map<std::string, std::string> config_;
 };
 
+/// Set deterministic mode globally
+auto set_deterministic(bool deterministic) -> void;
+
+/// Check if deterministic mode is enabled
+auto is_deterministic() -> bool;
+
 } // namespace tenzor

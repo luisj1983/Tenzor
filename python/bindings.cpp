@@ -22,7 +22,11 @@
 #include <tenzor/nn/optim/rmsprop.hpp>
 #include <tenzor/nn/optim/adagrad.hpp>
 #include <tenzor/nn/optim/adadelta.hpp>
+#include <tenzor/nn/optim/radam.hpp>
+#include <tenzor/nn/optim/lamb.hpp>
+#include <tenzor/nn/optim/sparse_adam.hpp>
 #include <tenzor/nn/loss/losses.hpp>
+#include <tenzor/nn/loss/contrastive.hpp>
 #include <tenzor/nn/callbacks.hpp>
 #include <tenzor/nn/training.hpp>
 #include <tenzor/nn/checkpoint.hpp>
@@ -64,6 +68,7 @@
 #include <tenzor/nn/utils/clip_grad.hpp>
 #include <tenzor/nn/utils/rnn_utils.hpp>
 #include <tenzor/utils/error.hpp>
+#include <tenzor/utils/config.hpp>
 #include "numpy_interop.hpp"
 #include <thread>
 #include <cstdlib>
@@ -222,6 +227,11 @@ PYBIND11_MODULE(tenzor_core, m) {
 
     m.def("mkl_cleanup", &tenzor::mkl_cleanup,
           "Free MKL internal buffers (call before using PyTorch/NumPy with MKL)");
+
+    m.def("set_deterministic", &tenzor::set_deterministic, py::arg("mode"),
+          "Enable or disable deterministic operations");
+    m.def("is_deterministic", &tenzor::is_deterministic,
+          "Check if deterministic mode is enabled");
 
     // Device availability checks
     m.def("cuda_is_available", []() {
@@ -4304,6 +4314,52 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("log_probs"), py::arg("targets"),
              py::arg("input_lengths"), py::arg("target_lengths"));
 
+    // Contrastive loss functions
+    py::class_<tenzor::nn::InfoNCELoss>(nn, "InfoNCELoss",
+        "InfoNCE loss for contrastive learning (SimCLR, CLIP, MoCo)")
+        .def(py::init<double, tenzor::nn::Reduction>(),
+             py::arg("temperature") = 0.07,
+             py::arg("reduction") = tenzor::nn::Reduction::Mean)
+        .def("forward", &tenzor::nn::InfoNCELoss::forward,
+             py::arg("queries"), py::arg("keys"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("__call__", &tenzor::nn::InfoNCELoss::operator(),
+             py::arg("queries"), py::arg("keys"));
+
+    py::class_<tenzor::nn::NTXentLoss>(nn, "NTXentLoss",
+        "NT-Xent (Normalized Temperature-scaled Cross Entropy) loss for SimCLR")
+        .def(py::init<double, tenzor::nn::Reduction>(),
+             py::arg("temperature") = 0.5,
+             py::arg("reduction") = tenzor::nn::Reduction::Mean)
+        .def("forward", &tenzor::nn::NTXentLoss::forward,
+             py::arg("z_i"), py::arg("z_j"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("__call__", &tenzor::nn::NTXentLoss::operator(),
+             py::arg("z_i"), py::arg("z_j"));
+
+    py::class_<tenzor::nn::TripletLoss>(nn, "TripletLoss",
+        "Triplet margin loss for metric learning")
+        .def(py::init<double, double, bool, tenzor::nn::Reduction>(),
+             py::arg("margin") = 1.0, py::arg("p") = 2.0,
+             py::arg("swap") = false,
+             py::arg("reduction") = tenzor::nn::Reduction::Mean)
+        .def("forward", &tenzor::nn::TripletLoss::forward,
+             py::arg("anchor"), py::arg("positive"), py::arg("negative"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("__call__", &tenzor::nn::TripletLoss::operator(),
+             py::arg("anchor"), py::arg("positive"), py::arg("negative"));
+
+    py::class_<tenzor::nn::MarginRankingLoss>(nn, "MarginRankingLoss",
+        "Margin ranking loss for ranking tasks")
+        .def(py::init<double, tenzor::nn::Reduction>(),
+             py::arg("margin") = 0.0,
+             py::arg("reduction") = tenzor::nn::Reduction::Mean)
+        .def("forward", &tenzor::nn::MarginRankingLoss::forward,
+             py::arg("input1"), py::arg("input2"), py::arg("target"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("__call__", &tenzor::nn::MarginRankingLoss::operator(),
+             py::arg("input1"), py::arg("input2"), py::arg("target"));
+
     // Functional loss functions
     nn.def("mse_loss", &tenzor::nn::mse_loss, "MSE loss function",
           py::arg("input"), py::arg("target"),
@@ -4343,6 +4399,27 @@ PYBIND11_MODULE(tenzor_core, m) {
        py::arg("beta") = 1.0,
        "Smooth L1 loss function",
        py::call_guard<py::gil_scoped_release>());
+
+    nn.def("info_nce_loss", &tenzor::nn::info_nce_loss,
+          py::arg("queries"), py::arg("keys"),
+          py::arg("temperature") = 0.07,
+          py::arg("reduction") = tenzor::nn::Reduction::Mean,
+          py::call_guard<py::gil_scoped_release>());
+    nn.def("nt_xent_loss", &tenzor::nn::nt_xent_loss,
+          py::arg("z_i"), py::arg("z_j"),
+          py::arg("temperature") = 0.5,
+          py::arg("reduction") = tenzor::nn::Reduction::Mean,
+          py::call_guard<py::gil_scoped_release>());
+    nn.def("triplet_loss", &tenzor::nn::triplet_loss,
+          py::arg("anchor"), py::arg("positive"), py::arg("negative"),
+          py::arg("margin") = 1.0, py::arg("p") = 2.0, py::arg("swap") = false,
+          py::arg("reduction") = tenzor::nn::Reduction::Mean,
+          py::call_guard<py::gil_scoped_release>());
+    nn.def("margin_ranking_loss", &tenzor::nn::margin_ranking_loss,
+          py::arg("input1"), py::arg("input2"), py::arg("target"),
+          py::arg("margin") = 0.0,
+          py::arg("reduction") = tenzor::nn::Reduction::Mean,
+          py::call_guard<py::gil_scoped_release>());
 
     // =========================================================================
     // Functional API — stateless operation wrappers (F.dropout, F.linear, etc.)
@@ -4648,6 +4725,45 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("eps") = 1e-6, py::arg("weight_decay") = 0.0)
         .def("step", &tenzor::optim::Adadelta::step)
         .def("zero_grad", &tenzor::optim::Adadelta::zero_grad);
+
+    py::class_<tenzor::optim::RAdam, tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::RAdam>>(optim, "RAdam",
+        "Rectified Adam optimizer (no warmup needed)")
+        .def(py::init<std::vector<std::shared_ptr<tenzor::Variable>>, double, double, double, double, double>(),
+             py::arg("params"), py::arg("lr") = 1e-3,
+             py::arg("beta1") = 0.9, py::arg("beta2") = 0.999,
+             py::arg("eps") = 1e-8, py::arg("weight_decay") = 0.0)
+        .def("step", &tenzor::optim::RAdam::step)
+        .def("zero_grad", &tenzor::optim::RAdam::zero_grad)
+        .def("set_lr", &tenzor::optim::RAdam::set_lr, py::arg("lr"))
+        .def("get_lr", &tenzor::optim::RAdam::get_lr)
+        .def("state_dict", &tenzor::optim::RAdam::state_dict)
+        .def("load_state_dict", &tenzor::optim::RAdam::load_state_dict, py::arg("state"));
+
+    py::class_<tenzor::optim::LAMB, tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::LAMB>>(optim, "LAMB",
+        "LAMB optimizer for large-batch training")
+        .def(py::init<std::vector<std::shared_ptr<tenzor::Variable>>, double, double, double, double, double>(),
+             py::arg("params"), py::arg("lr") = 1e-3,
+             py::arg("beta1") = 0.9, py::arg("beta2") = 0.999,
+             py::arg("eps") = 1e-6, py::arg("weight_decay") = 0.01)
+        .def("step", &tenzor::optim::LAMB::step)
+        .def("zero_grad", &tenzor::optim::LAMB::zero_grad)
+        .def("set_lr", &tenzor::optim::LAMB::set_lr, py::arg("lr"))
+        .def("get_lr", &tenzor::optim::LAMB::get_lr)
+        .def("state_dict", &tenzor::optim::LAMB::state_dict)
+        .def("load_state_dict", &tenzor::optim::LAMB::load_state_dict, py::arg("state"));
+
+    py::class_<tenzor::optim::SparseAdam, tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::SparseAdam>>(optim, "SparseAdam",
+        "SparseAdam optimizer for efficient embedding training with sparse gradients")
+        .def(py::init<std::vector<std::shared_ptr<tenzor::Variable>>, double, double, double, double>(),
+             py::arg("params"), py::arg("lr") = 1e-3,
+             py::arg("beta1") = 0.9, py::arg("beta2") = 0.999,
+             py::arg("eps") = 1e-8)
+        .def("step", &tenzor::optim::SparseAdam::step)
+        .def("zero_grad", &tenzor::optim::SparseAdam::zero_grad)
+        .def("set_lr", &tenzor::optim::SparseAdam::set_lr, py::arg("lr"))
+        .def("get_lr", &tenzor::optim::SparseAdam::get_lr)
+        .def("state_dict", &tenzor::optim::SparseAdam::state_dict)
+        .def("load_state_dict", &tenzor::optim::SparseAdam::load_state_dict, py::arg("state"));
 
     // Learning rate schedulers
     auto lr_scheduler = optim.def_submodule("lr_scheduler", "Learning rate scheduling");

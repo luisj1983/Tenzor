@@ -120,7 +120,7 @@ __global__ void cast_i32_to_i64(const int32_t* __restrict__ src,
 /// Helper to build a CSR SparseTensor on GPU from a COO SparseTensor.
 /// If already CSR, returns the input. Otherwise converts COO -> CSR on GPU
 /// using cusparseXcoo2csr() — avoids CPU round-trips.
-SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse) {
+SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse, cudaStream_t stream = 0) {
     // Move to GPU if on CPU
     auto sp = (sparse.device().type != Device::Type::CUDA)
               ? sparse.to(Device::cuda())
@@ -148,11 +148,11 @@ SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse) {
 
         int threads = 256;
         int blocks_nnz = static_cast<int>((nnz + threads - 1) / threads);
-        cast_i64_to_i32<<<blocks_nnz, threads>>>(row_indices_ptr, row_i32_buf.as<int32_t>(), nnz);
+        cast_i64_to_i32<<<blocks_nnz, threads, 0, stream>>>(row_indices_ptr, row_i32_buf.as<int32_t>(), nnz);
         CUDA_CHECK_SPARSE(cudaGetLastError());
 
         // Convert COO row indices to CSR row pointers on GPU
-        cusparseHandle_t handle = CuSPARSEHandlePool::get(cudaStreamPerThread);
+        cusparseHandle_t handle = CuSPARSEHandlePool::get(stream);
         CUSPARSE_CHECK(cusparseXcoo2csr(
             handle, row_i32_buf.as<int32_t>(), static_cast<int>(nnz), static_cast<int>(nrows),
             crow_i32_buf.as<int32_t>(), CUSPARSE_INDEX_BASE_ZERO));
@@ -160,13 +160,13 @@ SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse) {
         // Convert Int32 crow_indices back to Int64 on GPU
         Tensor crow_indices = zeros(std::vector<int64_t>{nrows + 1}, DType::Int64, Device::cuda());
         int blocks_crow = static_cast<int>((nrows + 1 + threads - 1) / threads);
-        cast_i32_to_i64<<<blocks_crow, threads>>>(crow_i32_buf.as<int32_t>(), crow_indices.data<int64_t>(), nrows + 1);
+        cast_i32_to_i64<<<blocks_crow, threads, 0, stream>>>(crow_i32_buf.as<int32_t>(), crow_indices.data<int64_t>(), nrows + 1);
         CUDA_CHECK_SPARSE(cudaGetLastError());
 
         // Copy col indices (already on GPU, just need a separate tensor)
         Tensor col_idx = zeros(std::vector<int64_t>{nnz}, DType::Int64, Device::cuda());
         CUDA_CHECK_SPARSE(cudaMemcpyAsync(col_idx.data<int64_t>(), col_indices_ptr,
-                                          nnz * sizeof(int64_t), cudaMemcpyDeviceToDevice));
+                                          nnz * sizeof(int64_t), cudaMemcpyDeviceToDevice, stream));
 
         return SparseTensor::sparse_csr(
             crow_indices, col_idx, values,
@@ -177,7 +177,7 @@ SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse) {
 
 } // anonymous namespace
 
-Tensor cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
+Tensor cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense, cudaStream_t stream = 0) {
     auto sp_shape = sparse.shape();
     if (sp_shape.size() != 2 || dense.ndim() != 2) {
         throw std::runtime_error("cuda_spmm: both inputs must be 2D");
@@ -198,7 +198,7 @@ Tensor cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
     }
 
     // Ensure sparse is in CSR format on GPU
-    auto csr = ensure_csr_on_gpu(sparse);
+    auto csr = ensure_csr_on_gpu(sparse, stream);
     int64_t nnz = csr.nnz();
 
     // Ensure dense is contiguous and on GPU
@@ -210,7 +210,7 @@ Tensor cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
     auto result = zeros({M, N}, dtype, Device::cuda());
 
     // Get cuSPARSE handle
-    cusparseHandle_t handle = CuSPARSEHandlePool::get(cudaStreamPerThread);
+    cusparseHandle_t handle = CuSPARSEHandlePool::get(stream);
     cudaDataType cuda_dtype = get_cuda_data_type(dtype);
 
     // Get raw pointers
@@ -296,12 +296,12 @@ Tensor cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
     ));
 
     // Stream-synchronize to ensure computation is complete (avoids blocking other streams)
-    CUDA_CHECK_SPARSE(cudaStreamSynchronize(cudaStreamPerThread));
+    CUDA_CHECK_SPARSE(cudaStreamSynchronize(stream));
 
     return result;
 }
 
-Tensor cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
+Tensor cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec, cudaStream_t stream = 0) {
     auto sp_shape = sparse.shape();
     if (sp_shape.size() != 2 || vec.ndim() != 1) {
         throw std::runtime_error("cuda_spmv: sparse must be 2D, vec must be 1D");
@@ -321,7 +321,7 @@ Tensor cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
     }
 
     // Ensure sparse is in CSR format on GPU
-    auto csr = ensure_csr_on_gpu(sparse);
+    auto csr = ensure_csr_on_gpu(sparse, stream);
     int64_t nnz = csr.nnz();
 
     // Ensure vec is contiguous and on GPU
@@ -333,7 +333,7 @@ Tensor cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
     auto result = zeros({M}, dtype, Device::cuda());
 
     // Get cuSPARSE handle
-    cusparseHandle_t handle = CuSPARSEHandlePool::get(cudaStreamPerThread);
+    cusparseHandle_t handle = CuSPARSEHandlePool::get(stream);
     cudaDataType cuda_dtype = get_cuda_data_type(dtype);
 
     // Get raw pointers

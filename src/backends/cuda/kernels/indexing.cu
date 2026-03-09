@@ -21,6 +21,7 @@
 #include <stdexcept>
 #include <vector>
 #include <cub/cub.cuh>
+#include "tenzor/utils/config.hpp"
 #include <thrust/iterator/counting_iterator.h>
 
 namespace tenzor {
@@ -623,6 +624,10 @@ __global__ void scatter_add_kernel_impl(
 
 auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                         const Tensor& src, cudaStream_t stream) -> Tensor {
+    if (tenzor::is_deterministic()) {
+        throw std::runtime_error("scatter_add: deterministic mode not yet implemented for CUDA");
+    }
+
     int64_t ndim = input.ndim();
     if (dim < 0) dim += ndim;
     if (dim < 0 || dim >= ndim) {

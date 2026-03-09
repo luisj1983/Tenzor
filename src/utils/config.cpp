@@ -87,4 +87,12 @@ auto Config::save_to_file(const std::string& path) -> bool {
     return true;
 }
 
+auto set_deterministic(bool deterministic) -> void {
+    Config::instance().set_bool("deterministic", deterministic);
+}
+
+auto is_deterministic() -> bool {
+    return Config::instance().get_bool("deterministic").value_or(false);
+}
+
 } // namespace tenzor

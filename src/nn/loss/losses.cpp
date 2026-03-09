@@ -281,4 +281,33 @@ auto l1_loss(const Variable& input, const Variable& target,
     return loss.forward(input, target);
 }
 
+// MarginRankingLoss implementation
+MarginRankingLoss::MarginRankingLoss(double margin, Reduction reduction)
+    : margin_(margin), reduction_(reduction) {}
+
+auto MarginRankingLoss::forward(const Variable& input1, const Variable& input2,
+                                const Variable& target) -> Variable {
+    // loss = max(0, -y * (x1 - x2) + margin)
+    auto diff = input1 - input2;
+    auto neg_target_diff = target * diff * -1.0f;
+    auto loss = relu(neg_target_diff + static_cast<float>(margin_));
+
+    switch (reduction_) {
+        case Reduction::None:
+            return loss;
+        case Reduction::Mean:
+            return mean(loss);
+        case Reduction::Sum:
+            return sum(loss);
+    }
+    return loss;
+}
+
+auto margin_ranking_loss(const Variable& input1, const Variable& input2,
+                        const Variable& target,
+                        double margin, Reduction reduction) -> Variable {
+    MarginRankingLoss loss_fn(margin, reduction);
+    return loss_fn.forward(input1, input2, target);
+}
+
 } // namespace tenzor::nn

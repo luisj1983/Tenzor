@@ -417,7 +417,7 @@ public:
             }
             // Use async transfer for H2D and D2D — host doesn't need to wait
             // for the copy to complete, GPU-side ordering is guaranteed by stream.
-            cudaStream_t stream = nullptr;  // default stream
+            cudaStream_t stream = cudaStreamPerThread;  // per-thread default stream
             err = cudaMemcpyAsync(dst, src, bytes, cuda_kind, stream);
         } else {
             // D2H and H2H: use synchronous copy since host needs data immediately

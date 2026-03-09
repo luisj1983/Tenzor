@@ -818,6 +818,41 @@ private:
     bool zero_infinity_;
 };
 
+/**
+ * @brief Margin Ranking Loss
+ *
+ * Computes loss = max(0, -y * (x1 - x2) + margin)
+ * where y is +1 or -1 indicating which input should rank higher.
+ *
+ * Used for ranking tasks and metric learning.
+ *
+ * @param margin Minimum desired margin (default: 0.0)
+ * @param reduction Reduction mode (default: Mean)
+ */
+class MarginRankingLoss {
+public:
+    explicit MarginRankingLoss(double margin = 0.0,
+                               Reduction reduction = Reduction::Mean);
+
+    auto forward(const Variable& input1, const Variable& input2,
+                 const Variable& target) -> Variable;
+
+    auto operator()(const Variable& input1, const Variable& input2,
+                   const Variable& target) -> Variable {
+        return forward(input1, input2, target);
+    }
+
+private:
+    double margin_;
+    Reduction reduction_;
+};
+
+// Functional form
+auto margin_ranking_loss(const Variable& input1, const Variable& input2,
+                        const Variable& target,
+                        double margin = 0.0,
+                        Reduction reduction = Reduction::Mean) -> Variable;
+
 /** @} */ // end of functional_advanced_losses group
 
 } // namespace nn

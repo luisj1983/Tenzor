@@ -84,10 +84,13 @@ set(TENZOR_CORE_SOURCES
     nn/optim/optimizer.cpp
     nn/optim/sgd.cpp
     nn/optim/adam.cpp
+    nn/optim/radam.cpp
     nn/optim/adam_atan2.cpp
     nn/optim/rmsprop.cpp
     nn/optim/adagrad.cpp
     nn/optim/adadelta.cpp
+    nn/optim/lamb.cpp
+    nn/optim/sparse_adam.cpp
     nn/optim/zero_optimizer.cpp
     nn/optim/gradient_utils.cpp
     nn/optim/scheduler.cpp
