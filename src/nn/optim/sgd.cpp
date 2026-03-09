@@ -33,10 +33,10 @@ auto SGD::step_impl() -> void {
 
             // Prepare attributes
             NewOpAttributes attrs;
-            attrs.set(AttrKey::Lr, static_cast<float>(lr_));
-            attrs.set(AttrKey::Momentum, static_cast<float>(momentum_));
-            attrs.set(AttrKey::WeightDecay, static_cast<float>(weight_decay_));
-            attrs.set(AttrKey::Dampening, static_cast<float>(dampening_));
+            attrs.set(AttrKey::Lr, lr_);
+            attrs.set(AttrKey::Momentum, momentum_);
+            attrs.set(AttrKey::WeightDecay, weight_decay_);
+            attrs.set(AttrKey::Dampening, dampening_);
             attrs.set(AttrKey::Nesterov, nesterov_);
 
             // Dispatch to fused kernel (modifies param and momentum buffer in-place)
@@ -45,28 +45,33 @@ auto SGD::step_impl() -> void {
         }
 
         // CPU fallback: use tensor operations
+        // Use dtype-appropriate scalar tensors to preserve Float64 precision
+        auto scalar = [&](double value) -> Tensor {
+            return full({1}, value, param_tensor.dtype(), param_tensor.device());
+        };
+
         auto grad = grad_tensor.clone();
 
         // Weight decay
         if (weight_decay_ > 0.0) {
-            grad = grad + param_tensor * static_cast<float>(weight_decay_);
+            grad = grad + param_tensor * scalar(weight_decay_);
         }
 
         // Momentum
         if (momentum_ > 0.0) {
             auto& velocity = velocity_buffers_[i];
-            velocity = velocity * static_cast<float>(momentum_) +
-                      grad * static_cast<float>(1.0 - dampening_);
+            velocity = velocity * scalar(momentum_) +
+                      grad * scalar(1.0 - dampening_);
 
             if (nesterov_) {
-                grad = grad + velocity * static_cast<float>(momentum_);
+                grad = grad + velocity * scalar(momentum_);
             } else {
                 grad = velocity;
             }
         }
 
         // Update parameters
-        param_tensor = param_tensor - grad * static_cast<float>(lr_);
+        param_tensor = param_tensor - grad * scalar(lr_);
     }
 }
 

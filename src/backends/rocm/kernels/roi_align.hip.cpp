@@ -245,6 +245,14 @@ auto roi_align_forward(const Tensor& features, const Tensor& rois,
                        int64_t output_h, int64_t output_w,
                        float spatial_scale, int64_t sampling_ratio,
                        bool aligned) -> Tensor {
+    // BFloat16: upcast features to Float32, compute, downcast result
+    if (features.dtype() == DType::BFloat16) {
+        auto features_f32 = features.to(DType::Float32);
+        auto result_f32 = roi_align_forward(features_f32, rois, output_h, output_w,
+                                            spatial_scale, sampling_ratio, aligned);
+        return result_f32.to(DType::BFloat16);
+    }
+
     auto shape = features.shape();
     int64_t batch_size = shape[0];
     int64_t channels = shape[1];
@@ -281,6 +289,14 @@ auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
                         int64_t batch_size, int64_t feat_height, int64_t feat_width,
                         float spatial_scale, int64_t sampling_ratio,
                         bool aligned) -> Tensor {
+    // BFloat16: upcast grad_output to Float32, compute, downcast result
+    if (grad_output.dtype() == DType::BFloat16) {
+        auto grad_f32 = grad_output.to(DType::Float32);
+        auto result_f32 = roi_align_backward(grad_f32, rois, batch_size, feat_height,
+                                             feat_width, spatial_scale, sampling_ratio, aligned);
+        return result_f32.to(DType::BFloat16);
+    }
+
     int64_t num_rois = rois.shape()[0];
     int64_t channels = grad_output.shape()[1];
     int64_t output_h = grad_output.shape()[2];

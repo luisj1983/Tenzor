@@ -1163,8 +1163,20 @@ auto batchnorm2d_mean_var(const Tensor& input,
                           reinterpret_cast<__half*>(mean.data<Float16>()),
                           reinterpret_cast<__half*>(variance.data<Float16>()), N, C, H, W);
         HIP_CHECK(hipGetLastError());
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        Tensor mean_f32({mean.shape()[0]}, DType::Float32, mean.device());
+        Tensor var_f32({variance.shape()[0]}, DType::Float32, variance.device());
+        batchnorm2d_mean_var(input_f32, mean_f32, var_f32, stream);
+        // Copy results back to BFloat16
+        auto mean_bf16 = mean_f32.to(DType::BFloat16);
+        auto var_bf16 = var_f32.to(DType::BFloat16);
+        HIP_CHECK(hipMemcpyAsync(mean.data_ptr(), mean_bf16.data_ptr(),
+            mean.numel() * dtype_size(DType::BFloat16), hipMemcpyDeviceToDevice, stream));
+        HIP_CHECK(hipMemcpyAsync(variance.data_ptr(), var_bf16.data_ptr(),
+            variance.numel() * dtype_size(DType::BFloat16), hipMemcpyDeviceToDevice, stream));
     } else {
-        throw std::runtime_error("BatchNorm2D only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("BatchNorm2D only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 }
 
@@ -1210,8 +1222,14 @@ auto batchnorm2d_forward(const Tensor& input,
                           reinterpret_cast<const __half*>(variance.data<Float16>()),
                           epsilon, N, C, H, W);
         HIP_CHECK(hipGetLastError());
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto mean_f32 = mean.to(DType::Float32);
+        auto variance_f32 = variance.to(DType::Float32);
+        auto result_f32 = batchnorm2d_forward(input_f32, mean_f32, variance_f32, epsilon, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("BatchNorm2D only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("BatchNorm2D only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     return output;
@@ -1265,8 +1283,16 @@ auto batchnorm2d_forward_affine(const Tensor& input,
                           reinterpret_cast<const __half*>(beta.data<Float16>()),
                           epsilon, N, C, H, W);
         HIP_CHECK(hipGetLastError());
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto mean_f32 = mean.to(DType::Float32);
+        auto variance_f32 = variance.to(DType::Float32);
+        auto gamma_f32 = gamma.to(DType::Float32);
+        auto beta_f32 = beta.to(DType::Float32);
+        auto result_f32 = batchnorm2d_forward_affine(input_f32, mean_f32, variance_f32, gamma_f32, beta_f32, epsilon, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("BatchNorm2D only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("BatchNorm2D only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     return output;
@@ -1307,8 +1333,20 @@ auto batchnorm2d_update_running_stats(Tensor& running_mean,
                           reinterpret_cast<const __half*>(batch_var.data<Float16>()),
                           momentum, C);
         HIP_CHECK(hipGetLastError());
+    } else if (running_mean.dtype() == DType::BFloat16) {
+        auto rm_f32 = running_mean.to(DType::Float32);
+        auto rv_f32 = running_var.to(DType::Float32);
+        auto bm_f32 = batch_mean.to(DType::Float32);
+        auto bv_f32 = batch_var.to(DType::Float32);
+        batchnorm2d_update_running_stats(rm_f32, rv_f32, bm_f32, bv_f32, momentum, stream);
+        auto rm_bf16 = rm_f32.to(DType::BFloat16);
+        auto rv_bf16 = rv_f32.to(DType::BFloat16);
+        HIP_CHECK(hipMemcpyAsync(running_mean.data_ptr(), rm_bf16.data_ptr(),
+            running_mean.numel() * dtype_size(DType::BFloat16), hipMemcpyDeviceToDevice, stream));
+        HIP_CHECK(hipMemcpyAsync(running_var.data_ptr(), rv_bf16.data_ptr(),
+            running_var.numel() * dtype_size(DType::BFloat16), hipMemcpyDeviceToDevice, stream));
     } else {
-        throw std::runtime_error("BatchNorm2D only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("BatchNorm2D only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 }
 
@@ -1401,8 +1439,16 @@ auto batchnorm2d_backward(const Tensor& grad_output,
                           reinterpret_cast<const __half*>(gamma.data<Float16>()),
                           epsilon, N, C, H, W);
         HIP_CHECK(hipGetLastError());
+    } else if (input.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto mean_f32 = mean.to(DType::Float32);
+        auto variance_f32 = variance.to(DType::Float32);
+        auto gamma_f32 = gamma.to(DType::Float32);
+        auto [gi_f32, gg_f32, gb_f32] = batchnorm2d_backward(grad_output_f32, input_f32, mean_f32, variance_f32, gamma_f32, epsilon, stream);
+        return std::make_tuple(gi_f32.to(DType::BFloat16), gg_f32.to(DType::BFloat16), gb_f32.to(DType::BFloat16));
     } else {
-        throw std::runtime_error("BatchNorm2D only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("BatchNorm2D only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     return std::make_tuple(grad_input, grad_gamma, grad_beta);
@@ -1449,8 +1495,14 @@ auto layernorm_forward(const Tensor& input,
                           reinterpret_cast<const __half*>(beta.data<Float16>()),
                           epsilon, outer_size, normalized_size);
         HIP_CHECK(hipGetLastError());
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto gamma_f32 = gamma.to(DType::Float32);
+        auto beta_f32 = beta.to(DType::Float32);
+        auto result_f32 = layernorm_forward(input_f32, gamma_f32, beta_f32, epsilon, normalized_size, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("LayerNorm only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("LayerNorm only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     return output;
@@ -1522,8 +1574,14 @@ auto layernorm_backward(const Tensor& grad_output,
                           reinterpret_cast<__half*>(grad_beta.data<Float16>()),
                           normalized_size);
         HIP_CHECK(hipGetLastError());
+    } else if (input.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto gamma_f32 = gamma.to(DType::Float32);
+        auto [gi_f32, gg_f32, gb_f32] = layernorm_backward(grad_output_f32, input_f32, gamma_f32, epsilon, normalized_size, stream);
+        return std::make_tuple(gi_f32.to(DType::BFloat16), gg_f32.to(DType::BFloat16), gb_f32.to(DType::BFloat16));
     } else {
-        throw std::runtime_error("LayerNorm only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("LayerNorm only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     return std::make_tuple(grad_input, grad_gamma, grad_beta);
@@ -1570,8 +1628,14 @@ auto instancenorm_forward(const Tensor& input,
                           reinterpret_cast<const __half*>(beta.data<Float16>()),
                           epsilon, N, C, H, W);
         HIP_CHECK(hipGetLastError());
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto gamma_f32 = gamma.to(DType::Float32);
+        auto beta_f32 = beta.to(DType::Float32);
+        auto result_f32 = instancenorm_forward(input_f32, gamma_f32, beta_f32, epsilon, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("InstanceNorm only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("InstanceNorm only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     return output;
@@ -1643,8 +1707,14 @@ auto instancenorm_backward(const Tensor& grad_output,
                           reinterpret_cast<__half*>(grad_beta.data<Float16>()),
                           C);
         HIP_CHECK(hipGetLastError());
+    } else if (input.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto gamma_f32 = gamma.to(DType::Float32);
+        auto [gi_f32, gg_f32, gb_f32] = instancenorm_backward(grad_output_f32, input_f32, gamma_f32, epsilon, stream);
+        return std::make_tuple(gi_f32.to(DType::BFloat16), gg_f32.to(DType::BFloat16), gb_f32.to(DType::BFloat16));
     } else {
-        throw std::runtime_error("InstanceNorm only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("InstanceNorm only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     return std::make_tuple(grad_input, grad_gamma, grad_beta);
@@ -1696,8 +1766,14 @@ auto groupnorm_forward(const Tensor& input,
                           reinterpret_cast<const __half*>(beta.data<Float16>()),
                           epsilon, N, C, H, W, groups);
         HIP_CHECK(hipGetLastError());
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto gamma_f32 = gamma.to(DType::Float32);
+        auto beta_f32 = beta.to(DType::Float32);
+        auto result_f32 = groupnorm_forward(input_f32, gamma_f32, beta_f32, groups, epsilon, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("GroupNorm only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("GroupNorm only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     return output;
@@ -1770,8 +1846,14 @@ auto groupnorm_backward(const Tensor& grad_output,
                           reinterpret_cast<__half*>(grad_beta.data<Float16>()),
                           C);
         HIP_CHECK(hipGetLastError());
+    } else if (input.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto gamma_f32 = gamma.to(DType::Float32);
+        auto [gi_f32, gg_f32, gb_f32] = groupnorm_backward(grad_output_f32, input_f32, gamma_f32, groups, epsilon, stream);
+        return std::make_tuple(gi_f32.to(DType::BFloat16), gg_f32.to(DType::BFloat16), gb_f32.to(DType::BFloat16));
     } else {
-        throw std::runtime_error("GroupNorm only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("GroupNorm only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     return std::make_tuple(grad_input, grad_gamma, grad_beta);

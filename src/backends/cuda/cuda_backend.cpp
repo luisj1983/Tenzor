@@ -407,7 +407,7 @@ public:
                 // Use cudaMemcpyPeerAsync when devices differ and P2P is enabled
                 if (src_device >= 0 && dst_device >= 0 && src_device != dst_device &&
                     has_peer_access(src_device, dst_device)) {
-                    err = cudaMemcpyPeerAsync(dst, dst_device, src, src_device, bytes, nullptr);
+                    err = cudaMemcpyPeerAsync(dst, dst_device, src, src_device, bytes, cudaStreamPerThread);
                     if (err != cudaSuccess) {
                         throw std::runtime_error(
                             std::string("CUDA peer copy failed: ") + cudaGetErrorString(err));

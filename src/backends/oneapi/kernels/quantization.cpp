@@ -56,7 +56,7 @@ auto quantize_kernel(
                 val = sycl::fmax(-128.0f, sycl::fmin(127.0f, val));
                 out_ptr[idx] = static_cast<int8_t>(val);
             }
-        ).wait();
+        );
     }
     else {
         throw std::runtime_error("quantize: only Float32 input supported");
@@ -100,7 +100,7 @@ auto dequantize_kernel(
                 int8_t q_val = in_ptr[idx];
                 out_ptr[idx] = (static_cast<float>(q_val) - static_cast<float>(zero_point)) * scale;
             }
-        ).wait();
+        );
     }
     else {
         throw std::runtime_error("dequantize: only Int8 input supported");
@@ -193,7 +193,7 @@ auto quantized_linear_kernel(
 
                 out_ptr[idx] = result;
             }
-        ).wait();
+        );
     }
     else {
         throw std::runtime_error("quantized_linear: requires Int8 input and weight");
@@ -317,7 +317,7 @@ auto quantized_conv2d_kernel(
 
                 out_ptr[idx] = result;
             }
-        ).wait();
+        );
     }
     else {
         throw std::runtime_error("quantized_conv2d: requires Int8 input and weight");

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <vector>
 #include <cstdint>
+#include "tenzor/core/tensor.hpp"
 
 namespace tenzor {
 namespace rocm {
@@ -200,6 +201,41 @@ extern "C" void nms_hip(const float* boxes, const float* scores,
     }
 
     // RAII guards handle cleanup automatically
+}
+
+// Tensor-level NMS wrapper with BFloat16 support
+auto nms_forward(const Tensor& boxes, const Tensor& scores,
+                 float iou_threshold) -> Tensor {
+    // BFloat16: convert boxes and scores to Float32 (output is Int64 indices)
+    const Tensor boxes_f32 = (boxes.dtype() == DType::BFloat16)
+        ? boxes.to(DType::Float32)
+        : (boxes.dtype() == DType::Float32) ? boxes : boxes.to(DType::Float32);
+    const Tensor scores_f32 = (scores.dtype() == DType::BFloat16)
+        ? scores.to(DType::Float32)
+        : (scores.dtype() == DType::Float32) ? scores : scores.to(DType::Float32);
+
+    int64_t num_boxes = boxes_f32.shape()[0];
+    if (num_boxes == 0) {
+        return Tensor({0}, DType::Int64, boxes.device());
+    }
+
+    // Allocate device memory for keep indices
+    HipDevicePtr d_keep_guard;
+    NMS_HIP_CHECK(hipMalloc(&d_keep_guard.ptr, num_boxes * sizeof(int64_t)));
+    auto* d_keep_indices = static_cast<int64_t*>(d_keep_guard.ptr);
+
+    int64_t num_keep = 0;
+    nms_hip(boxes_f32.data<float>(), scores_f32.data<float>(),
+            num_boxes, iou_threshold, d_keep_indices, &num_keep);
+
+    // Create output tensor and copy results
+    Tensor result({num_keep}, DType::Int64, boxes.device());
+    if (num_keep > 0) {
+        NMS_HIP_CHECK(hipMemcpy(result.data<int64_t>(), d_keep_indices,
+                                 num_keep * sizeof(int64_t), hipMemcpyDeviceToDevice));
+    }
+
+    return result;
 }
 
 } // namespace rocm

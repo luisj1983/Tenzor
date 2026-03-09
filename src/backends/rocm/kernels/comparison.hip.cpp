@@ -8,6 +8,8 @@
 
 #include "tenzor/core/tensor.hpp"
 #include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
+#include <hip/hip_bfloat16.h>
 #include <stdexcept>
 #include <algorithm>
 
@@ -194,6 +196,15 @@ auto eq_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
             hipLaunchKernelGGL(eq_kernel<bool>, dim3(blocks), dim3(threads), 0, stream,
                 a.data<bool>(), b.data<bool>(), output.data<bool>(), n);
             break;
+        case DType::Float16:
+            hipLaunchKernelGGL(eq_kernel<__half>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<__half>(), b.data<__half>(), output.data<bool>(), n);
+            break;
+        case DType::BFloat16: {
+            auto a_f32 = a.to(DType::Float32);
+            auto b_f32 = b.to(DType::Float32);
+            return eq_kernel(a_f32, b_f32, stream);
+        }
         default:
             throw std::runtime_error("eq_kernel: unsupported dtype");
     }
@@ -239,6 +250,15 @@ auto ne_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
             hipLaunchKernelGGL(ne_kernel<bool>, dim3(blocks), dim3(threads), 0, stream,
                 a.data<bool>(), b.data<bool>(), output.data<bool>(), n);
             break;
+        case DType::Float16:
+            hipLaunchKernelGGL(ne_kernel<__half>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<__half>(), b.data<__half>(), output.data<bool>(), n);
+            break;
+        case DType::BFloat16: {
+            auto a_f32 = a.to(DType::Float32);
+            auto b_f32 = b.to(DType::Float32);
+            return ne_kernel(a_f32, b_f32, stream);
+        }
         default:
             throw std::runtime_error("ne_kernel: unsupported dtype");
     }
@@ -280,6 +300,15 @@ auto lt_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
             hipLaunchKernelGGL(lt_kernel<int64_t>, dim3(blocks), dim3(threads), 0, stream,
                 a.data<int64_t>(), b.data<int64_t>(), output.data<bool>(), n);
             break;
+        case DType::Float16:
+            hipLaunchKernelGGL(lt_kernel<__half>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<__half>(), b.data<__half>(), output.data<bool>(), n);
+            break;
+        case DType::BFloat16: {
+            auto a_f32 = a.to(DType::Float32);
+            auto b_f32 = b.to(DType::Float32);
+            return lt_kernel(a_f32, b_f32, stream);
+        }
         default:
             throw std::runtime_error("lt_kernel: unsupported dtype");
     }
@@ -321,6 +350,15 @@ auto le_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
             hipLaunchKernelGGL(le_kernel<int64_t>, dim3(blocks), dim3(threads), 0, stream,
                 a.data<int64_t>(), b.data<int64_t>(), output.data<bool>(), n);
             break;
+        case DType::Float16:
+            hipLaunchKernelGGL(le_kernel<__half>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<__half>(), b.data<__half>(), output.data<bool>(), n);
+            break;
+        case DType::BFloat16: {
+            auto a_f32 = a.to(DType::Float32);
+            auto b_f32 = b.to(DType::Float32);
+            return le_kernel(a_f32, b_f32, stream);
+        }
         default:
             throw std::runtime_error("le_kernel: unsupported dtype");
     }
@@ -362,6 +400,15 @@ auto gt_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
             hipLaunchKernelGGL(gt_kernel<int64_t>, dim3(blocks), dim3(threads), 0, stream,
                 a.data<int64_t>(), b.data<int64_t>(), output.data<bool>(), n);
             break;
+        case DType::Float16:
+            hipLaunchKernelGGL(gt_kernel<__half>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<__half>(), b.data<__half>(), output.data<bool>(), n);
+            break;
+        case DType::BFloat16: {
+            auto a_f32 = a.to(DType::Float32);
+            auto b_f32 = b.to(DType::Float32);
+            return gt_kernel(a_f32, b_f32, stream);
+        }
         default:
             throw std::runtime_error("gt_kernel: unsupported dtype");
     }
@@ -403,6 +450,15 @@ auto ge_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
             hipLaunchKernelGGL(ge_kernel<int64_t>, dim3(blocks), dim3(threads), 0, stream,
                 a.data<int64_t>(), b.data<int64_t>(), output.data<bool>(), n);
             break;
+        case DType::Float16:
+            hipLaunchKernelGGL(ge_kernel<__half>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<__half>(), b.data<__half>(), output.data<bool>(), n);
+            break;
+        case DType::BFloat16: {
+            auto a_f32 = a.to(DType::Float32);
+            auto b_f32 = b.to(DType::Float32);
+            return ge_kernel(a_f32, b_f32, stream);
+        }
         default:
             throw std::runtime_error("ge_kernel: unsupported dtype");
     }

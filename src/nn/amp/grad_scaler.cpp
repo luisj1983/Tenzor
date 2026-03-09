@@ -66,14 +66,14 @@ auto GradScaler::unscale_(optim::Optimizer& optimizer) -> void {
             continue;
         }
 
-        auto& grad = param->mutable_grad();
+        const auto& grad = param->grad();
         if (!grad.has_value()) {
             continue;
         }
 
         // Clone gradient before modifying to avoid corrupting shared gradient data
         // (e.g., when retain_graph=true and backward is called multiple times)
-        *grad = grad->clone() * inv_scale;
+        param->set_grad(grad->clone() * inv_scale);
     }
 
     has_unscaled_ = true;

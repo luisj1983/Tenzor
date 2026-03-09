@@ -195,7 +195,7 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, sycl::queue& queue
 
                     dst_ptr[dst_idx] = src_ptr[src_idx];
                 }
-            ).wait();
+            );
         }
         else if (dtype == DType::Float64) {
             const double* src_ptr = get_data_ptr<const double>(tensor);
@@ -221,7 +221,7 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, sycl::queue& queue
 
                     dst_ptr[dst_idx] = src_ptr[src_idx];
                 }
-            ).wait();
+            );
         }
         else if (dtype == DType::Float16) {
             const sycl::half* src_ptr = get_data_ptr<const sycl::half>(tensor);
@@ -247,7 +247,7 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, sycl::queue& queue
 
                     dst_ptr[dst_idx] = src_ptr[src_idx];
                 }
-            ).wait();
+            );
         }
         else if (dtype == DType::BFloat16) {
             // BFloat16 stored as uint16_t — pure copy, no conversion needed
@@ -273,7 +273,7 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, sycl::queue& queue
 
                     dst_ptr[dst_idx] = src_ptr[src_idx];
                 }
-            ).wait();
+            );
         }
         else if (dtype == DType::Int32) {
             const int32_t* src_ptr = get_data_ptr<const int32_t>(tensor);
@@ -299,7 +299,7 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, sycl::queue& queue
 
                     dst_ptr[dst_idx] = src_ptr[src_idx];
                 }
-            ).wait();
+            );
         }
         else if (dtype == DType::Int64) {
             const int64_t* src_ptr = get_data_ptr<const int64_t>(tensor);
@@ -324,7 +324,7 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, sycl::queue& queue
 
                     dst_ptr[dst_idx] = src_ptr[src_idx];
                 }
-            ).wait();
+            );
         }
         else if (dtype == DType::Bool) {
             const bool* src_ptr = get_data_ptr<const bool>(tensor);
@@ -349,7 +349,7 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, sycl::queue& queue
 
                     dst_ptr[dst_idx] = src_ptr[src_idx];
                 }
-            ).wait();
+            );
         }
         else {
             throw std::runtime_error("cat_kernel: unsupported dtype");

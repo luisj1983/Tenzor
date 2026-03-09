@@ -62,7 +62,7 @@ void im2col_kernel_impl(const T* data_im, int64_t channels, int64_t height, int6
 
         data_col[index] = (h_in >= 0 && w_in >= 0 && h_in < height && w_in < width) ?
             data_im[(c * height + h_in) * width + w_in] : T(0);
-    }).wait();
+    });
 }
 
 /**
@@ -93,7 +93,7 @@ void col2im_kernel_impl(const T* data_col, int64_t channels, int64_t height, int
     const int64_t im_size = channels * height * width;
 
     // Initialize grad_input to zero
-    queue.fill(data_im, T(0), im_size).wait();
+    queue.fill(data_im, T(0), im_size);
 
     // Accumulate gradients from col buffer
     using KernelClass = std::conditional_t<std::is_same_v<T, float>, Col2imKernelFloat32, Col2imKernelFloat64>;
@@ -118,7 +118,7 @@ void col2im_kernel_impl(const T* data_col, int64_t channels, int64_t height, int
                 atomic_val(data_im[im_idx]);
             atomic_val.fetch_add(data_col[index]);
         }
-    }).wait();
+    });
 }
 
 /**

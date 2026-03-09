@@ -231,8 +231,12 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices, hipStream_t s
             reinterpret_cast<__half*>(output.data<Float16>()),
             num_indices,
             embedding_dim);
+    } else if (weight.dtype() == DType::BFloat16) {
+        auto weight_f32 = weight.to(DType::Float32);
+        auto result_f32 = embedding_kernel(weight_f32, indices, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("Embedding only supports Float32, Float64, and Float16");
+        throw std::runtime_error("Embedding only supports Float32, Float64, Float16, and BFloat16");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -290,8 +294,12 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
             grad_weight_f32.data<float>(),
             reinterpret_cast<__half*>(grad_weight.data<Float16>()),
             grad_weight_size);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto result_f32 = embedding_backward_kernel(grad_output_f32, indices, num_embeddings, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("Embedding backward only supports Float32, Float64, and Float16");
+        throw std::runtime_error("Embedding backward only supports Float32, Float64, Float16, and BFloat16");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -397,8 +405,16 @@ auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias
                 reinterpret_cast<const __half*>(bias->data<Float16>()),
                 reinterpret_cast<__half*>(output.data<Float16>()), batch_size, out_features);
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto weight_f32 = weight.to(DType::Float32);
+        const Tensor* bias_f32_ptr = nullptr;
+        Tensor bias_f32;
+        if (bias) { bias_f32 = bias->to(DType::Float32); bias_f32_ptr = &bias_f32; }
+        auto result_f32 = linear_kernel(input_f32, weight_f32, bias_f32_ptr, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("Linear only supports Float32, Float64, and Float16");
+        throw std::runtime_error("Linear only supports Float32, Float64, Float16, and BFloat16");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -535,8 +551,14 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input, cons
             grad_bias_f32.data<float>(),
             reinterpret_cast<__half*>(grad_bias.data<Float16>()),
             out_features);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto weight_f32 = weight.to(DType::Float32);
+        auto results_f32 = linear_backward_kernel(grad_output_f32, input_f32, weight_f32, stream);
+        return {results_f32[0].to(DType::BFloat16), results_f32[1].to(DType::BFloat16), results_f32[2].to(DType::BFloat16)};
     } else {
-        throw std::runtime_error("Linear backward only supports Float32, Float64, and Float16");
+        throw std::runtime_error("Linear backward only supports Float32, Float64, Float16, and BFloat16");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -670,9 +692,14 @@ auto dropout_kernel(const Tensor& input, float p, bool training, hipStream_t str
             reinterpret_cast<__half*>(output.data<Float16>()),
             mask.data<float>(),
             n, p, scale);
+    } else if (input.dtype() == DType::BFloat16) {
+        hiprandDestroyGenerator(gen);
+        auto input_f32 = input.to(DType::Float32);
+        auto [output_f32, mask_out] = dropout_kernel(input_f32, p, training, stream);
+        return {output_f32.to(DType::BFloat16), mask_out};
     } else {
         hiprandDestroyGenerator(gen);
-        throw std::runtime_error("Dropout only supports Float32, Float64, and Float16");
+        throw std::runtime_error("Dropout only supports Float32, Float64, Float16, and BFloat16");
     }
 
     hiprandDestroyGenerator(gen);
@@ -711,8 +738,12 @@ auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, floa
             mask.data<float>(),
             reinterpret_cast<__half*>(grad_input.data<Float16>()),
             n, scale);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto result_f32 = dropout_backward_kernel(grad_output_f32, mask, p, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("Dropout backward only supports Float32, Float64, and Float16");
+        throw std::runtime_error("Dropout backward only supports Float32, Float64, Float16, and BFloat16");
     }
 
     HIP_CHECK(hipGetLastError());

@@ -71,8 +71,23 @@ __global__ void fused_linear_relu_kernel(
 auto fused_linear_relu_hip(
     const Tensor& input,
     const Tensor& weight,
-    const Tensor* bias
+    const Tensor* bias,
+    hipStream_t stream
 ) -> Tensor {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto weight_f32 = weight.to(DType::Float32);
+        Tensor bias_f32;
+        const Tensor* bias_f32_ptr = nullptr;
+        if (bias) {
+            bias_f32 = bias->to(DType::Float32);
+            bias_f32_ptr = &bias_f32;
+        }
+        auto result = fused_linear_relu_hip(input_f32, weight_f32, bias_f32_ptr, stream);
+        return result.to(DType::BFloat16);
+    }
+
     // Flatten input to 2D
     auto input_shape = input.shape();
     int64_t batch_size = 1;
@@ -96,7 +111,7 @@ auto fused_linear_relu_hip(
     if (input.dtype() == DType::Float32) {
         const float* bias_ptr = bias ? bias->data<float>() : nullptr;
         hipLaunchKernelGGL(fused_linear_relu_kernel<float>,
-            dim3(blocks), dim3(threads), 0, 0,
+            dim3(blocks), dim3(threads), 0, stream,
             input.data<float>(),
             weight.data<float>(),
             bias_ptr,
@@ -111,7 +126,6 @@ auto fused_linear_relu_hip(
     }
 
     HIP_CHECK(hipGetLastError());
-    HIP_CHECK(hipDeviceSynchronize());
 
     return output;
 }
@@ -158,6 +172,17 @@ auto fused_batchnorm_relu_hip(
     const Tensor& bias,
     float eps
 ) -> Tensor {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto rm_f32 = running_mean.to(DType::Float32);
+        auto rv_f32 = running_var.to(DType::Float32);
+        auto w_f32 = weight.to(DType::Float32);
+        auto b_f32 = bias.to(DType::Float32);
+        auto result = fused_batchnorm_relu_hip(input_f32, rm_f32, rv_f32, w_f32, b_f32, eps);
+        return result.to(DType::BFloat16);
+    }
+
     int64_t batch_size = input.shape()[0];
     int64_t num_features = input.shape()[1];
     int64_t spatial_size = 1;
@@ -265,6 +290,12 @@ auto fused_softmax_cross_entropy_hip(
     const Tensor& targets,
     const std::string& reduction
 ) -> Tensor {
+    // BFloat16: upcast to Float32, compute (loss stays Float32)
+    if (logits.dtype() == DType::BFloat16) {
+        auto logits_f32 = logits.to(DType::Float32);
+        return fused_softmax_cross_entropy_hip(logits_f32, targets, reduction);
+    }
+
     int64_t batch_size = logits.shape()[0];
     int64_t num_classes = logits.shape()[1];
 
@@ -321,6 +352,14 @@ __global__ void fused_add_relu_kernel(
 }
 
 auto fused_add_relu_hip(const Tensor& a, const Tensor& b) -> Tensor {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (a.dtype() == DType::BFloat16) {
+        auto a_f32 = a.to(DType::Float32);
+        auto b_f32 = b.to(DType::Float32);
+        auto result = fused_add_relu_hip(a_f32, b_f32);
+        return result.to(DType::BFloat16);
+    }
+
     Tensor result = zeros(a.shape(), a.dtype(), a.device());
 
     int64_t n = a.numel();
@@ -372,6 +411,13 @@ __global__ void fused_gelu_kernel(
 }
 
 auto fused_gelu_hip(const Tensor& input) -> Tensor {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result = fused_gelu_hip(input_f32);
+        return result.to(DType::BFloat16);
+    }
+
     Tensor output = zeros(input.shape(), input.dtype(), input.device());
 
     int64_t n = input.numel();
@@ -471,6 +517,15 @@ auto fused_layer_norm_hip(
     const Tensor& bias,
     float eps
 ) -> Tensor {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto w_f32 = weight.to(DType::Float32);
+        auto b_f32 = bias.to(DType::Float32);
+        auto result = fused_layer_norm_hip(input_f32, normalized_shape, w_f32, b_f32, eps);
+        return result.to(DType::BFloat16);
+    }
+
     int64_t norm_size = 1;
     for (auto dim : normalized_shape) {
         norm_size *= dim;
@@ -548,6 +603,17 @@ auto fused_conv_batchnorm_relu_hip(
     const Tensor& bias,
     float eps
 ) -> Tensor {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (conv_output.dtype() == DType::BFloat16) {
+        auto co_f32 = conv_output.to(DType::Float32);
+        auto rm_f32 = running_mean.to(DType::Float32);
+        auto rv_f32 = running_var.to(DType::Float32);
+        auto w_f32 = weight.to(DType::Float32);
+        auto b_f32 = bias.to(DType::Float32);
+        auto result = fused_conv_batchnorm_relu_hip(co_f32, rm_f32, rv_f32, w_f32, b_f32, eps);
+        return result.to(DType::BFloat16);
+    }
+
     int64_t batch_size = conv_output.shape()[0];
     int64_t num_features = conv_output.shape()[1];
     int64_t spatial_size = 1;
@@ -646,6 +712,20 @@ auto fused_matmul_add_hip(
     const Tensor& B,
     const Tensor* bias
 ) -> Tensor {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (A.dtype() == DType::BFloat16) {
+        auto a_f32 = A.to(DType::Float32);
+        auto b_f32 = B.to(DType::Float32);
+        Tensor bias_f32;
+        const Tensor* bias_f32_ptr = nullptr;
+        if (bias) {
+            bias_f32 = bias->to(DType::Float32);
+            bias_f32_ptr = &bias_f32;
+        }
+        auto result = fused_matmul_add_hip(a_f32, b_f32, bias_f32_ptr);
+        return result.to(DType::BFloat16);
+    }
+
     int64_t M = A.shape()[0];
     int64_t K = A.shape()[1];
     int64_t N = B.shape()[1];
@@ -720,6 +800,15 @@ auto fused_elementwise_chain_hip(
     const Tensor& c,
     int op_type
 ) -> Tensor {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (a.dtype() == DType::BFloat16) {
+        auto a_f32 = a.to(DType::Float32);
+        auto b_f32 = b.to(DType::Float32);
+        auto c_f32 = c.to(DType::Float32);
+        auto result = fused_elementwise_chain_hip(a_f32, b_f32, c_f32, op_type);
+        return result.to(DType::BFloat16);
+    }
+
     Tensor output = zeros(a.shape(), a.dtype(), a.device());
 
     int64_t n = a.numel();
@@ -843,6 +932,15 @@ auto fused_attention_hip(
     const Tensor& V,
     float scale
 ) -> Tensor {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (Q.dtype() == DType::BFloat16) {
+        auto q_f32 = Q.to(DType::Float32);
+        auto k_f32 = K.to(DType::Float32);
+        auto v_f32 = V.to(DType::Float32);
+        auto result = fused_attention_hip(q_f32, k_f32, v_f32, scale);
+        return result.to(DType::BFloat16);
+    }
+
     int64_t batch_size = Q.shape()[0];
     int64_t seq_len = Q.shape()[1];
     int64_t d_k = Q.shape()[2];
@@ -938,6 +1036,14 @@ auto fused_rms_norm_hip(
     const Tensor& weight,
     float eps
 ) -> std::pair<Tensor, Tensor> {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto weight_f32 = weight.to(DType::Float32);
+        auto [result, rrms] = fused_rms_norm_hip(input_f32, weight_f32, eps);
+        return {result.to(DType::BFloat16), rrms};
+    }
+
     auto shape = input.shape();
     int64_t norm_size = shape[shape.size() - 1];
 
@@ -1054,6 +1160,26 @@ auto fused_conv2d_bn_relu_full_hip(
     int64_t padding,
     float eps
 ) -> Tensor {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto weight_f32 = weight.to(DType::Float32);
+        Tensor bias_f32;
+        const Tensor* bias_f32_ptr = nullptr;
+        if (bias) {
+            bias_f32 = bias->to(DType::Float32);
+            bias_f32_ptr = &bias_f32;
+        }
+        auto bn_mean_f32 = bn_mean.to(DType::Float32);
+        auto bn_var_f32 = bn_var.to(DType::Float32);
+        auto bn_gamma_f32 = bn_gamma.to(DType::Float32);
+        auto bn_beta_f32 = bn_beta.to(DType::Float32);
+        auto result = fused_conv2d_bn_relu_full_hip(input_f32, weight_f32, bias_f32_ptr,
+                                                     bn_mean_f32, bn_var_f32, bn_gamma_f32,
+                                                     bn_beta_f32, stride, padding, eps);
+        return result.to(DType::BFloat16);
+    }
+
     int64_t batch_size = input.shape()[0];
     int64_t in_channels = input.shape()[1];
     int64_t in_h = input.shape()[2];
@@ -1166,6 +1292,23 @@ auto fused_sgd_step_hip(
     bool nesterov,
     hipStream_t stream
 ) -> void {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (param.dtype() == DType::BFloat16) {
+        auto param_f32 = param.to(DType::Float32);
+        auto grad_f32 = grad.to(DType::Float32);
+        Tensor mom_f32;
+        Tensor* mom_f32_ptr = nullptr;
+        if (momentum_buffer) {
+            mom_f32 = momentum_buffer->to(DType::Float32);
+            mom_f32_ptr = &mom_f32;
+        }
+        fused_sgd_step_hip(param_f32, grad_f32, mom_f32_ptr, lr, momentum,
+                           weight_decay, dampening, nesterov, stream);
+        param = param_f32.to(DType::BFloat16);
+        if (momentum_buffer) *momentum_buffer = mom_f32.to(DType::BFloat16);
+        return;
+    }
+
     int64_t numel = param.numel();
     constexpr int BLOCK_SIZE = 256;
     int blocks = (numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
@@ -1284,6 +1427,27 @@ auto fused_adam_step_hip(
     Tensor* max_exp_avg_sq,
     bool amsgrad
 ) -> void {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (param.dtype() == DType::BFloat16) {
+        auto param_f32 = param.to(DType::Float32);
+        auto grad_f32 = grad.to(DType::Float32);
+        auto ea_f32 = exp_avg.to(DType::Float32);
+        auto eas_f32 = exp_avg_sq.to(DType::Float32);
+        Tensor meas_f32;
+        Tensor* meas_f32_ptr = nullptr;
+        if (max_exp_avg_sq) {
+            meas_f32 = max_exp_avg_sq->to(DType::Float32);
+            meas_f32_ptr = &meas_f32;
+        }
+        fused_adam_step_hip(param_f32, grad_f32, ea_f32, eas_f32, lr, beta1, beta2, eps,
+                            weight_decay, step, decoupled_weight_decay, stream, meas_f32_ptr, amsgrad);
+        param = param_f32.to(DType::BFloat16);
+        exp_avg = ea_f32.to(DType::BFloat16);
+        exp_avg_sq = eas_f32.to(DType::BFloat16);
+        if (max_exp_avg_sq) *max_exp_avg_sq = meas_f32.to(DType::BFloat16);
+        return;
+    }
+
     int64_t numel = param.numel();
     constexpr int BLOCK_SIZE = 256;
     int blocks = (numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
@@ -1387,6 +1551,25 @@ auto fused_rmsprop_step_hip(
     bool centered,
     hipStream_t stream
 ) -> void {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (param.dtype() == DType::BFloat16) {
+        auto param_f32 = param.to(DType::Float32);
+        auto grad_f32 = grad.to(DType::Float32);
+        auto sa_f32 = square_avg.to(DType::Float32);
+        Tensor ga_f32, mb_f32;
+        Tensor* ga_f32_ptr = nullptr;
+        Tensor* mb_f32_ptr = nullptr;
+        if (grad_avg) { ga_f32 = grad_avg->to(DType::Float32); ga_f32_ptr = &ga_f32; }
+        if (momentum_buffer) { mb_f32 = momentum_buffer->to(DType::Float32); mb_f32_ptr = &mb_f32; }
+        fused_rmsprop_step_hip(param_f32, grad_f32, sa_f32, ga_f32_ptr, mb_f32_ptr,
+                               lr, alpha, eps, weight_decay, momentum, centered, stream);
+        param = param_f32.to(DType::BFloat16);
+        square_avg = sa_f32.to(DType::BFloat16);
+        if (grad_avg) *grad_avg = ga_f32.to(DType::BFloat16);
+        if (momentum_buffer) *momentum_buffer = mb_f32.to(DType::BFloat16);
+        return;
+    }
+
     int64_t n = param.numel();
     int block_size = 256;
     int num_blocks = (n + block_size - 1) / block_size;
@@ -1453,6 +1636,20 @@ auto fused_adadelta_step_hip(
     float rho, float eps, float lr, float weight_decay,
     hipStream_t stream
 ) -> void {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (param.dtype() == DType::BFloat16) {
+        auto param_f32 = param.to(DType::Float32);
+        auto grad_f32 = grad.to(DType::Float32);
+        auto sa_f32 = square_avg.to(DType::Float32);
+        auto ad_f32 = acc_delta.to(DType::Float32);
+        fused_adadelta_step_hip(param_f32, grad_f32, sa_f32, ad_f32,
+                                rho, eps, lr, weight_decay, stream);
+        param = param_f32.to(DType::BFloat16);
+        square_avg = sa_f32.to(DType::BFloat16);
+        acc_delta = ad_f32.to(DType::BFloat16);
+        return;
+    }
+
     int64_t n = param.numel();
     int block_size = 256;
     int num_blocks = (n + block_size - 1) / block_size;
@@ -1510,6 +1707,18 @@ auto fused_adagrad_step_hip(
     int64_t step,
     hipStream_t stream
 ) -> void {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (param.dtype() == DType::BFloat16) {
+        auto param_f32 = param.to(DType::Float32);
+        auto grad_f32 = grad.to(DType::Float32);
+        auto ss_f32 = sum_sq.to(DType::Float32);
+        fused_adagrad_step_hip(param_f32, grad_f32, ss_f32, lr, lr_decay, eps,
+                               weight_decay, step, stream);
+        param = param_f32.to(DType::BFloat16);
+        sum_sq = ss_f32.to(DType::BFloat16);
+        return;
+    }
+
     int64_t n = param.numel();
     int block_size = 256;
     int num_blocks = (n + block_size - 1) / block_size;
@@ -1602,6 +1811,27 @@ auto fused_adam_atan2_step_hip(
     bool amsgrad,
     hipStream_t stream
 ) -> void {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (param.dtype() == DType::BFloat16) {
+        auto param_f32 = param.to(DType::Float32);
+        auto grad_f32 = grad.to(DType::Float32);
+        auto ea_f32 = exp_avg.to(DType::Float32);
+        auto eas_f32 = exp_avg_sq.to(DType::Float32);
+        Tensor meas_f32;
+        Tensor* meas_f32_ptr = nullptr;
+        if (max_exp_avg_sq) {
+            meas_f32 = max_exp_avg_sq->to(DType::Float32);
+            meas_f32_ptr = &meas_f32;
+        }
+        fused_adam_atan2_step_hip(param_f32, grad_f32, ea_f32, eas_f32, meas_f32_ptr,
+                                  lr, beta1, beta2, eps, weight_decay, step, amsgrad, stream);
+        param = param_f32.to(DType::BFloat16);
+        exp_avg = ea_f32.to(DType::BFloat16);
+        exp_avg_sq = eas_f32.to(DType::BFloat16);
+        if (max_exp_avg_sq) *max_exp_avg_sq = meas_f32.to(DType::BFloat16);
+        return;
+    }
+
     int64_t numel = param.numel();
     constexpr int BLOCK_SIZE = 256;
     int blocks = (numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
@@ -1709,6 +1939,16 @@ auto fused_rms_norm_backward_hip(
     const Tensor& weight,
     const Tensor& rrms
 ) -> std::tuple<Tensor, Tensor> {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (input.dtype() == DType::BFloat16) {
+        auto go_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto w_f32 = weight.to(DType::Float32);
+        auto rrms_f32 = rrms.to(DType::Float32);
+        auto [gi, gw] = fused_rms_norm_backward_hip(go_f32, input_f32, w_f32, rrms_f32);
+        return {gi.to(DType::BFloat16), gw.to(DType::BFloat16)};
+    }
+
     auto shape = input.shape();
     int64_t norm_size = shape.back();
 
@@ -1852,6 +2092,18 @@ auto fused_layer_norm_backward_hip(
     const Tensor& inv_std,
     const std::vector<int64_t>& normalized_shape
 ) -> std::tuple<Tensor, Tensor, Tensor> {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (input.dtype() == DType::BFloat16) {
+        auto go_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto w_f32 = weight.to(DType::Float32);
+        auto mean_f32 = mean.to(DType::Float32);
+        auto is_f32 = inv_std.to(DType::Float32);
+        auto [gi, gw, gb] = fused_layer_norm_backward_hip(go_f32, input_f32, w_f32,
+                                                            mean_f32, is_f32, normalized_shape);
+        return {gi.to(DType::BFloat16), gw.to(DType::BFloat16), gb.to(DType::BFloat16)};
+    }
+
     int64_t norm_size = 1;
     for (auto dim : normalized_shape) {
         norm_size *= dim;

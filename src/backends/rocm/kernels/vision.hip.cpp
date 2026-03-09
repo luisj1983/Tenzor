@@ -357,6 +357,12 @@ auto unfold_kernel(const Tensor& input,
                    int64_t padding,
                    int64_t dilation,
                    hipStream_t stream) -> Tensor {
+    // BFloat16 upcast: convert to Float32, compute, convert back
+    if (input.dtype() == DType::BFloat16) {
+        return unfold_kernel(input.to(DType::Float32), kernel_size, stride, padding, dilation, stream)
+            .to(DType::BFloat16);
+    }
+
     auto shape = input.shape();
     int64_t batch = shape[0];
     int64_t channels = shape[1];
@@ -410,6 +416,12 @@ auto fold_kernel(const Tensor& input,
                  int64_t padding,
                  int64_t dilation,
                  hipStream_t stream) -> Tensor {
+    // BFloat16 upcast: convert to Float32, compute, convert back
+    if (input.dtype() == DType::BFloat16) {
+        return fold_kernel(input.to(DType::Float32), output_size, kernel_size, stride, padding, dilation, stream)
+            .to(DType::BFloat16);
+    }
+
     auto shape = input.shape();
     int64_t batch = shape[0];
     int64_t col_channels = shape[1];
@@ -467,6 +479,12 @@ auto interpolate_kernel(const Tensor& input,
                         const std::string& mode,
                         bool align_corners,
                         hipStream_t stream) -> Tensor {
+    // BFloat16 upcast: convert to Float32, compute, convert back
+    if (input.dtype() == DType::BFloat16) {
+        return interpolate_kernel(input.to(DType::Float32), size, mode, align_corners, stream)
+            .to(DType::BFloat16);
+    }
+
     auto shape = input.shape();
     int64_t batch = shape[0];
     int64_t channels = shape[1];
@@ -612,6 +630,12 @@ __global__ void box_iou_kernel(
 }
 
 auto box_iou_hip(const Tensor& boxes1, const Tensor& boxes2, int iou_type) -> Tensor {
+    // BFloat16 upcast: convert to Float32, compute, convert back
+    if (boxes1.dtype() == DType::BFloat16) {
+        return box_iou_hip(boxes1.to(DType::Float32), boxes2.to(DType::Float32), iou_type)
+            .to(DType::BFloat16);
+    }
+
     int64_t N = boxes1.shape()[0];
     int64_t M = boxes2.shape()[0];
 

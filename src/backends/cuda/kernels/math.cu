@@ -55,16 +55,8 @@ __device__ __host__ inline BFloat16 from_cuda_bfloat16(const __nv_bfloat16& x) {
     return BFloat16(__bfloat16_as_ushort(x));
 }
 
-// ============================================================================
-// CUDA Error Checking
-// ============================================================================
-
-#define CUDA_CHECK(call) do { \
-    cudaError_t err = call; \
-    if (err != cudaSuccess) { \
-        throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(err)); \
-    } \
-} while(0)
+// CUDA error checking — use the canonical macro from cuda_error.hpp
+#include "../cuda_error.hpp"
 
 // ============================================================================
 // Kernel Launch Helpers

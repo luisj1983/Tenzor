@@ -255,6 +255,15 @@ auto layer_norm_kernel(
             reinterpret_cast<__half*>(output.data<Float16>()),
             nullptr, nullptr,
             batch_size, normalized_size, eps);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        const Tensor* weight_f32_ptr = nullptr;
+        const Tensor* bias_f32_ptr = nullptr;
+        Tensor weight_f32, bias_f32;
+        if (weight) { weight_f32 = weight->to(DType::Float32); weight_f32_ptr = &weight_f32; }
+        if (bias) { bias_f32 = bias->to(DType::Float32); bias_f32_ptr = &bias_f32; }
+        auto result_f32 = layer_norm_kernel(input_f32, normalized_shape, weight_f32_ptr, bias_f32_ptr, eps, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("layer_norm_kernel: unsupported dtype");
     }
@@ -485,6 +494,18 @@ auto layer_norm_backward_kernel(
                 reinterpret_cast<__half*>(grad_bias.data<Float16>()),
                 normalized_size);
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto mean_f32 = mean.to(DType::Float32);
+        auto rstd_f32 = rstd.to(DType::Float32);
+        const Tensor* weight_f32_ptr = nullptr;
+        Tensor weight_f32;
+        if (weight) { weight_f32 = weight->to(DType::Float32); weight_f32_ptr = &weight_f32; }
+        auto [gi_f32, gw_f32, gb_f32] = layer_norm_backward_kernel(grad_output_f32, input_f32, mean_f32, rstd_f32, weight_f32_ptr, stream);
+        return {gi_f32.to(DType::BFloat16),
+                gw_f32.numel() > 0 ? gw_f32.to(DType::BFloat16) : gw_f32,
+                gb_f32.numel() > 0 ? gb_f32.to(DType::BFloat16) : gb_f32};
     } else {
         throw std::runtime_error("layer_norm_backward_kernel: unsupported dtype");
     }
@@ -701,6 +722,15 @@ auto group_norm_kernel(
             bias ? reinterpret_cast<const __half*>(bias->data<Float16>()) : nullptr,
             reinterpret_cast<__half*>(output.data<Float16>()),
             N, C, HW, num_groups, channels_per_group, eps);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        const Tensor* weight_f32_ptr = nullptr;
+        const Tensor* bias_f32_ptr = nullptr;
+        Tensor weight_f32, bias_f32;
+        if (weight) { weight_f32 = weight->to(DType::Float32); weight_f32_ptr = &weight_f32; }
+        if (bias) { bias_f32 = bias->to(DType::Float32); bias_f32_ptr = &bias_f32; }
+        auto result_f32 = group_norm_kernel(input_f32, num_groups, weight_f32_ptr, bias_f32_ptr, eps, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("group_norm_kernel: unsupported dtype");
     }
@@ -876,6 +906,15 @@ auto instance_norm_kernel(
             bias ? reinterpret_cast<const __half*>(bias->data<Float16>()) : nullptr,
             reinterpret_cast<__half*>(output.data<Float16>()),
             N, C, HW, eps);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        const Tensor* weight_f32_ptr = nullptr;
+        const Tensor* bias_f32_ptr = nullptr;
+        Tensor weight_f32, bias_f32;
+        if (weight) { weight_f32 = weight->to(DType::Float32); weight_f32_ptr = &weight_f32; }
+        if (bias) { bias_f32 = bias->to(DType::Float32); bias_f32_ptr = &bias_f32; }
+        auto result_f32 = instance_norm_kernel(input_f32, weight_f32_ptr, bias_f32_ptr, eps, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("instance_norm_kernel: unsupported dtype");
     }

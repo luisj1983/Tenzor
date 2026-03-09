@@ -84,7 +84,7 @@ auto fused_add_relu_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue)
         queue.parallel_for<FusedAddReluKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float sum = a_ptr[idx] + b_ptr[idx];
             out_ptr[idx] = sum > 0.0f ? sum : 0.0f;
-        }).wait();
+        });
     }
     else if (a.dtype() == DType::Float64) {
         const double* a_ptr = get_data_ptr<const double>(a);
@@ -94,7 +94,7 @@ auto fused_add_relu_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue)
         queue.parallel_for<FusedAddReluKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             double sum = a_ptr[idx] + b_ptr[idx];
             out_ptr[idx] = sum > 0.0 ? sum : 0.0;
-        }).wait();
+        });
     }
     else if (a.dtype() == DType::Float16) {
         const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a);
@@ -104,7 +104,7 @@ auto fused_add_relu_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue)
         queue.parallel_for<FusedAddReluKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float sum = static_cast<float>(a_ptr[idx]) + static_cast<float>(b_ptr[idx]);
             out_ptr[idx] = sycl::half(sum > 0.0f ? sum : 0.0f);
-        }).wait();
+        });
     }
     else if (a.dtype() == DType::BFloat16) {
         const uint16_t* a_ptr = get_data_ptr<const uint16_t>(a);
@@ -114,7 +114,7 @@ auto fused_add_relu_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue)
         queue.parallel_for<FusedAddReluKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float sum = bf16_to_f32(a_ptr[idx]) + bf16_to_f32(b_ptr[idx]);
             out_ptr[idx] = f32_to_bf16(sum > 0.0f ? sum : 0.0f);
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("fused_add_relu: unsupported dtype");
@@ -147,7 +147,7 @@ auto fused_gelu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
             float tanh_val = sycl::tanh(inner);
             out_ptr[idx] = 0.5f * x * (1.0f + tanh_val);
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
@@ -162,7 +162,7 @@ auto fused_gelu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             double inner = sqrt_2_over_pi * (x + coeff * x_cubed);
             double tanh_val = sycl::tanh(inner);
             out_ptr[idx] = 0.5 * x * (1.0 + tanh_val);
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
@@ -177,7 +177,7 @@ auto fused_gelu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             float inner = sqrt_2_over_pi_f * (x + coeff_f * x_cubed);
             float tanh_val = sycl::tanh(inner);
             out_ptr[idx] = sycl::half(0.5f * x * (1.0f + tanh_val));
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
@@ -191,7 +191,7 @@ auto fused_gelu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             float x_cubed = x * x * x;
             float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
             out_ptr[idx] = f32_to_bf16(0.5f * x * (1.0f + sycl::tanh(inner)));
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("fused_gelu: unsupported dtype");
@@ -260,15 +260,15 @@ auto fused_layer_norm_kernel(
             float batch_inv_std = 1.0f / sycl::sqrt(variance + epsilon);
 
             // Store mean and inv_std
-            queue.fill(mean_ptr + b, batch_mean, 1).wait();
-            queue.fill(inv_std_ptr + b, batch_inv_std, 1).wait();
+            queue.fill(mean_ptr + b, batch_mean, 1);
+            queue.fill(inv_std_ptr + b, batch_inv_std, 1);
 
             // Normalize and apply scale/shift
             queue.parallel_for<class LayerNormBatch>(sycl::range<1>(norm_size), [=](sycl::id<1> idx) {
                 int64_t i = idx[0];
                 float normalized = (batch_in[i] - batch_mean) * batch_inv_std;
                 batch_out[i] = normalized * weight_ptr[i] + bias_ptr[i];
-            }).wait();
+            });
         }
     }
     else if (input.dtype() == DType::Float64) {
@@ -300,14 +300,14 @@ auto fused_layer_norm_kernel(
             double variance = var_sum / static_cast<double>(norm_size);
             double batch_inv_std = 1.0 / sycl::sqrt(variance + static_cast<double>(epsilon));
 
-            queue.fill(mean_ptr + b, batch_mean, 1).wait();
-            queue.fill(inv_std_ptr + b, batch_inv_std, 1).wait();
+            queue.fill(mean_ptr + b, batch_mean, 1);
+            queue.fill(inv_std_ptr + b, batch_inv_std, 1);
 
             queue.parallel_for<class LayerNormBatchD>(sycl::range<1>(norm_size), [=](sycl::id<1> idx) {
                 int64_t i = idx[0];
                 double normalized = (batch_in[i] - batch_mean) * batch_inv_std;
                 batch_out[i] = normalized * weight_ptr[i] + bias_ptr[i];
-            }).wait();
+            });
         }
     }
     else if (input.dtype() == DType::Float16) {
@@ -342,8 +342,8 @@ auto fused_layer_norm_kernel(
 
             sycl::half h_mean = sycl::half(batch_mean);
             sycl::half h_inv_std = sycl::half(batch_inv_std);
-            queue.fill(mean_ptr + b, h_mean, 1).wait();
-            queue.fill(inv_std_ptr + b, h_inv_std, 1).wait();
+            queue.fill(mean_ptr + b, h_mean, 1);
+            queue.fill(inv_std_ptr + b, h_inv_std, 1);
 
             queue.parallel_for<FusedLayerNormKernelFloat16>(sycl::range<1>(norm_size), [=](sycl::id<1> idx) {
                 int64_t i = idx[0];
@@ -351,7 +351,7 @@ auto fused_layer_norm_kernel(
                 float normalized = (val - batch_mean) * batch_inv_std;
                 float result = normalized * static_cast<float>(weight_ptr[i]) + static_cast<float>(bias_ptr[i]);
                 batch_out[i] = sycl::half(result);
-            }).wait();
+            });
         }
     }
     else if (input.dtype() == DType::BFloat16) {
@@ -386,8 +386,8 @@ auto fused_layer_norm_kernel(
 
             uint16_t h_mean = f32_to_bf16(batch_mean);
             uint16_t h_inv_std = f32_to_bf16(batch_inv_std);
-            queue.fill(mean_ptr + b, h_mean, 1).wait();
-            queue.fill(inv_std_ptr + b, h_inv_std, 1).wait();
+            queue.fill(mean_ptr + b, h_mean, 1);
+            queue.fill(inv_std_ptr + b, h_inv_std, 1);
 
             queue.parallel_for<FusedLayerNormKernelBFloat16>(sycl::range<1>(norm_size), [=](sycl::id<1> idx) {
                 int64_t i = idx[0];
@@ -395,7 +395,7 @@ auto fused_layer_norm_kernel(
                 float normalized = (val - batch_mean) * batch_inv_std;
                 float result = normalized * bf16_to_f32(weight_ptr[i]) + bf16_to_f32(bias_ptr[i]);
                 batch_out[i] = f32_to_bf16(result);
-            }).wait();
+            });
         }
     }
     else {
@@ -442,8 +442,8 @@ auto fused_layer_norm_backward_kernel(
         float* grad_bias_ptr = get_data_ptr<float>(grad_bias);
 
         // Initialize grad_weight and grad_bias to zero
-        queue.fill(grad_weight_ptr, 0.0f, norm_size).wait();
-        queue.fill(grad_bias_ptr, 0.0f, norm_size).wait();
+        queue.fill(grad_weight_ptr, 0.0f, norm_size);
+        queue.fill(grad_bias_ptr, 0.0f, norm_size);
 
         // Accumulate gradients for weight and bias
         for (int64_t b = 0; b < batch_size; ++b) {
@@ -478,8 +478,8 @@ auto fused_layer_norm_backward_kernel(
                 curr_gb[i] += grad_b_acc[i];
             }
 
-            queue.memcpy(grad_weight_ptr, curr_gw.data(), norm_size * sizeof(float)).wait();
-            queue.memcpy(grad_bias_ptr, curr_gb.data(), norm_size * sizeof(float)).wait();
+            queue.memcpy(grad_weight_ptr, curr_gw.data(), norm_size * sizeof(float));
+            queue.memcpy(grad_bias_ptr, curr_gb.data(), norm_size * sizeof(float));
         }
 
         // Compute grad_input
@@ -496,7 +496,7 @@ auto fused_layer_norm_backward_kernel(
             queue.parallel_for<class LayerNormBackward>(sycl::range<1>(norm_size), [=](sycl::id<1> idx) {
                 int64_t i = idx[0];
                 batch_grad_in[i] = batch_grad[i] * weight_ptr[i] * batch_inv_std;
-            }).wait();
+            });
         }
     }
     else if (input.dtype() == DType::Float64) {
@@ -509,8 +509,8 @@ auto fused_layer_norm_backward_kernel(
         double* grad_weight_ptr = get_data_ptr<double>(grad_weight);
         double* grad_bias_ptr = get_data_ptr<double>(grad_bias);
 
-        queue.fill(grad_weight_ptr, 0.0, norm_size).wait();
-        queue.fill(grad_bias_ptr, 0.0, norm_size).wait();
+        queue.fill(grad_weight_ptr, 0.0, norm_size);
+        queue.fill(grad_bias_ptr, 0.0, norm_size);
 
         for (int64_t b = 0; b < batch_size; ++b) {
             const double* batch_grad = grad_out_ptr + b * norm_size;
@@ -535,8 +535,8 @@ auto fused_layer_norm_backward_kernel(
                 curr_gb[i] += host_grad[i];
             }
 
-            queue.memcpy(grad_weight_ptr, curr_gw.data(), norm_size * sizeof(double)).wait();
-            queue.memcpy(grad_bias_ptr, curr_gb.data(), norm_size * sizeof(double)).wait();
+            queue.memcpy(grad_weight_ptr, curr_gw.data(), norm_size * sizeof(double));
+            queue.memcpy(grad_bias_ptr, curr_gb.data(), norm_size * sizeof(double));
         }
 
         for (int64_t b = 0; b < batch_size; ++b) {
@@ -550,7 +550,7 @@ auto fused_layer_norm_backward_kernel(
             queue.parallel_for<FusedLayerNormBackwardKernelFloat64>(sycl::range<1>(norm_size), [=](sycl::id<1> idx) {
                 int64_t i = idx[0];
                 batch_grad_in[i] = batch_grad[i] * weight_ptr[i] * batch_inv_std;
-            }).wait();
+            });
         }
     }
     else if (input.dtype() == DType::BFloat16) {
@@ -565,8 +565,8 @@ auto fused_layer_norm_backward_kernel(
 
         // Initialize grad_weight and grad_bias to zero
         uint16_t bf16_zero = f32_to_bf16(0.0f);
-        queue.fill(grad_weight_ptr, bf16_zero, norm_size).wait();
-        queue.fill(grad_bias_ptr, bf16_zero, norm_size).wait();
+        queue.fill(grad_weight_ptr, bf16_zero, norm_size);
+        queue.fill(grad_bias_ptr, bf16_zero, norm_size);
 
         // Accumulate gradients for weight and bias (in float32 on host)
         for (int64_t b = 0; b < batch_size; ++b) {
@@ -596,8 +596,8 @@ auto fused_layer_norm_backward_kernel(
                 curr_gb[i] = f32_to_bf16(gb);
             }
 
-            queue.memcpy(grad_weight_ptr, curr_gw.data(), norm_size * sizeof(uint16_t)).wait();
-            queue.memcpy(grad_bias_ptr, curr_gb.data(), norm_size * sizeof(uint16_t)).wait();
+            queue.memcpy(grad_weight_ptr, curr_gw.data(), norm_size * sizeof(uint16_t));
+            queue.memcpy(grad_bias_ptr, curr_gb.data(), norm_size * sizeof(uint16_t));
         }
 
         // Compute grad_input
@@ -615,7 +615,7 @@ auto fused_layer_norm_backward_kernel(
                 float grad = bf16_to_f32(batch_grad[i]);
                 float w = bf16_to_f32(weight_ptr[i]);
                 batch_grad_in[i] = f32_to_bf16(grad * w * batch_inv_std);
-            }).wait();
+            });
         }
     }
     else {
@@ -677,7 +677,7 @@ auto fused_linear_relu_kernel(
                 // ReLU
                 out_ptr[idx] = sum > 0.0f ? sum : 0.0f;
             }
-        ).wait();
+        );
     }
     else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
@@ -705,7 +705,7 @@ auto fused_linear_relu_kernel(
                 // ReLU
                 out_ptr[idx] = sum > 0.0 ? sum : 0.0;
             }
-        ).wait();
+        );
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
@@ -733,7 +733,7 @@ auto fused_linear_relu_kernel(
 
                 out_ptr[idx] = sycl::half(sum > 0.0f ? sum : 0.0f);
             }
-        ).wait();
+        );
     }
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
@@ -762,7 +762,7 @@ auto fused_linear_relu_kernel(
                 // ReLU
                 out_ptr[idx] = f32_to_bf16(sum > 0.0f ? sum : 0.0f);
             }
-        ).wait();
+        );
     }
     else {
         throw std::runtime_error("fused_linear_relu: unsupported dtype");
@@ -819,7 +819,7 @@ auto fused_batchnorm_relu_kernel(
                 // ReLU
                 out_ptr[i] = scaled > 0.0f ? scaled : 0.0f;
             }
-        ).wait();
+        );
     }
     else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
@@ -845,7 +845,7 @@ auto fused_batchnorm_relu_kernel(
                 // ReLU
                 out_ptr[i] = scaled > 0.0 ? scaled : 0.0;
             }
-        ).wait();
+        );
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
@@ -871,7 +871,7 @@ auto fused_batchnorm_relu_kernel(
                 float scaled = normalized * w + b;
                 out_ptr[i] = sycl::half(scaled > 0.0f ? scaled : 0.0f);
             }
-        ).wait();
+        );
     }
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
@@ -897,7 +897,7 @@ auto fused_batchnorm_relu_kernel(
                 float scaled = normalized * w + b;
                 out_ptr[i] = f32_to_bf16(scaled > 0.0f ? scaled : 0.0f);
             }
-        ).wait();
+        );
     }
     else {
         throw std::runtime_error("fused_batchnorm_relu: unsupported dtype");
@@ -952,7 +952,7 @@ auto fused_matmul_add_kernel(
                 // Add bias (broadcast along the m dimension)
                 out_ptr[i * n + j] = sum + bias_ptr[j];
             }
-        ).wait();
+        );
     }
     else if (a.dtype() == DType::Float64) {
         const double* a_ptr = get_data_ptr<const double>(a);
@@ -973,7 +973,7 @@ auto fused_matmul_add_kernel(
 
                 out_ptr[i * n + j] = sum + bias_ptr[j];
             }
-        ).wait();
+        );
     }
     else if (a.dtype() == DType::Float16) {
         const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a);
@@ -994,7 +994,7 @@ auto fused_matmul_add_kernel(
                 }
                 out_ptr[i * n + j] = sycl::half(sum + static_cast<float>(bias_ptr[j]));
             }
-        ).wait();
+        );
     }
     else if (a.dtype() == DType::BFloat16) {
         const uint16_t* a_ptr = get_data_ptr<const uint16_t>(a);
@@ -1015,7 +1015,7 @@ auto fused_matmul_add_kernel(
                 }
                 out_ptr[i * n + j] = f32_to_bf16(sum + bf16_to_f32(bias_ptr[j]));
             }
-        ).wait();
+        );
     }
     else {
         throw std::runtime_error("fused_matmul_add: unsupported dtype");
@@ -1068,7 +1068,7 @@ auto fused_softmax_cross_entropy_kernel(
             float log_sum_exp = std::log(sum_exp) + max_val;
             float loss = log_sum_exp - host_row[target];
 
-            queue.fill(losses_ptr + b, loss, 1).wait();
+            queue.fill(losses_ptr + b, loss, 1);
         }
 
         // Apply reduction
@@ -1083,7 +1083,7 @@ auto fused_softmax_cross_entropy_kernel(
             mean_loss /= static_cast<float>(batch_size);
 
             Tensor result({1}, logits.dtype(), logits.device());
-            queue.fill(get_data_ptr<float>(result), mean_loss, 1).wait();
+            queue.fill(get_data_ptr<float>(result), mean_loss, 1);
             return result;
         }
         else if (reduction == "sum") {
@@ -1096,7 +1096,7 @@ auto fused_softmax_cross_entropy_kernel(
             }
 
             Tensor result({1}, logits.dtype(), logits.device());
-            queue.fill(get_data_ptr<float>(result), sum_loss, 1).wait();
+            queue.fill(get_data_ptr<float>(result), sum_loss, 1);
             return result;
         }
     }
@@ -1124,7 +1124,7 @@ auto fused_softmax_cross_entropy_kernel(
 
             double log_sum_exp = std::log(sum_exp) + max_val;
             double loss = log_sum_exp - host_row[target];
-            queue.fill(losses_ptr + b, loss, 1).wait();
+            queue.fill(losses_ptr + b, loss, 1);
         }
 
         if (reduction == "mean") {
@@ -1138,7 +1138,7 @@ auto fused_softmax_cross_entropy_kernel(
             mean_loss /= static_cast<double>(batch_size);
 
             Tensor result({1}, logits.dtype(), logits.device());
-            queue.fill(get_data_ptr<double>(result), mean_loss, 1).wait();
+            queue.fill(get_data_ptr<double>(result), mean_loss, 1);
             return result;
         }
         else if (reduction == "sum") {
@@ -1151,7 +1151,7 @@ auto fused_softmax_cross_entropy_kernel(
             }
 
             Tensor result({1}, logits.dtype(), logits.device());
-            queue.fill(get_data_ptr<double>(result), sum_loss, 1).wait();
+            queue.fill(get_data_ptr<double>(result), sum_loss, 1);
             return result;
         }
     }
@@ -1182,7 +1182,7 @@ auto fused_softmax_cross_entropy_kernel(
             float log_sum_exp = std::log(sum_exp) + max_val;
             float loss = log_sum_exp - static_cast<float>(host_row[target]);
             sycl::half h_loss = sycl::half(loss);
-            queue.fill(losses_ptr + b, h_loss, 1).wait();
+            queue.fill(losses_ptr + b, h_loss, 1);
         }
 
         if (reduction == "mean") {
@@ -1197,7 +1197,7 @@ auto fused_softmax_cross_entropy_kernel(
 
             Tensor result({1}, logits.dtype(), logits.device());
             sycl::half h_mean = sycl::half(mean_loss);
-            queue.fill(get_data_ptr<sycl::half>(result), h_mean, 1).wait();
+            queue.fill(get_data_ptr<sycl::half>(result), h_mean, 1);
             return result;
         }
         else if (reduction == "sum") {
@@ -1211,7 +1211,7 @@ auto fused_softmax_cross_entropy_kernel(
 
             Tensor result({1}, logits.dtype(), logits.device());
             sycl::half h_sum = sycl::half(sum_loss);
-            queue.fill(get_data_ptr<sycl::half>(result), h_sum, 1).wait();
+            queue.fill(get_data_ptr<sycl::half>(result), h_sum, 1);
             return result;
         }
     }
@@ -1267,7 +1267,7 @@ auto fused_rms_norm_kernel(const Tensor& input, const Tensor& weight, float eps,
                     out_row[i] = row[i] * rr * w_ptr[i];
                 }
             }
-        ).wait();
+        );
     }
     else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
@@ -1295,7 +1295,7 @@ auto fused_rms_norm_kernel(const Tensor& input, const Tensor& weight, float eps,
                     out_row[i] = row[i] * rr * w_ptr[i];
                 }
             }
-        ).wait();
+        );
     }
     else {
         throw std::runtime_error("fused_rms_norm: unsupported dtype (only Float32/Float64)");
@@ -1323,7 +1323,7 @@ auto rms_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
 
     // Zero-initialize grad_weight
     queue.memset(const_cast<void*>(grad_weight.data_ptr()), 0,
-                 norm_size * grad_weight.dtype_size()).wait();
+                 norm_size * grad_weight.dtype_size());
 
     if (input.dtype() == DType::Float32) {
         const float* go_ptr = get_data_ptr<const float>(grad_output);
@@ -1355,7 +1355,7 @@ auto rms_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
                     gi_row[i] = rr * (go_row[i] * w_ptr[i] - in_row[i] * dot);
                 }
             }
-        ).wait();
+        );
 
         // Compute grad_weight (accumulate across batch on host)
         std::vector<float> go_host(batch_size * norm_size);
@@ -1401,7 +1401,7 @@ auto rms_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
                     gi_row[i] = rr * (go_row[i] * w_ptr[i] - in_row[i] * dot);
                 }
             }
-        ).wait();
+        );
 
         std::vector<double> go_host(batch_size * norm_size);
         std::vector<double> in_host(batch_size * norm_size);
@@ -1519,7 +1519,7 @@ auto fused_adam_step_kernel(
 
             // Update parameters
             param_ptr[idx] = p - f_lr * m_hat / (sycl::sqrt(v_hat) + f_eps);
-        }).wait();
+        });
     } else if (param.dtype() == DType::Float64) {
         double* param_ptr = get_data_ptr<double>(param);
         const double* grad_ptr = get_data_ptr<const double>(grad);
@@ -1563,7 +1563,7 @@ auto fused_adam_step_kernel(
             }
 
             param_ptr[idx] = p - lr * m_hat / (sycl::sqrt(v_hat) + eps);
-        }).wait();
+        });
     } else {
         throw std::runtime_error("fused_adam_step_kernel: Only Float32 and Float64 supported");
     }
@@ -1616,7 +1616,7 @@ auto fused_sgd_step_kernel(
             }
 
             param_ptr[idx] = p - lr * g;
-        }).wait();
+        });
     } else if (param.dtype() == DType::Float64) {
         double* param_ptr = get_data_ptr<double>(param);
         const double* grad_ptr = get_data_ptr<const double>(grad);
@@ -1648,7 +1648,7 @@ auto fused_sgd_step_kernel(
             }
 
             param_ptr[idx] = p - d_lr * g;
-        }).wait();
+        });
     } else {
         throw std::runtime_error("fused_sgd_step_kernel: Only Float32 and Float64 supported");
     }
@@ -1712,7 +1712,7 @@ auto fused_rmsprop_step_kernel(
             } else {
                 param_ptr[idx] = param_ptr[idx] - lr * g / avg;
             }
-        }).wait();
+        });
     } else if (param.dtype() == DType::Float64) {
         double* param_ptr = get_data_ptr<double>(param);
         const double* grad_ptr = get_data_ptr<const double>(grad);
@@ -1755,7 +1755,7 @@ auto fused_rmsprop_step_kernel(
             } else {
                 param_ptr[idx] = param_ptr[idx] - d_lr * g / avg;
             }
-        }).wait();
+        });
     } else {
         throw std::runtime_error("fused_rmsprop_step_kernel: Only Float32 and Float64 supported");
     }
@@ -1804,7 +1804,7 @@ auto fused_adadelta_step_kernel(
             ad_ptr[idx] = rho * ad_ptr[idx] + (1.0f - rho) * delta * delta;
 
             param_ptr[idx] = param_ptr[idx] - lr * delta;
-        }).wait();
+        });
     } else if (param.dtype() == DType::Float64) {
         double* param_ptr = get_data_ptr<double>(param);
         const double* grad_ptr = get_data_ptr<const double>(grad);
@@ -1832,7 +1832,7 @@ auto fused_adadelta_step_kernel(
             ad_ptr[idx] = d_rho * ad_ptr[idx] + (1.0 - d_rho) * delta * delta;
 
             param_ptr[idx] = param_ptr[idx] - d_lr * delta;
-        }).wait();
+        });
     } else {
         throw std::runtime_error("fused_adadelta_step_kernel: Only Float32 and Float64 supported");
     }
@@ -1874,7 +1874,7 @@ auto fused_adagrad_step_kernel(
 
             // param -= clr * g / (sqrt(sum_sq) + eps)
             param_ptr[idx] = param_ptr[idx] - clr * g / (sycl::sqrt(sq) + eps);
-        }).wait();
+        });
     } else if (param.dtype() == DType::Float64) {
         double* param_ptr = get_data_ptr<double>(param);
         const double* grad_ptr = get_data_ptr<const double>(grad);
@@ -1895,7 +1895,7 @@ auto fused_adagrad_step_kernel(
             sq_ptr[idx] = sq;
 
             param_ptr[idx] = param_ptr[idx] - clr * g / (sycl::sqrt(sq) + d_eps);
-        }).wait();
+        });
     } else {
         throw std::runtime_error("fused_adagrad_step_kernel: Only Float32 and Float64 supported");
     }

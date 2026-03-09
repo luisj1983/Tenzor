@@ -301,7 +301,7 @@ auto roi_align_kernel(
 
                 output_ptr[idx] = output_val;
             }
-        ).wait();
+        );
     }
     else if (features.dtype() == DType::Float64) {
         const double* features_ptr = get_data_ptr<const double>(features);
@@ -395,7 +395,7 @@ auto roi_align_kernel(
 
                 output_ptr[idx] = output_val;
             }
-        ).wait();
+        );
     }
     else if (features.dtype() == DType::Float16) {
         const sycl::half* features_ptr = get_data_ptr<const sycl::half>(features);
@@ -489,7 +489,7 @@ auto roi_align_kernel(
 
                 output_ptr[idx] = sycl::half(output_val);
             }
-        ).wait();
+        );
     }
     else {
         throw std::runtime_error("roi_align: unsupported dtype");
@@ -544,9 +544,9 @@ auto roi_align_backward_kernel(
     if (num_rois == 0 || total_elements == 0) {
         // Zero out and return
         if (grad_output.dtype() == DType::Float32) {
-            queue.fill(get_data_ptr<float>(grad_features), 0.0f, feat_size).wait();
+            queue.fill(get_data_ptr<float>(grad_features), 0.0f, feat_size);
         } else {
-            queue.fill(get_data_ptr<double>(grad_features), 0.0, feat_size).wait();
+            queue.fill(get_data_ptr<double>(grad_features), 0.0, feat_size);
         }
         return grad_features;
     }
@@ -556,7 +556,7 @@ auto roi_align_backward_kernel(
         const float* rois_ptr = get_data_ptr<const float>(rois);
         float* grad_feat_ptr = get_data_ptr<float>(grad_features);
 
-        queue.fill(grad_feat_ptr, 0.0f, feat_size).wait();
+        queue.fill(grad_feat_ptr, 0.0f, feat_size);
 
         const float offset = aligned ? 0.5f : 0.0f;
 
@@ -636,14 +636,14 @@ auto roi_align_backward_kernel(
                     }
                 }
             }
-        ).wait();
+        );
     }
     else if (grad_output.dtype() == DType::Float64) {
         const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
         const double* rois_ptr = get_data_ptr<const double>(rois);
         double* grad_feat_ptr = get_data_ptr<double>(grad_features);
 
-        queue.fill(grad_feat_ptr, 0.0, feat_size).wait();
+        queue.fill(grad_feat_ptr, 0.0, feat_size);
 
         const double offset = aligned ? 0.5 : 0.0;
 
@@ -723,7 +723,7 @@ auto roi_align_backward_kernel(
                     }
                 }
             }
-        ).wait();
+        );
     }
     else if (grad_output.dtype() == DType::Float16) {
         const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
@@ -732,7 +732,7 @@ auto roi_align_backward_kernel(
 
         // Accumulate in float32 since sycl::half doesn't support atomic operations
         float* accum_ptr = sycl::malloc_device<float>(feat_size, queue);
-        queue.fill(accum_ptr, 0.0f, feat_size).wait();
+        queue.fill(accum_ptr, 0.0f, feat_size);
 
         const float offset = aligned ? 0.5f : 0.0f;
 
@@ -812,7 +812,7 @@ auto roi_align_backward_kernel(
                     }
                 }
             }
-        ).wait();
+        );
 
         // Convert float32 accumulation buffer back to half
         queue.parallel_for<ROIAlignBackwardF16ConvertKernel>(
@@ -878,7 +878,7 @@ auto gather_relative_position_bias_kernel(
                 int64_t table_idx = indices_ptr[i * num_positions + j];
                 output_ptr[flat_idx] = table_ptr[table_idx * num_heads + h];
             }
-        ).wait();
+        );
     }
     else if (table.dtype() == DType::Float64) {
         const double* table_ptr = get_data_ptr<const double>(table);
@@ -896,7 +896,7 @@ auto gather_relative_position_bias_kernel(
                 int64_t table_idx = indices_ptr[i * num_positions + j];
                 output_ptr[flat_idx] = table_ptr[table_idx * num_heads + h];
             }
-        ).wait();
+        );
     }
     else if (table.dtype() == DType::Float16) {
         const sycl::half* table_ptr = get_data_ptr<const sycl::half>(table);
@@ -914,7 +914,7 @@ auto gather_relative_position_bias_kernel(
                 int64_t table_idx = indices_ptr[i * num_positions + j];
                 output_ptr[flat_idx] = table_ptr[table_idx * num_heads + h];
             }
-        ).wait();
+        );
     }
     else {
         throw std::runtime_error("gather_relative_position_bias: unsupported dtype");
@@ -997,7 +997,7 @@ auto interpolate_kernel(
                     w_in = sycl::min(w_in, W_in - 1);
 
                     out_ptr[idx] = in_ptr[((n * C + c) * H_in + h_in) * W_in + w_in];
-                }).wait();
+                });
         }
         else if (input.dtype() == DType::Float64) {
             const double* in_ptr = get_data_ptr<const double>(input);
@@ -1016,7 +1016,7 @@ auto interpolate_kernel(
                     w_in = sycl::min(w_in, W_in - 1);
 
                     out_ptr[idx] = in_ptr[((n * C + c) * H_in + h_in) * W_in + w_in];
-                }).wait();
+                });
         }
         else if (input.dtype() == DType::Float16) {
             const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
@@ -1035,7 +1035,7 @@ auto interpolate_kernel(
                     w_in = sycl::min(w_in, W_in - 1);
 
                     out_ptr[idx] = in_ptr[((n * C + c) * H_in + h_in) * W_in + w_in];
-                }).wait();
+                });
         }
         else {
             throw std::runtime_error("interpolate nearest: unsupported dtype");
@@ -1085,7 +1085,7 @@ auto interpolate_kernel(
                     float val = (1.0f - h_lambda) * ((1.0f - w_lambda) * v00 + w_lambda * v01)
                               + h_lambda * ((1.0f - w_lambda) * v10 + w_lambda * v11);
                     out_ptr[idx] = val;
-                }).wait();
+                });
         }
         else if (input.dtype() == DType::Float64) {
             const double* in_ptr = get_data_ptr<const double>(input);
@@ -1130,7 +1130,7 @@ auto interpolate_kernel(
                     double val = (1.0 - h_lambda) * ((1.0 - w_lambda) * v00 + w_lambda * v01)
                                + h_lambda * ((1.0 - w_lambda) * v10 + w_lambda * v11);
                     out_ptr[idx] = val;
-                }).wait();
+                });
         }
         else if (input.dtype() == DType::Float16) {
             const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
@@ -1175,7 +1175,7 @@ auto interpolate_kernel(
                     float val = (1.0f - h_lambda) * ((1.0f - w_lambda) * v00 + w_lambda * v01)
                               + h_lambda * ((1.0f - w_lambda) * v10 + w_lambda * v11);
                     out_ptr[idx] = sycl::half(val);
-                }).wait();
+                });
         }
         else {
             throw std::runtime_error("interpolate bilinear: unsupported dtype");
@@ -1235,7 +1235,7 @@ auto interpolate_kernel(
                         }
                     }
                     out_ptr[idx] = val;
-                }).wait();
+                });
         }
         else if (input.dtype() == DType::Float64) {
             const double* in_ptr = get_data_ptr<const double>(input);
@@ -1290,7 +1290,7 @@ auto interpolate_kernel(
                         }
                     }
                     out_ptr[idx] = val;
-                }).wait();
+                });
         }
         else if (input.dtype() == DType::Float16) {
             const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
@@ -1345,7 +1345,7 @@ auto interpolate_kernel(
                         }
                     }
                     out_ptr[idx] = sycl::half(val);
-                }).wait();
+                });
         }
         else {
             throw std::runtime_error("interpolate bicubic: unsupported dtype");
@@ -1433,7 +1433,7 @@ auto box_iou_kernel(
             }
 
             out_ptr[i * M + j] = iou;
-        }).wait();
+        });
     } else if (boxes1.dtype() == DType::Float64) {
         const double* b1_ptr = get_vision_data_ptr<const double>(boxes1);
         const double* b2_ptr = get_vision_data_ptr<const double>(boxes2);
@@ -1478,7 +1478,7 @@ auto box_iou_kernel(
             }
 
             out_ptr[i * M + j] = iou;
-        }).wait();
+        });
     } else {
         throw std::runtime_error("box_iou_kernel: unsupported dtype (need Float32 or Float64)");
     }

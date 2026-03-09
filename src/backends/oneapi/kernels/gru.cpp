@@ -102,7 +102,7 @@ auto gru_cell_forward_kernel(
                 // Store output
                 h_out_ptr[idx] = h_t;
             }
-        ).wait();
+        );
     }
     else if (reset_gates.dtype() == DType::Float64) {
         const double* reset_ptr = get_data_ptr<const double>(reset_gates);
@@ -131,7 +131,7 @@ auto gru_cell_forward_kernel(
 
                 h_out_ptr[idx] = h_t;
             }
-        ).wait();
+        );
     }
     else if (reset_gates.dtype() == DType::BFloat16) {
         const uint16_t* reset_ptr = get_data_ptr<const uint16_t>(reset_gates);
@@ -160,7 +160,7 @@ auto gru_cell_forward_kernel(
 
                 h_out_ptr[idx] = f32_to_bf16(h_t);
             }
-        ).wait();
+        );
     }
     else {
         throw std::runtime_error("gru_cell_forward: only Float32, Float64, and BFloat16 supported");
@@ -277,7 +277,7 @@ auto gru_cell_backward_kernel(
                 // Gradient for previous hidden also comes from new gate hidden part
                 grad_h_prev_ptr[idx] = dh_prev;
             }
-        ).wait();
+        );
     }
     else if (grad_h.dtype() == DType::Float64) {
         const double* grad_h_ptr = get_data_ptr<const double>(grad_h);
@@ -329,7 +329,7 @@ auto gru_cell_backward_kernel(
                 grad_new_hidden_ptr[idx] = dn_hidden;
                 grad_h_prev_ptr[idx] = dh_prev;
             }
-        ).wait();
+        );
     }
     else if (grad_h.dtype() == DType::BFloat16) {
         const uint16_t* grad_h_ptr = get_data_ptr<const uint16_t>(grad_h);
@@ -381,7 +381,7 @@ auto gru_cell_backward_kernel(
                 grad_new_hidden_ptr[idx] = f32_to_bf16(dn_hidden);
                 grad_h_prev_ptr[idx] = f32_to_bf16(dh_prev);
             }
-        ).wait();
+        );
     }
     else {
         throw std::runtime_error("gru_cell_backward: only Float32, Float64, and BFloat16 supported");

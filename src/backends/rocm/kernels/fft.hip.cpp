@@ -291,6 +291,13 @@ void execute_plan(rocfft_plan plan, void* in_buf, void* out_buf, hipStream_t str
 
 auto rocm_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                      const std::string& norm, hipStream_t stream) -> Tensor {
+    // BFloat16: upcast to Float32 (Complex64), compute, downcast
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = rocm_fft_kernel(input_f32, dim, n, norm, stream);
+        return result_f32.to(DType::BFloat16);
+    }
+
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
     bool is_float32 = (input.dtype() == DType::Complex64);
@@ -354,6 +361,13 @@ auto rocm_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
 auto rocm_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
                       const std::string& norm, hipStream_t stream) -> Tensor {
+    // BFloat16: upcast to Float32 (Complex64), compute, downcast
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = rocm_ifft_kernel(input_f32, dim, n, norm, stream);
+        return result_f32.to(DType::BFloat16);
+    }
+
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
     bool is_float32 = (input.dtype() == DType::Complex64);
@@ -409,6 +423,12 @@ auto rocm_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
 auto rocm_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                       const std::string& norm, hipStream_t stream) -> Tensor {
+    // BFloat16: upcast to Float32, compute rfft, result is Complex64 (no downcast needed)
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        return rocm_rfft_kernel(input_f32, dim, n, norm, stream);
+    }
+
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
     bool is_float32 = (input.dtype() == DType::Float32);
@@ -503,6 +523,13 @@ auto rocm_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
 auto rocm_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                        const std::string& norm, hipStream_t stream) -> Tensor {
+    // BFloat16: upcast to Float32 (Complex64), compute irfft, downcast real result
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = rocm_irfft_kernel(input_f32, dim, n, norm, stream);
+        return result_f32.to(DType::BFloat16);
+    }
+
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
     bool is_float32 = (input.dtype() == DType::Complex64);
@@ -597,6 +624,13 @@ auto rocm_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 auto rocm_fft2_kernel(const Tensor& input, const std::vector<int64_t>& dims,
                       const std::vector<int64_t>& n_vec,
                       const std::string& norm, hipStream_t stream) -> Tensor {
+    // BFloat16: upcast to Float32 (Complex64), compute, downcast
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = rocm_fft2_kernel(input_f32, dims, n_vec, norm, stream);
+        return result_f32.to(DType::BFloat16);
+    }
+
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
     bool is_float32 = (input.dtype() == DType::Complex64);
@@ -675,6 +709,13 @@ auto rocm_fft2_kernel(const Tensor& input, const std::vector<int64_t>& dims,
 auto rocm_ifft2_kernel(const Tensor& input, const std::vector<int64_t>& dims,
                        const std::vector<int64_t>& n_vec,
                        const std::string& norm, hipStream_t stream) -> Tensor {
+    // BFloat16: upcast to Float32 (Complex64), compute, downcast
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = rocm_ifft2_kernel(input_f32, dims, n_vec, norm, stream);
+        return result_f32.to(DType::BFloat16);
+    }
+
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
     bool is_float32 = (input.dtype() == DType::Complex64);
@@ -748,6 +789,13 @@ auto rocm_ifft2_kernel(const Tensor& input, const std::vector<int64_t>& dims,
 auto rocm_fftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
                       const std::vector<int64_t>& n_vec,
                       const std::string& norm, hipStream_t stream) -> Tensor {
+    // BFloat16: upcast to Float32 (Complex64), compute, downcast
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = rocm_fftn_kernel(input_f32, dims, n_vec, norm, stream);
+        return result_f32.to(DType::BFloat16);
+    }
+
     int64_t ndim = static_cast<int64_t>(input.shape().size());
     int64_t rank = static_cast<int64_t>(dims.size());
 
@@ -850,6 +898,13 @@ auto rocm_fftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
 auto rocm_ifftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
                        const std::vector<int64_t>& n_vec,
                        const std::string& norm, hipStream_t stream) -> Tensor {
+    // BFloat16: upcast to Float32 (Complex64), compute, downcast
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = rocm_ifftn_kernel(input_f32, dims, n_vec, norm, stream);
+        return result_f32.to(DType::BFloat16);
+    }
+
     int64_t ndim = static_cast<int64_t>(input.shape().size());
     int64_t rank = static_cast<int64_t>(dims.size());
 

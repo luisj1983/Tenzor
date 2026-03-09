@@ -791,6 +791,21 @@ auto conv2d_forward_kernel(
     hipStream_t stream,
     DataLayout layout = DataLayout::NCHW
 ) -> Tensor {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto weight_f32 = weight.to(DType::Float32);
+        Tensor bias_f32;
+        const Tensor* bias_f32_ptr = nullptr;
+        if (bias) {
+            bias_f32 = bias->to(DType::Float32);
+            bias_f32_ptr = &bias_f32;
+        }
+        auto result = conv2d_forward_kernel(input_f32, weight_f32, bias_f32_ptr,
+                                            stride, padding, dilation, groups, stream, layout);
+        return result.to(DType::BFloat16);
+    }
+
     // Extract dimensions
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
@@ -1110,6 +1125,21 @@ auto conv2d_backward_kernel(
     hipStream_t stream,
     DataLayout layout = DataLayout::NCHW
 ) -> std::tuple<Tensor, Tensor, Tensor> {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (input.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto weight_f32 = weight.to(DType::Float32);
+        auto [gi, gw, gb] = conv2d_backward_kernel(grad_output_f32, input_f32, weight_f32,
+                                                     stride, padding, dilation, groups,
+                                                     compute_grad_input, compute_grad_weight,
+                                                     compute_grad_bias, stream, layout);
+        if (compute_grad_input) gi = gi.to(DType::BFloat16);
+        if (compute_grad_weight) gw = gw.to(DType::BFloat16);
+        if (compute_grad_bias) gb = gb.to(DType::BFloat16);
+        return {gi, gw, gb};
+    }
+
     // Extract dimensions
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
@@ -1493,6 +1523,13 @@ auto conv2d_backward_bias(
     const Tensor& grad_output,
     hipStream_t stream
 ) -> Tensor {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (grad_output.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto result = conv2d_backward_bias(grad_output_f32, stream);
+        return result.to(DType::BFloat16);
+    }
+
     auto grad_shape = grad_output.shape();
     int64_t out_channels = grad_shape[1];  // Assumes NCHW
     DType dtype = grad_output.dtype();
@@ -1646,6 +1683,19 @@ auto conv_transpose2d_forward_kernel(
             batch, in_channels, in_h, in_w, out_channels, out_h, out_w,
             kernel_h, kernel_w, stride_h, stride_w,
             padding_h, padding_w, output_padding_h, output_padding_w);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto weight_f32 = weight.to(DType::Float32);
+        Tensor bias_f32;
+        const Tensor* bias_f32_ptr = nullptr;
+        if (bias) {
+            bias_f32 = bias->to(DType::Float32);
+            bias_f32_ptr = &bias_f32;
+        }
+        auto result = conv_transpose2d_forward_kernel(input_f32, weight_f32, bias_f32_ptr,
+                                                       stride_h, stride_w, padding_h, padding_w,
+                                                       output_padding_h, output_padding_w, stream);
+        return result.to(DType::BFloat16);
     } else {
         throw std::runtime_error("conv_transpose2d_forward: unsupported dtype");
     }
@@ -1761,6 +1811,19 @@ auto depthwise_conv2d_kernel(
             batch, channels, in_h, in_w, out_h, out_w,
             kernel_h, kernel_w, stride_h, stride_w,
             padding_h, padding_w, dilation_h, dilation_w);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto weight_f32 = weight.to(DType::Float32);
+        Tensor bias_f32;
+        const Tensor* bias_f32_ptr = nullptr;
+        if (bias) {
+            bias_f32 = bias->to(DType::Float32);
+            bias_f32_ptr = &bias_f32;
+        }
+        auto result = depthwise_conv2d_kernel(input_f32, weight_f32, bias_f32_ptr,
+                                               stride_h, stride_w, padding_h, padding_w,
+                                               dilation_h, dilation_w, stream);
+        return result.to(DType::BFloat16);
     } else {
         throw std::runtime_error("depthwise_conv2d: unsupported dtype");
     }

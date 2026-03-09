@@ -45,7 +45,7 @@ static auto slice_at(const Tensor& input, int64_t t, sycl::queue& queue) -> Tens
     Tensor out({batch, features}, input.dtype(), input.device());
     const auto* src = static_cast<const uint8_t*>(input.data_ptr()) + t * batch * features * elem_size;
     auto* dst = const_cast<void*>(out.data_ptr());
-    queue.memcpy(dst, src, batch * features * elem_size).wait();
+    queue.memcpy(dst, src, batch * features * elem_size);
     return out;
 }
 
@@ -58,7 +58,7 @@ static void copy_to_time(Tensor& output, const Tensor& src, int64_t t, sycl::que
 
     auto* dst = static_cast<uint8_t*>(const_cast<void*>(output.data_ptr())) + t * batch * features * elem_size;
     const auto* s = static_cast<const uint8_t*>(src.data_ptr());
-    queue.memcpy(dst, s, batch * features * elem_size).wait();
+    queue.memcpy(dst, s, batch * features * elem_size);
 }
 
 // ============================================================================
@@ -131,7 +131,7 @@ auto lstm_forward_kernel(
                 int64_t r = idx / is;  // row in W_ih = gate dim
                 int64_t c = idx % is;  // col in W_ih = input dim
                 dst[c * gs + r] = src[r * is + c];
-            }).wait();
+            });
         } else if (W_ih.dtype() == DType::Float64) {
             const double* src = static_cast<const double*>(W_ih.data_ptr());
             double* dst = static_cast<double*>(const_cast<void*>(W_ih_T.data_ptr()));
@@ -139,7 +139,7 @@ auto lstm_forward_kernel(
                 int64_t r = idx / is;
                 int64_t c = idx % is;
                 dst[c * gs + r] = src[r * is + c];
-            }).wait();
+            });
         } else {
             // BFloat16: treat as uint16_t
             const uint16_t* src = static_cast<const uint16_t*>(W_ih.data_ptr());
@@ -148,7 +148,7 @@ auto lstm_forward_kernel(
                 int64_t r = idx / is;
                 int64_t c = idx % is;
                 dst[c * gs + r] = src[r * is + c];
-            }).wait();
+            });
         }
     }
 
@@ -166,7 +166,7 @@ auto lstm_forward_kernel(
                 int64_t r = idx / hs;
                 int64_t c = idx % hs;
                 dst[c * gs + r] = src[r * hs + c];
-            }).wait();
+            });
         } else if (W_hh.dtype() == DType::Float64) {
             const double* src = static_cast<const double*>(W_hh.data_ptr());
             double* dst = static_cast<double*>(const_cast<void*>(W_hh_T.data_ptr()));
@@ -174,7 +174,7 @@ auto lstm_forward_kernel(
                 int64_t r = idx / hs;
                 int64_t c = idx % hs;
                 dst[c * gs + r] = src[r * hs + c];
-            }).wait();
+            });
         } else {
             const uint16_t* src = static_cast<const uint16_t*>(W_hh.data_ptr());
             uint16_t* dst = static_cast<uint16_t*>(const_cast<void*>(W_hh_T.data_ptr()));
@@ -182,7 +182,7 @@ auto lstm_forward_kernel(
                 int64_t r = idx / hs;
                 int64_t c = idx % hs;
                 dst[c * gs + r] = src[r * hs + c];
-            }).wait();
+            });
         }
     }
 
@@ -244,7 +244,7 @@ auto gru_forward_kernel(
                 int64_t r = idx / cols;
                 int64_t c = idx % cols;
                 dst[c * rows + r] = src[r * cols + c];
-            }).wait();
+            });
         } else if (w.dtype() == DType::Float64) {
             const double* src = static_cast<const double*>(w.data_ptr());
             double* dst = static_cast<double*>(const_cast<void*>(w_t.data_ptr()));
@@ -252,7 +252,7 @@ auto gru_forward_kernel(
                 int64_t r = idx / cols;
                 int64_t c = idx % cols;
                 dst[c * rows + r] = src[r * cols + c];
-            }).wait();
+            });
         } else {
             const uint16_t* src = static_cast<const uint16_t*>(w.data_ptr());
             uint16_t* dst = static_cast<uint16_t*>(const_cast<void*>(w_t.data_ptr()));
@@ -260,7 +260,7 @@ auto gru_forward_kernel(
                 int64_t r = idx / cols;
                 int64_t c = idx % cols;
                 dst[c * rows + r] = src[r * cols + c];
-            }).wait();
+            });
         }
         return w_t;
     };
@@ -290,7 +290,7 @@ auto gru_forward_kernel(
                 int64_t b = idx / hidden_size;
                 int64_t h = idx % hidden_size;
                 c[b * hidden_size + h] = g[b * gate3 + gate_idx * hidden_size + h];
-            }).wait();
+            });
         } else if (gates.dtype() == DType::Float64) {
             const double* g = static_cast<const double*>(gates.data_ptr());
             double* c = static_cast<double*>(const_cast<void*>(chunk.data_ptr()));
@@ -298,7 +298,7 @@ auto gru_forward_kernel(
                 int64_t b = idx / hidden_size;
                 int64_t h = idx % hidden_size;
                 c[b * hidden_size + h] = g[b * gate3 + gate_idx * hidden_size + h];
-            }).wait();
+            });
         } else {
             const uint16_t* g = static_cast<const uint16_t*>(gates.data_ptr());
             uint16_t* c = static_cast<uint16_t*>(const_cast<void*>(chunk.data_ptr()));
@@ -306,7 +306,7 @@ auto gru_forward_kernel(
                 int64_t b = idx / hidden_size;
                 int64_t h = idx % hidden_size;
                 c[b * hidden_size + h] = g[b * gate3 + gate_idx * hidden_size + h];
-            }).wait();
+            });
         }
         return chunk;
     };
@@ -381,10 +381,10 @@ auto lstm_multilayer_forward_kernel(
                 bias_hh = Tensor({gate_size}, bias_list[l].dtype(), bias_list[l].device());
                 int64_t elem_size = bias_list[l].dtype_size();
                 queue.memcpy(const_cast<void*>(bias_ih.data_ptr()),
-                            bias_list[l].data_ptr(), gate_size * elem_size).wait();
+                            bias_list[l].data_ptr(), gate_size * elem_size);
                 queue.memcpy(const_cast<void*>(bias_hh.data_ptr()),
                             static_cast<const uint8_t*>(bias_list[l].data_ptr()) + gate_size * elem_size,
-                            gate_size * elem_size).wait();
+                            gate_size * elem_size);
             } else {
                 bias_ih = bias_list[l];
                 bias_hh = Tensor();
@@ -512,7 +512,6 @@ auto bilstm_forward_kernel(
             queue.memcpy(dst, fwd_src, hidden_size * elem_size);
             queue.memcpy(dst + hidden_size * elem_size, bwd_src, hidden_size * elem_size);
         }
-        queue.wait();
     }
 
     // Stack h_n and c_n: (2, batch, hidden_size)

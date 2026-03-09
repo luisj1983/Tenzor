@@ -1148,6 +1148,11 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stre
             }
             break;
         }
+        case DType::BFloat16: {
+            auto input_f32 = input.to(DType::Float32);
+            auto result_f32 = sum_kernel(input_f32, full_reduction ? INT64_MIN : dim, keepdim, stream);
+            return result_f32.to(DType::BFloat16);
+        }
         default:
             throw std::runtime_error("sum: unsupported dtype");
     }
@@ -1172,8 +1177,15 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t str
     const auto dtype = input.dtype();
     const int64_t ndim = input.ndim();
 
-    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16) {
-        throw std::runtime_error("mean: only Float32, Float64, and Float16 are supported");
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
+        throw std::runtime_error("mean: only Float32, Float64, Float16, and BFloat16 are supported");
+    }
+
+    // BFloat16: upcast to Float32, compute mean, convert back
+    if (dtype == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = mean_kernel(input_f32, dim, keepdim, stream);
+        return result_f32.to(DType::BFloat16);
     }
 
     // Normalize negative dimension (but preserve special value INT64_MIN for full reduction)
@@ -1322,6 +1334,11 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stre
             }
             break;
         }
+        case DType::BFloat16: {
+            auto input_f32 = input.to(DType::Float32);
+            auto result_f32 = max_kernel(input_f32, dim, keepdim, stream);
+            return result_f32.to(DType::BFloat16);
+        }
         default:
             throw std::runtime_error("max: unsupported dtype");
     }
@@ -1419,6 +1436,11 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stre
                 );
             }
             break;
+        }
+        case DType::BFloat16: {
+            auto input_f32 = input.to(DType::Float32);
+            auto result_f32 = min_kernel(input_f32, dim, keepdim, stream);
+            return result_f32.to(DType::BFloat16);
         }
         default:
             throw std::runtime_error("min: unsupported dtype");
@@ -1687,11 +1709,19 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t s
             }
 
             HIP_CHECK(hipFree(d_partial));
+        } else if (dtype == DType::BFloat16) {
+            auto input_f32 = input.to(DType::Float32);
+            return argmax_kernel(input_f32, dim, keepdim, stream);
         } else {
             throw std::runtime_error("argmax: unsupported dtype");
         }
     } else {
         // Dimensional argmax
+        if (dtype == DType::BFloat16) {
+            auto input_f32 = input.to(DType::Float32);
+            return argmax_kernel(input_f32, dim, keepdim, stream);
+        }
+
         const auto& input_strides = input.strides();
 
         switch (dtype) {
@@ -1815,11 +1845,19 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t s
             }
 
             HIP_CHECK(hipFree(d_partial));
+        } else if (dtype == DType::BFloat16) {
+            auto input_f32 = input.to(DType::Float32);
+            return argmin_kernel(input_f32, dim, keepdim, stream);
         } else {
             throw std::runtime_error("argmin: unsupported dtype");
         }
     } else {
         // Dimensional argmin
+        if (dtype == DType::BFloat16) {
+            auto input_f32 = input.to(DType::Float32);
+            return argmin_kernel(input_f32, dim, keepdim, stream);
+        }
+
         const auto& input_strides = input.strides();
 
         switch (dtype) {
@@ -1967,11 +2005,21 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t str
             }
 
             HIP_CHECK(hipFree(d_partial));
+        } else if (dtype == DType::BFloat16) {
+            auto input_f32 = input.to(DType::Float32);
+            auto result_f32 = prod_kernel(input_f32, dim, keepdim, stream);
+            return result_f32.to(DType::BFloat16);
         } else {
             throw std::runtime_error("prod: unsupported dtype");
         }
     } else {
         // Dimensional product
+        if (dtype == DType::BFloat16) {
+            auto input_f32 = input.to(DType::Float32);
+            auto result_f32 = prod_kernel(input_f32, dim, keepdim, stream);
+            return result_f32.to(DType::BFloat16);
+        }
+
         const auto& input_strides = input.strides();
 
         switch (dtype) {
@@ -2024,8 +2072,15 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, bool unbiased, h
     const auto& device = input.device();
     int64_t n = input.numel();
 
-    if (dtype != DType::Float32 && dtype != DType::Float64) {
-        throw std::runtime_error("var: only Float32 and Float64 are supported");
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::BFloat16) {
+        throw std::runtime_error("var: only Float32, Float64, and BFloat16 are supported");
+    }
+
+    // BFloat16: upcast to Float32, compute variance, convert back
+    if (dtype == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = var_kernel(input_f32, dim, keepdim, unbiased, stream);
+        return result_f32.to(DType::BFloat16);
     }
 
     // First compute mean
@@ -2096,6 +2151,13 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, bool unbiased, h
  * @brief Standard deviation reduction kernel
  */
 auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, bool unbiased, hipStream_t stream) -> Tensor {
+    // BFloat16: upcast to Float32, compute std, convert back
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = std_kernel(input_f32, dim, keepdim, unbiased, stream);
+        return result_f32.to(DType::BFloat16);
+    }
+
     auto var_result = var_kernel(input, dim, keepdim, unbiased, stream);
 
     // Compute sqrt of variance
@@ -2129,8 +2191,15 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, hipStr
     const auto& device = input.device();
     int64_t n = input.numel();
 
-    if (dtype != DType::Float32 && dtype != DType::Float64) {
-        throw std::runtime_error("norm: only Float32 and Float64 are supported");
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::BFloat16) {
+        throw std::runtime_error("norm: only Float32, Float64, and BFloat16 are supported");
+    }
+
+    // BFloat16: upcast to Float32, compute norm, convert back
+    if (dtype == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = norm_kernel(input_f32, p, dim, keepdim, stream);
+        return result_f32.to(DType::BFloat16);
     }
 
     auto output_shape = compute_reduction_shape(
@@ -2624,6 +2693,10 @@ auto any_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stre
         case DType::Int8:
             launch(input.data<int8_t>());
             break;
+        case DType::BFloat16: {
+            auto input_f32 = input.to(DType::Float32);
+            return any_kernel(input_f32, dim, keepdim, stream);
+        }
         default:
             throw std::runtime_error("any: unsupported dtype");
     }
@@ -2702,6 +2775,10 @@ auto all_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stre
         case DType::Int8:
             launch(input.data<int8_t>());
             break;
+        case DType::BFloat16: {
+            auto input_f32 = input.to(DType::Float32);
+            return all_kernel(input_f32, dim, keepdim, stream);
+        }
         default:
             throw std::runtime_error("all: unsupported dtype");
     }

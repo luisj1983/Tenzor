@@ -46,6 +46,8 @@ __global__ void quantized_linear_kernel_hip(
     const int8_t* weight_row = weight + o * in_features;
 
     int32_t acc = 0;
+    int32_t sum_x = 0;
+    int32_t sum_w = 0;
 
     // Vectorized loading: process 16 int8 values at a time via int4 (16 bytes)
     constexpr int VEC_SIZE = 16;
@@ -61,19 +63,23 @@ __global__ void quantized_linear_kernel_hip(
         #pragma unroll
         for (int i = 0; i < VEC_SIZE; ++i) {
             acc += static_cast<int32_t>(input_bytes[i]) * static_cast<int32_t>(weight_bytes[i]);
+            sum_x += static_cast<int32_t>(input_bytes[i]);
+            sum_w += static_cast<int32_t>(weight_bytes[i]);
         }
     }
 
     // Remainder elements
     for (int64_t i = vec_steps * VEC_SIZE; i < in_features; ++i) {
         acc += static_cast<int32_t>(input_row[i]) * static_cast<int32_t>(weight_row[i]);
+        sum_x += static_cast<int32_t>(input_row[i]);
+        sum_w += static_cast<int32_t>(weight_row[i]);
     }
 
     // Zero point correction:
     // Full expansion: sum((x_i - x_zp) * (w_j - w_zp))
     //   = sum(x_i * w_j) - x_zp * sum(w_j) - w_zp * sum(x_i) + x_zp * w_zp * K
-    // Simplified correction when accumulating raw products:
-    acc -= input_zp * weight_zp * static_cast<int32_t>(in_features);
+    acc = acc - input_zp * sum_w - weight_zp * sum_x
+          + input_zp * weight_zp * static_cast<int32_t>(in_features);
 
     // Dequantize to float and add bias
     float result = static_cast<float>(acc) * combined_scale;

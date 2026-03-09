@@ -449,7 +449,7 @@ namespace rocm {
                                        hipStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
 
     // Fused operations
-    auto fused_linear_relu_hip(const Tensor& input, const Tensor& weight, const Tensor* bias) -> Tensor;
+    auto fused_linear_relu_hip(const Tensor& input, const Tensor& weight, const Tensor* bias, hipStream_t stream) -> Tensor;
     auto fused_batchnorm_relu_hip(const Tensor& input, const Tensor& running_mean, const Tensor& running_var,
                                   const Tensor& weight, const Tensor& bias, float eps) -> Tensor;
     auto fused_softmax_cross_entropy_hip(const Tensor& logits, const Tensor& targets,
@@ -1720,7 +1720,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::FusedLinearReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: input, weight, [bias]
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
-        return std::vector<Tensor>{rocm::fused_linear_relu_hip(inputs[0], inputs[1], bias)};
+        return std::vector<Tensor>{rocm::fused_linear_relu_hip(inputs[0], inputs[1], bias, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::FusedBatchNormReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {

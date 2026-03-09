@@ -121,7 +121,7 @@ auto relu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 
         queue.parallel_for<ReLUKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::fmax(0.0f, in_ptr[idx]);
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(in_cont);
@@ -129,7 +129,7 @@ auto relu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 
         queue.parallel_for<ReLUKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::fmax(0.0, in_ptr[idx]);
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
@@ -138,7 +138,7 @@ auto relu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         queue.parallel_for<ReLUKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float val = static_cast<float>(in_ptr[idx]);
             out_ptr[idx] = sycl::half(sycl::fmax(0.0f, val));
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
@@ -147,7 +147,7 @@ auto relu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         queue.parallel_for<ReLUKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float val = bf16_to_f32(in_ptr[idx]);
             out_ptr[idx] = f32_to_bf16(sycl::fmax(0.0f, val));
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for relu");
@@ -175,7 +175,7 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
 
         queue.parallel_for<ReLUBackwardKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = in_ptr[idx] > 0.0f ? grad_out_ptr[idx] : 0.0f;
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float64) {
         const double* grad_out_ptr = get_data_ptr<const double>(grad_out_cont);
@@ -184,7 +184,7 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
 
         queue.parallel_for<ReLUBackwardKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = in_ptr[idx] > 0.0 ? grad_out_ptr[idx] : 0.0;
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float16) {
         const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_out_cont);
@@ -194,7 +194,7 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
         queue.parallel_for<ReLUBackwardKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float in_val = static_cast<float>(in_ptr[idx]);
             grad_in_ptr[idx] = in_val > 0.0f ? grad_out_ptr[idx] : sycl::half(0.0f);
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::BFloat16) {
         const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_out_cont);
@@ -204,7 +204,7 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
         queue.parallel_for<ReLUBackwardKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float in_val = bf16_to_f32(in_ptr[idx]);
             grad_in_ptr[idx] = in_val > 0.0f ? grad_out_ptr[idx] : f32_to_bf16(0.0f);
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for relu_backward");
@@ -226,7 +226,7 @@ auto sigmoid_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 
         queue.parallel_for<SigmoidKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = 1.0f / (1.0f + sycl::exp(-in_ptr[idx]));
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
@@ -234,7 +234,7 @@ auto sigmoid_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 
         queue.parallel_for<SigmoidKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = 1.0 / (1.0 + sycl::exp(-in_ptr[idx]));
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
@@ -243,7 +243,7 @@ auto sigmoid_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         queue.parallel_for<SigmoidKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float val = static_cast<float>(in_ptr[idx]);
             out_ptr[idx] = sycl::half(1.0f / (1.0f + sycl::exp(-val)));
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
@@ -252,7 +252,7 @@ auto sigmoid_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         queue.parallel_for<SigmoidKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float val = bf16_to_f32(in_ptr[idx]);
             out_ptr[idx] = f32_to_bf16(1.0f / (1.0f + sycl::exp(-val)));
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for sigmoid");
@@ -275,7 +275,7 @@ auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& output, sy
 
         queue.parallel_for<SigmoidBackwardKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = grad_out_ptr[idx] * out_ptr[idx] * (1.0f - out_ptr[idx]);
-        }).wait();
+        });
     }
     else if (output.dtype() == DType::Float64) {
         const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
@@ -284,7 +284,7 @@ auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& output, sy
 
         queue.parallel_for<SigmoidBackwardKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = grad_out_ptr[idx] * out_ptr[idx] * (1.0 - out_ptr[idx]);
-        }).wait();
+        });
     }
     else if (output.dtype() == DType::Float16) {
         const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
@@ -295,7 +295,7 @@ auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& output, sy
             float g_out = static_cast<float>(grad_out_ptr[idx]);
             float out_val = static_cast<float>(out_ptr[idx]);
             grad_in_ptr[idx] = sycl::half(g_out * out_val * (1.0f - out_val));
-        }).wait();
+        });
     }
     else if (output.dtype() == DType::BFloat16) {
         const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
@@ -306,7 +306,7 @@ auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& output, sy
             float g_out = bf16_to_f32(grad_out_ptr[idx]);
             float out_val = bf16_to_f32(out_ptr[idx]);
             grad_in_ptr[idx] = f32_to_bf16(g_out * out_val * (1.0f - out_val));
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for sigmoid_backward");
@@ -328,7 +328,7 @@ auto tanh_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 
         queue.parallel_for<TanhKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::tanh(in_ptr[idx]);
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
@@ -336,7 +336,7 @@ auto tanh_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 
         queue.parallel_for<TanhKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::tanh(in_ptr[idx]);
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
@@ -345,7 +345,7 @@ auto tanh_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         queue.parallel_for<TanhKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float val = static_cast<float>(in_ptr[idx]);
             out_ptr[idx] = sycl::half(sycl::tanh(val));
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
@@ -353,7 +353,7 @@ auto tanh_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 
         queue.parallel_for<TanhKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = f32_to_bf16(sycl::tanh(bf16_to_f32(in_ptr[idx])));
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for tanh");
@@ -376,7 +376,7 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& output, sycl:
 
         queue.parallel_for<TanhBackwardKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = grad_out_ptr[idx] * (1.0f - out_ptr[idx] * out_ptr[idx]);
-        }).wait();
+        });
     }
     else if (output.dtype() == DType::Float64) {
         const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
@@ -385,7 +385,7 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& output, sycl:
 
         queue.parallel_for<TanhBackwardKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = grad_out_ptr[idx] * (1.0 - out_ptr[idx] * out_ptr[idx]);
-        }).wait();
+        });
     }
     else if (output.dtype() == DType::Float16) {
         const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
@@ -396,7 +396,7 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& output, sycl:
             float g_out = static_cast<float>(grad_out_ptr[idx]);
             float out_val = static_cast<float>(out_ptr[idx]);
             grad_in_ptr[idx] = sycl::half(g_out * (1.0f - out_val * out_val));
-        }).wait();
+        });
     }
     else if (output.dtype() == DType::BFloat16) {
         const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
@@ -407,7 +407,7 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& output, sycl:
             float g_out = bf16_to_f32(grad_out_ptr[idx]);
             float out_val = bf16_to_f32(out_ptr[idx]);
             grad_in_ptr[idx] = f32_to_bf16(g_out * (1.0f - out_val * out_val));
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for tanh_backward");
@@ -435,7 +435,7 @@ auto gelu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             float x_cubed = x * x * x;
             float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
             out_ptr[idx] = 0.5f * x * (1.0f + sycl::tanh(inner));
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
@@ -449,7 +449,7 @@ auto gelu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             double x_cubed = x * x * x;
             double inner = sqrt_2_over_pi * (x + coeff * x_cubed);
             out_ptr[idx] = 0.5 * x * (1.0 + sycl::tanh(inner));
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
@@ -463,7 +463,7 @@ auto gelu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             float x_cubed = x * x * x;
             float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
             out_ptr[idx] = sycl::half(0.5f * x * (1.0f + sycl::tanh(inner)));
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
@@ -477,7 +477,7 @@ auto gelu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             float x_cubed = x * x * x;
             float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
             out_ptr[idx] = f32_to_bf16(0.5f * x * (1.0f + sycl::tanh(inner)));
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for gelu");
@@ -514,7 +514,7 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
                              0.5f * x * sech_sq * sqrt_2_over_pi * (1.0f + 3.0f * coeff * x_sq);
 
             grad_in_ptr[idx] = grad_out_ptr[idx] * derivative;
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float64) {
         const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
@@ -537,7 +537,7 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
                               0.5 * x * sech_sq * sqrt_2_over_pi * (1.0 + 3.0 * coeff * x_sq);
 
             grad_in_ptr[idx] = grad_out_ptr[idx] * derivative;
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
@@ -560,7 +560,7 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
                              0.5f * x * sech_sq * sqrt_2_over_pi * (1.0f + 3.0f * coeff * x_sq);
 
             grad_in_ptr[idx] = sycl::half(static_cast<float>(grad_out_ptr[idx]) * derivative);
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
@@ -583,7 +583,7 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
                              0.5f * x * sech_sq * sqrt_2_over_pi * (1.0f + 3.0f * coeff * x_sq);
 
             grad_in_ptr[idx] = f32_to_bf16(bf16_to_f32(grad_out_ptr[idx]) * derivative);
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for gelu_backward");
@@ -641,7 +641,7 @@ auto softmax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Ten
             for (int64_t d = 0; d < dim_size; ++d) {
                 out_ptr[base_offset + d * inner_size] /= sum;
             }
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(in_cont);
@@ -668,7 +668,7 @@ auto softmax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Ten
             for (int64_t d = 0; d < dim_size; ++d) {
                 out_ptr[base_offset + d * inner_size] /= sum;
             }
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
@@ -697,7 +697,7 @@ auto softmax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Ten
                 float normalized = static_cast<float>(out_ptr[base_offset + d * inner_size]) / sum;
                 out_ptr[base_offset + d * inner_size] = sycl::half(normalized);
             }
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
@@ -727,7 +727,7 @@ auto softmax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Ten
                 float normalized = bf16_to_f32(out_ptr[base_offset + d * inner_size]) / sum;
                 out_ptr[base_offset + d * inner_size] = f32_to_bf16(normalized);
             }
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for softmax");
@@ -771,7 +771,7 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
                 grad_in_ptr[offset + d * inner_size] = out_ptr[offset + d * inner_size] *
                     (grad_out_ptr[offset + d * inner_size] - dot);
             }
-        }).wait();
+        });
     }
     else if (output.dtype() == DType::Float64) {
         const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
@@ -792,7 +792,7 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
                 grad_in_ptr[offset + d * inner_size] = out_ptr[offset + d * inner_size] *
                     (grad_out_ptr[offset + d * inner_size] - dot);
             }
-        }).wait();
+        });
     }
     else if (output.dtype() == DType::Float16) {
         const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
@@ -816,7 +816,7 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
                 float grad_out_val = static_cast<float>(grad_out_ptr[offset + d * inner_size]);
                 grad_in_ptr[offset + d * inner_size] = sycl::half(out_val * (grad_out_val - dot));
             }
-        }).wait();
+        });
     }
     else if (output.dtype() == DType::BFloat16) {
         const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
@@ -841,7 +841,7 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
                 float grad_out_val = bf16_to_f32(grad_out_ptr[offset + d * inner_size]);
                 grad_in_ptr[offset + d * inner_size] = f32_to_bf16(out_val * (grad_out_val - dot));
             }
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for softmax_backward");
@@ -864,7 +864,7 @@ auto leaky_relu_kernel(const Tensor& input, float alpha, sycl::queue& queue) -> 
         queue.parallel_for<LeakyReLUKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = in_ptr[idx];
             out_ptr[idx] = x > 0.0f ? x : alpha * x;
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
@@ -874,7 +874,7 @@ auto leaky_relu_kernel(const Tensor& input, float alpha, sycl::queue& queue) -> 
         queue.parallel_for<LeakyReLUKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             double x = in_ptr[idx];
             out_ptr[idx] = x > 0.0 ? x : alpha_d * x;
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
@@ -883,7 +883,7 @@ auto leaky_relu_kernel(const Tensor& input, float alpha, sycl::queue& queue) -> 
         queue.parallel_for<LeakyReLUKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = static_cast<float>(in_ptr[idx]);
             out_ptr[idx] = sycl::half(x > 0.0f ? x : alpha * x);
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
@@ -892,7 +892,7 @@ auto leaky_relu_kernel(const Tensor& input, float alpha, sycl::queue& queue) -> 
         queue.parallel_for<LeakyReLUKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = bf16_to_f32(in_ptr[idx]);
             out_ptr[idx] = f32_to_bf16(x > 0.0f ? x : alpha * x);
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for leaky_relu");
@@ -915,7 +915,7 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
 
         queue.parallel_for<LeakyReLUBackwardKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = in_ptr[idx] > 0.0f ? grad_out_ptr[idx] : alpha * grad_out_ptr[idx];
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float64) {
         const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
@@ -925,7 +925,7 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
 
         queue.parallel_for<LeakyReLUBackwardKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = in_ptr[idx] > 0.0 ? grad_out_ptr[idx] : alpha_d * grad_out_ptr[idx];
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
@@ -936,7 +936,7 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
             float in_val = static_cast<float>(in_ptr[idx]);
             float grad_out_val = static_cast<float>(grad_out_ptr[idx]);
             grad_in_ptr[idx] = sycl::half(in_val > 0.0f ? grad_out_val : alpha * grad_out_val);
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
@@ -947,7 +947,7 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
             float in_val = bf16_to_f32(in_ptr[idx]);
             float g_out = bf16_to_f32(grad_out_ptr[idx]);
             grad_in_ptr[idx] = f32_to_bf16(in_val > 0.0f ? g_out : alpha * g_out);
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for leaky_relu_backward");
@@ -1015,7 +1015,7 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) ->
                     }
                 }
             );
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
@@ -1061,7 +1061,7 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) ->
                     }
                 }
             );
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
@@ -1105,7 +1105,7 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) ->
                     }
                 }
             );
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
@@ -1149,7 +1149,7 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) ->
                     }
                 }
             );
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for log_softmax");
@@ -1205,7 +1205,7 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
                     }
                 }
             );
-        }).wait();
+        });
     }
     else if (output.dtype() == DType::Float64) {
         const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
@@ -1244,7 +1244,7 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
                     }
                 }
             );
-        }).wait();
+        });
     }
     else if (output.dtype() == DType::Float16) {
         const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
@@ -1284,7 +1284,7 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
                     }
                 }
             );
-        }).wait();
+        });
     }
     else if (output.dtype() == DType::BFloat16) {
         const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
@@ -1324,7 +1324,7 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
                     }
                 }
             );
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for log_softmax_backward");
@@ -1349,7 +1349,7 @@ auto swish_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             const float x = in_ptr[idx];
             const float sigmoid = 1.0f / (1.0f + sycl::exp(-x));
             out_ptr[idx] = x * sigmoid;
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
@@ -1359,7 +1359,7 @@ auto swish_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             const double x = in_ptr[idx];
             const double sigmoid = 1.0 / (1.0 + sycl::exp(-x));
             out_ptr[idx] = x * sigmoid;
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
@@ -1369,7 +1369,7 @@ auto swish_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             const float x = static_cast<float>(in_ptr[idx]);
             const float sigmoid = 1.0f / (1.0f + sycl::exp(-x));
             out_ptr[idx] = sycl::half(x * sigmoid);
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
@@ -1379,7 +1379,7 @@ auto swish_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             float x = bf16_to_f32(in_ptr[idx]);
             float sigmoid = 1.0f / (1.0f + sycl::exp(-x));
             out_ptr[idx] = f32_to_bf16(x * sigmoid);
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for swish");
@@ -1411,7 +1411,7 @@ auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl:
             const float swish_grad = sigmoid + x * sigmoid * (1.0f - sigmoid);
 
             grad_in_ptr[idx] = g_out * swish_grad;
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float64) {
         const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
@@ -1426,7 +1426,7 @@ auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl:
             const double swish_grad = sigmoid + x * sigmoid * (1.0 - sigmoid);
 
             grad_in_ptr[idx] = g_out * swish_grad;
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
@@ -1441,7 +1441,7 @@ auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl:
             const float swish_grad = sigmoid + x * sigmoid * (1.0f - sigmoid);
 
             grad_in_ptr[idx] = sycl::half(g_out * swish_grad);
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
@@ -1453,7 +1453,7 @@ auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl:
             float sigmoid = 1.0f / (1.0f + sycl::exp(-x));
             float derivative = sigmoid + x * sigmoid * (1.0f - sigmoid);
             grad_in_ptr[idx] = f32_to_bf16(bf16_to_f32(grad_out_ptr[idx]) * derivative);
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for swish_backward");
@@ -1494,25 +1494,25 @@ auto relu_inplace_kernel(Tensor& input, sycl::queue& queue) -> void {
         float* ptr = get_data_ptr<float>(input);
         queue.parallel_for<ReLUInplaceKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             if (ptr[idx] < 0.0f) ptr[idx] = 0.0f;
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float64) {
         double* ptr = get_data_ptr<double>(input);
         queue.parallel_for<ReLUInplaceKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             if (ptr[idx] < 0.0) ptr[idx] = 0.0;
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float16) {
         sycl::half* ptr = get_data_ptr<sycl::half>(input);
         queue.parallel_for<ReLUInplaceKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             if (float(ptr[idx]) < 0.0f) ptr[idx] = sycl::half(0.0f);
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::BFloat16) {
         uint16_t* ptr = get_data_ptr<uint16_t>(input);
         queue.parallel_for<ReLUInplaceKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             if (bf16_to_f32(ptr[idx]) < 0.0f) ptr[idx] = f32_to_bf16(0.0f);
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("relu_inplace: unsupported dtype");
@@ -1525,27 +1525,27 @@ auto sigmoid_inplace_kernel(Tensor& input, sycl::queue& queue) -> void {
         float* ptr = get_data_ptr<float>(input);
         queue.parallel_for<SigmoidInplaceKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             ptr[idx] = 1.0f / (1.0f + sycl::exp(-ptr[idx]));
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float64) {
         double* ptr = get_data_ptr<double>(input);
         queue.parallel_for<SigmoidInplaceKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             ptr[idx] = 1.0 / (1.0 + sycl::exp(-ptr[idx]));
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float16) {
         sycl::half* ptr = get_data_ptr<sycl::half>(input);
         queue.parallel_for<SigmoidInplaceKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = static_cast<float>(ptr[idx]);
             ptr[idx] = sycl::half(1.0f / (1.0f + sycl::exp(-x)));
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::BFloat16) {
         uint16_t* ptr = get_data_ptr<uint16_t>(input);
         queue.parallel_for<SigmoidInplaceKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = bf16_to_f32(ptr[idx]);
             ptr[idx] = f32_to_bf16(1.0f / (1.0f + sycl::exp(-x)));
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("sigmoid_inplace: unsupported dtype");
@@ -1558,27 +1558,27 @@ auto tanh_inplace_kernel(Tensor& input, sycl::queue& queue) -> void {
         float* ptr = get_data_ptr<float>(input);
         queue.parallel_for<TanhInplaceKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             ptr[idx] = sycl::tanh(ptr[idx]);
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float64) {
         double* ptr = get_data_ptr<double>(input);
         queue.parallel_for<TanhInplaceKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             ptr[idx] = sycl::tanh(ptr[idx]);
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float16) {
         sycl::half* ptr = get_data_ptr<sycl::half>(input);
         queue.parallel_for<TanhInplaceKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = static_cast<float>(ptr[idx]);
             ptr[idx] = sycl::half(sycl::tanh(x));
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::BFloat16) {
         uint16_t* ptr = get_data_ptr<uint16_t>(input);
         queue.parallel_for<TanhInplaceKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = bf16_to_f32(ptr[idx]);
             ptr[idx] = f32_to_bf16(sycl::tanh(x));
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("tanh_inplace: unsupported dtype");
@@ -1591,28 +1591,28 @@ auto leaky_relu_inplace_kernel(Tensor& input, float alpha, sycl::queue& queue) -
         float* ptr = get_data_ptr<float>(input);
         queue.parallel_for<LeakyReLUInplaceKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             if (ptr[idx] < 0.0f) ptr[idx] *= alpha;
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float64) {
         double* ptr = get_data_ptr<double>(input);
         const double alpha_d = static_cast<double>(alpha);
         queue.parallel_for<LeakyReLUInplaceKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             if (ptr[idx] < 0.0) ptr[idx] *= alpha_d;
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float16) {
         sycl::half* ptr = get_data_ptr<sycl::half>(input);
         queue.parallel_for<LeakyReLUInplaceKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = static_cast<float>(ptr[idx]);
             if (x < 0.0f) ptr[idx] = sycl::half(x * alpha);
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::BFloat16) {
         uint16_t* ptr = get_data_ptr<uint16_t>(input);
         queue.parallel_for<LeakyReLUInplaceKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = bf16_to_f32(ptr[idx]);
             if (x < 0.0f) ptr[idx] = f32_to_bf16(x * alpha);
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("leaky_relu_inplace: unsupported dtype");
@@ -1631,7 +1631,7 @@ auto gelu_inplace_kernel(Tensor& input, sycl::queue& queue) -> void {
             float x_cubed = x * x * x;
             float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
             ptr[idx] = 0.5f * x * (1.0f + sycl::tanh(inner));
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float64) {
         double* ptr = get_data_ptr<double>(input);
@@ -1642,7 +1642,7 @@ auto gelu_inplace_kernel(Tensor& input, sycl::queue& queue) -> void {
             double x_cubed = x * x * x;
             double inner = sqrt_2_over_pi_d * (x + coeff_d * x_cubed);
             ptr[idx] = 0.5 * x * (1.0 + sycl::tanh(inner));
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float16) {
         sycl::half* ptr = get_data_ptr<sycl::half>(input);
@@ -1651,7 +1651,7 @@ auto gelu_inplace_kernel(Tensor& input, sycl::queue& queue) -> void {
             float x_cubed = x * x * x;
             float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
             ptr[idx] = sycl::half(0.5f * x * (1.0f + sycl::tanh(inner)));
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::BFloat16) {
         uint16_t* ptr = get_data_ptr<uint16_t>(input);
@@ -1660,7 +1660,7 @@ auto gelu_inplace_kernel(Tensor& input, sycl::queue& queue) -> void {
             float x_cubed = x * x * x;
             float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
             ptr[idx] = f32_to_bf16(0.5f * x * (1.0f + sycl::tanh(inner)));
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("gelu_inplace: unsupported dtype");
@@ -1693,7 +1693,7 @@ auto elu_kernel(const Tensor& input, float alpha, sycl::queue& queue) -> Tensor 
         queue.parallel_for<EluKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = in_ptr[idx];
             out_ptr[idx] = (x > 0.0f) ? x : alpha * (sycl::exp(x) - 1.0f);
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(in_cont);
@@ -1702,7 +1702,7 @@ auto elu_kernel(const Tensor& input, float alpha, sycl::queue& queue) -> Tensor 
         queue.parallel_for<EluKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             double x = in_ptr[idx];
             out_ptr[idx] = (x > 0.0) ? x : alpha_d * (sycl::exp(x) - 1.0);
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
@@ -1710,7 +1710,7 @@ auto elu_kernel(const Tensor& input, float alpha, sycl::queue& queue) -> Tensor 
         queue.parallel_for<EluKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = static_cast<float>(in_ptr[idx]);
             out_ptr[idx] = sycl::half((x > 0.0f) ? x : alpha * (sycl::exp(x) - 1.0f));
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
@@ -1718,7 +1718,7 @@ auto elu_kernel(const Tensor& input, float alpha, sycl::queue& queue) -> Tensor 
         queue.parallel_for<EluKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = bf16_to_f32(in_ptr[idx]);
             out_ptr[idx] = f32_to_bf16((x > 0.0f) ? x : alpha * (sycl::exp(x) - 1.0f));
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for elu");
@@ -1740,7 +1740,7 @@ auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float a
         queue.parallel_for<EluBackwardKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = in_ptr[idx];
             out_ptr[idx] = grad_ptr[idx] * ((x > 0.0f) ? 1.0f : alpha * sycl::exp(x));
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float64) {
         const double* grad_ptr = get_data_ptr<const double>(grad_cont);
@@ -1750,7 +1750,7 @@ auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float a
         queue.parallel_for<EluBackwardKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             double x = in_ptr[idx];
             out_ptr[idx] = grad_ptr[idx] * ((x > 0.0) ? 1.0 : alpha_d * sycl::exp(x));
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float16) {
         const sycl::half* grad_ptr = get_data_ptr<const sycl::half>(grad_cont);
@@ -1760,7 +1760,7 @@ auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float a
             float x = static_cast<float>(in_ptr[idx]);
             float g = static_cast<float>(grad_ptr[idx]);
             out_ptr[idx] = sycl::half(g * ((x > 0.0f) ? 1.0f : alpha * sycl::exp(x)));
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::BFloat16) {
         const uint16_t* grad_ptr = get_data_ptr<const uint16_t>(grad_cont);
@@ -1770,7 +1770,7 @@ auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float a
             float x = bf16_to_f32(in_ptr[idx]);
             float g = bf16_to_f32(grad_ptr[idx]);
             out_ptr[idx] = f32_to_bf16(g * ((x > 0.0f) ? 1.0f : alpha * sycl::exp(x)));
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for elu_backward");
@@ -1805,7 +1805,7 @@ auto selu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         queue.parallel_for<SeluKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = in_ptr[idx];
             out_ptr[idx] = SELU_SCALE * ((x > 0.0f) ? x : SELU_ALPHA * (sycl::exp(x) - 1.0f));
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(in_cont);
@@ -1815,7 +1815,7 @@ auto selu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         queue.parallel_for<SeluKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             double x = in_ptr[idx];
             out_ptr[idx] = SELU_SCALE_D * ((x > 0.0) ? x : SELU_ALPHA_D * (sycl::exp(x) - 1.0));
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
@@ -1823,7 +1823,7 @@ auto selu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         queue.parallel_for<SeluKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = static_cast<float>(in_ptr[idx]);
             out_ptr[idx] = sycl::half(SELU_SCALE * ((x > 0.0f) ? x : SELU_ALPHA * (sycl::exp(x) - 1.0f)));
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
@@ -1831,7 +1831,7 @@ auto selu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         queue.parallel_for<SeluKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = bf16_to_f32(in_ptr[idx]);
             out_ptr[idx] = f32_to_bf16(SELU_SCALE * ((x > 0.0f) ? x : SELU_ALPHA * (sycl::exp(x) - 1.0f)));
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for selu");
@@ -1855,7 +1855,7 @@ auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
         queue.parallel_for<SeluBackwardKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = in_ptr[idx];
             out_ptr[idx] = grad_ptr[idx] * SELU_SCALE * ((x > 0.0f) ? 1.0f : SELU_ALPHA * sycl::exp(x));
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float64) {
         const double* grad_ptr = get_data_ptr<const double>(grad_cont);
@@ -1866,7 +1866,7 @@ auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
         queue.parallel_for<SeluBackwardKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             double x = in_ptr[idx];
             out_ptr[idx] = grad_ptr[idx] * SELU_SCALE_D * ((x > 0.0) ? 1.0 : SELU_ALPHA_D * sycl::exp(x));
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float16) {
         const sycl::half* grad_ptr = get_data_ptr<const sycl::half>(grad_cont);
@@ -1876,7 +1876,7 @@ auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
             float x = static_cast<float>(in_ptr[idx]);
             float g = static_cast<float>(grad_ptr[idx]);
             out_ptr[idx] = sycl::half(g * SELU_SCALE * ((x > 0.0f) ? 1.0f : SELU_ALPHA * sycl::exp(x)));
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::BFloat16) {
         const uint16_t* grad_ptr = get_data_ptr<const uint16_t>(grad_cont);
@@ -1886,7 +1886,7 @@ auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
             float x = bf16_to_f32(in_ptr[idx]);
             float g = bf16_to_f32(grad_ptr[idx]);
             out_ptr[idx] = f32_to_bf16(g * SELU_SCALE * ((x > 0.0f) ? 1.0f : SELU_ALPHA * sycl::exp(x)));
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for selu_backward");
@@ -1920,7 +1920,7 @@ auto mish_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             float x = in_ptr[idx];
             float sp = (x > 20.0f) ? x : ((x < -20.0f) ? sycl::exp(x) : sycl::log1p(sycl::exp(x)));
             out_ptr[idx] = x * sycl::tanh(sp);
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(in_cont);
@@ -1929,7 +1929,7 @@ auto mish_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             double x = in_ptr[idx];
             double sp = (x > 20.0) ? x : ((x < -20.0) ? sycl::exp(x) : sycl::log1p(sycl::exp(x)));
             out_ptr[idx] = x * sycl::tanh(sp);
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
@@ -1938,7 +1938,7 @@ auto mish_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             float x = static_cast<float>(in_ptr[idx]);
             float sp = (x > 20.0f) ? x : ((x < -20.0f) ? sycl::exp(x) : sycl::log1p(sycl::exp(x)));
             out_ptr[idx] = sycl::half(x * sycl::tanh(sp));
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
@@ -1947,7 +1947,7 @@ auto mish_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             float x = bf16_to_f32(in_ptr[idx]);
             float sp = (x > 20.0f) ? x : ((x < -20.0f) ? sycl::exp(x) : sycl::log1p(sycl::exp(x)));
             out_ptr[idx] = f32_to_bf16(x * sycl::tanh(sp));
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for mish");
@@ -1973,7 +1973,7 @@ auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
             float sigmoid_x = 1.0f / (1.0f + sycl::exp(-x));
             float sech2 = 1.0f - tanh_sp * tanh_sp;
             out_ptr[idx] = grad_ptr[idx] * (tanh_sp + x * sech2 * sigmoid_x);
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float64) {
         const double* grad_ptr = get_data_ptr<const double>(grad_cont);
@@ -1986,7 +1986,7 @@ auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
             double sigmoid_x = 1.0 / (1.0 + sycl::exp(-x));
             double sech2 = 1.0 - tanh_sp * tanh_sp;
             out_ptr[idx] = grad_ptr[idx] * (tanh_sp + x * sech2 * sigmoid_x);
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float16) {
         const sycl::half* grad_ptr = get_data_ptr<const sycl::half>(grad_cont);
@@ -2000,7 +2000,7 @@ auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
             float sigmoid_x = 1.0f / (1.0f + sycl::exp(-x));
             float sech2 = 1.0f - tanh_sp * tanh_sp;
             out_ptr[idx] = sycl::half(g * (tanh_sp + x * sech2 * sigmoid_x));
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::BFloat16) {
         const uint16_t* grad_ptr = get_data_ptr<const uint16_t>(grad_cont);
@@ -2014,7 +2014,7 @@ auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
             float sigmoid_x = 1.0f / (1.0f + sycl::exp(-x));
             float sech2 = 1.0f - tanh_sp * tanh_sp;
             out_ptr[idx] = f32_to_bf16(g * (tanh_sp + x * sech2 * sigmoid_x));
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for mish_backward");
@@ -2049,7 +2049,7 @@ auto softplus_kernel(const Tensor& input, float beta, float threshold, sycl::que
             if (x > threshold) out_ptr[idx] = in_ptr[idx];
             else if (x < -threshold) out_ptr[idx] = sycl::exp(x) / beta;
             else out_ptr[idx] = sycl::log1p(sycl::exp(x)) / beta;
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(in_cont);
@@ -2061,7 +2061,7 @@ auto softplus_kernel(const Tensor& input, float beta, float threshold, sycl::que
             if (x > threshold_d) out_ptr[idx] = in_ptr[idx];
             else if (x < -threshold_d) out_ptr[idx] = sycl::exp(x) / beta_d;
             else out_ptr[idx] = sycl::log1p(sycl::exp(x)) / beta_d;
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
@@ -2074,7 +2074,7 @@ auto softplus_kernel(const Tensor& input, float beta, float threshold, sycl::que
             else if (x < -threshold) result = sycl::exp(x) / beta;
             else result = sycl::log1p(sycl::exp(x)) / beta;
             out_ptr[idx] = sycl::half(result);
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
@@ -2087,7 +2087,7 @@ auto softplus_kernel(const Tensor& input, float beta, float threshold, sycl::que
             else if (x < -threshold) result = sycl::exp(x) / beta;
             else result = sycl::log1p(sycl::exp(x)) / beta;
             out_ptr[idx] = f32_to_bf16(result);
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for softplus");
@@ -2113,7 +2113,7 @@ auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, fl
             else if (x < -threshold) sigmoid_x = sycl::exp(x);
             else sigmoid_x = 1.0f / (1.0f + sycl::exp(-x));
             out_ptr[idx] = grad_ptr[idx] * sigmoid_x;
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float64) {
         const double* grad_ptr = get_data_ptr<const double>(grad_cont);
@@ -2128,7 +2128,7 @@ auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, fl
             else if (x < -threshold_d) sigmoid_x = sycl::exp(x);
             else sigmoid_x = 1.0 / (1.0 + sycl::exp(-x));
             out_ptr[idx] = grad_ptr[idx] * sigmoid_x;
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float16) {
         const sycl::half* grad_ptr = get_data_ptr<const sycl::half>(grad_cont);
@@ -2142,7 +2142,7 @@ auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, fl
             else if (x < -threshold) sigmoid_x = sycl::exp(x);
             else sigmoid_x = 1.0f / (1.0f + sycl::exp(-x));
             out_ptr[idx] = sycl::half(static_cast<float>(grad_ptr[idx]) * sigmoid_x);
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::BFloat16) {
         const uint16_t* grad_ptr = get_data_ptr<const uint16_t>(grad_cont);
@@ -2156,7 +2156,7 @@ auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, fl
             else if (x < -threshold) sigmoid_x = sycl::exp(x);
             else sigmoid_x = 1.0f / (1.0f + sycl::exp(-x));
             out_ptr[idx] = f32_to_bf16(bf16_to_f32(grad_ptr[idx]) * sigmoid_x);
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for softplus_backward");
@@ -2215,7 +2215,7 @@ auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias
                 sum += in_ptr[b * in_features + i] * w_ptr[o * in_features + i];
             }
             out_ptr[b * out_features + o] = sum + (b_ptr ? b_ptr[o] : 0.0f);
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(in_cont);
@@ -2232,7 +2232,7 @@ auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias
                 sum += in_ptr[b * in_features + i] * w_ptr[o * in_features + i];
             }
             out_ptr[b * out_features + o] = sum + (b_ptr ? b_ptr[o] : 0.0);
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float16) {
         // Compute in float32 for precision
@@ -2252,7 +2252,7 @@ auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias
             }
             sum += b_ptr ? static_cast<float>(b_ptr[o]) : 0.0f;
             out_ptr[b * out_features + o] = sycl::half(sum);
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
@@ -2271,7 +2271,7 @@ auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias
             }
             sum += b_ptr ? bf16_to_f32(b_ptr[o]) : 0.0f;
             out_ptr[b * out_features + o] = f32_to_bf16(sum);
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for linear");
@@ -2354,7 +2354,7 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input,
                 sum += g_ptr[b * out_features + o] * w_ptr[o * in_features + i];
             }
             gi_ptr[b * in_features + i] = sum;
-        }).wait();
+        });
 
         // grad_weight = grad_output^T @ input (accumulate)
         queue.parallel_for<LinearBackwardGradWeightFloat32>(
@@ -2366,7 +2366,7 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input,
                 sum += g_ptr[b * out_features + o] * i_ptr[b * in_features + i];
             }
             gw_ptr[o * in_features + i] = sum;
-        }).wait();
+        });
 
         // grad_bias = sum(grad_output, dim=0)
         queue.parallel_for<LinearBackwardGradBiasFloat32>(
@@ -2376,7 +2376,7 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input,
                 sum += g_ptr[b * out_features + o];
             }
             gb_ptr[o] = sum;
-        }).wait();
+        });
     }
     else if (grad_cont.dtype() == DType::Float64) {
         const double* g_ptr = get_data_ptr<const double>(grad_cont);
@@ -2395,7 +2395,7 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input,
                 sum += g_ptr[b * out_features + o] * w_ptr[o * in_features + i];
             }
             gi_ptr[b * in_features + i] = sum;
-        }).wait();
+        });
 
         queue.parallel_for<LinearBackwardGradWeightFloat64>(
             sycl::range<2>(out_features, in_features), [=](sycl::id<2> id) {
@@ -2406,7 +2406,7 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input,
                 sum += g_ptr[b * out_features + o] * i_ptr[b * in_features + i];
             }
             gw_ptr[o * in_features + i] = sum;
-        }).wait();
+        });
 
         queue.parallel_for<LinearBackwardGradBiasFloat64>(
             sycl::range<1>(out_features), [=](sycl::id<1> o) {
@@ -2415,7 +2415,7 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input,
                 sum += g_ptr[b * out_features + o];
             }
             gb_ptr[o] = sum;
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for linear_backward");
@@ -2467,28 +2467,28 @@ auto dropout_kernel(const Tensor& input, float p, bool training, sycl::queue& qu
         float* out_ptr = get_data_ptr<float>(output);
         queue.parallel_for<DropoutKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = in_ptr[idx] * mask_ptr[idx];
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(in_cont);
         double* out_ptr = get_data_ptr<double>(output);
         queue.parallel_for<DropoutKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = in_ptr[idx] * static_cast<double>(mask_ptr[idx]);
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
         queue.parallel_for<DropoutKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::half(static_cast<float>(in_ptr[idx]) * mask_ptr[idx]);
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
         queue.parallel_for<DropoutKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = f32_to_bf16(bf16_to_f32(in_ptr[idx]) * mask_ptr[idx]);
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for dropout");
@@ -2513,28 +2513,28 @@ auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, floa
         float* out_ptr = get_data_ptr<float>(output);
         queue.parallel_for<DropoutBackwardKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = grad_ptr[idx] * mask_ptr[idx];
-        }).wait();
+        });
     }
     else if (grad_cont.dtype() == DType::Float64) {
         const double* grad_ptr = get_data_ptr<const double>(grad_cont);
         double* out_ptr = get_data_ptr<double>(output);
         queue.parallel_for<DropoutBackwardKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = grad_ptr[idx] * static_cast<double>(mask_ptr[idx]);
-        }).wait();
+        });
     }
     else if (grad_cont.dtype() == DType::Float16) {
         const sycl::half* grad_ptr = get_data_ptr<const sycl::half>(grad_cont);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
         queue.parallel_for<DropoutBackwardKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::half(static_cast<float>(grad_ptr[idx]) * mask_ptr[idx]);
-        }).wait();
+        });
     }
     else if (grad_cont.dtype() == DType::BFloat16) {
         const uint16_t* grad_ptr = get_data_ptr<const uint16_t>(grad_cont);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
         queue.parallel_for<DropoutBackwardKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = f32_to_bf16(bf16_to_f32(grad_ptr[idx]) * mask_ptr[idx]);
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for dropout_backward");
@@ -2622,7 +2622,7 @@ auto instance_norm_kernel(const Tensor& input, const Tensor& weight,
             for (int64_t s = 0; s < spatial_size; ++s) {
                 out_ptr[base + s] = (in_ptr[base + s] - m) * istd * w + b;
             }
-        }).wait();
+        });
     }
     else if (in_cont.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(in_cont);
@@ -2660,7 +2660,7 @@ auto instance_norm_kernel(const Tensor& input, const Tensor& weight,
             for (int64_t s = 0; s < spatial_size; ++s) {
                 out_ptr[base + s] = (in_ptr[base + s] - m) * istd * w + b;
             }
-        }).wait();
+        });
     }
     else {
         // Float16/BFloat16: compute in float32 via conversion
@@ -2730,7 +2730,7 @@ auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& inpu
                 float x_hat = (in_ptr[base + s] - m) * r;
                 gi_ptr[base + s] = r * (dy * w - inv_ss * (db + x_hat * ds));
             }
-        }).wait();
+        });
 
         // Compute grad_weight and grad_bias on host (requires reduction across N)
         std::vector<float> gw_host(C, 0.0f);
@@ -2794,7 +2794,7 @@ auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& inpu
                 double x_hat = (in_ptr[base + s] - m) * r;
                 gi_ptr[base + s] = r * (dy * w - inv_ss * (db + x_hat * ds));
             }
-        }).wait();
+        });
 
         // grad_weight/bias reduction on host
         std::vector<double> gw_host(C, 0.0);

@@ -1453,8 +1453,12 @@ auto relu_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(relu_forward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           reinterpret_cast<const __half*>(input.data<Float16>()),
                           reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = relu_kernel(input_f32, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("ReLU only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("ReLU only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1489,8 +1493,13 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStr
                           reinterpret_cast<const __half*>(grad_output.data<Float16>()),
                           reinterpret_cast<const __half*>(input.data<Float16>()),
                           reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = relu_backward_kernel(grad_output_f32, input_f32, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("ReLU backward only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("ReLU backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1524,8 +1533,12 @@ auto sigmoid_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(sigmoid_forward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           reinterpret_cast<const __half*>(input.data<Float16>()),
                           reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = sigmoid_kernel(input_f32, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("Sigmoid only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("Sigmoid only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1560,8 +1573,13 @@ auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input, hip
                           reinterpret_cast<const __half*>(grad_output.data<Float16>()),
                           reinterpret_cast<const __half*>(input.data<Float16>()),
                           reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = sigmoid_backward_kernel(grad_output_f32, input_f32, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("Sigmoid backward only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("Sigmoid backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1595,8 +1613,12 @@ auto tanh_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(tanh_forward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           reinterpret_cast<const __half*>(input.data<Float16>()),
                           reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = tanh_kernel(input_f32, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("Tanh only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("Tanh only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1631,8 +1653,13 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStr
                           reinterpret_cast<const __half*>(grad_output.data<Float16>()),
                           reinterpret_cast<const __half*>(input.data<Float16>()),
                           reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = tanh_backward_kernel(grad_output_f32, input_f32, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("Tanh backward only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("Tanh backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1666,8 +1693,12 @@ auto gelu_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(gelu_forward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           reinterpret_cast<const __half*>(input.data<Float16>()),
                           reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = gelu_kernel(input_f32, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("GELU only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("GELU only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1702,8 +1733,13 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStr
                           reinterpret_cast<const __half*>(grad_output.data<Float16>()),
                           reinterpret_cast<const __half*>(input.data<Float16>()),
                           reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = gelu_backward_kernel(grad_output_f32, input_f32, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("GELU backward only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("GELU backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1736,8 +1772,12 @@ auto leaky_relu_kernel(const Tensor& input, float alpha, hipStream_t stream) -> 
         int num_blocks = get_num_blocks(n);
         hipLaunchKernelGGL(leaky_relu_forward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           reinterpret_cast<const __half*>(input.data<Float16>()), reinterpret_cast<__half*>(result.data<Float16>()), n, alpha);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = leaky_relu_kernel(input_f32, alpha, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("Leaky ReLU only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("Leaky ReLU only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1770,8 +1810,13 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
         int num_blocks = get_num_blocks(n);
         hipLaunchKernelGGL(leaky_relu_backward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           reinterpret_cast<const __half*>(grad_output.data<Float16>()), reinterpret_cast<const __half*>(input.data<Float16>()), reinterpret_cast<__half*>(result.data<Float16>()), n, alpha);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = leaky_relu_backward_kernel(grad_output_f32, input_f32, alpha, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("Leaky ReLU backward only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("Leaky ReLU backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1829,8 +1874,12 @@ auto softmax_kernel(const Tensor& input, int64_t dim, hipStream_t stream, float 
                           reinterpret_cast<const __half*>(input.data<Float16>()),
                           reinterpret_cast<__half*>(result.data<Float16>()),
                           batch_size, dim_size, temperature);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = softmax_kernel(input_f32, dim, stream, temperature);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("Softmax only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("Softmax only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1883,8 +1932,13 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
                           reinterpret_cast<const __half*>(output.data<Float16>()),
                           reinterpret_cast<__half*>(result.data<Float16>()),
                           batch_size, dim_size);
+    } else if (output.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto output_f32 = output.to(DType::Float32);
+        auto result_f32 = softmax_backward_kernel(grad_output_f32, output_f32, dim, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("Softmax backward only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("Softmax backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1936,8 +1990,12 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim, hipStream_t stream) ->
                           reinterpret_cast<const __half*>(input.data<Float16>()),
                           reinterpret_cast<__half*>(result.data<Float16>()),
                           batch_size, dim_size);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = log_softmax_kernel(input_f32, dim, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("Log Softmax only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("Log Softmax only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1990,8 +2048,13 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
                           reinterpret_cast<const __half*>(output.data<Float16>()),
                           reinterpret_cast<__half*>(result.data<Float16>()),
                           batch_size, dim_size);
+    } else if (output.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto output_f32 = output.to(DType::Float32);
+        auto result_f32 = log_softmax_backward_kernel(grad_output_f32, output_f32, dim, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("Log Softmax backward only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("Log Softmax backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -2023,8 +2086,12 @@ auto elu_kernel(const Tensor& input, float alpha, hipStream_t stream) -> Tensor 
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(elu_forward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           reinterpret_cast<const __half*>(input.data<Float16>()), reinterpret_cast<__half*>(result.data<Float16>()), n, alpha);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = elu_kernel(input_f32, alpha, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("ELU only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("ELU only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -2054,8 +2121,13 @@ auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float a
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(elu_backward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           reinterpret_cast<const __half*>(grad_output.data<Float16>()), reinterpret_cast<const __half*>(input.data<Float16>()), reinterpret_cast<__half*>(result.data<Float16>()), n, alpha);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = elu_backward_kernel(grad_output_f32, input_f32, alpha, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("ELU backward only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("ELU backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -2087,8 +2159,12 @@ auto selu_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(selu_forward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           reinterpret_cast<const __half*>(input.data<Float16>()), reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = selu_kernel(input_f32, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("SELU only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("SELU only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -2118,8 +2194,13 @@ auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStr
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(selu_backward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           reinterpret_cast<const __half*>(grad_output.data<Float16>()), reinterpret_cast<const __half*>(input.data<Float16>()), reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = selu_backward_kernel(grad_output_f32, input_f32, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("SELU backward only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("SELU backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -2151,8 +2232,12 @@ auto swish_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(swish_forward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           reinterpret_cast<const __half*>(input.data<Float16>()), reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = swish_kernel(input_f32, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("Swish only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("Swish only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -2182,8 +2267,13 @@ auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, hipSt
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(swish_backward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           reinterpret_cast<const __half*>(grad_output.data<Float16>()), reinterpret_cast<const __half*>(input.data<Float16>()), reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = swish_backward_kernel(grad_output_f32, input_f32, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("Swish backward only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("Swish backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -2215,8 +2305,12 @@ auto mish_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(mish_forward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           reinterpret_cast<const __half*>(input.data<Float16>()), reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = mish_kernel(input_f32, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("Mish only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("Mish only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -2246,8 +2340,13 @@ auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStr
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(mish_backward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           reinterpret_cast<const __half*>(grad_output.data<Float16>()), reinterpret_cast<const __half*>(input.data<Float16>()), reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = mish_backward_kernel(grad_output_f32, input_f32, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("Mish backward only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("Mish backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -2279,8 +2378,12 @@ auto softplus_kernel(const Tensor& input, float beta, float threshold, hipStream
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(softplus_forward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           reinterpret_cast<const __half*>(input.data<Float16>()), reinterpret_cast<__half*>(result.data<Float16>()), n, beta, threshold);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = softplus_kernel(input_f32, beta, threshold, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("Softplus only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("Softplus only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -2310,8 +2413,13 @@ auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, fl
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(softplus_backward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           reinterpret_cast<const __half*>(grad_output.data<Float16>()), reinterpret_cast<const __half*>(input.data<Float16>()), reinterpret_cast<__half*>(result.data<Float16>()), n, beta, threshold);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = softplus_backward_kernel(grad_output_f32, input_f32, beta, threshold, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("Softplus backward only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("Softplus backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     hipError_t err = hipGetLastError();

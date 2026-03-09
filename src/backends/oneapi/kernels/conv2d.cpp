@@ -354,7 +354,7 @@ void im2col_kernel(const T* data_im, int64_t channels, int64_t height, int64_t w
 
         data_col[index] = (h_in >= 0 && w_in >= 0 && h_in < height && w_in < width) ?
             data_im[(c * height + h_in) * width + w_in] : T(0);
-    }).wait();
+    });
 }
 
 // Col2im transformation (inverse of im2col)
@@ -367,7 +367,7 @@ void col2im_kernel(const T* data_col, int64_t channels, int64_t height, int64_t 
     const int64_t im_size = channels * height * width;
 
     // Initialize grad_input to zero
-    queue.fill(data_im, T(0), im_size).wait();
+    queue.fill(data_im, T(0), im_size);
 
     // Accumulate gradients from col buffer
     queue.parallel_for<Conv2dCol2imKernel>(sycl::range<1>(channels * kernel_h * kernel_w * output_h * output_w),
@@ -391,7 +391,7 @@ void col2im_kernel(const T* data_col, int64_t channels, int64_t height, int64_t 
                 atomic_val(data_im[im_idx]);
             atomic_val.fetch_add(data_col[index]);
         }
-    }).wait();
+    });
 }
 
 // Grouped im2col - type-specific overloads for SYCL kernel naming
@@ -418,7 +418,7 @@ void im2col_grouped_kernel(const float* data_im, int64_t total_channels, int64_t
         int64_t w_in = w_out * stride - pad + kw * dilation;
         data_col[index] = (h_in >= 0 && w_in >= 0 && h_in < height && w_in < width) ?
             data_im[(c_global * height + h_in) * width + w_in] : 0.0f;
-    }).wait();
+    });
 }
 
 // Float64 version
@@ -444,7 +444,7 @@ void im2col_grouped_kernel(const double* data_im, int64_t total_channels, int64_
         int64_t w_in = w_out * stride - pad + kw * dilation;
         data_col[index] = (h_in >= 0 && w_in >= 0 && h_in < height && w_in < width) ?
             data_im[(c_global * height + h_in) * width + w_in] : 0.0;
-    }).wait();
+    });
 }
 
 // Float16 version
@@ -470,7 +470,7 @@ void im2col_grouped_kernel(const sycl::half* data_im, int64_t total_channels, in
         int64_t w_in = w_out * stride - pad + kw * dilation;
         data_col[index] = (h_in >= 0 && w_in >= 0 && h_in < height && w_in < width) ?
             data_im[(c_global * height + h_in) * width + w_in] : sycl::half(0.0f);
-    }).wait();
+    });
 }
 
 // Grouped col2im - type-specific overloads
@@ -502,7 +502,7 @@ void col2im_grouped_kernel(const float* data_col, int64_t total_channels, int64_
                     atomic_val(data_im[im_idx]);
                 atomic_val.fetch_add(data_col[index]);
             }
-        }).wait();
+        });
 }
 
 // Float64 version
@@ -533,7 +533,7 @@ void col2im_grouped_kernel(const double* data_col, int64_t total_channels, int64
                     atomic_val(data_im[im_idx]);
                 atomic_val.fetch_add(data_col[index]);
             }
-        }).wait();
+        });
 }
 
 // Float16 version - uses float accumulation for atomics (half atomics may not be supported)
@@ -568,7 +568,7 @@ void col2im_grouped_kernel(const sycl::half* data_col, int64_t total_channels, i
                 // compare-exchange loop or accumulating in float buffer first
                 data_im[im_idx] = sycl::half(static_cast<float>(data_im[im_idx]) + val);
             }
-        }).wait();
+        });
 }
 
 auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias,
@@ -632,7 +632,7 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
                         sum += weight_group_ptr[oc_local * K + k] * col_ptr[k * N_gemm + hw];
                     }
                     output_group_ptr[oc_local * N_gemm + hw] = sum;
-                }).wait();
+                });
             }
 
             if (bias != nullptr) {
@@ -642,7 +642,7 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
                     const int64_t hw = idx[1];
                     const int64_t out_idx = n * C_out * H_out * W_out + oc * H_out * W_out + hw;
                     output_ptr[out_idx] += bias_ptr[oc];
-                }).wait();
+                });
             }
         }
     }
@@ -678,7 +678,7 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
                         sum += weight_group_ptr[oc_local * K + k] * col_ptr[k * N_gemm + hw];
                     }
                     output_group_ptr[oc_local * N_gemm + hw] = sum;
-                }).wait();
+                });
             }
 
             if (bias != nullptr) {
@@ -688,7 +688,7 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
                     const int64_t hw = idx[1];
                     const int64_t out_idx = n * C_out * H_out * W_out + oc * H_out * W_out + hw;
                     output_ptr[out_idx] += bias_ptr[oc];
-                }).wait();
+                });
             }
         }
     }
@@ -727,7 +727,7 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
                     }
                     // Saturate to Float16 range to prevent Inf/NaN propagation
                     output_group_ptr[oc_local * N_gemm + hw] = saturate_to_half(sum);
-                }).wait();
+                });
             }
 
             if (bias != nullptr) {
@@ -738,7 +738,7 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
                     const int64_t out_idx = n * C_out * H_out * W_out + oc * H_out * W_out + hw;
                     output_ptr[out_idx] = saturate_to_half(static_cast<float>(output_ptr[out_idx]) +
                                                            static_cast<float>(bias_ptr[oc]));
-                }).wait();
+                });
             }
         }
     }
@@ -788,7 +788,7 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
         float* grad_input_ptr = get_data_ptr<float>(grad_input);
 
         // Initialize grad_input to zero (needed for grouped col2im accumulation)
-        queue.fill(grad_input_ptr, 0.0f, N * C_in * H_in * W_in).wait();
+        queue.fill(grad_input_ptr, 0.0f, N * C_in * H_in * W_in);
 
         // Col buffer for one group
         const int64_t col_size = C_in_per_group * K_h * K_w * H_out * W_out;
@@ -826,7 +826,7 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
                         sum += weight_group[oc * M_group + k] * grad_out_group[oc * N_gemm + hw];
                     }
                     col_ptr[k * N_gemm + hw] = sum;
-                }).wait();
+                });
 
                 // Col2im for this group - accumulates into grad_input
                 col2im_grouped_kernel(
@@ -845,7 +845,7 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
 
         // Initialize grad_weight to zero
         const int64_t total_weight_size = C_out * C_in_per_group * K_h * K_w;
-        queue.fill(grad_weight_ptr, 0.0f, total_weight_size).wait();
+        queue.fill(grad_weight_ptr, 0.0f, total_weight_size);
 
         // Col buffer for one group
         const int64_t col_size = C_in_per_group * K_h * K_w * H_out * W_out;
@@ -894,7 +894,7 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
                     sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
                         atomic_val(grad_weight_group[oc * N_weight + k]);
                     atomic_val.fetch_add(sum);
-                }).wait();
+                });
             }
         }
     }
@@ -920,7 +920,7 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
                 }
             }
             grad_bias_ptr[c] = sum;
-        }).wait();
+        });
     }
 
     return {grad_input, grad_weight, grad_bias};
@@ -974,7 +974,7 @@ auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
         const float* weight_ptr = get_data_ptr<const float>(weight);
         const float* grad_output_ptr = get_data_ptr<const float>(grad_output);
 
-        queue.fill(grad_input_ptr, 0.0f, N * C_in * H_in * W_in).wait();
+        queue.fill(grad_input_ptr, 0.0f, N * C_in * H_in * W_in);
 
         Tensor col_buffer({col_size}, grad_output.dtype(), grad_output.device());
         float* col_ptr = get_data_ptr<float>(col_buffer);
@@ -1004,7 +1004,7 @@ auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
                         sum += weight_group[oc * M_group + k] * grad_out_group[oc * N_gemm + hw];
                     }
                     col_ptr[k * N_gemm + hw] = sum;
-                }).wait();
+                });
 
                 col2im_grouped_kernel(
                     col_ptr, C_in, C_in_per_group, in_channel_offset,
@@ -1019,7 +1019,7 @@ auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
         const double* weight_ptr = get_data_ptr<const double>(weight);
         const double* grad_output_ptr = get_data_ptr<const double>(grad_output);
 
-        queue.fill(grad_input_ptr, 0.0, N * C_in * H_in * W_in).wait();
+        queue.fill(grad_input_ptr, 0.0, N * C_in * H_in * W_in);
 
         Tensor col_buffer({col_size}, grad_output.dtype(), grad_output.device());
         double* col_ptr = get_data_ptr<double>(col_buffer);
@@ -1049,7 +1049,7 @@ auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
                         sum += weight_group[oc * M_group + k] * grad_out_group[oc * N_gemm + hw];
                     }
                     col_ptr[k * N_gemm + hw] = sum;
-                }).wait();
+                });
 
                 col2im_grouped_kernel(
                     col_ptr, C_in, C_in_per_group, in_channel_offset,
@@ -1067,7 +1067,7 @@ auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
         // Initialize to zero
         queue.parallel_for(sycl::range<1>(N * C_in * H_in * W_in), [=](sycl::id<1> i) {
             grad_input_ptr[i] = sycl::half(0.0f);
-        }).wait();
+        });
 
         Tensor col_buffer({col_size}, grad_output.dtype(), grad_output.device());
         sycl::half* col_ptr = get_data_ptr<sycl::half>(col_buffer);
@@ -1099,7 +1099,7 @@ auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
                                static_cast<float>(grad_out_group[oc * N_gemm + hw]);
                     }
                     col_ptr[k * N_gemm + hw] = saturate_to_half(sum);
-                }).wait();
+                });
 
                 col2im_grouped_kernel(
                     col_ptr, C_in, C_in_per_group, in_channel_offset,
@@ -1149,7 +1149,7 @@ auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
         const float* input_ptr = get_data_ptr<const float>(input);
         const float* grad_output_ptr = get_data_ptr<const float>(grad_output);
 
-        queue.fill(grad_weight_ptr, 0.0f, total_weight_size).wait();
+        queue.fill(grad_weight_ptr, 0.0f, total_weight_size);
 
         Tensor col_buffer({col_size}, input.dtype(), input.device());
         float* col_ptr = get_data_ptr<float>(col_buffer);
@@ -1188,7 +1188,7 @@ auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
                     sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
                         atomic_val(grad_weight_group[oc * N_weight + k]);
                     atomic_val.fetch_add(sum);
-                }).wait();
+                });
             }
         }
     }
@@ -1197,7 +1197,7 @@ auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
         const double* input_ptr = get_data_ptr<const double>(input);
         const double* grad_output_ptr = get_data_ptr<const double>(grad_output);
 
-        queue.fill(grad_weight_ptr, 0.0, total_weight_size).wait();
+        queue.fill(grad_weight_ptr, 0.0, total_weight_size);
 
         Tensor col_buffer({col_size}, input.dtype(), input.device());
         double* col_ptr = get_data_ptr<double>(col_buffer);
@@ -1236,7 +1236,7 @@ auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
                     sycl::atomic_ref<double, sycl::memory_order::relaxed, sycl::memory_scope::device>
                         atomic_val(grad_weight_group[oc * N_weight + k]);
                     atomic_val.fetch_add(sum);
-                }).wait();
+                });
             }
         }
     }
@@ -1248,7 +1248,7 @@ auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
         // Initialize to zero
         queue.parallel_for(sycl::range<1>(total_weight_size), [=](sycl::id<1> i) {
             grad_weight_ptr[i] = sycl::half(0.0f);
-        }).wait();
+        });
 
         Tensor col_buffer({col_size}, input.dtype(), input.device());
         sycl::half* col_ptr = get_data_ptr<sycl::half>(col_buffer);
@@ -1256,7 +1256,7 @@ auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
         // Use float accumulation buffer for better precision
         Tensor grad_weight_float({total_weight_size}, DType::Float32, input.device());
         float* grad_weight_float_ptr = get_data_ptr<float>(grad_weight_float);
-        queue.fill(grad_weight_float_ptr, 0.0f, total_weight_size).wait();
+        queue.fill(grad_weight_float_ptr, 0.0f, total_weight_size);
 
         for (int64_t n = 0; n < N; ++n) {
             const sycl::half* input_batch = input_ptr + n * C_in * H_in * W_in;
@@ -1293,14 +1293,14 @@ auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
                     sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
                         atomic_val(grad_weight_group[oc * N_weight + k]);
                     atomic_val.fetch_add(sum);
-                }).wait();
+                });
             }
         }
 
         // Convert accumulated float values back to half
         queue.parallel_for(sycl::range<1>(total_weight_size), [=](sycl::id<1> i) {
             grad_weight_ptr[i] = sycl::half(grad_weight_float_ptr[i]);
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for conv2d_backward_weight");
@@ -1333,7 +1333,7 @@ auto conv2d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tens
                 }
             }
             grad_bias_ptr[c] = sum;
-        }).wait();
+        });
     }
     else if (grad_output.dtype() == DType::Float64) {
         double* grad_bias_ptr = get_data_ptr<double>(grad_bias);
@@ -1349,7 +1349,7 @@ auto conv2d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tens
                 }
             }
             grad_bias_ptr[c] = sum;
-        }).wait();
+        });
     }
     else if (grad_output.dtype() == DType::Float16) {
         sycl::half* grad_bias_ptr = get_data_ptr<sycl::half>(grad_bias);
@@ -1366,7 +1366,7 @@ auto conv2d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tens
                 }
             }
             grad_bias_ptr[c] = saturate_to_half(sum);
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for conv2d_backward_bias");
@@ -1486,7 +1486,7 @@ auto conv_transpose2d_forward(
 
                 output_data[idx] = sum;
             }
-        ).wait();
+        );
 
         // Add bias if present
         if (bias != nullptr) {
@@ -1497,7 +1497,7 @@ auto conv_transpose2d_forward(
                     int64_t c = (idx / (out_w * out_h)) % out_channels;
                     output_data[idx] += bias_data[c];
                 }
-            ).wait();
+            );
         }
     }
     else if (input.dtype() == DType::Float64) {
@@ -1546,7 +1546,7 @@ auto conv_transpose2d_forward(
 
                 output_data[idx] = sum;
             }
-        ).wait();
+        );
 
         if (bias != nullptr) {
             const double* bias_data = get_data_ptr<const double>(*bias);
@@ -1556,7 +1556,7 @@ auto conv_transpose2d_forward(
                     int64_t c = (idx / (out_w * out_h)) % out_channels;
                     output_data[idx] += bias_data[c];
                 }
-            ).wait();
+            );
         }
     }
     else if (input.dtype() == DType::Float16) {
@@ -1605,7 +1605,7 @@ auto conv_transpose2d_forward(
 
                 output_data[idx] = saturate_to_half(sum);
             }
-        ).wait();
+        );
 
         if (bias != nullptr) {
             const sycl::half* bias_data = get_data_ptr<const sycl::half>(*bias);
@@ -1615,7 +1615,7 @@ auto conv_transpose2d_forward(
                     int64_t c = (idx / (out_w * out_h)) % out_channels;
                     output_data[idx] = saturate_to_half(float(output_data[idx]) + float(bias_data[c]));
                 }
-            ).wait();
+            );
         }
     }
     else {
@@ -1679,7 +1679,7 @@ auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight, const Te
             }
             if (has_bias) sum += b_ptr[c];
             out_ptr[idx] = sum;
-        }).wait();
+        });
     } else if (input.dtype() == DType::Float64) {
         const double* in_ptr = static_cast<const double*>(input.data_ptr());
         const double* w_ptr = static_cast<const double*>(weight.data_ptr());
@@ -1707,7 +1707,7 @@ auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight, const Te
             }
             if (has_bias) sum += b_ptr[c];
             out_ptr[idx] = sum;
-        }).wait();
+        });
     } else {
         throw std::runtime_error("depthwise_conv2d: unsupported dtype");
     }

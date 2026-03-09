@@ -19,6 +19,9 @@ class EmbeddingBackwardZeroKernelFloat32;
 class EmbeddingBackwardZeroKernelFloat64;
 class EmbeddingBackwardZeroKernelFloat16;
 class EmbeddingBackwardZeroKernelBFloat16;
+class EmbeddingBagKernelFloat64;
+class EmbeddingBagKernelFloat16;
+class EmbeddingBagKernelBFloat16;
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -165,7 +168,7 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
         queue.parallel_for<EmbeddingBackwardZeroKernelFloat32>(
             sycl::range<1>(total_weight_elements),
             [=](sycl::id<1> idx) { grad_weight_ptr[idx] = 0.0f; }
-        ).wait();
+        );
 
         const float* grad_output_ptr = get_data_ptr<const float>(grad_output);
 
@@ -193,7 +196,7 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
         queue.parallel_for<EmbeddingBackwardZeroKernelFloat64>(
             sycl::range<1>(total_weight_elements),
             [=](sycl::id<1> idx) { grad_weight_ptr[idx] = 0.0; }
-        ).wait();
+        );
 
         const double* grad_output_ptr = get_data_ptr<const double>(grad_output);
 
@@ -224,7 +227,7 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
         queue.parallel_for<EmbeddingBackwardZeroKernelFloat16>(
             sycl::range<1>(total_weight_elements),
             [=](sycl::id<1> idx) { gw_f32_ptr[idx] = 0.0f; }
-        ).wait();
+        );
 
         const sycl::half* grad_output_ptr = get_data_ptr<const sycl::half>(grad_output);
 
@@ -244,7 +247,7 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
                     atomic_grad.fetch_add(grad_val);
                 }
             }
-        ).wait();
+        );
 
         // Convert Float32 accumulator back to Float16
         sycl::half* gw_ptr = get_data_ptr<sycl::half>(grad_weight);
@@ -261,7 +264,7 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
         queue.parallel_for<EmbeddingBackwardZeroKernelBFloat16>(
             sycl::range<1>(total_weight_elements),
             [=](sycl::id<1> idx) { gw_f32_ptr[idx] = 0.0f; }
-        ).wait();
+        );
 
         const uint16_t* grad_output_ptr = get_data_ptr<const uint16_t>(grad_output);
 
@@ -284,7 +287,7 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
                     atomic_grad.fetch_add(grad_val);
                 }
             }
-        ).wait();
+        );
 
         // Convert Float32 accumulator back to BFloat16
         uint16_t* gw_ptr = get_data_ptr<uint16_t>(grad_weight);
@@ -304,11 +307,25 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
     return grad_weight;
 }
 
+// BFloat16 conversion helpers for EmbeddingBag kernels
+inline float embag_bf16_to_f32(uint16_t bf16) {
+    uint32_t bits = static_cast<uint32_t>(bf16) << 16;
+    float result;
+    __builtin_memcpy(&result, &bits, sizeof(float));
+    return result;
+}
+
+inline uint16_t embag_f32_to_bf16(float f32) {
+    uint32_t bits;
+    __builtin_memcpy(&bits, &f32, sizeof(uint32_t));
+    return static_cast<uint16_t>(bits >> 16);
+}
+
 /**
  * @brief EmbeddingBag forward kernel - aggregate embeddings
  *
  * Computes sum, mean, or max aggregation of embeddings for bags of indices.
- * Currently Float32 only (EmbeddingBag is rarely used with other dtypes).
+ * Supports Float32, Float64, Float16, and BFloat16.
  */
 auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offsets,
                                   const std::string& mode, bool include_last_offset,
@@ -321,60 +338,126 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
 
     Tensor output({num_bags, embedding_dim}, embeddings.dtype(), embeddings.device());
 
-    const float* embeddings_ptr = get_data_ptr<const float>(embeddings);
     const int64_t* offsets_ptr = get_data_ptr<const int64_t>(offsets);
-    float* output_ptr = get_data_ptr<float>(output);
 
     int mode_enum = 1; // default mean
     if (mode == "sum") mode_enum = 0;
     else if (mode == "mean") mode_enum = 1;
     else if (mode == "max") mode_enum = 2;
 
-    queue.parallel_for<class EmbeddingBagKernel>(
-        sycl::range<2>(num_bags, embedding_dim),
-        [=](sycl::id<2> idx) {
-            int64_t bag_idx = idx[0];
-            int64_t emb_dim_idx = idx[1];
+    if (embeddings.dtype() == DType::Float32) {
+        const float* embeddings_ptr = get_data_ptr<const float>(embeddings);
+        float* output_ptr = get_data_ptr<float>(output);
 
-            int64_t start_idx = offsets_ptr[bag_idx];
-            int64_t end_idx;
+        queue.parallel_for<class EmbeddingBagKernel>(
+            sycl::range<2>(num_bags, embedding_dim),
+            [=](sycl::id<2> idx) {
+                int64_t bag_idx = idx[0];
+                int64_t emb_dim_idx = idx[1];
+                int64_t start_idx = offsets_ptr[bag_idx];
+                int64_t end_idx = (bag_idx + 1 < num_bags) ? offsets_ptr[bag_idx + 1] : total_elements;
+                int64_t bag_size = end_idx - start_idx;
 
-            if (bag_idx + 1 < num_bags) {
-                end_idx = offsets_ptr[bag_idx + 1];
-            } else {
-                end_idx = total_elements;
-            }
+                if (bag_size <= 0) { output_ptr[bag_idx * embedding_dim + emb_dim_idx] = 0.0f; return; }
 
-            int64_t bag_size = end_idx - start_idx;
-
-            if (bag_size <= 0) {
-                output_ptr[bag_idx * embedding_dim + emb_dim_idx] = 0.0f;
-                return;
-            }
-
-            float result = 0.0f;
-            bool first = true;
-
-            for (int64_t i = start_idx; i < end_idx; ++i) {
-                float val = embeddings_ptr[i * embedding_dim + emb_dim_idx];
-
-                if (mode_enum == 0 || mode_enum == 1) {
-                    result += val;
-                } else if (mode_enum == 2) {
-                    if (first || val > result) {
-                        result = val;
-                        first = false;
-                    }
+                float result = 0.0f;
+                bool first = true;
+                for (int64_t i = start_idx; i < end_idx; ++i) {
+                    float val = embeddings_ptr[i * embedding_dim + emb_dim_idx];
+                    if (mode_enum == 0 || mode_enum == 1) { result += val; }
+                    else if (mode_enum == 2) { if (first || val > result) { result = val; first = false; } }
                 }
+                if (mode_enum == 1 && bag_size > 0) { result /= bag_size; }
+                output_ptr[bag_idx * embedding_dim + emb_dim_idx] = result;
             }
+        ).wait();
+    }
+    else if (embeddings.dtype() == DType::Float64) {
+        const double* embeddings_ptr = get_data_ptr<const double>(embeddings);
+        double* output_ptr = get_data_ptr<double>(output);
 
-            if (mode_enum == 1 && bag_size > 0) {
-                result /= bag_size;
+        queue.parallel_for<EmbeddingBagKernelFloat64>(
+            sycl::range<2>(num_bags, embedding_dim),
+            [=](sycl::id<2> idx) {
+                int64_t bag_idx = idx[0];
+                int64_t emb_dim_idx = idx[1];
+                int64_t start_idx = offsets_ptr[bag_idx];
+                int64_t end_idx = (bag_idx + 1 < num_bags) ? offsets_ptr[bag_idx + 1] : total_elements;
+                int64_t bag_size = end_idx - start_idx;
+
+                if (bag_size <= 0) { output_ptr[bag_idx * embedding_dim + emb_dim_idx] = 0.0; return; }
+
+                double result = 0.0;
+                bool first = true;
+                for (int64_t i = start_idx; i < end_idx; ++i) {
+                    double val = embeddings_ptr[i * embedding_dim + emb_dim_idx];
+                    if (mode_enum == 0 || mode_enum == 1) { result += val; }
+                    else if (mode_enum == 2) { if (first || val > result) { result = val; first = false; } }
+                }
+                if (mode_enum == 1 && bag_size > 0) { result /= bag_size; }
+                output_ptr[bag_idx * embedding_dim + emb_dim_idx] = result;
             }
+        ).wait();
+    }
+    else if (embeddings.dtype() == DType::Float16) {
+        const sycl::half* embeddings_ptr = get_data_ptr<const sycl::half>(embeddings);
+        sycl::half* output_ptr = get_data_ptr<sycl::half>(output);
 
-            output_ptr[bag_idx * embedding_dim + emb_dim_idx] = result;
-        }
-    ).wait();
+        queue.parallel_for<EmbeddingBagKernelFloat16>(
+            sycl::range<2>(num_bags, embedding_dim),
+            [=](sycl::id<2> idx) {
+                int64_t bag_idx = idx[0];
+                int64_t emb_dim_idx = idx[1];
+                int64_t start_idx = offsets_ptr[bag_idx];
+                int64_t end_idx = (bag_idx + 1 < num_bags) ? offsets_ptr[bag_idx + 1] : total_elements;
+                int64_t bag_size = end_idx - start_idx;
+
+                if (bag_size <= 0) { output_ptr[bag_idx * embedding_dim + emb_dim_idx] = sycl::half(0.0f); return; }
+
+                // Use float accumulator for precision
+                float result = 0.0f;
+                bool first = true;
+                for (int64_t i = start_idx; i < end_idx; ++i) {
+                    float val = static_cast<float>(embeddings_ptr[i * embedding_dim + emb_dim_idx]);
+                    if (mode_enum == 0 || mode_enum == 1) { result += val; }
+                    else if (mode_enum == 2) { if (first || val > result) { result = val; first = false; } }
+                }
+                if (mode_enum == 1 && bag_size > 0) { result /= bag_size; }
+                output_ptr[bag_idx * embedding_dim + emb_dim_idx] = sycl::half(result);
+            }
+        ).wait();
+    }
+    else if (embeddings.dtype() == DType::BFloat16) {
+        const uint16_t* embeddings_ptr = get_data_ptr<const uint16_t>(embeddings);
+        uint16_t* output_ptr = get_data_ptr<uint16_t>(output);
+
+        queue.parallel_for<EmbeddingBagKernelBFloat16>(
+            sycl::range<2>(num_bags, embedding_dim),
+            [=](sycl::id<2> idx) {
+                int64_t bag_idx = idx[0];
+                int64_t emb_dim_idx = idx[1];
+                int64_t start_idx = offsets_ptr[bag_idx];
+                int64_t end_idx = (bag_idx + 1 < num_bags) ? offsets_ptr[bag_idx + 1] : total_elements;
+                int64_t bag_size = end_idx - start_idx;
+
+                if (bag_size <= 0) { output_ptr[bag_idx * embedding_dim + emb_dim_idx] = 0; return; }
+
+                // Use float accumulator for precision
+                float result = 0.0f;
+                bool first = true;
+                for (int64_t i = start_idx; i < end_idx; ++i) {
+                    float val = embag_bf16_to_f32(embeddings_ptr[i * embedding_dim + emb_dim_idx]);
+                    if (mode_enum == 0 || mode_enum == 1) { result += val; }
+                    else if (mode_enum == 2) { if (first || val > result) { result = val; first = false; } }
+                }
+                if (mode_enum == 1 && bag_size > 0) { result /= bag_size; }
+                output_ptr[bag_idx * embedding_dim + emb_dim_idx] = embag_f32_to_bf16(result);
+            }
+        ).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for embedding_bag_forward_kernel");
+    }
 
     return output;
 }

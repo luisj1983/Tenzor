@@ -624,8 +624,17 @@ auto gru_cell_forward_kernel(
                           reinterpret_cast<__half*>(h_out.data<Float16>()),
                           batch_size,
                           hidden_size);
+    } else if (reset_gates.dtype() == DType::BFloat16) {
+        auto rg_f32 = reset_gates.to(DType::Float32);
+        auto ug_f32 = update_gates.to(DType::Float32);
+        auto ngi_f32 = new_gates_input.to(DType::Float32);
+        auto ngh_f32 = new_gates_hidden.to(DType::Float32);
+        auto hp_f32 = h_prev.to(DType::Float32);
+        auto result = gru_cell_forward_kernel(rg_f32, ug_f32, ngi_f32, ngh_f32, hp_f32,
+                                               batch_size, hidden_size, stream);
+        return result.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("GRU only supports Float32, Float64, and Float16");
+        throw std::runtime_error("GRU only supports Float32, Float64, Float16, and BFloat16");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -712,8 +721,23 @@ auto gru_cell_backward_kernel(
                           reinterpret_cast<__half*>(outputs.grad_h_prev.data<Float16>()),
                           batch_size,
                           hidden_size);
+    } else if (grad_h.dtype() == DType::BFloat16) {
+        auto gh_f32 = grad_h.to(DType::Float32);
+        auto rg_f32 = reset_gates.to(DType::Float32);
+        auto ug_f32 = update_gates.to(DType::Float32);
+        auto ngi_f32 = new_gates_input.to(DType::Float32);
+        auto ngh_f32 = new_gates_hidden.to(DType::Float32);
+        auto hp_f32 = h_prev.to(DType::Float32);
+        auto result = gru_cell_backward_kernel(gh_f32, rg_f32, ug_f32, ngi_f32, ngh_f32, hp_f32,
+                                                batch_size, hidden_size, stream);
+        result.grad_reset = result.grad_reset.to(DType::BFloat16);
+        result.grad_update = result.grad_update.to(DType::BFloat16);
+        result.grad_new_input = result.grad_new_input.to(DType::BFloat16);
+        result.grad_new_hidden = result.grad_new_hidden.to(DType::BFloat16);
+        result.grad_h_prev = result.grad_h_prev.to(DType::BFloat16);
+        return result;
     } else {
-        throw std::runtime_error("GRU backward only supports Float32, Float64, and Float16");
+        throw std::runtime_error("GRU backward only supports Float32, Float64, Float16, and BFloat16");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -745,6 +769,19 @@ auto gru_forward_kernel(
     const Tensor& bias,
     const Tensor& h0,
     hipStream_t stream) -> std::vector<Tensor> {
+
+    // BFloat16 upcast: convert to Float32, compute, convert back
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto W_ih_f32 = W_ih.to(DType::Float32);
+        auto W_hh_f32 = W_hh.to(DType::Float32);
+        auto bias_f32 = (bias.numel() > 0) ? bias.to(DType::Float32) : bias;
+        auto h0_f32 = h0.to(DType::Float32);
+        auto results = gru_forward_kernel(input_f32, W_ih_f32, W_hh_f32, bias_f32, h0_f32, stream);
+        results[0] = results[0].to(DType::BFloat16);  // output
+        results[1] = results[1].to(DType::BFloat16);  // h_n
+        return results;
+    }
 
     // Get dimensions
     auto input_shape = input.shape();
@@ -1009,7 +1046,7 @@ auto gru_forward_kernel(
                       batch * hidden * sizeof(__half),
                       hipMemcpyDeviceToDevice, stream);
     } else {
-        throw std::runtime_error("GRU forward only supports Float32, Float64, and Float16");
+        throw std::runtime_error("GRU forward only supports Float32, Float64, Float16, and BFloat16");
     }
 
     HIP_CHECK(hipGetLastError());

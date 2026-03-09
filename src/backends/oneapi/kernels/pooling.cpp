@@ -250,7 +250,7 @@ auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, in
             }
 
             idx_ptr[((n * C + c) * H_out + h_out) * W_out + w_out] = static_cast<float>(max_idx);
-        }).wait();
+        });
     }
 
     return {output, indices};
@@ -393,7 +393,7 @@ auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, in
             int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
             out_ptr[out_idx] = max_val;
             idx_ptr[out_idx] = static_cast<float>(max_idx);
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
@@ -432,7 +432,7 @@ auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, in
             int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
             out_ptr[out_idx] = max_val;
             idx_ptr[out_idx] = static_cast<double>(max_idx);
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
@@ -472,7 +472,7 @@ auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, in
             int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
             out_ptr[out_idx] = sycl::half(max_val);
             idx_ptr[out_idx] = sycl::half(static_cast<float>(max_idx));
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
@@ -512,7 +512,7 @@ auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, in
             int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
             out_ptr[out_idx] = f32_to_bf16(max_val);
             idx_ptr[out_idx] = f32_to_bf16(static_cast<float>(max_idx));
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for maxpool2d_forward_with_indices");
@@ -579,7 +579,7 @@ auto avgpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
 
             out_ptr[((n * C + c) * H_out + h_out) * W_out + w_out] =
                 count > 0 ? sum / static_cast<float>(count) : 0.0f;
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
@@ -614,7 +614,7 @@ auto avgpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
 
             out_ptr[((n * C + c) * H_out + h_out) * W_out + w_out] =
                 count > 0 ? sum / static_cast<double>(count) : 0.0;
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
@@ -650,7 +650,7 @@ auto avgpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
 
             out_ptr[((n * C + c) * H_out + h_out) * W_out + w_out] =
                 sycl::half(count > 0 ? sum / static_cast<float>(count) : 0.0f);
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
@@ -686,7 +686,7 @@ auto avgpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
 
             out_ptr[((n * C + c) * H_out + h_out) * W_out + w_out] =
                 f32_to_bf16(count > 0 ? sum / static_cast<float>(count) : 0.0f);
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for avgpool2d_forward");
@@ -744,7 +744,7 @@ auto adaptive_avgpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
 
             out_ptr[((n * C + c) * output_h + h_out) * output_w + w_out] =
                 count > 0 ? sum / static_cast<float>(count) : 0.0f;
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
@@ -777,7 +777,7 @@ auto adaptive_avgpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
 
             out_ptr[((n * C + c) * output_h + h_out) * output_w + w_out] =
                 count > 0 ? sum / static_cast<double>(count) : 0.0;
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
@@ -812,7 +812,7 @@ auto adaptive_avgpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
 
             out_ptr[((n * C + c) * output_h + h_out) * output_w + w_out] =
                 sycl::half(count > 0 ? sum / static_cast<float>(count) : 0.0f);
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
@@ -847,7 +847,7 @@ auto adaptive_avgpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
 
             out_ptr[((n * C + c) * output_h + h_out) * output_w + w_out] =
                 f32_to_bf16(count > 0 ? sum / static_cast<float>(count) : 0.0f);
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for adaptive_avgpool2d_forward");
@@ -873,7 +873,7 @@ auto adaptive_avgpool2d_backward(const Tensor& grad_output, int64_t H_in, int64_
 
     // Initialize grad_input to zeros
     const size_t bytes = grad_input.numel() * grad_input.dtype_size();
-    queue.memset(const_cast<void*>(grad_input.data_ptr()), 0, bytes).wait();
+    queue.memset(const_cast<void*>(grad_input.data_ptr()), 0, bytes);
 
     if (grad_output.dtype() == DType::Float32) {
         const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
@@ -907,7 +907,7 @@ auto adaptive_avgpool2d_backward(const Tensor& grad_output, int64_t H_in, int64_
                     atomic_val.fetch_add(grad_val);
                 }
             }
-        }).wait();
+        });
     }
     else if (grad_output.dtype() == DType::Float64) {
         const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
@@ -939,7 +939,7 @@ auto adaptive_avgpool2d_backward(const Tensor& grad_output, int64_t H_in, int64_
                     atomic_val.fetch_add(grad_val);
                 }
             }
-        }).wait();
+        });
     }
     else if (grad_output.dtype() == DType::Float16) {
         // Float16 backward uses float accumulation for numerical stability
@@ -949,7 +949,7 @@ auto adaptive_avgpool2d_backward(const Tensor& grad_output, int64_t H_in, int64_
 
         // Use a temporary float buffer for atomic accumulation
         Tensor grad_input_f32({N, C, H_in, W_in}, DType::Float32, grad_output.device());
-        queue.memset(const_cast<void*>(grad_input_f32.data_ptr()), 0, grad_input_f32.numel() * sizeof(float)).wait();
+        queue.memset(const_cast<void*>(grad_input_f32.data_ptr()), 0, grad_input_f32.numel() * sizeof(float));
         float* grad_in_f32_ptr = get_data_ptr<float>(grad_input_f32);
 
         const int64_t total_size = N * C * H_out * W_out;
@@ -978,13 +978,13 @@ auto adaptive_avgpool2d_backward(const Tensor& grad_output, int64_t H_in, int64_
                     atomic_val.fetch_add(grad_val);
                 }
             }
-        }).wait();
+        });
 
         // Convert float result back to half
         const int64_t total_input = N * C * H_in * W_in;
         queue.parallel_for(sycl::range<1>(total_input), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = sycl::half(grad_in_f32_ptr[idx]);
-        }).wait();
+        });
     }
     else if (grad_output.dtype() == DType::BFloat16) {
         // BFloat16 backward uses float accumulation for numerical stability
@@ -993,7 +993,7 @@ auto adaptive_avgpool2d_backward(const Tensor& grad_output, int64_t H_in, int64_
 
         // Use a temporary float buffer for atomic accumulation
         Tensor grad_input_f32({N, C, H_in, W_in}, DType::Float32, grad_output.device());
-        queue.memset(const_cast<void*>(grad_input_f32.data_ptr()), 0, grad_input_f32.numel() * sizeof(float)).wait();
+        queue.memset(const_cast<void*>(grad_input_f32.data_ptr()), 0, grad_input_f32.numel() * sizeof(float));
         float* grad_in_f32_ptr = get_data_ptr<float>(grad_input_f32);
 
         const int64_t total_size = N * C * H_out * W_out;
@@ -1022,13 +1022,13 @@ auto adaptive_avgpool2d_backward(const Tensor& grad_output, int64_t H_in, int64_
                     atomic_val.fetch_add(grad_val);
                 }
             }
-        }).wait();
+        });
 
         // Convert float result back to BFloat16
         const int64_t total_input = N * C * H_in * W_in;
         queue.parallel_for(sycl::range<1>(total_input), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = f32_to_bf16(grad_in_f32_ptr[idx]);
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for adaptive_avgpool2d_backward");
@@ -1082,7 +1082,7 @@ auto adaptive_maxpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
             }
 
             out_ptr[((n * C + c) * output_h + h_out) * output_w + w_out] = max_val;
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
@@ -1113,7 +1113,7 @@ auto adaptive_maxpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
             }
 
             out_ptr[((n * C + c) * output_h + h_out) * output_w + w_out] = max_val;
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
@@ -1146,7 +1146,7 @@ auto adaptive_maxpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
             }
 
             out_ptr[((n * C + c) * output_h + h_out) * output_w + w_out] = sycl::half(max_val);
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
@@ -1179,7 +1179,7 @@ auto adaptive_maxpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
             }
 
             out_ptr[((n * C + c) * output_h + h_out) * output_w + w_out] = f32_to_bf16(max_val);
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for adaptive_maxpool2d_forward");
@@ -1206,7 +1206,7 @@ auto adaptive_maxpool2d_backward(const Tensor& grad_output, const Tensor& indice
 
     // Initialize grad_input to zeros
     const size_t bytes = grad_input.numel() * grad_input.dtype_size();
-    queue.memset(const_cast<void*>(grad_input.data_ptr()), 0, bytes).wait();
+    queue.memset(const_cast<void*>(grad_input.data_ptr()), 0, bytes);
 
     const int64_t total_size = N * C * H_out * W_out;
 
@@ -1222,7 +1222,7 @@ auto adaptive_maxpool2d_backward(const Tensor& grad_output, const Tensor& indice
                                  sycl::access::address_space::global_space> atomic_val(grad_in_ptr[input_idx]);
                 atomic_val.fetch_add(grad_out_ptr[flat_idx]);
             }
-        }).wait();
+        });
     }
     else if (grad_output.dtype() == DType::Float64) {
         const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
@@ -1236,7 +1236,7 @@ auto adaptive_maxpool2d_backward(const Tensor& grad_output, const Tensor& indice
                                  sycl::access::address_space::global_space> atomic_val(grad_in_ptr[input_idx]);
                 atomic_val.fetch_add(grad_out_ptr[flat_idx]);
             }
-        }).wait();
+        });
     }
     else if (grad_output.dtype() == DType::Float16) {
         const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
@@ -1245,7 +1245,7 @@ auto adaptive_maxpool2d_backward(const Tensor& grad_output, const Tensor& indice
 
         // Use temporary float buffer for atomic accumulation
         Tensor grad_input_f32({N, C, H_in, W_in}, DType::Float32, grad_output.device());
-        queue.memset(const_cast<void*>(grad_input_f32.data_ptr()), 0, grad_input_f32.numel() * sizeof(float)).wait();
+        queue.memset(const_cast<void*>(grad_input_f32.data_ptr()), 0, grad_input_f32.numel() * sizeof(float));
         float* grad_in_f32_ptr = get_data_ptr<float>(grad_input_f32);
 
         queue.parallel_for<AdaptiveMaxPool2dBackwardKernelFloat16>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
@@ -1255,13 +1255,13 @@ auto adaptive_maxpool2d_backward(const Tensor& grad_output, const Tensor& indice
                                  sycl::access::address_space::global_space> atomic_val(grad_in_f32_ptr[input_idx]);
                 atomic_val.fetch_add(static_cast<float>(grad_out_ptr[flat_idx]));
             }
-        }).wait();
+        });
 
         // Convert float result back to half
         const int64_t total_input = N * C * H_in * W_in;
         queue.parallel_for(sycl::range<1>(total_input), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = sycl::half(grad_in_f32_ptr[idx]);
-        }).wait();
+        });
     }
     else if (grad_output.dtype() == DType::BFloat16) {
         const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
@@ -1270,7 +1270,7 @@ auto adaptive_maxpool2d_backward(const Tensor& grad_output, const Tensor& indice
 
         // Use temporary float buffer for atomic accumulation
         Tensor grad_input_f32({N, C, H_in, W_in}, DType::Float32, grad_output.device());
-        queue.memset(const_cast<void*>(grad_input_f32.data_ptr()), 0, grad_input_f32.numel() * sizeof(float)).wait();
+        queue.memset(const_cast<void*>(grad_input_f32.data_ptr()), 0, grad_input_f32.numel() * sizeof(float));
         float* grad_in_f32_ptr = get_data_ptr<float>(grad_input_f32);
 
         queue.parallel_for<AdaptiveMaxPool2dBackwardKernelBFloat16>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
@@ -1280,13 +1280,13 @@ auto adaptive_maxpool2d_backward(const Tensor& grad_output, const Tensor& indice
                                  sycl::access::address_space::global_space> atomic_val(grad_in_f32_ptr[input_idx]);
                 atomic_val.fetch_add(bf16_to_f32(grad_out_ptr[flat_idx]));
             }
-        }).wait();
+        });
 
         // Convert float result back to BFloat16
         const int64_t total_input = N * C * H_in * W_in;
         queue.parallel_for(sycl::range<1>(total_input), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = f32_to_bf16(grad_in_f32_ptr[idx]);
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for adaptive_maxpool2d_backward");
@@ -1465,7 +1465,7 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
 
         // Initialize grad_input to zero
         const int64_t input_size = N * C * H_in * W_in;
-        queue.fill(grad_in_ptr, 0.0f, input_size).wait();
+        queue.fill(grad_in_ptr, 0.0f, input_size);
 
         // For each output position, distribute gradient to input positions
         const int64_t total_output_size = N * C * H_out * W_out;
@@ -1512,14 +1512,14 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
                         }
                     }
                 }
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float64) {
         const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
         double* grad_in_ptr = get_data_ptr<double>(grad_input);
 
         const int64_t input_size = N * C * H_in * W_in;
-        queue.fill(grad_in_ptr, 0.0, input_size).wait();
+        queue.fill(grad_in_ptr, 0.0, input_size);
 
         const int64_t total_output_size = N * C * H_out * W_out;
         queue.parallel_for<AvgPool2dBackwardKernelFloat64>(sycl::range<1>(total_output_size),
@@ -1563,7 +1563,7 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
                         }
                     }
                 }
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
@@ -1572,7 +1572,7 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
         // Use float32 intermediate buffer since atomic_ref<sycl::half> is not widely supported
         const int64_t input_size = N * C * H_in * W_in;
         float* acc_ptr = sycl::malloc_device<float>(input_size, queue);
-        queue.fill(acc_ptr, 0.0f, input_size).wait();
+        queue.fill(acc_ptr, 0.0f, input_size);
 
         const int64_t total_output_size = N * C * H_out * W_out;
         queue.parallel_for<AvgPool2dBackwardKernelFloat16>(sycl::range<1>(total_output_size),
@@ -1616,12 +1616,12 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
                         }
                     }
                 }
-        }).wait();
+        });
 
         // Convert float32 accumulator back to Float16
         queue.parallel_for(sycl::range<1>(input_size), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = sycl::half(acc_ptr[idx]);
-        }).wait();
+        });
 
         sycl::free(acc_ptr, queue);
     }
@@ -1632,7 +1632,7 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
         // Use float32 intermediate buffer since atomic_ref<uint16_t> is not suitable for BFloat16
         const int64_t input_size = N * C * H_in * W_in;
         float* acc_ptr = sycl::malloc_device<float>(input_size, queue);
-        queue.fill(acc_ptr, 0.0f, input_size).wait();
+        queue.fill(acc_ptr, 0.0f, input_size);
 
         const int64_t total_output_size = N * C * H_out * W_out;
         queue.parallel_for<AvgPool2dBackwardKernelBFloat16>(sycl::range<1>(total_output_size),
@@ -1676,12 +1676,12 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
                         }
                     }
                 }
-        }).wait();
+        });
 
         // Convert float32 accumulator back to BFloat16
         queue.parallel_for(sycl::range<1>(input_size), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = f32_to_bf16(acc_ptr[idx]);
-        }).wait();
+        });
 
         sycl::free(acc_ptr, queue);
     }
@@ -1741,7 +1741,7 @@ auto max_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
 
         // Initialize grad_input to zero
         const int64_t input_size = N * C * H_in * W_in;
-        queue.fill(grad_in_ptr, 0.0f, input_size).wait();
+        queue.fill(grad_in_ptr, 0.0f, input_size);
 
         // For each output position, find max and route gradient
         const int64_t total_output_size = N * C * H_out * W_out;
@@ -1785,7 +1785,7 @@ auto max_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
                                    sycl::memory_scope::device> atomic_grad(grad_in_ptr[input_idx]);
                     atomic_grad += grad_val;
                 }
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
@@ -1793,7 +1793,7 @@ auto max_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
         double* grad_in_ptr = get_data_ptr<double>(grad_input);
 
         const int64_t input_size = N * C * H_in * W_in;
-        queue.fill(grad_in_ptr, 0.0, input_size).wait();
+        queue.fill(grad_in_ptr, 0.0, input_size);
 
         const int64_t total_output_size = N * C * H_out * W_out;
         queue.parallel_for<MaxPool2dBackwardKernelFloat64>(sycl::range<1>(total_output_size),
@@ -1834,7 +1834,7 @@ auto max_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
                                    sycl::memory_scope::device> atomic_grad(grad_in_ptr[input_idx]);
                     atomic_grad += grad_val;
                 }
-        }).wait();
+        });
     }
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
@@ -1844,7 +1844,7 @@ auto max_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
         // Use float32 intermediate buffer for atomic accumulation
         const int64_t input_size = N * C * H_in * W_in;
         float* acc_ptr = sycl::malloc_device<float>(input_size, queue);
-        queue.fill(acc_ptr, 0.0f, input_size).wait();
+        queue.fill(acc_ptr, 0.0f, input_size);
 
         const int64_t total_output_size = N * C * H_out * W_out;
         queue.parallel_for<MaxPool2dBackwardKernelBFloat16>(sycl::range<1>(total_output_size),
@@ -1887,12 +1887,12 @@ auto max_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
                                    sycl::memory_scope::device> atomic_grad(acc_ptr[input_idx]);
                     atomic_grad += grad_val;
                 }
-        }).wait();
+        });
 
         // Convert float32 accumulator back to BFloat16
         queue.parallel_for(sycl::range<1>(input_size), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = f32_to_bf16(acc_ptr[idx]);
-        }).wait();
+        });
 
         sycl::free(acc_ptr, queue);
     }
@@ -1973,7 +1973,7 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
         float* grad_in_ptr = get_data_ptr<float>(grad_input);
 
         // Initialize grad_input to zero
-        queue.fill(grad_in_ptr, 0.0f, input_size).wait();
+        queue.fill(grad_in_ptr, 0.0f, input_size);
 
         // For each output position, route gradient to the stored index
         queue.parallel_for<MaxPool2dBackwardWithIndicesKernelFloat32>(sycl::range<1>(output_size),
@@ -2000,14 +2000,14 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
                                    sycl::access::address_space::global_space> atomic_grad(grad_in_ptr[input_idx]);
                     atomic_grad.fetch_add(grad_val);
                 }
-        }).wait();
+        });
     }
     else if (grad_output.dtype() == DType::Float64) {
         const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
         const double* idx_ptr = get_data_ptr<const double>(indices);
         double* grad_in_ptr = get_data_ptr<double>(grad_input);
 
-        queue.fill(grad_in_ptr, 0.0, input_size).wait();
+        queue.fill(grad_in_ptr, 0.0, input_size);
 
         queue.parallel_for<MaxPool2dBackwardWithIndicesKernelFloat64>(sycl::range<1>(output_size),
             [=](sycl::id<1> flat_idx) {
@@ -2032,7 +2032,7 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
                                    sycl::access::address_space::global_space> atomic_grad(grad_in_ptr[input_idx]);
                     atomic_grad.fetch_add(grad_val);
                 }
-        }).wait();
+        });
     }
     else if (grad_output.dtype() == DType::Float16) {
         const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
@@ -2043,7 +2043,7 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
         Tensor grad_input_float({N, C, H_in, W_in}, DType::Float32, grad_output.device());
         float* grad_in_float_ptr = get_data_ptr<float>(grad_input_float);
 
-        queue.fill(grad_in_float_ptr, 0.0f, input_size).wait();
+        queue.fill(grad_in_float_ptr, 0.0f, input_size);
 
         queue.parallel_for<MaxPool2dBackwardWithIndicesKernelFloat16>(sycl::range<1>(output_size),
             [=](sycl::id<1> flat_idx) {
@@ -2068,12 +2068,12 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
                                    sycl::access::address_space::global_space> atomic_grad(grad_in_float_ptr[input_idx]);
                     atomic_grad.fetch_add(grad_val);
                 }
-        }).wait();
+        });
 
         // Convert back to Float16
         queue.parallel_for(sycl::range<1>(input_size), [=](sycl::id<1> i) {
             grad_in_ptr[i] = sycl::half(grad_in_float_ptr[i]);
-        }).wait();
+        });
     }
     else if (grad_output.dtype() == DType::BFloat16) {
         const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
@@ -2084,7 +2084,7 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
         Tensor grad_input_float({N, C, H_in, W_in}, DType::Float32, grad_output.device());
         float* grad_in_float_ptr = get_data_ptr<float>(grad_input_float);
 
-        queue.fill(grad_in_float_ptr, 0.0f, input_size).wait();
+        queue.fill(grad_in_float_ptr, 0.0f, input_size);
 
         queue.parallel_for<MaxPool2dBackwardWithIndicesKernelBFloat16>(sycl::range<1>(output_size),
             [=](sycl::id<1> flat_idx) {
@@ -2109,12 +2109,12 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
                                    sycl::access::address_space::global_space> atomic_grad(grad_in_float_ptr[input_idx]);
                     atomic_grad.fetch_add(grad_val);
                 }
-        }).wait();
+        });
 
         // Convert back to BFloat16
         queue.parallel_for(sycl::range<1>(input_size), [=](sycl::id<1> i) {
             grad_in_ptr[i] = f32_to_bf16(grad_in_float_ptr[i]);
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for max_pool2d_backward_with_indices");
@@ -2158,7 +2158,7 @@ auto maxpool1d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
             }
             int64_t oi = (n * C + c) * L_out + l;
             out_ptr[oi] = mx; idx_ptr[oi] = mi;
-        }).wait();
+        });
     } else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
         double* out_ptr = get_data_ptr<double>(output);
@@ -2178,7 +2178,7 @@ auto maxpool1d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
             }
             int64_t oi = (n * C + c) * L_out + l;
             out_ptr[oi] = mx; idx_ptr[oi] = mi;
-        }).wait();
+        });
     } else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
@@ -2198,7 +2198,7 @@ auto maxpool1d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
             }
             int64_t oi = (n * C + c) * L_out + l;
             out_ptr[oi] = sycl::half(mx); idx_ptr[oi] = mi;
-        }).wait();
+        });
     } else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
@@ -2218,7 +2218,7 @@ auto maxpool1d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
             }
             int64_t oi = (n * C + c) * L_out + l;
             out_ptr[oi] = f32_to_bf16(mx); idx_ptr[oi] = mi;
-        }).wait();
+        });
     } else {
         throw std::runtime_error("Unsupported dtype for maxpool1d_forward");
     }
@@ -2242,7 +2242,7 @@ auto maxpool1d_backward(const Tensor& grad_output, const Tensor& indices,
         const float* go = get_data_ptr<const float>(grad_output);
         const int64_t* idx = get_data_ptr<const int64_t>(indices);
         float* gi = get_data_ptr<float>(grad_input);
-        queue.fill(gi, 0.0f, in_size).wait();
+        queue.fill(gi, 0.0f, in_size);
         queue.parallel_for<MaxPool1dBackwardFloat32>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             float gv = go[gid];
             int64_t mi = idx[gid];
@@ -2251,12 +2251,12 @@ auto maxpool1d_backward(const Tensor& grad_output, const Tensor& indices,
                                  sycl::access::address_space::global_space> ar(gi[mi]);
                 ar.fetch_add(gv);
             }
-        }).wait();
+        });
     } else if (grad_output.dtype() == DType::Float64) {
         const double* go = get_data_ptr<const double>(grad_output);
         const int64_t* idx = get_data_ptr<const int64_t>(indices);
         double* gi = get_data_ptr<double>(grad_input);
-        queue.fill(gi, 0.0, in_size).wait();
+        queue.fill(gi, 0.0, in_size);
         queue.parallel_for<MaxPool1dBackwardFloat64>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             double gv = go[gid];
             int64_t mi = idx[gid];
@@ -2265,13 +2265,13 @@ auto maxpool1d_backward(const Tensor& grad_output, const Tensor& indices,
                                  sycl::access::address_space::global_space> ar(gi[mi]);
                 ar.fetch_add(gv);
             }
-        }).wait();
+        });
     } else if (grad_output.dtype() == DType::Float16) {
         const sycl::half* go = get_data_ptr<const sycl::half>(grad_output);
         const int64_t* idx = get_data_ptr<const int64_t>(indices);
         sycl::half* gi = get_data_ptr<sycl::half>(grad_input);
         float* acc = sycl::malloc_device<float>(in_size, queue);
-        queue.fill(acc, 0.0f, in_size).wait();
+        queue.fill(acc, 0.0f, in_size);
         queue.parallel_for<MaxPool1dBackwardFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             float gv = static_cast<float>(go[gid]);
             int64_t mi = idx[gid];
@@ -2280,17 +2280,17 @@ auto maxpool1d_backward(const Tensor& grad_output, const Tensor& indices,
                                  sycl::access::address_space::global_space> ar(acc[mi]);
                 ar.fetch_add(gv);
             }
-        }).wait();
+        });
         queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) {
             gi[i] = sycl::half(acc[i]);
-        }).wait();
+        });
         sycl::free(acc, queue);
     } else if (grad_output.dtype() == DType::BFloat16) {
         const uint16_t* go = get_data_ptr<const uint16_t>(grad_output);
         const int64_t* idx = get_data_ptr<const int64_t>(indices);
         uint16_t* gi = get_data_ptr<uint16_t>(grad_input);
         float* acc = sycl::malloc_device<float>(in_size, queue);
-        queue.fill(acc, 0.0f, in_size).wait();
+        queue.fill(acc, 0.0f, in_size);
         queue.parallel_for<MaxPool1dBackwardBFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             float gv = bf16_to_f32(go[gid]);
             int64_t mi = idx[gid];
@@ -2299,10 +2299,10 @@ auto maxpool1d_backward(const Tensor& grad_output, const Tensor& indices,
                                  sycl::access::address_space::global_space> ar(acc[mi]);
                 ar.fetch_add(gv);
             }
-        }).wait();
+        });
         queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) {
             gi[i] = f32_to_bf16(acc[i]);
-        }).wait();
+        });
         sycl::free(acc, queue);
     } else {
         throw std::runtime_error("Unsupported dtype for maxpool1d_backward");
@@ -2334,7 +2334,7 @@ auto avgpool1d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
                 if (li >= 0 && li < L_in) { sum += in_ptr[(n * C + c) * L_in + li]; count++; }
             }
             out_ptr[(n * C + c) * L_out + l] = count > 0 ? sum / static_cast<float>(count) : 0.0f;
-        }).wait();
+        });
     } else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
         double* out_ptr = get_data_ptr<double>(output);
@@ -2348,7 +2348,7 @@ auto avgpool1d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
                 if (li >= 0 && li < L_in) { sum += in_ptr[(n * C + c) * L_in + li]; count++; }
             }
             out_ptr[(n * C + c) * L_out + l] = count > 0 ? sum / static_cast<double>(count) : 0.0;
-        }).wait();
+        });
     } else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
@@ -2362,7 +2362,7 @@ auto avgpool1d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
                 if (li >= 0 && li < L_in) { sum += static_cast<float>(in_ptr[(n * C + c) * L_in + li]); count++; }
             }
             out_ptr[(n * C + c) * L_out + l] = sycl::half(count > 0 ? sum / static_cast<float>(count) : 0.0f);
-        }).wait();
+        });
     } else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
@@ -2376,7 +2376,7 @@ auto avgpool1d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
                 if (li >= 0 && li < L_in) { sum += bf16_to_f32(in_ptr[(n * C + c) * L_in + li]); count++; }
             }
             out_ptr[(n * C + c) * L_out + l] = f32_to_bf16(count > 0 ? sum / static_cast<float>(count) : 0.0f);
-        }).wait();
+        });
     } else {
         throw std::runtime_error("Unsupported dtype for avgpool1d_forward");
     }
@@ -2399,7 +2399,7 @@ auto avgpool1d_backward(const Tensor& grad_output, int64_t kernel_size, int64_t 
     if (grad_output.dtype() == DType::Float32) {
         const float* go = get_data_ptr<const float>(grad_output);
         float* gi = get_data_ptr<float>(grad_input);
-        queue.fill(gi, 0.0f, in_size).wait();
+        queue.fill(gi, 0.0f, in_size);
         queue.parallel_for<AvgPool1dBackwardFloat32>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
@@ -2417,11 +2417,11 @@ auto avgpool1d_backward(const Tensor& grad_output, int64_t kernel_size, int64_t 
                     ar.fetch_add(gv);
                 }
             }
-        }).wait();
+        });
     } else if (grad_output.dtype() == DType::Float64) {
         const double* go = get_data_ptr<const double>(grad_output);
         double* gi = get_data_ptr<double>(grad_input);
-        queue.fill(gi, 0.0, in_size).wait();
+        queue.fill(gi, 0.0, in_size);
         queue.parallel_for<AvgPool1dBackwardFloat64>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
@@ -2439,12 +2439,12 @@ auto avgpool1d_backward(const Tensor& grad_output, int64_t kernel_size, int64_t 
                     ar.fetch_add(gv);
                 }
             }
-        }).wait();
+        });
     } else if (grad_output.dtype() == DType::Float16) {
         const sycl::half* go = get_data_ptr<const sycl::half>(grad_output);
         sycl::half* gi = get_data_ptr<sycl::half>(grad_input);
         float* acc = sycl::malloc_device<float>(in_size, queue);
-        queue.fill(acc, 0.0f, in_size).wait();
+        queue.fill(acc, 0.0f, in_size);
         queue.parallel_for<AvgPool1dBackwardFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
@@ -2462,14 +2462,14 @@ auto avgpool1d_backward(const Tensor& grad_output, int64_t kernel_size, int64_t 
                     ar.fetch_add(gv);
                 }
             }
-        }).wait();
-        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) { gi[i] = sycl::half(acc[i]); }).wait();
+        });
+        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) { gi[i] = sycl::half(acc[i]); });
         sycl::free(acc, queue);
     } else if (grad_output.dtype() == DType::BFloat16) {
         const uint16_t* go = get_data_ptr<const uint16_t>(grad_output);
         uint16_t* gi = get_data_ptr<uint16_t>(grad_input);
         float* acc = sycl::malloc_device<float>(in_size, queue);
-        queue.fill(acc, 0.0f, in_size).wait();
+        queue.fill(acc, 0.0f, in_size);
         queue.parallel_for<AvgPool1dBackwardBFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
@@ -2487,8 +2487,8 @@ auto avgpool1d_backward(const Tensor& grad_output, int64_t kernel_size, int64_t 
                     ar.fetch_add(gv);
                 }
             }
-        }).wait();
-        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) { gi[i] = f32_to_bf16(acc[i]); }).wait();
+        });
+        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) { gi[i] = f32_to_bf16(acc[i]); });
         sycl::free(acc, queue);
     } else {
         throw std::runtime_error("Unsupported dtype for avgpool1d_backward");
@@ -2526,7 +2526,7 @@ auto adaptive_maxpool1d_forward(const Tensor& input, int64_t output_size,
             }
             int64_t oi = (n * C + c) * L_out + l;
             out_ptr[oi] = mx; idx_ptr[oi] = mi;
-        }).wait();
+        });
     } else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
         double* out_ptr = get_data_ptr<double>(output);
@@ -2545,7 +2545,7 @@ auto adaptive_maxpool1d_forward(const Tensor& input, int64_t output_size,
             }
             int64_t oi = (n * C + c) * L_out + l;
             out_ptr[oi] = mx; idx_ptr[oi] = mi;
-        }).wait();
+        });
     } else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
@@ -2564,7 +2564,7 @@ auto adaptive_maxpool1d_forward(const Tensor& input, int64_t output_size,
             }
             int64_t oi = (n * C + c) * L_out + l;
             out_ptr[oi] = sycl::half(mx); idx_ptr[oi] = mi;
-        }).wait();
+        });
     } else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
@@ -2583,7 +2583,7 @@ auto adaptive_maxpool1d_forward(const Tensor& input, int64_t output_size,
             }
             int64_t oi = (n * C + c) * L_out + l;
             out_ptr[oi] = f32_to_bf16(mx); idx_ptr[oi] = mi;
-        }).wait();
+        });
     } else {
         throw std::runtime_error("Unsupported dtype for adaptive_maxpool1d_forward");
     }
@@ -2621,7 +2621,7 @@ auto adaptive_avgpool1d_forward(const Tensor& input, int64_t output_size,
                 sum += in_ptr[(n * C + c) * L_in + i];
             int64_t cnt = end - start;
             out_ptr[(n * C + c) * L_out + l] = cnt > 0 ? sum / static_cast<float>(cnt) : 0.0f;
-        }).wait();
+        });
     } else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
         double* out_ptr = get_data_ptr<double>(output);
@@ -2636,7 +2636,7 @@ auto adaptive_avgpool1d_forward(const Tensor& input, int64_t output_size,
                 sum += in_ptr[(n * C + c) * L_in + i];
             int64_t cnt = end - start;
             out_ptr[(n * C + c) * L_out + l] = cnt > 0 ? sum / static_cast<double>(cnt) : 0.0;
-        }).wait();
+        });
     } else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
@@ -2651,7 +2651,7 @@ auto adaptive_avgpool1d_forward(const Tensor& input, int64_t output_size,
                 sum += static_cast<float>(in_ptr[(n * C + c) * L_in + i]);
             int64_t cnt = end - start;
             out_ptr[(n * C + c) * L_out + l] = sycl::half(cnt > 0 ? sum / static_cast<float>(cnt) : 0.0f);
-        }).wait();
+        });
     } else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
@@ -2666,7 +2666,7 @@ auto adaptive_avgpool1d_forward(const Tensor& input, int64_t output_size,
                 sum += bf16_to_f32(in_ptr[(n * C + c) * L_in + i]);
             int64_t cnt = end - start;
             out_ptr[(n * C + c) * L_out + l] = f32_to_bf16(cnt > 0 ? sum / static_cast<float>(cnt) : 0.0f);
-        }).wait();
+        });
     } else {
         throw std::runtime_error("Unsupported dtype for adaptive_avgpool1d_forward");
     }
@@ -2689,7 +2689,7 @@ auto adaptive_avgpool1d_backward(const Tensor& grad_output, const std::vector<in
     if (grad_output.dtype() == DType::Float32) {
         const float* go = get_data_ptr<const float>(grad_output);
         float* gi = get_data_ptr<float>(grad_input);
-        queue.fill(gi, 0.0f, in_size).wait();
+        queue.fill(gi, 0.0f, in_size);
         queue.parallel_for<AdaptiveAvgPool1dBackwardFloat32>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
@@ -2702,11 +2702,11 @@ auto adaptive_avgpool1d_backward(const Tensor& grad_output, const std::vector<in
                                  sycl::access::address_space::global_space> ar(gi[(n * C + c) * L_in + i]);
                 ar.fetch_add(gv);
             }
-        }).wait();
+        });
     } else if (grad_output.dtype() == DType::Float64) {
         const double* go = get_data_ptr<const double>(grad_output);
         double* gi = get_data_ptr<double>(grad_input);
-        queue.fill(gi, 0.0, in_size).wait();
+        queue.fill(gi, 0.0, in_size);
         queue.parallel_for<AdaptiveAvgPool1dBackwardFloat64>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
@@ -2719,12 +2719,12 @@ auto adaptive_avgpool1d_backward(const Tensor& grad_output, const std::vector<in
                                  sycl::access::address_space::global_space> ar(gi[(n * C + c) * L_in + i]);
                 ar.fetch_add(gv);
             }
-        }).wait();
+        });
     } else if (grad_output.dtype() == DType::Float16) {
         const sycl::half* go = get_data_ptr<const sycl::half>(grad_output);
         sycl::half* gi = get_data_ptr<sycl::half>(grad_input);
         float* acc = sycl::malloc_device<float>(in_size, queue);
-        queue.fill(acc, 0.0f, in_size).wait();
+        queue.fill(acc, 0.0f, in_size);
         queue.parallel_for<AdaptiveAvgPool1dBackwardFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
@@ -2737,14 +2737,14 @@ auto adaptive_avgpool1d_backward(const Tensor& grad_output, const std::vector<in
                                  sycl::access::address_space::global_space> ar(acc[(n * C + c) * L_in + i]);
                 ar.fetch_add(gv);
             }
-        }).wait();
-        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) { gi[i] = sycl::half(acc[i]); }).wait();
+        });
+        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) { gi[i] = sycl::half(acc[i]); });
         sycl::free(acc, queue);
     } else if (grad_output.dtype() == DType::BFloat16) {
         const uint16_t* go = get_data_ptr<const uint16_t>(grad_output);
         uint16_t* gi = get_data_ptr<uint16_t>(grad_input);
         float* acc = sycl::malloc_device<float>(in_size, queue);
-        queue.fill(acc, 0.0f, in_size).wait();
+        queue.fill(acc, 0.0f, in_size);
         queue.parallel_for<AdaptiveAvgPool1dBackwardBFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             int64_t tmp = gid; const int64_t l = tmp % L_out; tmp /= L_out;
             const int64_t c = tmp % C; const int64_t n = tmp / C;
@@ -2757,8 +2757,8 @@ auto adaptive_avgpool1d_backward(const Tensor& grad_output, const std::vector<in
                                  sycl::access::address_space::global_space> ar(acc[(n * C + c) * L_in + i]);
                 ar.fetch_add(gv);
             }
-        }).wait();
-        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) { gi[i] = f32_to_bf16(acc[i]); }).wait();
+        });
+        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) { gi[i] = f32_to_bf16(acc[i]); });
         sycl::free(acc, queue);
     } else {
         throw std::runtime_error("Unsupported dtype for adaptive_avgpool1d_backward");
@@ -2817,7 +2817,7 @@ auto maxpool3d_forward(const Tensor& input, const std::vector<int64_t>& kernel_s
             }
             int64_t oi = ((n * Ch + c) * D_out + d) * H_out * W_out + h * W_out + w;
             out_p[oi] = mx; idx_p[oi] = mi;
-        }).wait();
+        });
     } else if (input.dtype() == DType::Float64) {
         const double* in_p = get_data_ptr<const double>(input);
         double* out_p = get_data_ptr<double>(output);
@@ -2846,7 +2846,7 @@ auto maxpool3d_forward(const Tensor& input, const std::vector<int64_t>& kernel_s
             }
             int64_t oi = ((n * Ch + c) * D_out + d) * H_out * W_out + h * W_out + w;
             out_p[oi] = mx; idx_p[oi] = mi;
-        }).wait();
+        });
     } else if (input.dtype() == DType::Float16) {
         const sycl::half* in_p = get_data_ptr<const sycl::half>(input);
         sycl::half* out_p = get_data_ptr<sycl::half>(output);
@@ -2875,7 +2875,7 @@ auto maxpool3d_forward(const Tensor& input, const std::vector<int64_t>& kernel_s
             }
             int64_t oi = ((n * Ch + c) * D_out + d) * H_out * W_out + h * W_out + w;
             out_p[oi] = sycl::half(mx); idx_p[oi] = mi;
-        }).wait();
+        });
     } else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_p = get_data_ptr<const uint16_t>(input);
         uint16_t* out_p = get_data_ptr<uint16_t>(output);
@@ -2904,7 +2904,7 @@ auto maxpool3d_forward(const Tensor& input, const std::vector<int64_t>& kernel_s
             }
             int64_t oi = ((n * Ch + c) * D_out + d) * H_out * W_out + h * W_out + w;
             out_p[oi] = f32_to_bf16(mx); idx_p[oi] = mi;
-        }).wait();
+        });
     } else {
         throw std::runtime_error("Unsupported dtype for maxpool3d_forward");
     }
@@ -2925,7 +2925,7 @@ auto maxpool3d_backward(const Tensor& grad_output, const Tensor& indices,
         const float* go = get_data_ptr<const float>(grad_output);
         const int64_t* idx = get_data_ptr<const int64_t>(indices);
         float* gi = get_data_ptr<float>(grad_input);
-        queue.fill(gi, 0.0f, in_size).wait();
+        queue.fill(gi, 0.0f, in_size);
         queue.parallel_for<MaxPool3dBackwardFloat32>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             float gv = go[gid]; int64_t mi = idx[gid];
             if (mi >= 0 && mi < in_size) {
@@ -2933,12 +2933,12 @@ auto maxpool3d_backward(const Tensor& grad_output, const Tensor& indices,
                                  sycl::access::address_space::global_space> ar(gi[mi]);
                 ar.fetch_add(gv);
             }
-        }).wait();
+        });
     } else if (grad_output.dtype() == DType::Float64) {
         const double* go = get_data_ptr<const double>(grad_output);
         const int64_t* idx = get_data_ptr<const int64_t>(indices);
         double* gi = get_data_ptr<double>(grad_input);
-        queue.fill(gi, 0.0, in_size).wait();
+        queue.fill(gi, 0.0, in_size);
         queue.parallel_for<MaxPool3dBackwardFloat64>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             double gv = go[gid]; int64_t mi = idx[gid];
             if (mi >= 0 && mi < in_size) {
@@ -2946,13 +2946,13 @@ auto maxpool3d_backward(const Tensor& grad_output, const Tensor& indices,
                                  sycl::access::address_space::global_space> ar(gi[mi]);
                 ar.fetch_add(gv);
             }
-        }).wait();
+        });
     } else if (grad_output.dtype() == DType::Float16) {
         const sycl::half* go = get_data_ptr<const sycl::half>(grad_output);
         const int64_t* idx = get_data_ptr<const int64_t>(indices);
         sycl::half* gi = get_data_ptr<sycl::half>(grad_input);
         float* acc = sycl::malloc_device<float>(in_size, queue);
-        queue.fill(acc, 0.0f, in_size).wait();
+        queue.fill(acc, 0.0f, in_size);
         queue.parallel_for<MaxPool3dBackwardFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             float gv = static_cast<float>(go[gid]); int64_t mi = idx[gid];
             if (mi >= 0 && mi < in_size) {
@@ -2960,15 +2960,15 @@ auto maxpool3d_backward(const Tensor& grad_output, const Tensor& indices,
                                  sycl::access::address_space::global_space> ar(acc[mi]);
                 ar.fetch_add(gv);
             }
-        }).wait();
-        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) { gi[i] = sycl::half(acc[i]); }).wait();
+        });
+        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) { gi[i] = sycl::half(acc[i]); });
         sycl::free(acc, queue);
     } else if (grad_output.dtype() == DType::BFloat16) {
         const uint16_t* go = get_data_ptr<const uint16_t>(grad_output);
         const int64_t* idx = get_data_ptr<const int64_t>(indices);
         uint16_t* gi = get_data_ptr<uint16_t>(grad_input);
         float* acc = sycl::malloc_device<float>(in_size, queue);
-        queue.fill(acc, 0.0f, in_size).wait();
+        queue.fill(acc, 0.0f, in_size);
         queue.parallel_for<MaxPool3dBackwardBFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             float gv = bf16_to_f32(go[gid]); int64_t mi = idx[gid];
             if (mi >= 0 && mi < in_size) {
@@ -2976,8 +2976,8 @@ auto maxpool3d_backward(const Tensor& grad_output, const Tensor& indices,
                                  sycl::access::address_space::global_space> ar(acc[mi]);
                 ar.fetch_add(gv);
             }
-        }).wait();
-        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) { gi[i] = f32_to_bf16(acc[i]); }).wait();
+        });
+        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) { gi[i] = f32_to_bf16(acc[i]); });
         sycl::free(acc, queue);
     } else {
         throw std::runtime_error("Unsupported dtype for maxpool3d_backward");
@@ -3025,7 +3025,7 @@ auto avgpool3d_forward(const Tensor& input, const std::vector<int64_t>& kernel_s
                 }
             }
             out_p[gid] = count > 0 ? sum / static_cast<float>(count) : 0.0f;
-        }).wait();
+        });
     } else if (input.dtype() == DType::Float64) {
         const double* in_p = get_data_ptr<const double>(input);
         double* out_p = get_data_ptr<double>(output);
@@ -3048,7 +3048,7 @@ auto avgpool3d_forward(const Tensor& input, const std::vector<int64_t>& kernel_s
                 }
             }
             out_p[gid] = count > 0 ? sum / static_cast<double>(count) : 0.0;
-        }).wait();
+        });
     } else if (input.dtype() == DType::Float16) {
         const sycl::half* in_p = get_data_ptr<const sycl::half>(input);
         sycl::half* out_p = get_data_ptr<sycl::half>(output);
@@ -3071,7 +3071,7 @@ auto avgpool3d_forward(const Tensor& input, const std::vector<int64_t>& kernel_s
                 }
             }
             out_p[gid] = sycl::half(count > 0 ? sum / static_cast<float>(count) : 0.0f);
-        }).wait();
+        });
     } else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_p = get_data_ptr<const uint16_t>(input);
         uint16_t* out_p = get_data_ptr<uint16_t>(output);
@@ -3094,7 +3094,7 @@ auto avgpool3d_forward(const Tensor& input, const std::vector<int64_t>& kernel_s
                 }
             }
             out_p[gid] = f32_to_bf16(count > 0 ? sum / static_cast<float>(count) : 0.0f);
-        }).wait();
+        });
     } else {
         throw std::runtime_error("Unsupported dtype for avgpool3d_forward");
     }
@@ -3121,7 +3121,7 @@ auto avgpool3d_backward(const Tensor& grad_output, const std::vector<int64_t>& k
     if (grad_output.dtype() == DType::Float32) {
         const float* go = get_data_ptr<const float>(grad_output);
         float* gi = get_data_ptr<float>(grad_input);
-        queue.fill(gi, 0.0f, in_size).wait();
+        queue.fill(gi, 0.0f, in_size);
         queue.parallel_for<AvgPool3dBackwardFloat32>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             int64_t tmp = gid;
             const int64_t w = tmp % W_out; tmp /= W_out;
@@ -3141,11 +3141,11 @@ auto avgpool3d_backward(const Tensor& grad_output, const std::vector<int64_t>& k
                                          sycl::access::address_space::global_space> ar(gi[idx]);
                         ar.fetch_add(gv);
                     }}}
-        }).wait();
+        });
     } else if (grad_output.dtype() == DType::Float64) {
         const double* go = get_data_ptr<const double>(grad_output);
         double* gi = get_data_ptr<double>(grad_input);
-        queue.fill(gi, 0.0, in_size).wait();
+        queue.fill(gi, 0.0, in_size);
         queue.parallel_for<AvgPool3dBackwardFloat64>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             int64_t tmp = gid;
             const int64_t w = tmp % W_out; tmp /= W_out;
@@ -3165,12 +3165,12 @@ auto avgpool3d_backward(const Tensor& grad_output, const std::vector<int64_t>& k
                                          sycl::access::address_space::global_space> ar(gi[idx]);
                         ar.fetch_add(gv);
                     }}}
-        }).wait();
+        });
     } else if (grad_output.dtype() == DType::Float16) {
         const sycl::half* go = get_data_ptr<const sycl::half>(grad_output);
         sycl::half* gi = get_data_ptr<sycl::half>(grad_input);
         float* acc = sycl::malloc_device<float>(in_size, queue);
-        queue.fill(acc, 0.0f, in_size).wait();
+        queue.fill(acc, 0.0f, in_size);
         queue.parallel_for<AvgPool3dBackwardFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             int64_t tmp = gid;
             const int64_t w = tmp % W_out; tmp /= W_out;
@@ -3190,14 +3190,14 @@ auto avgpool3d_backward(const Tensor& grad_output, const std::vector<int64_t>& k
                                          sycl::access::address_space::global_space> ar(acc[idx]);
                         ar.fetch_add(gv);
                     }}}
-        }).wait();
-        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) { gi[i] = sycl::half(acc[i]); }).wait();
+        });
+        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) { gi[i] = sycl::half(acc[i]); });
         sycl::free(acc, queue);
     } else if (grad_output.dtype() == DType::BFloat16) {
         const uint16_t* go = get_data_ptr<const uint16_t>(grad_output);
         uint16_t* gi = get_data_ptr<uint16_t>(grad_input);
         float* acc = sycl::malloc_device<float>(in_size, queue);
-        queue.fill(acc, 0.0f, in_size).wait();
+        queue.fill(acc, 0.0f, in_size);
         queue.parallel_for<AvgPool3dBackwardBFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             int64_t tmp = gid;
             const int64_t w = tmp % W_out; tmp /= W_out;
@@ -3217,8 +3217,8 @@ auto avgpool3d_backward(const Tensor& grad_output, const std::vector<int64_t>& k
                                          sycl::access::address_space::global_space> ar(acc[idx]);
                         ar.fetch_add(gv);
                     }}}
-        }).wait();
-        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) { gi[i] = f32_to_bf16(acc[i]); }).wait();
+        });
+        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) { gi[i] = f32_to_bf16(acc[i]); });
         sycl::free(acc, queue);
     } else {
         throw std::runtime_error("Unsupported dtype for avgpool3d_backward");
@@ -3261,7 +3261,7 @@ auto adaptive_maxpool3d_forward(const Tensor& input, const std::vector<int64_t>&
                         if (v > mx) { mx = v; mi = idx; }
                     }
             out_p[gid] = mx; idx_p[gid] = mi;
-        }).wait();
+        });
     } else if (input.dtype() == DType::Float64) {
         const double* in_p = get_data_ptr<const double>(input);
         double* out_p = get_data_ptr<double>(output);
@@ -3284,7 +3284,7 @@ auto adaptive_maxpool3d_forward(const Tensor& input, const std::vector<int64_t>&
                         if (v > mx) { mx = v; mi = idx; }
                     }
             out_p[gid] = mx; idx_p[gid] = mi;
-        }).wait();
+        });
     } else if (input.dtype() == DType::Float16) {
         const sycl::half* in_p = get_data_ptr<const sycl::half>(input);
         sycl::half* out_p = get_data_ptr<sycl::half>(output);
@@ -3307,7 +3307,7 @@ auto adaptive_maxpool3d_forward(const Tensor& input, const std::vector<int64_t>&
                         if (v > mx) { mx = v; mi = idx; }
                     }
             out_p[gid] = sycl::half(mx); idx_p[gid] = mi;
-        }).wait();
+        });
     } else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_p = get_data_ptr<const uint16_t>(input);
         uint16_t* out_p = get_data_ptr<uint16_t>(output);
@@ -3330,7 +3330,7 @@ auto adaptive_maxpool3d_forward(const Tensor& input, const std::vector<int64_t>&
                         if (v > mx) { mx = v; mi = idx; }
                     }
             out_p[gid] = f32_to_bf16(mx); idx_p[gid] = mi;
-        }).wait();
+        });
     } else {
         throw std::runtime_error("Unsupported dtype for adaptive_maxpool3d_forward");
     }
@@ -3373,7 +3373,7 @@ auto adaptive_avgpool3d_forward(const Tensor& input, const std::vector<int64_t>&
                         sum += in_p[((n * Ch + c) * D_in + di) * H_in * W_in + hi * W_in + wi]; cnt++;
                     }
             out_p[gid] = cnt > 0 ? sum / static_cast<float>(cnt) : 0.0f;
-        }).wait();
+        });
     } else if (input.dtype() == DType::Float64) {
         const double* in_p = get_data_ptr<const double>(input);
         double* out_p = get_data_ptr<double>(output);
@@ -3393,7 +3393,7 @@ auto adaptive_avgpool3d_forward(const Tensor& input, const std::vector<int64_t>&
                         sum += in_p[((n * Ch + c) * D_in + di) * H_in * W_in + hi * W_in + wi]; cnt++;
                     }
             out_p[gid] = cnt > 0 ? sum / static_cast<double>(cnt) : 0.0;
-        }).wait();
+        });
     } else if (input.dtype() == DType::Float16) {
         const sycl::half* in_p = get_data_ptr<const sycl::half>(input);
         sycl::half* out_p = get_data_ptr<sycl::half>(output);
@@ -3413,7 +3413,7 @@ auto adaptive_avgpool3d_forward(const Tensor& input, const std::vector<int64_t>&
                         sum += static_cast<float>(in_p[((n * Ch + c) * D_in + di) * H_in * W_in + hi * W_in + wi]); cnt++;
                     }
             out_p[gid] = sycl::half(cnt > 0 ? sum / static_cast<float>(cnt) : 0.0f);
-        }).wait();
+        });
     } else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_p = get_data_ptr<const uint16_t>(input);
         uint16_t* out_p = get_data_ptr<uint16_t>(output);
@@ -3433,7 +3433,7 @@ auto adaptive_avgpool3d_forward(const Tensor& input, const std::vector<int64_t>&
                         sum += bf16_to_f32(in_p[((n * Ch + c) * D_in + di) * H_in * W_in + hi * W_in + wi]); cnt++;
                     }
             out_p[gid] = f32_to_bf16(cnt > 0 ? sum / static_cast<float>(cnt) : 0.0f);
-        }).wait();
+        });
     } else {
         throw std::runtime_error("Unsupported dtype for adaptive_avgpool3d_forward");
     }
@@ -3456,7 +3456,7 @@ auto adaptive_avgpool3d_backward(const Tensor& grad_output, const std::vector<in
     if (grad_output.dtype() == DType::Float32) {
         const float* go = get_data_ptr<const float>(grad_output);
         float* gi = get_data_ptr<float>(grad_input);
-        queue.fill(gi, 0.0f, in_size).wait();
+        queue.fill(gi, 0.0f, in_size);
         queue.parallel_for<AdaptiveAvgPool3dBackwardFloat32>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             int64_t tmp = gid;
             const int64_t w = tmp % W_out; tmp /= W_out;
@@ -3476,11 +3476,11 @@ auto adaptive_avgpool3d_backward(const Tensor& grad_output, const std::vector<in
                                          sycl::access::address_space::global_space> ar(gi[idx]);
                         ar.fetch_add(gv);
                     }
-        }).wait();
+        });
     } else if (grad_output.dtype() == DType::Float64) {
         const double* go = get_data_ptr<const double>(grad_output);
         double* gi = get_data_ptr<double>(grad_input);
-        queue.fill(gi, 0.0, in_size).wait();
+        queue.fill(gi, 0.0, in_size);
         queue.parallel_for<AdaptiveAvgPool3dBackwardFloat64>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             int64_t tmp = gid;
             const int64_t w = tmp % W_out; tmp /= W_out;
@@ -3500,12 +3500,12 @@ auto adaptive_avgpool3d_backward(const Tensor& grad_output, const std::vector<in
                                          sycl::access::address_space::global_space> ar(gi[idx]);
                         ar.fetch_add(gv);
                     }
-        }).wait();
+        });
     } else if (grad_output.dtype() == DType::Float16) {
         const sycl::half* go = get_data_ptr<const sycl::half>(grad_output);
         sycl::half* gi = get_data_ptr<sycl::half>(grad_input);
         float* acc = sycl::malloc_device<float>(in_size, queue);
-        queue.fill(acc, 0.0f, in_size).wait();
+        queue.fill(acc, 0.0f, in_size);
         queue.parallel_for<AdaptiveAvgPool3dBackwardFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             int64_t tmp = gid;
             const int64_t w = tmp % W_out; tmp /= W_out;
@@ -3525,14 +3525,14 @@ auto adaptive_avgpool3d_backward(const Tensor& grad_output, const std::vector<in
                                          sycl::access::address_space::global_space> ar(acc[idx]);
                         ar.fetch_add(gv);
                     }
-        }).wait();
-        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) { gi[i] = sycl::half(acc[i]); }).wait();
+        });
+        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) { gi[i] = sycl::half(acc[i]); });
         sycl::free(acc, queue);
     } else if (grad_output.dtype() == DType::BFloat16) {
         const uint16_t* go = get_data_ptr<const uint16_t>(grad_output);
         uint16_t* gi = get_data_ptr<uint16_t>(grad_input);
         float* acc = sycl::malloc_device<float>(in_size, queue);
-        queue.fill(acc, 0.0f, in_size).wait();
+        queue.fill(acc, 0.0f, in_size);
         queue.parallel_for<AdaptiveAvgPool3dBackwardBFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             int64_t tmp = gid;
             const int64_t w = tmp % W_out; tmp /= W_out;
@@ -3552,8 +3552,8 @@ auto adaptive_avgpool3d_backward(const Tensor& grad_output, const std::vector<in
                                          sycl::access::address_space::global_space> ar(acc[idx]);
                         ar.fetch_add(gv);
                     }
-        }).wait();
-        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) { gi[i] = f32_to_bf16(acc[i]); }).wait();
+        });
+        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) { gi[i] = f32_to_bf16(acc[i]); });
         sycl::free(acc, queue);
     } else {
         throw std::runtime_error("Unsupported dtype for adaptive_avgpool3d_backward");

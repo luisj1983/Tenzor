@@ -119,7 +119,7 @@ auto lstm_cell_forward_kernel(
                 c_out_ptr[idx] = c_t;
                 h_out_ptr[idx] = h_t;
             }
-        ).wait();
+        );
     }
     else if (gates.dtype() == DType::Float64) {
         const double* gates_ptr = get_data_ptr<const double>(gates);
@@ -156,7 +156,7 @@ auto lstm_cell_forward_kernel(
                 c_out_ptr[idx] = c_t;
                 h_out_ptr[idx] = h_t;
             }
-        ).wait();
+        );
     }
     else if (gates.dtype() == DType::BFloat16) {
         const uint16_t* gates_ptr = get_data_ptr<const uint16_t>(gates);
@@ -193,7 +193,7 @@ auto lstm_cell_forward_kernel(
                 c_out_ptr[idx] = f32_to_bf16(c_t);
                 h_out_ptr[idx] = f32_to_bf16(h_t);
             }
-        ).wait();
+        );
     }
     else {
         throw std::runtime_error("lstm_cell_forward: only Float32, Float64, and BFloat16 supported");
@@ -303,7 +303,7 @@ auto lstm_cell_backward_kernel(
                 grad_gates_ptr[o_offset] = do_gate;
                 grad_c_prev_ptr[idx] = dc_prev;
             }
-        ).wait();
+        );
     }
     else if (gates.dtype() == DType::Float64) {
         const double* grad_h_ptr = get_data_ptr<const double>(grad_h);
@@ -362,7 +362,7 @@ auto lstm_cell_backward_kernel(
                 grad_gates_ptr[o_offset] = do_gate;
                 grad_c_prev_ptr[idx] = dc_prev;
             }
-        ).wait();
+        );
     }
     else if (gates.dtype() == DType::BFloat16) {
         const uint16_t* grad_h_ptr = get_data_ptr<const uint16_t>(grad_h);
@@ -421,7 +421,7 @@ auto lstm_cell_backward_kernel(
                 grad_gates_ptr[o_offset] = f32_to_bf16(do_gate);
                 grad_c_prev_ptr[idx] = f32_to_bf16(dc_prev);
             }
-        ).wait();
+        );
     }
     else {
         throw std::runtime_error("lstm_cell_backward: only Float32, Float64, and BFloat16 supported");

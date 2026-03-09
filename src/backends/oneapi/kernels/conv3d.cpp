@@ -111,7 +111,7 @@ void im3col_grouped_3d_kernel(const float* data_im, int64_t total_channels, int6
         data_col[index] = (id >= 0 && id < depth && ih >= 0 && ih < height && iw >= 0 && iw < width)
             ? data_im[(c_global * depth + id) * height * width + ih * width + iw]
             : 0.0f;
-    }).wait();
+    });
 }
 
 // Float64
@@ -143,7 +143,7 @@ void im3col_grouped_3d_kernel(const double* data_im, int64_t total_channels, int
         data_col[index] = (id >= 0 && id < depth && ih >= 0 && ih < height && iw >= 0 && iw < width)
             ? data_im[(c_global * depth + id) * height * width + ih * width + iw]
             : 0.0;
-    }).wait();
+    });
 }
 
 // Float16
@@ -175,7 +175,7 @@ void im3col_grouped_3d_kernel(const sycl::half* data_im, int64_t total_channels,
         data_col[index] = (id >= 0 && id < depth && ih >= 0 && ih < height && iw >= 0 && iw < width)
             ? data_im[(c_global * depth + id) * height * width + ih * width + iw]
             : sycl::half(0.0f);
-    }).wait();
+    });
 }
 
 // ============================================================================
@@ -214,7 +214,7 @@ void col3im_grouped_3d_kernel(const float* data_col, int64_t total_channels, int
                 atomic_val(data_im[im_idx]);
             atomic_val.fetch_add(data_col[index]);
         }
-    }).wait();
+    });
 }
 
 // Float64
@@ -249,7 +249,7 @@ void col3im_grouped_3d_kernel(const double* data_col, int64_t total_channels, in
                 atomic_val(data_im[im_idx]);
             atomic_val.fetch_add(data_col[index]);
         }
-    }).wait();
+    });
 }
 
 // Float16 (uses float cast for atomics)
@@ -283,7 +283,7 @@ void col3im_grouped_3d_kernel(const sycl::half* data_col, int64_t total_channels
             float val = static_cast<float>(data_col[index]);
             data_im[im_idx] = sycl::half(static_cast<float>(data_im[im_idx]) + val);
         }
-    }).wait();
+    });
 }
 
 #ifdef TENZOR_HAS_ONEDNN
@@ -601,7 +601,7 @@ auto conv3d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tens
             }
         }
         grad_bias_ptr[c] = sum;
-    }).wait();
+    });
 
     return grad_bias;
 }
@@ -695,7 +695,7 @@ auto conv3d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
                         sum += weight_group_ptr[oc_local * K + k] * col_ptr[k * N_gemm + hw];
                     }
                     output_group_ptr[oc_local * N_gemm + hw] = sum;
-                }).wait();
+                });
             }
 
             if (bias != nullptr) {
@@ -705,7 +705,7 @@ auto conv3d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
                     const int64_t dhw = idx[1];
                     const int64_t out_idx = n * C_out * N_gemm + oc * N_gemm + dhw;
                     output_ptr[out_idx] += bias_ptr[oc];
-                }).wait();
+                });
             }
         }
     } else if (input.dtype() == DType::Float64) {
@@ -744,7 +744,7 @@ auto conv3d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
                         sum += weight_group_ptr[oc_local * K + k] * col_ptr[k * N_gemm + hw];
                     }
                     output_group_ptr[oc_local * N_gemm + hw] = sum;
-                }).wait();
+                });
             }
 
             if (bias != nullptr) {
@@ -754,7 +754,7 @@ auto conv3d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
                     const int64_t dhw = idx[1];
                     const int64_t out_idx = n * C_out * N_gemm + oc * N_gemm + dhw;
                     output_ptr[out_idx] += bias_ptr[oc];
-                }).wait();
+                });
             }
         }
     } else if (input.dtype() == DType::Float16) {
@@ -794,7 +794,7 @@ auto conv3d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
                                static_cast<float>(col_ptr[k * N_gemm + hw]);
                     }
                     output_group_ptr[oc_local * N_gemm + hw] = saturate_to_half_conv3d(sum);
-                }).wait();
+                });
             }
 
             if (bias != nullptr) {
@@ -805,7 +805,7 @@ auto conv3d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
                     const int64_t out_idx = n * C_out * N_gemm + oc * N_gemm + dhw;
                     output_ptr[out_idx] = saturate_to_half_conv3d(
                         static_cast<float>(output_ptr[out_idx]) + static_cast<float>(bias_ptr[oc]));
-                }).wait();
+                });
             }
         }
     } else {
@@ -867,7 +867,7 @@ auto conv3d_backward_input(const Tensor& grad_output, const Tensor& weight,
         const float* weight_ptr = get_data_ptr_conv3d<const float>(weight);
         const float* grad_output_ptr = get_data_ptr_conv3d<const float>(grad_output);
 
-        queue.fill(grad_input_ptr, 0.0f, N * C_in * D_in * H_in * W_in).wait();
+        queue.fill(grad_input_ptr, 0.0f, N * C_in * D_in * H_in * W_in);
 
         Tensor col_buffer({col_size}, grad_output.dtype(), grad_output.device());
         float* col_ptr = get_data_ptr_conv3d<float>(col_buffer);
@@ -894,7 +894,7 @@ auto conv3d_backward_input(const Tensor& grad_output, const Tensor& weight,
                         sum += weight_group[oc * M_group + k] * grad_out_group[oc * N_gemm + hw];
                     }
                     col_ptr[k * N_gemm + hw] = sum;
-                }).wait();
+                });
 
                 col3im_grouped_3d_kernel(
                     col_ptr, C_in, C_in_per_group, in_channel_offset,
@@ -912,7 +912,7 @@ auto conv3d_backward_input(const Tensor& grad_output, const Tensor& weight,
         const double* weight_ptr = get_data_ptr_conv3d<const double>(weight);
         const double* grad_output_ptr = get_data_ptr_conv3d<const double>(grad_output);
 
-        queue.fill(grad_input_ptr, 0.0, N * C_in * D_in * H_in * W_in).wait();
+        queue.fill(grad_input_ptr, 0.0, N * C_in * D_in * H_in * W_in);
 
         Tensor col_buffer({col_size}, grad_output.dtype(), grad_output.device());
         double* col_ptr = get_data_ptr_conv3d<double>(col_buffer);
@@ -938,7 +938,7 @@ auto conv3d_backward_input(const Tensor& grad_output, const Tensor& weight,
                         sum += weight_group[oc * M_group + k] * grad_out_group[oc * N_gemm + hw];
                     }
                     col_ptr[k * N_gemm + hw] = sum;
-                }).wait();
+                });
 
                 col3im_grouped_3d_kernel(
                     col_ptr, C_in, C_in_per_group, in_channel_offset,
@@ -958,7 +958,7 @@ auto conv3d_backward_input(const Tensor& grad_output, const Tensor& weight,
 
         queue.parallel_for(sycl::range<1>(N * C_in * D_in * H_in * W_in), [=](sycl::id<1> i) {
             grad_input_ptr[i] = sycl::half(0.0f);
-        }).wait();
+        });
 
         Tensor col_buffer({col_size}, grad_output.dtype(), grad_output.device());
         sycl::half* col_ptr = get_data_ptr_conv3d<sycl::half>(col_buffer);
@@ -985,7 +985,7 @@ auto conv3d_backward_input(const Tensor& grad_output, const Tensor& weight,
                                static_cast<float>(grad_out_group[oc * N_gemm + hw]);
                     }
                     col_ptr[k * N_gemm + hw] = saturate_to_half_conv3d(sum);
-                }).wait();
+                });
 
                 col3im_grouped_3d_kernel(
                     col_ptr, C_in, C_in_per_group, in_channel_offset,
@@ -1058,7 +1058,7 @@ auto conv3d_backward_weight(const Tensor& grad_output, const Tensor& input,
         const float* input_ptr = get_data_ptr_conv3d<const float>(input);
         const float* grad_output_ptr = get_data_ptr_conv3d<const float>(grad_output);
 
-        queue.fill(grad_weight_ptr, 0.0f, total_weight_size).wait();
+        queue.fill(grad_weight_ptr, 0.0f, total_weight_size);
 
         Tensor col_buffer({col_size}, input.dtype(), input.device());
         float* col_ptr = get_data_ptr_conv3d<float>(col_buffer);
@@ -1095,7 +1095,7 @@ auto conv3d_backward_weight(const Tensor& grad_output, const Tensor& input,
                     sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
                         atomic_val(grad_weight_group[oc * K + k]);
                     atomic_val.fetch_add(sum);
-                }).wait();
+                });
             }
         }
     } else if (input.dtype() == DType::Float64) {
@@ -1103,7 +1103,7 @@ auto conv3d_backward_weight(const Tensor& grad_output, const Tensor& input,
         const double* input_ptr = get_data_ptr_conv3d<const double>(input);
         const double* grad_output_ptr = get_data_ptr_conv3d<const double>(grad_output);
 
-        queue.fill(grad_weight_ptr, 0.0, total_weight_size).wait();
+        queue.fill(grad_weight_ptr, 0.0, total_weight_size);
 
         Tensor col_buffer({col_size}, input.dtype(), input.device());
         double* col_ptr = get_data_ptr_conv3d<double>(col_buffer);
@@ -1140,7 +1140,7 @@ auto conv3d_backward_weight(const Tensor& grad_output, const Tensor& input,
                     sycl::atomic_ref<double, sycl::memory_order::relaxed, sycl::memory_scope::device>
                         atomic_val(grad_weight_group[oc * K + k]);
                     atomic_val.fetch_add(sum);
-                }).wait();
+                });
             }
         }
     } else if (input.dtype() == DType::Float16) {
@@ -1151,7 +1151,7 @@ auto conv3d_backward_weight(const Tensor& grad_output, const Tensor& input,
         // Use float accumulation buffer
         Tensor grad_weight_float({total_weight_size}, DType::Float32, input.device());
         float* grad_weight_float_ptr = get_data_ptr_conv3d<float>(grad_weight_float);
-        queue.fill(grad_weight_float_ptr, 0.0f, total_weight_size).wait();
+        queue.fill(grad_weight_float_ptr, 0.0f, total_weight_size);
 
         Tensor col_buffer({col_size}, input.dtype(), input.device());
         sycl::half* col_ptr = get_data_ptr_conv3d<sycl::half>(col_buffer);
@@ -1189,14 +1189,14 @@ auto conv3d_backward_weight(const Tensor& grad_output, const Tensor& input,
                     sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
                         atomic_val(grad_weight_group[oc * K + k]);
                     atomic_val.fetch_add(sum);
-                }).wait();
+                });
             }
         }
 
         // Convert accumulated float values back to half
         queue.parallel_for(sycl::range<1>(total_weight_size), [=](sycl::id<1> i) {
             grad_weight_ptr[i] = sycl::half(grad_weight_float_ptr[i]);
-        }).wait();
+        });
     } else {
         throw std::runtime_error("Unsupported dtype for conv3d_backward_weight");
     }
@@ -1233,7 +1233,7 @@ auto conv3d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tens
                 }
             }
             grad_bias_ptr[c] = sum;
-        }).wait();
+        });
     } else if (grad_output.dtype() == DType::Float64) {
         double* grad_bias_ptr = get_data_ptr_conv3d<double>(grad_bias);
         const double* grad_output_ptr = get_data_ptr_conv3d<const double>(grad_output);
@@ -1250,7 +1250,7 @@ auto conv3d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tens
                 }
             }
             grad_bias_ptr[c] = sum;
-        }).wait();
+        });
     } else if (grad_output.dtype() == DType::Float16) {
         sycl::half* grad_bias_ptr = get_data_ptr_conv3d<sycl::half>(grad_bias);
         const sycl::half* grad_output_ptr = get_data_ptr_conv3d<const sycl::half>(grad_output);
@@ -1267,7 +1267,7 @@ auto conv3d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tens
                 }
             }
             grad_bias_ptr[c] = saturate_to_half_conv3d(sum);
-        }).wait();
+        });
     } else {
         throw std::runtime_error("Unsupported dtype for conv3d_backward_bias");
     }
@@ -1361,7 +1361,7 @@ auto conv_transpose3d_forward(const Tensor& input, const Tensor& weight, const T
                 }
             }
             output_ptr[idx] = sum;
-        }).wait();
+        });
     } else if (input.dtype() == DType::Float64) {
         const double* input_ptr = get_data_ptr_conv3d<const double>(input);
         const double* weight_ptr = get_data_ptr_conv3d<const double>(weight);
@@ -1401,7 +1401,7 @@ auto conv_transpose3d_forward(const Tensor& input, const Tensor& weight, const T
                 }
             }
             output_ptr[idx] = sum;
-        }).wait();
+        });
     } else if (input.dtype() == DType::Float16) {
         const sycl::half* input_ptr = get_data_ptr_conv3d<const sycl::half>(input);
         const sycl::half* weight_ptr = get_data_ptr_conv3d<const sycl::half>(weight);
@@ -1441,7 +1441,7 @@ auto conv_transpose3d_forward(const Tensor& input, const Tensor& weight, const T
                 }
             }
             output_ptr[idx] = saturate_to_half_conv3d(sum);
-        }).wait();
+        });
     } else {
         throw std::runtime_error("ConvTranspose3d forward: unsupported dtype");
     }

@@ -267,7 +267,7 @@ auto DistributedDataParallel::all_reduce_bucket_async(
         }
 
         // Get the gradient tensor
-        Tensor& grad = param->mutable_grad().value();
+        Tensor grad = param->grad().value();
 
         // Launch NCCL all-reduce asynchronously on the communication stream.
         // The NCCL kernel reads gradient data from GPU memory; since the
@@ -290,8 +290,7 @@ auto DistributedDataParallel::all_reduce_bucket_async(
             // The division is a simple element-wise operation. Since we're
             // on the comm stream and the all-reduce just finished on this
             // same stream, data ordering is guaranteed.
-            // We use in-place division to avoid allocation.
-            grad = grad / static_cast<double>(ws);
+            param->set_grad(grad / static_cast<double>(ws));
         }
     }
 
@@ -357,7 +356,7 @@ auto DistributedDataParallel::all_reduce_bucket(GradBucket& bucket) -> void {
         }
 
         // Get the gradient tensor
-        Tensor& grad = param->mutable_grad().value();
+        Tensor grad = param->grad().value();
 
         // All-reduce: sum gradients across all processes
         pg_.all_reduce(grad, ReduceOp::SUM);
@@ -366,7 +365,7 @@ auto DistributedDataParallel::all_reduce_bucket(GradBucket& bucket) -> void {
         // This is equivalent to using ReduceOp::AVG but more explicit
         // and works with backends that may not support AVG natively.
         if (ws > 1) {
-            grad = grad / static_cast<double>(ws);
+            param->set_grad(grad / static_cast<double>(ws));
         }
     }
 

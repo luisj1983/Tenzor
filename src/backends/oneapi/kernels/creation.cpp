@@ -72,8 +72,6 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
 
             // Generate random numbers directly into device memory
             ::oneapi::mkl::rng::generate(distribution, engine, numel, ptr);
-
-            queue.wait();
         }
         else if (dtype == DType::Float64) {
             double* ptr = get_data_ptr<double>(output);
@@ -86,8 +84,6 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
 
             // Generate random numbers directly into device memory
             ::oneapi::mkl::rng::generate(distribution, engine, numel, ptr);
-
-            queue.wait();
         }
         else if (dtype == DType::Float16) {
             // oneMKL doesn't support half precision directly, so generate float32 and convert
@@ -106,12 +102,10 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
             // Generate random numbers into temp buffer
             ::oneapi::mkl::rng::generate(distribution, engine, numel, temp_ptr);
 
-            queue.wait();
-
             // Convert from float32 to float16
             queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
                 ptr[i] = sycl::half(temp_ptr[i]);
-            }).wait();
+            });
         }
         else if (dtype == DType::BFloat16) {
             // Generate Float32 then convert to BFloat16
@@ -123,13 +117,12 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
             ::oneapi::mkl::rng::philox4x32x10 engine(queue, seed);
             ::oneapi::mkl::rng::gaussian<float> distribution(0.0f, 1.0f);
             ::oneapi::mkl::rng::generate(distribution, engine, numel, temp_ptr);
-            queue.wait();
 
             queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
                 uint32_t bits;
                 __builtin_memcpy(&bits, &temp_ptr[i], sizeof(uint32_t));
                 ptr[i] = static_cast<uint16_t>(bits >> 16);
-            }).wait();
+            });
         }
         else {
             throw std::runtime_error("Unsupported dtype for randn (oneMKL path)");
@@ -182,7 +175,7 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
         sycl::half* device_ptr = get_data_ptr<sycl::half>(output);
         queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
             device_ptr[i] = sycl::half(temp_ptr[i]);
-        }).wait();
+        });
     }
     else if (dtype == DType::BFloat16) {
         std::vector<float> host_data(numel);
@@ -199,7 +192,7 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
             uint32_t bits;
             __builtin_memcpy(&bits, &temp_ptr[i], sizeof(uint32_t));
             device_ptr[i] = static_cast<uint16_t>(bits >> 16);
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for randn (fallback path)");
@@ -244,8 +237,6 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
             ::oneapi::mkl::rng::uniform<float> distribution(0.0f, 1.0f);
 
             ::oneapi::mkl::rng::generate(distribution, engine, numel, ptr);
-
-            queue.wait();
         }
         else if (dtype == DType::Float64) {
             double* ptr = get_data_ptr<double>(output);
@@ -255,8 +246,6 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
             ::oneapi::mkl::rng::uniform<double> distribution(0.0, 1.0);
 
             ::oneapi::mkl::rng::generate(distribution, engine, numel, ptr);
-
-            queue.wait();
         }
         else if (dtype == DType::Float16) {
             // Generate Float32 then convert to Float16
@@ -268,11 +257,10 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
             ::oneapi::mkl::rng::philox4x32x10 engine(queue, seed);
             ::oneapi::mkl::rng::uniform<float> distribution(0.0f, 1.0f);
             ::oneapi::mkl::rng::generate(distribution, engine, numel, temp_ptr);
-            queue.wait();
 
             queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
                 ptr[i] = sycl::half(temp_ptr[i]);
-            }).wait();
+            });
         }
         else if (dtype == DType::BFloat16) {
             // Generate Float32 then convert to BFloat16 (truncate upper 16 bits)
@@ -284,14 +272,13 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
             ::oneapi::mkl::rng::philox4x32x10 engine(queue, seed);
             ::oneapi::mkl::rng::uniform<float> distribution(0.0f, 1.0f);
             ::oneapi::mkl::rng::generate(distribution, engine, numel, temp_ptr);
-            queue.wait();
 
             queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
                 // BFloat16: upper 16 bits of float32
                 uint32_t bits;
                 __builtin_memcpy(&bits, &temp_ptr[i], sizeof(uint32_t));
                 ptr[i] = static_cast<uint16_t>(bits >> 16);
-            }).wait();
+            });
         }
         else {
             throw std::runtime_error("Unsupported dtype for rand (oneMKL path)");
@@ -344,14 +331,14 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
             sycl::half* device_ptr = get_data_ptr<sycl::half>(output);
             queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
                 device_ptr[i] = sycl::half(temp_ptr[i]);
-            }).wait();
+            });
         } else {
             uint16_t* device_ptr = get_data_ptr<uint16_t>(output);
             queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
                 uint32_t bits;
                 __builtin_memcpy(&bits, &temp_ptr[i], sizeof(uint32_t));
                 device_ptr[i] = static_cast<uint16_t>(bits >> 16);
-            }).wait();
+            });
         }
     }
     else {
@@ -377,41 +364,41 @@ auto arange_kernel(double start, double end, double step, DType dtype, Device de
         float s = static_cast<float>(start), st = static_cast<float>(step);
         queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
             ptr[i] = s + static_cast<float>(i[0]) * st;
-        }).wait();
+        });
     }
     else if (dtype == DType::Float64) {
         double* ptr = get_data_ptr<double>(output);
         queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
             ptr[i] = start + static_cast<double>(i[0]) * step;
-        }).wait();
+        });
     }
     else if (dtype == DType::Float16) {
         sycl::half* ptr = get_data_ptr<sycl::half>(output);
         float s = static_cast<float>(start), st = static_cast<float>(step);
         queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
             ptr[i] = sycl::half(s + static_cast<float>(i[0]) * st);
-        }).wait();
+        });
     }
     else if (dtype == DType::BFloat16) {
         uint16_t* ptr = get_data_ptr<uint16_t>(output);
         float s = static_cast<float>(start), st = static_cast<float>(step);
         queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
             ptr[i] = f32_to_bf16(s + static_cast<float>(i[0]) * st);
-        }).wait();
+        });
     }
     else if (dtype == DType::Int32) {
         int32_t* ptr = get_data_ptr<int32_t>(output);
         int32_t s = static_cast<int32_t>(start), st = static_cast<int32_t>(step);
         queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
             ptr[i] = s + static_cast<int32_t>(i[0]) * st;
-        }).wait();
+        });
     }
     else if (dtype == DType::Int64) {
         int64_t* ptr = get_data_ptr<int64_t>(output);
         int64_t s = static_cast<int64_t>(start), st = static_cast<int64_t>(step);
         queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
             ptr[i] = s + static_cast<int64_t>(i[0]) * st;
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for arange kernel");
@@ -460,7 +447,7 @@ auto linspace_kernel(double start, double end, int64_t steps, DType dtype, Devic
             } else {
                 ptr[i] = s + static_cast<float>(i[0]) * st;
             }
-        }).wait();
+        });
     }
     else if (dtype == DType::Float64) {
         double* ptr = get_data_ptr<double>(output);
@@ -471,7 +458,7 @@ auto linspace_kernel(double start, double end, int64_t steps, DType dtype, Devic
             } else {
                 ptr[i] = start + static_cast<double>(i[0]) * step_size;
             }
-        }).wait();
+        });
     }
     else if (dtype == DType::Float16) {
         sycl::half* ptr = get_data_ptr<sycl::half>(output);
@@ -483,7 +470,7 @@ auto linspace_kernel(double start, double end, int64_t steps, DType dtype, Devic
             } else {
                 ptr[i] = sycl::half(s + static_cast<float>(i[0]) * st);
             }
-        }).wait();
+        });
     }
     else if (dtype == DType::BFloat16) {
         uint16_t* ptr = get_data_ptr<uint16_t>(output);
@@ -495,7 +482,7 @@ auto linspace_kernel(double start, double end, int64_t steps, DType dtype, Devic
             } else {
                 ptr[i] = f32_to_bf16(s + static_cast<float>(i[0]) * st);
             }
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for linspace kernel");
@@ -512,7 +499,7 @@ auto eye_kernel(int64_t n, int64_t m, DType dtype, Device device, sycl::queue& q
     int64_t total = n * m;
 
     // Zero-initialize first
-    queue.memset(const_cast<void*>(output.data_ptr()), 0, total * output.dtype_size()).wait();
+    queue.memset(const_cast<void*>(output.data_ptr()), 0, total * output.dtype_size());
 
     int64_t diag_len = std::min(n, m);
 
@@ -520,38 +507,38 @@ auto eye_kernel(int64_t n, int64_t m, DType dtype, Device device, sycl::queue& q
         float* ptr = get_data_ptr<float>(output);
         queue.parallel_for(sycl::range<1>(diag_len), [=](sycl::id<1> i) {
             ptr[i[0] * m + i[0]] = 1.0f;
-        }).wait();
+        });
     }
     else if (dtype == DType::Float64) {
         double* ptr = get_data_ptr<double>(output);
         queue.parallel_for(sycl::range<1>(diag_len), [=](sycl::id<1> i) {
             ptr[i[0] * m + i[0]] = 1.0;
-        }).wait();
+        });
     }
     else if (dtype == DType::Float16) {
         sycl::half* ptr = get_data_ptr<sycl::half>(output);
         queue.parallel_for(sycl::range<1>(diag_len), [=](sycl::id<1> i) {
             ptr[i[0] * m + i[0]] = sycl::half(1.0f);
-        }).wait();
+        });
     }
     else if (dtype == DType::BFloat16) {
         uint16_t* ptr = get_data_ptr<uint16_t>(output);
         uint16_t one = f32_to_bf16(1.0f);
         queue.parallel_for(sycl::range<1>(diag_len), [=](sycl::id<1> i) {
             ptr[i[0] * m + i[0]] = one;
-        }).wait();
+        });
     }
     else if (dtype == DType::Int32) {
         int32_t* ptr = get_data_ptr<int32_t>(output);
         queue.parallel_for(sycl::range<1>(diag_len), [=](sycl::id<1> i) {
             ptr[i[0] * m + i[0]] = 1;
-        }).wait();
+        });
     }
     else if (dtype == DType::Int64) {
         int64_t* ptr = get_data_ptr<int64_t>(output);
         queue.parallel_for(sycl::range<1>(diag_len), [=](sycl::id<1> i) {
             ptr[i[0] * m + i[0]] = 1;
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for eye kernel");

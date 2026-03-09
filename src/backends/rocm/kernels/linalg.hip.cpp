@@ -245,6 +245,9 @@ __global__ void copy_q_columns_f64(const double* a_data, double* q_data,
 // ============================================================================
 
 auto linalg_det_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
+    if (A.dtype() == DType::BFloat16) {
+        return linalg_det_kernel(A.to(DType::Float32), stream).to(DType::BFloat16);
+    }
     auto work = A.contiguous().clone();
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);
@@ -304,6 +307,9 @@ auto linalg_det_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
 // ============================================================================
 
 auto linalg_inv_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
+    if (A.dtype() == DType::BFloat16) {
+        return linalg_inv_kernel(A.to(DType::Float32), stream).to(DType::BFloat16);
+    }
     auto work = A.contiguous().clone();
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);
@@ -378,6 +384,11 @@ auto linalg_inv_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
 // ============================================================================
 
 auto linalg_solve_kernel(const Tensor& A, const Tensor& B, hipStream_t stream) -> Tensor {
+    if (A.dtype() == DType::BFloat16) {
+        auto A_f32 = A.to(DType::Float32);
+        auto B_f32 = B.to(DType::Float32);
+        return linalg_solve_kernel(A_f32, B_f32, stream).to(DType::BFloat16);
+    }
     auto work_a = A.contiguous().clone();
     auto work_b = B.contiguous().clone();
     auto [n, ndim_a] = check_square(work_a);
@@ -435,6 +446,10 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, hipStream_t stream) -
 
 auto linalg_svd_kernel(const Tensor& A, bool full_matrices, hipStream_t stream)
     -> std::tuple<Tensor, Tensor, Tensor> {
+    if (A.dtype() == DType::BFloat16) {
+        auto [U, S, Vt] = linalg_svd_kernel(A.to(DType::Float32), full_matrices, stream);
+        return {U.to(DType::BFloat16), S.to(DType::BFloat16), Vt.to(DType::BFloat16)};
+    }
     auto work = A.contiguous().clone();
     auto shape = A.shape();
     auto a_ndim = static_cast<int64_t>(shape.size());
@@ -550,6 +565,10 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, hipStream_t stream)
 
 auto linalg_qr_kernel(const Tensor& A, hipStream_t stream)
     -> std::tuple<Tensor, Tensor> {
+    if (A.dtype() == DType::BFloat16) {
+        auto [Q, R] = linalg_qr_kernel(A.to(DType::Float32), stream);
+        return {Q.to(DType::BFloat16), R.to(DType::BFloat16)};
+    }
     auto work = A.contiguous().clone();
     auto shape = A.shape();
     auto a_ndim = static_cast<int64_t>(shape.size());
@@ -653,6 +672,10 @@ auto linalg_qr_kernel(const Tensor& A, hipStream_t stream)
 
 auto linalg_eigh_kernel(const Tensor& A, hipStream_t stream)
     -> std::tuple<Tensor, Tensor> {
+    if (A.dtype() == DType::BFloat16) {
+        auto [W, V] = linalg_eigh_kernel(A.to(DType::Float32), stream);
+        return {W.to(DType::BFloat16), V.to(DType::BFloat16)};
+    }
     auto work = A.contiguous().clone();
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);
@@ -713,6 +736,9 @@ auto linalg_eigh_kernel(const Tensor& A, hipStream_t stream)
 // ============================================================================
 
 auto linalg_cholesky_kernel(const Tensor& A, bool upper, hipStream_t stream) -> Tensor {
+    if (A.dtype() == DType::BFloat16) {
+        return linalg_cholesky_kernel(A.to(DType::Float32), upper, stream).to(DType::BFloat16);
+    }
     auto work = A.contiguous().clone();
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);

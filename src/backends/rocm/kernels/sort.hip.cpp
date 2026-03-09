@@ -194,6 +194,13 @@ __global__ void topk_slice_kernel(
 auto topk_kernel(const Tensor& input, int64_t k, int64_t dim, bool largest,
                  bool sorted, hipStream_t stream) -> std::pair<Tensor, Tensor>
 {
+    // BFloat16 upcast: convert to Float32, compute, convert values back
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto [values, indices] = topk_kernel(input_f32, k, dim, largest, sorted, stream);
+        return {values.to(DType::BFloat16), indices};
+    }
+
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     const auto& shape = input_cont.shape();
     const int64_t ndim = input.ndim();
@@ -307,6 +314,13 @@ __global__ void scatter_slice_kernel(const T* __restrict__ sorted_vals,
 auto sort_kernel(const Tensor& input, int64_t dim, bool descending,
                  hipStream_t stream) -> std::pair<Tensor, Tensor>
 {
+    // BFloat16 upcast: convert to Float32, compute, convert values back
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto [values, indices] = sort_kernel(input_f32, dim, descending, stream);
+        return {values.to(DType::BFloat16), indices};
+    }
+
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     const auto& shape = input_cont.shape();
     const int64_t ndim = input.ndim();
@@ -474,6 +488,11 @@ static void launch_argsort(const T* d_input, int64_t* d_output, int64_t n,
 auto argsort_kernel(const Tensor& input, int64_t dim, bool descending,
                     hipStream_t stream) -> Tensor
 {
+    // BFloat16 upcast: convert to Float32, compute (indices are Int64, no convert back needed)
+    if (input.dtype() == DType::BFloat16) {
+        return argsort_kernel(input.to(DType::Float32), dim, descending, stream);
+    }
+
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();
@@ -639,6 +658,13 @@ auto unique_kernel(const Tensor& input, bool sorted_output, bool return_inverse,
                    bool return_counts, hipStream_t stream)
     -> std::tuple<Tensor, Tensor, Tensor>
 {
+    // BFloat16 upcast: convert to Float32, compute, convert unique values back
+    if (input.dtype() == DType::BFloat16) {
+        auto [unique_vals, inverse, counts] = unique_kernel(input.to(DType::Float32),
+            sorted_output, return_inverse, return_counts, stream);
+        return {unique_vals.to(DType::BFloat16), inverse, counts};
+    }
+
     Tensor flat = input.flatten().contiguous();
 
     switch (input.dtype()) {

@@ -61,14 +61,14 @@ auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
 
         // Step 1: Compute mean using atomic operations
         float* mean_device = sycl::malloc_device<float>(1, queue);
-        queue.fill(mean_device, 0.0f, 1).wait();
+        queue.fill(mean_device, 0.0f, 1);
 
         queue.parallel_for<class MeanAllKernelFloat32>(sycl::range<1>(total_size),
             [=](sycl::id<1> idx) {
                 sycl::atomic_ref<float, sycl::memory_order::relaxed,
                                sycl::memory_scope::device> atomic_mean(mean_device[0]);
                 atomic_mean += in_ptr[idx];
-        }).wait();
+        });
 
         float mean_host;
         queue.memcpy(&mean_host, mean_device, sizeof(float)).wait();
@@ -76,7 +76,7 @@ auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
 
         // Step 2: Compute variance
         float* var_device = sycl::malloc_device<float>(1, queue);
-        queue.fill(var_device, 0.0f, 1).wait();
+        queue.fill(var_device, 0.0f, 1);
 
         queue.parallel_for<class VarAllKernelFloat32>(sycl::range<1>(total_size),
             [=](sycl::id<1> idx) {
@@ -84,7 +84,7 @@ auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
                 sycl::atomic_ref<float, sycl::memory_order::relaxed,
                                sycl::memory_scope::device> atomic_var(var_device[0]);
                 atomic_var += diff * diff;
-        }).wait();
+        });
 
         float var_host;
         queue.memcpy(&var_host, var_device, sizeof(float)).wait();
@@ -118,14 +118,14 @@ auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
 
         // Step 1: Compute mean
         double* mean_device = sycl::malloc_device<double>(1, queue);
-        queue.fill(mean_device, 0.0, 1).wait();
+        queue.fill(mean_device, 0.0, 1);
 
         queue.parallel_for<class MeanAllKernelFloat64>(sycl::range<1>(total_size),
             [=](sycl::id<1> idx) {
                 sycl::atomic_ref<double, sycl::memory_order::relaxed,
                                sycl::memory_scope::device> atomic_mean(mean_device[0]);
                 atomic_mean += in_ptr[idx];
-        }).wait();
+        });
 
         double mean_host;
         queue.memcpy(&mean_host, mean_device, sizeof(double)).wait();
@@ -133,7 +133,7 @@ auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
 
         // Step 2: Compute variance
         double* var_device = sycl::malloc_device<double>(1, queue);
-        queue.fill(var_device, 0.0, 1).wait();
+        queue.fill(var_device, 0.0, 1);
 
         queue.parallel_for<class VarAllKernelFloat64>(sycl::range<1>(total_size),
             [=](sycl::id<1> idx) {
@@ -141,7 +141,7 @@ auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
                 sycl::atomic_ref<double, sycl::memory_order::relaxed,
                                sycl::memory_scope::device> atomic_var(var_device[0]);
                 atomic_var += diff * diff;
-        }).wait();
+        });
 
         double var_host;
         queue.memcpy(&var_host, var_device, sizeof(double)).wait();
@@ -211,14 +211,14 @@ auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
 
         // Step 1: Compute mean using atomic operations
         float* mean_device = sycl::malloc_device<float>(1, queue);
-        queue.fill(mean_device, 0.0f, 1).wait();
+        queue.fill(mean_device, 0.0f, 1);
 
         queue.parallel_for<class MeanVarKernelFloat32>(sycl::range<1>(total_size),
             [=](sycl::id<1> idx) {
                 sycl::atomic_ref<float, sycl::memory_order::relaxed,
                                sycl::memory_scope::device> atomic_mean(mean_device[0]);
                 atomic_mean += in_ptr[idx];
-        }).wait();
+        });
 
         float mean_host;
         queue.memcpy(&mean_host, mean_device, sizeof(float)).wait();
@@ -226,7 +226,7 @@ auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
 
         // Step 2: Compute variance
         float* var_device = sycl::malloc_device<float>(1, queue);
-        queue.fill(var_device, 0.0f, 1).wait();
+        queue.fill(var_device, 0.0f, 1);
 
         queue.parallel_for<class VarKernelFloat32>(sycl::range<1>(total_size),
             [=](sycl::id<1> idx) {
@@ -234,7 +234,7 @@ auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
                 sycl::atomic_ref<float, sycl::memory_order::relaxed,
                                sycl::memory_scope::device> atomic_var(var_device[0]);
                 atomic_var += diff * diff;
-        }).wait();
+        });
 
         float var_host;
         queue.memcpy(&var_host, var_device, sizeof(float)).wait();
@@ -264,14 +264,14 @@ auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
 
         // Step 1: Compute mean
         double* mean_device = sycl::malloc_device<double>(1, queue);
-        queue.fill(mean_device, 0.0, 1).wait();
+        queue.fill(mean_device, 0.0, 1);
 
         queue.parallel_for<class MeanVarKernelFloat64>(sycl::range<1>(total_size),
             [=](sycl::id<1> idx) {
                 sycl::atomic_ref<double, sycl::memory_order::relaxed,
                                sycl::memory_scope::device> atomic_mean(mean_device[0]);
                 atomic_mean += in_ptr[idx];
-        }).wait();
+        });
 
         double mean_host;
         queue.memcpy(&mean_host, mean_device, sizeof(double)).wait();
@@ -279,7 +279,7 @@ auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
 
         // Step 2: Compute variance
         double* var_device = sycl::malloc_device<double>(1, queue);
-        queue.fill(var_device, 0.0, 1).wait();
+        queue.fill(var_device, 0.0, 1);
 
         queue.parallel_for<class VarKernelFloat64>(sycl::range<1>(total_size),
             [=](sycl::id<1> idx) {
@@ -287,7 +287,7 @@ auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
                 sycl::atomic_ref<double, sycl::memory_order::relaxed,
                                sycl::memory_scope::device> atomic_var(var_device[0]);
                 atomic_var += diff * diff;
-        }).wait();
+        });
 
         double var_host;
         queue.memcpy(&var_host, var_device, sizeof(double)).wait();

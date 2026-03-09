@@ -495,8 +495,14 @@ auto lstm_cell_forward_kernel(
                           reinterpret_cast<__half*>(c_out.data<Float16>()),
                           batch_size,
                           hidden_size);
+    } else if (gates.dtype() == DType::BFloat16) {
+        auto gates_f32 = gates.to(DType::Float32);
+        auto c_prev_f32 = c_prev.to(DType::Float32);
+        auto [h_out_f32, c_out_f32] = lstm_cell_forward_kernel(gates_f32, c_prev_f32,
+                                                                 batch_size, hidden_size, stream);
+        return {h_out_f32.to(DType::BFloat16), c_out_f32.to(DType::BFloat16)};
     } else {
-        throw std::runtime_error("LSTM only supports Float32, Float64, and Float16");
+        throw std::runtime_error("LSTM only supports Float32, Float64, Float16, and BFloat16");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -559,8 +565,18 @@ auto lstm_cell_backward_kernel(
                           reinterpret_cast<__half*>(grad_c_prev.data<Float16>()),
                           batch_size,
                           hidden_size);
+    } else if (gates.dtype() == DType::BFloat16) {
+        auto grad_h_f32 = grad_h.to(DType::Float32);
+        auto grad_c_f32 = grad_c.to(DType::Float32);
+        auto gates_f32 = gates.to(DType::Float32);
+        auto c_prev_f32 = c_prev.to(DType::Float32);
+        auto c_out_f32 = c_out.to(DType::Float32);
+        auto [gg_f32, gcp_f32] = lstm_cell_backward_kernel(grad_h_f32, grad_c_f32, gates_f32,
+                                                             c_prev_f32, c_out_f32,
+                                                             batch_size, hidden_size, stream);
+        return {gg_f32.to(DType::BFloat16), gcp_f32.to(DType::BFloat16)};
     } else {
-        throw std::runtime_error("LSTM backward only supports Float32, Float64, and Float16");
+        throw std::runtime_error("LSTM backward only supports Float32, Float64, Float16, and BFloat16");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -763,8 +779,19 @@ auto lstm_forward_kernel(
         hipMemcpyAsync(c_n.data<double>(), c_t_ptr,
                       batch * hidden * sizeof(double),
                       hipMemcpyDeviceToDevice, stream);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto W_ih_f32 = W_ih.to(DType::Float32);
+        auto W_hh_f32 = W_hh.to(DType::Float32);
+        auto bias_f32 = bias.numel() > 0 ? bias.to(DType::Float32) : bias;
+        auto h0_f32 = h0.to(DType::Float32);
+        auto c0_f32 = c0.to(DType::Float32);
+        auto results = lstm_forward_kernel(input_f32, W_ih_f32, W_hh_f32, bias_f32,
+                                            h0_f32, c0_f32, stream);
+        for (auto& t : results) t = t.to(DType::BFloat16);
+        return results;
     } else {
-        throw std::runtime_error("LSTM forward only supports Float32 and Float64");
+        throw std::runtime_error("LSTM forward only supports Float32, Float64, and BFloat16");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -901,6 +928,26 @@ auto bilstm_forward_kernel(
     const Tensor& h0,    // (2, batch, hidden)
     const Tensor& c0,    // (2, batch, hidden)
     hipStream_t stream) -> std::vector<Tensor> {
+
+    // BFloat16: upcast to Float32, compute, convert back
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto wif_f32 = W_ih_fwd.to(DType::Float32);
+        auto whf_f32 = W_hh_fwd.to(DType::Float32);
+        auto bif_f32 = bias_ih_fwd.numel() > 0 ? bias_ih_fwd.to(DType::Float32) : bias_ih_fwd;
+        auto bhf_f32 = bias_hh_fwd.numel() > 0 ? bias_hh_fwd.to(DType::Float32) : bias_hh_fwd;
+        auto wib_f32 = W_ih_bwd.to(DType::Float32);
+        auto whb_f32 = W_hh_bwd.to(DType::Float32);
+        auto bib_f32 = bias_ih_bwd.numel() > 0 ? bias_ih_bwd.to(DType::Float32) : bias_ih_bwd;
+        auto bhb_f32 = bias_hh_bwd.numel() > 0 ? bias_hh_bwd.to(DType::Float32) : bias_hh_bwd;
+        auto h0_f32 = h0.to(DType::Float32);
+        auto c0_f32 = c0.to(DType::Float32);
+        auto results = bilstm_forward_kernel(input_f32, wif_f32, whf_f32, bif_f32, bhf_f32,
+                                              wib_f32, whb_f32, bib_f32, bhb_f32,
+                                              h0_f32, c0_f32, stream);
+        for (auto& t : results) t = t.to(DType::BFloat16);
+        return results;
+    }
 
     auto shape = input.shape();
     int64_t seq_len = shape[0];

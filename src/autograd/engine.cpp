@@ -364,9 +364,9 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                                 existing_grad = existing_grad.to(target);
                                 grad_to_apply = grad_to_apply.to(target);
                             }
-                            var.mutable_grad() = existing_grad + grad_to_apply;
+                            var.set_grad(existing_grad + grad_to_apply);
                         } else {
-                            var.mutable_grad() = grad_to_apply;
+                            var.set_grad(grad_to_apply);
                         }
                     };
 
@@ -651,9 +651,9 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                                 existing_grad = existing_grad.to(target);
                                 grad_to_apply = grad_to_apply.to(target);
                             }
-                            var.mutable_grad() = existing_grad + grad_to_apply;
+                            var.set_grad(existing_grad + grad_to_apply);
                         } else {
-                            var.mutable_grad() = grad_to_apply;
+                            var.set_grad(grad_to_apply);
                         }
                     };
 

@@ -264,6 +264,16 @@ auto conv3d_forward_hip(
     int64_t groups,
     hipStream_t stream
 ) -> Tensor {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto weight_f32 = weight.to(DType::Float32);
+        auto bias_f32 = bias.numel() > 0 ? bias.to(DType::Float32) : bias;
+        auto result = conv3d_forward_hip(input_f32, weight_f32, bias_f32,
+                                          stride, padding, dilation, groups, stream);
+        return result.to(DType::BFloat16);
+    }
+
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
     const DType dtype = input.dtype();
@@ -466,6 +476,15 @@ auto conv3d_backward_input_hip(
     int64_t groups,
     hipStream_t stream
 ) -> Tensor {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (grad_output.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto weight_f32 = weight.to(DType::Float32);
+        auto result = conv3d_backward_input_hip(grad_output_f32, weight_f32, input_shape,
+                                                 stride, padding, dilation, groups, stream);
+        return result.to(DType::BFloat16);
+    }
+
     auto weight_shape = weight.shape();
     auto grad_shape = grad_output.shape();
     const DType dtype = grad_output.dtype();
@@ -653,6 +672,15 @@ auto conv3d_backward_weight_hip(
     int64_t groups,
     hipStream_t stream
 ) -> Tensor {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (input.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto result = conv3d_backward_weight_hip(grad_output_f32, input_f32, weight_shape,
+                                                  stride, padding, dilation, groups, stream);
+        return result.to(DType::BFloat16);
+    }
+
     auto input_shape = input.shape();
     auto grad_shape = grad_output.shape();
     const DType dtype = input.dtype();
@@ -829,6 +857,13 @@ auto conv3d_backward_bias_hip(
     const Tensor& grad_output,
     hipStream_t stream
 ) -> Tensor {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (grad_output.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto result = conv3d_backward_bias_hip(grad_output_f32, stream);
+        return result.to(DType::BFloat16);
+    }
+
     auto grad_shape = grad_output.shape();
     const int64_t N = grad_shape[0];
     const int64_t C_out = grad_shape[1];
@@ -935,6 +970,17 @@ auto conv_transpose3d_forward_hip(
     int64_t groups,
     hipStream_t stream
 ) -> Tensor {
+    // BFloat16: upcast to Float32, compute, convert back
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto weight_f32 = weight.to(DType::Float32);
+        auto bias_f32 = bias.numel() > 0 ? bias.to(DType::Float32) : bias;
+        auto result = conv_transpose3d_forward_hip(input_f32, weight_f32, bias_f32,
+                                                    stride, padding, output_padding,
+                                                    dilation, groups, stream);
+        return result.to(DType::BFloat16);
+    }
+
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
 

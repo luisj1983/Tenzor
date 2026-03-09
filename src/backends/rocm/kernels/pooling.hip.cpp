@@ -200,6 +200,10 @@ auto maxpool2d_forward_hip(
             output_h, output_w, kernel_h, kernel_w,
             stride_h, stride_w, pad_h, pad_w, return_indices
         );
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto [output_f32, idx] = maxpool2d_forward_hip(input_f32, kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w, return_indices);
+        return {output_f32.to(DType::BFloat16), idx};
     } else {
         throw std::runtime_error("maxpool2d_forward_hip: Only Float32, Float64, and Float16 supported");
     }
@@ -297,8 +301,12 @@ auto maxpool2d_backward_hip(
             reinterpret_cast<__half*>(grad_input.data<Float16>()),
             input_numel
         );
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto result_f32 = maxpool2d_backward_hip(grad_output_f32, indices, input_shape);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("maxpool2d_backward_hip: Only Float32, Float64, and Float16 supported");
+        throw std::runtime_error("maxpool2d_backward_hip: Only Float32, Float64, Float16, and BFloat16 supported");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -466,6 +474,10 @@ auto avgpool2d_forward_hip(
             output_h, output_w, kernel_h, kernel_w,
             stride_h, stride_w, pad_h, pad_w, count_include_pad
         );
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = avgpool2d_forward_hip(input_f32, kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w, count_include_pad);
+        return result_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("avgpool2d_forward_hip: Only Float32, Float64, and Float16 supported");
     }
@@ -642,8 +654,12 @@ auto avgpool2d_backward_hip(
             reinterpret_cast<__half*>(grad_input.data<Float16>()),
             input_numel
         );
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto result_f32 = avgpool2d_backward_hip(grad_output_f32, input_shape, kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w, count_include_pad);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("avgpool2d_backward_hip: Only Float32, Float64, and Float16 supported");
+        throw std::runtime_error("avgpool2d_backward_hip: Only Float32, Float64, Float16, and BFloat16 supported");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -738,6 +754,10 @@ auto adaptive_avgpool2d_hip(
             batch_size, channels, input_h, input_w,
             output_h, output_w
         );
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = adaptive_avgpool2d_hip(input_f32, output_h, output_w);
+        return result_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("adaptive_avgpool2d_hip: unsupported dtype");
     }
@@ -842,6 +862,10 @@ auto adaptive_maxpool2d_hip(
             batch_size, channels, input_h, input_w,
             output_h, output_w, return_indices
         );
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto [output_f32, idx] = adaptive_maxpool2d_hip(input_f32, output_h, output_w, return_indices);
+        return {output_f32.to(DType::BFloat16), idx};
     } else {
         throw std::runtime_error("adaptive_maxpool2d_hip: Only Float32 and Float64 supported");
     }
@@ -950,6 +974,11 @@ auto adaptive_avgpool2d_backward_hip(
             reinterpret_cast<const __half*>(grad_output.data<Float16>()),
             reinterpret_cast<__half*>(grad_input.data<Float16>()),
             N, C, in_H, in_W, out_H, out_W);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = adaptive_avgpool2d_backward_hip(grad_output_f32, input_f32, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("adaptive_avgpool2d_backward: unsupported dtype");
     }
@@ -1029,6 +1058,11 @@ auto adaptive_maxpool2d_backward_hip(
             indices.data<int64_t>(),
             grad_input.data<double>(),
             N, C, in_H, in_W, out_H, out_W);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = adaptive_maxpool2d_backward_hip(grad_output_f32, indices, input_f32, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("adaptive_maxpool2d_backward: unsupported dtype");
     }
@@ -1075,6 +1109,10 @@ auto adaptive_avgpool2d_forward(
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(output.data<Float16>()),
             N, C, H_in, W_in, output_h, output_w);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = adaptive_avgpool2d_forward(input_f32, output_h, output_w, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("adaptive_avgpool2d_forward: unsupported dtype");
     }
@@ -1118,6 +1156,10 @@ auto adaptive_avgpool2d_backward(
             reinterpret_cast<const __half*>(grad_output.data<Float16>()),
             reinterpret_cast<__half*>(grad_input.data<Float16>()),
             N, C, H_in, W_in, H_out, W_out);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto result_f32 = adaptive_avgpool2d_backward(grad_output_f32, H_in, W_in, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("adaptive_avgpool2d_backward: unsupported dtype");
     }
@@ -1242,6 +1284,10 @@ auto maxpool1d_forward_hip(
             reinterpret_cast<__half*>(output.data<Float16>()),
             indices.data<int64_t>(),
             N, C, L, L_out, kernel_size, stride, padding, dilation);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto [output_f32, idx] = maxpool1d_forward_hip(input_f32, kernel_size, stride, padding, dilation, stream);
+        return {output_f32.to(DType::BFloat16), idx};
     } else {
         throw std::runtime_error("maxpool1d_forward_hip: unsupported dtype");
     }
@@ -1342,6 +1388,10 @@ auto maxpool1d_backward_hip(
             grad_input_f32.data<float>(),
             reinterpret_cast<__half*>(grad_input.data<Float16>()),
             input_numel);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto result_f32 = maxpool1d_backward_hip(grad_output_f32, indices, input_shape, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("maxpool1d_backward_hip: unsupported dtype");
     }
@@ -1452,6 +1502,10 @@ auto avgpool1d_forward_hip(
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(output.data<Float16>()),
             N, C, L, L_out, kernel_size, stride, padding);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = avgpool1d_forward_hip(input_f32, kernel_size, stride, padding, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("avgpool1d_forward_hip: unsupported dtype");
     }
@@ -1582,6 +1636,10 @@ auto avgpool1d_backward_hip(
             grad_input_f32.data<float>(),
             reinterpret_cast<__half*>(grad_input.data<Float16>()),
             input_numel);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto result_f32 = avgpool1d_backward_hip(grad_output_f32, input_shape, kernel_size, stride, padding, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("avgpool1d_backward_hip: unsupported dtype");
     }
@@ -1694,6 +1752,10 @@ auto adaptive_maxpool1d_forward_hip(
             reinterpret_cast<__half*>(output.data<Float16>()),
             indices.data<int64_t>(),
             N, C, L_in, output_size);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto [output_f32, idx] = adaptive_maxpool1d_forward_hip(input_f32, output_size, stream);
+        return {output_f32.to(DType::BFloat16), idx};
     } else {
         throw std::runtime_error("adaptive_maxpool1d_forward_hip: unsupported dtype");
     }
@@ -1799,6 +1861,10 @@ auto adaptive_avgpool1d_forward_hip(
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(output.data<Float16>()),
             N, C, L_in, output_size);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = adaptive_avgpool1d_forward_hip(input_f32, output_size, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("adaptive_avgpool1d_forward_hip: unsupported dtype");
     }
@@ -1908,6 +1974,10 @@ auto adaptive_avgpool1d_backward_hip(
             grad_input_f32.data<float>(),
             reinterpret_cast<__half*>(grad_input.data<Float16>()),
             input_numel);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto result_f32 = adaptive_avgpool1d_backward_hip(grad_output_f32, input_shape, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("adaptive_avgpool1d_backward_hip: unsupported dtype");
     }
@@ -2060,6 +2130,10 @@ auto maxpool3d_forward_hip(
             reinterpret_cast<__half*>(output.data<Float16>()),
             indices.data<int64_t>(),
             N, C, D, H, W, D_out, H_out, W_out, kernel_size, stride, padding);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto [output_f32, idx] = maxpool3d_forward_hip(input_f32, kernel_size, stride, padding, stream);
+        return {output_f32.to(DType::BFloat16), idx};
     } else {
         throw std::runtime_error("maxpool3d_forward_hip: unsupported dtype");
     }
@@ -2169,6 +2243,10 @@ auto maxpool3d_backward_hip(
             grad_input_f32.data<float>(),
             reinterpret_cast<__half*>(grad_input.data<Float16>()),
             input_numel);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto result_f32 = maxpool3d_backward_hip(grad_output_f32, indices, input_shape, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("maxpool3d_backward_hip: unsupported dtype");
     }
@@ -2307,6 +2385,10 @@ auto avgpool3d_forward_hip(
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(output.data<Float16>()),
             N, C, D, H, W, D_out, H_out, W_out, kernel_size, stride, padding);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = avgpool3d_forward_hip(input_f32, kernel_size, stride, padding, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("avgpool3d_forward_hip: unsupported dtype");
     }
@@ -2475,6 +2557,10 @@ auto avgpool3d_backward_hip(
             grad_input_f32.data<float>(),
             reinterpret_cast<__half*>(grad_input.data<Float16>()),
             input_numel);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto result_f32 = avgpool3d_backward_hip(grad_output_f32, input_shape, kernel_size, stride, padding, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("avgpool3d_backward_hip: unsupported dtype");
     }
@@ -2612,6 +2698,10 @@ auto adaptive_maxpool3d_forward_hip(
             reinterpret_cast<__half*>(output.data<Float16>()),
             indices.data<int64_t>(),
             N, C, D_in, H_in, W_in, output_d, output_h, output_w);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto [output_f32, idx] = adaptive_maxpool3d_forward_hip(input_f32, output_d, output_h, output_w, stream);
+        return {output_f32.to(DType::BFloat16), idx};
     } else {
         throw std::runtime_error("adaptive_maxpool3d_forward_hip: unsupported dtype");
     }
@@ -2748,6 +2838,10 @@ auto adaptive_avgpool3d_forward_hip(
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(output.data<Float16>()),
             N, C, D_in, H_in, W_in, output_d, output_h, output_w);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = adaptive_avgpool3d_forward_hip(input_f32, output_d, output_h, output_w, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("adaptive_avgpool3d_forward_hip: unsupported dtype");
     }
@@ -2887,6 +2981,10 @@ auto adaptive_avgpool3d_backward_hip(
             grad_input_f32.data<float>(),
             reinterpret_cast<__half*>(grad_input.data<Float16>()),
             input_numel);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto result_f32 = adaptive_avgpool3d_backward_hip(grad_output_f32, input_shape, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("adaptive_avgpool3d_backward_hip: unsupported dtype");
     }

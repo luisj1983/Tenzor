@@ -233,8 +233,9 @@ public:
     /**
      * @brief Get mutable reference to gradient (internal use only).
      *
-     * @warning This accessor bypasses thread-safe locking. Use set_grad()
-     * for external gradient mutation when thread_safe_ is enabled.
+     * @warning This accessor bypasses thread-safe locking. Prefer set_grad()
+     * for gradient mutation. Only use mutable_grad() when you need in-place
+     * access to the underlying buffer (e.g., memset for zero_grad).
      *
      * @return Optional tensor containing gradient
      */
