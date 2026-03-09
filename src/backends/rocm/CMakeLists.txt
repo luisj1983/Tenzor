@@ -56,6 +56,7 @@ set(ROCM_HIP_SOURCES
     kernels/roi_align.hip.cpp
     kernels/vision.hip.cpp
     kernels/sort.hip.cpp
+    kernels/quantization.hip.cpp
 )
 
 # Conditionally add linalg source if rocSOLVER is found

@@ -48,6 +48,10 @@ class AdaptiveAvgPool2dBackwardKernelBFloat16;
 class AvgPool2dBackwardKernelBFloat16;
 class MaxPool2dBackwardKernelBFloat16;
 class MaxPool2dBackwardWithIndicesKernelBFloat16;
+class AdaptiveMaxPool2dBackwardKernelFloat32;
+class AdaptiveMaxPool2dBackwardKernelFloat64;
+class AdaptiveMaxPool2dBackwardKernelFloat16;
+class AdaptiveMaxPool2dBackwardKernelBFloat16;
 
 // 1D pooling kernel name classes
 class MaxPool1dForwardFloat32 {};
@@ -1182,6 +1186,113 @@ auto adaptive_maxpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
     }
 
     return output;
+}
+
+// AdaptiveMaxPool2d backward - routes gradients to max positions using indices
+auto adaptive_maxpool2d_backward(const Tensor& grad_output, const Tensor& indices,
+                                   int64_t H_in, int64_t W_in,
+                                   sycl::queue& queue) -> Tensor {
+    auto shape = grad_output.shape();
+    if (shape.size() != 4) {
+        throw std::invalid_argument("AdaptiveMaxPool2d backward requires 4D grad_output (N, C, H, W)");
+    }
+
+    const int64_t N = shape[0];
+    const int64_t C = shape[1];
+    const int64_t H_out = shape[2];
+    const int64_t W_out = shape[3];
+
+    Tensor grad_input({N, C, H_in, W_in}, grad_output.dtype(), grad_output.device());
+
+    // Initialize grad_input to zeros
+    const size_t bytes = grad_input.numel() * grad_input.dtype_size();
+    queue.memset(const_cast<void*>(grad_input.data_ptr()), 0, bytes).wait();
+
+    const int64_t total_size = N * C * H_out * W_out;
+
+    if (grad_output.dtype() == DType::Float32) {
+        const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
+        const int64_t* idx_ptr = get_data_ptr<const int64_t>(indices);
+        float* grad_in_ptr = get_data_ptr<float>(grad_input);
+
+        queue.parallel_for<AdaptiveMaxPool2dBackwardKernelFloat32>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
+            int64_t input_idx = idx_ptr[flat_idx];
+            if (input_idx >= 0 && input_idx < N * C * H_in * W_in) {
+                sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                                 sycl::access::address_space::global_space> atomic_val(grad_in_ptr[input_idx]);
+                atomic_val.fetch_add(grad_out_ptr[flat_idx]);
+            }
+        }).wait();
+    }
+    else if (grad_output.dtype() == DType::Float64) {
+        const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
+        const int64_t* idx_ptr = get_data_ptr<const int64_t>(indices);
+        double* grad_in_ptr = get_data_ptr<double>(grad_input);
+
+        queue.parallel_for<AdaptiveMaxPool2dBackwardKernelFloat64>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
+            int64_t input_idx = idx_ptr[flat_idx];
+            if (input_idx >= 0 && input_idx < N * C * H_in * W_in) {
+                sycl::atomic_ref<double, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                                 sycl::access::address_space::global_space> atomic_val(grad_in_ptr[input_idx]);
+                atomic_val.fetch_add(grad_out_ptr[flat_idx]);
+            }
+        }).wait();
+    }
+    else if (grad_output.dtype() == DType::Float16) {
+        const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
+        const int64_t* idx_ptr = get_data_ptr<const int64_t>(indices);
+        sycl::half* grad_in_ptr = get_data_ptr<sycl::half>(grad_input);
+
+        // Use temporary float buffer for atomic accumulation
+        Tensor grad_input_f32({N, C, H_in, W_in}, DType::Float32, grad_output.device());
+        queue.memset(const_cast<void*>(grad_input_f32.data_ptr()), 0, grad_input_f32.numel() * sizeof(float)).wait();
+        float* grad_in_f32_ptr = get_data_ptr<float>(grad_input_f32);
+
+        queue.parallel_for<AdaptiveMaxPool2dBackwardKernelFloat16>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
+            int64_t input_idx = idx_ptr[flat_idx];
+            if (input_idx >= 0 && input_idx < N * C * H_in * W_in) {
+                sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                                 sycl::access::address_space::global_space> atomic_val(grad_in_f32_ptr[input_idx]);
+                atomic_val.fetch_add(static_cast<float>(grad_out_ptr[flat_idx]));
+            }
+        }).wait();
+
+        // Convert float result back to half
+        const int64_t total_input = N * C * H_in * W_in;
+        queue.parallel_for(sycl::range<1>(total_input), [=](sycl::id<1> idx) {
+            grad_in_ptr[idx] = sycl::half(grad_in_f32_ptr[idx]);
+        }).wait();
+    }
+    else if (grad_output.dtype() == DType::BFloat16) {
+        const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
+        const int64_t* idx_ptr = get_data_ptr<const int64_t>(indices);
+        uint16_t* grad_in_ptr = get_data_ptr<uint16_t>(grad_input);
+
+        // Use temporary float buffer for atomic accumulation
+        Tensor grad_input_f32({N, C, H_in, W_in}, DType::Float32, grad_output.device());
+        queue.memset(const_cast<void*>(grad_input_f32.data_ptr()), 0, grad_input_f32.numel() * sizeof(float)).wait();
+        float* grad_in_f32_ptr = get_data_ptr<float>(grad_input_f32);
+
+        queue.parallel_for<AdaptiveMaxPool2dBackwardKernelBFloat16>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
+            int64_t input_idx = idx_ptr[flat_idx];
+            if (input_idx >= 0 && input_idx < N * C * H_in * W_in) {
+                sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                                 sycl::access::address_space::global_space> atomic_val(grad_in_f32_ptr[input_idx]);
+                atomic_val.fetch_add(bf16_to_f32(grad_out_ptr[flat_idx]));
+            }
+        }).wait();
+
+        // Convert float result back to BFloat16
+        const int64_t total_input = N * C * H_in * W_in;
+        queue.parallel_for(sycl::range<1>(total_input), [=](sycl::id<1> idx) {
+            grad_in_ptr[idx] = f32_to_bf16(grad_in_f32_ptr[idx]);
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for adaptive_maxpool2d_backward");
+    }
+
+    return grad_input;
 }
 
 /**

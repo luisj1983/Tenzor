@@ -395,6 +395,7 @@ public:
                           int64_t diagonal) -> Tensor;
     auto dispatchDiag(const Tensor& input, int64_t diagonal) -> Tensor;
     auto dispatchFlip(const Tensor& input, int64_t dim) -> Tensor;
+    auto dispatchRoll(const Tensor& input, int64_t shift, int64_t dim) -> Tensor;
     auto dispatchTrace(const Tensor& input) -> Tensor;
 
     // Indexing operations

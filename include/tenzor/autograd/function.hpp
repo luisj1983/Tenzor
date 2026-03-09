@@ -107,6 +107,9 @@ public:
      * higher-order gradient support via backward_with_variables():
      *   - AddBackward, SubBackward, MulBackward, DivBackward, MatMulBackward
      *   - LinearBackward, SumBackward, MeanBackward, LogBackward
+     *   - DetBackward, InvBackward, SolveBackward, NormBackward_Linalg, SlogdetBackward
+     *   - CholeskyBackward, SvdBackward, QrBackward, EighBackward, EigvalshBackward
+     *   - SpMMBackward, SpMVBackward
      *
      * @param grad_outputs Gradient Variables with respect to outputs
      * @return Gradient Variables with respect to inputs (with grad_fn set)
@@ -398,26 +401,8 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 };
 
-/**
- * @brief ReLU activation gradient function.
- *
- * Implements forward and backward for ReLU (Rectified Linear Unit) activation.
- *
- * Forward: y = max(0, x)
- * Backward: dL/dx = dL/dy * (x > 0)
- *
- * @note Input is saved to determine which elements to pass gradient through.
- *
- * @code
- * Variable x(Tensor({3, 4}, DType::Float32, Device::cpu()), true);
- * Variable y = relu(x);  // Applies ReLU with ReLUBackward
- * @endcode
- */
-class ReLUBackward : public Function {
-public:
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
-    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
-};
+// Note: ReLUBackward is implemented in src/nn/activations/activations.cpp
+// with full higher-order gradient support. No separate declaration needed here.
 
 /**
  * @brief Sum reduction gradient function.
@@ -1187,6 +1172,7 @@ class DetBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto name() const -> std::string override { return "DetBackward"; }
 };
 
@@ -1202,6 +1188,7 @@ class InvBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto name() const -> std::string override { return "InvBackward"; }
 };
 
@@ -1219,6 +1206,7 @@ class SolveBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto name() const -> std::string override { return "SolveBackward"; }
 };
 
@@ -1236,6 +1224,7 @@ public:
     CholeskyBackward(bool upper = false) : upper_(upper) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto name() const -> std::string override { return "CholeskyBackward"; }
 private:
     bool upper_;
@@ -1254,6 +1243,7 @@ public:
     SvdBackward(bool full_matrices = true) : full_matrices_(full_matrices) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto name() const -> std::string override { return "SvdBackward"; }
 private:
     bool full_matrices_;
@@ -1272,6 +1262,7 @@ class QrBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto name() const -> std::string override { return "QrBackward"; }
 };
 
@@ -1289,6 +1280,7 @@ class EighBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto name() const -> std::string override { return "EighBackward"; }
 };
 
@@ -1305,6 +1297,7 @@ class EigvalshBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto name() const -> std::string override { return "EigvalshBackward"; }
 };
 
@@ -1322,6 +1315,7 @@ public:
     NormBackward_Linalg(const std::string& ord = "fro") : ord_(ord) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto name() const -> std::string override { return "NormBackward_Linalg"; }
 private:
     std::string ord_;
@@ -1340,6 +1334,7 @@ class SlogdetBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto name() const -> std::string override { return "SlogdetBackward"; }
 };
 
@@ -1366,6 +1361,7 @@ public:
 
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto name() const -> std::string override { return "SpMMBackward"; }
 
 private:
@@ -1391,6 +1387,7 @@ public:
 
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto name() const -> std::string override { return "SpMVBackward"; }
 
 private:

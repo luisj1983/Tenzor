@@ -1766,6 +1766,155 @@ auto fused_rms_norm_backward_hip(
     return std::make_tuple(grad_input, grad_weight);
 }
 
+// ==============================================================================
+// Fused LayerNorm Backward HIP Kernel
+// ==============================================================================
+
+/**
+ * @brief HIP kernel for LayerNorm backward pass.
+ *
+ * Computes gradients for input, weight, and bias given output gradients.
+ * Uses efficient parallel reduction for batch-wise operations.
+ */
+template<typename T, int BLOCK_SZ>
+__global__ void fused_layer_norm_backward_kernel_hip(
+    const T* grad_output,
+    const T* input,
+    const T* weight,
+    const T* mean,
+    const T* inv_std,
+    T* grad_input,
+    T* grad_weight,
+    T* grad_bias,
+    int64_t batch_size,
+    int64_t norm_size
+) {
+    int64_t b = blockIdx.x;
+    if (b >= batch_size) return;
+
+    const T* batch_grad_out = grad_output + b * norm_size;
+    const T* batch_in = input + b * norm_size;
+    T* batch_grad_in = grad_input + b * norm_size;
+
+    T batch_mean = mean[b];
+    T batch_inv_std = inv_std[b];
+
+    __shared__ T shared_sum1[BLOCK_SZ];  // For sum(grad_out * weight)
+    __shared__ T shared_sum2[BLOCK_SZ];  // For sum(grad_out * weight * normalized)
+
+    // Compute sums needed for input gradient
+    T sum_grad_out = 0;
+    T sum_grad_out_normalized = 0;
+
+    for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+        T normalized = (batch_in[i] - batch_mean) * batch_inv_std;
+        T grad_out_weighted = batch_grad_out[i] * weight[i];
+
+        sum_grad_out += grad_out_weighted;
+        sum_grad_out_normalized += grad_out_weighted * normalized;
+
+        // Accumulate weight and bias gradients atomically
+        atomicAdd(&grad_weight[i], batch_grad_out[i] * normalized);
+        atomicAdd(&grad_bias[i], batch_grad_out[i]);
+    }
+
+    shared_sum1[threadIdx.x] = sum_grad_out;
+    shared_sum2[threadIdx.x] = sum_grad_out_normalized;
+    __syncthreads();
+
+    // Parallel reduction for sums
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) {
+            shared_sum1[threadIdx.x] += shared_sum1[threadIdx.x + s];
+            shared_sum2[threadIdx.x] += shared_sum2[threadIdx.x + s];
+        }
+        __syncthreads();
+    }
+
+    T mean_grad_out = shared_sum1[0] / static_cast<T>(norm_size);
+    T mean_grad_out_normalized = shared_sum2[0] / static_cast<T>(norm_size);
+
+    // Compute input gradients
+    for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+        T normalized = (batch_in[i] - batch_mean) * batch_inv_std;
+        T grad_out_weighted = batch_grad_out[i] * weight[i];
+
+        batch_grad_in[i] = (grad_out_weighted - mean_grad_out -
+                           normalized * mean_grad_out_normalized) * batch_inv_std;
+    }
+}
+
+auto fused_layer_norm_backward_hip(
+    const Tensor& grad_output,
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor& mean,
+    const Tensor& inv_std,
+    const std::vector<int64_t>& normalized_shape
+) -> std::tuple<Tensor, Tensor, Tensor> {
+    int64_t norm_size = 1;
+    for (auto dim : normalized_shape) {
+        norm_size *= dim;
+    }
+
+    int64_t batch_size = input.numel() / norm_size;
+
+    // Create zero-initialized output tensors
+    std::vector<int64_t> input_shape(input.shape().begin(), input.shape().end());
+    Tensor grad_input(input_shape, input.dtype(), input.device());
+    Tensor grad_weight({norm_size}, input.dtype(), input.device());
+    Tensor grad_bias({norm_size}, input.dtype(), input.device());
+
+    // Zero-initialize
+    HIP_CHECK(hipMemset(grad_input.data_ptr(), 0,
+        grad_input.numel() * dtype_size(input.dtype())));
+    HIP_CHECK(hipMemset(grad_weight.data_ptr(), 0,
+        norm_size * dtype_size(input.dtype())));
+    HIP_CHECK(hipMemset(grad_bias.data_ptr(), 0,
+        norm_size * dtype_size(input.dtype())));
+
+    constexpr int BLOCK_SIZE = 256;
+    int blocks = batch_size;
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(
+            (fused_layer_norm_backward_kernel_hip<float, BLOCK_SIZE>),
+            dim3(blocks), dim3(BLOCK_SIZE), 0, 0,
+            grad_output.data<float>(),
+            input.data<float>(),
+            weight.data<float>(),
+            mean.data<float>(),
+            inv_std.data<float>(),
+            grad_input.data<float>(),
+            grad_weight.data<float>(),
+            grad_bias.data<float>(),
+            batch_size,
+            norm_size
+        );
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(
+            (fused_layer_norm_backward_kernel_hip<double, BLOCK_SIZE>),
+            dim3(blocks), dim3(BLOCK_SIZE), 0, 0,
+            grad_output.data<double>(),
+            input.data<double>(),
+            weight.data<double>(),
+            mean.data<double>(),
+            inv_std.data<double>(),
+            grad_input.data<double>(),
+            grad_weight.data<double>(),
+            grad_bias.data<double>(),
+            batch_size,
+            norm_size
+        );
+    } else {
+        throw std::runtime_error("fused_layer_norm_backward_hip: Only Float32 and Float64 supported");
+    }
+
+    HIP_CHECK(hipGetLastError());
+
+    return std::make_tuple(grad_input, grad_weight, grad_bias);
+}
+
 } // namespace rocm
 } // namespace tenzor
 

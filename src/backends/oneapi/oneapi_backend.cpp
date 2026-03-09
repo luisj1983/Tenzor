@@ -173,6 +173,7 @@ namespace oneapi {
     auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& indices, int64_t H_in, int64_t W_in, sycl::queue& queue) -> Tensor;
     auto adaptive_avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
     auto adaptive_avgpool2d_backward(const Tensor& grad_output, int64_t H_in, int64_t W_in, sycl::queue& queue) -> Tensor;
+    auto adaptive_maxpool2d_backward(const Tensor& grad_output, const Tensor& indices, int64_t H_in, int64_t W_in, sycl::queue& queue) -> Tensor;
 
     // Statistical operations
     auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;

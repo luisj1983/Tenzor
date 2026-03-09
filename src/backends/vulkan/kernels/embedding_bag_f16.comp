@@ -1,0 +1,61 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// EmbeddingBag for Float16
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Embeddings { float16_t emb_data[]; };
+layout(binding = 1) buffer Offsets { int offset_data[]; };
+layout(binding = 2) buffer Output { float16_t out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_bags;
+    uint embedding_dim;
+    uint total_rows;
+    uint mode;
+    uint include_last_offset;
+    uint num_offsets;
+} params;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint total_output = params.num_bags * params.embedding_dim;
+    if (gid >= total_output) return;
+
+    uint bag = gid / params.embedding_dim;
+    uint j = gid % params.embedding_dim;
+
+    int start = offset_data[bag];
+    int end_val;
+    if (bag + 1 < params.num_offsets) {
+        end_val = offset_data[bag + 1];
+    } else {
+        end_val = int(params.total_rows);
+    }
+
+    int bag_size = end_val - start;
+    if (bag_size <= 0) {
+        out_data[gid] = float16_t(0.0);
+        return;
+    }
+
+    if (params.mode == 2) {
+        // Max mode — accumulate in float for precision, store as f16
+        float max_val = float(emb_data[uint(start) * params.embedding_dim + j]);
+        for (int i = start + 1; i < end_val; ++i) {
+            float v = float(emb_data[uint(i) * params.embedding_dim + j]);
+            if (v > max_val) max_val = v;
+        }
+        out_data[gid] = float16_t(max_val);
+    } else {
+        // Sum or Mean mode — accumulate in float for precision
+        float acc = 0.0;
+        for (int i = start; i < end_val; ++i) {
+            acc += float(emb_data[uint(i) * params.embedding_dim + j]);
+        }
+        if (params.mode == 1) {
+            acc /= float(bag_size);
+        }
+        out_data[gid] = float16_t(acc);
+    }
+}

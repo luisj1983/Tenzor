@@ -1,0 +1,57 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Cross Entropy Loss for Float64
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer LogProbs { float64_t log_probs[]; };    // Log probabilities (batch_size x num_classes)
+layout(binding = 1) buffer Targets { int targets[]; };              // Target class indices (batch_size)
+layout(binding = 2) buffer Losses { float64_t losses[]; };          // Output losses (batch_size)
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint num_classes;
+    uint reduction;  // 0=none, 1=mean, 2=sum
+} params;
+
+shared float64_t shared_sum[WORKGROUP_SIZE];
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint tid = gl_LocalInvocationID.x;
+
+    float64_t loss_val = float64_t(0.0);
+
+    if (idx < params.batch_size) {
+        int target = targets[idx];
+        if (target >= 0 && target < int(params.num_classes)) {
+            // Cross entropy: -log(p[target])
+            loss_val = -log_probs[idx * params.num_classes + uint(target)];
+        }
+        losses[idx] = loss_val;
+    }
+
+    // Reduction
+    if (params.reduction > 0) {
+        shared_sum[tid] = (idx < params.batch_size) ? loss_val : float64_t(0.0);
+        barrier();
+
+        // Parallel reduction
+        for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+            if (tid < s && (tid + s) < 256) {
+                shared_sum[tid] += shared_sum[tid + s];
+            }
+            barrier();
+        }
+
+        if (tid == 0) {
+            float64_t total = shared_sum[0];
+            if (params.reduction == 1) { // mean
+                total /= float64_t(params.batch_size);
+            }
+            // Store result in first element
+            losses[0] = total;
+        }
+    }
+}

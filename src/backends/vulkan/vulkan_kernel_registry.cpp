@@ -1547,6 +1547,53 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     // ========================================================================
+    // Roll Operation (native Vulkan shader)
+    // ========================================================================
+    table.register_single_output_kernel(OpId::Roll, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t shift = attrs.get_int(AttrKey::Shift, 0);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        return get_vulkan_backend()->dispatchRoll(inputs[0], shift, dim);
+    });
+
+    // ========================================================================
+    // CPU fallback ops (no dedicated Vulkan shaders)
+    // ========================================================================
+
+    #define VULKAN_CPU_FALLBACK(OP_ID) \
+    table.register_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes& attrs) \
+        -> std::vector<Tensor> { \
+        auto device = inputs[0].device(); \
+        std::vector<Tensor> cpu_inputs; \
+        cpu_inputs.reserve(inputs.size()); \
+        for (size_t i = 0; i < inputs.size(); ++i) { \
+            cpu_inputs.push_back(inputs[i].to(Device::cpu())); \
+        } \
+        auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU); \
+        auto results = cpu_table.dispatch(OpId::OP_ID, cpu_inputs, attrs); \
+        for (auto& r : results) r = r.to(device); \
+        return results; \
+    })
+
+    VULKAN_CPU_FALLBACK(Stack);
+    VULKAN_CPU_FALLBACK(Tile);
+    VULKAN_CPU_FALLBACK(Take);
+    VULKAN_CPU_FALLBACK(Put);
+    VULKAN_CPU_FALLBACK(QuantizedLinear);
+    VULKAN_CPU_FALLBACK(QuantizedConv2d);
+    VULKAN_CPU_FALLBACK(LSTMCellForward);
+    VULKAN_CPU_FALLBACK(LSTMCellBackward);
+    VULKAN_CPU_FALLBACK(GRUCellForward);
+    VULKAN_CPU_FALLBACK(GRUCellBackward);
+    // Complex number ops
+    VULKAN_CPU_FALLBACK(Conj);
+    VULKAN_CPU_FALLBACK(Real);
+    VULKAN_CPU_FALLBACK(Imag);
+    VULKAN_CPU_FALLBACK(Angle);
+    VULKAN_CPU_FALLBACK(Polar);
+
+    #undef VULKAN_CPU_FALLBACK
+
+    // ========================================================================
     // FFT Operations (CPU fallback — FFT is impractical in native Vulkan)
     // ========================================================================
 

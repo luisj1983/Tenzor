@@ -5325,6 +5325,99 @@ auto VulkanBackend::dispatchFlip(const Tensor& input, int64_t dim) -> Tensor {
     return output;
 }
 
+auto VulkanBackend::dispatchRoll(const Tensor& input, int64_t shift, int64_t dim) -> Tensor {
+    auto input_shape = input.shape();
+
+    if (input.numel() == 0) {
+        std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
+        return Tensor(out_shape, input.dtype(), input.device());
+    }
+
+    // Handle negative dim
+    if (dim < 0) {
+        dim = static_cast<int64_t>(input_shape.size()) + dim;
+    }
+    if (dim < 0 || dim >= static_cast<int64_t>(input_shape.size())) {
+        throw std::invalid_argument("roll dim out of range");
+    }
+
+    // BFloat16: upcast to Float32
+    if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = dispatchRoll(input_f32, shift, dim);
+        return result_f32.to(DType::BFloat16);
+    }
+
+    // Float16: upcast to Float32 (no F16 roll shader)
+    if (input.dtype() == DType::Float16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = dispatchRoll(input_f32, shift, dim);
+        return result_f32.to(DType::Float16);
+    }
+
+    int32_t device_id = input.device().index;
+    bool is_float64 = (input.dtype() == DType::Float64);
+
+    std::string shader_name = is_float64 ? "roll_f64" : "roll";
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
+    Tensor output(out_shape, input.dtype(), input.device());
+
+    // Calculate inner_size: product of dims after roll dim
+    uint32_t inner_size = 1;
+    for (size_t i = static_cast<size_t>(dim) + 1; i < input_shape.size(); ++i) {
+        inner_size *= static_cast<uint32_t>(input_shape[i]);
+    }
+
+    // Normalize shift to [0, dim_size)
+    int64_t dim_size = input_shape[dim];
+    int64_t normalized_shift = ((shift % dim_size) + dim_size) % dim_size;
+
+    struct {
+        uint32_t n;
+        uint32_t dim_size;
+        uint32_t shift;
+        uint32_t inner_size;
+    } pushConstants;
+    pushConstants.n = static_cast<uint32_t>(input.numel());
+    pushConstants.dim_size = static_cast<uint32_t>(dim_size);
+    pushConstants.shift = static_cast<uint32_t>(normalized_shift);
+    pushConstants.inner_size = inner_size;
+
+    const void* buffer_in = input.data_ptr();
+    const void* buffer_out = output.data_ptr();
+
+    size_t buffer_size_in = input.numel() * input.dtype_size();
+    size_t buffer_size_out = output.numel() * output.dtype_size();
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, buffer_in},
+        {1, buffer_out}
+    };
+    std::vector<size_t> sizes = {buffer_size_in, buffer_size_out};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+
+    uint32_t workgroups = div_wg(input.numel(), devices_[device_id].workgroupSize);
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    insertComputeOnlyBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
 auto VulkanBackend::dispatchTrace(const Tensor& input) -> Tensor {
     auto input_shape = input.shape();
     if (input_shape.size() != 2) {
@@ -14049,16 +14142,20 @@ auto VulkanBackend::dispatchEmbeddingBag(const Tensor& embeddings, const Tensor&
                                           bool include_last_offset) -> Tensor {
     int32_t device_id = embeddings.device().index;
 
-    // Float16/BFloat16 upcast
-    if (embeddings.dtype() == DType::Float16 || embeddings.dtype() == DType::BFloat16) {
-        DType orig_dtype = embeddings.dtype();
+    // BFloat16 upcast (no native shader)
+    if (embeddings.dtype() == DType::BFloat16) {
         auto emb_f32 = embeddings.to(DType::Float32);
         auto result = dispatchEmbeddingBag(emb_f32, offsets, embedding_dim, mode, include_last_offset);
-        return result.to(orig_dtype);
+        return result.to(DType::BFloat16);
     }
 
-    bool is_float64 = (embeddings.dtype() == DType::Float64);
-    std::string shader_name = is_float64 ? "embedding_bag_f64" : "embedding_bag";
+    // Select shader based on dtype
+    std::string shader_name = "embedding_bag";
+    if (embeddings.dtype() == DType::Float64) {
+        shader_name = "embedding_bag_f64";
+    } else if (embeddings.dtype() == DType::Float16) {
+        shader_name = "embedding_bag_f16";
+    }
     auto* pipeline = getPipeline(shader_name, device_id);
 
     int64_t total_rows = embeddings.shape()[0];

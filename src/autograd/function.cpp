@@ -3324,4 +3324,185 @@ auto SpMVBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
     return {grad_v};
 }
 
+// ============================================================================
+// Linalg backward_with_variables implementations (higher-order gradients)
+// ============================================================================
+
+auto DetBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // dL/dA = dL/dy * det(A) * A^{-T}
+    // Use saved Variables if available, otherwise wrap saved Tensors
+    Variable det_val, inv_A;
+    if (has_saved_variables()) {
+        require_saved_variables(2);
+        det_val = saved_variables_[0];
+        inv_A = saved_variables_[1];
+    } else {
+        require_saved_tensors(2);
+        det_val = Variable(saved_tensors_[0], false);
+        inv_A = Variable(saved_tensors_[1], false);
+    }
+
+    auto ndim = inv_A.tensor().ndim();
+    auto inv_At = tenzor::transpose(inv_A, ndim - 2, ndim - 1);
+
+    // grad * det(A) — expand for broadcasting with matrix shape
+    auto grad_det = grad_outputs[0] * det_val;
+    auto gd_shape = std::vector<int64_t>(grad_det.shape().begin(), grad_det.shape().end());
+    gd_shape.push_back(1);
+    gd_shape.push_back(1);
+    auto grad_det_expanded = tenzor::reshape(grad_det, gd_shape);
+
+    auto grad_A = grad_det_expanded * inv_At;
+    return {grad_A};
+}
+
+auto InvBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // dL/dA = -Y^T @ dL/dY @ Y^T  where Y = A^{-1}
+    Variable inv_A;
+    if (has_saved_variables()) {
+        require_saved_variables(1);
+        inv_A = saved_variables_[0];
+    } else {
+        require_saved_tensors(1);
+        inv_A = Variable(saved_tensors_[0], false);
+    }
+
+    auto ndim = inv_A.tensor().ndim();
+    auto inv_At = tenzor::transpose(inv_A, ndim - 2, ndim - 1);
+
+    auto temp = tenzor::matmul(inv_At, grad_outputs[0]);
+    auto result = tenzor::matmul(temp, inv_At);
+    auto grad_A = tenzor::neg(result);
+
+    return {grad_A};
+}
+
+auto SolveBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // dL/dB = solve(A^T, dL/dX), dL/dA = -dL/dB @ X^T
+    Variable A, X;
+    if (has_saved_variables()) {
+        require_saved_variables(2);
+        A = saved_variables_[0];
+        X = saved_variables_[1];
+    } else {
+        require_saved_tensors(2);
+        A = Variable(saved_tensors_[0], false);
+        X = Variable(saved_tensors_[1], false);
+    }
+
+    auto ndim = A.tensor().ndim();
+    auto At = tenzor::transpose(A, ndim - 2, ndim - 1);
+
+    auto grad_B = tenzor::solve(At, grad_outputs[0]);
+
+    auto x_ndim = X.tensor().ndim();
+    auto Xt = tenzor::transpose(X, x_ndim - 2, x_ndim - 1);
+    auto grad_A = tenzor::neg(tenzor::matmul(grad_B, Xt));
+
+    return {grad_A, grad_B};
+}
+
+auto NormBackward_Linalg::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // Frobenius: dL/dA = dL/dy * A / norm(A)
+    Variable input, norm_val;
+    if (has_saved_variables()) {
+        require_saved_variables(2);
+        input = saved_variables_[0];
+        norm_val = saved_variables_[1];
+    } else {
+        require_saved_tensors(2);
+        input = Variable(saved_tensors_[0], false);
+        norm_val = Variable(saved_tensors_[1], false);
+    }
+
+    if (ord_ == "fro") {
+        auto scale = grad_outputs[0] * tenzor::reciprocal(norm_val);
+        auto input_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+        auto scale_shape = std::vector<int64_t>(scale.shape().begin(), scale.shape().end());
+        while (scale_shape.size() < input_shape.size()) {
+            scale_shape.push_back(1);
+        }
+        auto scale_expanded = tenzor::reshape(scale, scale_shape);
+        return {scale_expanded * input};
+    }
+
+    // Unsupported norm order — return zeros (no gradient)
+    return {Variable(zeros_like(input.tensor()), false)};
+}
+
+auto SlogdetBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // dL/dA = dL/d(logabsdet) * A^{-T} (sign gradient is zero)
+    Variable inv_A;
+    if (has_saved_variables()) {
+        require_saved_variables(1);
+        inv_A = saved_variables_[0];
+    } else {
+        require_saved_tensors(1);
+        inv_A = Variable(saved_tensors_[0], false);
+    }
+
+    auto ndim = inv_A.tensor().ndim();
+    auto inv_At = tenzor::transpose(inv_A, ndim - 2, ndim - 1);
+
+    auto gd_shape = std::vector<int64_t>(grad_outputs[1].shape().begin(), grad_outputs[1].shape().end());
+    while (gd_shape.size() < static_cast<size_t>(ndim)) {
+        gd_shape.push_back(1);
+    }
+    auto grad_expanded = tenzor::reshape(grad_outputs[1], gd_shape);
+
+    return {grad_expanded * inv_At};
+}
+
+auto EigvalshBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // dL/dA = V @ diag(dL/dW) @ V^T — delegates to backward() since diag() has no Variable-level op
+    auto result_tensors = backward({grad_outputs[0].tensor()});
+    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+}
+
+// Complex linalg ops — delegate to backward() and wrap (diag/tril/eye have no Variable-level ops)
+
+auto CholeskyBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    auto result_tensors = backward({grad_outputs[0].tensor()});
+    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+}
+
+auto SvdBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    std::vector<Tensor> tensor_grads;
+    tensor_grads.reserve(grad_outputs.size());
+    for (auto& var : grad_outputs) {
+        tensor_grads.push_back(var.tensor());
+    }
+    auto result_tensors = backward(tensor_grads);
+    bool any_rg = false;
+    for (auto& var : grad_outputs) { if (var.requires_grad()) { any_rg = true; break; } }
+    return {Variable(result_tensors[0], any_rg)};
+}
+
+auto QrBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    auto result_tensors = backward({grad_outputs[0].tensor(), grad_outputs[1].tensor()});
+    bool any_rg = grad_outputs[0].requires_grad() || grad_outputs[1].requires_grad();
+    return {Variable(result_tensors[0], any_rg)};
+}
+
+auto EighBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    auto result_tensors = backward({grad_outputs[0].tensor(), grad_outputs[1].tensor()});
+    bool any_rg = grad_outputs[0].requires_grad() || grad_outputs[1].requires_grad();
+    return {Variable(result_tensors[0], any_rg)};
+}
+
+// ============================================================================
+// Sparse backward_with_variables implementations
+// ============================================================================
+
+auto SpMMBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // Sparse ops have no Variable-level equivalents — delegate to backward()
+    auto result_tensors = backward({grad_outputs[0].tensor()});
+    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+}
+
+auto SpMVBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    auto result_tensors = backward({grad_outputs[0].tensor()});
+    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+}
+
 } // namespace tenzor

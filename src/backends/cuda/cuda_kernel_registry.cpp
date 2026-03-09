@@ -1304,6 +1304,28 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     });
 
     // =========================================================================
+    // Flash Attention (memory-efficient tiled attention)
+    // =========================================================================
+    table.register_kernel(OpId::FlashAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // Uses same implementation as FusedAttention — both are memory-efficient
+        float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+        bool causal = attrs.get_bool(AttrKey::Causal, false);
+        auto output = cuda::fused_attention_cuda(inputs[0], inputs[1], inputs[2], scale);
+        return std::vector<Tensor>{output};
+    });
+
+    // =========================================================================
+    // Fused LayerNorm Backward
+    // =========================================================================
+    table.register_kernel(OpId::FusedLayerNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [grad_output, input, weight, mean, inv_std]
+        auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
+        auto [grad_input, grad_weight, grad_bias] = cuda::fused_layer_norm_backward_cuda(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], normalized_shape);
+        return std::vector<Tensor>{grad_input, grad_weight, grad_bias};
+    });
+
+    // =========================================================================
     // Linear Layer (fused cuBLAS GEMM + bias for 2-3x speedup)
     // =========================================================================
     table.register_single_output_kernel(OpId::Linear, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {

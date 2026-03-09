@@ -329,6 +329,8 @@ namespace oneapi {
                                           int64_t H_in, int64_t W_in, sycl::queue& queue) -> Tensor;
     auto adaptive_avgpool2d_backward(const Tensor& grad_output, int64_t H_in, int64_t W_in,
                                      sycl::queue& queue) -> Tensor;
+    auto adaptive_maxpool2d_backward(const Tensor& grad_output, const Tensor& indices,
+                                     int64_t H_in, int64_t W_in, sycl::queue& queue) -> Tensor;
 
     // ---- 1D Pooling operations (kernels/pooling.cpp) ----
     auto maxpool1d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
@@ -1567,6 +1569,13 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             int64_t H_in = attrs.get_int(AttrKey::InputH, 0);
             int64_t W_in = attrs.get_int(AttrKey::InputW, 0);
             return {oneapi::adaptive_avgpool2d_backward(inputs[0], H_in, W_in, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::AdaptiveMaxPool2dBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t H_in = attrs.get_int(AttrKey::InputH, 0);
+            int64_t W_in = attrs.get_int(AttrKey::InputW, 0);
+            return {oneapi::adaptive_maxpool2d_backward(inputs[0], inputs[1], H_in, W_in, get_q(inputs))};
         });
 
     // =========================================================================

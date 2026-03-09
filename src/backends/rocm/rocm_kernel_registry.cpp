@@ -468,6 +468,13 @@ namespace rocm {
     auto fused_rms_norm_hip(const Tensor& input, const Tensor& weight,
                             float eps) -> std::pair<Tensor, Tensor>;
 
+    // Fused LayerNorm Backward
+    auto fused_layer_norm_backward_hip(const Tensor& grad_output, const Tensor& input,
+                                       const Tensor& weight, const Tensor& mean,
+                                       const Tensor& inv_std,
+                                       const std::vector<int64_t>& normalized_shape)
+        -> std::tuple<Tensor, Tensor, Tensor>;
+
     // Fused Conv2D + BatchNorm + ReLU (full pipeline)
     auto fused_conv2d_bn_relu_full_hip(const Tensor& input, const Tensor& weight, const Tensor* bias,
                                         const Tensor& bn_mean, const Tensor& bn_var,
@@ -599,6 +606,21 @@ namespace rocm {
     auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offsets,
                                        const std::string& mode, int64_t embedding_dim,
                                        bool include_last_offset, hipStream_t stream) -> Tensor;
+
+    // Quantized operations (quantization.hip.cpp)
+    auto quantized_linear_hip(
+        const Tensor& input, const Tensor& weight, const Tensor* bias,
+        float input_scale, int32_t input_zero_point,
+        float weight_scale, int32_t weight_zero_point,
+        float output_scale, int32_t output_zero_point,
+        hipStream_t stream) -> Tensor;
+    auto quantized_conv2d_hip(
+        const Tensor& input, const Tensor& weight, const Tensor* bias,
+        int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+        float input_scale, int32_t input_zero_point,
+        float weight_scale, int32_t weight_zero_point,
+        float output_scale, int32_t output_zero_point,
+        hipStream_t stream) -> Tensor;
 
     // Trunc (math.hip.cpp)
     auto trunc_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
@@ -1758,6 +1780,25 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     // ========================================================================
+    // Flash Attention (memory-efficient tiled attention)
+    // ========================================================================
+    table.register_kernel(OpId::FlashAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+        return std::vector<Tensor>{rocm::fused_attention_hip(inputs[0], inputs[1], inputs[2], scale)};
+    });
+
+    // ========================================================================
+    // Fused LayerNorm Backward
+    // ========================================================================
+    table.register_kernel(OpId::FusedLayerNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [grad_output, input, weight, mean, inv_std]
+        auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
+        auto [grad_input, grad_weight, grad_bias] = rocm::fused_layer_norm_backward_hip(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], normalized_shape);
+        return std::vector<Tensor>{grad_input, grad_weight, grad_bias};
+    });
+
+    // ========================================================================
     // Fused Conv2D + BatchNorm + ReLU (full pipeline)
     // ========================================================================
     table.register_single_output_kernel(OpId::FusedConv2dBnReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -2307,39 +2348,26 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     // ========================================================================
-    // Quantized Operations (dequantize → float compute → output)
+    // Quantized Operations (INT8 inputs, INT32 accumulation, Float32 output)
     // ========================================================================
     table.register_kernel(OpId::QuantizedLinear, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [input_int8, weight_int8] or [input_int8, weight_int8, bias_f32]
         const auto& input = inputs[0];
         const auto& weight = inputs[1];
+        const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
 
         float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale, 1.0));
         float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ, 1.0));
+        float output_scale = static_cast<float>(attrs.get_float(AttrKey::OutputScale, 1.0));
         int32_t input_zp = static_cast<int32_t>(attrs.get_int(AttrKey::InputZeroPoint, 0));
         int32_t weight_zp = static_cast<int32_t>(attrs.get_int(AttrKey::WeightZeroPoint, 0));
+        int32_t output_zp = static_cast<int32_t>(attrs.get_int(AttrKey::OutputZeroPoint, 0));
 
-        // Dequantize: float_val = (int_val - zero_point) * scale
-        Tensor input_f32 = input.to(DType::Float32);
-        Tensor weight_f32 = weight.to(DType::Float32);
+        Tensor output = rocm::quantized_linear_hip(
+            input, weight, bias,
+            input_scale, input_zp, weight_scale, weight_zp,
+            output_scale, output_zp, get_hip_stream(attrs));
 
-        // Apply scale and zero point
-        // input_dequant = (input_f32 - input_zp) * input_scale
-        // weight_dequant = (weight_f32 - weight_zp) * weight_scale
-        // These are done element-wise but we need basic arithmetic — use raw matmul with scaling
-        // Simpler: compute output = input_scale * weight_scale * (input_f32 - input_zp) @ (weight_f32 - weight_zp)^T
-
-        auto input_shape = input.shape();
-        auto weight_shape = weight.shape();
-        int64_t batch_size = input_shape[0];
-        int64_t out_features = weight_shape[0];
-
-        // Use matmul: output = input_f32 @ weight_f32^T (after dequantization)
-        Tensor output = rocm::matmul_kernel(input_f32, weight_f32, get_hip_stream(attrs));
-
-        // Scale the output by input_scale * weight_scale (approximate dequantized linear)
-        // Note: This is a simplified quantized linear without proper zero-point handling
-        // A full implementation would need a dedicated HIP kernel
         return std::vector<Tensor>{output};
     });
 
@@ -2347,19 +2375,25 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         // inputs: [input_int8, weight_int8] or [input_int8, weight_int8, bias_f32]
         const auto& input = inputs[0];
         const auto& weight = inputs[1];
+        const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
 
         int64_t stride = attrs.get_int(AttrKey::Stride, 1);
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
 
-        // Dequantize to float32 and use regular conv2d
-        Tensor input_f32 = input.to(DType::Float32);
-        Tensor weight_f32 = weight.to(DType::Float32);
+        float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale, 1.0));
+        float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ, 1.0));
+        float output_scale = static_cast<float>(attrs.get_float(AttrKey::OutputScale, 1.0));
+        int32_t input_zp = static_cast<int32_t>(attrs.get_int(AttrKey::InputZeroPoint, 0));
+        int32_t weight_zp = static_cast<int32_t>(attrs.get_int(AttrKey::WeightZeroPoint, 0));
+        int32_t output_zp = static_cast<int32_t>(attrs.get_int(AttrKey::OutputZeroPoint, 0));
 
-        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
-        Tensor output = rocm::conv2d_forward_kernel(input_f32, weight_f32, bias,
-            stride, padding, dilation, groups, get_hip_stream(attrs));
+        Tensor output = rocm::quantized_conv2d_hip(
+            input, weight, bias,
+            stride, padding, dilation, groups,
+            input_scale, input_zp, weight_scale, weight_zp,
+            output_scale, output_zp, get_hip_stream(attrs));
 
         return std::vector<Tensor>{output};
     });
