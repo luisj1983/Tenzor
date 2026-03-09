@@ -205,13 +205,9 @@ public:
         const Tensor& input = saved_tensors_[0];
         const Tensor& weight = saved_tensors_[1];
 
-        // Use backend dispatcher for gradient computation (routes to CUDA/cuDNN automatically)
-        std::vector<Tensor> tensors_for_dispatch = {grad_output};
-        auto* backend = Dispatcher::get_backend(tensors_for_dispatch);
-
         bool has_bias = saved_tensors_.size() > 2;
 
-        // Prepare attributes for unified backward — include both paired and single-value keys
+        // Use OpId-based dispatch for each gradient component
         OpAttributes backward_attrs;
         backward_attrs.set(AttrKey::Stride, stride_h_);
         backward_attrs.set(AttrKey::Padding, padding_h_);
@@ -223,22 +219,18 @@ public:
         backward_attrs.set(AttrKey::DilationH, dilation_h_);
         backward_attrs.set(AttrKey::DilationW, dilation_w_);
         backward_attrs.set(AttrKey::Groups, groups_);
-        backward_attrs.set(AttrKey::ComputeGradInput, true);
-        backward_attrs.set(AttrKey::ComputeGradWeight, true);
-        backward_attrs.set(AttrKey::ComputeGradBias, has_bias);
 
-        // Single dispatch call: conv2d_backward(grad_output, input, weight) -> [grad_input, grad_weight, grad_bias]
         std::vector<Tensor> backward_inputs = {grad_output, input, weight};
-        auto backward_result = backend->dispatch(
-            "conv2d_backward",
-            backward_inputs,
-            backward_attrs
-        );
+
+        // Dispatch individual backward ops via OpId
+        auto grad_input_result = dispatch(OpId::Conv2dBackwardInput, backward_inputs, backward_attrs);
+        auto grad_weight_result = dispatch(OpId::Conv2dBackwardWeight, backward_inputs, backward_attrs);
 
         if (has_bias) {
-            return {backward_result[0], backward_result[1], backward_result[2]};
+            auto grad_bias_result = dispatch(OpId::Conv2dBackwardBias, backward_inputs, backward_attrs);
+            return {grad_input_result[0], grad_weight_result[0], grad_bias_result[0]};
         }
-        return {backward_result[0], backward_result[1]};
+        return {grad_input_result[0], grad_weight_result[0]};
     }
 
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
@@ -478,10 +470,6 @@ public:
         auto input_4d = input_padded.unsqueeze(2);
         auto weight_4d = weight.unsqueeze(2);
 
-        // Use backend dispatcher for Conv2d backward with padding=0
-        std::vector<Tensor> tensors_for_dispatch = {grad_4d};
-        auto* backend = Dispatcher::get_backend(tensors_for_dispatch);
-
         bool has_bias = saved_tensors_.size() > 2;
 
         OpAttributes backward_attrs;
@@ -489,20 +477,16 @@ public:
         backward_attrs.set(AttrKey::Padding, 0);
         backward_attrs.set(AttrKey::Dilation, dilation_);
         backward_attrs.set(AttrKey::Groups, groups_);
-        backward_attrs.set(AttrKey::ComputeGradInput, true);
-        backward_attrs.set(AttrKey::ComputeGradWeight, true);
-        backward_attrs.set(AttrKey::ComputeGradBias, has_bias);
 
         std::vector<Tensor> backward_inputs = {grad_4d, input_4d, weight_4d};
-        auto backward_result = backend->dispatch(
-            "conv2d_backward",
-            backward_inputs,
-            backward_attrs
-        );
+
+        // Use OpId-based dispatch for each gradient component
+        auto grad_input_result = dispatch(OpId::Conv2dBackwardInput, backward_inputs, backward_attrs);
+        auto grad_weight_result = dispatch(OpId::Conv2dBackwardWeight, backward_inputs, backward_attrs);
 
         // Squeeze height dimension: [N,C,1,L] -> [N,C,L]
-        Tensor grad_input_padded = backward_result[0].squeeze(2);
-        Tensor grad_weight = backward_result[1].squeeze(2);
+        Tensor grad_input_padded = grad_input_result[0].squeeze(2);
+        Tensor grad_weight = grad_weight_result[0].squeeze(2);
 
         // Remove padding from grad_input to match original input shape
         Tensor grad_input = grad_input_padded;
@@ -513,7 +497,8 @@ public:
         }
 
         if (has_bias) {
-            return {grad_input, grad_weight, backward_result[2]};
+            auto grad_bias_result = dispatch(OpId::Conv2dBackwardBias, backward_inputs, backward_attrs);
+            return {grad_input, grad_weight, grad_bias_result[0]};
         }
         return {grad_input, grad_weight};
     }
@@ -635,10 +620,6 @@ auto Conv1d::forward_impl(const Variable& input) -> Variable {
     auto input_4d = input_tensor.unsqueeze(2);
     auto weight_4d = weight_matched.unsqueeze(2);
 
-    // Use backend dispatcher for Conv2d with padding=0 (we already padded manually)
-    std::vector<Tensor> tensors_for_dispatch = {input_4d};
-    auto* backend = Dispatcher::get_backend(tensors_for_dispatch);
-
     std::vector<Tensor> inputs_vec = {input_4d, weight_4d};
     if (bias_ptr != nullptr) {
         inputs_vec.push_back(*bias_ptr);
@@ -651,11 +632,9 @@ auto Conv1d::forward_impl(const Variable& input) -> Variable {
     forward_attrs.set(AttrKey::Dilation, dilation_);
     forward_attrs.set(AttrKey::Groups, groups_);
 
-    auto output_result = backend->dispatch(
-        "conv2d_forward",
+    auto output_result = dispatch(OpId::Conv2dForward,
         std::span<const Tensor>(inputs_vec),
-        forward_attrs
-    );
+        forward_attrs);
     Tensor output_4d = output_result[0];
 
     // Remove height dimension: [N, C_out, 1, L_out] -> [N, C_out, L_out]
@@ -776,8 +755,9 @@ public:
         weight_grad_attrs.set(AttrKey::Groups, groups_);
         weight_grad_attrs.set(AttrKey::WeightShape, std::string_view(ws_str));
 
-        // Swap roles: input as grad_output, grad_output as input for weight gradient
-        std::vector<Tensor> weight_grad_inputs = {input, grad_output};
+        // Conv2dBackwardWeight expects [grad_output, input, weight]
+        // For ConvTranspose2d weight grad, we swap roles: input acts as grad_output, grad_output acts as input
+        std::vector<Tensor> weight_grad_inputs = {input, grad_output, weight};
         auto weight_grad_result = dispatch(OpId::Conv2dBackwardWeight, std::span<const Tensor>(weight_grad_inputs), weight_grad_attrs);
         Tensor grad_weight = weight_grad_result[0];
 
@@ -893,10 +873,6 @@ auto ConvTranspose2d::forward_impl(const Variable& input) -> Variable {
 
     Tensor output;
 
-    // Use CPU backend through operation registry
-    std::vector<Tensor> tensors_for_dispatch = {input.tensor()};
-    auto* backend = Dispatcher::get_backend(tensors_for_dispatch);
-
     std::vector<Tensor> inputs_vec = {input.tensor(), weight_matched.tensor()};
     if (bias_ptr != nullptr) {
         inputs_vec.push_back(*bias_ptr);
@@ -908,11 +884,9 @@ auto ConvTranspose2d::forward_impl(const Variable& input) -> Variable {
     forward_attrs.set(AttrKey::OutputPadding, output_padding_);
     forward_attrs.set(AttrKey::Dilation, static_cast<int64_t>(1));  // ConvTranspose2d uses dilation=1
     forward_attrs.set(AttrKey::Groups, groups_);
-    auto output_result = backend->dispatch(
-        "conv_transpose2d_forward",
+    auto output_result = dispatch(OpId::ConvTranspose2dForward,
         std::span<const Tensor>(inputs_vec),
-        forward_attrs
-    );
+        forward_attrs);
     output = output_result[0];
 
     auto result = Variable(output, input.requires_grad() || weight.requires_grad());
@@ -1496,7 +1470,8 @@ public:
         weight_grad_attrs.set(AttrKey::Groups, groups_);
         weight_grad_attrs.set(AttrKey::WeightShape, std::string_view(ws_str));
 
-        std::vector<Tensor> weight_grad_inputs = {input_4d, grad_4d};
+        // Conv2dBackwardWeight expects [grad_output, input, weight]
+        std::vector<Tensor> weight_grad_inputs = {input_4d, grad_4d, weight_4d};
         auto weight_grad_result = dispatch(OpId::Conv2dBackwardWeight,
             std::span<const Tensor>(weight_grad_inputs), weight_grad_attrs);
         Tensor grad_weight = weight_grad_result[0].squeeze(2);
@@ -1615,9 +1590,6 @@ auto ConvTranspose1d::forward_impl(const Variable& input) -> Variable {
     auto weight_4d = weight_matched.tensor().unsqueeze(2);
 
     // Dispatch to ConvTranspose2d forward
-    std::vector<Tensor> tensors_for_dispatch = {input_4d};
-    auto* backend = Dispatcher::get_backend(tensors_for_dispatch);
-
     std::vector<Tensor> inputs_vec = {input_4d, weight_4d};
     if (bias_ptr != nullptr) {
         inputs_vec.push_back(*bias_ptr);
@@ -1629,11 +1601,9 @@ auto ConvTranspose1d::forward_impl(const Variable& input) -> Variable {
     forward_attrs.set(AttrKey::OutputPadding, output_padding_);
     forward_attrs.set(AttrKey::Dilation, static_cast<int64_t>(1));
     forward_attrs.set(AttrKey::Groups, groups_);
-    auto output_result = backend->dispatch(
-        "conv_transpose2d_forward",
+    auto output_result = dispatch(OpId::ConvTranspose2dForward,
         std::span<const Tensor>(inputs_vec),
-        forward_attrs
-    );
+        forward_attrs);
     Tensor output_4d = output_result[0];
 
     // Squeeze back: [N, C_out, 1, L_out] -> [N, C_out, L_out]

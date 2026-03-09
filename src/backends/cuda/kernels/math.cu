@@ -2453,6 +2453,18 @@ auto fill_kernel(const Tensor& tensor, float value, cudaStream_t stream) -> Tens
         fill_kernel_device<<<grid, block, 0, stream>>>(
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), bf_value, n);
         CUDA_CHECK(cudaGetLastError());
+    } else if (tensor.dtype() == DType::Int8) {
+        fill_kernel_device<<<grid, block, 0, stream>>>(
+            result.data<int8_t>(), static_cast<int8_t>(value), n);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (tensor.dtype() == DType::UInt8) {
+        fill_kernel_device<<<grid, block, 0, stream>>>(
+            result.data<uint8_t>(), static_cast<uint8_t>(value), n);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (tensor.dtype() == DType::Bool) {
+        fill_kernel_device<<<grid, block, 0, stream>>>(
+            result.data<bool>(), static_cast<bool>(value != 0.0f), n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Unsupported dtype for fill operation");
     }
@@ -3132,6 +3144,20 @@ auto compare_kernel_launcher(const Tensor& a, const Tensor& b, cudaStream_t stre
                 reinterpret_cast<const __half*>(b.data_ptr()),
                 result.data<bool>(), n, op);
             CUDA_CHECK(cudaGetLastError());
+        } else if (a.dtype() == DType::BFloat16) {
+            compare_kernel_device<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const __nv_bfloat16*>(a.data_ptr()),
+                reinterpret_cast<const __nv_bfloat16*>(b.data_ptr()),
+                result.data<bool>(), n, op);
+            CUDA_CHECK(cudaGetLastError());
+        } else if (a.dtype() == DType::Int8) {
+            compare_kernel_device<<<grid, block, 0, stream>>>(
+                a.data<int8_t>(), b.data<int8_t>(), result.data<bool>(), n, op);
+            CUDA_CHECK(cudaGetLastError());
+        } else if (a.dtype() == DType::UInt8) {
+            compare_kernel_device<<<grid, block, 0, stream>>>(
+                a.data<uint8_t>(), b.data<uint8_t>(), result.data<bool>(), n, op);
+            CUDA_CHECK(cudaGetLastError());
         } else if (a.dtype() == DType::Bool) {
             compare_kernel_device<<<grid, block, 0, stream>>>(
                 a.data<bool>(), b.data<bool>(), result.data<bool>(), n, op);
@@ -3189,6 +3215,23 @@ auto compare_kernel_launcher(const Tensor& a, const Tensor& b, cudaStream_t stre
             reinterpret_cast<const __half*>(a.data_ptr()),
             reinterpret_cast<const __half*>(b.data_ptr()),
             result.data<bool>(),
+            meta, ndim, n, op);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::BFloat16) {
+        broadcast_compare_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(a.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(b.data_ptr()),
+            result.data<bool>(),
+            meta, ndim, n, op);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::Int8) {
+        broadcast_compare_kernel<<<grid, block, 0, stream>>>(
+            a.data<int8_t>(), b.data<int8_t>(), result.data<bool>(),
+            meta, ndim, n, op);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::UInt8) {
+        broadcast_compare_kernel<<<grid, block, 0, stream>>>(
+            a.data<uint8_t>(), b.data<uint8_t>(), result.data<bool>(),
             meta, ndim, n, op);
         CUDA_CHECK(cudaGetLastError());
     } else if (a.dtype() == DType::Bool) {

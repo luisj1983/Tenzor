@@ -369,7 +369,8 @@ MaskRCNN::MaskRCNN(std::shared_ptr<nn::Module> backbone,
     register_module("feature_proj", feature_proj_);
 
     // Create RPN (assumes backbone output has 256 channels for FPN)
-    auto num_anchors = 3;  // 3 scales per location
+    // Anchor generator uses 3 sizes × 3 aspect ratios = 9 anchors per location
+    auto num_anchors = 9;
     rpn_ = std::make_shared<RPN>(256, num_anchors);
     register_module("rpn", rpn_);
 

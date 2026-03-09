@@ -450,6 +450,17 @@ TEST_P(YOLOMultiDTypeTest, YOLOv3EvalMode) {
     tenzor::manual_seed(42);
     auto model = yolov3(80, false);
     convert_model(model);
+
+    // Run one forward pass in training mode to populate BatchNorm running
+    // statistics.  Without this, BN eval uses default running_mean=0 /
+    // running_var=1, which is a no-op — activations grow through the deep
+    // backbone and overflow in reduced-precision dtypes.
+    model->train();
+    {
+        auto warmup = createInput({1, 3, 416, 416}, false);
+        model->forward(warmup);
+    }
+
     model->eval();
 
     auto images = createInput({1, 3, 416, 416}, false);

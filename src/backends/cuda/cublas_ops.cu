@@ -539,6 +539,11 @@ __global__ void bias_add_kernel_vec4(
  * Computes grad_bias[j] = sum_i(grad_output[i, j]) for all j in [0, out_features)
  * Each block handles one output feature, using efficient parallel reduction.
  */
+// Accumulation type: use float for half/bfloat16 to prevent overflow
+template<typename T> struct AccumType { using type = T; };
+template<> struct AccumType<__half> { using type = float; };
+template<> struct AccumType<__nv_bfloat16> { using type = float; };
+
 template<typename T, int BLOCK_SIZE = 256>
 __global__ void bias_grad_reduce_kernel(
     const T* __restrict__ grad_output,
@@ -546,16 +551,18 @@ __global__ void bias_grad_reduce_kernel(
     int64_t batch_size,
     int64_t out_features
 ) {
+    using Acc = typename AccumType<T>::type;
+
     // Each block handles one output feature
     int64_t feature_idx = blockIdx.x;
     if (feature_idx >= out_features) return;
 
-    __shared__ T shared[BLOCK_SIZE];
+    __shared__ Acc shared[BLOCK_SIZE];
 
-    // Each thread accumulates multiple elements
-    T sum = 0;
+    // Each thread accumulates multiple elements in higher precision
+    Acc sum = Acc(0);
     for (int64_t i = threadIdx.x; i < batch_size; i += BLOCK_SIZE) {
-        sum += grad_output[i * out_features + feature_idx];
+        sum += Acc(grad_output[i * out_features + feature_idx]);
     }
     shared[threadIdx.x] = sum;
     __syncthreads();
@@ -568,9 +575,9 @@ __global__ void bias_grad_reduce_kernel(
         __syncthreads();
     }
 
-    // Write result
+    // Write result (convert back to output type)
     if (threadIdx.x == 0) {
-        grad_bias[feature_idx] = shared[0];
+        grad_bias[feature_idx] = T(shared[0]);
     }
 }
 
@@ -586,14 +593,16 @@ __global__ void bias_grad_reduce_warp_kernel(
     int64_t batch_size,
     int64_t out_features
 ) {
+    using Acc = typename AccumType<T>::type;
+
     // Each block handles one output feature
     int64_t feature_idx = blockIdx.x;
     if (feature_idx >= out_features) return;
 
-    // Each thread accumulates multiple elements
-    T sum = 0;
+    // Each thread accumulates multiple elements in higher precision
+    Acc sum = Acc(0);
     for (int64_t i = threadIdx.x; i < batch_size; i += BLOCK_SIZE) {
-        sum += grad_output[i * out_features + feature_idx];
+        sum += Acc(grad_output[i * out_features + feature_idx]);
     }
 
     // Warp-level reduction using shuffle
@@ -602,7 +611,7 @@ __global__ void bias_grad_reduce_warp_kernel(
     }
 
     // First thread of each warp writes to shared memory
-    __shared__ T warp_sums[BLOCK_SIZE / 32];
+    __shared__ Acc warp_sums[BLOCK_SIZE / 32];
     int warp_id = threadIdx.x / 32;
     int lane_id = threadIdx.x % 32;
 
@@ -618,7 +627,7 @@ __global__ void bias_grad_reduce_warp_kernel(
             sum += __shfl_down_sync(0xffffffff, sum, offset);
         }
         if (lane_id == 0) {
-            grad_bias[feature_idx] = sum;
+            grad_bias[feature_idx] = T(sum);
         }
     }
 }

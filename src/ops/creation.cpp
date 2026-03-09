@@ -716,7 +716,7 @@ auto eye(int64_t n, std::optional<int64_t> m, DType dtype, Device device) -> Ten
     if (device.type != Device::Type::CPU) {
         OpAttributes attrs;
         attrs.set(AttrKey::N, n);
-        attrs.set(AttrKey::Shape, std::to_string(cols));
+        attrs.set(AttrKey::M, cols);
         attrs.set(AttrKey::Dtype, dtype_to_string(dtype));
         attrs.set(AttrKey::Device, static_cast<int64_t>(device.index));
 

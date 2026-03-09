@@ -153,9 +153,9 @@ TEST_P(TransformTest, Squeeze_AllOnes) {
     auto t = zeros({1, 1, 1}, DType::Float32, device);
     auto squeezed = t.squeeze();
 
-    // Should keep at least one dimension
-    EXPECT_EQ(squeezed.ndim(), 1) << "Failed on " << device.to_string();
-    EXPECT_EQ(squeezed.shape()[0], 1) << "Failed on " << device.to_string();
+    // PyTorch behavior: squeezing all singleton dims yields a 0-D scalar tensor
+    EXPECT_EQ(squeezed.ndim(), 0) << "Failed on " << device.to_string();
+    EXPECT_EQ(squeezed.numel(), 1) << "Failed on " << device.to_string();
 }
 
 TEST_P(TransformTest, Squeeze_InvalidDim) {

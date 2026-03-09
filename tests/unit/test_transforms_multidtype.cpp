@@ -225,8 +225,9 @@ TEST_P(TransformMultiDTypeTest, Squeeze_AllOnes) {
     auto t = zeros({1, 1, 1}, dtype, device);
     auto squeezed = t.squeeze();
 
-    EXPECT_EQ(squeezed.ndim(), 1);
-    EXPECT_EQ(squeezed.shape()[0], 1);
+    // PyTorch behavior: squeezing all singleton dims yields a 0-D scalar tensor
+    EXPECT_EQ(squeezed.ndim(), 0);
+    EXPECT_EQ(squeezed.numel(), 1);
 }
 
 TEST_P(TransformMultiDTypeTest, Squeeze_NegativeIndex) {

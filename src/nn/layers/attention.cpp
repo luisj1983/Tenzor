@@ -30,6 +30,43 @@ namespace nn {
 // Namespace alias for autograd operations
 namespace autograd = tenzor;
 
+// Autograd-aware dtype cast (gradient flows through with proper dtype conversion)
+class AttentionTypeCastBackward : public Function {
+public:
+    DType original_dtype_ = DType::Float32;
+    auto forward(std::vector<Variable>) -> std::vector<Variable> override {
+        throw std::runtime_error("AttentionTypeCastBackward::forward should not be called");
+    }
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        auto& grad = grad_outputs[0];
+        return {(grad.dtype() != original_dtype_) ? grad.to(original_dtype_) : grad};
+    }
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        auto& grad = grad_outputs[0];
+        if (grad.dtype() != original_dtype_) {
+            return {Variable(grad.tensor().to(original_dtype_), grad.requires_grad())};
+        }
+        return {grad};
+    }
+};
+
+static auto attention_cast(const Variable& input, DType target_dtype) -> Variable {
+    if (input.dtype() == target_dtype) return input;
+    auto converted = input.tensor().to(target_dtype);
+    Variable result(converted, input.requires_grad());
+    if (input.requires_grad() && is_grad_enabled()) {
+        auto grad_fn = std::make_shared<AttentionTypeCastBackward>();
+        grad_fn->original_dtype_ = input.dtype();
+        std::vector<Variable> input_vars = {input};
+        grad_fn->set_input_variables(input_vars);
+        if (auto fn = input.grad_fn()) {
+            grad_fn->set_next_functions({fn});
+        }
+        result.set_grad_fn(grad_fn);
+    }
+    return result;
+}
+
 // ============================================================================
 // MultiheadAttention Implementation
 // ============================================================================
@@ -297,6 +334,14 @@ auto MultiheadAttention::scaled_dot_product_attention(
 
     // Standard path: Use cuBLAS bmm operations (fast for all cases)
 
+    // For Float16/BFloat16, upcast Q, K, V to Float32 for the full attention computation
+    // to prevent gradient overflow. This matches PyTorch's scaled_dot_product_attention behavior.
+    DType orig_dtype = query.dtype();
+    bool needs_attn_upcast = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    Variable query_compute = needs_attn_upcast ? attention_cast(query, DType::Float32) : query;
+    Variable key_compute = needs_attn_upcast ? attention_cast(key, DType::Float32) : key;
+    Variable value_compute = needs_attn_upcast ? attention_cast(value, DType::Float32) : value;
+
     // Compute scaling factor
     double scale = 1.0 / std::sqrt(static_cast<double>(head_dim));
 
@@ -306,9 +351,9 @@ auto MultiheadAttention::scaled_dot_product_attention(
     std::vector<int64_t> reshaped_k_shape = {batch_size * num_heads, seq_len_k, head_dim};
     std::vector<int64_t> reshaped_v_shape = {batch_size * num_heads, seq_len_k, head_dim};
 
-    auto query_3d = autograd::reshape(query, reshaped_q_shape);
-    auto key_3d = autograd::reshape(key, reshaped_k_shape);
-    auto value_3d = autograd::reshape(value, reshaped_v_shape);
+    auto query_3d = autograd::reshape(query_compute, reshaped_q_shape);
+    auto key_3d = autograd::reshape(key_compute, reshaped_k_shape);
+    auto value_3d = autograd::reshape(value_compute, reshaped_v_shape);
 
     // Transpose key: (batch*num_heads, seq_len_k, head_dim) -> (batch*num_heads, head_dim, seq_len_k)
     std::vector<int64_t> key_perm = {0, 2, 1};
@@ -323,8 +368,9 @@ auto MultiheadAttention::scaled_dot_product_attention(
     std::vector<int64_t> scores_4d_shape = {batch_size, num_heads, seq_len_q, seq_len_k};
     scores = autograd::reshape(scores, scores_4d_shape);
 
-    // Scale scores
-    Tensor scale_tensor = full({1}, static_cast<float>(scale), query.dtype(), query.device());
+    // Scale scores (use Float32 for reduced-precision types)
+    DType score_dtype = needs_attn_upcast ? DType::Float32 : orig_dtype;
+    Tensor scale_tensor = full({1}, static_cast<float>(scale), score_dtype, query.device());
     Variable scale_var(scale_tensor, false);
 
     scores = scores * scale_var;
@@ -342,18 +388,20 @@ auto MultiheadAttention::scaled_dot_product_attention(
         // Build directly in Float32 (sufficient precision for mask values)
         Tensor causal = zeros({seq_len_q, seq_len_k}, DType::Float32, Device::cpu());
         auto* causal_data = causal.data<float>();
-        // Use dtype-appropriate mask value: 1e4 for FP16/BF16 (avoids overflow), 1e9 for FP32+
-        DType qdt = query.dtype();
-        float neg_inf_val = (qdt == DType::Float16 || qdt == DType::BFloat16)
-                            ? -1e4f : -std::numeric_limits<float>::infinity();
+        // When scores are in Float32 (upcast from FP16/BF16), use -inf directly
+        // Otherwise use dtype-appropriate mask value: 1e4 for FP16/BF16, inf for FP32+
+        float neg_inf_val = -std::numeric_limits<float>::infinity();
+        if (!needs_attn_upcast && (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16)) {
+            neg_inf_val = -1e4f;
+        }
         for (int64_t i = 0; i < seq_len_q; ++i) {
             for (int64_t j = i + 1; j < seq_len_k; ++j) {
                 causal_data[i * seq_len_k + j] = neg_inf_val;
             }
         }
-        // Convert to query dtype and device
-        if (qdt != DType::Float32) {
-            causal = causal.to(qdt);
+        // Convert to score dtype and device
+        if (score_dtype != DType::Float32) {
+            causal = causal.to(score_dtype);
         }
         if (query.device() != Device::cpu()) {
             causal = causal.to(query.device());
@@ -395,6 +443,7 @@ auto MultiheadAttention::scaled_dot_product_attention(
 
     // Apply softmax to get attention weights
     // Softmax over last dimension (seq_len_k)
+    // For Float16/BFloat16, scores are already in Float32 from upcast above
     Variable attn_weights = autograd::softmax(scores, -1);
 
     // Apply dropout if in training mode and dropout > 0
@@ -413,6 +462,12 @@ auto MultiheadAttention::scaled_dot_product_attention(
     // Reshape back to (batch, num_heads, seq_len_q, head_dim)
     std::vector<int64_t> attended_4d_shape = {batch_size, num_heads, seq_len_q, head_dim};
     auto attended = autograd::reshape(attended_3d, attended_4d_shape);
+
+    // Downcast attention output back to original dtype
+    if (needs_attn_upcast) {
+        attended = attention_cast(attended, orig_dtype);
+        attn_weights = attention_cast(attn_weights, orig_dtype);
+    }
 
     return {attended, attn_weights};
 }
@@ -451,23 +506,25 @@ auto MultiheadAttention::forward(const Variable& query,
     auto k_shape = k_ptr->shape();
     int64_t seq_len_k = k_shape[1];
 
-    // Ensure query/key/value are on the same device as projection weights
+    // Ensure projection weights are on the same device as input
     auto weight_device = q_proj_->own_parameters()[0]->tensor().device();
+    auto input_device = q_ptr->tensor().device();
 
-    auto ensure_compat = [&](const Variable& var) -> Variable {
-        Variable result = var;
-        // Device conversion first
-        if (result.tensor().device() != weight_device) {
-            auto transferred = result.tensor().to(weight_device);
-            result = Variable(transferred, result.requires_grad());
-            result.set_grad_fn(var.grad_fn());
+    if (weight_device != input_device) {
+        // Move projection layers to input device to preserve autograd chain
+        q_proj_->to(input_device);
+        k_proj_->to(input_device);
+        v_proj_->to(input_device);
+        out_proj_->to(input_device);
+        if (add_bias_kv_) {
+            bias_k_ = Variable(bias_k_.tensor().to(input_device), bias_k_.requires_grad());
+            bias_v_ = Variable(bias_v_.tensor().to(input_device), bias_v_.requires_grad());
         }
-        return result;
-    };
+    }
 
-    Variable q_compat = ensure_compat(*q_ptr);
-    Variable k_compat = ensure_compat(*k_ptr);
-    Variable v_compat = ensure_compat(*v_ptr);
+    const Variable& q_compat = *q_ptr;
+    const Variable& k_compat = *k_ptr;
+    const Variable& v_compat = *v_ptr;
 
     // Project inputs
     Variable Q = q_proj_->forward(q_compat);

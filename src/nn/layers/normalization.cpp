@@ -430,10 +430,39 @@ public:
             auto rs = rstd_orig.contiguous();
             auto wt = weight_orig.contiguous();
 
+            // For Float16/BFloat16, upcast all tensors to Float32 for backward
+            // computation to prevent gradient overflow. The CUDA mixed kernel
+            // computes internally in Float32 but writes __half output, losing
+            // values > 65504 to Inf. This matches CPU backward behavior.
+            DType orig_dt = inp.dtype();
+            bool needs_upcast = (orig_dt == DType::Float16 || orig_dt == DType::BFloat16);
+            if (needs_upcast) {
+                go = go.to(DType::Float32);
+                inp = inp.to(DType::Float32);
+                mn = mn.to(DType::Float32);
+                rs = rs.to(DType::Float32);
+                wt = wt.to(DType::Float32);
+            } else {
+                // GPU backward kernels read all tensors with the same dtype as input
+                // (e.g., CUDA Float64 kernel reinterpret_casts to double*).
+                // Mixed precision (e.g. Float32 weights with Float64 input) requires
+                // converting all tensors to match input dtype before dispatch.
+                if (go.dtype() != inp.dtype()) go = go.to(inp.dtype());
+                if (mn.dtype() != inp.dtype()) mn = mn.to(inp.dtype());
+                if (rs.dtype() != inp.dtype()) rs = rs.to(inp.dtype());
+                if (wt.dtype() != inp.dtype()) wt = wt.to(inp.dtype());
+            }
+
             NewOpAttributes attrs;
             attrs.set(AttrKey::NormalizedShape, std::to_string(normalized_size_));
+            // Standard order: [grad_output, input, mean, inv_std, weight]
             std::vector<Tensor> inputs_vec = {go, inp, mn, rs, wt};
             auto results = dispatch<OpId::LayerNormBackward>(inputs_vec, attrs);
+
+            // Convert results back to original dtype
+            if (needs_upcast) {
+                for (auto& r : results) r = r.to(orig_dt);
+            }
             return results;
         }
 
@@ -1157,20 +1186,10 @@ auto LayerNorm::forward_impl(const Variable& input) -> Variable {
             auto result = Variable(output, true);
 
             // Save mean and rstd for backward pass
-            // For Vulkan backward, stats must match input dtype (Float64) since the
-            // f64 shader reads them as double[]. CPU backward converts to Float32 itself.
+            // GPU backward kernels expect stats to match input dtype (Float64).
+            // CPU backward converts to Float32 itself, so save as Float32 to avoid waste.
             Tensor batch_mean_save, rstd_save;
-            if (original_device.type == Device::Type::Vulkan) {
-                // Save as Float64 to match the f64 backward shader's buffer declarations
-                batch_mean_save = zeros({batch_size}, DType::Float64, Device::cpu());
-                rstd_save = zeros({batch_size}, DType::Float64, Device::cpu());
-                auto* mean_save_data = batch_mean_save.data<double>();
-                auto* rstd_save_data = rstd_save.data<double>();
-                for (int64_t b = 0; b < batch_size; b++) {
-                    mean_save_data[b] = mean_data_f64[b];
-                    rstd_save_data[b] = rstd_data_f64[b];
-                }
-            } else {
+            if (original_device.type == Device::Type::CPU) {
                 // CPU backward converts to Float32 anyway, save as Float32
                 batch_mean_save = zeros({batch_size}, DType::Float32, Device::cpu());
                 rstd_save = zeros({batch_size}, DType::Float32, Device::cpu());
@@ -1179,6 +1198,16 @@ auto LayerNorm::forward_impl(const Variable& input) -> Variable {
                 for (int64_t b = 0; b < batch_size; b++) {
                     mean_save_data[b] = static_cast<float>(mean_data_f64[b]);
                     rstd_save_data[b] = static_cast<float>(rstd_data_f64[b]);
+                }
+            } else {
+                // GPU backends (CUDA, Vulkan, ROCm, etc.) read stats as-is in backward kernels
+                batch_mean_save = zeros({batch_size}, DType::Float64, Device::cpu());
+                rstd_save = zeros({batch_size}, DType::Float64, Device::cpu());
+                auto* mean_save_data = batch_mean_save.data<double>();
+                auto* rstd_save_data = rstd_save.data<double>();
+                for (int64_t b = 0; b < batch_size; b++) {
+                    mean_save_data[b] = mean_data_f64[b];
+                    rstd_save_data[b] = rstd_data_f64[b];
                 }
             }
 

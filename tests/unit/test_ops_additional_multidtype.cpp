@@ -133,7 +133,8 @@ TEST_P(OpsAdditionalMultiDTypeTest, SumAllElements) {
     } else if (dtype == DType::Float64) {
         EXPECT_DOUBLE_EQ(result_cpu.data<double>()[0], 24.0);
     } else if (dtype == DType::Int32) {
-        EXPECT_EQ(result_cpu.data<int32_t>()[0], 24);
+        // Int32 sum promotes to Int64 to prevent overflow (matches PyTorch)
+        EXPECT_EQ(result_cpu.data<int64_t>()[0], 24);
     }
 }
 
@@ -260,7 +261,8 @@ TEST_P(OpsAdditionalMultiDTypeTest, ProdOperation) {
     if (dtype == DType::Float32) {
         EXPECT_FLOAT_EQ(result_cpu.data<float>()[0], 64.0f);
     } else if (dtype == DType::Int32) {
-        EXPECT_EQ(result_cpu.data<int32_t>()[0], 64);
+        // Int32 prod promotes to Int64 to prevent overflow (matches PyTorch)
+        EXPECT_EQ(result_cpu.data<int64_t>()[0], 64);
     }
 }
 

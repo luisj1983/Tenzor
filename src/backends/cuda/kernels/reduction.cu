@@ -72,6 +72,11 @@ static DimMeta make_dim_meta(const std::vector<int64_t>& shape, const std::vecto
 // Type helpers for __half support
 // ============================================================================
 
+// Accumulation type: use float for half/bfloat16 to prevent overflow
+template<typename T> struct AccumType { using type = T; };
+template<> struct AccumType<__half> { using type = float; };
+template<> struct AccumType<__nv_bfloat16> { using type = float; };
+
 // Device-side helpers
 template<typename T>
 __device__ __forceinline__ T cuda_zero() { return T(0); }
@@ -340,16 +345,17 @@ __device__ __forceinline__ __half half_pos_inf() {
 
 template<typename T>
 __global__ void sum_reduce_kernel(const T* input, T* output, int64_t n) {
-    __shared__ T shared[REDUCTION_BLOCK_SIZE];
+    using Acc = typename AccumType<T>::type;
+    __shared__ Acc shared[REDUCTION_BLOCK_SIZE];
 
     int tid = threadIdx.x;
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t grid_size = blockDim.x * gridDim.x;
 
-    // Grid-stride loop for better occupancy
-    T thread_sum = cuda_zero<T>();
+    // Grid-stride loop with higher-precision accumulation
+    Acc thread_sum = Acc(0);
     for (int64_t i = idx; i < n; i += grid_size) {
-        thread_sum = cuda_add(thread_sum, input[i]);
+        thread_sum = thread_sum + Acc(input[i]);
     }
 
     shared[tid] = thread_sum;
@@ -358,18 +364,18 @@ __global__ void sum_reduce_kernel(const T* input, T* output, int64_t n) {
     // Block-level reduction in shared memory
     for (int stride = blockDim.x / 2; stride >= WARP_SIZE; stride >>= 1) {
         if (tid < stride) {
-            shared[tid] = cuda_add(shared[tid], shared[tid + stride]);
+            shared[tid] = shared[tid] + shared[tid + stride];
         }
         __syncthreads();
     }
 
     // Warp-level reduction
     if (tid < WARP_SIZE) {
-        T val = shared[tid];
+        Acc val = shared[tid];
         val = warp_reduce_sum(val);
 
         if (tid == 0) {
-            output[blockIdx.x] = val;
+            output[blockIdx.x] = T(val);
         }
     }
 }
@@ -655,8 +661,9 @@ __global__ void sum_along_dim_kernel(
         tmp /= meta.shape[d];
     }
 
-    // Sum along the reduction dimension
-    T sum = cuda_zero<T>();
+    // Sum along the reduction dimension with higher-precision accumulation
+    using Acc = typename AccumType<T>::type;
+    Acc sum = Acc(0);
     for (int64_t i = 0; i < dim_size; i++) {
         indices[dim] = i;
 
@@ -666,10 +673,10 @@ __global__ void sum_along_dim_kernel(
             in_idx += indices[d] * meta.strides[d];
         }
 
-        sum = cuda_add(sum, input[in_idx]);
+        sum = sum + Acc(input[in_idx]);
     }
 
-    output[out_idx] = sum;
+    output[out_idx] = T(sum);
 }
 
 // Max reduction along a specific dimension
@@ -3768,26 +3775,27 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
 // Reduces input[0..n-1] and writes sqrt(sum) to output[0]
 template<typename T>
 __global__ void sum_reduce_sqrt_kernel(const T* input, T* output, int64_t n) {
-    __shared__ T shared[REDUCTION_BLOCK_SIZE];
+    using Acc = typename AccumType<T>::type;
+    __shared__ Acc shared[REDUCTION_BLOCK_SIZE];
     int tid = threadIdx.x;
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t grid_size = blockDim.x * gridDim.x;
 
-    T thread_sum = cuda_zero<T>();
+    Acc thread_sum = Acc(0);
     for (int64_t i = idx; i < n; i += grid_size) {
-        thread_sum = cuda_add(thread_sum, input[i]);
+        thread_sum = thread_sum + Acc(input[i]);
     }
     shared[tid] = thread_sum;
     __syncthreads();
 
     for (int stride = blockDim.x / 2; stride >= WARP_SIZE; stride >>= 1) {
-        if (tid < stride) shared[tid] = cuda_add(shared[tid], shared[tid + stride]);
+        if (tid < stride) shared[tid] = shared[tid] + shared[tid + stride];
         __syncthreads();
     }
     if (tid < WARP_SIZE) {
-        T val = shared[tid];
+        Acc val = shared[tid];
         val = warp_reduce_sum(val);
-        if (tid == 0) output[blockIdx.x] = sqrt(val);
+        if (tid == 0) output[blockIdx.x] = T(sqrt(val));
     }
 }
 
@@ -3795,26 +3803,27 @@ __global__ void sum_reduce_sqrt_kernel(const T* input, T* output, int64_t n) {
 // Reduces input[0..n-1] and writes pow(sum, exponent) to output[0]
 template<typename T>
 __global__ void sum_reduce_pow_kernel(const T* input, T* output, int64_t n, T exponent) {
-    __shared__ T shared[REDUCTION_BLOCK_SIZE];
+    using Acc = typename AccumType<T>::type;
+    __shared__ Acc shared[REDUCTION_BLOCK_SIZE];
     int tid = threadIdx.x;
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t grid_size = blockDim.x * gridDim.x;
 
-    T thread_sum = cuda_zero<T>();
+    Acc thread_sum = Acc(0);
     for (int64_t i = idx; i < n; i += grid_size) {
-        thread_sum = cuda_add(thread_sum, input[i]);
+        thread_sum = thread_sum + Acc(input[i]);
     }
     shared[tid] = thread_sum;
     __syncthreads();
 
     for (int stride = blockDim.x / 2; stride >= WARP_SIZE; stride >>= 1) {
-        if (tid < stride) shared[tid] = cuda_add(shared[tid], shared[tid + stride]);
+        if (tid < stride) shared[tid] = shared[tid] + shared[tid + stride];
         __syncthreads();
     }
     if (tid < WARP_SIZE) {
-        T val = shared[tid];
+        Acc val = shared[tid];
         val = warp_reduce_sum(val);
-        if (tid == 0) output[blockIdx.x] = pow(val, exponent);
+        if (tid == 0) output[blockIdx.x] = T(pow(val, Acc(exponent)));
     }
 }
 

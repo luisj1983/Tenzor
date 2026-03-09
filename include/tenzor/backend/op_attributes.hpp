@@ -313,6 +313,7 @@ public:
     void set(AttrKey key, double v) { set_entry(key, AttrValue::from_float(v)); }
     void set(AttrKey key, float v) { set_entry(key, AttrValue::from_float(v)); }
     void set(AttrKey key, bool v) { set_entry(key, AttrValue::from_bool(v)); }
+    void set(AttrKey key, const char* v) { set_entry(key, AttrValue::from_string(v)); }
     void set(AttrKey key, std::string_view v) { set_entry(key, AttrValue::from_string(v)); }
 
     // Typed getters with defaults

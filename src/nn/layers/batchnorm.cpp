@@ -383,10 +383,25 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
             rv_var_ptr->tensor() = fused_results[2].to(DType::Float32);
             batch_mean = fused_results[3];  // saved_mean for backward
             batch_var = fused_results[4];   // saved_inv_var for backward
-            buffers_["num_batches_tracked"]->tensor().data<int64_t>()[0]++;
+            // Safe increment: transfer to CPU if on GPU, increment, transfer back
+            {
+                auto& nbt = buffers_["num_batches_tracked"]->tensor();
+                if (nbt.device().type != Device::Type::CPU) {
+                    auto nbt_cpu = nbt.to(Device::cpu());
+                    nbt_cpu.data<int64_t>()[0]++;
+                    nbt = nbt_cpu.to(nbt.device());
+                } else {
+                    nbt.data<int64_t>()[0]++;
+                }
+            }
 
             // Return output directly (autograd handled below if needed)
             Tensor output = fused_results[0];
+
+            // Downcast output back to original dtype if we upcasted
+            if (needs_upcast) {
+                output = output.to(orig_dtype);
+            }
 
             // Handle autograd for fused path
             bool requires_grad = input.requires_grad();
@@ -477,7 +492,15 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
             rm_var_ptr->tensor() = updated_stats[0].to(DType::Float32);
             rv_var_ptr->tensor() = updated_stats[1].to(DType::Float32);
 
-            buffers_["num_batches_tracked"]->tensor().data<int64_t>()[0]++;
+            // Safe increment: transfer to CPU if on GPU, increment, transfer back
+            auto& nbt = buffers_["num_batches_tracked"]->tensor();
+            if (nbt.device().type != Device::Type::CPU) {
+                auto nbt_cpu = nbt.to(Device::cpu());
+                nbt_cpu.data<int64_t>()[0]++;
+                nbt = nbt_cpu.to(nbt.device());
+            } else {
+                nbt.data<int64_t>()[0]++;
+            }
         }
     } else {
         // Inference mode: use running statistics (transfer to input device if needed)
@@ -834,7 +857,15 @@ auto BatchNorm1d::forward_impl(const Variable& input) -> Variable {
             rm_tensor = rm_tensor * (1.0f - momentum_) + batch_mean * momentum_;
             rv_tensor = rv_tensor * (1.0f - momentum_) + unbiased_var * momentum_;
 
-            buffers_["num_batches_tracked"]->tensor().data<int64_t>()[0]++;
+            // Safe increment: transfer to CPU if on GPU, increment, transfer back
+            auto& nbt = buffers_["num_batches_tracked"]->tensor();
+            if (nbt.device().type != Device::Type::CPU) {
+                auto nbt_cpu = nbt.to(Device::cpu());
+                nbt_cpu.data<int64_t>()[0]++;
+                nbt = nbt_cpu.to(nbt.device());
+            } else {
+                nbt.data<int64_t>()[0]++;
+            }
         }
     } else {
         if (track_running_stats_) {

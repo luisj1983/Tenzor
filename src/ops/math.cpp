@@ -39,7 +39,7 @@ static void validate_broadcast_shapes(const char* op_name,
                 if (i) b_str += ",";
                 b_str += std::to_string(b_shape[i]);
             }
-            throw std::invalid_argument(
+            throw std::runtime_error(
                 std::string(op_name) + ": shapes " + a_str + "] and " + b_str +
                 "] are not broadcast-compatible");
         }

@@ -257,7 +257,10 @@ TEST_P(MaskRCNNMultiDTypeTest, MaskHeadMultiInstance) {
     Tensor gt_boxes({1, 5, 4}, dtype(), device());
     initialize_boxes(gt_boxes, 5, img_size);
 
-    Tensor gt_labels({1, 5}, DType::Int64, device());
+    Tensor gt_labels_cpu260({1, 5}, DType::Int64, Device::cpu());
+    auto labels_data260 = gt_labels_cpu260.data<int64_t>();
+    for (int64_t i = 0; i < 5; ++i) labels_data260[i] = i + 1;
+    auto gt_labels = gt_labels_cpu260.to(device());
 
     Tensor gt_masks({1, 5, img_size, img_size}, dtype(), device());
     initialize_masks(gt_masks);
@@ -280,7 +283,10 @@ TEST_P(MaskRCNNMultiDTypeTest, MaskHeadGradientFlow) {
     Tensor gt_boxes({1, 2, 4}, dtype(), device());
     initialize_boxes(gt_boxes, 2, img_size);
 
-    Tensor gt_labels({1, 2}, DType::Int64, device());
+    Tensor gt_labels_cpu283({1, 2}, DType::Int64, Device::cpu());
+    auto labels_data283 = gt_labels_cpu283.data<int64_t>();
+    labels_data283[0] = 1; labels_data283[1] = 2;
+    auto gt_labels = gt_labels_cpu283.to(device());
 
     Tensor gt_masks({1, 2, img_size, img_size}, dtype(), device());
     initialize_masks(gt_masks);
@@ -462,7 +468,10 @@ TEST_P(MaskRCNNMultiDTypeTest, MultiInstanceTraining) {
     Tensor gt_boxes({1, 4, 4}, dtype(), device());
     initialize_boxes(gt_boxes, 4, img_size);
 
-    Tensor gt_labels({1, 4}, DType::Int64, device());
+    Tensor gt_labels_cpu465({1, 4}, DType::Int64, Device::cpu());
+    auto labels_data465 = gt_labels_cpu465.data<int64_t>();
+    for (int64_t i = 0; i < 4; ++i) labels_data465[i] = i + 1;
+    auto gt_labels = gt_labels_cpu465.to(device());
 
     Tensor gt_masks({1, 4, img_size, img_size}, dtype(), device());
     initialize_masks(gt_masks);
@@ -487,7 +496,10 @@ TEST_P(MaskRCNNMultiDTypeTest, MultiInstanceDifferentClasses) {
     Tensor gt_boxes({1, 3, 4}, dtype(), device());
     initialize_boxes(gt_boxes, 3, img_size);
 
-    Tensor gt_labels({1, 3}, DType::Int64, device());
+    Tensor gt_labels_cpu490({1, 3}, DType::Int64, Device::cpu());
+    auto labels_data490 = gt_labels_cpu490.data<int64_t>();
+    labels_data490[0] = 1; labels_data490[1] = 5; labels_data490[2] = 10;
+    auto gt_labels = gt_labels_cpu490.to(device());
 
     Tensor gt_masks({1, 3, img_size, img_size}, dtype(), device());
     initialize_masks(gt_masks);
@@ -579,7 +591,10 @@ TEST_P(MaskRCNNMultiDTypeTest, EndToEndTraining) {
     Tensor gt_boxes({1, 2, 4}, dtype(), device());
     initialize_boxes(gt_boxes, 2, img_size);
 
-    Tensor gt_labels({1, 2}, DType::Int64, device());
+    Tensor gt_labels_cpu594({1, 2}, DType::Int64, Device::cpu());
+    auto labels_data594 = gt_labels_cpu594.data<int64_t>();
+    labels_data594[0] = 1; labels_data594[1] = 3;
+    auto gt_labels = gt_labels_cpu594.to(device());
 
     Tensor gt_masks({1, 2, img_size, img_size}, dtype(), device());
     initialize_masks(gt_masks);

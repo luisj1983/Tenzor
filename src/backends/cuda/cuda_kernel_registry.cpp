@@ -24,6 +24,25 @@
 
 namespace tenzor {
 
+// Helper to convert dtype string to DType enum (matches creation.cpp's dtype_to_string)
+inline DType dtype_from_string(std::string_view s, DType default_val = DType::Float32) {
+    if (s == "float32") return DType::Float32;
+    if (s == "float64") return DType::Float64;
+    if (s == "float16") return DType::Float16;
+    if (s == "bfloat16") return DType::BFloat16;
+    if (s == "int32") return DType::Int32;
+    if (s == "int64") return DType::Int64;
+    if (s == "int16") return DType::Int16;
+    if (s == "int8") return DType::Int8;
+    if (s == "uint8") return DType::UInt8;
+    if (s == "uint16") return DType::UInt16;
+    if (s == "uint32") return DType::UInt32;
+    if (s == "uint64") return DType::UInt64;
+    if (s == "bool") return DType::Bool;
+    if (s.empty()) return default_val;
+    return default_val;
+}
+
 // Helper to extract CUDA stream from attributes
 inline cudaStream_t get_cuda_stream(const OpAttributes& attrs) {
     if (attrs.has(AttrKey::Stream)) {
@@ -1552,10 +1571,10 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{output, mean, inv_std};
     });
     table.register_kernel(OpId::LayerNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // inputs: [grad_output, input, weight, mean, inv_std]
+        // inputs: [grad_output, input, mean, inv_std, weight]
         auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
         auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_layer_norm_backward(
-            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], normalized_shape, get_cuda_stream(attrs));
+            inputs[0], inputs[1], inputs[4], inputs[2], inputs[3], normalized_shape, get_cuda_stream(attrs));
         return std::vector<Tensor>{grad_input, grad_weight, grad_bias};
     });
 #else
@@ -1567,9 +1586,10 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{output, mean, inv_std};
     });
     table.register_kernel(OpId::LayerNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [grad_output, input, mean, inv_std, weight]
         auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
         auto [grad_input, grad_weight, grad_bias] = cuda::fused_layer_norm_backward_cuda(
-            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], normalized_shape);
+            inputs[0], inputs[1], inputs[4], inputs[2], inputs[3], normalized_shape);
         return std::vector<Tensor>{grad_input, grad_weight, grad_bias};
     });
 #endif
@@ -1604,7 +1624,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // =========================================================================
     table.register_kernel(OpId::GroupNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [input, weight, bias]
-        int64_t num_groups = attrs.get_int(AttrKey::Groups, 1);
+        int64_t num_groups = attrs.get_int(AttrKey::NumGroups, 1);
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         auto [output, mean, inv_std] = cuda::group_norm_forward_kernel(
             inputs[0], inputs[1], inputs[2], num_groups, eps, get_cuda_stream(attrs));
@@ -1612,7 +1632,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     });
     table.register_kernel(OpId::GroupNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [grad_output, input, weight, mean, inv_std]
-        int64_t num_groups = attrs.get_int(AttrKey::Groups, 1);
+        int64_t num_groups = attrs.get_int(AttrKey::NumGroups, 1);
         auto [grad_input, grad_weight, grad_bias] = cuda::group_norm_backward_kernel(
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], num_groups, get_cuda_stream(attrs));
         return std::vector<Tensor>{grad_input, grad_weight, grad_bias};
@@ -1653,9 +1673,8 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // =========================================================================
     table.register_kernel(OpId::Zeros, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto shape = attrs.get_int_list(AttrKey::Shape);
-        int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int>(DType::Float32)));
-        DType dtype = static_cast<DType>(dtype_int);
-        int device_idx = static_cast<int>(attrs.get_int(AttrKey::DeviceIndex, 0));
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
+        int device_idx = static_cast<int>(attrs.get_int(AttrKey::Device, 0));
         Device device = Device::cuda(device_idx);
         Tensor output(shape, dtype, device);
         cudaMemsetAsync(output.data_ptr(), 0, output.numel() * dtype_size(dtype), get_cuda_stream(attrs));
@@ -1663,9 +1682,8 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     });
     table.register_kernel(OpId::Ones, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto shape = attrs.get_int_list(AttrKey::Shape);
-        int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int>(DType::Float32)));
-        DType dtype = static_cast<DType>(dtype_int);
-        int device_idx = static_cast<int>(attrs.get_int(AttrKey::DeviceIndex, 0));
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
+        int device_idx = static_cast<int>(attrs.get_int(AttrKey::Device, 0));
         Device device = Device::cuda(device_idx);
         Tensor output(shape, dtype, device);
         return std::vector<Tensor>{cuda::fill_kernel(output, 1.0f, get_cuda_stream(attrs))};
@@ -1673,26 +1691,23 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::Full, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto shape = attrs.get_int_list(AttrKey::Shape);
         float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
-        int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int>(DType::Float32)));
-        DType dtype = static_cast<DType>(dtype_int);
-        int device_idx = static_cast<int>(attrs.get_int(AttrKey::DeviceIndex, 0));
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
+        int device_idx = static_cast<int>(attrs.get_int(AttrKey::Device, 0));
         Device device = Device::cuda(device_idx);
         Tensor output(shape, dtype, device);
         return std::vector<Tensor>{cuda::fill_kernel(output, value, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::Rand, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto shape = attrs.get_int_list(AttrKey::Shape);
-        int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int>(DType::Float32)));
-        DType dtype = static_cast<DType>(dtype_int);
-        int device_idx = static_cast<int>(attrs.get_int(AttrKey::DeviceIndex, 0));
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
+        int device_idx = static_cast<int>(attrs.get_int(AttrKey::Device, 0));
         Device device = Device::cuda(device_idx);
         return std::vector<Tensor>{cuda::rand_kernel(shape, dtype, device, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::Randn, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto shape = attrs.get_int_list(AttrKey::Shape);
-        int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int>(DType::Float32)));
-        DType dtype = static_cast<DType>(dtype_int);
-        int device_idx = static_cast<int>(attrs.get_int(AttrKey::DeviceIndex, 0));
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
+        int device_idx = static_cast<int>(attrs.get_int(AttrKey::Device, 0));
         Device device = Device::cuda(device_idx);
         return std::vector<Tensor>{cuda::randn_kernel(shape, dtype, device, get_cuda_stream(attrs))};
     });
@@ -1700,9 +1715,8 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         float start = static_cast<float>(attrs.get_float(AttrKey::Start, 0.0));
         float end = static_cast<float>(attrs.get_float(AttrKey::End, 0.0));
         float step = static_cast<float>(attrs.get_float(AttrKey::Step, 1.0));
-        int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int>(DType::Float32)));
-        DType dtype = static_cast<DType>(dtype_int);
-        int device_idx = static_cast<int>(attrs.get_int(AttrKey::DeviceIndex, 0));
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
+        int device_idx = static_cast<int>(attrs.get_int(AttrKey::Device, 0));
         Device device = Device::cuda(device_idx);
         return std::vector<Tensor>{cuda::arange_kernel(start, end, step, dtype, device, get_cuda_stream(attrs))};
     });
@@ -1710,18 +1724,16 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         float start = static_cast<float>(attrs.get_float(AttrKey::Start, 0.0));
         float end = static_cast<float>(attrs.get_float(AttrKey::End, 1.0));
         int64_t steps = attrs.get_int(AttrKey::Steps, 100);
-        int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int>(DType::Float32)));
-        DType dtype = static_cast<DType>(dtype_int);
-        int device_idx = static_cast<int>(attrs.get_int(AttrKey::DeviceIndex, 0));
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
+        int device_idx = static_cast<int>(attrs.get_int(AttrKey::Device, 0));
         Device device = Device::cuda(device_idx);
         return std::vector<Tensor>{cuda::linspace_kernel(start, end, steps, dtype, device, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::Eye, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t n = attrs.get_int(AttrKey::N, 0);
         int64_t m = attrs.get_int(AttrKey::M, -1);
-        int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int>(DType::Float32)));
-        DType dtype = static_cast<DType>(dtype_int);
-        int device_idx = static_cast<int>(attrs.get_int(AttrKey::DeviceIndex, 0));
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
+        int device_idx = static_cast<int>(attrs.get_int(AttrKey::Device, 0));
         Device device = Device::cuda(device_idx);
         return std::vector<Tensor>{cuda::eye_kernel(n, m, dtype, device, get_cuda_stream(attrs))};
     });

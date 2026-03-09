@@ -2528,6 +2528,18 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             }
             break;
         }
+        case DType::Int64: {
+            auto* input_data = input.data<int64_t>();
+            auto* output_data = output.data<int64_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = prod_impl(input_data, input.numel());
+            } else {
+                auto strides_span = input.strides();
+                std::vector<int64_t> input_strides(strides_span.begin(), strides_span.end());
+                prod_along_dim(input_data, output_data, input_shape, input_strides, dim);
+            }
+            break;
+        }
         case DType::Float16: {
             // Compute product in Float32, store result as Float32
             // (Float16 product overflows easily, so output stays Float32)

@@ -51,10 +51,12 @@ public:
         // grad_outputs[0]: gradient w.r.t output [N, C, H_out, W_out]
         // saved_tensors_[0]: input [N, C, H_in, W_in]
         // saved_tensors_[1]: indices [N, C, H_out, W_out]
+        // saved_tensors_[2]: output [N, C, H_out, W_out] (for cuDNN backward)
 
         const auto& grad_output = grad_outputs[0];
         const auto& input = saved_tensors_[0];
         const auto& indices = saved_tensors_[1];
+        const auto& output = saved_tensors_[2];
 
         auto input_shape = input.shape();
         int64_t N = input_shape[0];
@@ -64,10 +66,11 @@ public:
 
         // Use OpId dispatch for non-CPU devices (CUDA, Vulkan, etc.)
         if (grad_output.device().type != Device::Type::CPU) {
-            std::vector<Tensor> inputs = {grad_output, indices};
+            std::vector<Tensor> inputs = {grad_output, input, output};
             OpAttributes bwd_attrs;
-            bwd_attrs.set(AttrKey::InputH, H_in);
-            bwd_attrs.set(AttrKey::InputW, W_in);
+            bwd_attrs.set(AttrKey::KernelSize, kernel_size_);
+            bwd_attrs.set(AttrKey::Stride, stride_);
+            bwd_attrs.set(AttrKey::Padding, padding_);
             auto result = dispatch_to_device(OpId::MaxPool2dBackward, grad_output.device().type,
                 inputs, bwd_attrs);
             return {result[0]};
@@ -368,7 +371,7 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
 
     // Setup backward function if gradient is required
     if (input.requires_grad()) {
-        std::vector<Tensor> tensors_to_save = {input.tensor(), indices};
+        std::vector<Tensor> tensors_to_save = {input.tensor(), indices, output};
 
         auto backward_fn = std::make_shared<MaxPool2dBackward>(
             kernel_size_, stride_, padding_, std::move(tensors_to_save)
@@ -422,7 +425,9 @@ public:
 
         // Use OpId dispatch for non-CPU devices (CUDA, Vulkan, etc.)
         if (grad_output.device().type != Device::Type::CPU) {
-            std::vector<Tensor> inputs = {grad_output};
+            // cuDNN path needs [grad_output, input]; non-cuDNN needs InputShape attr
+            // Save input in saved_tensors_[0] for this purpose
+            std::vector<Tensor> inputs = {grad_output, saved_tensors_[0]};
             OpAttributes bwd_attrs;
             bwd_attrs.set(AttrKey::InputShape, std::to_string(N) + "," + std::to_string(C) + "," + std::to_string(H_in_) + "," + std::to_string(W_in_));
             bwd_attrs.set(AttrKey::KernelSize, kernel_size_);
@@ -716,7 +721,7 @@ auto AvgPool2d::forward_impl(const Variable& input) -> Variable {
 
     // Setup backward function if gradient is required
     if (input.requires_grad()) {
-        std::vector<Tensor> tensors_to_save = {};  // No tensors needed for avg pool backward
+        std::vector<Tensor> tensors_to_save = {input.tensor()};  // Save input for cuDNN backward
 
         auto backward_fn = std::make_shared<AvgPool2dBackward>(
             kernel_size_, stride_, padding_, H_in, W_in, std::move(tensors_to_save)

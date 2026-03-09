@@ -569,14 +569,34 @@ auto LinearBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
     const auto& w = saved_tensors_[1];       // (out, in)
     const auto& grad_out = grad_outputs[0];  // (batch, out)
 
-    // Use optimized LinearBackward kernel for Float32/Float64
-    // Fall back to tensor ops for Float16 and other types
-    if (grad_out.dtype() == DType::Float32 || grad_out.dtype() == DType::Float64) {
-        std::vector<Tensor> inputs = {grad_out, x, w};
+    // Use optimized LinearBackward kernel (supports Float32, Float64, Float16, BFloat16)
+    if (grad_out.device().type == Device::Type::CUDA ||
+        grad_out.dtype() == DType::Float32 || grad_out.dtype() == DType::Float64) {
+        // For Float16/BFloat16 on CUDA, upcast to Float32 for computation to
+        // prevent gradient overflow. cuBLAS GemmEx outputs Float16 which can't
+        // represent values > 65504, causing Inf in larger models.
+        DType orig_dt = grad_out.dtype();
+        bool needs_upcast = (grad_out.device().type == Device::Type::CUDA &&
+                            (orig_dt == DType::Float16 || orig_dt == DType::BFloat16));
+        if (needs_upcast) {
+            std::vector<Tensor> inputs = {
+                grad_out.to(DType::Float32),
+                x.to(DType::Float32),
+                w.to(DType::Float32)
+            };
+            auto results = dispatch<OpId::LinearBackward>(inputs);
+            for (auto& r : results) r = r.to(orig_dt);
+            return results;
+        }
+        // Ensure all inputs match grad_out dtype (mixed precision: e.g. Float64
+        // input with Float32 weight) — CUDA kernels select kernel by first tensor dtype
+        auto x_cast = (x.dtype() != orig_dt) ? x.to(orig_dt) : x;
+        auto w_cast = (w.dtype() != orig_dt) ? w.to(orig_dt) : w;
+        std::vector<Tensor> inputs = {grad_out, x_cast, w_cast};
         return dispatch<OpId::LinearBackward>(inputs);
     }
 
-    // Fallback for Float16 and other types using tensor operations
+    // Fallback for other backends/types using tensor operations
     // grad_input = grad_out @ W
     auto grad_x = matmul(grad_out, w);
 
