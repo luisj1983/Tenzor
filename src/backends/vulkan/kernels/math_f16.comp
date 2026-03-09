@@ -1,7 +1,9 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 
-// Math operations for Float16: add, sub, mul, div, sqrt, exp, log, neg, abs, pow, sign
+// Math operations for Float16: add, sub, mul, div, sqrt, exp, log, neg, abs, pow, sign,
+//   floor, ceil, round, trunc, reciprocal, log2, log10, log1p, exp2, expm1, erf, erfc,
+//   atan2, fmod, remainder, minimum, maximum
 // Float16 elements are packed 2 per 32-bit word
 layout(local_size_x_id = 0) in;
 
@@ -117,6 +119,73 @@ void main() {
         case 15: // reciprocal
             res0 = float16_t(1.0 / float(val_a0));
             res1 = float16_t(1.0 / float(val_a1));
+            break;
+        case 16: // log2
+            res0 = float16_t(log2(fa0));
+            res1 = float16_t(log2(fa1));
+            break;
+        case 17: // log10
+            res0 = float16_t(log2(fa0) / log2(10.0));
+            res1 = float16_t(log2(fa1) / log2(10.0));
+            break;
+        case 18: // log1p
+            res0 = float16_t(log(1.0 + fa0));
+            res1 = float16_t(log(1.0 + fa1));
+            break;
+        case 19: // exp2
+            res0 = float16_t(exp2(fa0));
+            res1 = float16_t(exp2(fa1));
+            break;
+        case 20: // expm1
+            res0 = float16_t(exp(fa0) - 1.0);
+            res1 = float16_t(exp(fa1) - 1.0);
+            break;
+        case 21: { // erf - Abramowitz & Stegun approximation
+            float ax0 = abs(fa0);
+            float t0 = 1.0 / (1.0 + 0.3275911 * ax0);
+            float y0 = 1.0 - (((((1.061405429 * t0 - 1.453152027) * t0) + 1.421413741) * t0 - 0.284496736) * t0 + 0.254829592) * t0 * exp(-ax0 * ax0);
+            res0 = float16_t(fa0 < 0.0 ? -y0 : y0);
+            float ax1 = abs(fa1);
+            float t1 = 1.0 / (1.0 + 0.3275911 * ax1);
+            float y1 = 1.0 - (((((1.061405429 * t1 - 1.453152027) * t1) + 1.421413741) * t1 - 0.284496736) * t1 + 0.254829592) * t1 * exp(-ax1 * ax1);
+            res1 = float16_t(fa1 < 0.0 ? -y1 : y1);
+            break;
+        }
+        case 22: { // erfc
+            float ax0 = abs(fa0);
+            float t0 = 1.0 / (1.0 + 0.3275911 * ax0);
+            float y0 = 1.0 - (((((1.061405429 * t0 - 1.453152027) * t0) + 1.421413741) * t0 - 0.284496736) * t0 + 0.254829592) * t0 * exp(-ax0 * ax0);
+            float erf0 = fa0 < 0.0 ? -y0 : y0;
+            res0 = float16_t(1.0 - erf0);
+            float ax1 = abs(fa1);
+            float t1 = 1.0 / (1.0 + 0.3275911 * ax1);
+            float y1 = 1.0 - (((((1.061405429 * t1 - 1.453152027) * t1) + 1.421413741) * t1 - 0.284496736) * t1 + 0.254829592) * t1 * exp(-ax1 * ax1);
+            float erf1 = fa1 < 0.0 ? -y1 : y1;
+            res1 = float16_t(1.0 - erf1);
+            break;
+        }
+        case 23: // atan2 (binary)
+            res0 = float16_t(atan(fa0, fb0));
+            res1 = float16_t(atan(fa1, fb1));
+            break;
+        case 24: // fmod (binary)
+            res0 = float16_t(fa0 - trunc(fa0 / fb0) * fb0);
+            res1 = float16_t(fa1 - trunc(fa1 / fb1) * fb1);
+            break;
+        case 25: { // remainder (binary)
+            float r0 = round(fa0 / fb0);
+            res0 = float16_t(fa0 - r0 * fb0);
+            float r1 = round(fa1 / fb1);
+            res1 = float16_t(fa1 - r1 * fb1);
+            break;
+        }
+        case 26: // minimum (binary)
+            res0 = float16_t(min(fa0, fb0));
+            res1 = float16_t(min(fa1, fb1));
+            break;
+        case 27: // maximum (binary)
+            res0 = float16_t(max(fa0, fb0));
+            res1 = float16_t(max(fa1, fb1));
             break;
         default:
             res0 = float16_t(0.0);

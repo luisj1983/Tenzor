@@ -726,5 +726,48 @@ auto to_memory_format_kernel(const Tensor& input, MemoryFormat format) -> Tensor
     return contiguous_kernel(input);
 }
 
+auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim) -> Tensor {
+    auto shape = input.shape();
+    auto cont = input.is_contiguous() ? input : contiguous_kernel(input);
+
+    Tensor output(std::vector<int64_t>(shape.begin(), shape.end()),
+                  input.dtype(), input.device());
+
+    int64_t total = input.numel();
+    if (total == 0) return output;
+
+    int64_t dim_size = shape[dim];
+    // Normalize shift to [0, dim_size)
+    shift = ((shift % dim_size) + dim_size) % dim_size;
+    if (shift == 0) {
+        std::memcpy(output.storage()->data(), cont.storage()->data(),
+                    total * dtype_size(input.dtype()));
+        return output;
+    }
+
+    int64_t inner_size = 1;
+    for (int64_t d = dim + 1; d < static_cast<int64_t>(shape.size()); ++d) {
+        inner_size *= shape[d];
+    }
+
+    const size_t elem_size = dtype_size(input.dtype());
+    const auto* src = static_cast<const uint8_t*>(cont.storage()->data());
+    auto* dst = static_cast<uint8_t*>(output.storage()->data());
+
+    #pragma omp parallel for if(total > 65536)
+    for (int64_t i = 0; i < total; ++i) {
+        int64_t inner_idx = i % inner_size;
+        int64_t dim_idx = (i / inner_size) % dim_size;
+        int64_t outer_idx = i / (inner_size * dim_size);
+
+        int64_t src_dim_idx = (dim_idx - shift + dim_size) % dim_size;
+        int64_t src_idx = (outer_idx * dim_size + src_dim_idx) * inner_size + inner_idx;
+
+        std::memcpy(dst + i * elem_size, src + src_idx * elem_size, elem_size);
+    }
+
+    return output;
+}
+
 } // namespace cpu
 } // namespace tenzor

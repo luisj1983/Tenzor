@@ -1,0 +1,67 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// ScatterAdd for Float16: atomically accumulates source values into output along a dimension.
+// Float16 elements are packed 2 per 32-bit word in uint buffers.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Src { uint src_data[]; };     // Packed F16 pairs (source)
+layout(binding = 1) buffer Index { int idx_data[]; };     // Index tensor
+layout(binding = 2) buffer Output { uint out_data[]; };   // Packed F16 pairs (output, uint for CAS)
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint dim_size;
+    uint inner_size;
+    uint src_dim_size;
+} params;
+
+// Read a single Float16 element from packed uint32 array
+float readF16(uint element_idx, uint word_idx_base) {
+    uint word_idx = element_idx / 2;
+    uint half_offset = (element_idx % 2) * 16;
+    uint bits = (src_data[word_idx] >> half_offset) & 0xFFFFu;
+    return unpackHalf2x16(bits).x;
+}
+
+// Atomic add for Float16 using CAS loop on the uint32 word
+void atomicAddF16(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_offset = (element_idx % 2) * 16;
+
+    uint old_word = out_data[word_idx];
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        uint old_bits = (old_word >> half_offset) & 0xFFFFu;
+        float old_val = unpackHalf2x16(old_bits).x;
+        float new_val = old_val + val;
+        uint new_bits = packHalf2x16(vec2(new_val, 0.0)) & 0xFFFFu;
+
+        uint new_word = (old_word & ~(0xFFFFu << half_offset)) | (new_bits << half_offset);
+        uint result = atomicCompSwap(out_data[word_idx], old_word, new_word);
+        if (result == old_word) return;
+        old_word = result;
+    }
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= params.n) return;
+
+    uint inner_idx = i % params.inner_size;
+    uint outer_idx = i / (params.inner_size * params.src_dim_size);
+
+    int dest_dim_idx = idx_data[i];
+    if (dest_dim_idx < 0 || dest_dim_idx >= int(params.dim_size)) return;
+
+    uint out_idx = outer_idx * (params.dim_size * params.inner_size) +
+                   uint(dest_dim_idx) * params.inner_size +
+                   inner_idx;
+
+    // Read source value
+    uint src_word_idx = i / 2;
+    uint src_half_offset = (i % 2) * 16;
+    uint src_bits = (src_data[src_word_idx] >> src_half_offset) & 0xFFFFu;
+    float value = unpackHalf2x16(src_bits).x;
+
+    atomicAddF16(out_idx, value);
+}

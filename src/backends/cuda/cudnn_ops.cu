@@ -3866,6 +3866,797 @@ auto cudnn_layer_norm_backward(
     return {grad_input, grad_weight, grad_bias};
 }
 
+// ============================================================================
+// cuDNN Conv3d Forward Implementation
+// ============================================================================
+
+static cudnnDataType_t to_cudnn_dtype(DType dtype) {
+    switch (dtype) {
+        case DType::Float32: return CUDNN_DATA_FLOAT;
+        case DType::Float64: return CUDNN_DATA_DOUBLE;
+        case DType::Float16: return CUDNN_DATA_HALF;
+        case DType::BFloat16: return CUDNN_DATA_BFLOAT16;
+        default:
+            throw std::runtime_error("cuDNN Conv3d: unsupported dtype");
+    }
+}
+
+// Helper: dispatch cudnnConvolutionForward for the correct dtype
+static void dispatch_conv_forward(
+    cudnnHandle_t handle,
+    const cudnnTensorDescriptor_t& input_desc, const void* input_ptr,
+    const cudnnFilterDescriptor_t& filter_desc, const void* weight_ptr,
+    const cudnnConvolutionDescriptor_t& conv_desc,
+    cudnnConvolutionFwdAlgo_t algo, void* workspace, size_t workspace_size,
+    const cudnnTensorDescriptor_t& output_desc, void* output_ptr,
+    DType dtype
+) {
+    if (dtype == DType::Float64) {
+        const double alpha = 1.0, beta = 0.0;
+        CUDNN_CHECK(cudnnConvolutionForward(
+            handle, &alpha, input_desc, input_ptr, filter_desc, weight_ptr,
+            conv_desc, algo, workspace, workspace_size, &beta, output_desc, output_ptr));
+    } else {
+        const float alpha = 1.0f, beta = 0.0f;
+        CUDNN_CHECK(cudnnConvolutionForward(
+            handle, &alpha, input_desc, input_ptr, filter_desc, weight_ptr,
+            conv_desc, algo, workspace, workspace_size, &beta, output_desc, output_ptr));
+    }
+}
+
+// Helper: dispatch cudnnConvolutionBackwardData for the correct dtype
+static void dispatch_conv_bwd_data(
+    cudnnHandle_t handle,
+    const cudnnFilterDescriptor_t& filter_desc, const void* weight_ptr,
+    const cudnnTensorDescriptor_t& grad_output_desc, const void* grad_output_ptr,
+    const cudnnConvolutionDescriptor_t& conv_desc,
+    cudnnConvolutionBwdDataAlgo_t algo, void* workspace, size_t workspace_size,
+    const cudnnTensorDescriptor_t& input_desc, void* grad_input_ptr,
+    DType dtype
+) {
+    if (dtype == DType::Float64) {
+        const double alpha = 1.0, beta = 0.0;
+        CUDNN_CHECK(cudnnConvolutionBackwardData(
+            handle, &alpha, filter_desc, weight_ptr, grad_output_desc, grad_output_ptr,
+            conv_desc, algo, workspace, workspace_size, &beta, input_desc, grad_input_ptr));
+    } else {
+        const float alpha = 1.0f, beta = 0.0f;
+        CUDNN_CHECK(cudnnConvolutionBackwardData(
+            handle, &alpha, filter_desc, weight_ptr, grad_output_desc, grad_output_ptr,
+            conv_desc, algo, workspace, workspace_size, &beta, input_desc, grad_input_ptr));
+    }
+}
+
+// Helper: dispatch cudnnConvolutionBackwardFilter for the correct dtype
+static void dispatch_conv_bwd_filter(
+    cudnnHandle_t handle,
+    const cudnnTensorDescriptor_t& input_desc, const void* input_ptr,
+    const cudnnTensorDescriptor_t& grad_output_desc, const void* grad_output_ptr,
+    const cudnnConvolutionDescriptor_t& conv_desc,
+    cudnnConvolutionBwdFilterAlgo_t algo, void* workspace, size_t workspace_size,
+    const cudnnFilterDescriptor_t& filter_desc, void* grad_weight_ptr,
+    DType dtype
+) {
+    if (dtype == DType::Float64) {
+        const double alpha = 1.0, beta = 0.0;
+        CUDNN_CHECK(cudnnConvolutionBackwardFilter(
+            handle, &alpha, input_desc, input_ptr, grad_output_desc, grad_output_ptr,
+            conv_desc, algo, workspace, workspace_size, &beta, filter_desc, grad_weight_ptr));
+    } else {
+        const float alpha = 1.0f, beta = 0.0f;
+        CUDNN_CHECK(cudnnConvolutionBackwardFilter(
+            handle, &alpha, input_desc, input_ptr, grad_output_desc, grad_output_ptr,
+            conv_desc, algo, workspace, workspace_size, &beta, filter_desc, grad_weight_ptr));
+    }
+}
+
+// Helper: dispatch cudnnConvolutionBackwardBias for the correct dtype
+static void dispatch_conv_bwd_bias(
+    cudnnHandle_t handle,
+    const cudnnTensorDescriptor_t& grad_output_desc, const void* grad_output_ptr,
+    const cudnnTensorDescriptor_t& bias_desc, void* grad_bias_ptr,
+    DType dtype
+) {
+    if (dtype == DType::Float64) {
+        const double alpha = 1.0, beta = 0.0;
+        CUDNN_CHECK(cudnnConvolutionBackwardBias(
+            handle, &alpha, grad_output_desc, grad_output_ptr,
+            &beta, bias_desc, grad_bias_ptr));
+    } else {
+        const float alpha = 1.0f, beta = 0.0f;
+        CUDNN_CHECK(cudnnConvolutionBackwardBias(
+            handle, &alpha, grad_output_desc, grad_output_ptr,
+            &beta, bias_desc, grad_bias_ptr));
+    }
+}
+
+// Helper: dispatch cudnnAddTensor for bias addition
+static void dispatch_add_tensor(
+    cudnnHandle_t handle,
+    const cudnnTensorDescriptor_t& bias_desc, const void* bias_ptr,
+    const cudnnTensorDescriptor_t& output_desc, void* output_ptr,
+    DType dtype
+) {
+    if (dtype == DType::Float64) {
+        const double alpha = 1.0, beta = 1.0;
+        CUDNN_CHECK(cudnnAddTensor(handle, &alpha, bias_desc, bias_ptr, &beta, output_desc, output_ptr));
+    } else {
+        const float alpha = 1.0f, beta = 1.0f;
+        CUDNN_CHECK(cudnnAddTensor(handle, &alpha, bias_desc, bias_ptr, &beta, output_desc, output_ptr));
+    }
+}
+
+// RAII wrapper for cudnnTensorDescriptor_t (Nd)
+struct TensorDescriptorNd {
+    cudnnTensorDescriptor_t desc = nullptr;
+    TensorDescriptorNd() { CUDNN_CHECK(cudnnCreateTensorDescriptor(&desc)); }
+    ~TensorDescriptorNd() { if (desc) cudnnDestroyTensorDescriptor(desc); }
+    TensorDescriptorNd(const TensorDescriptorNd&) = delete;
+    TensorDescriptorNd& operator=(const TensorDescriptorNd&) = delete;
+
+    void set(cudnnDataType_t dtype, const std::vector<int>& dims) {
+        int nbDims = static_cast<int>(dims.size());
+        // Compute strides for contiguous layout
+        std::vector<int> strides(nbDims);
+        strides[nbDims - 1] = 1;
+        for (int i = nbDims - 2; i >= 0; --i) {
+            strides[i] = strides[i + 1] * dims[i + 1];
+        }
+        CUDNN_CHECK(cudnnSetTensorNdDescriptor(desc, dtype, nbDims, dims.data(), strides.data()));
+    }
+};
+
+// RAII wrapper for cudnnFilterDescriptor_t (Nd)
+struct FilterDescriptorNd {
+    cudnnFilterDescriptor_t desc = nullptr;
+    FilterDescriptorNd() { CUDNN_CHECK(cudnnCreateFilterDescriptor(&desc)); }
+    ~FilterDescriptorNd() { if (desc) cudnnDestroyFilterDescriptor(desc); }
+    FilterDescriptorNd(const FilterDescriptorNd&) = delete;
+    FilterDescriptorNd& operator=(const FilterDescriptorNd&) = delete;
+
+    void set(cudnnDataType_t dtype, const std::vector<int>& dims) {
+        int nbDims = static_cast<int>(dims.size());
+        CUDNN_CHECK(cudnnSetFilterNdDescriptor(desc, dtype, CUDNN_TENSOR_NCHW, nbDims, dims.data()));
+    }
+};
+
+// RAII wrapper for cudnnConvolutionDescriptor_t (Nd)
+struct ConvolutionDescriptorNd {
+    cudnnConvolutionDescriptor_t desc = nullptr;
+    ConvolutionDescriptorNd() { CUDNN_CHECK(cudnnCreateConvolutionDescriptor(&desc)); }
+    ~ConvolutionDescriptorNd() { if (desc) cudnnDestroyConvolutionDescriptor(desc); }
+    ConvolutionDescriptorNd(const ConvolutionDescriptorNd&) = delete;
+    ConvolutionDescriptorNd& operator=(const ConvolutionDescriptorNd&) = delete;
+
+    void set(int spatial_dims, const int* padding, const int* stride, const int* dilation,
+             cudnnConvolutionMode_t mode, cudnnDataType_t compute_type) {
+        CUDNN_CHECK(cudnnSetConvolutionNdDescriptor(
+            desc, spatial_dims, padding, stride, dilation, mode, compute_type));
+    }
+
+    void set_group_count(int groups) {
+        CUDNN_CHECK(cudnnSetConvolutionGroupCount(desc, groups));
+    }
+};
+
+auto cudnn_conv3d_forward(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t groups,
+    cudaStream_t stream
+) -> Tensor {
+    auto input_shape = input.shape();
+    auto weight_shape = weight.shape();
+
+    // 5D: [N, C, D, H, W]
+    int64_t batch = input_shape[0];
+    int64_t in_channels = input_shape[1];
+    int64_t depth = input_shape[2];
+    int64_t height = input_shape[3];
+    int64_t width = input_shape[4];
+
+    int64_t out_channels = weight_shape[0];
+    int64_t kernel_d = weight_shape[2];
+    int64_t kernel_h = weight_shape[3];
+    int64_t kernel_w = weight_shape[4];
+
+    int64_t out_d = (depth + 2 * padding - dilation * (kernel_d - 1) - 1) / stride + 1;
+    int64_t out_h = (height + 2 * padding - dilation * (kernel_h - 1) - 1) / stride + 1;
+    int64_t out_w = (width + 2 * padding - dilation * (kernel_w - 1) - 1) / stride + 1;
+
+    std::vector<int64_t> output_shape = {batch, out_channels, out_d, out_h, out_w};
+    Tensor output(output_shape, input.dtype(), input.device());
+
+    cudnnHandle_t handle = CuDNNHandle::get();
+    CuDNNHandle::set_stream(stream);
+
+    cudnnDataType_t cudnn_dtype = to_cudnn_dtype(input.dtype());
+
+    // Compute type: FP32 for half-precision inputs
+    cudnnDataType_t compute_type = cudnn_dtype;
+    if (cudnn_dtype == CUDNN_DATA_HALF || cudnn_dtype == CUDNN_DATA_BFLOAT16) {
+        compute_type = CUDNN_DATA_FLOAT;
+    }
+
+    // Set up Nd descriptors (5D for Conv3d)
+    TensorDescriptorNd input_desc, output_desc;
+    FilterDescriptorNd filter_desc;
+    ConvolutionDescriptorNd conv_desc;
+
+    std::vector<int> input_dims = {(int)batch, (int)in_channels, (int)depth, (int)height, (int)width};
+    std::vector<int> output_dims = {(int)batch, (int)out_channels, (int)out_d, (int)out_h, (int)out_w};
+    std::vector<int> filter_dims = {(int)out_channels, (int)(in_channels / groups), (int)kernel_d, (int)kernel_h, (int)kernel_w};
+
+    input_desc.set(cudnn_dtype, input_dims);
+    output_desc.set(cudnn_dtype, output_dims);
+    filter_desc.set(cudnn_dtype, filter_dims);
+
+    int pad_arr[3] = {(int)padding, (int)padding, (int)padding};
+    int str_arr[3] = {(int)stride, (int)stride, (int)stride};
+    int dil_arr[3] = {(int)dilation, (int)dilation, (int)dilation};
+    conv_desc.set(3, pad_arr, str_arr, dil_arr, CUDNN_CROSS_CORRELATION, compute_type);
+
+    if (groups > 1) {
+        conv_desc.set_group_count(static_cast<int>(groups));
+    }
+
+    #ifdef TENZOR_HAS_TENSOR_CORES
+    if (cudnn_dtype == CUDNN_DATA_HALF || cudnn_dtype == CUDNN_DATA_BFLOAT16) {
+        CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.desc, CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION));
+    }
+    #endif
+
+    // Find algorithm using heuristic
+    constexpr int kMaxAlgos = 8;
+    int returned_algo_count = 0;
+    cudnnConvolutionFwdAlgoPerf_t perf_results[kMaxAlgos];
+
+    CUDNN_CHECK(cudnnGetConvolutionForwardAlgorithm_v7(
+        handle, input_desc.desc, filter_desc.desc, conv_desc.desc,
+        output_desc.desc, kMaxAlgos, &returned_algo_count, perf_results));
+
+    const size_t kMaxWorkspaceSize = CuDNNWorkspace::max_workspace_size();
+    cudnnConvolutionFwdAlgo_t algo = perf_results[0].algo;
+    size_t workspace_size = 0;
+
+    // Pick fastest algorithm that fits in workspace
+    float best_time = std::numeric_limits<float>::max();
+    for (int i = 0; i < returned_algo_count; ++i) {
+        if (perf_results[i].status != CUDNN_STATUS_SUCCESS) continue;
+        size_t ws_size = 0;
+        cudnnStatus_t ws_status = cudnnGetConvolutionForwardWorkspaceSize(
+            handle, input_desc.desc, filter_desc.desc, conv_desc.desc,
+            output_desc.desc, perf_results[i].algo, &ws_size);
+        if (ws_status == CUDNN_STATUS_SUCCESS && ws_size <= kMaxWorkspaceSize) {
+            if (perf_results[i].time < best_time) {
+                best_time = perf_results[i].time;
+                algo = perf_results[i].algo;
+                workspace_size = ws_size;
+            }
+        }
+    }
+    if (best_time == std::numeric_limits<float>::max()) {
+        CUDNN_CHECK(cudnnGetConvolutionForwardWorkspaceSize(
+            handle, input_desc.desc, filter_desc.desc, conv_desc.desc,
+            output_desc.desc, algo, &workspace_size));
+    }
+
+    void* workspace = CuDNNWorkspace::get(workspace_size);
+
+    dispatch_conv_forward(
+        handle, input_desc.desc, input.data_ptr(), filter_desc.desc, weight.data_ptr(),
+        conv_desc.desc, algo, workspace, workspace_size,
+        output_desc.desc, output.data_ptr(), input.dtype());
+
+    // Add bias if present: bias shape is [out_channels], described as [1, out_channels, 1, 1, 1]
+    if (bias != nullptr) {
+        TensorDescriptorNd bias_desc;
+        std::vector<int> bias_dims = {1, (int)out_channels, 1, 1, 1};
+        bias_desc.set(cudnn_dtype, bias_dims);
+        dispatch_add_tensor(handle, bias_desc.desc, bias->data_ptr(), output_desc.desc, output.data_ptr(), input.dtype());
+    }
+
+    // Saturate FP16 output
+    if (input.dtype() == DType::Float16) {
+        fp16_saturate(output.data<Float16>(), output.numel(), stream);
+    }
+
+    return output;
+}
+
+// ============================================================================
+// cuDNN Conv3d Backward Implementation
+// ============================================================================
+
+auto cudnn_conv3d_backward(
+    const Tensor& grad_output,
+    const Tensor& input,
+    const Tensor& weight,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t groups,
+    bool compute_grad_input,
+    bool compute_grad_weight,
+    bool compute_grad_bias,
+    cudaStream_t stream
+) -> std::tuple<Tensor, Tensor, Tensor> {
+    auto input_shape = input.shape();
+    auto weight_shape = weight.shape();
+    auto grad_shape = grad_output.shape();
+
+    int64_t batch = input_shape[0];
+    int64_t in_channels = input_shape[1];
+    int64_t depth = input_shape[2];
+    int64_t height = input_shape[3];
+    int64_t width = input_shape[4];
+
+    int64_t out_channels = weight_shape[0];
+    int64_t kernel_d = weight_shape[2];
+    int64_t kernel_h = weight_shape[3];
+    int64_t kernel_w = weight_shape[4];
+
+    int64_t out_d = grad_shape[2];
+    int64_t out_h = grad_shape[3];
+    int64_t out_w = grad_shape[4];
+
+    Tensor grad_input({batch, in_channels, depth, height, width}, input.dtype(), input.device());
+    Tensor grad_weight({out_channels, in_channels / groups, kernel_d, kernel_h, kernel_w}, weight.dtype(), weight.device());
+    Tensor grad_bias({out_channels}, weight.dtype(), weight.device());
+
+    cudnnHandle_t handle = CuDNNHandle::get();
+    CuDNNHandle::set_stream(stream);
+
+    cudnnDataType_t cudnn_dtype = to_cudnn_dtype(input.dtype());
+    cudnnDataType_t compute_type = cudnn_dtype;
+    if (cudnn_dtype == CUDNN_DATA_HALF || cudnn_dtype == CUDNN_DATA_BFLOAT16) {
+        compute_type = CUDNN_DATA_FLOAT;
+    }
+
+    TensorDescriptorNd input_desc, grad_output_desc;
+    FilterDescriptorNd filter_desc;
+    ConvolutionDescriptorNd conv_desc;
+
+    std::vector<int> input_dims = {(int)batch, (int)in_channels, (int)depth, (int)height, (int)width};
+    std::vector<int> grad_output_dims = {(int)batch, (int)out_channels, (int)out_d, (int)out_h, (int)out_w};
+    std::vector<int> filter_dims = {(int)out_channels, (int)(in_channels / groups), (int)kernel_d, (int)kernel_h, (int)kernel_w};
+
+    input_desc.set(cudnn_dtype, input_dims);
+    grad_output_desc.set(cudnn_dtype, grad_output_dims);
+    filter_desc.set(cudnn_dtype, filter_dims);
+
+    int pad_arr[3] = {(int)padding, (int)padding, (int)padding};
+    int str_arr[3] = {(int)stride, (int)stride, (int)stride};
+    int dil_arr[3] = {(int)dilation, (int)dilation, (int)dilation};
+    conv_desc.set(3, pad_arr, str_arr, dil_arr, CUDNN_CROSS_CORRELATION, compute_type);
+
+    if (groups > 1) {
+        conv_desc.set_group_count(static_cast<int>(groups));
+    }
+
+    #ifdef TENZOR_HAS_TENSOR_CORES
+    if (cudnn_dtype == CUDNN_DATA_HALF || cudnn_dtype == CUDNN_DATA_BFLOAT16) {
+        CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.desc, CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION));
+    }
+    #endif
+
+    const size_t kMaxWorkspaceSize = CuDNNWorkspace::max_workspace_size();
+
+    // Gradient w.r.t. input
+    if (compute_grad_input) {
+        constexpr int kMaxAlgos = 8;
+        int returned_algo_count = 0;
+        cudnnConvolutionBwdDataAlgoPerf_t perf_results[kMaxAlgos];
+
+        CUDNN_CHECK(cudnnGetConvolutionBackwardDataAlgorithm_v7(
+            handle, filter_desc.desc, grad_output_desc.desc, conv_desc.desc,
+            input_desc.desc, kMaxAlgos, &returned_algo_count, perf_results));
+
+        cudnnConvolutionBwdDataAlgo_t algo = perf_results[0].algo;
+        size_t workspace_size = 0;
+        float best_time = std::numeric_limits<float>::max();
+
+        for (int i = 0; i < returned_algo_count; ++i) {
+            if (perf_results[i].status != CUDNN_STATUS_SUCCESS) continue;
+            size_t ws_size = 0;
+            cudnnStatus_t ws_status = cudnnGetConvolutionBackwardDataWorkspaceSize(
+                handle, filter_desc.desc, grad_output_desc.desc, conv_desc.desc,
+                input_desc.desc, perf_results[i].algo, &ws_size);
+            if (ws_status == CUDNN_STATUS_SUCCESS && ws_size <= kMaxWorkspaceSize) {
+                if (perf_results[i].time < best_time) {
+                    best_time = perf_results[i].time;
+                    algo = perf_results[i].algo;
+                    workspace_size = ws_size;
+                }
+            }
+        }
+        if (best_time == std::numeric_limits<float>::max()) {
+            CUDNN_CHECK(cudnnGetConvolutionBackwardDataWorkspaceSize(
+                handle, filter_desc.desc, grad_output_desc.desc, conv_desc.desc,
+                input_desc.desc, algo, &workspace_size));
+        }
+
+        void* workspace = CuDNNWorkspace::get(workspace_size);
+        dispatch_conv_bwd_data(
+            handle, filter_desc.desc, weight.data_ptr(), grad_output_desc.desc, grad_output.data_ptr(),
+            conv_desc.desc, algo, workspace, workspace_size,
+            input_desc.desc, grad_input.data_ptr(), input.dtype());
+    }
+
+    // Gradient w.r.t. weight
+    if (compute_grad_weight) {
+        constexpr int kMaxAlgos = 8;
+        int returned_algo_count = 0;
+        cudnnConvolutionBwdFilterAlgoPerf_t perf_results[kMaxAlgos];
+
+        CUDNN_CHECK(cudnnGetConvolutionBackwardFilterAlgorithm_v7(
+            handle, input_desc.desc, grad_output_desc.desc, conv_desc.desc,
+            filter_desc.desc, kMaxAlgos, &returned_algo_count, perf_results));
+
+        cudnnConvolutionBwdFilterAlgo_t algo = perf_results[0].algo;
+        size_t workspace_size = 0;
+        float best_time = std::numeric_limits<float>::max();
+
+        for (int i = 0; i < returned_algo_count; ++i) {
+            if (perf_results[i].status != CUDNN_STATUS_SUCCESS) continue;
+            size_t ws_size = 0;
+            cudnnStatus_t ws_status = cudnnGetConvolutionBackwardFilterWorkspaceSize(
+                handle, input_desc.desc, grad_output_desc.desc, conv_desc.desc,
+                filter_desc.desc, perf_results[i].algo, &ws_size);
+            if (ws_status == CUDNN_STATUS_SUCCESS && ws_size <= kMaxWorkspaceSize) {
+                if (perf_results[i].time < best_time) {
+                    best_time = perf_results[i].time;
+                    algo = perf_results[i].algo;
+                    workspace_size = ws_size;
+                }
+            }
+        }
+        if (best_time == std::numeric_limits<float>::max()) {
+            CUDNN_CHECK(cudnnGetConvolutionBackwardFilterWorkspaceSize(
+                handle, input_desc.desc, grad_output_desc.desc, conv_desc.desc,
+                filter_desc.desc, algo, &workspace_size));
+        }
+
+        void* workspace = CuDNNWorkspace::get(workspace_size);
+        dispatch_conv_bwd_filter(
+            handle, input_desc.desc, input.data_ptr(), grad_output_desc.desc, grad_output.data_ptr(),
+            conv_desc.desc, algo, workspace, workspace_size,
+            filter_desc.desc, grad_weight.data_ptr(), input.dtype());
+    }
+
+    // Gradient w.r.t. bias
+    if (compute_grad_bias) {
+        TensorDescriptorNd bias_desc;
+        std::vector<int> bias_dims = {1, (int)out_channels, 1, 1, 1};
+        bias_desc.set(cudnn_dtype, bias_dims);
+        dispatch_conv_bwd_bias(
+            handle, grad_output_desc.desc, grad_output.data_ptr(),
+            bias_desc.desc, grad_bias.data_ptr(), input.dtype());
+    }
+
+    return std::make_tuple(grad_input, grad_weight, grad_bias);
+}
+
+// ============================================================================
+// cuDNN ConvTranspose3d Forward Implementation
+// Transposed convolution forward is mathematically cudnnConvolutionBackwardData
+// ============================================================================
+
+auto cudnn_conv_transpose3d_forward(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride,
+    int64_t padding,
+    int64_t output_padding,
+    int64_t dilation,
+    int64_t groups,
+    cudaStream_t stream
+) -> Tensor {
+    auto input_shape = input.shape();
+    auto weight_shape = weight.shape();
+
+    // Input: [N, C_in, D_in, H_in, W_in]
+    // Weight for ConvTranspose: [C_in, C_out/groups, kD, kH, kW]
+    int64_t batch = input_shape[0];
+    int64_t in_channels = input_shape[1];
+    int64_t d_in = input_shape[2];
+    int64_t h_in = input_shape[3];
+    int64_t w_in = input_shape[4];
+
+    int64_t out_channels = weight_shape[1] * groups;
+    int64_t kernel_d = weight_shape[2];
+    int64_t kernel_h = weight_shape[3];
+    int64_t kernel_w = weight_shape[4];
+
+    // Output dimensions for transposed convolution
+    int64_t d_out = (d_in - 1) * stride - 2 * padding + dilation * (kernel_d - 1) + output_padding + 1;
+    int64_t h_out = (h_in - 1) * stride - 2 * padding + dilation * (kernel_h - 1) + output_padding + 1;
+    int64_t w_out = (w_in - 1) * stride - 2 * padding + dilation * (kernel_w - 1) + output_padding + 1;
+
+    std::vector<int64_t> output_shape = {batch, out_channels, d_out, h_out, w_out};
+    Tensor output(output_shape, input.dtype(), input.device());
+
+    cudnnHandle_t handle = CuDNNHandle::get();
+    CuDNNHandle::set_stream(stream);
+
+    cudnnDataType_t cudnn_dtype = to_cudnn_dtype(input.dtype());
+    cudnnDataType_t compute_type = cudnn_dtype;
+    if (cudnn_dtype == CUDNN_DATA_HALF || cudnn_dtype == CUDNN_DATA_BFLOAT16) {
+        compute_type = CUDNN_DATA_FLOAT;
+    }
+
+    // For transposed conv, the "input" to cudnnConvolutionBackwardData is our grad_output (input),
+    // and the "output" (grad_input) is our actual output.
+    // The filter descriptor uses the same weight layout.
+    TensorDescriptorNd input_desc, output_desc;
+    FilterDescriptorNd filter_desc;
+    ConvolutionDescriptorNd conv_desc;
+
+    // input_desc describes our input (which is the "grad_output" in cuDNN backward data terms)
+    std::vector<int> input_dims = {(int)batch, (int)in_channels, (int)d_in, (int)h_in, (int)w_in};
+    // output_desc describes our output (which is the "grad_input" in cuDNN backward data terms)
+    std::vector<int> output_dims = {(int)batch, (int)out_channels, (int)d_out, (int)h_out, (int)w_out};
+    // Filter: [C_in, C_out/groups, kD, kH, kW]
+    std::vector<int> filter_dims = {(int)in_channels, (int)(out_channels / groups), (int)kernel_d, (int)kernel_h, (int)kernel_w};
+
+    input_desc.set(cudnn_dtype, input_dims);
+    output_desc.set(cudnn_dtype, output_dims);
+    filter_desc.set(cudnn_dtype, filter_dims);
+
+    int pad_arr[3] = {(int)padding, (int)padding, (int)padding};
+    int str_arr[3] = {(int)stride, (int)stride, (int)stride};
+    int dil_arr[3] = {(int)dilation, (int)dilation, (int)dilation};
+    conv_desc.set(3, pad_arr, str_arr, dil_arr, CUDNN_CROSS_CORRELATION, compute_type);
+
+    if (groups > 1) {
+        conv_desc.set_group_count(static_cast<int>(groups));
+    }
+
+    #ifdef TENZOR_HAS_TENSOR_CORES
+    if (cudnn_dtype == CUDNN_DATA_HALF || cudnn_dtype == CUDNN_DATA_BFLOAT16) {
+        CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.desc, CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION));
+    }
+    #endif
+
+    // Use cudnnConvolutionBackwardData for transposed convolution forward
+    constexpr int kMaxAlgos = 8;
+    int returned_algo_count = 0;
+    cudnnConvolutionBwdDataAlgoPerf_t perf_results[kMaxAlgos];
+
+    CUDNN_CHECK(cudnnGetConvolutionBackwardDataAlgorithm_v7(
+        handle, filter_desc.desc, input_desc.desc, conv_desc.desc,
+        output_desc.desc, kMaxAlgos, &returned_algo_count, perf_results));
+
+    const size_t kMaxWorkspaceSize = CuDNNWorkspace::max_workspace_size();
+    cudnnConvolutionBwdDataAlgo_t algo = perf_results[0].algo;
+    size_t workspace_size = 0;
+    float best_time = std::numeric_limits<float>::max();
+
+    for (int i = 0; i < returned_algo_count; ++i) {
+        if (perf_results[i].status != CUDNN_STATUS_SUCCESS) continue;
+        size_t ws_size = 0;
+        cudnnStatus_t ws_status = cudnnGetConvolutionBackwardDataWorkspaceSize(
+            handle, filter_desc.desc, input_desc.desc, conv_desc.desc,
+            output_desc.desc, perf_results[i].algo, &ws_size);
+        if (ws_status == CUDNN_STATUS_SUCCESS && ws_size <= kMaxWorkspaceSize) {
+            if (perf_results[i].time < best_time) {
+                best_time = perf_results[i].time;
+                algo = perf_results[i].algo;
+                workspace_size = ws_size;
+            }
+        }
+    }
+    if (best_time == std::numeric_limits<float>::max()) {
+        CUDNN_CHECK(cudnnGetConvolutionBackwardDataWorkspaceSize(
+            handle, filter_desc.desc, input_desc.desc, conv_desc.desc,
+            output_desc.desc, algo, &workspace_size));
+    }
+
+    void* workspace = CuDNNWorkspace::get(workspace_size);
+
+    // BackwardData: filter * input -> output (transposed conv forward)
+    dispatch_conv_bwd_data(
+        handle, filter_desc.desc, weight.data_ptr(), input_desc.desc, input.data_ptr(),
+        conv_desc.desc, algo, workspace, workspace_size,
+        output_desc.desc, output.data_ptr(), input.dtype());
+
+    // Add bias
+    if (bias != nullptr) {
+        TensorDescriptorNd bias_desc;
+        std::vector<int> bias_dims = {1, (int)out_channels, 1, 1, 1};
+        bias_desc.set(cudnn_dtype, bias_dims);
+        dispatch_add_tensor(handle, bias_desc.desc, bias->data_ptr(), output_desc.desc, output.data_ptr(), input.dtype());
+    }
+
+    if (input.dtype() == DType::Float16) {
+        fp16_saturate(output.data<Float16>(), output.numel(), stream);
+    }
+
+    return output;
+}
+
+// ============================================================================
+// cuDNN ConvTranspose3d Backward Implementation
+// ============================================================================
+
+auto cudnn_conv_transpose3d_backward(
+    const Tensor& grad_output,
+    const Tensor& input,
+    const Tensor& weight,
+    int64_t stride,
+    int64_t padding,
+    int64_t output_padding,
+    int64_t dilation,
+    int64_t groups,
+    bool compute_grad_input,
+    bool compute_grad_weight,
+    bool compute_grad_bias,
+    cudaStream_t stream
+) -> std::tuple<Tensor, Tensor, Tensor> {
+    auto input_shape = input.shape();
+    auto weight_shape = weight.shape();
+    auto grad_shape = grad_output.shape();
+
+    int64_t batch = input_shape[0];
+    int64_t in_channels = input_shape[1];
+    int64_t d_in = input_shape[2];
+    int64_t h_in = input_shape[3];
+    int64_t w_in = input_shape[4];
+
+    int64_t out_channels = weight_shape[1] * groups;
+    int64_t kernel_d = weight_shape[2];
+    int64_t kernel_h = weight_shape[3];
+    int64_t kernel_w = weight_shape[4];
+
+    int64_t d_out = grad_shape[2];
+    int64_t h_out = grad_shape[3];
+    int64_t w_out = grad_shape[4];
+
+    Tensor grad_input({batch, in_channels, d_in, h_in, w_in}, input.dtype(), input.device());
+    Tensor grad_weight({in_channels, out_channels / groups, kernel_d, kernel_h, kernel_w}, weight.dtype(), weight.device());
+    Tensor grad_bias({out_channels}, weight.dtype(), weight.device());
+
+    cudnnHandle_t handle = CuDNNHandle::get();
+    CuDNNHandle::set_stream(stream);
+
+    cudnnDataType_t cudnn_dtype = to_cudnn_dtype(input.dtype());
+    cudnnDataType_t compute_type = cudnn_dtype;
+    if (cudnn_dtype == CUDNN_DATA_HALF || cudnn_dtype == CUDNN_DATA_BFLOAT16) {
+        compute_type = CUDNN_DATA_FLOAT;
+    }
+
+    // Descriptors: same layout as forward
+    TensorDescriptorNd input_desc, grad_output_desc;
+    FilterDescriptorNd filter_desc;
+    ConvolutionDescriptorNd conv_desc;
+
+    std::vector<int> input_dims = {(int)batch, (int)in_channels, (int)d_in, (int)h_in, (int)w_in};
+    std::vector<int> grad_output_dims = {(int)batch, (int)out_channels, (int)d_out, (int)h_out, (int)w_out};
+    std::vector<int> filter_dims = {(int)in_channels, (int)(out_channels / groups), (int)kernel_d, (int)kernel_h, (int)kernel_w};
+
+    input_desc.set(cudnn_dtype, input_dims);
+    grad_output_desc.set(cudnn_dtype, grad_output_dims);
+    filter_desc.set(cudnn_dtype, filter_dims);
+
+    int pad_arr[3] = {(int)padding, (int)padding, (int)padding};
+    int str_arr[3] = {(int)stride, (int)stride, (int)stride};
+    int dil_arr[3] = {(int)dilation, (int)dilation, (int)dilation};
+    conv_desc.set(3, pad_arr, str_arr, dil_arr, CUDNN_CROSS_CORRELATION, compute_type);
+
+    if (groups > 1) {
+        conv_desc.set_group_count(static_cast<int>(groups));
+    }
+
+    #ifdef TENZOR_HAS_TENSOR_CORES
+    if (cudnn_dtype == CUDNN_DATA_HALF || cudnn_dtype == CUDNN_DATA_BFLOAT16) {
+        CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.desc, CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION));
+    }
+    #endif
+
+    const size_t kMaxWorkspaceSize = CuDNNWorkspace::max_workspace_size();
+
+    // Gradient w.r.t. input: use cudnnConvolutionForward
+    // (transposed conv backward-input IS regular conv forward)
+    if (compute_grad_input) {
+        constexpr int kMaxAlgos = 8;
+        int returned_algo_count = 0;
+        cudnnConvolutionFwdAlgoPerf_t perf_results[kMaxAlgos];
+
+        CUDNN_CHECK(cudnnGetConvolutionForwardAlgorithm_v7(
+            handle, grad_output_desc.desc, filter_desc.desc, conv_desc.desc,
+            input_desc.desc, kMaxAlgos, &returned_algo_count, perf_results));
+
+        cudnnConvolutionFwdAlgo_t algo = perf_results[0].algo;
+        size_t workspace_size = 0;
+        float best_time = std::numeric_limits<float>::max();
+
+        for (int i = 0; i < returned_algo_count; ++i) {
+            if (perf_results[i].status != CUDNN_STATUS_SUCCESS) continue;
+            size_t ws_size = 0;
+            cudnnStatus_t ws_status = cudnnGetConvolutionForwardWorkspaceSize(
+                handle, grad_output_desc.desc, filter_desc.desc, conv_desc.desc,
+                input_desc.desc, perf_results[i].algo, &ws_size);
+            if (ws_status == CUDNN_STATUS_SUCCESS && ws_size <= kMaxWorkspaceSize) {
+                if (perf_results[i].time < best_time) {
+                    best_time = perf_results[i].time;
+                    algo = perf_results[i].algo;
+                    workspace_size = ws_size;
+                }
+            }
+        }
+        if (best_time == std::numeric_limits<float>::max()) {
+            CUDNN_CHECK(cudnnGetConvolutionForwardWorkspaceSize(
+                handle, grad_output_desc.desc, filter_desc.desc, conv_desc.desc,
+                input_desc.desc, algo, &workspace_size));
+        }
+
+        void* workspace = CuDNNWorkspace::get(workspace_size);
+        dispatch_conv_forward(
+            handle, grad_output_desc.desc, grad_output.data_ptr(), filter_desc.desc, weight.data_ptr(),
+            conv_desc.desc, algo, workspace, workspace_size,
+            input_desc.desc, grad_input.data_ptr(), input.dtype());
+    }
+
+    // Gradient w.r.t. weight: use cudnnConvolutionBackwardFilter
+    // but with swapped input/grad_output roles
+    if (compute_grad_weight) {
+        constexpr int kMaxAlgos = 8;
+        int returned_algo_count = 0;
+        cudnnConvolutionBwdFilterAlgoPerf_t perf_results[kMaxAlgos];
+
+        CUDNN_CHECK(cudnnGetConvolutionBackwardFilterAlgorithm_v7(
+            handle, grad_output_desc.desc, input_desc.desc, conv_desc.desc,
+            filter_desc.desc, kMaxAlgos, &returned_algo_count, perf_results));
+
+        cudnnConvolutionBwdFilterAlgo_t algo = perf_results[0].algo;
+        size_t workspace_size = 0;
+        float best_time = std::numeric_limits<float>::max();
+
+        for (int i = 0; i < returned_algo_count; ++i) {
+            if (perf_results[i].status != CUDNN_STATUS_SUCCESS) continue;
+            size_t ws_size = 0;
+            cudnnStatus_t ws_status = cudnnGetConvolutionBackwardFilterWorkspaceSize(
+                handle, grad_output_desc.desc, input_desc.desc, conv_desc.desc,
+                filter_desc.desc, perf_results[i].algo, &ws_size);
+            if (ws_status == CUDNN_STATUS_SUCCESS && ws_size <= kMaxWorkspaceSize) {
+                if (perf_results[i].time < best_time) {
+                    best_time = perf_results[i].time;
+                    algo = perf_results[i].algo;
+                    workspace_size = ws_size;
+                }
+            }
+        }
+        if (best_time == std::numeric_limits<float>::max()) {
+            CUDNN_CHECK(cudnnGetConvolutionBackwardFilterWorkspaceSize(
+                handle, grad_output_desc.desc, input_desc.desc, conv_desc.desc,
+                filter_desc.desc, algo, &workspace_size));
+        }
+
+        void* workspace = CuDNNWorkspace::get(workspace_size);
+        dispatch_conv_bwd_filter(
+            handle, grad_output_desc.desc, grad_output.data_ptr(), input_desc.desc, input.data_ptr(),
+            conv_desc.desc, algo, workspace, workspace_size,
+            filter_desc.desc, grad_weight.data_ptr(), input.dtype());
+    }
+
+    // Gradient w.r.t. bias: sum grad_output over N,D,H,W dimensions
+    if (compute_grad_bias) {
+        TensorDescriptorNd bias_desc;
+        std::vector<int> bias_dims = {1, (int)out_channels, 1, 1, 1};
+        bias_desc.set(cudnn_dtype, bias_dims);
+        dispatch_conv_bwd_bias(
+            handle, grad_output_desc.desc, grad_output.data_ptr(),
+            bias_desc.desc, grad_bias.data_ptr(), input.dtype());
+    }
+
+    return std::make_tuple(grad_input, grad_weight, grad_bias);
+}
+
 } // namespace cuda
 } // namespace tenzor
 

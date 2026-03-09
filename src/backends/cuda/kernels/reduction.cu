@@ -4430,5 +4430,736 @@ auto argsort_kernel(const Tensor& input, int64_t dim, bool descending, cudaStrea
     return output;
 }
 
+// ============================================================================
+// Any/All reductions
+// ============================================================================
+
+// Per-dimension any reduction kernel: output[out_idx] = OR of (input != 0) along dim
+template<typename T>
+__global__ void any_along_dim_kernel(
+    const T* input,
+    uint8_t* output,
+    DimMeta meta,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= output_size) return;
+
+    // Compute multi-dimensional indices for output position
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+    for (int64_t d = ndim - 1; d >= 0; --d) {
+        if (d == dim) {
+            indices[d] = 0;
+            continue;
+        }
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
+    }
+
+    // OR reduction along dim
+    uint8_t result = 0;
+    for (int64_t i = 0; i < dim_size; i++) {
+        indices[dim] = i;
+        int64_t in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * meta.strides[d];
+        }
+        if (input[in_idx] != T(0)) {
+            result = 1;
+            break;  // Short-circuit: found a non-zero element
+        }
+    }
+    output[out_idx] = result;
+}
+
+// Specialization for __half (no != operator with T(0))
+template<>
+__global__ void any_along_dim_kernel<__half>(
+    const __half* input,
+    uint8_t* output,
+    DimMeta meta,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= output_size) return;
+
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+    for (int64_t d = ndim - 1; d >= 0; --d) {
+        if (d == dim) { indices[d] = 0; continue; }
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
+    }
+
+    uint8_t result = 0;
+    for (int64_t i = 0; i < dim_size; i++) {
+        indices[dim] = i;
+        int64_t in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) in_idx += indices[d] * meta.strides[d];
+        if (__half2float(input[in_idx]) != 0.0f) { result = 1; break; }
+    }
+    output[out_idx] = result;
+}
+
+// Specialization for __nv_bfloat16
+template<>
+__global__ void any_along_dim_kernel<__nv_bfloat16>(
+    const __nv_bfloat16* input,
+    uint8_t* output,
+    DimMeta meta,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= output_size) return;
+
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+    for (int64_t d = ndim - 1; d >= 0; --d) {
+        if (d == dim) { indices[d] = 0; continue; }
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
+    }
+
+    uint8_t result = 0;
+    for (int64_t i = 0; i < dim_size; i++) {
+        indices[dim] = i;
+        int64_t in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) in_idx += indices[d] * meta.strides[d];
+        if (__bfloat162float(input[in_idx]) != 0.0f) { result = 1; break; }
+    }
+    output[out_idx] = result;
+}
+
+// Per-dimension all reduction kernel: output[out_idx] = AND of (input != 0) along dim
+template<typename T>
+__global__ void all_along_dim_kernel(
+    const T* input,
+    uint8_t* output,
+    DimMeta meta,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= output_size) return;
+
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+    for (int64_t d = ndim - 1; d >= 0; --d) {
+        if (d == dim) { indices[d] = 0; continue; }
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
+    }
+
+    // AND reduction along dim
+    uint8_t result = 1;
+    for (int64_t i = 0; i < dim_size; i++) {
+        indices[dim] = i;
+        int64_t in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * meta.strides[d];
+        }
+        if (input[in_idx] == T(0)) {
+            result = 0;
+            break;  // Short-circuit: found a zero element
+        }
+    }
+    output[out_idx] = result;
+}
+
+// Specialization for __half
+template<>
+__global__ void all_along_dim_kernel<__half>(
+    const __half* input,
+    uint8_t* output,
+    DimMeta meta,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= output_size) return;
+
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+    for (int64_t d = ndim - 1; d >= 0; --d) {
+        if (d == dim) { indices[d] = 0; continue; }
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
+    }
+
+    uint8_t result = 1;
+    for (int64_t i = 0; i < dim_size; i++) {
+        indices[dim] = i;
+        int64_t in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) in_idx += indices[d] * meta.strides[d];
+        if (__half2float(input[in_idx]) == 0.0f) { result = 0; break; }
+    }
+    output[out_idx] = result;
+}
+
+// Specialization for __nv_bfloat16
+template<>
+__global__ void all_along_dim_kernel<__nv_bfloat16>(
+    const __nv_bfloat16* input,
+    uint8_t* output,
+    DimMeta meta,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= output_size) return;
+
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+    for (int64_t d = ndim - 1; d >= 0; --d) {
+        if (d == dim) { indices[d] = 0; continue; }
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
+    }
+
+    uint8_t result = 1;
+    for (int64_t i = 0; i < dim_size; i++) {
+        indices[dim] = i;
+        int64_t in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) in_idx += indices[d] * meta.strides[d];
+        if (__bfloat162float(input[in_idx]) == 0.0f) { result = 0; break; }
+    }
+    output[out_idx] = result;
+}
+
+// Full reduction any kernel: check if any element in entire tensor is non-zero
+template<typename T>
+__global__ void any_full_reduce_kernel(const T* input, uint8_t* output, int64_t n) {
+    __shared__ uint8_t shared[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    uint8_t thread_any = 0;
+    for (int64_t i = idx; i < n; i += grid_size) {
+        if (input[i] != T(0)) { thread_any = 1; break; }
+    }
+
+    shared[tid] = thread_any;
+    __syncthreads();
+
+    // OR reduction in shared memory
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            shared[tid] = shared[tid] | shared[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        output[blockIdx.x] = shared[0];
+    }
+}
+
+// Specialization for __half
+template<>
+__global__ void any_full_reduce_kernel<__half>(const __half* input, uint8_t* output, int64_t n) {
+    __shared__ uint8_t shared[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    uint8_t thread_any = 0;
+    for (int64_t i = idx; i < n; i += grid_size) {
+        if (__half2float(input[i]) != 0.0f) { thread_any = 1; break; }
+    }
+
+    shared[tid] = thread_any;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) shared[tid] = shared[tid] | shared[tid + stride];
+        __syncthreads();
+    }
+
+    if (tid == 0) output[blockIdx.x] = shared[0];
+}
+
+// Specialization for __nv_bfloat16
+template<>
+__global__ void any_full_reduce_kernel<__nv_bfloat16>(const __nv_bfloat16* input, uint8_t* output, int64_t n) {
+    __shared__ uint8_t shared[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    uint8_t thread_any = 0;
+    for (int64_t i = idx; i < n; i += grid_size) {
+        if (__bfloat162float(input[i]) != 0.0f) { thread_any = 1; break; }
+    }
+
+    shared[tid] = thread_any;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) shared[tid] = shared[tid] | shared[tid + stride];
+        __syncthreads();
+    }
+
+    if (tid == 0) output[blockIdx.x] = shared[0];
+}
+
+// Full reduction all kernel: check if all elements in entire tensor are non-zero
+template<typename T>
+__global__ void all_full_reduce_kernel(const T* input, uint8_t* output, int64_t n) {
+    __shared__ uint8_t shared[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    uint8_t thread_all = 1;
+    for (int64_t i = idx; i < n; i += grid_size) {
+        if (input[i] == T(0)) { thread_all = 0; break; }
+    }
+
+    shared[tid] = thread_all;
+    __syncthreads();
+
+    // AND reduction in shared memory
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            shared[tid] = shared[tid] & shared[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        output[blockIdx.x] = shared[0];
+    }
+}
+
+// Specialization for __half
+template<>
+__global__ void all_full_reduce_kernel<__half>(const __half* input, uint8_t* output, int64_t n) {
+    __shared__ uint8_t shared[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    uint8_t thread_all = 1;
+    for (int64_t i = idx; i < n; i += grid_size) {
+        if (__half2float(input[i]) == 0.0f) { thread_all = 0; break; }
+    }
+
+    shared[tid] = thread_all;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) shared[tid] = shared[tid] & shared[tid + stride];
+        __syncthreads();
+    }
+
+    if (tid == 0) output[blockIdx.x] = shared[0];
+}
+
+// Specialization for __nv_bfloat16
+template<>
+__global__ void all_full_reduce_kernel<__nv_bfloat16>(const __nv_bfloat16* input, uint8_t* output, int64_t n) {
+    __shared__ uint8_t shared[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    uint8_t thread_all = 1;
+    for (int64_t i = idx; i < n; i += grid_size) {
+        if (__bfloat162float(input[i]) == 0.0f) { thread_all = 0; break; }
+    }
+
+    shared[tid] = thread_all;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) shared[tid] = shared[tid] & shared[tid + stride];
+        __syncthreads();
+    }
+
+    if (tid == 0) output[blockIdx.x] = shared[0];
+}
+
+// Final reduction for any: OR across block results
+__global__ void any_final_reduce_kernel(const uint8_t* block_results, uint8_t* output, int num_blocks) {
+    __shared__ uint8_t shared[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    uint8_t val = 0;
+    if (tid < num_blocks) val = block_results[tid];
+    for (int i = tid + blockDim.x; i < num_blocks; i += blockDim.x) {
+        val = val | block_results[i];
+    }
+
+    shared[tid] = val;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) shared[tid] = shared[tid] | shared[tid + stride];
+        __syncthreads();
+    }
+
+    if (tid == 0) output[0] = shared[0];
+}
+
+// Final reduction for all: AND across block results
+__global__ void all_final_reduce_kernel(const uint8_t* block_results, uint8_t* output, int num_blocks) {
+    __shared__ uint8_t shared[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    uint8_t val = 1;
+    if (tid < num_blocks) val = block_results[tid];
+    // Threads beyond num_blocks must start with identity element for AND
+    else val = 1;
+    for (int i = tid + blockDim.x; i < num_blocks; i += blockDim.x) {
+        val = val & block_results[i];
+    }
+
+    shared[tid] = val;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) shared[tid] = shared[tid] & shared[tid + stride];
+        __syncthreads();
+    }
+
+    if (tid == 0) output[0] = shared[0];
+}
+
+// Helper: launch full any reduction
+template<typename T>
+static void launch_full_reduction_any(const T* d_input, uint8_t* d_output, int64_t n, cudaStream_t stream) {
+    if (n == 0) {
+        // any() on empty tensor is false
+        fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, uint8_t(0));
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
+
+    int num_blocks = std::min<int>((n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE, 1024);
+
+    if (num_blocks == 1) {
+        any_full_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+        CUDA_CHECK(cudaGetLastError());
+    } else {
+        backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(uint8_t));
+        auto* d_temp = static_cast<uint8_t*>(d_temp_guard.get());
+        any_full_reduce_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+        CUDA_CHECK(cudaGetLastError());
+        any_final_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
+        CUDA_CHECK(cudaGetLastError());
+    }
+}
+
+// Helper: launch full all reduction
+template<typename T>
+static void launch_full_reduction_all(const T* d_input, uint8_t* d_output, int64_t n, cudaStream_t stream) {
+    if (n == 0) {
+        // all() on empty tensor is true (vacuous truth)
+        fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, uint8_t(1));
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
+
+    int num_blocks = std::min<int>((n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE, 1024);
+
+    if (num_blocks == 1) {
+        all_full_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+        CUDA_CHECK(cudaGetLastError());
+    } else {
+        backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(uint8_t));
+        auto* d_temp = static_cast<uint8_t*>(d_temp_guard.get());
+        all_full_reduce_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+        CUDA_CHECK(cudaGetLastError());
+        all_final_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
+        CUDA_CHECK(cudaGetLastError());
+    }
+}
+
+// Helper: launch dim any reduction
+template<typename T>
+static void launch_dim_reduction_any(
+    const T* d_input,
+    uint8_t* d_output,
+    const std::vector<int64_t>& input_shape,
+    const std::vector<int64_t>& input_strides,
+    int64_t dim
+) {
+    const int64_t ndim = input_shape.size();
+    const int64_t dim_size = input_shape[dim];
+
+    int64_t output_size = 1;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != dim) output_size *= input_shape[i];
+    }
+
+    if (output_size == 0 || dim_size == 0) return;
+
+    DimMeta meta = make_dim_meta(input_shape, input_strides);
+    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    any_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+        d_input, d_output, meta, ndim, dim, output_size, dim_size
+    );
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// Helper: launch dim all reduction
+template<typename T>
+static void launch_dim_reduction_all(
+    const T* d_input,
+    uint8_t* d_output,
+    const std::vector<int64_t>& input_shape,
+    const std::vector<int64_t>& input_strides,
+    int64_t dim
+) {
+    const int64_t ndim = input_shape.size();
+    const int64_t dim_size = input_shape[dim];
+
+    int64_t output_size = 1;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != dim) output_size *= input_shape[i];
+    }
+
+    if (output_size == 0 || dim_size == 0) return;
+
+    DimMeta meta = make_dim_meta(input_shape, input_strides);
+    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    all_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+        d_input, d_output, meta, ndim, dim, output_size, dim_size
+    );
+    CUDA_CHECK(cudaGetLastError());
+}
+
+auto any_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+    auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
+    stream = resolved_stream;
+
+    const auto dtype = input.dtype();
+    const auto& device = input.device();
+    const auto& input_shape = input.shape();
+    const auto& input_strides = input.strides();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    // Normalize dimension
+    int64_t normalized_dim = dim;
+    if (dim != INT64_MIN) {
+        if (dim < 0) normalized_dim = ndim + dim;
+        if (normalized_dim < 0 || normalized_dim >= ndim) {
+            throw std::runtime_error("Dimension " + std::to_string(dim) +
+                " out of range for tensor with " + std::to_string(ndim) + " dimensions");
+        }
+    }
+
+    // Output shape: same as input but with reduction dim removed/kept
+    auto output_shape = compute_reduction_shape(
+        std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+        normalized_dim, keepdim
+    );
+
+    // Output is always Bool (uint8_t)
+    Tensor output(output_shape, DType::Bool, device);
+
+    auto* output_data = output.data<uint8_t>();
+    auto shape_vec = std::vector<int64_t>(input_shape.begin(), input_shape.end());
+    auto strides_vec = std::vector<int64_t>(input_strides.begin(), input_strides.end());
+
+    switch (dtype) {
+        case DType::Float32: {
+            auto* input_data = input.data<float>();
+            if (dim == INT64_MIN) {
+                launch_full_reduction_any(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_reduction_any(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+            }
+            break;
+        }
+        case DType::Float64: {
+            auto* input_data = input.data<double>();
+            if (dim == INT64_MIN) {
+                launch_full_reduction_any(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_reduction_any(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+            }
+            break;
+        }
+        case DType::Int32: {
+            auto* input_data = input.data<int32_t>();
+            if (dim == INT64_MIN) {
+                launch_full_reduction_any(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_reduction_any(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+            }
+            break;
+        }
+        case DType::Int64: {
+            auto* input_data = input.data<int64_t>();
+            if (dim == INT64_MIN) {
+                launch_full_reduction_any(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_reduction_any(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+            }
+            break;
+        }
+        case DType::Float16: {
+            auto* input_data = reinterpret_cast<const __half*>(input.data_ptr());
+            if (dim == INT64_MIN) {
+                launch_full_reduction_any(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_reduction_any(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+            }
+            break;
+        }
+        case DType::BFloat16: {
+            auto* input_data = reinterpret_cast<const __nv_bfloat16*>(input.data_ptr());
+            if (dim == INT64_MIN) {
+                launch_full_reduction_any(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_reduction_any(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+            }
+            break;
+        }
+        case DType::Bool: {
+            auto* input_data = input.data<uint8_t>();
+            if (dim == INT64_MIN) {
+                launch_full_reduction_any(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_reduction_any(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("any: unsupported dtype");
+    }
+
+    CUDA_PEEK_AND_THROW(stream, "any_kernel");
+    return output;
+}
+
+auto all_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+    auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
+    stream = resolved_stream;
+
+    const auto dtype = input.dtype();
+    const auto& device = input.device();
+    const auto& input_shape = input.shape();
+    const auto& input_strides = input.strides();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    // Normalize dimension
+    int64_t normalized_dim = dim;
+    if (dim != INT64_MIN) {
+        if (dim < 0) normalized_dim = ndim + dim;
+        if (normalized_dim < 0 || normalized_dim >= ndim) {
+            throw std::runtime_error("Dimension " + std::to_string(dim) +
+                " out of range for tensor with " + std::to_string(ndim) + " dimensions");
+        }
+    }
+
+    auto output_shape = compute_reduction_shape(
+        std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+        normalized_dim, keepdim
+    );
+
+    // Output is always Bool (uint8_t)
+    Tensor output(output_shape, DType::Bool, device);
+
+    auto* output_data = output.data<uint8_t>();
+    auto shape_vec = std::vector<int64_t>(input_shape.begin(), input_shape.end());
+    auto strides_vec = std::vector<int64_t>(input_strides.begin(), input_strides.end());
+
+    switch (dtype) {
+        case DType::Float32: {
+            auto* input_data = input.data<float>();
+            if (dim == INT64_MIN) {
+                launch_full_reduction_all(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_reduction_all(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+            }
+            break;
+        }
+        case DType::Float64: {
+            auto* input_data = input.data<double>();
+            if (dim == INT64_MIN) {
+                launch_full_reduction_all(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_reduction_all(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+            }
+            break;
+        }
+        case DType::Int32: {
+            auto* input_data = input.data<int32_t>();
+            if (dim == INT64_MIN) {
+                launch_full_reduction_all(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_reduction_all(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+            }
+            break;
+        }
+        case DType::Int64: {
+            auto* input_data = input.data<int64_t>();
+            if (dim == INT64_MIN) {
+                launch_full_reduction_all(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_reduction_all(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+            }
+            break;
+        }
+        case DType::Float16: {
+            auto* input_data = reinterpret_cast<const __half*>(input.data_ptr());
+            if (dim == INT64_MIN) {
+                launch_full_reduction_all(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_reduction_all(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+            }
+            break;
+        }
+        case DType::BFloat16: {
+            auto* input_data = reinterpret_cast<const __nv_bfloat16*>(input.data_ptr());
+            if (dim == INT64_MIN) {
+                launch_full_reduction_all(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_reduction_all(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+            }
+            break;
+        }
+        case DType::Bool: {
+            auto* input_data = input.data<uint8_t>();
+            if (dim == INT64_MIN) {
+                launch_full_reduction_all(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_reduction_all(input_data, output_data, shape_vec, strides_vec, normalized_dim);
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("all: unsupported dtype");
+    }
+
+    CUDA_PEEK_AND_THROW(stream, "all_kernel");
+    return output;
+}
+
 } // namespace cuda
 } // namespace tenzor

@@ -1,0 +1,26 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : enable
+
+// Max Pooling 3D Backward Pass for Float64 using pre-computed indices
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { double grad_output[]; };
+layout(binding = 1) buffer Indices { double indices[]; };
+layout(binding = 2) buffer GradInput { double grad_input[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint grad_input_size;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    double grad = grad_output[idx];
+    int target_idx = int(indices[idx]);
+
+    if (target_idx >= 0 && target_idx < int(params.grad_input_size)) {
+        grad_input[target_idx] += grad;
+    }
+}

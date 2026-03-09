@@ -136,6 +136,16 @@ set(SHADERS
     conv2d_backward_input_f64
     conv2d_backward_weight_f64
     conv2d_backward_bias_f64
+    # Conv3d operations
+    conv3d_forward
+    conv3d_forward_f64
+    conv3d_forward_f16
+    conv3d_backward_input
+    conv3d_backward_input_f64
+    conv3d_backward_weight
+    conv3d_backward_weight_f64
+    conv3d_backward_bias
+    conv3d_backward_bias_f64
     # Tensor manipulation operations
     expand
     expand_f64
@@ -217,6 +227,40 @@ set(SHADERS
     max_pool2d_f64
     avg_pool2d_f64
     avg_pool2d_backward_f64
+    # 1D pooling operations
+    max_pool1d
+    max_pool1d_f16
+    max_pool1d_f64
+    max_pool1d_backward
+    max_pool1d_backward_f16
+    max_pool1d_backward_f64
+    avg_pool1d
+    avg_pool1d_f16
+    avg_pool1d_f64
+    avg_pool1d_backward
+    avg_pool1d_backward_f16
+    avg_pool1d_backward_f64
+    # 3D pooling operations
+    max_pool3d
+    max_pool3d_f16
+    max_pool3d_f64
+    max_pool3d_backward
+    max_pool3d_backward_f16
+    max_pool3d_backward_f64
+    avg_pool3d
+    avg_pool3d_f16
+    avg_pool3d_f64
+    avg_pool3d_backward
+    avg_pool3d_backward_f64
+    avg_pool3d_backward_f16
+    # Adaptive 1D pooling
+    adaptive_pooling_1d
+    adaptive_pooling_1d_f64
+    adaptive_pooling_1d_f16
+    # Adaptive 3D pooling
+    adaptive_pooling_3d
+    adaptive_pooling_3d_f64
+    adaptive_pooling_3d_f16
     # Float64 batchnorm operations
     batchnorm2d_forward_f64
     batchnorm2d_backward_f64
@@ -334,10 +378,45 @@ set(SHADERS
     cumprod_f16
     adaptive_max_pool2d_backward
     adaptive_max_pool2d_backward_f64
+    # Bool predicates (isnan, isinf, isfinite)
+    bool_predicates
+    bool_predicates_f64
+    # Logical operations (and, or, not, xor)
+    logical
+    # Lerp (linear interpolation)
+    lerp
+    lerp_f64
+    lerp_f16
     strided_fill
     strided_fill_f64
     to_memory_format
     to_memory_format_f64
+    # ScatterAdd operations
+    scatter_add
+    scatter_add_f64
+    scatter_add_f16
+    # Instance Normalization
+    instance_norm
+    instance_norm_f64
+    instance_norm_backward
+    instance_norm_backward_f64
+    # EmbeddingBag
+    embedding_bag
+    embedding_bag_f64
+    # Fused SGD and Adam optimizer steps
+    fused_sgd_step
+    fused_adam_step
+    # Triangular matrix operations
+    triu_tril
+    triu_tril_f64
+    triu_tril_f16
+    # Diagonal operations
+    diag
+    diag_f64
+    # Flip (reverse) operations
+    flip
+    flip_f64
+    flip_f16
 )
 
 # Shaders requiring SPIR-V 1.3 (subgroup operations, Vulkan 1.1+)

@@ -2187,5 +2187,532 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, hipStr
     return output;
 }
 
+// ============================================================================
+// Any/All Reduction Kernels
+// ============================================================================
+
+/**
+ * @brief Full any reduction kernel - OR reduction over entire tensor
+ * @tparam T Data type
+ * @param input Input tensor data
+ * @param output Output buffer (one value per block)
+ * @param n Total number of elements
+ *
+ * Each thread checks its elements for non-zero, block reduces with OR.
+ */
+template<typename T>
+__global__ void any_reduce_kernel(const T* input, uint8_t* output, int64_t n) {
+    __shared__ int shared[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    // Grid-stride loop: check if any element is non-zero
+    int thread_any = 0;
+    for (int64_t i = idx; i < n; i += grid_size) {
+        if (input[i] != T(0)) {
+            thread_any = 1;
+        }
+    }
+
+    shared[tid] = thread_any;
+    __syncthreads();
+
+    // Block-level OR reduction in LDS
+    for (int stride = blockDim.x / 2; stride >= WAVEFRONT_SIZE; stride >>= 1) {
+        if (tid < stride) {
+            shared[tid] = shared[tid] | shared[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    // Wavefront-level reduction
+    if (tid < WAVEFRONT_SIZE) {
+        int val = shared[tid];
+        #pragma unroll
+        for (int offset = WAVEFRONT_SIZE / 2; offset > 0; offset /= 2) {
+            val |= __shfl_down(val, offset, WAVEFRONT_SIZE);
+        }
+        if (tid == 0) {
+            output[blockIdx.x] = val ? 1 : 0;
+        }
+    }
+}
+
+/**
+ * @brief Full all reduction kernel - AND reduction over entire tensor
+ * @tparam T Data type
+ * @param input Input tensor data
+ * @param output Output buffer (one value per block)
+ * @param n Total number of elements
+ */
+template<typename T>
+__global__ void all_reduce_kernel(const T* input, uint8_t* output, int64_t n) {
+    __shared__ int shared[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    // Grid-stride loop: check if all elements are non-zero
+    int thread_all = 1;
+    for (int64_t i = idx; i < n; i += grid_size) {
+        if (input[i] == T(0)) {
+            thread_all = 0;
+        }
+    }
+
+    shared[tid] = thread_all;
+    __syncthreads();
+
+    // Block-level AND reduction in LDS
+    for (int stride = blockDim.x / 2; stride >= WAVEFRONT_SIZE; stride >>= 1) {
+        if (tid < stride) {
+            shared[tid] = shared[tid] & shared[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    // Wavefront-level reduction
+    if (tid < WAVEFRONT_SIZE) {
+        int val = shared[tid];
+        #pragma unroll
+        for (int offset = WAVEFRONT_SIZE / 2; offset > 0; offset /= 2) {
+            val &= __shfl_down(val, offset, WAVEFRONT_SIZE);
+        }
+        if (tid == 0) {
+            output[blockIdx.x] = val ? 1 : 0;
+        }
+    }
+}
+
+/**
+ * @brief Any reduction along a specific dimension
+ * @tparam T Data type
+ */
+template<typename T>
+__global__ void any_along_dim_kernel(
+    const T* input,
+    uint8_t* output,
+    const int64_t* input_shape,
+    const int64_t* input_strides,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (out_idx >= output_size) return;
+
+    // Compute multi-dimensional indices for output position
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+
+    for (int64_t d = ndim - 1; d >= 0; --d) {
+        if (d == dim) {
+            indices[d] = 0;
+            continue;
+        }
+        int64_t dim_size_d = input_shape[d];
+        indices[d] = tmp % dim_size_d;
+        tmp /= dim_size_d;
+    }
+
+    // Check if any element along the reduction dimension is non-zero
+    uint8_t result = 0;
+    for (int64_t i = 0; i < dim_size; i++) {
+        indices[dim] = i;
+
+        int64_t in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * input_strides[d];
+        }
+
+        if (input[in_idx] != T(0)) {
+            result = 1;
+            break;  // Short-circuit: found a non-zero
+        }
+    }
+
+    output[out_idx] = result;
+}
+
+/**
+ * @brief All reduction along a specific dimension
+ * @tparam T Data type
+ */
+template<typename T>
+__global__ void all_along_dim_kernel(
+    const T* input,
+    uint8_t* output,
+    const int64_t* input_shape,
+    const int64_t* input_strides,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (out_idx >= output_size) return;
+
+    // Compute multi-dimensional indices for output position
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+
+    for (int64_t d = ndim - 1; d >= 0; --d) {
+        if (d == dim) {
+            indices[d] = 0;
+            continue;
+        }
+        int64_t dim_size_d = input_shape[d];
+        indices[d] = tmp % dim_size_d;
+        tmp /= dim_size_d;
+    }
+
+    // Check if all elements along the reduction dimension are non-zero
+    uint8_t result = 1;
+    for (int64_t i = 0; i < dim_size; i++) {
+        indices[dim] = i;
+
+        int64_t in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * input_strides[d];
+        }
+
+        if (input[in_idx] == T(0)) {
+            result = 0;
+            break;  // Short-circuit: found a zero
+        }
+    }
+
+    output[out_idx] = result;
+}
+
+/**
+ * @brief Launch full any reduction
+ * @tparam T Data type
+ */
+template<typename T>
+static void launch_full_any(const T* d_input, uint8_t* d_output, int64_t n, hipStream_t stream) {
+    if (n == 0) {
+        // any of empty tensor = false
+        uint8_t zero = 0;
+        HIP_CHECK(hipMemcpyAsync(d_output, &zero, sizeof(uint8_t), hipMemcpyHostToDevice, stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
+        return;
+    }
+
+    int num_blocks = std::min<int>((n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE, 1024);
+
+    if (num_blocks == 1) {
+        hipLaunchKernelGGL(any_reduce_kernel<T>, dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+            d_input, d_output, n);
+    } else {
+        // Phase 1: Reduce to num_blocks intermediate uint8_t results
+        uint8_t* d_temp;
+        HIP_CHECK(hipMalloc(&d_temp, num_blocks * sizeof(uint8_t)));
+        hipLaunchKernelGGL(any_reduce_kernel<T>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+            d_input, d_temp, n);
+
+        // Phase 2: Final OR reduction over intermediates
+        // Read back partial results and reduce on host (simpler for uint8_t)
+        std::vector<uint8_t> h_temp(num_blocks);
+        HIP_CHECK(hipMemcpy(h_temp.data(), d_temp, num_blocks * sizeof(uint8_t), hipMemcpyDeviceToHost));
+
+        uint8_t result = 0;
+        for (int i = 0; i < num_blocks; i++) {
+            result |= h_temp[i];
+        }
+        HIP_CHECK(hipMemcpy(d_output, &result, sizeof(uint8_t), hipMemcpyHostToDevice));
+        HIP_CHECK(hipFree(d_temp));
+    }
+    HIP_CHECK(hipStreamSynchronize(stream));
+}
+
+/**
+ * @brief Launch full all reduction
+ * @tparam T Data type
+ */
+template<typename T>
+static void launch_full_all(const T* d_input, uint8_t* d_output, int64_t n, hipStream_t stream) {
+    if (n == 0) {
+        // all of empty tensor = true (vacuous truth)
+        uint8_t one = 1;
+        HIP_CHECK(hipMemcpyAsync(d_output, &one, sizeof(uint8_t), hipMemcpyHostToDevice, stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
+        return;
+    }
+
+    int num_blocks = std::min<int>((n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE, 1024);
+
+    if (num_blocks == 1) {
+        hipLaunchKernelGGL(all_reduce_kernel<T>, dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+            d_input, d_output, n);
+    } else {
+        uint8_t* d_temp;
+        HIP_CHECK(hipMalloc(&d_temp, num_blocks * sizeof(uint8_t)));
+        hipLaunchKernelGGL(all_reduce_kernel<T>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+            d_input, d_temp, n);
+
+        // Read back partial results and reduce on host
+        std::vector<uint8_t> h_temp(num_blocks);
+        HIP_CHECK(hipMemcpy(h_temp.data(), d_temp, num_blocks * sizeof(uint8_t), hipMemcpyDeviceToHost));
+
+        uint8_t result = 1;
+        for (int i = 0; i < num_blocks; i++) {
+            result &= h_temp[i];
+        }
+        HIP_CHECK(hipMemcpy(d_output, &result, sizeof(uint8_t), hipMemcpyHostToDevice));
+        HIP_CHECK(hipFree(d_temp));
+    }
+    HIP_CHECK(hipStreamSynchronize(stream));
+}
+
+/**
+ * @brief Launch dimensional any reduction
+ * @tparam T Data type
+ */
+template<typename T>
+static void launch_dim_any(
+    const T* d_input,
+    uint8_t* d_output,
+    const std::vector<int64_t>& input_shape,
+    const std::vector<int64_t>& input_strides,
+    int64_t dim,
+    hipStream_t stream
+) {
+    const int64_t ndim = input_shape.size();
+    const int64_t dim_size = input_shape[dim];
+
+    int64_t output_size = 1;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != dim) {
+            output_size *= input_shape[i];
+        }
+    }
+
+    if (output_size == 0 || dim_size == 0) {
+        return;
+    }
+
+    int64_t* d_shape;
+    int64_t* d_strides;
+    HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
+    HIP_CHECK(hipMalloc(&d_strides, ndim * sizeof(int64_t)));
+    HIP_CHECK(hipMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+
+    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    hipLaunchKernelGGL(any_along_dim_kernel<T>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+        d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size);
+
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipFree(d_shape));
+    HIP_CHECK(hipFree(d_strides));
+}
+
+/**
+ * @brief Launch dimensional all reduction
+ * @tparam T Data type
+ */
+template<typename T>
+static void launch_dim_all(
+    const T* d_input,
+    uint8_t* d_output,
+    const std::vector<int64_t>& input_shape,
+    const std::vector<int64_t>& input_strides,
+    int64_t dim,
+    hipStream_t stream
+) {
+    const int64_t ndim = input_shape.size();
+    const int64_t dim_size = input_shape[dim];
+
+    int64_t output_size = 1;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != dim) {
+            output_size *= input_shape[i];
+        }
+    }
+
+    if (output_size == 0 || dim_size == 0) {
+        return;
+    }
+
+    int64_t* d_shape;
+    int64_t* d_strides;
+    HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
+    HIP_CHECK(hipMalloc(&d_strides, ndim * sizeof(int64_t)));
+    HIP_CHECK(hipMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+
+    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    hipLaunchKernelGGL(all_along_dim_kernel<T>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+        d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size);
+
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipFree(d_shape));
+    HIP_CHECK(hipFree(d_strides));
+}
+
+/**
+ * @brief Any reduction kernel - returns Bool tensor
+ * @param input Input tensor
+ * @param dim Dimension to reduce along (INT64_MIN for full reduction)
+ * @param keepdim Whether to keep the reduced dimension
+ * @param stream HIP stream
+ * @return Bool tensor with any-reduction result
+ */
+auto any_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor {
+    const auto dtype = input.dtype();
+    const auto& device = input.device();
+    const auto& input_shape = input.shape();
+    const auto& input_strides = input.strides();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    // Normalize negative dimension (but preserve special value INT64_MIN for full reduction)
+    bool full_reduction = (dim == INT64_MIN);
+    if (dim < 0 && dim != INT64_MIN) {
+        dim += ndim;
+    }
+
+    auto output_shape = compute_reduction_shape(
+        std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+        full_reduction ? -1 : dim, keepdim
+    );
+
+    // Output is always Bool (uint8_t)
+    Tensor output(output_shape, DType::Bool, device);
+    auto* output_data = output.data<uint8_t>();
+
+    // Dispatch based on input dtype - cast to appropriate type for comparison
+    auto launch = [&](auto* input_data) {
+        if (full_reduction) {
+            launch_full_any(input_data, output_data, input.numel(), stream);
+        } else {
+            launch_dim_any(
+                input_data, output_data,
+                std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                dim, stream
+            );
+        }
+    };
+
+    switch (dtype) {
+        case DType::Float32:
+            launch(input.data<float>());
+            break;
+        case DType::Float64:
+            launch(input.data<double>());
+            break;
+        case DType::Float16:
+            launch(reinterpret_cast<const __half*>(input.data<Float16>()));
+            break;
+        case DType::Int32:
+            launch(input.data<int32_t>());
+            break;
+        case DType::Int64:
+            launch(input.data<int64_t>());
+            break;
+        case DType::Bool:
+        case DType::UInt8:
+            launch(input.data<uint8_t>());
+            break;
+        case DType::Int8:
+            launch(input.data<int8_t>());
+            break;
+        default:
+            throw std::runtime_error("any: unsupported dtype");
+    }
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        throw std::runtime_error(std::string("HIP error in any_kernel: ") + hipGetErrorString(err));
+    }
+
+    return output;
+}
+
+/**
+ * @brief All reduction kernel - returns Bool tensor
+ * @param input Input tensor
+ * @param dim Dimension to reduce along (INT64_MIN for full reduction)
+ * @param keepdim Whether to keep the reduced dimension
+ * @param stream HIP stream
+ * @return Bool tensor with all-reduction result
+ */
+auto all_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor {
+    const auto dtype = input.dtype();
+    const auto& device = input.device();
+    const auto& input_shape = input.shape();
+    const auto& input_strides = input.strides();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    // Normalize negative dimension (but preserve special value INT64_MIN for full reduction)
+    bool full_reduction = (dim == INT64_MIN);
+    if (dim < 0 && dim != INT64_MIN) {
+        dim += ndim;
+    }
+
+    auto output_shape = compute_reduction_shape(
+        std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+        full_reduction ? -1 : dim, keepdim
+    );
+
+    // Output is always Bool (uint8_t)
+    Tensor output(output_shape, DType::Bool, device);
+    auto* output_data = output.data<uint8_t>();
+
+    auto launch = [&](auto* input_data) {
+        if (full_reduction) {
+            launch_full_all(input_data, output_data, input.numel(), stream);
+        } else {
+            launch_dim_all(
+                input_data, output_data,
+                std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                dim, stream
+            );
+        }
+    };
+
+    switch (dtype) {
+        case DType::Float32:
+            launch(input.data<float>());
+            break;
+        case DType::Float64:
+            launch(input.data<double>());
+            break;
+        case DType::Float16:
+            launch(reinterpret_cast<const __half*>(input.data<Float16>()));
+            break;
+        case DType::Int32:
+            launch(input.data<int32_t>());
+            break;
+        case DType::Int64:
+            launch(input.data<int64_t>());
+            break;
+        case DType::Bool:
+        case DType::UInt8:
+            launch(input.data<uint8_t>());
+            break;
+        case DType::Int8:
+            launch(input.data<int8_t>());
+            break;
+        default:
+            throw std::runtime_error("all: unsupported dtype");
+    }
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        throw std::runtime_error(std::string("HIP error in all_kernel: ") + hipGetErrorString(err));
+    }
+
+    return output;
+}
+
 } // namespace rocm
 } // namespace tenzor

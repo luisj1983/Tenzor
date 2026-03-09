@@ -1,0 +1,102 @@
+#version 450
+
+// 3D Convolution Forward Pass (with groups support)
+// im2vol + dot product approach: each thread computes one output element
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Weight { float weight_data[]; };
+layout(binding = 2) buffer Bias { float bias_data[]; };
+layout(binding = 3) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;      // Total output elements
+    uint batch;           // Batch size (N)
+    uint in_channels;     // Input channels (C_in)
+    uint out_channels;    // Output channels (C_out)
+    uint in_depth;        // Input depth (D_in)
+    uint in_height;       // Input height (H_in)
+    uint in_width;        // Input width (W_in)
+    uint kernel_d;        // Kernel depth
+    uint kernel_h;        // Kernel height
+    uint kernel_w;        // Kernel width
+    uint stride_d;        // Stride depth
+    uint stride_h;        // Stride height
+    uint stride_w;        // Stride width
+    uint padding_d;       // Padding depth
+    uint padding_h;       // Padding height
+    uint padding_w;       // Padding width
+    uint dilation_d;      // Dilation depth
+    uint dilation_h;      // Dilation height
+    uint dilation_w;      // Dilation width
+    uint groups;          // Groups (for grouped convolution)
+    uint out_d;           // Output depth
+    uint out_h;           // Output height
+    uint out_w;           // Output width
+    uint has_bias;        // 1 if bias present, 0 otherwise
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) {
+        return;
+    }
+
+    // Decode index to (n, oc, od, oh, ow)
+    uint ow = idx % params.out_w;
+    uint temp = idx / params.out_w;
+    uint oh = temp % params.out_h;
+    temp /= params.out_h;
+    uint od = temp % params.out_d;
+    temp /= params.out_d;
+    uint oc = temp % params.out_channels;
+    uint n = temp / params.out_channels;
+
+    float sum = 0.0;
+
+    // Compute which input channels this output channel uses (for grouped convolution)
+    uint channels_per_group = params.in_channels / params.groups;
+    uint out_channels_per_group = params.out_channels / params.groups;
+    uint group_id = oc / out_channels_per_group;
+    uint ic_start = group_id * channels_per_group;
+    uint ic_end = ic_start + channels_per_group;
+
+    // Perform 3D convolution
+    for (uint ic = ic_start; ic < ic_end; ic++) {
+        for (uint kd = 0; kd < params.kernel_d; kd++) {
+            for (uint kh = 0; kh < params.kernel_h; kh++) {
+                for (uint kw = 0; kw < params.kernel_w; kw++) {
+                    // Calculate input position with stride, padding, and dilation
+                    int id = int(od * params.stride_d) - int(params.padding_d) + int(kd * params.dilation_d);
+                    int ih = int(oh * params.stride_h) - int(params.padding_h) + int(kh * params.dilation_h);
+                    int iw = int(ow * params.stride_w) - int(params.padding_w) + int(kw * params.dilation_w);
+
+                    // Check bounds
+                    if (id >= 0 && id < int(params.in_depth) &&
+                        ih >= 0 && ih < int(params.in_height) &&
+                        iw >= 0 && iw < int(params.in_width)) {
+                        // Calculate input index: [n, ic, id, ih, iw]
+                        uint input_idx = ((n * params.in_channels + ic) * params.in_depth + uint(id)) *
+                                         params.in_height * params.in_width +
+                                         uint(ih) * params.in_width + uint(iw);
+
+                        // Calculate weight index: [oc, ic_local, kd, kh, kw]
+                        uint ic_local = ic - ic_start;
+                        uint weight_idx = ((oc * channels_per_group + ic_local) * params.kernel_d + kd) *
+                                          params.kernel_h * params.kernel_w +
+                                          kh * params.kernel_w + kw;
+
+                        sum += input_data[input_idx] * weight_data[weight_idx];
+                    }
+                }
+            }
+        }
+    }
+
+    // Add bias if present
+    if (params.has_bias == 1) {
+        sum += bias_data[oc];
+    }
+
+    output_data[idx] = sum;
+}

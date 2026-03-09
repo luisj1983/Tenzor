@@ -1,0 +1,37 @@
+#version 450
+
+// Triangular matrix operations: triu (upper) and tril (lower)
+// Grid-stride kernel: one thread per element
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer InputA { float a[]; };
+layout(binding = 1) buffer Output { float result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;         // total elements
+    uint rows;      // number of rows in last 2 dims
+    uint cols;      // number of cols in last 2 dims
+    int diagonal;   // diagonal offset
+    uint op;        // 0=triu, 1=tril
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= n) return;
+
+    uint matrix_size = rows * cols;
+    uint pos_in_matrix = idx % matrix_size;
+    uint row = pos_in_matrix / cols;
+    uint col = pos_in_matrix % cols;
+
+    bool keep;
+    if (op == 0) {
+        // triu: keep elements where col >= row + diagonal
+        keep = (int(col) >= int(row) + diagonal);
+    } else {
+        // tril: keep elements where col <= row + diagonal
+        keep = (int(col) <= int(row) + diagonal);
+    }
+
+    result[idx] = keep ? a[idx] : 0.0;
+}

@@ -1,0 +1,99 @@
+#version 450
+#extension GL_EXT_shader_atomic_float : enable
+
+// Average Pooling 3D Backward Pass
+// Distributes gradient evenly across pooling window
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { float grad_output[]; };  // (N, C, D_out, H_out, W_out)
+layout(binding = 1) buffer GradInput { float grad_input[]; };    // (N, C, D, H, W)
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;          // Total output gradient elements
+    uint batch_channels;      // N * C
+    uint in_depth;
+    uint in_height;
+    uint in_width;
+    uint out_depth;
+    uint out_height;
+    uint out_width;
+    uint kernel_d;
+    uint kernel_h;
+    uint kernel_w;
+    uint stride_d;
+    uint stride_h;
+    uint stride_w;
+    uint padding_d;
+    uint padding_h;
+    uint padding_w;
+    uint count_include_pad;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    uint temp = idx;
+    uint w_out = temp % params.out_width;
+    temp /= params.out_width;
+    uint h_out = temp % params.out_height;
+    temp /= params.out_height;
+    uint d_out = temp % params.out_depth;
+    uint bc = temp / params.out_depth;
+
+    float grad_out = grad_output[idx];
+
+    int d_start = int(d_out * params.stride_d) - int(params.padding_d);
+    int h_start = int(h_out * params.stride_h) - int(params.padding_h);
+    int w_start = int(w_out * params.stride_w) - int(params.padding_w);
+
+    // First pass: count valid elements
+    uint count = 0;
+    for (uint kd = 0; kd < params.kernel_d; kd++) {
+        int d_in = d_start + int(kd);
+        for (uint kh = 0; kh < params.kernel_h; kh++) {
+            int h_in = h_start + int(kh);
+            for (uint kw = 0; kw < params.kernel_w; kw++) {
+                int w_in = w_start + int(kw);
+
+                if (d_in >= 0 && d_in < int(params.in_depth) &&
+                    h_in >= 0 && h_in < int(params.in_height) &&
+                    w_in >= 0 && w_in < int(params.in_width)) {
+                    count++;
+                } else if (params.count_include_pad != 0) {
+                    count++;
+                }
+            }
+        }
+    }
+
+    float grad_per_element = 0.0;
+    if (count > 0) {
+        grad_per_element = grad_out / float(count);
+    }
+
+    uint in_spatial = params.in_depth * params.in_height * params.in_width;
+
+    // Second pass: distribute gradient
+    for (uint kd = 0; kd < params.kernel_d; kd++) {
+        int d_in = d_start + int(kd);
+        if (d_in < 0 || d_in >= int(params.in_depth)) continue;
+
+        for (uint kh = 0; kh < params.kernel_h; kh++) {
+            int h_in = h_start + int(kh);
+            if (h_in < 0 || h_in >= int(params.in_height)) continue;
+
+            for (uint kw = 0; kw < params.kernel_w; kw++) {
+                int w_in = w_start + int(kw);
+                if (w_in < 0 || w_in >= int(params.in_width)) continue;
+
+                uint input_idx = bc * in_spatial +
+                                uint(d_in) * params.in_height * params.in_width +
+                                uint(h_in) * params.in_width + uint(w_in);
+
+                atomicAdd(grad_input[input_idx], grad_per_element);
+            }
+        }
+    }
+}

@@ -371,6 +371,12 @@ jobs:
             --timeout 300
         timeout-minutes: 45
 
+      - name: Run Python tests
+        run: |
+          cd build
+          ctest --output-on-failure -L python --timeout 60
+        timeout-minutes: 10
+
   # Tier 3: Nightly comprehensive tests
   nightly:
     name: Nightly Comprehensive

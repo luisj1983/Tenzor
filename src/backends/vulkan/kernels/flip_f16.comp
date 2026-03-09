@@ -1,0 +1,63 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Flip (reverse) elements along a dimension for Float16
+// Float16 stored as packed uint32 words (2 elements per word)
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer InputA { uint a[]; };
+layout(binding = 1) buffer Output { uint result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // total elements (in Float16 units)
+    uint dim_size;   // size of the dimension being flipped
+    uint inner_size; // product of dims after the flip dim
+};
+
+// Helper to read a single Float16 element from packed storage
+float16_t read_f16(uint elem_idx) {
+    uint word_idx = elem_idx / 2;
+    uint packed = a[word_idx];
+    if ((elem_idx & 1) == 0) {
+        return unpackFloat2x16(packed & 0xFFFFu).x;
+    } else {
+        return unpackFloat2x16(packed >> 16).x;
+    }
+}
+
+void main() {
+    // Each thread handles one packed uint32 word (2 Float16 elements)
+    uint word_idx = gl_GlobalInvocationID.x;
+    uint num_words = (n + 1) / 2;
+    if (word_idx >= num_words) return;
+
+    uint elem0_idx = word_idx * 2;
+    uint elem1_idx = elem0_idx + 1;
+
+    // Compute flipped source for element 0
+    float16_t val0;
+    {
+        uint inner_idx = elem0_idx % inner_size;
+        uint dim_pos = (elem0_idx / inner_size) % dim_size;
+        uint outer_idx = elem0_idx / (dim_size * inner_size);
+        uint flipped = dim_size - 1 - dim_pos;
+        uint src = outer_idx * (dim_size * inner_size) + flipped * inner_size + inner_idx;
+        val0 = read_f16(src);
+    }
+
+    // Compute flipped source for element 1
+    float16_t val1 = float16_t(0.0);
+    if (elem1_idx < n) {
+        uint inner_idx = elem1_idx % inner_size;
+        uint dim_pos = (elem1_idx / inner_size) % dim_size;
+        uint outer_idx = elem1_idx / (dim_size * inner_size);
+        uint flipped = dim_size - 1 - dim_pos;
+        uint src = outer_idx * (dim_size * inner_size) + flipped * inner_size + inner_idx;
+        val1 = read_f16(src);
+    }
+
+    // Pack and write
+    uint lo = packFloat2x16(f16vec2(val0, float16_t(0.0)));
+    uint hi = packFloat2x16(f16vec2(val1, float16_t(0.0)));
+    result[word_idx] = (lo & 0xFFFFu) | ((hi & 0xFFFFu) << 16);
+}

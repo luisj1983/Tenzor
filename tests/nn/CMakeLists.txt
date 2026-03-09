@@ -126,4 +126,9 @@ tenzor_discover_tests(test_batchnorm2d_multidtype DISCOVERY_TIMEOUT 30)
 tenzor_discover_tests(test_normalization_multidtype DISCOVERY_TIMEOUT 30)
 tenzor_discover_tests(test_flatten_multidtype DISCOVERY_TIMEOUT 30)
 tenzor_discover_tests(test_segmentation_multidtype DISCOVERY_TIMEOUT 30)
+# PyTorch loader tests
+add_executable(test_pytorch_loader test_pytorch_loader.cpp)
+target_link_libraries(test_pytorch_loader PRIVATE tenzor_core GTest::gtest_main)
+
 tenzor_discover_tests(test_hrm DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_pytorch_loader DISCOVERY_TIMEOUT 30)

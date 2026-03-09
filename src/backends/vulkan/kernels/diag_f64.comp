@@ -1,0 +1,50 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Diagonal operations for Float64
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer InputA { float64_t a[]; };
+layout(binding = 1) buffer Output { float64_t result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;         // number of output elements
+    uint rows;      // rows of matrix
+    uint cols;      // cols of matrix
+    int diagonal;   // diagonal offset
+    uint op;        // 0=extract, 1=construct
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= n) return;
+
+    if (op == 0) {
+        // Extract diagonal
+        uint row, col;
+        if (diagonal >= 0) {
+            row = idx;
+            col = idx + uint(diagonal);
+        } else {
+            row = idx + uint(-diagonal);
+            col = idx;
+        }
+        result[idx] = a[row * cols + col];
+    } else {
+        // Construct diagonal matrix
+        uint row = idx / cols;
+        uint col = idx % cols;
+
+        bool on_diag;
+        uint diag_idx;
+        if (diagonal >= 0) {
+            on_diag = (col >= uint(diagonal)) && (col - uint(diagonal) == row);
+            diag_idx = row;
+        } else {
+            on_diag = (row >= uint(-diagonal)) && (row - uint(-diagonal) == col);
+            diag_idx = col;
+        }
+
+        result[idx] = on_diag ? a[diag_idx] : float64_t(0.0);
+    }
+}

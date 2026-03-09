@@ -1,0 +1,27 @@
+#version 450
+
+// Lerp (linear interpolation): result = start + weight * (end - start)
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer InputStart { uint start_buf[]; };
+layout(binding = 1) buffer InputEnd { uint end_buf[]; };
+layout(binding = 2) buffer InputWeight { uint weight_buf[]; };
+layout(binding = 3) buffer Output { uint result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of elements
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n) {
+        return;
+    }
+
+    float s = uintBitsToFloat(start_buf[idx]);
+    float e = uintBitsToFloat(end_buf[idx]);
+    float w = uintBitsToFloat(weight_buf[idx]);
+
+    result[idx] = floatBitsToUint(s + w * (e - s));
+}

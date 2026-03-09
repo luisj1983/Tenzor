@@ -3514,6 +3514,20 @@ PYBIND11_MODULE(tenzor_core, m) {
             return "BatchNorm2d(" + std::to_string(num_f) + ")";
         });
 
+    py::class_<tenzor::nn::BatchNorm3d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::BatchNorm3d>>(nn, "BatchNorm3d")
+        .def(py::init<int64_t, double, double, bool, bool>(),
+             py::arg("num_features"),
+             py::arg("eps") = 1e-5,
+             py::arg("momentum") = 0.1,
+             py::arg("affine") = true,
+             py::arg("track_running_stats") = true)
+        .def("__repr__", [](const tenzor::nn::BatchNorm3d& self) {
+            auto params = const_cast<tenzor::nn::BatchNorm3d&>(self).own_parameters();
+            int64_t num_f = params.empty() ? 0 : params[0]->tensor().numel();
+            return "BatchNorm3d(" + std::to_string(num_f) + ")";
+        });
+
     py::class_<tenzor::nn::BatchNorm1d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::BatchNorm1d>>(nn, "BatchNorm1d")
         .def(py::init<int64_t, double, double, bool, bool>(),
@@ -3558,6 +3572,18 @@ PYBIND11_MODULE(tenzor_core, m) {
             auto params = const_cast<tenzor::nn::InstanceNorm2d&>(self).own_parameters();
             int64_t size = params.empty() ? 0 : params[0]->tensor().numel();
             return "InstanceNorm2d(" + std::to_string(size) + ")";
+        });
+
+    py::class_<tenzor::nn::InstanceNorm3d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::InstanceNorm3d>>(nn, "InstanceNorm3d")
+        .def(py::init<int64_t, double, bool>(),
+             py::arg("num_features"),
+             py::arg("eps") = 1e-5,
+             py::arg("affine") = true)
+        .def("__repr__", [](const tenzor::nn::InstanceNorm3d& self) {
+            auto params = const_cast<tenzor::nn::InstanceNorm3d&>(self).own_parameters();
+            int64_t size = params.empty() ? 0 : params[0]->tensor().numel();
+            return "InstanceNorm3d(" + std::to_string(size) + ")";
         });
 
     py::class_<tenzor::nn::InstanceNorm1d, tenzor::nn::Module,

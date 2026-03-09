@@ -1,0 +1,26 @@
+#version 450
+#extension GL_EXT_shader_atomic_float : enable
+
+// Max Pooling 3D Backward Pass using pre-computed indices
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { float grad_output[]; };
+layout(binding = 1) buffer Indices { float indices[]; };
+layout(binding = 2) buffer GradInput { float grad_input[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint grad_input_size;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    float grad = grad_output[idx];
+    int target_idx = int(indices[idx]);
+
+    if (target_idx >= 0 && target_idx < int(params.grad_input_size)) {
+        atomicAdd(grad_input[target_idx], grad);
+    }
+}

@@ -240,6 +240,9 @@ public:
     auto dispatchTrigonometricOp(const std::string& op_name, const Tensor& input) -> Tensor;
     auto dispatchHyperbolicOp(const std::string& op_name, const Tensor& input) -> Tensor;
     auto dispatchComparisonOp(const std::string& op_name, const Tensor& a, const Tensor& b) -> Tensor;
+    auto dispatchBoolPredicateOp(const std::string& op_name, const Tensor& input) -> Tensor;
+    auto dispatchLogicalOp(const std::string& op_name, const Tensor& a, const Tensor& b) -> Tensor;
+    auto dispatchLerp(const Tensor& start, const Tensor& end, const Tensor& weight) -> Tensor;
     auto dispatchReduction(const std::string& op_name, const Tensor& input,
                           int64_t dim, bool keepdim) -> Tensor;
     auto dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor;
@@ -261,6 +264,24 @@ public:
                                       const std::vector<int64_t>& weight_shape,
                                       int64_t groups = 1) -> Tensor;
     auto dispatchConv2dBackwardBias(const Tensor& grad_output) -> Tensor;
+
+    // Conv3d operations
+    auto dispatchConv3dForward(const Tensor& input, const Tensor& weight, const Tensor* bias, const OpAttributes& attrs) -> Tensor;
+    auto dispatchConv3dBackwardInput(const Tensor& grad_output, const Tensor& weight,
+                                     int64_t stride, int64_t padding, int64_t dilation,
+                                     const std::vector<int64_t>& input_shape,
+                                     int64_t groups = 1) -> Tensor;
+    auto dispatchConv3dBackwardWeight(const Tensor& grad_output, const Tensor& input,
+                                      int64_t stride, int64_t padding, int64_t dilation,
+                                      const std::vector<int64_t>& weight_shape,
+                                      int64_t groups = 1) -> Tensor;
+    auto dispatchConv3dBackwardBias(const Tensor& grad_output) -> Tensor;
+
+    // ConvTranspose3d operations (use Conv3d shader duality)
+    auto dispatchConvTranspose3dForward(const Tensor& input, const Tensor& weight, const Tensor* bias, const OpAttributes& attrs) -> Tensor;
+    auto dispatchConvTranspose3dBackwardInput(const Tensor& grad_output, const Tensor& weight, const OpAttributes& attrs) -> Tensor;
+    auto dispatchConvTranspose3dBackwardWeight(const Tensor& grad_output, const Tensor& input, const std::vector<int64_t>& weight_shape, const OpAttributes& attrs) -> Tensor;
+    auto dispatchConvTranspose3dBackwardBias(const Tensor& grad_output) -> Tensor;
 
     // Vision operations
     auto dispatchIm2Col(const Tensor& input, const OpAttributes& attrs) -> Tensor;
@@ -288,6 +309,30 @@ public:
     auto dispatchMaxPool2dForward(const Tensor& input, const OpAttributes& attrs) -> Tensor;
     auto dispatchAvgPool2dBackward(const Tensor& grad_output, const Tensor& input, const OpAttributes& attrs) -> Tensor;
     auto dispatchMaxPool2dBackward(const Tensor& grad_output, const Tensor& input, const OpAttributes& attrs) -> Tensor;
+
+    // 1D pooling operations
+    auto dispatchMaxPool1dForward(const Tensor& input, const OpAttributes& attrs) -> std::vector<Tensor>;
+    auto dispatchMaxPool1dBackward(const Tensor& grad_output, const Tensor& indices,
+                                   int64_t L_in) -> Tensor;
+    auto dispatchAvgPool1dForward(const Tensor& input, const OpAttributes& attrs) -> Tensor;
+    auto dispatchAvgPool1dBackward(const Tensor& grad_output, const Tensor& input, const OpAttributes& attrs) -> Tensor;
+    auto dispatchAdaptiveMaxPool1d(const Tensor& input, int64_t output_size) -> std::pair<Tensor, Tensor>;
+    auto dispatchAdaptiveAvgPool1d(const Tensor& input, int64_t output_size) -> Tensor;
+    auto dispatchAdaptiveMaxPool1dBackward(const Tensor& grad_output, const Tensor& indices,
+                                            const std::vector<int64_t>& input_shape) -> Tensor;
+    auto dispatchAdaptiveAvgPool1dBackward(const Tensor& grad_output, int64_t L_in) -> Tensor;
+
+    // 3D pooling operations
+    auto dispatchMaxPool3dForward(const Tensor& input, const OpAttributes& attrs) -> std::vector<Tensor>;
+    auto dispatchMaxPool3dBackward(const Tensor& grad_output, const Tensor& indices,
+                                   int64_t D_in, int64_t H_in, int64_t W_in) -> Tensor;
+    auto dispatchAvgPool3dForward(const Tensor& input, const OpAttributes& attrs) -> Tensor;
+    auto dispatchAvgPool3dBackward(const Tensor& grad_output, const Tensor& input, const OpAttributes& attrs) -> Tensor;
+    auto dispatchAdaptiveMaxPool3d(const Tensor& input, int64_t out_d, int64_t out_h, int64_t out_w) -> std::pair<Tensor, Tensor>;
+    auto dispatchAdaptiveAvgPool3d(const Tensor& input, int64_t out_d, int64_t out_h, int64_t out_w) -> Tensor;
+    auto dispatchAdaptiveMaxPool3dBackward(const Tensor& grad_output, const Tensor& indices,
+                                            const std::vector<int64_t>& input_shape) -> Tensor;
+    auto dispatchAdaptiveAvgPool3dBackward(const Tensor& grad_output, int64_t D_in, int64_t H_in, int64_t W_in) -> Tensor;
 
     // Normalization operations
     auto dispatchBatchNorm2d(const Tensor& input, const Tensor& mean, const Tensor& var,
@@ -344,6 +389,13 @@ public:
     auto dispatchProd(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto dispatchAll(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto dispatchAny(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
+    auto dispatchBooleanReduction(const std::string& op_name, const Tensor& input,
+                                  int64_t dim, bool keepdim) -> Tensor;
+    auto dispatchTriuTril(const std::string& op_name, const Tensor& input,
+                          int64_t diagonal) -> Tensor;
+    auto dispatchDiag(const Tensor& input, int64_t diagonal) -> Tensor;
+    auto dispatchFlip(const Tensor& input, int64_t dim) -> Tensor;
+    auto dispatchTrace(const Tensor& input) -> Tensor;
 
     // Indexing operations
     auto dispatchEmbedding(const Tensor& weight, const Tensor& indices,
@@ -351,6 +403,8 @@ public:
     auto dispatchGather(const Tensor& input, int64_t dim, const Tensor& indices) -> Tensor;
     auto dispatchScatter(const Tensor& input, int64_t dim, const Tensor& indices,
                         const Tensor& values, int64_t reduction) -> Tensor;
+    auto dispatchScatterAdd(const Tensor& self, int64_t dim,
+                            const Tensor& index, const Tensor& src) -> Tensor;
     auto dispatchIndexSelect(const Tensor& input, int64_t dim, const Tensor& indices) -> Tensor;
 
     // Vision operations
@@ -474,6 +528,25 @@ public:
     auto dispatchSwishBackward(const Tensor& grad_output, const Tensor& input) -> Tensor;
     auto dispatchSoftmaxBackward(const Tensor& grad_output, const Tensor& output, int64_t dim) -> Tensor;
     auto dispatchLogSoftmaxBackward(const Tensor& grad_output, const Tensor& output, int64_t dim) -> Tensor;
+
+    // Instance Normalization operations
+    auto dispatchInstanceNorm(const Tensor& input, const Tensor& weight,
+                              const Tensor& bias, float epsilon) -> std::vector<Tensor>;
+    auto dispatchInstanceNormBackward(const Tensor& grad_output, const Tensor& input,
+                                      const Tensor& mean, const Tensor& rstd,
+                                      const Tensor& weight)
+                                      -> std::tuple<Tensor, Tensor, Tensor>;
+
+    // EmbeddingBag operation
+    auto dispatchEmbeddingBag(const Tensor& embeddings, const Tensor& offsets,
+                               int64_t embedding_dim, const std::string& mode,
+                               bool include_last_offset) -> Tensor;
+
+    // Fused optimizer steps
+    auto dispatchFusedSGDStep(std::span<const Tensor> inputs,
+                               const OpAttributes& attrs) -> std::vector<Tensor>;
+    auto dispatchFusedAdamStep(std::span<const Tensor> inputs,
+                                const OpAttributes& attrs) -> std::vector<Tensor>;
 
     // Instance and devices
     VkInstance instance_ = VK_NULL_HANDLE;

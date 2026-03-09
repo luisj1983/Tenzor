@@ -41,6 +41,7 @@ set(ROCM_HIP_SOURCES
     kernels/batchnorm.hip.cpp
     kernels/comparison.hip.cpp
     kernels/conv2d.hip.cpp
+    kernels/conv3d.hip.cpp
     kernels/pooling.hip.cpp
     kernels/indexing.hip.cpp
     kernels/transform.hip.cpp

@@ -157,6 +157,7 @@ namespace cpu {
     auto contiguous_kernel(const Tensor& input) -> Tensor;
     auto clone_kernel(const Tensor& input) -> Tensor;
     auto fill_kernel(const Tensor& input, float value) -> Tensor;
+    auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim) -> Tensor;
 
     // Indexing
     auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index) -> Tensor;
@@ -808,6 +809,12 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         std::vector<Tensor> tensors(inputs.begin(), inputs.end());
         return cpu::cat_kernel(tensors, dim);
+    });
+
+    table.register_single_output_kernel(OpId::Roll, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t shift = attrs.get_int(AttrKey::Shift, 0);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        return cpu::roll_kernel(inputs[0], shift, dim);
     });
 
     // =========================================================================

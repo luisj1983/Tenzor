@@ -1,0 +1,61 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : enable
+#extension GL_EXT_shader_atomic_float : enable
+
+// Average Pooling 1D Backward Pass - Float64 variant
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { double grad_output[]; };  // (N, C, L_out)
+layout(binding = 1) buffer GradInput { double grad_input[]; };    // (N, C, L)
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint batch;
+    uint channels;
+    uint in_length;
+    uint out_length;
+    uint kernel_size;
+    uint stride;
+    uint padding;
+    uint count_include_pad;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    uint temp = idx;
+    uint l_out = temp % params.out_length;
+    temp /= params.out_length;
+    uint c = temp % params.channels;
+    uint n = temp / params.channels;
+
+    double grad_out = grad_output[idx];
+
+    int l_start = int(l_out * params.stride) - int(params.padding);
+
+    uint count = 0;
+    for (uint k = 0; k < params.kernel_size; k++) {
+        int l_in = l_start + int(k);
+        if (l_in >= 0 && l_in < int(params.in_length)) {
+            count++;
+        } else if (params.count_include_pad != 0) {
+            count++;
+        }
+    }
+
+    double grad_per_element = 0.0lf;
+    if (count > 0) {
+        grad_per_element = grad_out / double(count);
+    }
+
+    for (uint k = 0; k < params.kernel_size; k++) {
+        int l_in = l_start + int(k);
+        if (l_in >= 0 && l_in < int(params.in_length)) {
+            uint input_idx = n * params.channels * params.in_length +
+                            c * params.in_length + uint(l_in);
+            atomicAdd(grad_input[input_idx], grad_per_element);
+        }
+    }
+}

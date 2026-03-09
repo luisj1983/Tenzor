@@ -1,0 +1,48 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : enable
+#extension GL_EXT_shader_float64 : enable
+
+// Bool predicate operations for Float64: isnan, isinf, isfinite
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer InputA { double a[]; };
+layout(binding = 1) buffer Output { uint8_t result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of elements
+    uint op;         // Operation: 0=isnan, 1=isinf, 2=isfinite
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n) {
+        return;
+    }
+
+    double val = a[idx];
+    uint8_t result_val;
+
+    switch (params.op) {
+        case 0u: // isnan
+            result_val = (val != val) ? uint8_t(1) : uint8_t(0);
+            break;
+        case 1u: { // isinf
+            // Check for infinity: abs(val) == infinity
+            double av = abs(val);
+            result_val = (av == 1.0/0.0) ? uint8_t(1) : uint8_t(0);
+            break;
+        }
+        case 2u: { // isfinite
+            double av = abs(val);
+            result_val = (val == val && av != 1.0/0.0) ? uint8_t(1) : uint8_t(0);
+            break;
+        }
+        default:
+            result_val = uint8_t(0);
+            break;
+    }
+
+    result[idx] = result_val;
+}

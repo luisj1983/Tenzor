@@ -1,43 +1,66 @@
 #version 450
 
-// Boolean reductions: all, any
+// Boolean reductions: any, all
+// Per-dimension reduction: one workgroup per output element
 layout(local_size_x_id = 0) in;
 layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
 
-layout(binding = 0) buffer Input { float input_data[]; };      // Treating as boolean (0 or non-zero)
-layout(binding = 1) buffer Output { int output_data[]; };      // Boolean result
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Output { int output_data[]; };   // Bool stored as int (0 or 1)
 
 layout(push_constant) uniform PushConstants {
-    uint n;              // Total number of elements
+    uint n;              // Total number of elements in input
     uint reduce_size;    // Size of dimension to reduce
-    uint outer_size;     // Size of outer dimensions
-    uint op;             // 0=all, 1=any
+    uint outer_size;     // Number of output elements
+    uint inner_size;     // Product of dimensions after reduction dim
+    uint op;             // 0=any, 1=all
 } params;
 
 shared int shared_data[WORKGROUP_SIZE];
 
 void main() {
     uint tid = gl_LocalInvocationID.x;
-    uint gid = gl_GlobalInvocationID.x;
-    uint wid = gl_WorkGroupID.x;
+    uint output_idx = gl_WorkGroupID.x;
 
-    // Convert to boolean
-    int value;
-    if (gid < params.n) {
-        value = (input_data[gid] != 0.0) ? 1 : 0;
-    } else {
-        value = (params.op == 0) ? 1 : 0; // all: true, any: false
+    // Each workgroup handles one output element
+    if (output_idx >= params.outer_size) {
+        return;
     }
-    shared_data[tid] = value;
+
+    // Initialize accumulator: any starts 0 (false), all starts 1 (true)
+    int accum = (params.op == 1) ? 1 : 0;
+
+    // Calculate position in output space
+    uint outer_idx = output_idx / params.inner_size;
+    uint inner_idx = output_idx % params.inner_size;
+
+    // Starting position in input
+    uint base_idx = outer_idx * params.reduce_size * params.inner_size + inner_idx;
+
+    // Each thread processes multiple elements along the reduction dimension
+    for (uint i = tid; i < params.reduce_size; i += WORKGROUP_SIZE) {
+        uint idx = base_idx + i * params.inner_size;
+        if (idx < params.n) {
+            int val = (input_data[idx] != 0.0) ? 1 : 0;
+            if (params.op == 0) { // any
+                accum = accum | val;
+            } else { // all
+                accum = accum & val;
+            }
+        }
+    }
+
+    // Store in shared memory for parallel reduction
+    shared_data[tid] = accum;
     barrier();
 
-    // Parallel reduction
+    // Parallel reduction within workgroup
     for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
-        if (tid < s && (gid + s) < params.n) {
-            if (params.op == 0) { // all
-                shared_data[tid] = shared_data[tid] & shared_data[tid + s];
-            } else { // any
+        if (tid < s) {
+            if (params.op == 0) { // any
                 shared_data[tid] = shared_data[tid] | shared_data[tid + s];
+            } else { // all
+                shared_data[tid] = shared_data[tid] & shared_data[tid + s];
             }
         }
         barrier();
@@ -45,6 +68,6 @@ void main() {
 
     // Write result
     if (tid == 0) {
-        output_data[wid] = shared_data[0];
+        output_data[output_idx] = shared_data[0];
     }
 }

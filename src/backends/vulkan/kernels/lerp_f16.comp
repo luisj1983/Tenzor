@@ -1,0 +1,62 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Lerp (linear interpolation) for Float16: result = start + weight * (end - start)
+// Float16 elements are packed 2 per 32-bit word
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer InputStart { uint start_buf[]; };
+layout(binding = 1) buffer InputEnd { uint end_buf[]; };
+layout(binding = 2) buffer InputWeight { uint weight_buf[]; };
+layout(binding = 3) buffer Output { uint result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of elements
+} params;
+
+// Helper to read float16 from packed buffer
+float16_t readF16(uint packed, uint offset) {
+    uint bits = (packed >> (offset * 16)) & 0xFFFFu;
+    return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
+}
+
+// Helper to pack two float16 values
+uint packF16Pair(float16_t v0, float16_t v1) {
+    uint bits0 = packHalf2x16(vec2(float(v0), 0.0)).x & 0xFFFFu;
+    uint bits1 = packHalf2x16(vec2(float(v1), 0.0)).x & 0xFFFFu;
+    return bits0 | (bits1 << 16);
+}
+
+void main() {
+    // Process 2 elements per thread
+    uint pair_idx = gl_GlobalInvocationID.x;
+    uint idx0 = pair_idx * 2;
+    uint idx1 = pair_idx * 2 + 1;
+
+    if (idx0 >= params.n) {
+        return;
+    }
+
+    uint s_packed = start_buf[pair_idx];
+    uint e_packed = end_buf[pair_idx];
+    uint w_packed = weight_buf[pair_idx];
+
+    // Upcast to float32 for computation
+    float s0 = float(readF16(s_packed, 0));
+    float e0 = float(readF16(e_packed, 0));
+    float w0 = float(readF16(w_packed, 0));
+
+    float s1 = float(readF16(s_packed, 1));
+    float e1 = float(readF16(e_packed, 1));
+    float w1 = float(readF16(w_packed, 1));
+
+    float16_t res0 = float16_t(s0 + w0 * (e0 - s0));
+    float16_t res1 = float16_t(s1 + w1 * (e1 - s1));
+
+    // Handle odd number of elements
+    if (idx1 >= params.n) {
+        res1 = float16_t(0.0);
+    }
+
+    result[pair_idx] = packF16Pair(res0, res1);
+}

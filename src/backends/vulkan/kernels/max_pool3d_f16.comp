@@ -1,0 +1,102 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Max Pooling 3D Forward Pass for Float16
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };
+layout(binding = 1) buffer Output { uint output_data[]; };
+layout(binding = 2) buffer Indices { int indices_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint batch_channels;
+    uint in_depth;
+    uint in_height;
+    uint in_width;
+    uint out_depth;
+    uint out_height;
+    uint out_width;
+    uint kernel_d;
+    uint kernel_h;
+    uint kernel_w;
+    uint stride_d;
+    uint stride_h;
+    uint stride_w;
+    uint padding_d;
+    uint padding_h;
+    uint padding_w;
+} params;
+
+float16_t readF16Element(uint flat_idx) {
+    uint word_idx = flat_idx / 2;
+    uint half_idx = flat_idx % 2;
+    uint packed = input_data[word_idx];
+    uint bits = (packed >> (half_idx * 16)) & 0xFFFFu;
+    return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
+}
+
+void writeF16Element(uint flat_idx, float16_t val) {
+    uint word_idx = flat_idx / 2;
+    uint half_offset = (flat_idx % 2) * 16;
+    uint new_bits = packHalf2x16(vec2(float(val), 0.0)) & 0xFFFFu;
+    uint mask = 0xFFFFu << half_offset;
+
+    uint old_word = output_data[word_idx];
+    for (int attempt = 0; attempt < 1024; ++attempt) {
+        uint new_word = (old_word & ~mask) | (new_bits << half_offset);
+        uint result = atomicCompSwap(output_data[word_idx], old_word, new_word);
+        if (result == old_word) return;
+        old_word = result;
+    }
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    uint temp = idx;
+    uint w_out = temp % params.out_width;
+    temp /= params.out_width;
+    uint h_out = temp % params.out_height;
+    temp /= params.out_height;
+    uint d_out = temp % params.out_depth;
+    uint bc = temp / params.out_depth;
+
+    int d_start = int(d_out * params.stride_d) - int(params.padding_d);
+    int h_start = int(h_out * params.stride_h) - int(params.padding_h);
+    int w_start = int(w_out * params.stride_w) - int(params.padding_w);
+
+    float max_val = -1.0 / 0.0;
+    int max_idx = 0;
+
+    uint in_spatial = params.in_depth * params.in_height * params.in_width;
+
+    for (uint kd = 0; kd < params.kernel_d; kd++) {
+        int d_in = d_start + int(kd);
+        if (d_in < 0 || d_in >= int(params.in_depth)) continue;
+
+        for (uint kh = 0; kh < params.kernel_h; kh++) {
+            int h_in = h_start + int(kh);
+            if (h_in < 0 || h_in >= int(params.in_height)) continue;
+
+            for (uint kw = 0; kw < params.kernel_w; kw++) {
+                int w_in = w_start + int(kw);
+                if (w_in < 0 || w_in >= int(params.in_width)) continue;
+
+                uint input_idx = bc * in_spatial +
+                                uint(d_in) * params.in_height * params.in_width +
+                                uint(h_in) * params.in_width + uint(w_in);
+
+                float val = float(readF16Element(input_idx));
+                if (val > max_val) {
+                    max_val = val;
+                    max_idx = int(input_idx);
+                }
+            }
+        }
+    }
+
+    writeF16Element(idx, float16_t(max_val));
+    indices_data[idx] = max_idx;
+}

@@ -99,6 +99,38 @@ namespace rocm {
     auto sinh_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
     auto cosh_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
 
+    // Extended math operations
+    auto log2_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto log10_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto log1p_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto exp2_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto expm1_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto erf_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto erfc_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+
+    // Bool predicate operations
+    auto isnan_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto isinf_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto isfinite_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+
+    // Binary math operations
+    auto atan2_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor;
+    auto fmod_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor;
+    auto remainder_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor;
+
+    // Ternary operations
+    auto lerp_kernel(const Tensor& a, const Tensor& b, const Tensor& weight, hipStream_t stream) -> Tensor;
+
+    // Logical operations
+    auto logical_and_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor;
+    auto logical_or_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor;
+    auto logical_not_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto logical_xor_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor;
+
+    // Element-wise min/max
+    auto minimum_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor;
+    auto maximum_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor;
+
     // Dot product
     auto dot_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor;
 
@@ -194,6 +226,41 @@ namespace rocm {
                                 int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
                                 hipStream_t stream) -> Tensor;
     auto conv2d_backward_bias(const Tensor& grad_output, hipStream_t stream) -> Tensor;
+
+    // Conv3d operations (conv3d.hip.cpp)
+    auto conv3d_forward_hip(const Tensor& input, const Tensor& weight, const Tensor& bias,
+                            const std::vector<int64_t>& stride, const std::vector<int64_t>& padding,
+                            const std::vector<int64_t>& dilation, int64_t groups,
+                            hipStream_t stream) -> Tensor;
+    auto conv3d_backward_input_hip(const Tensor& grad_output, const Tensor& weight,
+                                    const std::vector<int64_t>& input_shape,
+                                    const std::vector<int64_t>& stride, const std::vector<int64_t>& padding,
+                                    const std::vector<int64_t>& dilation, int64_t groups,
+                                    hipStream_t stream) -> Tensor;
+    auto conv3d_backward_weight_hip(const Tensor& grad_output, const Tensor& input,
+                                     const std::vector<int64_t>& weight_shape,
+                                     const std::vector<int64_t>& stride, const std::vector<int64_t>& padding,
+                                     const std::vector<int64_t>& dilation, int64_t groups,
+                                     hipStream_t stream) -> Tensor;
+    auto conv3d_backward_bias_hip(const Tensor& grad_output, hipStream_t stream) -> Tensor;
+
+    // ConvTranspose3d operations (conv3d.hip.cpp)
+    auto conv_transpose3d_forward_hip(const Tensor& input, const Tensor& weight, const Tensor& bias,
+                                       const std::vector<int64_t>& stride, const std::vector<int64_t>& padding,
+                                       const std::vector<int64_t>& output_padding,
+                                       const std::vector<int64_t>& dilation, int64_t groups,
+                                       hipStream_t stream) -> Tensor;
+    auto conv_transpose3d_backward_input_hip(const Tensor& grad_output, const Tensor& weight,
+                                              const std::vector<int64_t>& input_shape,
+                                              const std::vector<int64_t>& stride, const std::vector<int64_t>& padding,
+                                              const std::vector<int64_t>& dilation, int64_t groups,
+                                              hipStream_t stream) -> Tensor;
+    auto conv_transpose3d_backward_weight_hip(const Tensor& grad_output, const Tensor& input,
+                                               const std::vector<int64_t>& weight_shape,
+                                               const std::vector<int64_t>& stride, const std::vector<int64_t>& padding,
+                                               const std::vector<int64_t>& dilation, int64_t groups,
+                                               hipStream_t stream) -> Tensor;
+    auto conv_transpose3d_backward_bias_hip(const Tensor& grad_output, hipStream_t stream) -> Tensor;
 
     // Pooling operations
     auto maxpool2d_forward_hip(const Tensor& input, int64_t kernel_size, int64_t stride,
@@ -314,6 +381,48 @@ namespace rocm {
                                  int64_t dilation_h, int64_t dilation_w, hipStream_t stream) -> Tensor;
     auto adaptive_avgpool2d_backward_hip(const Tensor& grad_output, const Tensor& input, hipStream_t stream) -> Tensor;
     auto adaptive_maxpool2d_backward_hip(const Tensor& grad_output, const Tensor& indices, const Tensor& input, hipStream_t stream) -> Tensor;
+
+    // 1D Pooling operations
+    auto maxpool1d_forward_hip(const Tensor& input, int64_t kernel_size, int64_t stride,
+                               int64_t padding, int64_t dilation, hipStream_t stream)
+        -> std::pair<Tensor, Tensor>;
+    auto maxpool1d_backward_hip(const Tensor& grad_output, const Tensor& indices,
+                                const std::vector<int64_t>& input_shape, hipStream_t stream) -> Tensor;
+    auto avgpool1d_forward_hip(const Tensor& input, int64_t kernel_size, int64_t stride,
+                               int64_t padding, hipStream_t stream) -> Tensor;
+    auto avgpool1d_backward_hip(const Tensor& grad_output, const std::vector<int64_t>& input_shape,
+                                int64_t kernel_size, int64_t stride, int64_t padding,
+                                hipStream_t stream) -> Tensor;
+    auto adaptive_maxpool1d_forward_hip(const Tensor& input, int64_t output_size,
+                                        hipStream_t stream) -> std::pair<Tensor, Tensor>;
+    auto adaptive_maxpool1d_backward_hip(const Tensor& grad_output, const Tensor& indices,
+                                          const std::vector<int64_t>& input_shape, hipStream_t stream) -> Tensor;
+    auto adaptive_avgpool1d_forward_hip(const Tensor& input, int64_t output_size,
+                                         hipStream_t stream) -> Tensor;
+    auto adaptive_avgpool1d_backward_hip(const Tensor& grad_output,
+                                          const std::vector<int64_t>& input_shape, hipStream_t stream) -> Tensor;
+
+    // 3D Pooling operations
+    auto maxpool3d_forward_hip(const Tensor& input, int64_t kernel_size, int64_t stride,
+                               int64_t padding, hipStream_t stream)
+        -> std::pair<Tensor, Tensor>;
+    auto maxpool3d_backward_hip(const Tensor& grad_output, const Tensor& indices,
+                                const std::vector<int64_t>& input_shape, hipStream_t stream) -> Tensor;
+    auto avgpool3d_forward_hip(const Tensor& input, int64_t kernel_size, int64_t stride,
+                               int64_t padding, hipStream_t stream) -> Tensor;
+    auto avgpool3d_backward_hip(const Tensor& grad_output, const std::vector<int64_t>& input_shape,
+                                int64_t kernel_size, int64_t stride, int64_t padding,
+                                hipStream_t stream) -> Tensor;
+    auto adaptive_maxpool3d_forward_hip(const Tensor& input,
+                                         int64_t output_d, int64_t output_h, int64_t output_w,
+                                         hipStream_t stream) -> std::pair<Tensor, Tensor>;
+    auto adaptive_maxpool3d_backward_hip(const Tensor& grad_output, const Tensor& indices,
+                                          const std::vector<int64_t>& input_shape, hipStream_t stream) -> Tensor;
+    auto adaptive_avgpool3d_forward_hip(const Tensor& input,
+                                         int64_t output_d, int64_t output_h, int64_t output_w,
+                                         hipStream_t stream) -> Tensor;
+    auto adaptive_avgpool3d_backward_hip(const Tensor& grad_output,
+                                          const std::vector<int64_t>& input_shape, hipStream_t stream) -> Tensor;
 
     // Normalization operations
     auto layer_norm_kernel(const Tensor& input, const std::vector<int64_t>& normalized_shape,
@@ -460,6 +569,16 @@ namespace rocm {
     auto cast_kernel(const Tensor& input, DType target_dtype, hipStream_t stream) -> Tensor;
     auto strided_fill_kernel(Tensor& self, float value, hipStream_t stream) -> void;
     auto to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* stream_ptr) -> Tensor;
+
+    // Any/All reductions (reduction.hip.cpp)
+    auto any_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor;
+    auto all_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor;
+
+    // Triu/Tril/Diag/Trace (transform.hip.cpp)
+    auto triu_kernel(const Tensor& input, int64_t diagonal, hipStream_t stream) -> Tensor;
+    auto tril_kernel(const Tensor& input, int64_t diagonal, hipStream_t stream) -> Tensor;
+    auto diag_kernel(const Tensor& input, int64_t diagonal, hipStream_t stream) -> Tensor;
+    auto trace_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
 
     // CumSum, CumProd, HasInfNan (math.hip.cpp)
     auto cumsum_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Tensor;
@@ -1048,6 +1167,77 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{rocm::conv2d_backward_bias(inputs[0], get_hip_stream(attrs))};
     });
 
+    // Conv3d operations
+    table.register_kernel(OpId::Conv3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        auto stride = attrs.get_int_list(AttrKey::Stride);
+        auto padding = attrs.get_int_list(AttrKey::Padding);
+        auto dilation = attrs.get_int_list(AttrKey::Dilation);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        Tensor bias = inputs.size() > 2 ? inputs[2] : Tensor();
+        return std::vector<Tensor>{rocm::conv3d_forward_hip(inputs[0], inputs[1], bias,
+            stride, padding, dilation, groups, get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::Conv3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        auto stride = attrs.get_int_list(AttrKey::Stride);
+        auto padding = attrs.get_int_list(AttrKey::Padding);
+        auto dilation = attrs.get_int_list(AttrKey::Dilation);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return std::vector<Tensor>{rocm::conv3d_backward_input_hip(inputs[0], inputs[1], input_shape,
+            stride, padding, dilation, groups, get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::Conv3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        auto stride = attrs.get_int_list(AttrKey::Stride);
+        auto padding = attrs.get_int_list(AttrKey::Padding);
+        auto dilation = attrs.get_int_list(AttrKey::Dilation);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
+        return std::vector<Tensor>{rocm::conv3d_backward_weight_hip(inputs[0], inputs[1], weight_shape,
+            stride, padding, dilation, groups, get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::Conv3dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::conv3d_backward_bias_hip(inputs[0], get_hip_stream(attrs))};
+    });
+
+    // ConvTranspose3d operations
+    table.register_kernel(OpId::ConvTranspose3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        auto stride = attrs.get_int_list(AttrKey::Stride);
+        auto padding = attrs.get_int_list(AttrKey::Padding);
+        auto output_padding = attrs.get_int_list(AttrKey::OutputPadding);
+        auto dilation = attrs.get_int_list(AttrKey::Dilation);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        Tensor bias = inputs.size() > 2 ? inputs[2] : Tensor();
+        return std::vector<Tensor>{rocm::conv_transpose3d_forward_hip(inputs[0], inputs[1], bias,
+            stride, padding, output_padding, dilation, groups, get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::ConvTranspose3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        auto stride = attrs.get_int_list(AttrKey::Stride);
+        auto padding = attrs.get_int_list(AttrKey::Padding);
+        auto dilation = attrs.get_int_list(AttrKey::Dilation);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return std::vector<Tensor>{rocm::conv_transpose3d_backward_input_hip(inputs[0], inputs[1], input_shape,
+            stride, padding, dilation, groups, get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::ConvTranspose3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        auto stride = attrs.get_int_list(AttrKey::Stride);
+        auto padding = attrs.get_int_list(AttrKey::Padding);
+        auto dilation = attrs.get_int_list(AttrKey::Dilation);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
+        return std::vector<Tensor>{rocm::conv_transpose3d_backward_weight_hip(inputs[0], inputs[1], weight_shape,
+            stride, padding, dilation, groups, get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::ConvTranspose3dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::conv_transpose3d_backward_bias_hip(inputs[0], get_hip_stream(attrs))};
+    });
+
     // ========================================================================
     // Pooling Operations
     // ========================================================================
@@ -1105,6 +1295,115 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::AdaptiveMaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return std::vector<Tensor>{rocm::adaptive_maxpool2d_backward_hip(inputs[0], inputs[1], inputs[2], get_hip_stream(attrs))};
+    });
+
+    // ========================================================================
+    // 1D Pooling Operations
+    // ========================================================================
+    table.register_kernel(OpId::MaxPool1dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
+        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        auto [output, indices] = rocm::maxpool1d_forward_hip(inputs[0], kernel_size, stride, padding, dilation, get_hip_stream(attrs));
+        return std::vector<Tensor>{output, indices};
+    });
+
+    table.register_single_output_kernel(OpId::MaxPool1dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return rocm::maxpool1d_backward_hip(inputs[0], inputs[1], input_shape, get_hip_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::AvgPool1dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
+        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        return rocm::avgpool1d_forward_hip(inputs[0], kernel_size, stride, padding, get_hip_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::AvgPool1dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
+        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        return rocm::avgpool1d_backward_hip(inputs[0], input_shape, kernel_size, stride, padding, get_hip_stream(attrs));
+    });
+
+    table.register_kernel(OpId::AdaptiveMaxPool1d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t output_size = attrs.get_int(AttrKey::OutputSize, 1);
+        auto [output, indices] = rocm::adaptive_maxpool1d_forward_hip(inputs[0], output_size, get_hip_stream(attrs));
+        return std::vector<Tensor>{output, indices};
+    });
+
+    table.register_single_output_kernel(OpId::AdaptiveMaxPool1dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return rocm::adaptive_maxpool1d_backward_hip(inputs[0], inputs[1], input_shape, get_hip_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::AdaptiveAvgPool1d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t output_size = attrs.get_int(AttrKey::OutputSize, 1);
+        return rocm::adaptive_avgpool1d_forward_hip(inputs[0], output_size, get_hip_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::AdaptiveAvgPool1dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return rocm::adaptive_avgpool1d_backward_hip(inputs[0], input_shape, get_hip_stream(attrs));
+    });
+
+    // ========================================================================
+    // 3D Pooling Operations
+    // ========================================================================
+    table.register_kernel(OpId::MaxPool3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
+        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        auto [output, indices] = rocm::maxpool3d_forward_hip(inputs[0], kernel_size, stride, padding, get_hip_stream(attrs));
+        return std::vector<Tensor>{output, indices};
+    });
+
+    table.register_single_output_kernel(OpId::MaxPool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return rocm::maxpool3d_backward_hip(inputs[0], inputs[1], input_shape, get_hip_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::AvgPool3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
+        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        return rocm::avgpool3d_forward_hip(inputs[0], kernel_size, stride, padding, get_hip_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::AvgPool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
+        int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        return rocm::avgpool3d_backward_hip(inputs[0], input_shape, kernel_size, stride, padding, get_hip_stream(attrs));
+    });
+
+    table.register_kernel(OpId::AdaptiveMaxPool3d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t output_d = attrs.get_int(AttrKey::OutputSizeD, 1);
+        int64_t output_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t output_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        auto [output, indices] = rocm::adaptive_maxpool3d_forward_hip(inputs[0], output_d, output_h, output_w, get_hip_stream(attrs));
+        return std::vector<Tensor>{output, indices};
+    });
+
+    table.register_single_output_kernel(OpId::AdaptiveMaxPool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return rocm::adaptive_maxpool3d_backward_hip(inputs[0], inputs[1], input_shape, get_hip_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::AdaptiveAvgPool3d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t output_d = attrs.get_int(AttrKey::OutputSizeD, 1);
+        int64_t output_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t output_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        return rocm::adaptive_avgpool3d_forward_hip(inputs[0], output_d, output_h, output_w, get_hip_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::AdaptiveAvgPool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return rocm::adaptive_avgpool3d_backward_hip(inputs[0], input_shape, get_hip_stream(attrs));
     });
 
     table.register_kernel(OpId::ConvTranspose2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -1305,11 +1604,6 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t split_size = attrs.get_int(AttrKey::SplitSize, 1);
         int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         return rocm::split_kernel(inputs[0], split_size, dim, get_hip_stream(attrs));
-    });
-
-    table.register_kernel(OpId::Expand, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto new_shape = attrs.get_int_list(AttrKey::Shape);
-        return std::vector<Tensor>{rocm::expand_kernel(inputs[0], new_shape, get_hip_stream(attrs))};
     });
 
     // ========================================================================
@@ -2157,6 +2451,146 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         Tensor result = rocm::conv2d_forward_kernel(inputs[0], inputs[1], bias,
             stride, padding, dilation, groups, get_hip_stream(attrs));
         return std::vector<Tensor>{rocm::swish_kernel(result, get_hip_stream(attrs))};
+    });
+
+    // ========================================================================
+    // Extended Math Operations
+    // ========================================================================
+    table.register_kernel(OpId::Log2, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::log2_kernel(inputs[0], get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::Log10, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::log10_kernel(inputs[0], get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::Log1p, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::log1p_kernel(inputs[0], get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::Exp2, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::exp2_kernel(inputs[0], get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::Expm1, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::expm1_kernel(inputs[0], get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::Erf, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::erf_kernel(inputs[0], get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::Erfc, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::erfc_kernel(inputs[0], get_hip_stream(attrs))};
+    });
+
+    // ========================================================================
+    // Bool Predicate Operations
+    // ========================================================================
+    table.register_kernel(OpId::IsNan, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::isnan_kernel(inputs[0], get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::IsInf, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::isinf_kernel(inputs[0], get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::IsFinite, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::isfinite_kernel(inputs[0], get_hip_stream(attrs))};
+    });
+
+    // ========================================================================
+    // Binary Math Operations
+    // ========================================================================
+    table.register_kernel(OpId::Atan2, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::atan2_kernel(inputs[0], inputs[1], get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::Fmod, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::fmod_kernel(inputs[0], inputs[1], get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::Remainder, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::remainder_kernel(inputs[0], inputs[1], get_hip_stream(attrs))};
+    });
+
+    // ========================================================================
+    // Ternary Operations
+    // ========================================================================
+    table.register_kernel(OpId::Lerp, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::lerp_kernel(inputs[0], inputs[1], inputs[2], get_hip_stream(attrs))};
+    });
+
+    // ========================================================================
+    // Logical Operations
+    // ========================================================================
+    table.register_kernel(OpId::LogicalAnd, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::logical_and_kernel(inputs[0], inputs[1], get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::LogicalOr, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::logical_or_kernel(inputs[0], inputs[1], get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::LogicalNot, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::logical_not_kernel(inputs[0], get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::LogicalXor, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::logical_xor_kernel(inputs[0], inputs[1], get_hip_stream(attrs))};
+    });
+
+    // ========================================================================
+    // Element-wise Min/Max
+    // ========================================================================
+    table.register_kernel(OpId::Minimum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::minimum_kernel(inputs[0], inputs[1], get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::Maximum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::maximum_kernel(inputs[0], inputs[1], get_hip_stream(attrs))};
+    });
+
+    // ========================================================================
+    // Any/All Reductions
+    // ========================================================================
+    table.register_kernel(OpId::Any, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        return std::vector<Tensor>{rocm::any_kernel(inputs[0], dim, keepdim, get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::All, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        return std::vector<Tensor>{rocm::all_kernel(inputs[0], dim, keepdim, get_hip_stream(attrs))};
+    });
+
+    // ========================================================================
+    // Triu/Tril/Diag/Trace/Flip
+    // ========================================================================
+    table.register_kernel(OpId::Triu, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t diagonal = attrs.get_int(AttrKey::Diagonal, 0);
+        return std::vector<Tensor>{rocm::triu_kernel(inputs[0], diagonal, get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::Tril, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t diagonal = attrs.get_int(AttrKey::Diagonal, 0);
+        return std::vector<Tensor>{rocm::tril_kernel(inputs[0], diagonal, get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::Diag, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t diagonal = attrs.get_int(AttrKey::Diagonal, 0);
+        return std::vector<Tensor>{rocm::diag_kernel(inputs[0], diagonal, get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::Trace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::trace_kernel(inputs[0], get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::Flip, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        return std::vector<Tensor>{rocm::flip_kernel(inputs[0], dim, get_hip_stream(attrs))};
     });
 
     std::cout << "ROCm dispatch table initialized with O(1) lookup" << std::endl;

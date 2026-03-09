@@ -1714,5 +1714,397 @@ auto unique_kernel(const Tensor& input, bool sorted, bool return_inverse, bool r
     }
 }
 
+// ============================================================================
+// Any reduction kernel - check if any element is non-zero along a dimension
+// ============================================================================
+
+// Kernel name structs for any_kernel
+class AnyKernelFloat32;
+class AnyKernelFloat64;
+class AnyKernelFloat16;
+class AnyKernelBFloat16;
+class AnyKernelInt32;
+class AnyKernelInt64;
+class AnyKernelBool;
+class AnyFullKernel;
+
+auto any_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor {
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+
+    auto shape = in_cont.shape();
+    std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+    const int64_t ndim = static_cast<int64_t>(shape.size());
+
+    bool is_full_reduction = (dim == INT64_MIN || (dim == -1 && ndim == 0));
+
+    if (!is_full_reduction) {
+        if (dim < 0) dim += ndim;
+        if (dim < 0 || dim >= ndim) {
+            throw std::runtime_error("Dimension " + std::to_string(dim) +
+                " out of range for tensor with " + std::to_string(ndim) + " dimensions");
+        }
+    }
+
+    auto out_shape = compute_reduction_shape(shape_vec, is_full_reduction ? -1 : dim, keepdim);
+    Tensor output(out_shape, DType::Bool, in_cont.device());
+
+    if (is_full_reduction) {
+        const int64_t total_size = in_cont.numel();
+        bool* out_ptr = get_data_ptr<bool>(output);
+
+        if (total_size == 0) {
+            queue.single_task([=]() { out_ptr[0] = false; }).wait();
+            return output;
+        }
+
+        // Use int32 flag for reduction (1 = found non-zero)
+        auto flag_buf = sycl::malloc_shared<int32_t>(1, queue);
+        flag_buf[0] = 0;
+
+        if (in_cont.dtype() == DType::Float32) {
+            const float* in_ptr = get_data_ptr<const float>(in_cont);
+            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(flag_buf, sycl::maximum<int32_t>()),
+                [=](sycl::id<1> idx, auto& flag) {
+                    if (in_ptr[idx] != 0.0f) flag.combine(1);
+                }).wait();
+        } else if (in_cont.dtype() == DType::Float64) {
+            const double* in_ptr = get_data_ptr<const double>(in_cont);
+            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(flag_buf, sycl::maximum<int32_t>()),
+                [=](sycl::id<1> idx, auto& flag) {
+                    if (in_ptr[idx] != 0.0) flag.combine(1);
+                }).wait();
+        } else if (in_cont.dtype() == DType::Float16) {
+            const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
+            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(flag_buf, sycl::maximum<int32_t>()),
+                [=](sycl::id<1> idx, auto& flag) {
+                    if (static_cast<float>(in_ptr[idx]) != 0.0f) flag.combine(1);
+                }).wait();
+        } else if (in_cont.dtype() == DType::BFloat16) {
+            const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(flag_buf, sycl::maximum<int32_t>()),
+                [=](sycl::id<1> idx, auto& flag) {
+                    if (bf16_to_f32(in_ptr[idx]) != 0.0f) flag.combine(1);
+                }).wait();
+        } else if (in_cont.dtype() == DType::Int32) {
+            const int32_t* in_ptr = get_data_ptr<const int32_t>(in_cont);
+            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(flag_buf, sycl::maximum<int32_t>()),
+                [=](sycl::id<1> idx, auto& flag) {
+                    if (in_ptr[idx] != 0) flag.combine(1);
+                }).wait();
+        } else if (in_cont.dtype() == DType::Int64) {
+            const int64_t* in_ptr = get_data_ptr<const int64_t>(in_cont);
+            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(flag_buf, sycl::maximum<int32_t>()),
+                [=](sycl::id<1> idx, auto& flag) {
+                    if (in_ptr[idx] != 0) flag.combine(1);
+                }).wait();
+        } else if (in_cont.dtype() == DType::Bool) {
+            const bool* in_ptr = get_data_ptr<const bool>(in_cont);
+            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(flag_buf, sycl::maximum<int32_t>()),
+                [=](sycl::id<1> idx, auto& flag) {
+                    if (in_ptr[idx]) flag.combine(1);
+                }).wait();
+        } else {
+            sycl::free(flag_buf, queue);
+            throw std::runtime_error("Unsupported dtype for any reduction");
+        }
+
+        bool result = (flag_buf[0] != 0);
+        queue.memcpy(out_ptr, &result, sizeof(bool)).wait();
+        sycl::free(flag_buf, queue);
+    } else {
+        // Partial reduction along a specific dimension
+        const int64_t outer_size = std::accumulate(shape.begin(), shape.begin() + dim, 1LL, std::multiplies<>());
+        const int64_t dim_size = shape[dim];
+        const int64_t inner_size = std::accumulate(shape.begin() + dim + 1, shape.end(), 1LL, std::multiplies<>());
+        bool* out_ptr = get_data_ptr<bool>(output);
+
+        if (in_cont.dtype() == DType::Float32) {
+            const float* in_ptr = get_data_ptr<const float>(in_cont);
+            queue.parallel_for<AnyKernelFloat32>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+                bool found = false;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    if (in_ptr[base_offset + d * inner_size] != 0.0f) { found = true; break; }
+                }
+                out_ptr[outer_idx * inner_size + inner_idx] = found;
+            }).wait();
+        } else if (in_cont.dtype() == DType::Float64) {
+            const double* in_ptr = get_data_ptr<const double>(in_cont);
+            queue.parallel_for<AnyKernelFloat64>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+                bool found = false;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    if (in_ptr[base_offset + d * inner_size] != 0.0) { found = true; break; }
+                }
+                out_ptr[outer_idx * inner_size + inner_idx] = found;
+            }).wait();
+        } else if (in_cont.dtype() == DType::Float16) {
+            const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
+            queue.parallel_for<AnyKernelFloat16>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+                bool found = false;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    if (static_cast<float>(in_ptr[base_offset + d * inner_size]) != 0.0f) { found = true; break; }
+                }
+                out_ptr[outer_idx * inner_size + inner_idx] = found;
+            }).wait();
+        } else if (in_cont.dtype() == DType::BFloat16) {
+            const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+            queue.parallel_for<AnyKernelBFloat16>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+                bool found = false;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    if (bf16_to_f32(in_ptr[base_offset + d * inner_size]) != 0.0f) { found = true; break; }
+                }
+                out_ptr[outer_idx * inner_size + inner_idx] = found;
+            }).wait();
+        } else if (in_cont.dtype() == DType::Int32) {
+            const int32_t* in_ptr = get_data_ptr<const int32_t>(in_cont);
+            queue.parallel_for<AnyKernelInt32>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+                bool found = false;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    if (in_ptr[base_offset + d * inner_size] != 0) { found = true; break; }
+                }
+                out_ptr[outer_idx * inner_size + inner_idx] = found;
+            }).wait();
+        } else if (in_cont.dtype() == DType::Int64) {
+            const int64_t* in_ptr = get_data_ptr<const int64_t>(in_cont);
+            queue.parallel_for<AnyKernelInt64>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+                bool found = false;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    if (in_ptr[base_offset + d * inner_size] != 0) { found = true; break; }
+                }
+                out_ptr[outer_idx * inner_size + inner_idx] = found;
+            }).wait();
+        } else if (in_cont.dtype() == DType::Bool) {
+            const bool* in_ptr = get_data_ptr<const bool>(in_cont);
+            queue.parallel_for<AnyKernelBool>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+                bool found = false;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    if (in_ptr[base_offset + d * inner_size]) { found = true; break; }
+                }
+                out_ptr[outer_idx * inner_size + inner_idx] = found;
+            }).wait();
+        } else {
+            throw std::runtime_error("Unsupported dtype for any reduction");
+        }
+    }
+
+    return output;
+}
+
+// ============================================================================
+// All reduction kernel - check if all elements are non-zero along a dimension
+// ============================================================================
+
+// Kernel name structs for all_kernel
+class AllKernelFloat32;
+class AllKernelFloat64;
+class AllKernelFloat16;
+class AllKernelBFloat16;
+class AllKernelInt32;
+class AllKernelInt64;
+class AllKernelBool;
+
+auto all_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor {
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+
+    auto shape = in_cont.shape();
+    std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+    const int64_t ndim = static_cast<int64_t>(shape.size());
+
+    bool is_full_reduction = (dim == INT64_MIN || (dim == -1 && ndim == 0));
+
+    if (!is_full_reduction) {
+        if (dim < 0) dim += ndim;
+        if (dim < 0 || dim >= ndim) {
+            throw std::runtime_error("Dimension " + std::to_string(dim) +
+                " out of range for tensor with " + std::to_string(ndim) + " dimensions");
+        }
+    }
+
+    auto out_shape = compute_reduction_shape(shape_vec, is_full_reduction ? -1 : dim, keepdim);
+    Tensor output(out_shape, DType::Bool, in_cont.device());
+
+    if (is_full_reduction) {
+        const int64_t total_size = in_cont.numel();
+        bool* out_ptr = get_data_ptr<bool>(output);
+
+        if (total_size == 0) {
+            // all() of empty set is true (vacuous truth)
+            queue.single_task([=]() { out_ptr[0] = true; }).wait();
+            return output;
+        }
+
+        // Use int32 flag for reduction: minimum. Start at 1, set to 0 if any zero found.
+        auto flag_buf = sycl::malloc_shared<int32_t>(1, queue);
+        flag_buf[0] = 1;
+
+        if (in_cont.dtype() == DType::Float32) {
+            const float* in_ptr = get_data_ptr<const float>(in_cont);
+            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(flag_buf, sycl::minimum<int32_t>()),
+                [=](sycl::id<1> idx, auto& flag) {
+                    if (in_ptr[idx] == 0.0f) flag.combine(0);
+                }).wait();
+        } else if (in_cont.dtype() == DType::Float64) {
+            const double* in_ptr = get_data_ptr<const double>(in_cont);
+            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(flag_buf, sycl::minimum<int32_t>()),
+                [=](sycl::id<1> idx, auto& flag) {
+                    if (in_ptr[idx] == 0.0) flag.combine(0);
+                }).wait();
+        } else if (in_cont.dtype() == DType::Float16) {
+            const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
+            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(flag_buf, sycl::minimum<int32_t>()),
+                [=](sycl::id<1> idx, auto& flag) {
+                    if (static_cast<float>(in_ptr[idx]) == 0.0f) flag.combine(0);
+                }).wait();
+        } else if (in_cont.dtype() == DType::BFloat16) {
+            const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(flag_buf, sycl::minimum<int32_t>()),
+                [=](sycl::id<1> idx, auto& flag) {
+                    if (bf16_to_f32(in_ptr[idx]) == 0.0f) flag.combine(0);
+                }).wait();
+        } else if (in_cont.dtype() == DType::Int32) {
+            const int32_t* in_ptr = get_data_ptr<const int32_t>(in_cont);
+            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(flag_buf, sycl::minimum<int32_t>()),
+                [=](sycl::id<1> idx, auto& flag) {
+                    if (in_ptr[idx] == 0) flag.combine(0);
+                }).wait();
+        } else if (in_cont.dtype() == DType::Int64) {
+            const int64_t* in_ptr = get_data_ptr<const int64_t>(in_cont);
+            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(flag_buf, sycl::minimum<int32_t>()),
+                [=](sycl::id<1> idx, auto& flag) {
+                    if (in_ptr[idx] == 0) flag.combine(0);
+                }).wait();
+        } else if (in_cont.dtype() == DType::Bool) {
+            const bool* in_ptr = get_data_ptr<const bool>(in_cont);
+            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(flag_buf, sycl::minimum<int32_t>()),
+                [=](sycl::id<1> idx, auto& flag) {
+                    if (!in_ptr[idx]) flag.combine(0);
+                }).wait();
+        } else {
+            sycl::free(flag_buf, queue);
+            throw std::runtime_error("Unsupported dtype for all reduction");
+        }
+
+        bool result = (flag_buf[0] != 0);
+        queue.memcpy(out_ptr, &result, sizeof(bool)).wait();
+        sycl::free(flag_buf, queue);
+    } else {
+        // Partial reduction along a specific dimension
+        const int64_t outer_size = std::accumulate(shape.begin(), shape.begin() + dim, 1LL, std::multiplies<>());
+        const int64_t dim_size = shape[dim];
+        const int64_t inner_size = std::accumulate(shape.begin() + dim + 1, shape.end(), 1LL, std::multiplies<>());
+        bool* out_ptr = get_data_ptr<bool>(output);
+
+        if (in_cont.dtype() == DType::Float32) {
+            const float* in_ptr = get_data_ptr<const float>(in_cont);
+            queue.parallel_for<AllKernelFloat32>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+                bool all_nonzero = true;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    if (in_ptr[base_offset + d * inner_size] == 0.0f) { all_nonzero = false; break; }
+                }
+                out_ptr[outer_idx * inner_size + inner_idx] = all_nonzero;
+            }).wait();
+        } else if (in_cont.dtype() == DType::Float64) {
+            const double* in_ptr = get_data_ptr<const double>(in_cont);
+            queue.parallel_for<AllKernelFloat64>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+                bool all_nonzero = true;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    if (in_ptr[base_offset + d * inner_size] == 0.0) { all_nonzero = false; break; }
+                }
+                out_ptr[outer_idx * inner_size + inner_idx] = all_nonzero;
+            }).wait();
+        } else if (in_cont.dtype() == DType::Float16) {
+            const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
+            queue.parallel_for<AllKernelFloat16>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+                bool all_nonzero = true;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    if (static_cast<float>(in_ptr[base_offset + d * inner_size]) == 0.0f) { all_nonzero = false; break; }
+                }
+                out_ptr[outer_idx * inner_size + inner_idx] = all_nonzero;
+            }).wait();
+        } else if (in_cont.dtype() == DType::BFloat16) {
+            const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+            queue.parallel_for<AllKernelBFloat16>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+                bool all_nonzero = true;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    if (bf16_to_f32(in_ptr[base_offset + d * inner_size]) == 0.0f) { all_nonzero = false; break; }
+                }
+                out_ptr[outer_idx * inner_size + inner_idx] = all_nonzero;
+            }).wait();
+        } else if (in_cont.dtype() == DType::Int32) {
+            const int32_t* in_ptr = get_data_ptr<const int32_t>(in_cont);
+            queue.parallel_for<AllKernelInt32>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+                bool all_nonzero = true;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    if (in_ptr[base_offset + d * inner_size] == 0) { all_nonzero = false; break; }
+                }
+                out_ptr[outer_idx * inner_size + inner_idx] = all_nonzero;
+            }).wait();
+        } else if (in_cont.dtype() == DType::Int64) {
+            const int64_t* in_ptr = get_data_ptr<const int64_t>(in_cont);
+            queue.parallel_for<AllKernelInt64>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+                bool all_nonzero = true;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    if (in_ptr[base_offset + d * inner_size] == 0) { all_nonzero = false; break; }
+                }
+                out_ptr[outer_idx * inner_size + inner_idx] = all_nonzero;
+            }).wait();
+        } else if (in_cont.dtype() == DType::Bool) {
+            const bool* in_ptr = get_data_ptr<const bool>(in_cont);
+            queue.parallel_for<AllKernelBool>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+                bool all_nonzero = true;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    if (!in_ptr[base_offset + d * inner_size]) { all_nonzero = false; break; }
+                }
+                out_ptr[outer_idx * inner_size + inner_idx] = all_nonzero;
+            }).wait();
+        } else {
+            throw std::runtime_error("Unsupported dtype for all reduction");
+        }
+    }
+
+    return output;
+}
+
 } // namespace oneapi
 } // namespace tenzor

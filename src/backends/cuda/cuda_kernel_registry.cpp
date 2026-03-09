@@ -115,6 +115,8 @@ namespace cuda {
     auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction, cudaStream_t stream) -> Tensor;
     auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction, cudaStream_t stream) -> Tensor;
     auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor;
+    auto any_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor;
+    auto all_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor;
 
     // AMP operations
     auto has_inf_nan_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor;
@@ -159,6 +161,13 @@ namespace cuda {
     auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, cudaStream_t stream) -> Tensor;
     auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, cudaStream_t stream) -> Tensor;
     auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim, cudaStream_t stream) -> Tensor;
+
+    // Triangular / diagonal / flip operations
+    auto triu_kernel(const Tensor& input, int64_t diagonal, cudaStream_t stream) -> Tensor;
+    auto tril_kernel(const Tensor& input, int64_t diagonal, cudaStream_t stream) -> Tensor;
+    auto diag_kernel(const Tensor& input, int64_t diagonal, cudaStream_t stream) -> Tensor;
+    auto trace_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto flip_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tensor;
 
     // Memory format conversion
     auto to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* stream) -> Tensor;
@@ -420,6 +429,14 @@ namespace cuda {
     auto cudnn_conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& weight, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
     auto cudnn_layer_norm_forward(const Tensor& input, const std::vector<int64_t>& normalized_shape, const Tensor& weight, const Tensor& bias, float eps, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
     auto cudnn_layer_norm_backward(const Tensor& grad_output, const Tensor& input, const Tensor& weight, const Tensor& mean, const Tensor& inv_std, const std::vector<int64_t>& normalized_shape, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
+
+    // Conv3d (cuDNN Nd)
+    auto cudnn_conv3d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
+    auto cudnn_conv3d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& weight, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
+
+    // ConvTranspose3d (cuDNN Nd)
+    auto cudnn_conv_transpose3d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
+    auto cudnn_conv_transpose3d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& weight, int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation, int64_t groups, bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
 #endif
 
     // Dropout operations
@@ -563,6 +580,70 @@ namespace cuda {
 
     // Cast (dtype conversion) dispatch wrapper
     Tensor cast_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+
+    // Extended unary math kernels
+    auto log2_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto log10_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto log1p_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto exp2_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto expm1_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto erf_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto erfc_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+
+    // Bool predicate kernels
+    auto isnan_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto isinf_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto isfinite_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+
+    // Binary math kernels
+    auto atan2_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
+    auto fmod_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
+    auto remainder_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
+
+    // Ternary kernel
+    auto lerp_kernel(const Tensor& start, const Tensor& end, const Tensor& weight, cudaStream_t stream) -> Tensor;
+
+    // Logical kernels
+    auto logical_and_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
+    auto logical_or_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
+    auto logical_not_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto logical_xor_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
+
+    // Element-wise min/max kernels
+    auto minimum_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
+    auto maximum_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
+
+    // Extended unary math dispatch wrappers
+    Tensor log2_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor log10_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor log1p_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor exp2_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor expm1_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor erf_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor erfc_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+
+    // Bool predicate dispatch wrappers
+    Tensor isnan_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor isinf_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor isfinite_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+
+    // Binary math dispatch wrappers
+    Tensor atan2_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor fmod_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor remainder_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+
+    // Lerp dispatch wrapper
+    Tensor lerp_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+
+    // Logical dispatch wrappers
+    Tensor logical_and_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor logical_or_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor logical_not_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor logical_xor_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+
+    // Element-wise min/max dispatch wrappers
+    Tensor minimum_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor maximum_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
 
 } // namespace cuda
 
@@ -745,6 +826,52 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::Sinh, cuda::sinh_dispatch);
     table.register_single_output_kernel(OpId::Cosh, cuda::cosh_dispatch);
     table.register_single_output_kernel(OpId::Tanh, cuda::tanh_dispatch);
+
+    // =========================================================================
+    // Extended Math Operations
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Log2, cuda::log2_dispatch);
+    table.register_single_output_kernel(OpId::Log10, cuda::log10_dispatch);
+    table.register_single_output_kernel(OpId::Log1p, cuda::log1p_dispatch);
+    table.register_single_output_kernel(OpId::Exp2, cuda::exp2_dispatch);
+    table.register_single_output_kernel(OpId::Expm1, cuda::expm1_dispatch);
+    table.register_single_output_kernel(OpId::Erf, cuda::erf_dispatch);
+    table.register_single_output_kernel(OpId::Erfc, cuda::erfc_dispatch);
+
+    // =========================================================================
+    // Bool Predicate Operations
+    // =========================================================================
+    table.register_single_output_kernel(OpId::IsNan, cuda::isnan_dispatch);
+    table.register_single_output_kernel(OpId::IsInf, cuda::isinf_dispatch);
+    table.register_single_output_kernel(OpId::IsFinite, cuda::isfinite_dispatch);
+
+    // =========================================================================
+    // Binary Math Operations (atan2, fmod, remainder)
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Atan2, cuda::atan2_dispatch);
+    table.register_single_output_kernel(OpId::Fmod, cuda::fmod_dispatch);
+    table.register_single_output_kernel(OpId::Remainder, cuda::remainder_dispatch);
+
+    // =========================================================================
+    // Ternary Operations (lerp)
+    // =========================================================================
+    table.register_kernel(OpId::Lerp, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{cuda::lerp_dispatch(inputs, attrs)};
+    });
+
+    // =========================================================================
+    // Logical Operations
+    // =========================================================================
+    table.register_single_output_kernel(OpId::LogicalAnd, cuda::logical_and_dispatch);
+    table.register_single_output_kernel(OpId::LogicalOr, cuda::logical_or_dispatch);
+    table.register_single_output_kernel(OpId::LogicalNot, cuda::logical_not_dispatch);
+    table.register_single_output_kernel(OpId::LogicalXor, cuda::logical_xor_dispatch);
+
+    // =========================================================================
+    // Element-wise Min/Max Operations
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Minimum, cuda::minimum_dispatch);
+    table.register_single_output_kernel(OpId::Maximum, cuda::maximum_dispatch);
 
     // =========================================================================
     // Comparison Operations (using direct function pointers)
@@ -1527,6 +1654,90 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     });
 
     // =========================================================================
+    // Conv3d Operations (cuDNN Nd)
+    // =========================================================================
+#ifdef TENZOR_HAS_CUDNN
+    table.register_single_output_kernel(OpId::Conv3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        return cuda::cudnn_conv3d_forward(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
+    });
+    table.register_kernel(OpId::Conv3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv3d_backward(
+            inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, true, false, false, get_cuda_stream(attrs));
+        return {grad_input};
+    });
+    table.register_kernel(OpId::Conv3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv3d_backward(
+            inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, false, true, false, get_cuda_stream(attrs));
+        return {grad_weight};
+    });
+    table.register_kernel(OpId::Conv3dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv3d_backward(
+            inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, false, false, true, get_cuda_stream(attrs));
+        return {grad_bias};
+    });
+
+    // =========================================================================
+    // ConvTranspose3d Operations (cuDNN Nd)
+    // =========================================================================
+    table.register_single_output_kernel(OpId::ConvTranspose3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        return cuda::cudnn_conv_transpose3d_forward(inputs[0], inputs[1], bias, stride, padding, output_padding, dilation, groups, get_cuda_stream(attrs));
+    });
+    table.register_kernel(OpId::ConvTranspose3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv_transpose3d_backward(
+            inputs[0], inputs[1], inputs[2], stride, padding, output_padding, dilation, groups, true, false, false, get_cuda_stream(attrs));
+        return {grad_input};
+    });
+    table.register_kernel(OpId::ConvTranspose3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv_transpose3d_backward(
+            inputs[0], inputs[1], inputs[2], stride, padding, output_padding, dilation, groups, false, true, false, get_cuda_stream(attrs));
+        return {grad_weight};
+    });
+    table.register_kernel(OpId::ConvTranspose3dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv_transpose3d_backward(
+            inputs[0], inputs[1], inputs[2], stride, padding, output_padding, dilation, groups, false, false, true, get_cuda_stream(attrs));
+        return {grad_bias};
+    });
+#endif // TENZOR_HAS_CUDNN (Conv3d/ConvTranspose3d)
+
+    // =========================================================================
     // Dropout Operations (Phase 1B - CRITICAL)
     // =========================================================================
     table.register_kernel(OpId::Dropout, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -1902,6 +2113,43 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::Tile, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         auto reps = attrs.get_int_list(AttrKey::Reps);
         return cuda::tile_kernel(inputs[0], reps, get_cuda_stream(attrs));
+    });
+
+    // =========================================================================
+    // Any/All Reductions
+    // =========================================================================
+    table.register_kernel(OpId::Any, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        return std::vector<Tensor>{cuda::any_kernel(inputs[0], dim, keepdim, get_cuda_stream(attrs))};
+    });
+    table.register_kernel(OpId::All, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        return std::vector<Tensor>{cuda::all_kernel(inputs[0], dim, keepdim, get_cuda_stream(attrs))};
+    });
+
+    // =========================================================================
+    // Triangular / Diagonal / Trace / Flip Operations
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Triu, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t diagonal = attrs.get_int(AttrKey::Diagonal, 0);
+        return cuda::triu_kernel(inputs[0], diagonal, get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::Tril, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t diagonal = attrs.get_int(AttrKey::Diagonal, 0);
+        return cuda::tril_kernel(inputs[0], diagonal, get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::Diag, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t diagonal = attrs.get_int(AttrKey::Diagonal, 0);
+        return cuda::diag_kernel(inputs[0], diagonal, get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::Trace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return cuda::trace_kernel(inputs[0], get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::Flip, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        return cuda::flip_kernel(inputs[0], dim, get_cuda_stream(attrs));
     });
 
     // =========================================================================

@@ -1775,5 +1775,467 @@ auto to_memory_format_kernel(const Tensor& input, int format_int, sycl::queue& q
     return permute_kernel(input, perm_dims, queue);
 }
 
+// ============================================================================
+// Triu kernel - Upper triangular matrix
+// ============================================================================
+
+class TriuKernelFloat32;
+class TriuKernelFloat64;
+class TriuKernelFloat16;
+class TriuKernelBFloat16;
+
+auto triu_kernel(const Tensor& input, int64_t diagonal, sycl::queue& queue) -> Tensor {
+    if (input.ndim() < 2) {
+        throw std::invalid_argument("triu: input must be at least 2-D");
+    }
+
+    auto shape_span = input.shape();
+    std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+    const int64_t rows = shape[shape.size() - 2];
+    const int64_t cols = shape[shape.size() - 1];
+
+    // Calculate batch size (product of all dims except last two)
+    int64_t batch_size = 1;
+    for (size_t i = 0; i < shape.size() - 2; ++i) {
+        batch_size *= shape[i];
+    }
+
+    Tensor output(shape, input.dtype(), input.device());
+    const int64_t matrix_size = rows * cols;
+    const int64_t total = batch_size * matrix_size;
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(input);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for<TriuKernelFloat32>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            const int64_t mat_idx = idx % matrix_size;
+            const int64_t batch_idx = idx / matrix_size;
+            const int64_t row = mat_idx / cols;
+            const int64_t col = mat_idx % cols;
+            out_ptr[idx] = (col >= row + diagonal) ? in_ptr[idx] : 0.0f;
+        }).wait();
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(input);
+        double* out_ptr = get_data_ptr<double>(output);
+        queue.parallel_for<TriuKernelFloat64>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            const int64_t mat_idx = idx % matrix_size;
+            const int64_t row = mat_idx / cols;
+            const int64_t col = mat_idx % cols;
+            out_ptr[idx] = (col >= row + diagonal) ? in_ptr[idx] : 0.0;
+        }).wait();
+    } else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<TriuKernelFloat16>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            const int64_t mat_idx = idx % matrix_size;
+            const int64_t row = mat_idx / cols;
+            const int64_t col = mat_idx % cols;
+            out_ptr[idx] = (col >= row + diagonal) ? in_ptr[idx] : sycl::half(0.0f);
+        }).wait();
+    } else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        const uint16_t zero_bf16 = f32_to_bf16(0.0f);
+        queue.parallel_for<TriuKernelBFloat16>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            const int64_t mat_idx = idx % matrix_size;
+            const int64_t row = mat_idx / cols;
+            const int64_t col = mat_idx % cols;
+            out_ptr[idx] = (col >= row + diagonal) ? in_ptr[idx] : zero_bf16;
+        }).wait();
+    } else {
+        throw std::runtime_error("triu: unsupported dtype");
+    }
+
+    return output;
+}
+
+// ============================================================================
+// Tril kernel - Lower triangular matrix
+// ============================================================================
+
+class TrilKernelFloat32;
+class TrilKernelFloat64;
+class TrilKernelFloat16;
+class TrilKernelBFloat16;
+
+auto tril_kernel(const Tensor& input, int64_t diagonal, sycl::queue& queue) -> Tensor {
+    if (input.ndim() < 2) {
+        throw std::invalid_argument("tril: input must be at least 2-D");
+    }
+
+    auto shape_span = input.shape();
+    std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+    const int64_t rows = shape[shape.size() - 2];
+    const int64_t cols = shape[shape.size() - 1];
+
+    int64_t batch_size = 1;
+    for (size_t i = 0; i < shape.size() - 2; ++i) {
+        batch_size *= shape[i];
+    }
+
+    Tensor output(shape, input.dtype(), input.device());
+    const int64_t matrix_size = rows * cols;
+    const int64_t total = batch_size * matrix_size;
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(input);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for<TrilKernelFloat32>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            const int64_t mat_idx = idx % matrix_size;
+            const int64_t row = mat_idx / cols;
+            const int64_t col = mat_idx % cols;
+            out_ptr[idx] = (col <= row + diagonal) ? in_ptr[idx] : 0.0f;
+        }).wait();
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(input);
+        double* out_ptr = get_data_ptr<double>(output);
+        queue.parallel_for<TrilKernelFloat64>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            const int64_t mat_idx = idx % matrix_size;
+            const int64_t row = mat_idx / cols;
+            const int64_t col = mat_idx % cols;
+            out_ptr[idx] = (col <= row + diagonal) ? in_ptr[idx] : 0.0;
+        }).wait();
+    } else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<TrilKernelFloat16>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            const int64_t mat_idx = idx % matrix_size;
+            const int64_t row = mat_idx / cols;
+            const int64_t col = mat_idx % cols;
+            out_ptr[idx] = (col <= row + diagonal) ? in_ptr[idx] : sycl::half(0.0f);
+        }).wait();
+    } else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        const uint16_t zero_bf16 = f32_to_bf16(0.0f);
+        queue.parallel_for<TrilKernelBFloat16>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            const int64_t mat_idx = idx % matrix_size;
+            const int64_t row = mat_idx / cols;
+            const int64_t col = mat_idx % cols;
+            out_ptr[idx] = (col <= row + diagonal) ? in_ptr[idx] : zero_bf16;
+        }).wait();
+    } else {
+        throw std::runtime_error("tril: unsupported dtype");
+    }
+
+    return output;
+}
+
+// ============================================================================
+// Diag kernel - Extract diagonal (2D->1D) or construct diagonal matrix (1D->2D)
+// ============================================================================
+
+class DiagExtractKernelFloat32;
+class DiagExtractKernelFloat64;
+class DiagExtractKernelFloat16;
+class DiagExtractKernelBFloat16;
+class DiagConstructKernelFloat32;
+class DiagConstructKernelFloat64;
+class DiagConstructKernelFloat16;
+class DiagConstructKernelBFloat16;
+
+auto diag_kernel(const Tensor& input, int64_t diagonal, sycl::queue& queue) -> Tensor {
+    const int64_t ndim = input.ndim();
+
+    if (ndim == 2) {
+        // Extract diagonal from 2D matrix -> 1D
+        auto shape_span = input.shape();
+        const int64_t rows = shape_span[0];
+        const int64_t cols = shape_span[1];
+
+        // Compute diagonal length
+        int64_t diag_start_row = (diagonal >= 0) ? 0 : -diagonal;
+        int64_t diag_start_col = (diagonal >= 0) ? diagonal : 0;
+        int64_t diag_len = std::min(rows - diag_start_row, cols - diag_start_col);
+        if (diag_len <= 0) diag_len = 0;
+
+        Tensor output({diag_len}, input.dtype(), input.device());
+
+        if (diag_len == 0) return output;
+
+        if (input.dtype() == DType::Float32) {
+            const float* in_ptr = get_data_ptr<const float>(input);
+            float* out_ptr = get_data_ptr<float>(output);
+            queue.parallel_for<DiagExtractKernelFloat32>(sycl::range<1>(diag_len), [=](sycl::id<1> idx) {
+                int64_t r = diag_start_row + static_cast<int64_t>(idx);
+                int64_t c = diag_start_col + static_cast<int64_t>(idx);
+                out_ptr[idx] = in_ptr[r * cols + c];
+            }).wait();
+        } else if (input.dtype() == DType::Float64) {
+            const double* in_ptr = get_data_ptr<const double>(input);
+            double* out_ptr = get_data_ptr<double>(output);
+            queue.parallel_for<DiagExtractKernelFloat64>(sycl::range<1>(diag_len), [=](sycl::id<1> idx) {
+                int64_t r = diag_start_row + static_cast<int64_t>(idx);
+                int64_t c = diag_start_col + static_cast<int64_t>(idx);
+                out_ptr[idx] = in_ptr[r * cols + c];
+            }).wait();
+        } else if (input.dtype() == DType::Float16) {
+            const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+            sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+            queue.parallel_for<DiagExtractKernelFloat16>(sycl::range<1>(diag_len), [=](sycl::id<1> idx) {
+                int64_t r = diag_start_row + static_cast<int64_t>(idx);
+                int64_t c = diag_start_col + static_cast<int64_t>(idx);
+                out_ptr[idx] = in_ptr[r * cols + c];
+            }).wait();
+        } else if (input.dtype() == DType::BFloat16) {
+            const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+            uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+            queue.parallel_for<DiagExtractKernelBFloat16>(sycl::range<1>(diag_len), [=](sycl::id<1> idx) {
+                int64_t r = diag_start_row + static_cast<int64_t>(idx);
+                int64_t c = diag_start_col + static_cast<int64_t>(idx);
+                out_ptr[idx] = in_ptr[r * cols + c];
+            }).wait();
+        } else {
+            throw std::runtime_error("diag: unsupported dtype");
+        }
+
+        return output;
+    } else if (ndim == 1) {
+        // Construct diagonal matrix from 1D vector -> 2D
+        const int64_t n = input.shape()[0];
+        const int64_t abs_diag = std::abs(diagonal);
+        const int64_t size = n + abs_diag;
+
+        Tensor output({size, size}, input.dtype(), input.device());
+
+        // Zero-fill the output first
+        const size_t total_bytes = size * size * input.dtype_size();
+        queue.memset(const_cast<void*>(output.data_ptr()), 0, total_bytes).wait();
+
+        if (n == 0) return output;
+
+        const int64_t diag_start_row = (diagonal >= 0) ? 0 : -diagonal;
+        const int64_t diag_start_col = (diagonal >= 0) ? diagonal : 0;
+
+        if (input.dtype() == DType::Float32) {
+            const float* in_ptr = get_data_ptr<const float>(input);
+            float* out_ptr = get_data_ptr<float>(output);
+            queue.parallel_for<DiagConstructKernelFloat32>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+                int64_t r = diag_start_row + static_cast<int64_t>(idx);
+                int64_t c = diag_start_col + static_cast<int64_t>(idx);
+                out_ptr[r * size + c] = in_ptr[idx];
+            }).wait();
+        } else if (input.dtype() == DType::Float64) {
+            const double* in_ptr = get_data_ptr<const double>(input);
+            double* out_ptr = get_data_ptr<double>(output);
+            queue.parallel_for<DiagConstructKernelFloat64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+                int64_t r = diag_start_row + static_cast<int64_t>(idx);
+                int64_t c = diag_start_col + static_cast<int64_t>(idx);
+                out_ptr[r * size + c] = in_ptr[idx];
+            }).wait();
+        } else if (input.dtype() == DType::Float16) {
+            const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+            sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+            queue.parallel_for<DiagConstructKernelFloat16>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+                int64_t r = diag_start_row + static_cast<int64_t>(idx);
+                int64_t c = diag_start_col + static_cast<int64_t>(idx);
+                out_ptr[r * size + c] = in_ptr[idx];
+            }).wait();
+        } else if (input.dtype() == DType::BFloat16) {
+            const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+            uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+            queue.parallel_for<DiagConstructKernelBFloat16>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+                int64_t r = diag_start_row + static_cast<int64_t>(idx);
+                int64_t c = diag_start_col + static_cast<int64_t>(idx);
+                out_ptr[r * size + c] = in_ptr[idx];
+            }).wait();
+        } else {
+            throw std::runtime_error("diag: unsupported dtype");
+        }
+
+        return output;
+    } else {
+        throw std::invalid_argument("diag: input must be 1-D or 2-D, got " + std::to_string(ndim) + "-D");
+    }
+}
+
+// ============================================================================
+// Trace kernel - Sum of diagonal elements -> scalar
+// ============================================================================
+
+class TraceKernelFloat32;
+class TraceKernelFloat64;
+
+auto trace_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+    if (input.ndim() != 2) {
+        throw std::invalid_argument("trace: input must be 2-D");
+    }
+
+    auto shape_span = input.shape();
+    const int64_t rows = shape_span[0];
+    const int64_t cols = shape_span[1];
+    const int64_t diag_len = std::min(rows, cols);
+
+    Tensor output({}, input.dtype(), input.device());
+
+    if (diag_len == 0) {
+        // Trace of empty diagonal is 0
+        if (input.dtype() == DType::Float32) {
+            float zero = 0.0f;
+            queue.memcpy(const_cast<void*>(output.data_ptr()), &zero, sizeof(float)).wait();
+        } else if (input.dtype() == DType::Float64) {
+            double zero = 0.0;
+            queue.memcpy(const_cast<void*>(output.data_ptr()), &zero, sizeof(double)).wait();
+        } else if (input.dtype() == DType::Float16) {
+            sycl::half zero(0.0f);
+            queue.memcpy(const_cast<void*>(output.data_ptr()), &zero, sizeof(sycl::half)).wait();
+        } else if (input.dtype() == DType::BFloat16) {
+            uint16_t zero = f32_to_bf16(0.0f);
+            queue.memcpy(const_cast<void*>(output.data_ptr()), &zero, sizeof(uint16_t)).wait();
+        }
+        return output;
+    }
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(input);
+        auto sum_buf = sycl::malloc_shared<float>(1, queue);
+        sum_buf[0] = 0.0f;
+
+        queue.parallel_for(sycl::range<1>(diag_len), sycl::reduction(sum_buf, sycl::plus<float>()),
+            [=](sycl::id<1> idx, auto& sum) {
+                sum += in_ptr[static_cast<int64_t>(idx) * cols + static_cast<int64_t>(idx)];
+            }).wait();
+
+        queue.memcpy(const_cast<void*>(output.data_ptr()), sum_buf, sizeof(float)).wait();
+        sycl::free(sum_buf, queue);
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(input);
+        auto sum_buf = sycl::malloc_shared<double>(1, queue);
+        sum_buf[0] = 0.0;
+
+        queue.parallel_for(sycl::range<1>(diag_len), sycl::reduction(sum_buf, sycl::plus<double>()),
+            [=](sycl::id<1> idx, auto& sum) {
+                sum += in_ptr[static_cast<int64_t>(idx) * cols + static_cast<int64_t>(idx)];
+            }).wait();
+
+        queue.memcpy(const_cast<void*>(output.data_ptr()), sum_buf, sizeof(double)).wait();
+        sycl::free(sum_buf, queue);
+    } else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        auto sum_buf = sycl::malloc_shared<float>(1, queue);
+        sum_buf[0] = 0.0f;
+
+        queue.parallel_for(sycl::range<1>(diag_len), sycl::reduction(sum_buf, sycl::plus<float>()),
+            [=](sycl::id<1> idx, auto& sum) {
+                sum += static_cast<float>(in_ptr[static_cast<int64_t>(idx) * cols + static_cast<int64_t>(idx)]);
+            }).wait();
+
+        sycl::half result(sum_buf[0]);
+        queue.memcpy(const_cast<void*>(output.data_ptr()), &result, sizeof(sycl::half)).wait();
+        sycl::free(sum_buf, queue);
+    } else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        auto sum_buf = sycl::malloc_shared<float>(1, queue);
+        sum_buf[0] = 0.0f;
+
+        queue.parallel_for(sycl::range<1>(diag_len), sycl::reduction(sum_buf, sycl::plus<float>()),
+            [=](sycl::id<1> idx, auto& sum) {
+                sum += bf16_to_f32(in_ptr[static_cast<int64_t>(idx) * cols + static_cast<int64_t>(idx)]);
+            }).wait();
+
+        uint16_t result = f32_to_bf16(sum_buf[0]);
+        queue.memcpy(const_cast<void*>(output.data_ptr()), &result, sizeof(uint16_t)).wait();
+        sycl::free(sum_buf, queue);
+    } else {
+        throw std::runtime_error("trace: unsupported dtype");
+    }
+
+    return output;
+}
+
+// ============================================================================
+// Flip kernel - Reverse elements along a dimension
+// ============================================================================
+
+class FlipKernelFloat32;
+class FlipKernelFloat64;
+class FlipKernelFloat16;
+class FlipKernelBFloat16;
+
+auto flip_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor {
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+
+    auto shape_span = in_cont.shape();
+    std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+    const int64_t ndim = static_cast<int64_t>(shape.size());
+
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::invalid_argument("flip: dimension " + std::to_string(dim) + " out of range");
+    }
+
+    Tensor output(shape, input.dtype(), input.device());
+    const int64_t total = in_cont.numel();
+
+    if (total == 0) return output;
+
+    // Compute outer_size, dim_size, inner_size for the flipped dimension
+    const int64_t outer_size = std::accumulate(shape.begin(), shape.begin() + dim, 1LL, std::multiplies<>());
+    const int64_t dim_size = shape[dim];
+    const int64_t inner_size = std::accumulate(shape.begin() + dim + 1, shape.end(), 1LL, std::multiplies<>());
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for<FlipKernelFloat32>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            const int64_t flat = idx;
+            const int64_t outer_idx = flat / (dim_size * inner_size);
+            const int64_t remainder = flat % (dim_size * inner_size);
+            const int64_t dim_idx = remainder / inner_size;
+            const int64_t inner_idx = remainder % inner_size;
+
+            const int64_t flipped_dim_idx = dim_size - 1 - dim_idx;
+            const int64_t src_idx = outer_idx * dim_size * inner_size + flipped_dim_idx * inner_size + inner_idx;
+            out_ptr[flat] = in_ptr[src_idx];
+        }).wait();
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+        queue.parallel_for<FlipKernelFloat64>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            const int64_t flat = idx;
+            const int64_t outer_idx = flat / (dim_size * inner_size);
+            const int64_t remainder = flat % (dim_size * inner_size);
+            const int64_t dim_idx = remainder / inner_size;
+            const int64_t inner_idx = remainder % inner_size;
+
+            const int64_t flipped_dim_idx = dim_size - 1 - dim_idx;
+            const int64_t src_idx = outer_idx * dim_size * inner_size + flipped_dim_idx * inner_size + inner_idx;
+            out_ptr[flat] = in_ptr[src_idx];
+        }).wait();
+    } else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<FlipKernelFloat16>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            const int64_t flat = idx;
+            const int64_t outer_idx = flat / (dim_size * inner_size);
+            const int64_t remainder = flat % (dim_size * inner_size);
+            const int64_t dim_idx = remainder / inner_size;
+            const int64_t inner_idx = remainder % inner_size;
+
+            const int64_t flipped_dim_idx = dim_size - 1 - dim_idx;
+            const int64_t src_idx = outer_idx * dim_size * inner_size + flipped_dim_idx * inner_size + inner_idx;
+            out_ptr[flat] = in_ptr[src_idx];
+        }).wait();
+    } else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for<FlipKernelBFloat16>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            const int64_t flat = idx;
+            const int64_t outer_idx = flat / (dim_size * inner_size);
+            const int64_t remainder = flat % (dim_size * inner_size);
+            const int64_t dim_idx = remainder / inner_size;
+            const int64_t inner_idx = remainder % inner_size;
+
+            const int64_t flipped_dim_idx = dim_size - 1 - dim_idx;
+            const int64_t src_idx = outer_idx * dim_size * inner_size + flipped_dim_idx * inner_size + inner_idx;
+            out_ptr[flat] = in_ptr[src_idx];
+        }).wait();
+    } else {
+        throw std::runtime_error("flip: unsupported dtype");
+    }
+
+    return output;
+}
+
 } // namespace oneapi
 } // namespace tenzor

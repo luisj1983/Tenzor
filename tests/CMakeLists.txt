@@ -485,3 +485,29 @@ target_link_libraries(benchmark_backends PRIVATE tenzor_core)
 # target_link_libraries(debug_attn_residual_norm PRIVATE tenzor_core)
 # add_executable(debug_add_norm_only tmp/debug_add_norm_only.cpp)
 # target_link_libraries(debug_add_norm_only PRIVATE tenzor_core)
+
+# ==============================================================================
+# Python Tests (registered as CTest tests)
+# ==============================================================================
+if(TENZOR_BUILD_PYTHON)
+    find_package(Python COMPONENTS Interpreter)
+    if(Python_FOUND)
+        set(PYTHON_TEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/python")
+        set(PYTHON_TEST_ENV "PYTHONPATH=${CMAKE_BINARY_DIR}/python")
+
+        file(GLOB PYTHON_TEST_FILES "${PYTHON_TEST_DIR}/test_*.py")
+        foreach(test_file ${PYTHON_TEST_FILES})
+            get_filename_component(test_name ${test_file} NAME_WE)
+            add_test(
+                NAME "python_${test_name}"
+                COMMAND ${Python_EXECUTABLE} ${test_file}
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+            )
+            set_tests_properties("python_${test_name}" PROPERTIES
+                LABELS "python"
+                TIMEOUT 60
+                ENVIRONMENT "${PYTHON_TEST_ENV}"
+            )
+        endforeach()
+    endif()
+endif()

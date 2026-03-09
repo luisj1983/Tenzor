@@ -1,0 +1,29 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+#extension GL_ARB_gpu_shader_fp64 : enable
+
+// Lerp (linear interpolation) for Float64: result = start + weight * (end - start)
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer InputStart { double start_buf[]; };
+layout(binding = 1) buffer InputEnd { double end_buf[]; };
+layout(binding = 2) buffer InputWeight { double weight_buf[]; };
+layout(binding = 3) buffer Output { double result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of elements
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n) {
+        return;
+    }
+
+    double s = start_buf[idx];
+    double e = end_buf[idx];
+    double w = weight_buf[idx];
+
+    result[idx] = s + w * (e - s);
+}

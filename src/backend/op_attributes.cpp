@@ -33,6 +33,8 @@ auto attr_key_name(AttrKey key) -> std::string_view {
         case AttrKey::OutputPaddingD: return "output_padding_d";
         case AttrKey::InputH: return "input_h";
         case AttrKey::InputW: return "input_w";
+        case AttrKey::InputD: return "input_d";
+        case AttrKey::InputL: return "input_l";
         case AttrKey::Eps: return "eps";
         case AttrKey::Momentum: return "momentum";
         case AttrKey::Alpha: return "alpha";

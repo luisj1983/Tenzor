@@ -2,7 +2,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 #extension GL_ARB_gpu_shader_fp64 : enable
 
-// Math operations with Float64 support
+// Math operations with Float64 support (including extended math, binary math, min/max)
 layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer InputA { double a[]; };
@@ -11,7 +11,7 @@ layout(binding = 2) buffer Output { double result[]; };
 
 layout(push_constant) uniform PushConstants {
     uint n;          // Number of elements
-    uint op;         // Operation: 0=add, 1=sub, 2=mul, 3=div, 4=sqrt, 5=exp, 6=log, 7=neg, 8=abs, 9=pow, 10=sign, 11=floor, 12=ceil, 13=round, 14=trunc, 15=reciprocal
+    uint op;         // Operation: 0=add, 1=sub, 2=mul, 3=div, 4=sqrt, 5=exp, 6=log, 7=neg, 8=abs, 9=pow, 10=sign, 11=floor, 12=ceil, 13=round, 14=trunc, 15=reciprocal, 16=log2, 17=log10, 18=log1p, 19=exp2, 20=expm1, 21=erf, 22=erfc, 23=atan2, 24=fmod, 25=remainder, 26=minimum, 27=maximum
     double param;    // Parameter for operations like pow (exponent) - now double
 } params;
 
@@ -160,6 +160,57 @@ void main() {
             break;
         case 15: // reciprocal (unary)
             result[idx] = 1.0 / val_a;
+            break;
+        case 16: // log2 (unary)
+            result[idx] = log_double(val_a) / 0.6931471805599453;
+            break;
+        case 17: // log10 (unary)
+            result[idx] = log_double(val_a) / 2.302585092994046;
+            break;
+        case 18: // log1p (unary)
+            result[idx] = log_double(1.0 + val_a);
+            break;
+        case 19: // exp2 (unary)
+            result[idx] = exp_double(val_a * 0.6931471805599453);
+            break;
+        case 20: // expm1 (unary)
+            result[idx] = exp_double(val_a) - 1.0;
+            break;
+        case 21: { // erf (unary) - Abramowitz & Stegun approximation
+            double x = val_a;
+            double ax = abs(x);
+            double t = 1.0 / (1.0 + 0.3275911 * ax);
+            double y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp_double(-ax * ax);
+            result[idx] = x < 0.0 ? -y : y;
+            break;
+        }
+        case 22: { // erfc (unary)
+            double x = val_a;
+            double ax = abs(x);
+            double t = 1.0 / (1.0 + 0.3275911 * ax);
+            double y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp_double(-ax * ax);
+            double erf_val = x < 0.0 ? -y : y;
+            result[idx] = 1.0 - erf_val;
+            break;
+        }
+        case 23: // atan2 (binary)
+            // GLSL atan(y, x) computes atan2 — not available in f64, use float fallback
+            result[idx] = double(atan(float(val_a), float(val_b)));
+            break;
+        case 24: // fmod (binary)
+            result[idx] = val_a - trunc(val_a / val_b) * val_b;
+            break;
+        case 25: { // remainder (binary) - IEEE remainder
+            double quot = val_a / val_b;
+            double rounded = round(quot);
+            result[idx] = val_a - rounded * val_b;
+            break;
+        }
+        case 26: // minimum (binary)
+            result[idx] = min(val_a, val_b);
+            break;
+        case 27: // maximum (binary)
+            result[idx] = max(val_a, val_b);
             break;
     }
 }

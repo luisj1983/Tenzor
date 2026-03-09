@@ -1,0 +1,101 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Adaptive pooling 1D for Float16
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };
+layout(binding = 1) buffer Output { uint output_data[]; };
+layout(binding = 2) buffer Indices { int max_indices[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint batch;
+    uint channels;
+    uint in_length;
+    uint out_length;
+    uint pool_type;
+} params;
+
+float readF16(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = input_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+void writeF16(uint element_idx, float value) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+
+    uint new_bits = packHalf2x16(vec2(value, 0.0)) & 0xFFFFu;
+    uint shift = word_offset * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = output_data[word_idx];
+    uint new_val, expected;
+    do {
+        expected = old_val;
+        new_val = (expected & ~mask) | (new_bits << shift);
+        old_val = atomicCompSwap(output_data[word_idx], expected, new_val);
+    } while (old_val != expected);
+}
+
+int start_index(int a, int b, int c) {
+    return int(floor(float(a * c) / float(b)));
+}
+
+int end_index(int a, int b, int c) {
+    return int(ceil(float((a + 1) * c) / float(b)));
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    uint temp = idx;
+    uint l_out = temp % params.out_length;
+    temp /= params.out_length;
+    uint c = temp % params.channels;
+    uint n = temp / params.channels;
+
+    int in_start = start_index(int(l_out), int(params.out_length), int(params.in_length));
+    int in_end = end_index(int(l_out), int(params.out_length), int(params.in_length));
+
+    float result;
+    int max_idx = -1;
+
+    if (params.pool_type == 0) {
+        result = -1.0 / 0.0;
+    } else {
+        result = 0.0;
+    }
+
+    uint count = 0;
+
+    for (int il = in_start; il < in_end; il++) {
+        uint input_idx = n * params.channels * params.in_length +
+                        c * params.in_length + uint(il);
+        float value = readF16(input_idx);
+
+        if (params.pool_type == 0) {
+            if (value > result) {
+                result = value;
+                max_idx = int(input_idx);
+            }
+        } else {
+            result += value;
+            count++;
+        }
+    }
+
+    if (params.pool_type == 1 && count > 0) {
+        result /= float(count);
+    }
+
+    writeF16(idx, result);
+    if (params.pool_type == 0) {
+        max_indices[idx] = max_idx;
+    }
+}

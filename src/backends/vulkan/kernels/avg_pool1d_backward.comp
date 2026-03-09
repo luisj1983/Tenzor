@@ -1,0 +1,80 @@
+#version 450
+#extension GL_EXT_shader_atomic_float : enable
+
+// Average Pooling 1D Backward Pass
+// Distributes gradient evenly across pooling window
+// Uses atomic operations for overlapping regions
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { float grad_output[]; };  // (N, C, L_out)
+layout(binding = 1) buffer GradInput { float grad_input[]; };    // (N, C, L)
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;          // Total output gradient elements (N * C * L_out)
+    uint batch;               // N
+    uint channels;            // C
+    uint in_length;           // L
+    uint out_length;          // L_out
+    uint kernel_size;         // Kernel size
+    uint stride;              // Stride
+    uint padding;             // Padding
+    uint count_include_pad;   // 1 to include padding in count, 0 otherwise
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    // Bounds check
+    if (idx >= params.n_elements) {
+        return;
+    }
+
+    // Decode flat index to (n, c, l_out)
+    uint temp = idx;
+    uint l_out = temp % params.out_length;
+    temp /= params.out_length;
+    uint c = temp % params.channels;
+    uint n = temp / params.channels;
+
+    // Get output gradient
+    float grad_out = grad_output[idx];
+
+    // Compute input window start
+    int l_start = int(l_out * params.stride) - int(params.padding);
+
+    // Count valid elements in pooling window
+    uint count = 0;
+
+    // First pass: count valid elements
+    for (uint k = 0; k < params.kernel_size; k++) {
+        int l_in = l_start + int(k);
+        if (l_in >= 0 && l_in < int(params.in_length)) {
+            count++;
+        } else if (params.count_include_pad != 0) {
+            count++;
+        }
+    }
+
+    // Compute gradient per input element
+    float grad_per_element = 0.0;
+    if (count > 0) {
+        grad_per_element = grad_out / float(count);
+    }
+
+    // Second pass: distribute gradient to input
+    for (uint k = 0; k < params.kernel_size; k++) {
+        int l_in = l_start + int(k);
+
+        // Check if within input bounds
+        if (l_in >= 0 && l_in < int(params.in_length)) {
+            // Compute input index: (n, c, l_in)
+            uint input_idx = n * params.channels * params.in_length +
+                            c * params.in_length +
+                            uint(l_in);
+
+            // Atomically add gradient (for overlapping pooling windows)
+            atomicAdd(grad_input[input_idx], grad_per_element);
+        }
+    }
+}

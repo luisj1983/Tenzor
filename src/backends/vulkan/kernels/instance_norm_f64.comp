@@ -1,0 +1,83 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Instance Normalization for Float64
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer Input { float64_t input_data[]; };
+layout(binding = 1) buffer Output { float64_t output_data[]; };
+layout(binding = 2) buffer Weight { float64_t weight_data[]; };
+layout(binding = 3) buffer Bias { float64_t bias_data[]; };
+layout(binding = 4) buffer Mean { float64_t mean_data[]; };
+layout(binding = 5) buffer Var { float64_t var_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint channels;
+    uint spatial_size;
+    float epsilon;
+    uint affine;
+} params;
+
+// Use float64_t shared memory for full precision
+shared float64_t shared_sum[WORKGROUP_SIZE];
+shared float64_t shared_sum_sq[WORKGROUP_SIZE];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint nc_idx = gl_WorkGroupID.x;
+
+    uint total_nc = params.batch_size * params.channels;
+    if (nc_idx >= total_nc) return;
+
+    uint c = nc_idx % params.channels;
+    uint base = nc_idx * params.spatial_size;
+
+    float64_t local_sum = float64_t(0.0);
+    for (uint i = tid; i < params.spatial_size; i += WORKGROUP_SIZE) {
+        local_sum += input_data[base + i];
+    }
+    shared_sum[tid] = local_sum;
+    barrier();
+
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) shared_sum[tid] += shared_sum[tid + s];
+        barrier();
+    }
+
+    float64_t mean = shared_sum[0] / float64_t(params.spatial_size);
+    barrier();
+
+    float64_t local_sum_sq = float64_t(0.0);
+    for (uint i = tid; i < params.spatial_size; i += WORKGROUP_SIZE) {
+        float64_t diff = input_data[base + i] - mean;
+        local_sum_sq += diff * diff;
+    }
+    shared_sum_sq[tid] = local_sum_sq;
+    barrier();
+
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) shared_sum_sq[tid] += shared_sum_sq[tid + s];
+        barrier();
+    }
+
+    float64_t variance = shared_sum_sq[0] / float64_t(params.spatial_size);
+    float64_t inv_std = float64_t(1.0) / sqrt(variance + float64_t(params.epsilon));
+
+    if (tid == 0) {
+        mean_data[nc_idx] = mean;
+        var_data[nc_idx] = inv_std;
+    }
+    barrier();
+
+    for (uint i = tid; i < params.spatial_size; i += WORKGROUP_SIZE) {
+        float64_t normalized = (input_data[base + i] - mean) * inv_std;
+
+        if (params.affine > 0) {
+            normalized = normalized * weight_data[c] + bias_data[c];
+        }
+
+        output_data[base + i] = normalized;
+    }
+}

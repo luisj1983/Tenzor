@@ -1,0 +1,58 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_atomic_int64 : require
+
+// ScatterAdd for Float64: atomically accumulates source values into output along a dimension.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Src { float64_t src_data[]; };
+layout(binding = 1) buffer Index { int idx_data[]; };
+layout(binding = 2) buffer Output { uint64_t out_data[]; };   // uint64_t for CAS atomics
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint dim_size;
+    uint inner_size;
+    uint src_dim_size;
+} params;
+
+// Bit-cast helpers
+float64_t bitsToF64(uint64_t bits) {
+    return float64_t(packDouble2x32(uvec2(uint(bits), uint(bits >> 32u))));
+}
+
+uint64_t f64ToBits(float64_t val) {
+    uvec2 v = unpackDouble2x32(double(val));
+    return uint64_t(v.x) | (uint64_t(v.y) << 32u);
+}
+
+void atomicAddF64(uint idx, float64_t val) {
+    uint64_t old_bits = out_data[idx];
+    uint64_t new_bits;
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        float64_t old_val = bitsToF64(old_bits);
+        new_bits = f64ToBits(old_val + val);
+        uint64_t result = atomicCompSwap(out_data[idx], old_bits, new_bits);
+        if (result == old_bits) return;
+        old_bits = result;
+    }
+    out_data[idx] = new_bits;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= params.n) return;
+
+    uint inner_idx = i % params.inner_size;
+    uint outer_idx = i / (params.inner_size * params.src_dim_size);
+
+    int dest_dim_idx = idx_data[i];
+    if (dest_dim_idx < 0 || dest_dim_idx >= int(params.dim_size)) return;
+
+    uint out_idx = outer_idx * (params.dim_size * params.inner_size) +
+                   uint(dest_dim_idx) * params.inner_size +
+                   inner_idx;
+
+    atomicAddF64(out_idx, src_data[i]);
+}

@@ -1,0 +1,111 @@
+#version 450
+
+// Conv3d Backward Input - Gradient w.r.t. input
+// Supports grouped convolutions
+//
+// Algorithm: For each input pixel (id, ih, iw), accumulate gradients from all
+// output positions that used it during forward pass.
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { float grad_output[]; };  // (N, C_out, D_out, H_out, W_out)
+layout(binding = 1) buffer Weight { float weight[]; };           // (C_out, C_in/groups, kD, kH, kW)
+layout(binding = 2) buffer GradInput { float grad_input[]; };    // (N, C_in, D_in, H_in, W_in)
+
+layout(push_constant) uniform PushConstants {
+    uint batch;
+    uint channels_in;
+    uint channels_out;
+    uint depth_in;
+    uint height_in;
+    uint width_in;
+    uint depth_out;
+    uint height_out;
+    uint width_out;
+    uint kernel_d;
+    uint kernel_h;
+    uint kernel_w;
+    uint stride_d;
+    uint stride_h;
+    uint stride_w;
+    uint padding_d;
+    uint padding_h;
+    uint padding_w;
+    uint dilation_d;
+    uint dilation_h;
+    uint dilation_w;
+    uint groups;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total_elements = params.batch * params.channels_in * params.depth_in * params.height_in * params.width_in;
+
+    if (idx >= total_elements) {
+        return;
+    }
+
+    // Decode flat index to (b, c_in, id, ih, iw)
+    uint temp = idx;
+    uint iw = temp % params.width_in;
+    temp /= params.width_in;
+    uint ih = temp % params.height_in;
+    temp /= params.height_in;
+    uint id = temp % params.depth_in;
+    temp /= params.depth_in;
+    uint c_in = temp % params.channels_in;
+    uint b = temp / params.channels_in;
+
+    // Grouped convolution parameters
+    uint in_channels_per_group = params.channels_in / params.groups;
+    uint out_channels_per_group = params.channels_out / params.groups;
+    uint group = c_in / in_channels_per_group;
+    uint c_in_local = c_in % in_channels_per_group;
+
+    // Output channels for this group
+    uint c_out_start = group * out_channels_per_group;
+    uint c_out_end = c_out_start + out_channels_per_group;
+
+    float sum = 0.0;
+
+    // Iterate through all kernel positions
+    for (uint kd = 0; kd < params.kernel_d; kd++) {
+        for (uint kh = 0; kh < params.kernel_h; kh++) {
+            for (uint kw = 0; kw < params.kernel_w; kw++) {
+                // Reverse the forward mapping
+                int id_shifted = int(id) + int(params.padding_d) - int(kd * params.dilation_d);
+                int ih_shifted = int(ih) + int(params.padding_h) - int(kh * params.dilation_h);
+                int iw_shifted = int(iw) + int(params.padding_w) - int(kw * params.dilation_w);
+
+                // Check if this maps to a valid output position (must be divisible by stride)
+                if (id_shifted % int(params.stride_d) == 0 &&
+                    ih_shifted % int(params.stride_h) == 0 &&
+                    iw_shifted % int(params.stride_w) == 0) {
+                    int od = id_shifted / int(params.stride_d);
+                    int oh = ih_shifted / int(params.stride_h);
+                    int ow = iw_shifted / int(params.stride_w);
+
+                    // Check bounds
+                    if (od >= 0 && od < int(params.depth_out) &&
+                        oh >= 0 && oh < int(params.height_out) &&
+                        ow >= 0 && ow < int(params.width_out)) {
+
+                        for (uint c_out = c_out_start; c_out < c_out_end; c_out++) {
+                            // grad_output index: [b][c_out][od][oh][ow]
+                            uint grad_out_idx = (((b * params.channels_out + c_out) * params.depth_out + uint(od)) *
+                                                 params.height_out + uint(oh)) * params.width_out + uint(ow);
+
+                            // weight index: [c_out][c_in_local][kd][kh][kw]
+                            uint weight_idx = (((c_out * in_channels_per_group + c_in_local) * params.kernel_d + kd) *
+                                               params.kernel_h + kh) * params.kernel_w + kw;
+
+                            sum += grad_output[grad_out_idx] * weight[weight_idx];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    grad_input[idx] = sum;
+}

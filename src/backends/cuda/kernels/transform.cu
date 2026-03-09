@@ -11,6 +11,9 @@
 #include <stdexcept>
 #include <vector>
 #include <cstring>
+#include <algorithm>
+#include <cstdlib>
+#include <cmath>
 
 namespace tenzor {
 namespace cuda {
@@ -885,6 +888,762 @@ auto chunk_kernel(const Tensor& input, int64_t chunks, int64_t dim, cudaStream_t
 
 auto tile_kernel(const Tensor& input, const std::vector<int64_t>& reps, cudaStream_t stream) -> Tensor {
     return repeat_kernel(input, reps, stream);
+}
+
+// ============================================================================
+// Triu kernel — upper triangular: zero out elements below diagonal+k
+// ============================================================================
+
+template<typename T>
+__global__ void triu_kernel_impl(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    int64_t rows, int64_t cols,
+    int64_t batch_size,
+    int64_t diagonal
+) {
+    int64_t total = batch_size * rows * cols;
+    TENZOR_CUDA_KERNEL_LOOP(idx, total) {
+        int64_t b = idx / (rows * cols);
+        int64_t rem = idx % (rows * cols);
+        int64_t i = rem / cols;
+        int64_t j = rem % cols;
+
+        if (j >= i + diagonal) {
+            output[idx] = input[idx];
+        } else {
+            output[idx] = T(0);
+        }
+    }
+}
+
+// Specialization for __half (no T(0))
+template<>
+__global__ void triu_kernel_impl<__half>(
+    const __half* __restrict__ input,
+    __half* __restrict__ output,
+    int64_t rows, int64_t cols,
+    int64_t batch_size,
+    int64_t diagonal
+) {
+    int64_t total = batch_size * rows * cols;
+    TENZOR_CUDA_KERNEL_LOOP(idx, total) {
+        int64_t rem = idx % (rows * cols);
+        int64_t i = rem / cols;
+        int64_t j = rem % cols;
+        output[idx] = (j >= i + diagonal) ? input[idx] : __float2half(0.0f);
+    }
+}
+
+// Specialization for __nv_bfloat16
+template<>
+__global__ void triu_kernel_impl<__nv_bfloat16>(
+    const __nv_bfloat16* __restrict__ input,
+    __nv_bfloat16* __restrict__ output,
+    int64_t rows, int64_t cols,
+    int64_t batch_size,
+    int64_t diagonal
+) {
+    int64_t total = batch_size * rows * cols;
+    TENZOR_CUDA_KERNEL_LOOP(idx, total) {
+        int64_t rem = idx % (rows * cols);
+        int64_t i = rem / cols;
+        int64_t j = rem % cols;
+        output[idx] = (j >= i + diagonal) ? input[idx] : __float2bfloat16(0.0f);
+    }
+}
+
+auto triu_kernel(const Tensor& input, int64_t diagonal, cudaStream_t stream) -> Tensor {
+    if (input.ndim() < 2) {
+        throw std::runtime_error("triu: input must be at least 2D");
+    }
+
+    auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    Tensor cont = input.is_contiguous() ? input : contiguous_kernel(input, stream);
+    Tensor output(shape, input.dtype(), input.device());
+
+    int64_t rows = shape[shape.size() - 2];
+    int64_t cols = shape[shape.size() - 1];
+    int64_t batch_size = 1;
+    for (size_t i = 0; i + 2 < shape.size(); ++i) {
+        batch_size *= shape[i];
+    }
+
+    int64_t total = batch_size * rows * cols;
+    if (total == 0) return output;
+
+    switch (input.dtype()) {
+        case DType::Float32: {
+            auto [grid, block] = optimal_launch_config(triu_kernel_impl<float>, total);
+            triu_kernel_impl<<<grid, block, 0, stream>>>(
+                cont.data<float>(), output.data<float>(), rows, cols, batch_size, diagonal);
+            break;
+        }
+        case DType::Float64: {
+            auto [grid, block] = optimal_launch_config(triu_kernel_impl<double>, total);
+            triu_kernel_impl<<<grid, block, 0, stream>>>(
+                cont.data<double>(), output.data<double>(), rows, cols, batch_size, diagonal);
+            break;
+        }
+        case DType::Float16: {
+            auto [grid, block] = optimal_launch_config(triu_kernel_impl<__half>, total);
+            triu_kernel_impl<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const __half*>(cont.data_ptr()),
+                reinterpret_cast<__half*>(output.data_ptr()),
+                rows, cols, batch_size, diagonal);
+            break;
+        }
+        case DType::BFloat16: {
+            auto [grid, block] = optimal_launch_config(triu_kernel_impl<__nv_bfloat16>, total);
+            triu_kernel_impl<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const __nv_bfloat16*>(cont.data_ptr()),
+                reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+                rows, cols, batch_size, diagonal);
+            break;
+        }
+        case DType::Int32: {
+            auto [grid, block] = optimal_launch_config(triu_kernel_impl<int32_t>, total);
+            triu_kernel_impl<<<grid, block, 0, stream>>>(
+                cont.data<int32_t>(), output.data<int32_t>(), rows, cols, batch_size, diagonal);
+            break;
+        }
+        case DType::Int64: {
+            auto [grid, block] = optimal_launch_config(triu_kernel_impl<int64_t>, total);
+            triu_kernel_impl<<<grid, block, 0, stream>>>(
+                cont.data<int64_t>(), output.data<int64_t>(), rows, cols, batch_size, diagonal);
+            break;
+        }
+        default:
+            throw std::runtime_error("triu_kernel: unsupported dtype");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return output;
+}
+
+// ============================================================================
+// Tril kernel — lower triangular: zero out elements above diagonal+k
+// ============================================================================
+
+template<typename T>
+__global__ void tril_kernel_impl(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    int64_t rows, int64_t cols,
+    int64_t batch_size,
+    int64_t diagonal
+) {
+    int64_t total = batch_size * rows * cols;
+    TENZOR_CUDA_KERNEL_LOOP(idx, total) {
+        int64_t rem = idx % (rows * cols);
+        int64_t i = rem / cols;
+        int64_t j = rem % cols;
+
+        if (j <= i + diagonal) {
+            output[idx] = input[idx];
+        } else {
+            output[idx] = T(0);
+        }
+    }
+}
+
+template<>
+__global__ void tril_kernel_impl<__half>(
+    const __half* __restrict__ input,
+    __half* __restrict__ output,
+    int64_t rows, int64_t cols,
+    int64_t batch_size,
+    int64_t diagonal
+) {
+    int64_t total = batch_size * rows * cols;
+    TENZOR_CUDA_KERNEL_LOOP(idx, total) {
+        int64_t rem = idx % (rows * cols);
+        int64_t i = rem / cols;
+        int64_t j = rem % cols;
+        output[idx] = (j <= i + diagonal) ? input[idx] : __float2half(0.0f);
+    }
+}
+
+template<>
+__global__ void tril_kernel_impl<__nv_bfloat16>(
+    const __nv_bfloat16* __restrict__ input,
+    __nv_bfloat16* __restrict__ output,
+    int64_t rows, int64_t cols,
+    int64_t batch_size,
+    int64_t diagonal
+) {
+    int64_t total = batch_size * rows * cols;
+    TENZOR_CUDA_KERNEL_LOOP(idx, total) {
+        int64_t rem = idx % (rows * cols);
+        int64_t i = rem / cols;
+        int64_t j = rem % cols;
+        output[idx] = (j <= i + diagonal) ? input[idx] : __float2bfloat16(0.0f);
+    }
+}
+
+auto tril_kernel(const Tensor& input, int64_t diagonal, cudaStream_t stream) -> Tensor {
+    if (input.ndim() < 2) {
+        throw std::runtime_error("tril: input must be at least 2D");
+    }
+
+    auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    Tensor cont = input.is_contiguous() ? input : contiguous_kernel(input, stream);
+    Tensor output(shape, input.dtype(), input.device());
+
+    int64_t rows = shape[shape.size() - 2];
+    int64_t cols = shape[shape.size() - 1];
+    int64_t batch_size = 1;
+    for (size_t i = 0; i + 2 < shape.size(); ++i) {
+        batch_size *= shape[i];
+    }
+
+    int64_t total = batch_size * rows * cols;
+    if (total == 0) return output;
+
+    switch (input.dtype()) {
+        case DType::Float32: {
+            auto [grid, block] = optimal_launch_config(tril_kernel_impl<float>, total);
+            tril_kernel_impl<<<grid, block, 0, stream>>>(
+                cont.data<float>(), output.data<float>(), rows, cols, batch_size, diagonal);
+            break;
+        }
+        case DType::Float64: {
+            auto [grid, block] = optimal_launch_config(tril_kernel_impl<double>, total);
+            tril_kernel_impl<<<grid, block, 0, stream>>>(
+                cont.data<double>(), output.data<double>(), rows, cols, batch_size, diagonal);
+            break;
+        }
+        case DType::Float16: {
+            auto [grid, block] = optimal_launch_config(tril_kernel_impl<__half>, total);
+            tril_kernel_impl<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const __half*>(cont.data_ptr()),
+                reinterpret_cast<__half*>(output.data_ptr()),
+                rows, cols, batch_size, diagonal);
+            break;
+        }
+        case DType::BFloat16: {
+            auto [grid, block] = optimal_launch_config(tril_kernel_impl<__nv_bfloat16>, total);
+            tril_kernel_impl<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const __nv_bfloat16*>(cont.data_ptr()),
+                reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+                rows, cols, batch_size, diagonal);
+            break;
+        }
+        case DType::Int32: {
+            auto [grid, block] = optimal_launch_config(tril_kernel_impl<int32_t>, total);
+            tril_kernel_impl<<<grid, block, 0, stream>>>(
+                cont.data<int32_t>(), output.data<int32_t>(), rows, cols, batch_size, diagonal);
+            break;
+        }
+        case DType::Int64: {
+            auto [grid, block] = optimal_launch_config(tril_kernel_impl<int64_t>, total);
+            tril_kernel_impl<<<grid, block, 0, stream>>>(
+                cont.data<int64_t>(), output.data<int64_t>(), rows, cols, batch_size, diagonal);
+            break;
+        }
+        default:
+            throw std::runtime_error("tril_kernel: unsupported dtype");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return output;
+}
+
+// ============================================================================
+// Diag kernel — extract diagonal from 2D or construct diagonal matrix from 1D
+// ============================================================================
+
+// Extract diagonal from 2D matrix
+template<typename T>
+__global__ void diag_extract_kernel_impl(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    int64_t diag_size,
+    int64_t rows, int64_t cols,
+    int64_t diagonal
+) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, diag_size) {
+        int64_t i, j;
+        if (diagonal >= 0) {
+            i = idx;
+            j = idx + diagonal;
+        } else {
+            i = idx - diagonal;
+            j = idx;
+        }
+        output[idx] = input[i * cols + j];
+    }
+}
+
+// Construct diagonal matrix from 1D vector
+template<typename T>
+__global__ void diag_construct_kernel_impl(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    int64_t n,         // size of output matrix (n x n)
+    int64_t diag_size, // number of diagonal elements
+    int64_t diagonal
+) {
+    int64_t total = n * n;
+    TENZOR_CUDA_KERNEL_LOOP(idx, total) {
+        int64_t i = idx / n;
+        int64_t j = idx % n;
+
+        int64_t diag_idx;
+        if (diagonal >= 0) {
+            diag_idx = j - diagonal;  // element on diagonal if i == diag_idx
+        } else {
+            diag_idx = i + diagonal;  // element on diagonal if j == diag_idx
+        }
+
+        if (diagonal >= 0 && i == j - diagonal && diag_idx >= 0 && diag_idx < diag_size) {
+            output[idx] = input[diag_idx];
+        } else if (diagonal < 0 && j == i + diagonal && diag_idx >= 0 && diag_idx < diag_size) {
+            output[idx] = input[diag_idx];
+        } else {
+            output[idx] = T(0);
+        }
+    }
+}
+
+// __half specialization for construct
+template<>
+__global__ void diag_construct_kernel_impl<__half>(
+    const __half* __restrict__ input,
+    __half* __restrict__ output,
+    int64_t n,
+    int64_t diag_size,
+    int64_t diagonal
+) {
+    int64_t total = n * n;
+    TENZOR_CUDA_KERNEL_LOOP(idx, total) {
+        int64_t i = idx / n;
+        int64_t j = idx % n;
+
+        int64_t diag_idx;
+        if (diagonal >= 0) {
+            diag_idx = j - diagonal;
+        } else {
+            diag_idx = i + diagonal;
+        }
+
+        if (diagonal >= 0 && i == j - diagonal && diag_idx >= 0 && diag_idx < diag_size) {
+            output[idx] = input[diag_idx];
+        } else if (diagonal < 0 && j == i + diagonal && diag_idx >= 0 && diag_idx < diag_size) {
+            output[idx] = input[diag_idx];
+        } else {
+            output[idx] = __float2half(0.0f);
+        }
+    }
+}
+
+// __nv_bfloat16 specialization for construct
+template<>
+__global__ void diag_construct_kernel_impl<__nv_bfloat16>(
+    const __nv_bfloat16* __restrict__ input,
+    __nv_bfloat16* __restrict__ output,
+    int64_t n,
+    int64_t diag_size,
+    int64_t diagonal
+) {
+    int64_t total = n * n;
+    TENZOR_CUDA_KERNEL_LOOP(idx, total) {
+        int64_t i = idx / n;
+        int64_t j = idx % n;
+
+        int64_t diag_idx;
+        if (diagonal >= 0) {
+            diag_idx = j - diagonal;
+        } else {
+            diag_idx = i + diagonal;
+        }
+
+        if (diagonal >= 0 && i == j - diagonal && diag_idx >= 0 && diag_idx < diag_size) {
+            output[idx] = input[diag_idx];
+        } else if (diagonal < 0 && j == i + diagonal && diag_idx >= 0 && diag_idx < diag_size) {
+            output[idx] = input[diag_idx];
+        } else {
+            output[idx] = __float2bfloat16(0.0f);
+        }
+    }
+}
+
+auto diag_kernel(const Tensor& input, int64_t diagonal, cudaStream_t stream) -> Tensor {
+    Tensor cont = input.is_contiguous() ? input : contiguous_kernel(input, stream);
+    auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+
+    if (input.ndim() == 2) {
+        // Extract diagonal from 2D matrix
+        int64_t rows = shape[0];
+        int64_t cols = shape[1];
+        int64_t diag_size;
+        if (diagonal >= 0) {
+            diag_size = std::max<int64_t>(0, std::min(rows, cols - diagonal));
+        } else {
+            diag_size = std::max<int64_t>(0, std::min(rows + diagonal, cols));
+        }
+
+        Tensor output({diag_size}, input.dtype(), input.device());
+        if (diag_size == 0) return output;
+
+        switch (input.dtype()) {
+            case DType::Float32: {
+                auto [grid, block] = optimal_launch_config(diag_extract_kernel_impl<float>, diag_size);
+                diag_extract_kernel_impl<<<grid, block, 0, stream>>>(
+                    cont.data<float>(), output.data<float>(), diag_size, rows, cols, diagonal);
+                break;
+            }
+            case DType::Float64: {
+                auto [grid, block] = optimal_launch_config(diag_extract_kernel_impl<double>, diag_size);
+                diag_extract_kernel_impl<<<grid, block, 0, stream>>>(
+                    cont.data<double>(), output.data<double>(), diag_size, rows, cols, diagonal);
+                break;
+            }
+            case DType::Float16: {
+                auto [grid, block] = optimal_launch_config(diag_extract_kernel_impl<__half>, diag_size);
+                diag_extract_kernel_impl<<<grid, block, 0, stream>>>(
+                    reinterpret_cast<const __half*>(cont.data_ptr()),
+                    reinterpret_cast<__half*>(output.data_ptr()),
+                    diag_size, rows, cols, diagonal);
+                break;
+            }
+            case DType::BFloat16: {
+                auto [grid, block] = optimal_launch_config(diag_extract_kernel_impl<__nv_bfloat16>, diag_size);
+                diag_extract_kernel_impl<<<grid, block, 0, stream>>>(
+                    reinterpret_cast<const __nv_bfloat16*>(cont.data_ptr()),
+                    reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+                    diag_size, rows, cols, diagonal);
+                break;
+            }
+            case DType::Int32: {
+                auto [grid, block] = optimal_launch_config(diag_extract_kernel_impl<int32_t>, diag_size);
+                diag_extract_kernel_impl<<<grid, block, 0, stream>>>(
+                    cont.data<int32_t>(), output.data<int32_t>(), diag_size, rows, cols, diagonal);
+                break;
+            }
+            case DType::Int64: {
+                auto [grid, block] = optimal_launch_config(diag_extract_kernel_impl<int64_t>, diag_size);
+                diag_extract_kernel_impl<<<grid, block, 0, stream>>>(
+                    cont.data<int64_t>(), output.data<int64_t>(), diag_size, rows, cols, diagonal);
+                break;
+            }
+            default:
+                throw std::runtime_error("diag_kernel: unsupported dtype");
+        }
+
+        CUDA_CHECK(cudaGetLastError());
+        return output;
+
+    } else if (input.ndim() == 1) {
+        // Construct diagonal matrix from 1D vector
+        int64_t diag_size = shape[0];
+        int64_t n = diag_size + std::abs(diagonal);
+        int64_t total = n * n;
+
+        Tensor output({n, n}, input.dtype(), input.device());
+        if (total == 0) return output;
+
+        switch (input.dtype()) {
+            case DType::Float32: {
+                auto [grid, block] = optimal_launch_config(diag_construct_kernel_impl<float>, total);
+                diag_construct_kernel_impl<<<grid, block, 0, stream>>>(
+                    cont.data<float>(), output.data<float>(), n, diag_size, diagonal);
+                break;
+            }
+            case DType::Float64: {
+                auto [grid, block] = optimal_launch_config(diag_construct_kernel_impl<double>, total);
+                diag_construct_kernel_impl<<<grid, block, 0, stream>>>(
+                    cont.data<double>(), output.data<double>(), n, diag_size, diagonal);
+                break;
+            }
+            case DType::Float16: {
+                auto [grid, block] = optimal_launch_config(diag_construct_kernel_impl<__half>, total);
+                diag_construct_kernel_impl<<<grid, block, 0, stream>>>(
+                    reinterpret_cast<const __half*>(cont.data_ptr()),
+                    reinterpret_cast<__half*>(output.data_ptr()),
+                    n, diag_size, diagonal);
+                break;
+            }
+            case DType::BFloat16: {
+                auto [grid, block] = optimal_launch_config(diag_construct_kernel_impl<__nv_bfloat16>, total);
+                diag_construct_kernel_impl<<<grid, block, 0, stream>>>(
+                    reinterpret_cast<const __nv_bfloat16*>(cont.data_ptr()),
+                    reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+                    n, diag_size, diagonal);
+                break;
+            }
+            case DType::Int32: {
+                auto [grid, block] = optimal_launch_config(diag_construct_kernel_impl<int32_t>, total);
+                diag_construct_kernel_impl<<<grid, block, 0, stream>>>(
+                    cont.data<int32_t>(), output.data<int32_t>(), n, diag_size, diagonal);
+                break;
+            }
+            case DType::Int64: {
+                auto [grid, block] = optimal_launch_config(diag_construct_kernel_impl<int64_t>, total);
+                diag_construct_kernel_impl<<<grid, block, 0, stream>>>(
+                    cont.data<int64_t>(), output.data<int64_t>(), n, diag_size, diagonal);
+                break;
+            }
+            default:
+                throw std::runtime_error("diag_kernel: unsupported dtype");
+        }
+
+        CUDA_CHECK(cudaGetLastError());
+        return output;
+
+    } else {
+        throw std::runtime_error("diag_kernel: input must be 1D or 2D");
+    }
+}
+
+// ============================================================================
+// Trace kernel — sum of diagonal elements of a 2D matrix
+// ============================================================================
+
+// Accumulation type helper for trace: float for half types, T otherwise
+template<typename T> struct TraceAccumType { using type = T; };
+template<> struct TraceAccumType<__half> { using type = float; };
+template<> struct TraceAccumType<__nv_bfloat16> { using type = float; };
+
+// Trace kernel: sum diagonal elements from a 2D matrix (rows x cols)
+// input layout is row-major: diagonal element i is at input[i * cols + i]
+template<typename T>
+__global__ void trace_diag_sum_kernel(
+    const T* __restrict__ input,
+    T* output,
+    int64_t diag_size,
+    int64_t cols
+) {
+    using Acc = typename TraceAccumType<T>::type;
+    extern __shared__ char trace_shared_raw[];
+    Acc* shared = reinterpret_cast<Acc*>(trace_shared_raw);
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    Acc thread_sum = Acc(0);
+    for (int64_t i = idx; i < diag_size; i += grid_size) {
+        thread_sum = thread_sum + Acc(input[i * cols + i]);
+    }
+
+    shared[tid] = thread_sum;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            shared[tid] = shared[tid] + shared[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        output[blockIdx.x] = T(shared[0]);
+    }
+}
+
+// Simple contiguous sum for final pass of multi-block trace reduction
+template<typename T>
+__global__ void trace_final_sum_kernel(
+    const T* __restrict__ input,
+    T* output,
+    int64_t n
+) {
+    using Acc = typename TraceAccumType<T>::type;
+    extern __shared__ char trace_final_shared_raw[];
+    Acc* shared = reinterpret_cast<Acc*>(trace_final_shared_raw);
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    Acc thread_sum = Acc(0);
+    for (int64_t i = idx; i < n; i += grid_size) {
+        thread_sum = thread_sum + Acc(input[i]);
+    }
+
+    shared[tid] = thread_sum;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            shared[tid] = shared[tid] + shared[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        output[0] = T(shared[0]);
+    }
+}
+
+auto trace_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+    if (input.ndim() != 2) {
+        throw std::runtime_error("trace: input must be 2D");
+    }
+
+    Tensor cont = input.is_contiguous() ? input : contiguous_kernel(input, stream);
+    auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    int64_t rows = shape[0];
+    int64_t cols = shape[1];
+    int64_t diag_size = std::min(rows, cols);
+
+    // Output is a scalar tensor
+    Tensor output({}, input.dtype(), input.device());
+
+    if (diag_size == 0) {
+        // Zero-fill output for empty matrix
+        cudaMemsetAsync(output.data_ptr(), 0, output.numel() * dtype_size(input.dtype()), stream);
+        return output;
+    }
+
+    const int block_size = 256;
+    int num_blocks = std::min<int>((diag_size + block_size - 1) / block_size, 1024);
+
+    // Helper macro to reduce boilerplate for trace dispatch
+    #define TRACE_DISPATCH(T, in_ptr, out_ptr, accum_size) \
+        do { \
+            size_t smem = block_size * (accum_size); \
+            if (num_blocks == 1) { \
+                trace_diag_sum_kernel<T><<<1, block_size, smem, stream>>>( \
+                    in_ptr, out_ptr, diag_size, cols); \
+            } else { \
+                backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(T)); \
+                auto* d_temp = static_cast<T*>(d_temp_guard.get()); \
+                trace_diag_sum_kernel<T><<<num_blocks, block_size, smem, stream>>>( \
+                    in_ptr, d_temp, diag_size, cols); \
+                CUDA_CHECK(cudaGetLastError()); \
+                trace_final_sum_kernel<T><<<1, block_size, smem, stream>>>( \
+                    d_temp, out_ptr, num_blocks); \
+            } \
+        } while(0)
+
+    switch (input.dtype()) {
+        case DType::Float32:
+            TRACE_DISPATCH(float, cont.data<float>(), output.data<float>(), sizeof(float));
+            break;
+        case DType::Float64:
+            TRACE_DISPATCH(double, cont.data<double>(), output.data<double>(), sizeof(double));
+            break;
+        case DType::Float16:
+            TRACE_DISPATCH(__half,
+                reinterpret_cast<const __half*>(cont.data_ptr()),
+                reinterpret_cast<__half*>(output.data_ptr()),
+                sizeof(float));  // AccumType is float
+            break;
+        case DType::BFloat16:
+            TRACE_DISPATCH(__nv_bfloat16,
+                reinterpret_cast<const __nv_bfloat16*>(cont.data_ptr()),
+                reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+                sizeof(float));  // AccumType is float
+            break;
+        case DType::Int32:
+            TRACE_DISPATCH(int32_t, cont.data<int32_t>(), output.data<int32_t>(), sizeof(int32_t));
+            break;
+        case DType::Int64:
+            TRACE_DISPATCH(int64_t, cont.data<int64_t>(), output.data<int64_t>(), sizeof(int64_t));
+            break;
+        default:
+            throw std::runtime_error("trace_kernel: unsupported dtype");
+    }
+
+    #undef TRACE_DISPATCH
+
+    CUDA_CHECK(cudaGetLastError());
+    return output;
+}
+
+// ============================================================================
+// Flip kernel — reverse elements along a dimension
+// ============================================================================
+
+template<typename T>
+__global__ void flip_kernel_impl(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    int64_t total_elements,
+    int64_t dim_size,
+    int64_t inner_size  // product of sizes of dims after the flip dim
+) {
+    TENZOR_CUDA_KERNEL_LOOP(i, total_elements) {
+        int64_t inner_idx = i % inner_size;
+        int64_t dim_idx = (i / inner_size) % dim_size;
+        int64_t outer_idx = i / (inner_size * dim_size);
+
+        // Reverse the dim index
+        int64_t reversed_dim_idx = dim_size - 1 - dim_idx;
+        int64_t src_idx = (outer_idx * dim_size + reversed_dim_idx) * inner_size + inner_idx;
+
+        output[i] = input[src_idx];
+    }
+}
+
+auto flip_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tensor {
+    auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    int64_t ndim = static_cast<int64_t>(shape.size());
+
+    // Normalize dimension
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("flip: dimension " + std::to_string(dim) +
+            " out of range for tensor with " + std::to_string(ndim) + " dimensions");
+    }
+
+    Tensor cont = input.is_contiguous() ? input : contiguous_kernel(input, stream);
+    Tensor output(shape, input.dtype(), input.device());
+
+    int64_t total = input.numel();
+    if (total == 0) return output;
+
+    int64_t dim_size = shape[dim];
+    int64_t inner_size = 1;
+    for (int64_t d = dim + 1; d < ndim; ++d) {
+        inner_size *= shape[d];
+    }
+
+    switch (input.dtype()) {
+        case DType::Float32: {
+            auto [grid, block] = optimal_launch_config(flip_kernel_impl<float>, total);
+            flip_kernel_impl<<<grid, block, 0, stream>>>(
+                cont.data<float>(), output.data<float>(), total, dim_size, inner_size);
+            break;
+        }
+        case DType::Float64: {
+            auto [grid, block] = optimal_launch_config(flip_kernel_impl<double>, total);
+            flip_kernel_impl<<<grid, block, 0, stream>>>(
+                cont.data<double>(), output.data<double>(), total, dim_size, inner_size);
+            break;
+        }
+        case DType::Float16: {
+            auto [grid, block] = optimal_launch_config(flip_kernel_impl<Float16>, total);
+            flip_kernel_impl<<<grid, block, 0, stream>>>(
+                cont.data<Float16>(), output.data<Float16>(), total, dim_size, inner_size);
+            break;
+        }
+        case DType::BFloat16: {
+            auto [grid, block] = optimal_launch_config(flip_kernel_impl<BFloat16>, total);
+            flip_kernel_impl<<<grid, block, 0, stream>>>(
+                cont.data<BFloat16>(), output.data<BFloat16>(), total, dim_size, inner_size);
+            break;
+        }
+        case DType::Int32: {
+            auto [grid, block] = optimal_launch_config(flip_kernel_impl<int32_t>, total);
+            flip_kernel_impl<<<grid, block, 0, stream>>>(
+                cont.data<int32_t>(), output.data<int32_t>(), total, dim_size, inner_size);
+            break;
+        }
+        case DType::Int64: {
+            auto [grid, block] = optimal_launch_config(flip_kernel_impl<int64_t>, total);
+            flip_kernel_impl<<<grid, block, 0, stream>>>(
+                cont.data<int64_t>(), output.data<int64_t>(), total, dim_size, inner_size);
+            break;
+        }
+        default:
+            throw std::runtime_error("flip_kernel: unsupported dtype");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return output;
 }
 
 // ============================================================================

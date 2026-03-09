@@ -1,0 +1,54 @@
+#version 450
+
+// ScatterAdd operation: atomically accumulates source values into output along a dimension.
+// Equivalent to: output[...][index[i]][...] += src[i]
+// Uses CAS-loop atomics for thread-safe float addition (no GL_EXT_shader_atomic_float required).
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Src { float src_data[]; };         // Source values to add
+layout(binding = 1) buffer Index { int idx_data[]; };          // Index tensor (same shape as src)
+layout(binding = 2) buffer Output { uint out_data[]; };        // Self/output (uint for CAS atomics)
+
+layout(push_constant) uniform PushConstants {
+    uint n;             // Number of source elements
+    uint dim_size;      // Size of scatter dimension in output
+    uint inner_size;    // Product of dims after scatter dim
+    uint src_dim_size;  // Size of scatter dimension in source
+} params;
+
+// Atomic add for float using compare-and-swap loop (bounded to prevent hangs)
+void atomicAddFloat(uint idx, float val) {
+    uint old_bits = out_data[idx];
+    uint new_bits;
+    for (int attempt = 0; attempt < 1024; ++attempt) {
+        float old_val = uintBitsToFloat(old_bits);
+        new_bits = floatBitsToUint(old_val + val);
+        uint result = atomicCompSwap(out_data[idx], old_bits, new_bits);
+        if (result == old_bits) return;
+        old_bits = result;
+    }
+    // Last-resort direct write
+    out_data[idx] = new_bits;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= params.n) return;
+
+    // Decompose source index: outer * src_dim_size * inner + dim_idx * inner + inner_idx
+    uint inner_idx = i % params.inner_size;
+    uint outer_idx = i / (params.inner_size * params.src_dim_size);
+
+    // Get destination dim index from index tensor
+    int dest_dim_idx = idx_data[i];
+
+    // Bounds check
+    if (dest_dim_idx < 0 || dest_dim_idx >= int(params.dim_size)) return;
+
+    // Compute output linear index
+    uint out_idx = outer_idx * (params.dim_size * params.inner_size) +
+                   uint(dest_dim_idx) * params.inner_size +
+                   inner_idx;
+
+    atomicAddFloat(out_idx, src_data[i]);
+}

@@ -1,0 +1,40 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Conv3d Backward Bias - Float64 version
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { double grad_output[]; };
+layout(binding = 1) buffer GradBias { double grad_bias[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint batch;
+    uint channels_out;
+    uint depth_out;
+    uint height_out;
+    uint width_out;
+} params;
+
+void main() {
+    uint c = gl_GlobalInvocationID.x;
+
+    if (c >= params.channels_out) {
+        return;
+    }
+
+    double sum = 0.0LF;
+
+    for (uint b = 0; b < params.batch; b++) {
+        for (uint d = 0; d < params.depth_out; d++) {
+            for (uint h = 0; h < params.height_out; h++) {
+                for (uint w = 0; w < params.width_out; w++) {
+                    uint idx = (((b * params.channels_out + c) * params.depth_out + d) *
+                                params.height_out + h) * params.width_out + w;
+                    sum += grad_output[idx];
+                }
+            }
+        }
+    }
+
+    grad_bias[c] = sum;
+}

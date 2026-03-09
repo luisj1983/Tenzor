@@ -1,0 +1,47 @@
+#version 450
+
+// Fused SGD optimizer step (Float32)
+// Per-element: applies weight decay, momentum, dampening, nesterov, then updates param.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Grad { float grad_data[]; };
+layout(binding = 1) buffer Param { float param_data[]; };
+layout(binding = 2) buffer MomentumBuf { float momentum_buf[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint numel;
+    float lr;
+    float momentum;
+    float weight_decay;
+    float dampening;
+    uint nesterov;        // 0=off, 1=on
+    uint has_momentum;    // 0=no momentum buffer, 1=has momentum
+    uint padding;
+} params;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= params.numel) return;
+
+    float g = grad_data[gid];
+
+    // Weight decay (L2 regularization)
+    if (params.weight_decay > 0.0) {
+        g += params.weight_decay * param_data[gid];
+    }
+
+    if (params.has_momentum != 0 && params.momentum > 0.0) {
+        // buf = momentum * buf + (1 - dampening) * g
+        float buf = params.momentum * momentum_buf[gid] + (1.0 - params.dampening) * g;
+        momentum_buf[gid] = buf;
+
+        if (params.nesterov != 0) {
+            // Nesterov: effective update = g + momentum * buf
+            g = g + params.momentum * buf;
+        } else {
+            g = buf;
+        }
+    }
+
+    param_data[gid] -= params.lr * g;
+}

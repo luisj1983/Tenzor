@@ -1,0 +1,28 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Flip (reverse) elements along a dimension for Float64
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer InputA { float64_t a[]; };
+layout(binding = 1) buffer Output { float64_t result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // total elements
+    uint dim_size;   // size of the dimension being flipped
+    uint inner_size; // product of dims after the flip dim
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= n) return;
+
+    uint inner_idx = idx % inner_size;
+    uint dim_pos = (idx / inner_size) % dim_size;
+    uint outer_idx = idx / (dim_size * inner_size);
+
+    uint flipped_dim_pos = dim_size - 1 - dim_pos;
+    uint src_idx = outer_idx * (dim_size * inner_size) + flipped_dim_pos * inner_size + inner_idx;
+
+    result[idx] = a[src_idx];
+}

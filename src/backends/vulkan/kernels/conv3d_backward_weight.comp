@@ -1,0 +1,102 @@
+#version 450
+
+// Conv3d Backward Weight - Gradient w.r.t. weights
+// Supports grouped convolutions
+//
+// Algorithm: For each weight element, correlate corresponding input values
+// with grad_output values across all batch samples and spatial positions.
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { float grad_output[]; };  // (N, C_out, D_out, H_out, W_out)
+layout(binding = 1) buffer Input { float input_data[]; };        // (N, C_in, D_in, H_in, W_in)
+layout(binding = 2) buffer GradWeight { float grad_weight[]; };  // (C_out, C_in/groups, kD, kH, kW)
+
+layout(push_constant) uniform PushConstants {
+    uint batch;
+    uint channels_in;
+    uint channels_out;
+    uint depth_in;
+    uint height_in;
+    uint width_in;
+    uint depth_out;
+    uint height_out;
+    uint width_out;
+    uint kernel_d;
+    uint kernel_h;
+    uint kernel_w;
+    uint stride_d;
+    uint stride_h;
+    uint stride_w;
+    uint padding_d;
+    uint padding_h;
+    uint padding_w;
+    uint dilation_d;
+    uint dilation_h;
+    uint dilation_w;
+    uint groups;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    uint in_channels_per_group = params.channels_in / params.groups;
+    uint out_channels_per_group = params.channels_out / params.groups;
+
+    // Weight shape: (C_out, C_in/groups, kD, kH, kW)
+    uint total_weight_elements = params.channels_out * in_channels_per_group *
+                                 params.kernel_d * params.kernel_h * params.kernel_w;
+
+    if (idx >= total_weight_elements) {
+        return;
+    }
+
+    // Decode flat index to (c_out, c_in_local, kd, kh, kw)
+    uint temp = idx;
+    uint kw = temp % params.kernel_w;
+    temp /= params.kernel_w;
+    uint kh = temp % params.kernel_h;
+    temp /= params.kernel_h;
+    uint kd = temp % params.kernel_d;
+    temp /= params.kernel_d;
+    uint c_in_local = temp % in_channels_per_group;
+    uint c_out = temp / in_channels_per_group;
+
+    // Determine the group and actual input channel
+    uint group = c_out / out_channels_per_group;
+    uint c_in = group * in_channels_per_group + c_in_local;
+
+    float sum = 0.0;
+
+    // Iterate through batch and output spatial positions
+    for (uint b = 0; b < params.batch; b++) {
+        for (uint od = 0; od < params.depth_out; od++) {
+            for (uint oh = 0; oh < params.height_out; oh++) {
+                for (uint ow = 0; ow < params.width_out; ow++) {
+                    // Calculate corresponding input position
+                    int id = int(od * params.stride_d) - int(params.padding_d) + int(kd * params.dilation_d);
+                    int ih = int(oh * params.stride_h) - int(params.padding_h) + int(kh * params.dilation_h);
+                    int iw = int(ow * params.stride_w) - int(params.padding_w) + int(kw * params.dilation_w);
+
+                    // Check bounds
+                    if (id >= 0 && id < int(params.depth_in) &&
+                        ih >= 0 && ih < int(params.height_in) &&
+                        iw >= 0 && iw < int(params.width_in)) {
+
+                        // grad_output index: [b][c_out][od][oh][ow]
+                        uint grad_out_idx = (((b * params.channels_out + c_out) * params.depth_out + od) *
+                                             params.height_out + oh) * params.width_out + ow;
+
+                        // input index: [b][c_in][id][ih][iw]
+                        uint input_idx = (((b * params.channels_in + c_in) * params.depth_in + uint(id)) *
+                                          params.height_in + uint(ih)) * params.width_in + uint(iw);
+
+                        sum += grad_output[grad_out_idx] * input_data[input_idx];
+                    }
+                }
+            }
+        }
+    }
+
+    grad_weight[idx] = sum;
+}

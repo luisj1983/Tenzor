@@ -1,0 +1,54 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : enable
+
+// Max Pooling 1D Forward Pass - Float64 variant
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { double input_data[]; };    // (N, C, L)
+layout(binding = 1) buffer Output { double output_data[]; };  // (N, C, L_out)
+layout(binding = 2) buffer Indices { int indices_data[]; };    // (N, C, L_out)
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint batch;
+    uint channels;
+    uint in_length;
+    uint out_length;
+    uint kernel_size;
+    uint stride;
+    uint padding;
+    uint dilation;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    uint temp = idx;
+    uint l_out = temp % params.out_length;
+    temp /= params.out_length;
+    uint c = temp % params.channels;
+    uint n = temp / params.channels;
+
+    int l_start = int(l_out * params.stride) - int(params.padding);
+
+    double max_val = -1.0lf / 0.0lf;
+    int max_idx = 0;
+
+    for (uint k = 0; k < params.kernel_size; k++) {
+        int l_in = l_start + int(k * params.dilation);
+        if (l_in >= 0 && l_in < int(params.in_length)) {
+            uint input_idx = n * params.channels * params.in_length +
+                            c * params.in_length + uint(l_in);
+            double val = input_data[input_idx];
+            if (val > max_val) {
+                max_val = val;
+                max_idx = int(input_idx);
+            }
+        }
+    }
+
+    output_data[idx] = max_val;
+    indices_data[idx] = max_idx;
+}

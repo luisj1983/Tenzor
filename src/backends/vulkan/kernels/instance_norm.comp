@@ -1,0 +1,90 @@
+#version 450
+
+// Instance Normalization: normalizes over spatial dims (H*W) per channel per batch.
+// Input: (N, C, H, W) — one workgroup per (n, c) pair.
+// Computes: y = (x - mean) / sqrt(var + eps) * weight[c] + bias[c]
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Output { float output_data[]; };
+layout(binding = 2) buffer Weight { float weight_data[]; };  // (C) — affine scale
+layout(binding = 3) buffer Bias { float bias_data[]; };      // (C) — affine bias
+layout(binding = 4) buffer Mean { float mean_data[]; };      // (N*C) — output running mean
+layout(binding = 5) buffer Var { float var_data[]; };        // (N*C) — output running var
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;    // N
+    uint channels;      // C
+    uint spatial_size;  // H * W
+    float epsilon;
+    uint affine;        // 0=no affine, 1=with affine
+} params;
+
+shared float shared_sum[WORKGROUP_SIZE];
+shared float shared_sum_sq[WORKGROUP_SIZE];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint nc_idx = gl_WorkGroupID.x;  // linear index into (N, C)
+
+    uint total_nc = params.batch_size * params.channels;
+    if (nc_idx >= total_nc) return;
+
+    uint n = nc_idx / params.channels;
+    uint c = nc_idx % params.channels;
+
+    // Base offset in the flattened (N, C, H*W) tensor
+    uint base = nc_idx * params.spatial_size;
+
+    // Step 1: Compute mean over spatial dims
+    float local_sum = 0.0;
+    for (uint i = tid; i < params.spatial_size; i += WORKGROUP_SIZE) {
+        local_sum += input_data[base + i];
+    }
+    shared_sum[tid] = local_sum;
+    barrier();
+
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) shared_sum[tid] += shared_sum[tid + s];
+        barrier();
+    }
+
+    float mean = shared_sum[0] / float(params.spatial_size);
+    barrier();
+
+    // Step 2: Compute variance over spatial dims
+    float local_sum_sq = 0.0;
+    for (uint i = tid; i < params.spatial_size; i += WORKGROUP_SIZE) {
+        float diff = input_data[base + i] - mean;
+        local_sum_sq += diff * diff;
+    }
+    shared_sum_sq[tid] = local_sum_sq;
+    barrier();
+
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) shared_sum_sq[tid] += shared_sum_sq[tid + s];
+        barrier();
+    }
+
+    float variance = shared_sum_sq[0] / float(params.spatial_size);
+    float inv_std = 1.0 / sqrt(variance + params.epsilon);
+
+    // Store mean/var for backward pass
+    if (tid == 0) {
+        mean_data[nc_idx] = mean;
+        var_data[nc_idx] = inv_std;  // Store reciprocal std (rstd) like LayerNorm
+    }
+    barrier();
+
+    // Step 3: Normalize and apply affine
+    for (uint i = tid; i < params.spatial_size; i += WORKGROUP_SIZE) {
+        float normalized = (input_data[base + i] - mean) * inv_std;
+
+        if (params.affine > 0) {
+            normalized = normalized * weight_data[c] + bias_data[c];
+        }
+
+        output_data[base + i] = normalized;
+    }
+}

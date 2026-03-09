@@ -1301,5 +1301,486 @@ auto to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* str
     return output;
 }
 
+// ==============================================================================
+// Triu Kernel - upper triangular matrix
+// ==============================================================================
+
+template<typename T>
+__global__ void triu_kernel_impl(
+    const T* input,
+    T* output,
+    int64_t batch_size,
+    int64_t rows,
+    int64_t cols,
+    int64_t diagonal
+) {
+    int64_t total = batch_size * rows * cols;
+
+    HIP_GRID_STRIDE_LOOP(idx, total) {
+        int64_t col = idx % cols;
+        int64_t row = (idx / cols) % rows;
+
+        // Upper triangular: keep elements where col >= row + diagonal
+        if (col >= row + diagonal) {
+            output[idx] = input[idx];
+        } else {
+            output[idx] = T(0);
+        }
+    }
+}
+
+auto triu_kernel(const Tensor& input, int64_t diagonal, hipStream_t stream) -> Tensor {
+    auto input_shape = input.shape();
+    int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    if (ndim < 2) {
+        throw std::runtime_error("triu: input must be at least 2D");
+    }
+
+    Tensor result(std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                  input.dtype(), input.device());
+
+    int64_t rows = input_shape[ndim - 2];
+    int64_t cols = input_shape[ndim - 1];
+
+    // Compute batch size (product of all dims except last 2)
+    int64_t batch_size = 1;
+    for (int64_t i = 0; i < ndim - 2; ++i) {
+        batch_size *= input_shape[i];
+    }
+
+    int64_t total_elements = input.numel();
+    int num_blocks = get_num_blocks(total_elements);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(triu_kernel_impl<float>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<float>(), result.data<float>(),
+            batch_size, rows, cols, diagonal);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(triu_kernel_impl<double>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<double>(), result.data<double>(),
+            batch_size, rows, cols, diagonal);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(triu_kernel_impl<__half>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()),
+            batch_size, rows, cols, diagonal);
+    } else if (input.dtype() == DType::Int32) {
+        hipLaunchKernelGGL(triu_kernel_impl<int32_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<int32_t>(), result.data<int32_t>(),
+            batch_size, rows, cols, diagonal);
+    } else if (input.dtype() == DType::Int64) {
+        hipLaunchKernelGGL(triu_kernel_impl<int64_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<int64_t>(), result.data<int64_t>(),
+            batch_size, rows, cols, diagonal);
+    } else {
+        throw std::runtime_error("triu: unsupported dtype");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ==============================================================================
+// Tril Kernel - lower triangular matrix
+// ==============================================================================
+
+template<typename T>
+__global__ void tril_kernel_impl(
+    const T* input,
+    T* output,
+    int64_t batch_size,
+    int64_t rows,
+    int64_t cols,
+    int64_t diagonal
+) {
+    int64_t total = batch_size * rows * cols;
+
+    HIP_GRID_STRIDE_LOOP(idx, total) {
+        int64_t col = idx % cols;
+        int64_t row = (idx / cols) % rows;
+
+        // Lower triangular: keep elements where col <= row + diagonal
+        if (col <= row + diagonal) {
+            output[idx] = input[idx];
+        } else {
+            output[idx] = T(0);
+        }
+    }
+}
+
+auto tril_kernel(const Tensor& input, int64_t diagonal, hipStream_t stream) -> Tensor {
+    auto input_shape = input.shape();
+    int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    if (ndim < 2) {
+        throw std::runtime_error("tril: input must be at least 2D");
+    }
+
+    Tensor result(std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                  input.dtype(), input.device());
+
+    int64_t rows = input_shape[ndim - 2];
+    int64_t cols = input_shape[ndim - 1];
+
+    int64_t batch_size = 1;
+    for (int64_t i = 0; i < ndim - 2; ++i) {
+        batch_size *= input_shape[i];
+    }
+
+    int64_t total_elements = input.numel();
+    int num_blocks = get_num_blocks(total_elements);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(tril_kernel_impl<float>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<float>(), result.data<float>(),
+            batch_size, rows, cols, diagonal);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(tril_kernel_impl<double>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<double>(), result.data<double>(),
+            batch_size, rows, cols, diagonal);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(tril_kernel_impl<__half>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()),
+            batch_size, rows, cols, diagonal);
+    } else if (input.dtype() == DType::Int32) {
+        hipLaunchKernelGGL(tril_kernel_impl<int32_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<int32_t>(), result.data<int32_t>(),
+            batch_size, rows, cols, diagonal);
+    } else if (input.dtype() == DType::Int64) {
+        hipLaunchKernelGGL(tril_kernel_impl<int64_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<int64_t>(), result.data<int64_t>(),
+            batch_size, rows, cols, diagonal);
+    } else {
+        throw std::runtime_error("tril: unsupported dtype");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ==============================================================================
+// Diag Kernel - extract diagonal (2D->1D) or construct diagonal matrix (1D->2D)
+// ==============================================================================
+
+template<typename T>
+__global__ void diag_extract_kernel_impl(
+    const T* input,
+    T* output,
+    int64_t diag_size,
+    int64_t rows,
+    int64_t cols,
+    int64_t diagonal
+) {
+    HIP_GRID_STRIDE_LOOP(idx, diag_size) {
+        int64_t row, col;
+        if (diagonal >= 0) {
+            row = idx;
+            col = idx + diagonal;
+        } else {
+            row = idx - diagonal;
+            col = idx;
+        }
+        output[idx] = input[row * cols + col];
+    }
+}
+
+template<typename T>
+__global__ void diag_construct_simple_kernel(
+    const T* input,
+    T* output,
+    int64_t n,
+    int64_t diag_size,
+    int64_t diagonal
+) {
+    int64_t total = n * n;
+
+    HIP_GRID_STRIDE_LOOP(idx, total) {
+        int64_t row = idx / n;
+        int64_t col = idx % n;
+
+        bool on_diag = false;
+        int64_t d_idx = -1;
+        if (diagonal >= 0) {
+            if (col - row == diagonal) {
+                on_diag = true;
+                d_idx = row;
+            }
+        } else {
+            if (row - col == -diagonal) {
+                on_diag = true;
+                d_idx = col;
+            }
+        }
+
+        if (on_diag && d_idx >= 0 && d_idx < diag_size) {
+            output[idx] = input[d_idx];
+        } else {
+            output[idx] = T(0);
+        }
+    }
+}
+
+auto diag_kernel(const Tensor& input, int64_t diagonal, hipStream_t stream) -> Tensor {
+    auto input_shape = input.shape();
+    int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    if (ndim == 2) {
+        // Extract diagonal from 2D matrix -> 1D vector
+        int64_t rows = input_shape[0];
+        int64_t cols = input_shape[1];
+
+        int64_t diag_size;
+        if (diagonal >= 0) {
+            diag_size = std::min(rows, cols - diagonal);
+        } else {
+            diag_size = std::min(rows + diagonal, cols);
+        }
+
+        if (diag_size <= 0) {
+            return Tensor({0}, input.dtype(), input.device());
+        }
+
+        Tensor result({diag_size}, input.dtype(), input.device());
+        int num_blocks = get_num_blocks(diag_size);
+
+        if (input.dtype() == DType::Float32) {
+            hipLaunchKernelGGL(diag_extract_kernel_impl<float>,
+                dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                input.data<float>(), result.data<float>(),
+                diag_size, rows, cols, diagonal);
+        } else if (input.dtype() == DType::Float64) {
+            hipLaunchKernelGGL(diag_extract_kernel_impl<double>,
+                dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                input.data<double>(), result.data<double>(),
+                diag_size, rows, cols, diagonal);
+        } else if (input.dtype() == DType::Float16) {
+            hipLaunchKernelGGL(diag_extract_kernel_impl<__half>,
+                dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                reinterpret_cast<const __half*>(input.data<Float16>()),
+                reinterpret_cast<__half*>(result.data<Float16>()),
+                diag_size, rows, cols, diagonal);
+        } else if (input.dtype() == DType::Int32) {
+            hipLaunchKernelGGL(diag_extract_kernel_impl<int32_t>,
+                dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                input.data<int32_t>(), result.data<int32_t>(),
+                diag_size, rows, cols, diagonal);
+        } else if (input.dtype() == DType::Int64) {
+            hipLaunchKernelGGL(diag_extract_kernel_impl<int64_t>,
+                dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                input.data<int64_t>(), result.data<int64_t>(),
+                diag_size, rows, cols, diagonal);
+        } else {
+            throw std::runtime_error("diag: unsupported dtype");
+        }
+
+        HIP_CHECK(hipGetLastError());
+        return result;
+
+    } else if (ndim == 1) {
+        // Construct diagonal matrix from 1D vector -> 2D matrix
+        int64_t diag_size = input_shape[0];
+        int64_t n = diag_size + std::abs(diagonal);
+
+        Tensor result({n, n}, input.dtype(), input.device());
+        int64_t total = n * n;
+        int num_blocks = get_num_blocks(total);
+
+        if (input.dtype() == DType::Float32) {
+            hipLaunchKernelGGL(diag_construct_simple_kernel<float>,
+                dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                input.data<float>(), result.data<float>(),
+                n, diag_size, diagonal);
+        } else if (input.dtype() == DType::Float64) {
+            hipLaunchKernelGGL(diag_construct_simple_kernel<double>,
+                dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                input.data<double>(), result.data<double>(),
+                n, diag_size, diagonal);
+        } else if (input.dtype() == DType::Float16) {
+            hipLaunchKernelGGL(diag_construct_simple_kernel<__half>,
+                dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                reinterpret_cast<const __half*>(input.data<Float16>()),
+                reinterpret_cast<__half*>(result.data<Float16>()),
+                n, diag_size, diagonal);
+        } else if (input.dtype() == DType::Int32) {
+            hipLaunchKernelGGL(diag_construct_simple_kernel<int32_t>,
+                dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                input.data<int32_t>(), result.data<int32_t>(),
+                n, diag_size, diagonal);
+        } else if (input.dtype() == DType::Int64) {
+            hipLaunchKernelGGL(diag_construct_simple_kernel<int64_t>,
+                dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                input.data<int64_t>(), result.data<int64_t>(),
+                n, diag_size, diagonal);
+        } else {
+            throw std::runtime_error("diag: unsupported dtype");
+        }
+
+        HIP_CHECK(hipGetLastError());
+        return result;
+
+    } else {
+        throw std::runtime_error("diag: input must be 1D or 2D");
+    }
+}
+
+// ==============================================================================
+// Trace Kernel - sum of diagonal elements
+// ==============================================================================
+
+template<typename T>
+__global__ void trace_kernel_impl(
+    const T* input,
+    T* output,
+    int64_t diag_size,
+    int64_t cols
+) {
+    __shared__ T shared[256];
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    // Grid-stride loop to sum diagonal elements
+    T thread_sum = T(0);
+    for (int64_t i = idx; i < diag_size; i += grid_size) {
+        thread_sum += input[i * cols + i];
+    }
+
+    shared[tid] = thread_sum;
+    __syncthreads();
+
+    // Block-level reduction
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            shared[tid] += shared[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        atomicAdd(output, shared[0]);
+    }
+}
+
+// Specialization for double atomicAdd (not natively available on all HIP devices)
+__global__ void trace_kernel_impl_f64(
+    const double* input,
+    double* output,
+    int64_t diag_size,
+    int64_t cols
+) {
+    __shared__ double shared[256];
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    double thread_sum = 0.0;
+    for (int64_t i = idx; i < diag_size; i += grid_size) {
+        thread_sum += input[i * cols + i];
+    }
+
+    shared[tid] = thread_sum;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            shared[tid] += shared[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        // CAS-based atomicAdd for double
+        unsigned long long int* address_as_ull = reinterpret_cast<unsigned long long int*>(output);
+        unsigned long long int old_val = *address_as_ull;
+        unsigned long long int assumed;
+        do {
+            assumed = old_val;
+            old_val = atomicCAS(address_as_ull, assumed,
+                __double_as_longlong(__longlong_as_double(assumed) + shared[0]));
+        } while (assumed != old_val);
+    }
+}
+
+auto trace_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    auto input_shape = input.shape();
+    int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    if (ndim != 2) {
+        throw std::runtime_error("trace: input must be 2D");
+    }
+
+    int64_t rows = input_shape[0];
+    int64_t cols = input_shape[1];
+    int64_t diag_size = std::min(rows, cols);
+
+    // Output is a scalar
+    Tensor result({}, input.dtype(), input.device());
+
+    if (diag_size == 0) {
+        // Zero-initialize for empty diagonal
+        HIP_CHECK(hipMemsetAsync(result.data_ptr(), 0, result.numel() * dtype_size(input.dtype()), stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
+        return result;
+    }
+
+    // Zero-initialize the output for atomicAdd
+    HIP_CHECK(hipMemsetAsync(result.data_ptr(), 0, dtype_size(input.dtype()), stream));
+
+    int num_blocks = std::min<int>(get_num_blocks(diag_size), 256);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(trace_kernel_impl<float>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<float>(), result.data<float>(),
+            diag_size, cols);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(trace_kernel_impl_f64,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<double>(), result.data<double>(),
+            diag_size, cols);
+    } else if (input.dtype() == DType::Int32) {
+        hipLaunchKernelGGL(trace_kernel_impl<int32_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<int32_t>(), result.data<int32_t>(),
+            diag_size, cols);
+    } else if (input.dtype() == DType::Int64) {
+        // Use single-block reduction for int64 to avoid atomicAdd issues
+        // For simplicity, sum on host for int64
+        if (diag_size <= 65536) {
+            // Read diagonal elements to host, sum there
+            std::vector<int64_t> h_input(rows * cols);
+            HIP_CHECK(hipMemcpy(h_input.data(), input.data<int64_t>(),
+                rows * cols * sizeof(int64_t), hipMemcpyDeviceToHost));
+            int64_t sum = 0;
+            for (int64_t i = 0; i < diag_size; ++i) {
+                sum += h_input[i * cols + i];
+            }
+            HIP_CHECK(hipMemcpy(result.data<int64_t>(), &sum, sizeof(int64_t), hipMemcpyHostToDevice));
+        } else {
+            throw std::runtime_error("trace: Int64 not supported for very large matrices");
+        }
+    } else {
+        throw std::runtime_error("trace: unsupported dtype (supports Float32, Float64, Int32, Int64)");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    HIP_CHECK(hipStreamSynchronize(stream));
+    return result;
+}
+
 } // namespace rocm
 } // namespace tenzor

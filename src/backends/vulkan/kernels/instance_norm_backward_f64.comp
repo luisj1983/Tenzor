@@ -1,0 +1,126 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_atomic_int64 : require
+
+// Instance Normalization Backward for Float64
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer GradOutput { float64_t grad_output[]; };
+layout(binding = 1) buffer Input { float64_t input_data[]; };
+layout(binding = 2) buffer Mean { float64_t mean_data[]; };
+layout(binding = 3) buffer Rstd { float64_t rstd_data[]; };
+layout(binding = 4) buffer Weight { float64_t weight_data[]; };
+layout(binding = 5) buffer GradInput { float64_t grad_input[]; };
+layout(binding = 6) buffer GradWeight { uint64_t grad_weight[]; };   // uint64 for CAS atomics
+layout(binding = 7) buffer GradBias { uint64_t grad_bias[]; };       // uint64 for CAS atomics
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint channels;
+    uint spatial_size;
+    uint affine;
+} params;
+
+shared float64_t shared_sum_dy_w[WORKGROUP_SIZE];
+shared float64_t shared_sum_dy_w_xhat[WORKGROUP_SIZE];
+
+float64_t bitsToF64(uint64_t bits) {
+    return float64_t(packDouble2x32(uvec2(uint(bits), uint(bits >> 32u))));
+}
+
+uint64_t f64ToBits(float64_t val) {
+    uvec2 v = unpackDouble2x32(double(val));
+    return uint64_t(v.x) | (uint64_t(v.y) << 32u);
+}
+
+void atomicAddF64Weight(uint idx, float64_t val) {
+    uint64_t old_bits = grad_weight[idx];
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        float64_t old_val = bitsToF64(old_bits);
+        uint64_t new_bits = f64ToBits(old_val + val);
+        uint64_t result = atomicCompSwap(grad_weight[idx], old_bits, new_bits);
+        if (result == old_bits) return;
+        old_bits = result;
+    }
+}
+
+void atomicAddF64Bias(uint idx, float64_t val) {
+    uint64_t old_bits = grad_bias[idx];
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        float64_t old_val = bitsToF64(old_bits);
+        uint64_t new_bits = f64ToBits(old_val + val);
+        uint64_t result = atomicCompSwap(grad_bias[idx], old_bits, new_bits);
+        if (result == old_bits) return;
+        old_bits = result;
+    }
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint nc_idx = gl_WorkGroupID.x;
+
+    uint total_nc = params.batch_size * params.channels;
+    if (nc_idx >= total_nc) return;
+
+    uint c = nc_idx % params.channels;
+    uint base = nc_idx * params.spatial_size;
+
+    float64_t mean = mean_data[nc_idx];
+    float64_t rstd = rstd_data[nc_idx];
+
+    bool zero_variance = (rstd > float64_t(100.0));
+
+    if (zero_variance) {
+        for (uint i = tid; i < params.spatial_size; i += WORKGROUP_SIZE) {
+            grad_input[base + i] = float64_t(0.0);
+            if (params.affine > 0) {
+                float64_t dy = grad_output[base + i];
+                atomicAddF64Bias(c, dy);
+            }
+        }
+        return;
+    }
+
+    float64_t local_sum_dy_w = float64_t(0.0);
+    float64_t local_sum_dy_w_xhat = float64_t(0.0);
+    for (uint i = tid; i < params.spatial_size; i += WORKGROUP_SIZE) {
+        float64_t dy = grad_output[base + i];
+        float64_t w = (params.affine > 0) ? weight_data[c] : float64_t(1.0);
+        float64_t xhat = (input_data[base + i] - mean) * rstd;
+
+        local_sum_dy_w += dy * w;
+        local_sum_dy_w_xhat += dy * w * xhat;
+    }
+    shared_sum_dy_w[tid] = local_sum_dy_w;
+    shared_sum_dy_w_xhat[tid] = local_sum_dy_w_xhat;
+    barrier();
+
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_sum_dy_w[tid] += shared_sum_dy_w[tid + s];
+            shared_sum_dy_w_xhat[tid] += shared_sum_dy_w_xhat[tid + s];
+        }
+        barrier();
+    }
+
+    float64_t sum_dy_w = shared_sum_dy_w[0];
+    float64_t sum_dy_w_xhat = shared_sum_dy_w_xhat[0];
+    float64_t inv_n = float64_t(1.0) / float64_t(params.spatial_size);
+    barrier();
+
+    for (uint i = tid; i < params.spatial_size; i += WORKGROUP_SIZE) {
+        float64_t dy = grad_output[base + i];
+        float64_t w = (params.affine > 0) ? weight_data[c] : float64_t(1.0);
+        float64_t xhat = (input_data[base + i] - mean) * rstd;
+
+        float64_t grad_in = rstd * (dy * w - sum_dy_w * inv_n - xhat * sum_dy_w_xhat * inv_n);
+        grad_input[base + i] = grad_in;
+
+        if (params.affine > 0) {
+            atomicAddF64Weight(c, dy * xhat);
+            atomicAddF64Bias(c, dy);
+        }
+    }
+}

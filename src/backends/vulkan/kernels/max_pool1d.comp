@@ -1,0 +1,69 @@
+#version 450
+
+// Max Pooling 1D Forward Pass
+// Finds maximum value in pooling window
+// Supports dilation parameter
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };    // (N, C, L)
+layout(binding = 1) buffer Output { float output_data[]; };  // (N, C, L_out)
+layout(binding = 2) buffer Indices { int indices_data[]; };   // (N, C, L_out)
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;          // Total output elements (N * C * L_out)
+    uint batch;               // N
+    uint channels;            // C
+    uint in_length;           // L
+    uint out_length;          // L_out
+    uint kernel_size;         // Kernel size
+    uint stride;              // Stride
+    uint padding;             // Padding
+    uint dilation;            // Dilation
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    // Bounds check
+    if (idx >= params.n_elements) {
+        return;
+    }
+
+    // Decode flat index to (n, c, l_out)
+    uint temp = idx;
+    uint l_out = temp % params.out_length;
+    temp /= params.out_length;
+    uint c = temp % params.channels;
+    uint n = temp / params.channels;
+
+    // Compute input window start
+    int l_start = int(l_out * params.stride) - int(params.padding);
+
+    // Initialize max value to negative infinity
+    float max_val = -1.0 / 0.0;
+    int max_idx = 0;
+
+    // Iterate over pooling window with dilation
+    for (uint k = 0; k < params.kernel_size; k++) {
+        int l_in = l_start + int(k * params.dilation);
+
+        // Check if within input bounds
+        if (l_in >= 0 && l_in < int(params.in_length)) {
+            // Compute input index: (n, c, l_in)
+            uint input_idx = n * params.channels * params.in_length +
+                            c * params.in_length +
+                            uint(l_in);
+
+            float val = input_data[input_idx];
+            if (val > max_val) {
+                max_val = val;
+                max_idx = int(input_idx);
+            }
+        }
+    }
+
+    // Write output
+    output_data[idx] = max_val;
+    indices_data[idx] = max_idx;
+}

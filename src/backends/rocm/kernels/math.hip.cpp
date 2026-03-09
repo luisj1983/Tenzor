@@ -3094,5 +3094,1079 @@ auto has_inf_nan_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     return make_bool_scalar(h_flag != 0, input.device());
 }
 
+// ============================================================================
+// Extended Math Kernels (log2, log10, log1p, exp2, expm1, erf, erfc)
+// ============================================================================
+
+__global__ void log2_kernel_f32(const float* input, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = log2f(input[idx]);
+    }
+}
+
+__global__ void log2_kernel_f64(const double* input, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = log2(input[idx]);
+    }
+}
+
+__global__ void log2_kernel_f16(const __half* input, __half* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = __float2half(log2f(__half2float(input[idx])));
+    }
+}
+
+__global__ void log10_kernel_f32(const float* input, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = log10f(input[idx]);
+    }
+}
+
+__global__ void log10_kernel_f64(const double* input, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = log10(input[idx]);
+    }
+}
+
+__global__ void log10_kernel_f16(const __half* input, __half* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = __float2half(log10f(__half2float(input[idx])));
+    }
+}
+
+__global__ void log1p_kernel_f32(const float* input, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = log1pf(input[idx]);
+    }
+}
+
+__global__ void log1p_kernel_f64(const double* input, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = log1p(input[idx]);
+    }
+}
+
+__global__ void log1p_kernel_f16(const __half* input, __half* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = __float2half(log1pf(__half2float(input[idx])));
+    }
+}
+
+__global__ void exp2_kernel_f32(const float* input, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = exp2f(input[idx]);
+    }
+}
+
+__global__ void exp2_kernel_f64(const double* input, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = exp2(input[idx]);
+    }
+}
+
+__global__ void exp2_kernel_f16(const __half* input, __half* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = __float2half(exp2f(__half2float(input[idx])));
+    }
+}
+
+__global__ void expm1_kernel_f32(const float* input, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = expm1f(input[idx]);
+    }
+}
+
+__global__ void expm1_kernel_f64(const double* input, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = expm1(input[idx]);
+    }
+}
+
+__global__ void expm1_kernel_f16(const __half* input, __half* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = __float2half(expm1f(__half2float(input[idx])));
+    }
+}
+
+__global__ void erf_kernel_f32(const float* input, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = erff(input[idx]);
+    }
+}
+
+__global__ void erf_kernel_f64(const double* input, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = erf(input[idx]);
+    }
+}
+
+__global__ void erf_kernel_f16(const __half* input, __half* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = __float2half(erff(__half2float(input[idx])));
+    }
+}
+
+__global__ void erfc_kernel_f32(const float* input, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = erfcf(input[idx]);
+    }
+}
+
+__global__ void erfc_kernel_f64(const double* input, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = erfc(input[idx]);
+    }
+}
+
+__global__ void erfc_kernel_f16(const __half* input, __half* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = __float2half(erfcf(__half2float(input[idx])));
+    }
+}
+
+// ============================================================================
+// Bool Predicate Kernels (isnan, isinf, isfinite)
+// ============================================================================
+
+__global__ void isnan_kernel_f32(const float* input, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = static_cast<uint8_t>(isnan(input[idx]) ? 1 : 0);
+    }
+}
+
+__global__ void isnan_kernel_f64(const double* input, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = static_cast<uint8_t>(isnan(input[idx]) ? 1 : 0);
+    }
+}
+
+__global__ void isnan_kernel_f16(const __half* input, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float val = __half2float(input[idx]);
+        output[idx] = static_cast<uint8_t>(isnan(val) ? 1 : 0);
+    }
+}
+
+__global__ void isinf_kernel_f32(const float* input, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = static_cast<uint8_t>(isinf(input[idx]) ? 1 : 0);
+    }
+}
+
+__global__ void isinf_kernel_f64(const double* input, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = static_cast<uint8_t>(isinf(input[idx]) ? 1 : 0);
+    }
+}
+
+__global__ void isinf_kernel_f16(const __half* input, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float val = __half2float(input[idx]);
+        output[idx] = static_cast<uint8_t>(isinf(val) ? 1 : 0);
+    }
+}
+
+__global__ void isfinite_kernel_f32(const float* input, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = static_cast<uint8_t>(isfinite(input[idx]) ? 1 : 0);
+    }
+}
+
+__global__ void isfinite_kernel_f64(const double* input, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = static_cast<uint8_t>(isfinite(input[idx]) ? 1 : 0);
+    }
+}
+
+__global__ void isfinite_kernel_f16(const __half* input, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float val = __half2float(input[idx]);
+        output[idx] = static_cast<uint8_t>(isfinite(val) ? 1 : 0);
+    }
+}
+
+// ============================================================================
+// Binary Math Kernels (atan2, fmod, remainder)
+// ============================================================================
+
+__global__ void atan2_kernel_f32(const float* a, const float* b, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = atan2f(a[idx], b[idx]);
+    }
+}
+
+__global__ void atan2_kernel_f64(const double* a, const double* b, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = atan2(a[idx], b[idx]);
+    }
+}
+
+__global__ void atan2_kernel_f16(const __half* a, const __half* b, __half* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float va = __half2float(a[idx]);
+        float vb = __half2float(b[idx]);
+        output[idx] = __float2half(atan2f(va, vb));
+    }
+}
+
+__global__ void fmod_kernel_f32(const float* a, const float* b, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = fmodf(a[idx], b[idx]);
+    }
+}
+
+__global__ void fmod_kernel_f64(const double* a, const double* b, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = fmod(a[idx], b[idx]);
+    }
+}
+
+__global__ void fmod_kernel_f16(const __half* a, const __half* b, __half* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float va = __half2float(a[idx]);
+        float vb = __half2float(b[idx]);
+        output[idx] = __float2half(fmodf(va, vb));
+    }
+}
+
+__global__ void remainder_kernel_f32(const float* a, const float* b, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = remainderf(a[idx], b[idx]);
+    }
+}
+
+__global__ void remainder_kernel_f64(const double* a, const double* b, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = remainder(a[idx], b[idx]);
+    }
+}
+
+__global__ void remainder_kernel_f16(const __half* a, const __half* b, __half* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float va = __half2float(a[idx]);
+        float vb = __half2float(b[idx]);
+        output[idx] = __float2half(remainderf(va, vb));
+    }
+}
+
+// ============================================================================
+// Lerp Kernel (ternary: a + weight * (b - a))
+// ============================================================================
+
+__global__ void lerp_kernel_f32(const float* a, const float* b, const float* weight, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = a[idx] + weight[idx] * (b[idx] - a[idx]);
+    }
+}
+
+__global__ void lerp_kernel_f64(const double* a, const double* b, const double* weight, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = a[idx] + weight[idx] * (b[idx] - a[idx]);
+    }
+}
+
+__global__ void lerp_kernel_f16(const __half* a, const __half* b, const __half* weight, __half* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float va = __half2float(a[idx]);
+        float vb = __half2float(b[idx]);
+        float vw = __half2float(weight[idx]);
+        output[idx] = __float2half(va + vw * (vb - va));
+    }
+}
+
+// ============================================================================
+// Logical Kernels (logical_and, logical_or, logical_not, logical_xor)
+// ============================================================================
+
+template<typename T>
+__global__ void logical_and_kernel_device(const T* a, const T* b, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = static_cast<uint8_t>((a[idx] != T(0)) && (b[idx] != T(0)) ? 1 : 0);
+    }
+}
+
+template<typename T>
+__global__ void logical_or_kernel_device(const T* a, const T* b, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = static_cast<uint8_t>((a[idx] != T(0)) || (b[idx] != T(0)) ? 1 : 0);
+    }
+}
+
+template<typename T>
+__global__ void logical_not_kernel_device(const T* input, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = static_cast<uint8_t>(input[idx] == T(0) ? 1 : 0);
+    }
+}
+
+template<typename T>
+__global__ void logical_xor_kernel_device(const T* a, const T* b, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        bool ba = (a[idx] != T(0));
+        bool bb = (b[idx] != T(0));
+        output[idx] = static_cast<uint8_t>(ba != bb ? 1 : 0);
+    }
+}
+
+__global__ void logical_and_kernel_f16(const __half* a, const __half* b, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = static_cast<uint8_t>((__half2float(a[idx]) != 0.0f) && (__half2float(b[idx]) != 0.0f) ? 1 : 0);
+    }
+}
+
+__global__ void logical_or_kernel_f16(const __half* a, const __half* b, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = static_cast<uint8_t>((__half2float(a[idx]) != 0.0f) || (__half2float(b[idx]) != 0.0f) ? 1 : 0);
+    }
+}
+
+__global__ void logical_not_kernel_f16(const __half* input, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = static_cast<uint8_t>(__half2float(input[idx]) == 0.0f ? 1 : 0);
+    }
+}
+
+__global__ void logical_xor_kernel_f16(const __half* a, const __half* b, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        bool ba = (__half2float(a[idx]) != 0.0f);
+        bool bb = (__half2float(b[idx]) != 0.0f);
+        output[idx] = static_cast<uint8_t>(ba != bb ? 1 : 0);
+    }
+}
+
+// ============================================================================
+// Element-wise Min/Max Kernels
+// ============================================================================
+
+__global__ void minimum_kernel_f32(const float* a, const float* b, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = fminf(a[idx], b[idx]);
+    }
+}
+
+__global__ void minimum_kernel_f64(const double* a, const double* b, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = fmin(a[idx], b[idx]);
+    }
+}
+
+__global__ void minimum_kernel_f16(const __half* a, const __half* b, __half* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float va = __half2float(a[idx]);
+        float vb = __half2float(b[idx]);
+        output[idx] = __float2half(fminf(va, vb));
+    }
+}
+
+__global__ void maximum_kernel_f32(const float* a, const float* b, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = fmaxf(a[idx], b[idx]);
+    }
+}
+
+__global__ void maximum_kernel_f64(const double* a, const double* b, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = fmax(a[idx], b[idx]);
+    }
+}
+
+__global__ void maximum_kernel_f16(const __half* a, const __half* b, __half* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float va = __half2float(a[idx]);
+        float vb = __half2float(b[idx]);
+        output[idx] = __float2half(fmaxf(va, vb));
+    }
+}
+
+// ============================================================================
+// Host Wrappers: Extended Math Unary Operations
+// ============================================================================
+
+auto log2_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(log2_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(log2_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(log2_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else {
+        throw std::runtime_error("log2 operation only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto log10_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(log10_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(log10_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(log10_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else {
+        throw std::runtime_error("log10 operation only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto log1p_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(log1p_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(log1p_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(log1p_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else {
+        throw std::runtime_error("log1p operation only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto exp2_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(exp2_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(exp2_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(exp2_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else {
+        throw std::runtime_error("exp2 operation only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto expm1_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(expm1_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(expm1_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(expm1_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else {
+        throw std::runtime_error("expm1 operation only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto erf_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(erf_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(erf_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(erf_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else {
+        throw std::runtime_error("erf operation only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto erfc_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(erfc_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(erfc_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(erfc_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else {
+        throw std::runtime_error("erfc operation only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ============================================================================
+// Host Wrappers: Bool Predicate Operations
+// ============================================================================
+
+auto isnan_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, DType::Bool, input.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(isnan_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<uint8_t>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(isnan_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<uint8_t>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(isnan_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            result.data<uint8_t>(), n);
+    } else {
+        // Integer types cannot have NaN - return all false
+        HIP_CHECK(hipMemsetAsync(result.data<uint8_t>(), 0, n * sizeof(uint8_t), stream));
+        return result;
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto isinf_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, DType::Bool, input.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(isinf_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<uint8_t>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(isinf_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<uint8_t>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(isinf_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            result.data<uint8_t>(), n);
+    } else {
+        // Integer types cannot have Inf - return all false
+        HIP_CHECK(hipMemsetAsync(result.data<uint8_t>(), 0, n * sizeof(uint8_t), stream));
+        return result;
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto isfinite_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, DType::Bool, input.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(isfinite_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<uint8_t>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(isfinite_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<uint8_t>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(isfinite_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            result.data<uint8_t>(), n);
+    } else {
+        // Integer types are always finite - return all true
+        HIP_CHECK(hipMemsetAsync(result.data<uint8_t>(), 1, n * sizeof(uint8_t), stream));
+        return result;
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ============================================================================
+// Host Wrappers: Binary Math Operations (atan2, fmod, remainder)
+// ============================================================================
+
+auto atan2_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
+    if (a.dtype() != b.dtype()) {
+        throw std::runtime_error("atan2: tensors must have the same dtype");
+    }
+    if (a.numel() != b.numel()) {
+        throw std::runtime_error("atan2: tensors must have the same number of elements");
+    }
+
+    int64_t n = a.numel();
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, a.dtype(), a.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (a.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(atan2_kernel_f32, grid, block, 0, stream,
+            a.data<float>(), b.data<float>(), result.data<float>(), n);
+    } else if (a.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(atan2_kernel_f64, grid, block, 0, stream,
+            a.data<double>(), b.data<double>(), result.data<double>(), n);
+    } else if (a.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(atan2_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(b.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else {
+        throw std::runtime_error("atan2 operation only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto fmod_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
+    if (a.dtype() != b.dtype()) {
+        throw std::runtime_error("fmod: tensors must have the same dtype");
+    }
+    if (a.numel() != b.numel()) {
+        throw std::runtime_error("fmod: tensors must have the same number of elements");
+    }
+
+    int64_t n = a.numel();
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, a.dtype(), a.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (a.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(fmod_kernel_f32, grid, block, 0, stream,
+            a.data<float>(), b.data<float>(), result.data<float>(), n);
+    } else if (a.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(fmod_kernel_f64, grid, block, 0, stream,
+            a.data<double>(), b.data<double>(), result.data<double>(), n);
+    } else if (a.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(fmod_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(b.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else {
+        throw std::runtime_error("fmod operation only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto remainder_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
+    if (a.dtype() != b.dtype()) {
+        throw std::runtime_error("remainder: tensors must have the same dtype");
+    }
+    if (a.numel() != b.numel()) {
+        throw std::runtime_error("remainder: tensors must have the same number of elements");
+    }
+
+    int64_t n = a.numel();
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, a.dtype(), a.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (a.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(remainder_kernel_f32, grid, block, 0, stream,
+            a.data<float>(), b.data<float>(), result.data<float>(), n);
+    } else if (a.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(remainder_kernel_f64, grid, block, 0, stream,
+            a.data<double>(), b.data<double>(), result.data<double>(), n);
+    } else if (a.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(remainder_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(b.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else {
+        throw std::runtime_error("remainder operation only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ============================================================================
+// Host Wrapper: Lerp (ternary)
+// ============================================================================
+
+auto lerp_kernel(const Tensor& a, const Tensor& b, const Tensor& weight, hipStream_t stream) -> Tensor {
+    if (a.dtype() != b.dtype() || a.dtype() != weight.dtype()) {
+        throw std::runtime_error("lerp: all tensors must have the same dtype");
+    }
+    if (a.numel() != b.numel() || a.numel() != weight.numel()) {
+        throw std::runtime_error("lerp: all tensors must have the same number of elements");
+    }
+
+    int64_t n = a.numel();
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, a.dtype(), a.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (a.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(lerp_kernel_f32, grid, block, 0, stream,
+            a.data<float>(), b.data<float>(), weight.data<float>(), result.data<float>(), n);
+    } else if (a.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(lerp_kernel_f64, grid, block, 0, stream,
+            a.data<double>(), b.data<double>(), weight.data<double>(), result.data<double>(), n);
+    } else if (a.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(lerp_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(b.data<Float16>()),
+            reinterpret_cast<const __half*>(weight.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else {
+        throw std::runtime_error("lerp operation only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ============================================================================
+// Host Wrappers: Logical Operations
+// ============================================================================
+
+auto logical_and_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
+    if (a.numel() != b.numel()) {
+        throw std::runtime_error("logical_and: tensors must have the same number of elements");
+    }
+
+    int64_t n = a.numel();
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, DType::Bool, a.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (a.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(logical_and_kernel_device<float>, grid, block, 0, stream,
+            a.data<float>(), b.data<float>(), result.data<uint8_t>(), n);
+    } else if (a.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(logical_and_kernel_device<double>, grid, block, 0, stream,
+            a.data<double>(), b.data<double>(), result.data<uint8_t>(), n);
+    } else if (a.dtype() == DType::Int32) {
+        hipLaunchKernelGGL(logical_and_kernel_device<int32_t>, grid, block, 0, stream,
+            a.data<int32_t>(), b.data<int32_t>(), result.data<uint8_t>(), n);
+    } else if (a.dtype() == DType::Int64) {
+        hipLaunchKernelGGL(logical_and_kernel_device<int64_t>, grid, block, 0, stream,
+            a.data<int64_t>(), b.data<int64_t>(), result.data<uint8_t>(), n);
+    } else if (a.dtype() == DType::Bool) {
+        hipLaunchKernelGGL(logical_and_kernel_device<bool>, grid, block, 0, stream,
+            a.data<bool>(), b.data<bool>(), result.data<uint8_t>(), n);
+    } else if (a.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(logical_and_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(b.data<Float16>()),
+            result.data<uint8_t>(), n);
+    } else {
+        throw std::runtime_error("logical_and: unsupported dtype");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto logical_or_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
+    if (a.numel() != b.numel()) {
+        throw std::runtime_error("logical_or: tensors must have the same number of elements");
+    }
+
+    int64_t n = a.numel();
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, DType::Bool, a.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (a.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(logical_or_kernel_device<float>, grid, block, 0, stream,
+            a.data<float>(), b.data<float>(), result.data<uint8_t>(), n);
+    } else if (a.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(logical_or_kernel_device<double>, grid, block, 0, stream,
+            a.data<double>(), b.data<double>(), result.data<uint8_t>(), n);
+    } else if (a.dtype() == DType::Int32) {
+        hipLaunchKernelGGL(logical_or_kernel_device<int32_t>, grid, block, 0, stream,
+            a.data<int32_t>(), b.data<int32_t>(), result.data<uint8_t>(), n);
+    } else if (a.dtype() == DType::Int64) {
+        hipLaunchKernelGGL(logical_or_kernel_device<int64_t>, grid, block, 0, stream,
+            a.data<int64_t>(), b.data<int64_t>(), result.data<uint8_t>(), n);
+    } else if (a.dtype() == DType::Bool) {
+        hipLaunchKernelGGL(logical_or_kernel_device<bool>, grid, block, 0, stream,
+            a.data<bool>(), b.data<bool>(), result.data<uint8_t>(), n);
+    } else if (a.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(logical_or_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(b.data<Float16>()),
+            result.data<uint8_t>(), n);
+    } else {
+        throw std::runtime_error("logical_or: unsupported dtype");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto logical_not_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, DType::Bool, input.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(logical_not_kernel_device<float>, grid, block, 0, stream,
+            input.data<float>(), result.data<uint8_t>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(logical_not_kernel_device<double>, grid, block, 0, stream,
+            input.data<double>(), result.data<uint8_t>(), n);
+    } else if (input.dtype() == DType::Int32) {
+        hipLaunchKernelGGL(logical_not_kernel_device<int32_t>, grid, block, 0, stream,
+            input.data<int32_t>(), result.data<uint8_t>(), n);
+    } else if (input.dtype() == DType::Int64) {
+        hipLaunchKernelGGL(logical_not_kernel_device<int64_t>, grid, block, 0, stream,
+            input.data<int64_t>(), result.data<uint8_t>(), n);
+    } else if (input.dtype() == DType::Bool) {
+        hipLaunchKernelGGL(logical_not_kernel_device<bool>, grid, block, 0, stream,
+            input.data<bool>(), result.data<uint8_t>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(logical_not_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            result.data<uint8_t>(), n);
+    } else {
+        throw std::runtime_error("logical_not: unsupported dtype");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto logical_xor_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
+    if (a.numel() != b.numel()) {
+        throw std::runtime_error("logical_xor: tensors must have the same number of elements");
+    }
+
+    int64_t n = a.numel();
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, DType::Bool, a.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (a.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(logical_xor_kernel_device<float>, grid, block, 0, stream,
+            a.data<float>(), b.data<float>(), result.data<uint8_t>(), n);
+    } else if (a.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(logical_xor_kernel_device<double>, grid, block, 0, stream,
+            a.data<double>(), b.data<double>(), result.data<uint8_t>(), n);
+    } else if (a.dtype() == DType::Int32) {
+        hipLaunchKernelGGL(logical_xor_kernel_device<int32_t>, grid, block, 0, stream,
+            a.data<int32_t>(), b.data<int32_t>(), result.data<uint8_t>(), n);
+    } else if (a.dtype() == DType::Int64) {
+        hipLaunchKernelGGL(logical_xor_kernel_device<int64_t>, grid, block, 0, stream,
+            a.data<int64_t>(), b.data<int64_t>(), result.data<uint8_t>(), n);
+    } else if (a.dtype() == DType::Bool) {
+        hipLaunchKernelGGL(logical_xor_kernel_device<bool>, grid, block, 0, stream,
+            a.data<bool>(), b.data<bool>(), result.data<uint8_t>(), n);
+    } else if (a.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(logical_xor_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(b.data<Float16>()),
+            result.data<uint8_t>(), n);
+    } else {
+        throw std::runtime_error("logical_xor: unsupported dtype");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ============================================================================
+// Host Wrappers: Element-wise Min/Max
+// ============================================================================
+
+auto minimum_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
+    if (a.dtype() != b.dtype()) {
+        throw std::runtime_error("minimum: tensors must have the same dtype");
+    }
+    if (a.numel() != b.numel()) {
+        throw std::runtime_error("minimum: tensors must have the same number of elements");
+    }
+
+    int64_t n = a.numel();
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, a.dtype(), a.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (a.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(minimum_kernel_f32, grid, block, 0, stream,
+            a.data<float>(), b.data<float>(), result.data<float>(), n);
+    } else if (a.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(minimum_kernel_f64, grid, block, 0, stream,
+            a.data<double>(), b.data<double>(), result.data<double>(), n);
+    } else if (a.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(minimum_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(b.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else {
+        throw std::runtime_error("minimum operation only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto maximum_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
+    if (a.dtype() != b.dtype()) {
+        throw std::runtime_error("maximum: tensors must have the same dtype");
+    }
+    if (a.numel() != b.numel()) {
+        throw std::runtime_error("maximum: tensors must have the same number of elements");
+    }
+
+    int64_t n = a.numel();
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, a.dtype(), a.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (a.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(maximum_kernel_f32, grid, block, 0, stream,
+            a.data<float>(), b.data<float>(), result.data<float>(), n);
+    } else if (a.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(maximum_kernel_f64, grid, block, 0, stream,
+            a.data<double>(), b.data<double>(), result.data<double>(), n);
+    } else if (a.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(maximum_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(b.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else {
+        throw std::runtime_error("maximum operation only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
 } // namespace rocm
 } // namespace tenzor

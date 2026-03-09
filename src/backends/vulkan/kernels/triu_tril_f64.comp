@@ -1,0 +1,35 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Triangular matrix operations for Float64: triu (upper) and tril (lower)
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer InputA { float64_t a[]; };
+layout(binding = 1) buffer Output { float64_t result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;         // total elements
+    uint rows;      // number of rows in last 2 dims
+    uint cols;      // number of cols in last 2 dims
+    int diagonal;   // diagonal offset
+    uint op;        // 0=triu, 1=tril
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= n) return;
+
+    uint matrix_size = rows * cols;
+    uint pos_in_matrix = idx % matrix_size;
+    uint row = pos_in_matrix / cols;
+    uint col = pos_in_matrix % cols;
+
+    bool keep;
+    if (op == 0) {
+        keep = (int(col) >= int(row) + diagonal);
+    } else {
+        keep = (int(col) <= int(row) + diagonal);
+    }
+
+    result[idx] = keep ? a[idx] : float64_t(0.0);
+}

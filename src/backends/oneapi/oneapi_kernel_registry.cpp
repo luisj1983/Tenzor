@@ -60,6 +60,37 @@ namespace oneapi {
     auto trunc_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
     auto reciprocal_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
 
+    // Extended math
+    auto log2_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto log10_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto log1p_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto exp2_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto expm1_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto erf_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto erfc_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+
+    // Bool predicates
+    auto isnan_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto isinf_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto isfinite_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+
+    // Binary math
+    auto fmod_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto remainder_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+
+    // Ternary
+    auto lerp_kernel(const Tensor& start, const Tensor& end, const Tensor& weight, sycl::queue& queue) -> Tensor;
+
+    // Logical
+    auto logical_and_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto logical_or_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto logical_not_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto logical_xor_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+
+    // Element-wise min/max
+    auto minimum_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto maximum_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+
     // Additional math
     auto clamp_min_kernel(const Tensor& input, float min_val, sycl::queue& queue) -> Tensor;
     auto clamp_max_kernel(const Tensor& input, float max_val, sycl::queue& queue) -> Tensor;
@@ -129,6 +160,8 @@ namespace oneapi {
     auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
     auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
     auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
+    auto any_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
+    auto all_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
 
     // ---- Statistical operations (kernels/statistical.cpp) ----
     auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
@@ -139,6 +172,11 @@ namespace oneapi {
     // ---- Transform operations (kernels/transform.cpp) ----
     auto reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape, sycl::queue& queue) -> Tensor;
     auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1, sycl::queue& queue) -> Tensor;
+    auto triu_kernel(const Tensor& input, int64_t diagonal, sycl::queue& queue) -> Tensor;
+    auto tril_kernel(const Tensor& input, int64_t diagonal, sycl::queue& queue) -> Tensor;
+    auto diag_kernel(const Tensor& input, int64_t diagonal, sycl::queue& queue) -> Tensor;
+    auto trace_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto flip_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor;
     auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims, sycl::queue& queue) -> Tensor;
     auto squeeze_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor;
     auto unsqueeze_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor;
@@ -237,6 +275,41 @@ namespace oneapi {
                                   int64_t stride, int64_t padding, int64_t output_padding,
                                   int64_t dilation, int64_t groups, sycl::queue& queue) -> Tensor;
 
+    // ---- Conv3d operations (kernels/conv3d.cpp) ----
+    auto conv3d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                        const std::vector<int64_t>& stride, const std::vector<int64_t>& padding,
+                        const std::vector<int64_t>& dilation, int64_t groups,
+                        sycl::queue& queue) -> Tensor;
+    auto conv3d_backward_input(const Tensor& grad_output, const Tensor& weight,
+                                const std::vector<int64_t>& input_shape,
+                                const std::vector<int64_t>& stride, const std::vector<int64_t>& padding,
+                                const std::vector<int64_t>& dilation, int64_t groups,
+                                sycl::queue& queue) -> Tensor;
+    auto conv3d_backward_weight(const Tensor& grad_output, const Tensor& input,
+                                 const std::vector<int64_t>& weight_shape,
+                                 const std::vector<int64_t>& stride, const std::vector<int64_t>& padding,
+                                 const std::vector<int64_t>& dilation, int64_t groups,
+                                 sycl::queue& queue) -> Tensor;
+    auto conv3d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tensor;
+
+    // ---- ConvTranspose3d operations (kernels/conv3d.cpp) ----
+    auto conv_transpose3d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                                   const std::vector<int64_t>& stride, const std::vector<int64_t>& padding,
+                                   const std::vector<int64_t>& output_padding,
+                                   const std::vector<int64_t>& dilation, int64_t groups,
+                                   sycl::queue& queue) -> Tensor;
+    auto conv_transpose3d_backward_input(const Tensor& grad_output, const Tensor& weight,
+                                          const std::vector<int64_t>& input_shape,
+                                          const std::vector<int64_t>& stride, const std::vector<int64_t>& padding,
+                                          const std::vector<int64_t>& dilation, int64_t groups,
+                                          sycl::queue& queue) -> Tensor;
+    auto conv_transpose3d_backward_weight(const Tensor& grad_output, const Tensor& input,
+                                           const std::vector<int64_t>& weight_shape,
+                                           const std::vector<int64_t>& stride, const std::vector<int64_t>& padding,
+                                           const std::vector<int64_t>& dilation, int64_t groups,
+                                           sycl::queue& queue) -> Tensor;
+    auto conv_transpose3d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tensor;
+
     // ---- Pooling operations (kernels/pooling.cpp) ----
     auto avg_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
     auto max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> std::pair<Tensor, Tensor>;
@@ -248,6 +321,45 @@ namespace oneapi {
                                           int64_t H_in, int64_t W_in, sycl::queue& queue) -> Tensor;
     auto adaptive_avgpool2d_backward(const Tensor& grad_output, int64_t H_in, int64_t W_in,
                                      sycl::queue& queue) -> Tensor;
+
+    // ---- 1D Pooling operations (kernels/pooling.cpp) ----
+    auto maxpool1d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
+                           int64_t padding, sycl::queue& queue) -> std::vector<Tensor>;
+    auto maxpool1d_backward(const Tensor& grad_output, const Tensor& indices,
+                             const std::vector<int64_t>& input_shape, sycl::queue& queue) -> Tensor;
+    auto avgpool1d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
+                           int64_t padding, sycl::queue& queue) -> Tensor;
+    auto avgpool1d_backward(const Tensor& grad_output, int64_t kernel_size, int64_t stride,
+                             int64_t padding, const std::vector<int64_t>& input_shape, sycl::queue& queue) -> Tensor;
+    auto adaptive_maxpool1d_forward(const Tensor& input, int64_t output_size,
+                                     sycl::queue& queue) -> std::vector<Tensor>;
+    auto adaptive_maxpool1d_backward(const Tensor& grad_output, const Tensor& indices,
+                                      const std::vector<int64_t>& input_shape, sycl::queue& queue) -> Tensor;
+    auto adaptive_avgpool1d_forward(const Tensor& input, int64_t output_size,
+                                     sycl::queue& queue) -> Tensor;
+    auto adaptive_avgpool1d_backward(const Tensor& grad_output, const std::vector<int64_t>& input_shape,
+                                      sycl::queue& queue) -> Tensor;
+
+    // ---- 3D Pooling operations (kernels/pooling.cpp) ----
+    auto maxpool3d_forward(const Tensor& input, const std::vector<int64_t>& kernel_size,
+                           const std::vector<int64_t>& stride, const std::vector<int64_t>& padding,
+                           sycl::queue& queue) -> std::vector<Tensor>;
+    auto maxpool3d_backward(const Tensor& grad_output, const Tensor& indices,
+                             const std::vector<int64_t>& input_shape, sycl::queue& queue) -> Tensor;
+    auto avgpool3d_forward(const Tensor& input, const std::vector<int64_t>& kernel_size,
+                           const std::vector<int64_t>& stride, const std::vector<int64_t>& padding,
+                           sycl::queue& queue) -> Tensor;
+    auto avgpool3d_backward(const Tensor& grad_output, const std::vector<int64_t>& kernel_size,
+                             const std::vector<int64_t>& stride, const std::vector<int64_t>& padding,
+                             const std::vector<int64_t>& input_shape, sycl::queue& queue) -> Tensor;
+    auto adaptive_maxpool3d_forward(const Tensor& input, const std::vector<int64_t>& output_size,
+                                     sycl::queue& queue) -> std::vector<Tensor>;
+    auto adaptive_maxpool3d_backward(const Tensor& grad_output, const Tensor& indices,
+                                      const std::vector<int64_t>& input_shape, sycl::queue& queue) -> Tensor;
+    auto adaptive_avgpool3d_forward(const Tensor& input, const std::vector<int64_t>& output_size,
+                                     sycl::queue& queue) -> Tensor;
+    auto adaptive_avgpool3d_backward(const Tensor& grad_output, const std::vector<int64_t>& input_shape,
+                                      sycl::queue& queue) -> Tensor;
 
     // ---- Embedding operations (kernels/embedding.cpp) ----
     auto embedding_lookup_kernel(const Tensor& indices, const Tensor& weights,
@@ -705,6 +817,125 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         });
 
     // =========================================================================
+    // Extended Math Operations
+    // =========================================================================
+
+    table.register_kernel(OpId::Log2,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::log2_kernel(inputs[0], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Log10,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::log10_kernel(inputs[0], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Log1p,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::log1p_kernel(inputs[0], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Exp2,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::exp2_kernel(inputs[0], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Expm1,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::expm1_kernel(inputs[0], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Erf,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::erf_kernel(inputs[0], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Erfc,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::erfc_kernel(inputs[0], get_q(inputs))};
+        });
+
+    // =========================================================================
+    // Bool Predicate Operations
+    // =========================================================================
+
+    table.register_kernel(OpId::IsNan,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::isnan_kernel(inputs[0], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::IsInf,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::isinf_kernel(inputs[0], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::IsFinite,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::isfinite_kernel(inputs[0], get_q(inputs))};
+        });
+
+    // =========================================================================
+    // Binary Math Operations (fmod, remainder)
+    // =========================================================================
+
+    table.register_kernel(OpId::Fmod,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::fmod_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Remainder,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::remainder_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    // =========================================================================
+    // Ternary: Lerp
+    // =========================================================================
+
+    table.register_kernel(OpId::Lerp,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::lerp_kernel(inputs[0], inputs[1], inputs[2], get_q(inputs))};
+        });
+
+    // =========================================================================
+    // Logical Operations
+    // =========================================================================
+
+    table.register_kernel(OpId::LogicalAnd,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::logical_and_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::LogicalOr,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::logical_or_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::LogicalNot,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::logical_not_kernel(inputs[0], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::LogicalXor,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::logical_xor_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    // =========================================================================
+    // Element-wise Minimum / Maximum
+    // =========================================================================
+
+    table.register_kernel(OpId::Minimum,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::minimum_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Maximum,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::maximum_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    // =========================================================================
     // Clamp Operations
     // =========================================================================
 
@@ -805,6 +1036,20 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             int64_t dim = attrs.get_int(AttrKey::Dim, -1);
             bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             return {oneapi::argmin_kernel(inputs[0], dim, keepdim, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Any,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return {oneapi::any_kernel(inputs[0], dim, keepdim, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::All,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return {oneapi::all_kernel(inputs[0], dim, keepdim, get_q(inputs))};
         });
 
     // Statistical operations: these OneAPI kernels take OpAttributes directly
@@ -1152,6 +1397,88 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
                                                       dilation, groups, get_q(inputs))};
         });
 
+    // Conv3d operations
+    table.register_kernel(OpId::Conv3dForward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto stride = attrs.get_int_list(AttrKey::Stride);
+            auto padding = attrs.get_int_list(AttrKey::Padding);
+            auto dilation = attrs.get_int_list(AttrKey::Dilation);
+            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+            const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+            return {oneapi::conv3d_forward(inputs[0], inputs[1], bias,
+                                            stride, padding, dilation, groups, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Conv3dBackwardInput,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto stride = attrs.get_int_list(AttrKey::Stride);
+            auto padding = attrs.get_int_list(AttrKey::Padding);
+            auto dilation = attrs.get_int_list(AttrKey::Dilation);
+            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+            auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+            return {oneapi::conv3d_backward_input(inputs[0], inputs[1], input_shape,
+                                                    stride, padding, dilation, groups, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Conv3dBackwardWeight,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto stride = attrs.get_int_list(AttrKey::Stride);
+            auto padding = attrs.get_int_list(AttrKey::Padding);
+            auto dilation = attrs.get_int_list(AttrKey::Dilation);
+            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+            auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
+            return {oneapi::conv3d_backward_weight(inputs[0], inputs[1], weight_shape,
+                                                     stride, padding, dilation, groups, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Conv3dBackwardBias,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::conv3d_backward_bias(inputs[0], get_q(inputs))};
+        });
+
+    // ConvTranspose3d operations
+    table.register_kernel(OpId::ConvTranspose3dForward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto stride = attrs.get_int_list(AttrKey::Stride);
+            auto padding = attrs.get_int_list(AttrKey::Padding);
+            auto output_padding = attrs.get_int_list(AttrKey::OutputPadding);
+            auto dilation = attrs.get_int_list(AttrKey::Dilation);
+            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+            const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+            return {oneapi::conv_transpose3d_forward(inputs[0], inputs[1], bias,
+                                                       stride, padding, output_padding,
+                                                       dilation, groups, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::ConvTranspose3dBackwardInput,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto stride = attrs.get_int_list(AttrKey::Stride);
+            auto padding = attrs.get_int_list(AttrKey::Padding);
+            auto dilation = attrs.get_int_list(AttrKey::Dilation);
+            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+            auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+            return {oneapi::conv_transpose3d_backward_input(inputs[0], inputs[1], input_shape,
+                                                             stride, padding, dilation,
+                                                             groups, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::ConvTranspose3dBackwardWeight,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto stride = attrs.get_int_list(AttrKey::Stride);
+            auto padding = attrs.get_int_list(AttrKey::Padding);
+            auto dilation = attrs.get_int_list(AttrKey::Dilation);
+            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+            auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
+            return {oneapi::conv_transpose3d_backward_weight(inputs[0], inputs[1], weight_shape,
+                                                              stride, padding, dilation,
+                                                              groups, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::ConvTranspose3dBackwardBias,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::conv_transpose3d_backward_bias(inputs[0], get_q(inputs))};
+        });
+
     // =========================================================================
     // Pooling Operations
     // =========================================================================
@@ -1203,6 +1530,124 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             int64_t H_in = attrs.get_int(AttrKey::InputH, 0);
             int64_t W_in = attrs.get_int(AttrKey::InputW, 0);
             return {oneapi::adaptive_avgpool2d_backward(inputs[0], H_in, W_in, get_q(inputs))};
+        });
+
+    // =========================================================================
+    // 1D Pooling Operations
+    // =========================================================================
+
+    table.register_kernel(OpId::MaxPool1dForward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
+            int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
+            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            return oneapi::maxpool1d_forward(inputs[0], kernel_size, stride, padding, get_q(inputs));
+        });
+
+    table.register_kernel(OpId::MaxPool1dBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+            return {oneapi::maxpool1d_backward(inputs[0], inputs[1], input_shape, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::AvgPool1dForward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
+            int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
+            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            return {oneapi::avgpool1d_forward(inputs[0], kernel_size, stride, padding, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::AvgPool1dBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
+            int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
+            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+            return {oneapi::avgpool1d_backward(inputs[0], kernel_size, stride, padding, input_shape, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::AdaptiveMaxPool1d,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t output_size = attrs.get_int(AttrKey::OutputSize, 1);
+            return oneapi::adaptive_maxpool1d_forward(inputs[0], output_size, get_q(inputs));
+        });
+
+    table.register_kernel(OpId::AdaptiveMaxPool1dBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+            return {oneapi::adaptive_maxpool1d_backward(inputs[0], inputs[1], input_shape, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::AdaptiveAvgPool1d,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t output_size = attrs.get_int(AttrKey::OutputSize, 1);
+            return {oneapi::adaptive_avgpool1d_forward(inputs[0], output_size, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::AdaptiveAvgPool1dBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+            return {oneapi::adaptive_avgpool1d_backward(inputs[0], input_shape, get_q(inputs))};
+        });
+
+    // =========================================================================
+    // 3D Pooling Operations
+    // =========================================================================
+
+    table.register_kernel(OpId::MaxPool3dForward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto ks = attrs.get_int_list(AttrKey::KernelSize);
+            auto st = attrs.get_int_list(AttrKey::Stride);
+            auto pd = attrs.get_int_list(AttrKey::Padding);
+            return oneapi::maxpool3d_forward(inputs[0], ks, st, pd, get_q(inputs));
+        });
+
+    table.register_kernel(OpId::MaxPool3dBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+            return {oneapi::maxpool3d_backward(inputs[0], inputs[1], input_shape, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::AvgPool3dForward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto ks = attrs.get_int_list(AttrKey::KernelSize);
+            auto st = attrs.get_int_list(AttrKey::Stride);
+            auto pd = attrs.get_int_list(AttrKey::Padding);
+            return {oneapi::avgpool3d_forward(inputs[0], ks, st, pd, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::AvgPool3dBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto ks = attrs.get_int_list(AttrKey::KernelSize);
+            auto st = attrs.get_int_list(AttrKey::Stride);
+            auto pd = attrs.get_int_list(AttrKey::Padding);
+            auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+            return {oneapi::avgpool3d_backward(inputs[0], ks, st, pd, input_shape, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::AdaptiveMaxPool3d,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto output_size = attrs.get_int_list(AttrKey::OutputSize);
+            return oneapi::adaptive_maxpool3d_forward(inputs[0], output_size, get_q(inputs));
+        });
+
+    table.register_kernel(OpId::AdaptiveMaxPool3dBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+            return {oneapi::adaptive_maxpool3d_backward(inputs[0], inputs[1], input_shape, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::AdaptiveAvgPool3d,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto output_size = attrs.get_int_list(AttrKey::OutputSize);
+            return {oneapi::adaptive_avgpool3d_forward(inputs[0], output_size, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::AdaptiveAvgPool3dBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+            return {oneapi::adaptive_avgpool3d_backward(inputs[0], input_shape, get_q(inputs))};
         });
 
     // =========================================================================
@@ -1828,6 +2273,39 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             int64_t shift = attrs.get_int(AttrKey::Shift, 0);
             int64_t dim = attrs.get_int(AttrKey::Dim, 0);
             return oneapi::roll_kernel(inputs[0], shift, dim, get_q(inputs));
+        });
+
+    // =========================================================================
+    // Triu / Tril / Diag / Trace / Flip
+    // =========================================================================
+
+    table.register_kernel(OpId::Triu,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t diagonal = attrs.get_int(AttrKey::Diagonal, 0);
+            return {oneapi::triu_kernel(inputs[0], diagonal, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Tril,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t diagonal = attrs.get_int(AttrKey::Diagonal, 0);
+            return {oneapi::tril_kernel(inputs[0], diagonal, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Diag,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t diagonal = attrs.get_int(AttrKey::Diagonal, 0);
+            return {oneapi::diag_kernel(inputs[0], diagonal, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Trace,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::trace_kernel(inputs[0], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Flip,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            return {oneapi::flip_kernel(inputs[0], dim, get_q(inputs))};
         });
 
     // =========================================================================

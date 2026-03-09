@@ -120,6 +120,7 @@ set(ONEAPI_SYCL_SOURCES
     kernels/creation.cpp
     kernels/batchnorm.cpp
     kernels/conv2d.cpp
+    kernels/conv3d.cpp
     kernels/pooling.cpp
     kernels/indexing.cpp
     kernels/embedding.cpp

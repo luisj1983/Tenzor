@@ -1,0 +1,59 @@
+#version 450
+
+// Diagonal operations:
+//   op=0: extract diagonal from 2D matrix -> 1D vector
+//   op=1: construct diagonal matrix from 1D vector -> 2D matrix
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer InputA { float a[]; };
+layout(binding = 1) buffer Output { float result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;         // number of output elements
+    uint rows;      // rows of matrix (for extract) or output matrix (for construct)
+    uint cols;      // cols of matrix (for extract) or output matrix (for construct)
+    int diagonal;   // diagonal offset (positive=above main, negative=below main)
+    uint op;        // 0=extract, 1=construct
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= n) return;
+
+    if (op == 0) {
+        // Extract: output[idx] = input[row, col] where row,col walk the diagonal
+        uint row, col;
+        if (diagonal >= 0) {
+            row = idx;
+            col = idx + uint(diagonal);
+        } else {
+            row = idx + uint(-diagonal);
+            col = idx;
+        }
+        result[idx] = a[row * cols + col];
+    } else {
+        // Construct: output is a matrix of size rows x cols, initialized to 0
+        // We're iterating over ALL output elements, setting diagonal ones from input
+        // But it's more efficient to zero-fill and then set diagonal elements
+        // So n = rows * cols, and we check if this element is on the diagonal
+        uint row = idx / cols;
+        uint col = idx % cols;
+
+        // Check if this element is on the specified diagonal
+        bool on_diag;
+        uint diag_idx;
+        if (diagonal >= 0) {
+            on_diag = (col >= uint(diagonal)) && (col - uint(diagonal) == row);
+            diag_idx = row;
+        } else {
+            on_diag = (row >= uint(-diagonal)) && (row - uint(-diagonal) == col);
+            diag_idx = col;
+        }
+
+        if (on_diag) {
+            result[idx] = a[diag_idx];
+        } else {
+            result[idx] = 0.0;
+        }
+    }
+}

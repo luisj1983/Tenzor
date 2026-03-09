@@ -1,0 +1,63 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Triangular matrix operations for Float16: triu (upper) and tril (lower)
+// Float16 stored as packed uint32 words (2 elements per word)
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer InputA { uint a[]; };
+layout(binding = 1) buffer Output { uint result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;         // total elements
+    uint rows;      // number of rows in last 2 dims
+    uint cols;      // number of cols in last 2 dims
+    int diagonal;   // diagonal offset
+    uint op;        // 0=triu, 1=tril
+};
+
+void main() {
+    // Each thread handles one packed uint32 word (2 Float16 elements)
+    uint word_idx = gl_GlobalInvocationID.x;
+    uint num_words = (n + 1) / 2;
+    if (word_idx >= num_words) return;
+
+    uint packed = a[word_idx];
+    uint elem0_idx = word_idx * 2;
+    uint elem1_idx = elem0_idx + 1;
+
+    // Unpack
+    float16_t val0 = unpackFloat2x16(packed & 0xFFFFu).x;
+    float16_t val1 = unpackFloat2x16(packed >> 16).x;
+
+    // Element 0
+    {
+        uint matrix_size = rows * cols;
+        uint pos = elem0_idx % matrix_size;
+        uint row = pos / cols;
+        uint col = pos % cols;
+        bool keep;
+        if (op == 0) keep = (int(col) >= int(row) + diagonal);
+        else keep = (int(col) <= int(row) + diagonal);
+        if (!keep) val0 = float16_t(0.0);
+    }
+
+    // Element 1
+    if (elem1_idx < n) {
+        uint matrix_size = rows * cols;
+        uint pos = elem1_idx % matrix_size;
+        uint row = pos / cols;
+        uint col = pos % cols;
+        bool keep;
+        if (op == 0) keep = (int(col) >= int(row) + diagonal);
+        else keep = (int(col) <= int(row) + diagonal);
+        if (!keep) val1 = float16_t(0.0);
+    } else {
+        val1 = float16_t(0.0);
+    }
+
+    // Repack
+    uint lo = packFloat2x16(f16vec2(val0, float16_t(0.0)));
+    uint hi = packFloat2x16(f16vec2(val1, float16_t(0.0)));
+    result[word_idx] = (lo & 0xFFFFu) | ((hi & 0xFFFFu) << 16);
+}

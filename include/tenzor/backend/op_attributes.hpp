@@ -66,6 +66,8 @@ enum class AttrKey : uint16_t {
     // Input/output dimensions (for ops needing explicit sizes)
     InputH,
     InputW,
+    InputD,
+    InputL,
 
     // Numeric parameters
     Eps,
