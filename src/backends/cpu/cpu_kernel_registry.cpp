@@ -381,6 +381,11 @@ namespace cpu {
                                   float scale, bool causal,
                                   float dropout_p = 0.0f, bool is_training = false) -> Tensor;
 
+    // Flash Attention Backward
+    auto flash_attention_backward(const Tensor& dO, const Tensor& Q, const Tensor& K,
+                                   const Tensor& V, const Tensor& O,
+                                   float scale, bool causal) -> std::vector<Tensor>;
+
     // Fused Conv2d + Activation variants
     auto fused_conv2d_sigmoid_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
                                       int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
@@ -1614,6 +1619,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         float dropout_p = static_cast<float>(attrs.get_float(AttrKey::DropoutP, 0.0));
         bool is_training = attrs.get_bool(AttrKey::Training, false);
         return std::vector<Tensor>{cpu::flash_attention_forward(inputs[0], inputs[1], inputs[2], scale, causal, dropout_p, is_training)};
+    });
+
+    // =========================================================================
+    // Flash Attention Backward
+    // =========================================================================
+    table.register_kernel(OpId::FlashAttentionBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+        bool causal = attrs.get_bool(AttrKey::Causal, false);
+        // inputs: [dO, Q, K, V, O]
+        return cpu::flash_attention_backward(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], scale, causal);
     });
 
     // =========================================================================

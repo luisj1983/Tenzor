@@ -54,35 +54,39 @@ double get_norm_factor(int64_t n, const std::string& norm, bool is_fwd) {
 }
 
 /// Apply in-place scaling to interleaved complex data (Float32 pairs).
+/// Note: does NOT wait — caller must ensure completion before freeing buffers.
 void apply_scale_f32(sycl::queue& queue, float* data, int64_t total_floats, float scale) {
     if (scale == 1.0f) return;
     queue.parallel_for(sycl::range<1>(total_floats), [=](sycl::id<1> idx) {
         data[idx] *= scale;
-    }).wait();
+    });
 }
 
 /// Apply in-place scaling to interleaved complex data (Float64 pairs).
+/// Note: does NOT wait — caller must ensure completion before freeing buffers.
 void apply_scale_f64(sycl::queue& queue, double* data, int64_t total_doubles, double scale) {
     if (scale == 1.0) return;
     queue.parallel_for(sycl::range<1>(total_doubles), [=](sycl::id<1> idx) {
         data[idx] *= scale;
-    }).wait();
+    });
 }
 
 /// Apply in-place scaling to real data (Float32).
+/// Note: does NOT wait — caller must ensure completion before freeing buffers.
 void apply_scale_real_f32(sycl::queue& queue, float* data, int64_t numel, float scale) {
     if (scale == 1.0f) return;
     queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
         data[idx] *= scale;
-    }).wait();
+    });
 }
 
 /// Apply in-place scaling to real data (Float64).
+/// Note: does NOT wait — caller must ensure completion before freeing buffers.
 void apply_scale_real_f64(sycl::queue& queue, double* data, int64_t numel, double scale) {
     if (scale == 1.0) return;
     queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
         data[idx] *= scale;
-    }).wait();
+    });
 }
 
 } // anonymous namespace
@@ -148,7 +152,8 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
             queue.parallel_for(sycl::range<1>(total_reals), [=](sycl::id<1> idx) {
                 complex_buf[2 * idx] = in_ptr[idx];
                 complex_buf[2 * idx + 1] = 0.0f;
-            }).wait();
+            });
+            // No wait needed — in-order queue guarantees DFT sees completed gather
 
             // Create oneMKL DFT descriptor for batched 1D C2C
             dft::descriptor<dft::precision::SINGLE, dft::domain::COMPLEX> desc(signal_len);
@@ -162,7 +167,7 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
             desc.commit(queue);
 
             dft::compute_forward(desc, reinterpret_cast<std::complex<float>*>(complex_buf));
-            queue.wait();
+            // No wait needed — in-order queue guarantees subsequent ops see completed DFT
         } else {
             // General path: gather strided real data into contiguous complex buffer
             // Layout: transform t = b * inner_size + inner
@@ -177,7 +182,8 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                     int64_t in_idx = b * signal_len * inner_size + j * inner_size + inner;
                     complex_buf[2 * idx] = in_ptr[in_idx];
                     complex_buf[2 * idx + 1] = 0.0f;
-                }).wait();
+                });
+            // No wait needed — in-order queue guarantees DFT sees completed gather
 
             // Each transform is contiguous signal_len complex elements
             dft::descriptor<dft::precision::SINGLE, dft::domain::COMPLEX> desc(signal_len);
@@ -189,7 +195,7 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
             desc.commit(queue);
 
             dft::compute_forward(desc, reinterpret_cast<std::complex<float>*>(complex_buf));
-            queue.wait();
+            // No wait needed — in-order queue guarantees subsequent ops see completed DFT
         }
 
         // Apply normalization
@@ -237,7 +243,7 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
             queue.parallel_for(sycl::range<1>(total_reals), [=](sycl::id<1> idx) {
                 complex_buf[2 * idx] = in_ptr[idx];
                 complex_buf[2 * idx + 1] = 0.0;
-            }).wait();
+            });
 
             dft::descriptor<dft::precision::DOUBLE, dft::domain::COMPLEX> desc(signal_len);
             desc.set_value(dft::config_param::NUMBER_OF_TRANSFORMS, batch_size);
@@ -248,7 +254,6 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
             desc.commit(queue);
 
             dft::compute_forward(desc, reinterpret_cast<std::complex<double>*>(complex_buf));
-            queue.wait();
         } else {
             queue.parallel_for(sycl::range<1>(total_transforms * signal_len),
                 [=](sycl::id<1> flat_idx) {
@@ -260,7 +265,7 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                     int64_t in_idx = b * signal_len * inner_size + j * inner_size + inner;
                     complex_buf[2 * idx] = in_ptr[in_idx];
                     complex_buf[2 * idx + 1] = 0.0;
-                }).wait();
+                });
 
             dft::descriptor<dft::precision::DOUBLE, dft::domain::COMPLEX> desc(signal_len);
             desc.set_value(dft::config_param::NUMBER_OF_TRANSFORMS, total_transforms);
@@ -271,7 +276,6 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
             desc.commit(queue);
 
             dft::compute_forward(desc, reinterpret_cast<std::complex<double>*>(complex_buf));
-            queue.wait();
         }
 
         double norm_factor = get_norm_factor(signal_len, norm, true);
@@ -350,7 +354,7 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
         if (dim == ndim - 2 && inner_size == 1) {
             // Fast path: dim is second-to-last, last dim is 2 (complex)
             // Input layout: batch * signal_len * 2 — already contiguous per transform
-            queue.memcpy(complex_buf, in_ptr, complex_buf_floats * sizeof(float)).wait();
+            queue.memcpy(complex_buf, in_ptr, complex_buf_floats * sizeof(float));
         } else {
             queue.parallel_for(sycl::range<1>(total_transforms * signal_len),
                 [=](sycl::id<1> flat_idx) {
@@ -363,7 +367,7 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
                     int64_t in_idx = (b * signal_len * inner_size + j * inner_size + inner) * 2;
                     complex_buf[2 * idx] = in_ptr[in_idx];
                     complex_buf[2 * idx + 1] = in_ptr[in_idx + 1];
-                }).wait();
+                });
         }
 
         // Run inverse DFT
@@ -376,7 +380,6 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
         desc.commit(queue);
 
         dft::compute_backward(desc, reinterpret_cast<std::complex<float>*>(complex_buf));
-        queue.wait();
 
         // Apply normalization
         double norm_factor = get_norm_factor(signal_len, norm, false);
@@ -416,7 +419,7 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
         const double* in_ptr = get_data_ptr<const double>(input);
 
         if (dim == ndim - 2 && inner_size == 1) {
-            queue.memcpy(complex_buf, in_ptr, complex_buf_doubles * sizeof(double)).wait();
+            queue.memcpy(complex_buf, in_ptr, complex_buf_doubles * sizeof(double));
         } else {
             queue.parallel_for(sycl::range<1>(total_transforms * signal_len),
                 [=](sycl::id<1> flat_idx) {
@@ -428,7 +431,7 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
                     int64_t in_idx = (b * signal_len * inner_size + j * inner_size + inner) * 2;
                     complex_buf[2 * idx] = in_ptr[in_idx];
                     complex_buf[2 * idx + 1] = in_ptr[in_idx + 1];
-                }).wait();
+                });
         }
 
         dft::descriptor<dft::precision::DOUBLE, dft::domain::COMPLEX> desc(signal_len);
@@ -440,7 +443,6 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
         desc.commit(queue);
 
         dft::compute_backward(desc, reinterpret_cast<std::complex<double>*>(complex_buf));
-        queue.wait();
 
         double norm_factor = get_norm_factor(signal_len, norm, false);
         if (norm_factor != 1.0) {
@@ -521,7 +523,7 @@ auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
         // Gather real input into contiguous per-transform layout
         if (dim == ndim - 1 && inner_size == 1) {
-            queue.memcpy(real_buf, in_ptr, total_transforms * signal_len * sizeof(float)).wait();
+            queue.memcpy(real_buf, in_ptr, total_transforms * signal_len * sizeof(float));
         } else {
             queue.parallel_for(sycl::range<1>(total_transforms * signal_len),
                 [=](sycl::id<1> flat_idx) {
@@ -532,7 +534,7 @@ auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                     int64_t inner = t % inner_size;
                     int64_t in_idx = b * signal_len * inner_size + j * inner_size + inner;
                     real_buf[idx] = in_ptr[in_idx];
-                }).wait();
+                });
         }
 
         // oneMKL R2C descriptor
@@ -558,7 +560,6 @@ auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
         dft::compute_forward(desc, real_buf,
                              reinterpret_cast<std::complex<float>*>(complex_buf));
-        queue.wait();
 
         // Apply normalization
         double norm_factor = get_norm_factor(signal_len, norm, true);
@@ -601,7 +602,7 @@ auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
         const double* in_ptr = get_data_ptr<const double>(input);
 
         if (dim == ndim - 1 && inner_size == 1) {
-            queue.memcpy(real_buf, in_ptr, total_transforms * signal_len * sizeof(double)).wait();
+            queue.memcpy(real_buf, in_ptr, total_transforms * signal_len * sizeof(double));
         } else {
             queue.parallel_for(sycl::range<1>(total_transforms * signal_len),
                 [=](sycl::id<1> flat_idx) {
@@ -612,7 +613,7 @@ auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                     int64_t inner = t % inner_size;
                     int64_t in_idx = b * signal_len * inner_size + j * inner_size + inner;
                     real_buf[idx] = in_ptr[in_idx];
-                }).wait();
+                });
         }
 
         dft::descriptor<dft::precision::DOUBLE, dft::domain::REAL> desc(signal_len);
@@ -631,7 +632,6 @@ auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
         dft::compute_forward(desc, real_buf,
                              reinterpret_cast<std::complex<double>*>(complex_buf));
-        queue.wait();
 
         double norm_factor = get_norm_factor(signal_len, norm, true);
         if (norm_factor != 1.0) {
@@ -718,7 +718,7 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
         // Gather complex input into contiguous per-transform layout
         if (dim == ndim - 2 && inner_size == 1) {
             queue.memcpy(complex_buf, in_ptr,
-                         total_transforms * complex_len * 2 * sizeof(float)).wait();
+                         total_transforms * complex_len * 2 * sizeof(float));
         } else {
             queue.parallel_for(sycl::range<1>(total_transforms * complex_len),
                 [=](sycl::id<1> flat_idx) {
@@ -730,7 +730,7 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                     int64_t in_idx = (b * complex_len * inner_size + j * inner_size + inner) * 2;
                     complex_buf[2 * idx] = in_ptr[in_idx];
                     complex_buf[2 * idx + 1] = in_ptr[in_idx + 1];
-                }).wait();
+                });
         }
 
         // oneMKL C2R via backward transform with domain::REAL
@@ -755,7 +755,6 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
         dft::compute_backward(desc,
                               reinterpret_cast<std::complex<float>*>(complex_buf),
                               real_buf);
-        queue.wait();
 
         // Apply normalization
         double norm_factor = get_norm_factor(output_len, norm, false);
@@ -798,7 +797,7 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
         if (dim == ndim - 2 && inner_size == 1) {
             queue.memcpy(complex_buf, in_ptr,
-                         total_transforms * complex_len * 2 * sizeof(double)).wait();
+                         total_transforms * complex_len * 2 * sizeof(double));
         } else {
             queue.parallel_for(sycl::range<1>(total_transforms * complex_len),
                 [=](sycl::id<1> flat_idx) {
@@ -810,7 +809,7 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                     int64_t in_idx = (b * complex_len * inner_size + j * inner_size + inner) * 2;
                     complex_buf[2 * idx] = in_ptr[in_idx];
                     complex_buf[2 * idx + 1] = in_ptr[in_idx + 1];
-                }).wait();
+                });
         }
 
         dft::descriptor<dft::precision::DOUBLE, dft::domain::REAL> desc(output_len);
@@ -830,7 +829,6 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
         dft::compute_backward(desc,
                               reinterpret_cast<std::complex<double>*>(complex_buf),
                               real_buf);
-        queue.wait();
 
         double norm_factor = get_norm_factor(output_len, norm, false);
         if (norm_factor != 1.0) {

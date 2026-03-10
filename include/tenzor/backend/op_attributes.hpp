@@ -215,6 +215,10 @@ enum class AttrKey : uint16_t {
     FullMatrices,      // SVD: compute full U/Vt
     Upper,             // Cholesky: return upper triangular
 
+    // Random generation bounds
+    Low,               // Randint lower bound (inclusive)
+    High,              // Randint upper bound (exclusive)
+
     // Sentinel
     _Count
 };

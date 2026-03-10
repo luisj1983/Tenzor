@@ -1270,7 +1270,8 @@ auto take_kernel(const Tensor& input, const Tensor& indices, sycl::queue& queue)
 
         std::vector<uint8_t> in_host(input_numel * elem_size);
         std::vector<uint8_t> out_host(num_indices * elem_size);
-        queue.memcpy(in_host.data(), in_cont.data_ptr(), in_host.size()).wait();
+        queue.memcpy(in_host.data(), in_cont.data_ptr(), in_host.size());
+        // No wait — in-order queue guarantees next memcpy completes after this one
 
         // Read indices to host
         if (is_int64) {

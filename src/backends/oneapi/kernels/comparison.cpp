@@ -1,4 +1,5 @@
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/core/shape.hpp"
 #include <sycl/sycl.hpp>
 #include <stdexcept>
 
@@ -59,6 +60,23 @@ struct LeKernelBFloat16 {};
 struct GtKernelBFloat16 {};
 struct GeKernelBFloat16 {};
 
+// Broadcast comparison kernel name structs
+struct BroadcastEqFloat32 {}; struct BroadcastEqFloat64 {}; struct BroadcastEqInt32 {};
+struct BroadcastEqInt64 {};   struct BroadcastEqFloat16 {}; struct BroadcastEqBFloat16 {};
+struct BroadcastNeFloat32 {}; struct BroadcastNeFloat64 {}; struct BroadcastNeInt32 {};
+struct BroadcastNeInt64 {};   struct BroadcastNeFloat16 {}; struct BroadcastNeBFloat16 {};
+struct BroadcastLtFloat32 {}; struct BroadcastLtFloat64 {}; struct BroadcastLtInt32 {};
+struct BroadcastLtInt64 {};   struct BroadcastLtFloat16 {}; struct BroadcastLtBFloat16 {};
+struct BroadcastLeFloat32 {}; struct BroadcastLeFloat64 {}; struct BroadcastLeInt32 {};
+struct BroadcastLeInt64 {};   struct BroadcastLeFloat16 {}; struct BroadcastLeBFloat16 {};
+struct BroadcastGtFloat32 {}; struct BroadcastGtFloat64 {}; struct BroadcastGtInt32 {};
+struct BroadcastGtInt64 {};   struct BroadcastGtFloat16 {}; struct BroadcastGtBFloat16 {};
+struct BroadcastGeFloat32 {}; struct BroadcastGeFloat64 {}; struct BroadcastGeInt32 {};
+struct BroadcastGeInt64 {};   struct BroadcastGeFloat16 {}; struct BroadcastGeBFloat16 {};
+struct BroadcastEqBool {};    struct BroadcastNeBool {};
+struct BroadcastLtBool {};    struct BroadcastLeBool {};
+struct BroadcastGtBool {};    struct BroadcastGeBool {};
+
 // Helper function to get typed pointer from tensor
 template<typename T>
 inline auto get_data_ptr(const Tensor& t) -> T* {
@@ -85,6 +103,122 @@ inline uint16_t f32_to_bf16(float f32) {
 }
 
 // ============================================================================
+// Broadcasting Support for Comparisons
+// ============================================================================
+
+constexpr int MAX_BROADCAST_DIMS = 8;
+
+struct BroadcastInfo {
+    int64_t out_strides[MAX_BROADCAST_DIMS];
+    int64_t a_strides[MAX_BROADCAST_DIMS];
+    int64_t b_strides[MAX_BROADCAST_DIMS];
+    int ndim;
+    int64_t out_numel;
+};
+
+static auto compute_broadcast_info(
+    std::span<const int64_t> a_shape,
+    std::span<const int64_t> b_shape,
+    const std::vector<int64_t>& out_shape) -> BroadcastInfo {
+
+    BroadcastInfo info{};
+    info.ndim = static_cast<int>(out_shape.size());
+    info.out_numel = 1;
+    for (auto d : out_shape) info.out_numel *= d;
+
+    // Compute row-major strides for output
+    int64_t stride = 1;
+    for (int i = info.ndim - 1; i >= 0; --i) {
+        info.out_strides[i] = stride;
+        stride *= out_shape[i];
+    }
+
+    // Input strides: 0 for broadcast dims
+    auto compute_strides = [&](std::span<const int64_t> shape, int64_t* strides) {
+        int offset = info.ndim - static_cast<int>(shape.size());
+        int64_t s = 1;
+        for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i) {
+            strides[i + offset] = (shape[i] == 1) ? 0 : s;
+            s *= shape[i];
+        }
+        for (int i = 0; i < offset; ++i) strides[i] = 0;
+    };
+    compute_strides(a_shape, info.a_strides);
+    compute_strides(b_shape, info.b_strides);
+    return info;
+}
+
+// Generic broadcast comparison kernel
+template<typename T, typename KernelName, typename Op>
+static void sycl_broadcast_compare(
+    const Tensor& a, const Tensor& b, Tensor& output,
+    const BroadcastInfo& info, sycl::queue& queue, Op op) {
+
+    const T* a_ptr = get_data_ptr<const T>(a);
+    const T* b_ptr = get_data_ptr<const T>(b);
+    bool* out_ptr = get_data_ptr<bool>(output);
+
+    int ndim = info.ndim;
+    int64_t out_numel = info.out_numel;
+    int64_t os[MAX_BROADCAST_DIMS], as_[MAX_BROADCAST_DIMS], bs_[MAX_BROADCAST_DIMS];
+    for (int i = 0; i < ndim; ++i) {
+        os[i] = info.out_strides[i];
+        as_[i] = info.a_strides[i];
+        bs_[i] = info.b_strides[i];
+    }
+
+    queue.parallel_for<KernelName>(sycl::range<1>(out_numel), [=](sycl::id<1> gid) {
+        int64_t flat = gid[0];
+        int64_t a_idx = 0, b_idx = 0;
+        int64_t remaining = flat;
+        for (int d = 0; d < ndim; ++d) {
+            int64_t coord = remaining / os[d];
+            remaining %= os[d];
+            a_idx += coord * as_[d];
+            b_idx += coord * bs_[d];
+        }
+        out_ptr[gid] = op(a_ptr[a_idx], b_ptr[b_idx]);
+    });
+}
+
+// Dispatch broadcast comparison across dtypes
+// Returns true if handled on GPU, false for unsupported dtype
+template<typename F32K, typename F64K, typename I32K, typename I64K,
+         typename F16K, typename BF16K, typename BoolK, typename Op>
+static auto dispatch_broadcast_compare(
+    const Tensor& a, const Tensor& b, const BroadcastInfo& info,
+    const std::vector<int64_t>& out_shape, sycl::queue& queue, Op op) -> Tensor {
+
+    Tensor output(out_shape, DType::Bool, a.device());
+
+    if (a.dtype() == DType::Float32) {
+        sycl_broadcast_compare<float, F32K>(a, b, output, info, queue,
+            [op](float x, float y) { return op(x, y); });
+    } else if (a.dtype() == DType::Float64) {
+        sycl_broadcast_compare<double, F64K>(a, b, output, info, queue,
+            [op](double x, double y) { return op(x, y); });
+    } else if (a.dtype() == DType::Int32) {
+        sycl_broadcast_compare<int32_t, I32K>(a, b, output, info, queue,
+            [op](int32_t x, int32_t y) { return op(x, y); });
+    } else if (a.dtype() == DType::Int64) {
+        sycl_broadcast_compare<int64_t, I64K>(a, b, output, info, queue,
+            [op](int64_t x, int64_t y) { return op(x, y); });
+    } else if (a.dtype() == DType::Float16) {
+        sycl_broadcast_compare<sycl::half, F16K>(a, b, output, info, queue,
+            [op](sycl::half x, sycl::half y) { return op(x, y); });
+    } else if (a.dtype() == DType::BFloat16) {
+        sycl_broadcast_compare<uint16_t, BF16K>(a, b, output, info, queue,
+            [op](uint16_t x, uint16_t y) { return op(bf16_to_f32(x), bf16_to_f32(y)); });
+    } else if (a.dtype() == DType::Bool) {
+        sycl_broadcast_compare<bool, BoolK>(a, b, output, info, queue,
+            [op](bool x, bool y) { return op(x, y); });
+    } else {
+        throw std::runtime_error("Unsupported dtype for broadcast comparison");
+    }
+    return output;
+}
+
+// ============================================================================
 // Element-wise Equal (==)
 // ============================================================================
 
@@ -96,12 +230,14 @@ auto eq_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
     // Check if shapes match exactly
     bool same_shape = shapes_match(a_shape, b_shape);
 
-    // If shapes don't match, fall back to CPU for broadcasting
+    // GPU-side broadcasting for mismatched shapes
     if (!same_shape) {
-        auto a_cpu = a.to(Device::cpu());
-        auto b_cpu = b.to(Device::cpu());
-        auto result_cpu = tenzor::eq(a_cpu, b_cpu);
-        return result_cpu.to(a.device());
+        auto out_shape = broadcast_shapes(a_shape, b_shape);
+        auto info = compute_broadcast_info(a_shape, b_shape, out_shape);
+        return dispatch_broadcast_compare<
+            BroadcastEqFloat32, BroadcastEqFloat64, BroadcastEqInt32, BroadcastEqInt64,
+            BroadcastEqFloat16, BroadcastEqBFloat16, BroadcastEqBool>(
+            a, b, info, out_shape, queue, [](auto x, auto y) { return x == y; });
     }
 
     if (a.dtype() != b.dtype()) {
@@ -196,10 +332,12 @@ auto ne_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
     bool same_shape = shapes_match(a_shape, b_shape);
 
     if (!same_shape) {
-        auto a_cpu = a.to(Device::cpu());
-        auto b_cpu = b.to(Device::cpu());
-        auto result_cpu = tenzor::ne(a_cpu, b_cpu);
-        return result_cpu.to(a.device());
+        auto out_shape = broadcast_shapes(a_shape, b_shape);
+        auto info = compute_broadcast_info(a_shape, b_shape, out_shape);
+        return dispatch_broadcast_compare<
+            BroadcastNeFloat32, BroadcastNeFloat64, BroadcastNeInt32, BroadcastNeInt64,
+            BroadcastNeFloat16, BroadcastNeBFloat16, BroadcastNeBool>(
+            a, b, info, out_shape, queue, [](auto x, auto y) { return x != y; });
     }
 
     if (a.dtype() != b.dtype()) {
@@ -292,10 +430,12 @@ auto lt_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
     bool same_shape = shapes_match(a_shape, b_shape);
 
     if (!same_shape) {
-        auto a_cpu = a.to(Device::cpu());
-        auto b_cpu = b.to(Device::cpu());
-        auto result_cpu = tenzor::lt(a_cpu, b_cpu);
-        return result_cpu.to(a.device());
+        auto out_shape = broadcast_shapes(a_shape, b_shape);
+        auto info = compute_broadcast_info(a_shape, b_shape, out_shape);
+        return dispatch_broadcast_compare<
+            BroadcastLtFloat32, BroadcastLtFloat64, BroadcastLtInt32, BroadcastLtInt64,
+            BroadcastLtFloat16, BroadcastLtBFloat16, BroadcastLtBool>(
+            a, b, info, out_shape, queue, [](auto x, auto y) { return x < y; });
     }
 
     if (a.dtype() != b.dtype()) {
@@ -389,10 +529,12 @@ auto le_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
     bool same_shape = shapes_match(a_shape, b_shape);
 
     if (!same_shape) {
-        auto a_cpu = a.to(Device::cpu());
-        auto b_cpu = b.to(Device::cpu());
-        auto result_cpu = tenzor::le(a_cpu, b_cpu);
-        return result_cpu.to(a.device());
+        auto out_shape = broadcast_shapes(a_shape, b_shape);
+        auto info = compute_broadcast_info(a_shape, b_shape, out_shape);
+        return dispatch_broadcast_compare<
+            BroadcastLeFloat32, BroadcastLeFloat64, BroadcastLeInt32, BroadcastLeInt64,
+            BroadcastLeFloat16, BroadcastLeBFloat16, BroadcastLeBool>(
+            a, b, info, out_shape, queue, [](auto x, auto y) { return x <= y; });
     }
 
     if (a.dtype() != b.dtype()) {
@@ -486,10 +628,12 @@ auto gt_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
     bool same_shape = shapes_match(a_shape, b_shape);
 
     if (!same_shape) {
-        auto a_cpu = a.to(Device::cpu());
-        auto b_cpu = b.to(Device::cpu());
-        auto result_cpu = tenzor::gt(a_cpu, b_cpu);
-        return result_cpu.to(a.device());
+        auto out_shape = broadcast_shapes(a_shape, b_shape);
+        auto info = compute_broadcast_info(a_shape, b_shape, out_shape);
+        return dispatch_broadcast_compare<
+            BroadcastGtFloat32, BroadcastGtFloat64, BroadcastGtInt32, BroadcastGtInt64,
+            BroadcastGtFloat16, BroadcastGtBFloat16, BroadcastGtBool>(
+            a, b, info, out_shape, queue, [](auto x, auto y) { return x > y; });
     }
 
     if (a.dtype() != b.dtype()) {
@@ -583,10 +727,12 @@ auto ge_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
     bool same_shape = shapes_match(a_shape, b_shape);
 
     if (!same_shape) {
-        auto a_cpu = a.to(Device::cpu());
-        auto b_cpu = b.to(Device::cpu());
-        auto result_cpu = tenzor::ge(a_cpu, b_cpu);
-        return result_cpu.to(a.device());
+        auto out_shape = broadcast_shapes(a_shape, b_shape);
+        auto info = compute_broadcast_info(a_shape, b_shape, out_shape);
+        return dispatch_broadcast_compare<
+            BroadcastGeFloat32, BroadcastGeFloat64, BroadcastGeInt32, BroadcastGeInt64,
+            BroadcastGeFloat16, BroadcastGeBFloat16, BroadcastGeBool>(
+            a, b, info, out_shape, queue, [](auto x, auto y) { return x >= y; });
     }
 
     if (a.dtype() != b.dtype()) {

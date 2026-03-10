@@ -260,7 +260,8 @@ LSTM::LSTM(int64_t input_size, int64_t hidden_size, int64_t num_layers,
     }
 }
 
-auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& hx)
+auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& hx,
+                   const Tensor& lengths)
     -> std::pair<Variable, std::pair<Variable, Variable>> {
 
     auto input_shape = input.shape();
@@ -676,9 +677,26 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
             auto gates_ih_t = gates_ih_tensor.slice(0, t, t + 1).reshape({batch_size, 4 * hidden_size_});
 
             auto [h_next, c_next] = forward_cell->forward_with_precomputed_ih(gates_ih_t, forward_h, forward_c);
-            forward_h = h_next;
-            forward_c = c_next;
-            forward_outputs.push_back(h_next);
+
+            // Apply sequence length masking: preserve old state for padded positions
+            if (lengths.numel() > 0) {
+                // Create mask: (batch, 1) where mask[b] = (t < lengths[b]) ? 1 : 0
+                auto lengths_dev = lengths.to(input.device()).to(DType::Float32);
+                auto t_scalar = full({batch_size}, static_cast<float>(t), DType::Float32, input.device());
+                auto mask = gt(lengths_dev, t_scalar).to(input.dtype()).reshape({batch_size, 1});
+                auto one_minus_mask = full({batch_size, 1}, 1.0f, input.dtype(), input.device()) - mask;
+
+                forward_h = Variable(
+                    mask * h_next.tensor() + one_minus_mask * forward_h.tensor(),
+                    h_next.requires_grad() || forward_h.requires_grad());
+                forward_c = Variable(
+                    mask * c_next.tensor() + one_minus_mask * forward_c.tensor(),
+                    c_next.requires_grad() || forward_c.requires_grad());
+            } else {
+                forward_h = h_next;
+                forward_c = c_next;
+            }
+            forward_outputs.push_back(forward_h);
         }
 
         final_h_states.push_back(forward_h);
@@ -702,9 +720,25 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
                 auto gates_ih_t = gates_ih_bwd_tensor.slice(0, t, t + 1).reshape({batch_size, 4 * hidden_size_});
 
                 auto [h_next, c_next] = backward_cell->forward_with_precomputed_ih(gates_ih_t, backward_h, backward_c);
-                backward_h = h_next;
-                backward_c = c_next;
-                backward_outputs.push_back(h_next);
+
+                // Apply sequence length masking for backward direction
+                if (lengths.numel() > 0) {
+                    auto lengths_dev = lengths.to(input.device()).to(DType::Float32);
+                    auto t_scalar = full({batch_size}, static_cast<float>(t), DType::Float32, input.device());
+                    auto mask = gt(lengths_dev, t_scalar).to(input.dtype()).reshape({batch_size, 1});
+                    auto one_minus_mask = full({batch_size, 1}, 1.0f, input.dtype(), input.device()) - mask;
+
+                    backward_h = Variable(
+                        mask * h_next.tensor() + one_minus_mask * backward_h.tensor(),
+                        h_next.requires_grad() || backward_h.requires_grad());
+                    backward_c = Variable(
+                        mask * c_next.tensor() + one_minus_mask * backward_c.tensor(),
+                        c_next.requires_grad() || backward_c.requires_grad());
+                } else {
+                    backward_h = h_next;
+                    backward_c = c_next;
+                }
+                backward_outputs.push_back(backward_h);
             }
 
             std::reverse(backward_outputs.begin(), backward_outputs.end());

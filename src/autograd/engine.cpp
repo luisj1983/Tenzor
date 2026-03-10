@@ -17,6 +17,16 @@
 
 namespace tenzor {
 
+// RAII scope guard for exception-safe cleanup
+namespace {
+struct ScopeGuard {
+    std::function<void()> fn;
+    bool dismissed = false;
+    ~ScopeGuard() { if (!dismissed && fn) fn(); }
+    void dismiss() { dismissed = true; }
+};
+} // anonymous namespace
+
 // Check computed gradients for NaN/Inf when anomaly detection is enabled.
 // Zero overhead when disabled (thread-local bool early-return).
 static void check_for_anomaly(const std::vector<Tensor>& grads,
@@ -147,11 +157,15 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
         }
     };
 
+    // RAII guards for exception-safe cleanup
+    ScopeGuard accum_guard{[&]{ grad_accumulators_ = std::move(saved_accumulators); }};
+    ScopeGuard cleanup_guard{[&]{ clear_gradients(); cleanup_graph(); }};
+
     // Seed root gradient into accumulator so the root function is handled
     // uniformly — no fragile "empty accumulators = root" assumption.
     accumulate_grad(root.grad_fn().get(), root.grad().value());
 
-    try {
+    {
         // Execute backward in reverse topological order
         for (auto it = sorted.rbegin(); it != sorted.rend(); ++it) {
             // Check if shared_ptr is valid before dereferencing
@@ -333,17 +347,8 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                 }
             }
         }
-    } catch (...) {
-        clear_gradients();
-        cleanup_graph();
-        grad_accumulators_ = std::move(saved_accumulators);
-        throw;
     }
-
-    clear_gradients();
-    cleanup_graph();
-    // Restore outer accumulators for re-entrancy safety
-    grad_accumulators_ = std::move(saved_accumulators);
+    // ScopeGuards handle cleanup in both normal and exception paths
 }
 
 auto BackwardEngine::topological_sort(std::shared_ptr<Function> root)
@@ -513,7 +518,11 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
         }
     };
 
-    try {
+    // RAII guards for exception-safe cleanup
+    ScopeGuard accum_guard_multi{[&]{ grad_accumulators_ = std::move(saved_accumulators); }};
+    ScopeGuard cleanup_guard_multi{[&]{ clear_gradients(); cleanup_graph(); }};
+
+    {
         // Execute backward in reverse topological order
         for (auto it = sorted.rbegin(); it != sorted.rend(); ++it) {
             if (!*it) continue;
@@ -620,17 +629,8 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                 }
             }
         }
-    } catch (...) {
-        clear_gradients();
-        cleanup_graph();
-        grad_accumulators_ = std::move(saved_accumulators);
-        throw;
     }
-
-    clear_gradients();
-    cleanup_graph();
-    // Restore outer accumulators for re-entrancy safety
-    grad_accumulators_ = std::move(saved_accumulators);
+    // ScopeGuards handle cleanup in both normal and exception paths
 }
 
 // Thread-local engine -- each thread gets its own instance so concurrent

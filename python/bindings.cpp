@@ -25,6 +25,7 @@
 #include <tenzor/nn/optim/radam.hpp>
 #include <tenzor/nn/optim/lamb.hpp>
 #include <tenzor/nn/optim/sparse_adam.hpp>
+#include <tenzor/nn/init.hpp>
 #include <tenzor/nn/loss/losses.hpp>
 #include <tenzor/nn/loss/contrastive.hpp>
 #include <tenzor/nn/callbacks.hpp>
@@ -5947,6 +5948,50 @@ PYBIND11_MODULE(tenzor_core, m) {
                   py::arg("torch_tensor"), py::arg("device") = py::none(),
                   "Convert PyTorch tensor to Tenzor tensor");
     #endif
+
+    // =============================================================================
+    // nn.init - Weight Initialization
+    // =============================================================================
+    auto init = nn.def_submodule("init", "Weight initialization utilities");
+
+    py::enum_<tenzor::nn::init::FanMode>(init, "FanMode", "Fan mode for Kaiming initialization")
+        .value("fan_in", tenzor::nn::init::FanMode::FanIn, "Use fan_in")
+        .value("fan_out", tenzor::nn::init::FanMode::FanOut, "Use fan_out")
+        .export_values();
+
+    init.def("calculate_fan_in_and_fan_out", &tenzor::nn::init::calculate_fan_in_and_fan_out,
+             "Calculate fan_in and fan_out for a tensor", py::arg("tensor"));
+    init.def("calculate_gain", &tenzor::nn::init::calculate_gain,
+             "Calculate recommended gain for a nonlinearity",
+             py::arg("nonlinearity"), py::arg("param") = 0.01);
+    init.def("xavier_uniform_", &tenzor::nn::init::xavier_uniform_,
+             py::arg("tensor"), py::arg("gain") = 1.0, py::return_value_policy::reference);
+    init.def("xavier_normal_", &tenzor::nn::init::xavier_normal_,
+             py::arg("tensor"), py::arg("gain") = 1.0, py::return_value_policy::reference);
+    init.def("kaiming_uniform_", &tenzor::nn::init::kaiming_uniform_,
+             py::arg("tensor"), py::arg("a") = 0.0,
+             py::arg("mode") = tenzor::nn::init::FanMode::FanIn,
+             py::arg("nonlinearity") = "leaky_relu",
+             py::return_value_policy::reference);
+    init.def("kaiming_normal_", &tenzor::nn::init::kaiming_normal_,
+             py::arg("tensor"), py::arg("a") = 0.0,
+             py::arg("mode") = tenzor::nn::init::FanMode::FanIn,
+             py::arg("nonlinearity") = "leaky_relu",
+             py::return_value_policy::reference);
+    init.def("orthogonal_", &tenzor::nn::init::orthogonal_,
+             py::arg("tensor"), py::arg("gain") = 1.0, py::return_value_policy::reference);
+    init.def("uniform_", &tenzor::nn::init::uniform_,
+             py::arg("tensor"), py::arg("low") = 0.0, py::arg("high") = 1.0,
+             py::return_value_policy::reference);
+    init.def("normal_", &tenzor::nn::init::normal_,
+             py::arg("tensor"), py::arg("mean") = 0.0, py::arg("std") = 1.0,
+             py::return_value_policy::reference);
+    init.def("constant_", &tenzor::nn::init::constant_,
+             py::arg("tensor"), py::arg("value"), py::return_value_policy::reference);
+    init.def("zeros_", &tenzor::nn::init::zeros_,
+             py::arg("tensor"), py::return_value_policy::reference);
+    init.def("ones_", &tenzor::nn::init::ones_,
+             py::arg("tensor"), py::return_value_policy::reference);
 
     // Data loading utilities
     auto data_mod = m.def_submodule("data", "Data loading and dataset utilities");

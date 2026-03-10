@@ -152,6 +152,9 @@ auto Adam::state_dict() const -> std::unordered_map<std::string, Tensor> {
     state["weight_decay"] = Tensor({1}, DType::Float64, Device::cpu());
     state["weight_decay"].data<double>()[0] = weight_decay_;
 
+    state["amsgrad"] = Tensor({1}, DType::Int64, Device::cpu());
+    state["amsgrad"].data<int64_t>()[0] = amsgrad_ ? 1 : 0;
+
     // Save momentum buffers
     for (size_t i = 0; i < exp_avg_.size(); ++i) {
         state["exp_avg_" + std::to_string(i)] = exp_avg_[i].clone();
@@ -190,6 +193,10 @@ auto Adam::load_state_dict(const std::unordered_map<std::string, Tensor>& state)
 
     if (state.count("weight_decay")) {
         weight_decay_ = state.at("weight_decay").data<double>()[0];
+    }
+
+    if (state.count("amsgrad")) {
+        amsgrad_ = state.at("amsgrad").data<int64_t>()[0] != 0;
     }
 
     // Validate momentum buffer counts match current parameter count
@@ -366,6 +373,9 @@ auto AdamW::state_dict() const -> std::unordered_map<std::string, Tensor> {
     state["weight_decay"] = Tensor({1}, DType::Float64, Device::cpu());
     state["weight_decay"].data<double>()[0] = weight_decay_;
 
+    state["amsgrad"] = Tensor({1}, DType::Int64, Device::cpu());
+    state["amsgrad"].data<int64_t>()[0] = amsgrad_ ? 1 : 0;
+
     // Save momentum buffers
     for (size_t i = 0; i < exp_avg_.size(); ++i) {
         state["exp_avg_" + std::to_string(i)] = exp_avg_[i].clone();
@@ -404,6 +414,10 @@ auto AdamW::load_state_dict(const std::unordered_map<std::string, Tensor>& state
 
     if (state.count("weight_decay")) {
         weight_decay_ = state.at("weight_decay").data<double>()[0];
+    }
+
+    if (state.count("amsgrad")) {
+        amsgrad_ = state.at("amsgrad").data<int64_t>()[0] != 0;
     }
 
     // Load momentum buffers

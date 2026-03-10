@@ -475,7 +475,19 @@ auto randint(int64_t low, int64_t high, std::vector<int64_t> shape, DType dtype,
         throw std::invalid_argument("randint: low must be less than high");
     }
 
-    // Generate on CPU, transfer to target device if needed
+    // Use OpId dispatch for non-CPU devices
+    if (device.type != Device::Type::CPU) {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Start, static_cast<int64_t>(low));
+        attrs.set(AttrKey::End, static_cast<int64_t>(high));
+        attrs.set(AttrKey::Shape, shape_to_string(shape));
+        attrs.set(AttrKey::Dtype, dtype_to_string(dtype));
+        attrs.set(AttrKey::Device, static_cast<int64_t>(device.index));
+
+        return dispatch_to_device(OpId::Randint, device.type, {}, attrs)[0];
+    }
+
+    // CPU path: generate directly
     auto tensor = Tensor::empty_uninitialized(std::move(shape), dtype, Device::cpu());
     if (!tensor.impl() || !tensor.storage()) return tensor;
 
@@ -526,7 +538,7 @@ auto randint(int64_t low, int64_t high, std::vector<int64_t> shape, DType dtype,
         default:
             throw std::runtime_error("Unsupported dtype for randint() - only integer types are supported");
     }
-    return device.type != Device::Type::CPU ? tensor.to(device) : tensor;
+    return tensor;
 }
 
 auto arange(double start, double end, double step, DType dtype, Device device) -> Tensor {

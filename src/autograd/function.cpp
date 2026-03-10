@@ -1172,6 +1172,210 @@ auto MaxBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     return {Variable(result[0], grad_outputs[0].requires_grad())};
 }
 
+// MedianBackward implementation
+auto MedianBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+    int64_t dim = dim_.value_or(-1);
+    auto [values, indices] = ::tenzor::median(inputs[0].tensor(), dim, keepdim_);
+    save_for_backward({inputs[0].tensor(), values});
+    return {Variable(values, true)};
+}
+
+auto MedianBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    const auto& input = saved_tensors_[0];
+    const auto& output = saved_tensors_[1];
+    const auto& grad_output = grad_outputs[0];
+
+    TENZOR_CHECK_SHAPE(input.numel() > 0,
+        "MedianBackward: cannot compute gradient of median over empty tensor");
+
+    auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+
+    if (!dim_.has_value()) {
+        // Global median: gradient flows only to the median element
+        auto output_reshaped = output;
+        if (output.ndim() == 0) {
+            std::vector<int64_t> ones_shape(input_shape_vec.size(), 1);
+            output_reshaped = reshape(output, ones_shape);
+        }
+        auto output_expanded = expand(output_reshaped, input_shape_vec);
+
+        // Create mask where input == median value (within epsilon)
+        auto diff = sub(input, output_expanded);
+        auto abs_diff = abs(diff);
+        double eps_val;
+        switch (input.dtype()) {
+            case DType::Float64:  eps_val = 1e-12; break;
+            case DType::Float16:
+            case DType::BFloat16: eps_val = 1e-3; break;
+            default:              eps_val = 1e-7; break;
+        }
+        auto epsilon = full(input_shape_vec, eps_val, input.dtype(), input.device());
+        auto mask_bool = lt(abs_diff, epsilon);
+        auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
+        auto zeros_tensor = zeros(input_shape_vec, input.dtype(), input.device());
+        auto mask = where(mask_bool, ones_tensor, zeros_tensor);
+
+        // Normalize mask by tie count so gradient is split among tied elements
+        auto tie_count = sum(mask);
+        mask = div(mask, tie_count);
+
+        // Broadcast grad_output to input shape
+        auto grad_reshaped = grad_output;
+        if (grad_output.ndim() == 0) {
+            std::vector<int64_t> ones_shape(input_shape_vec.size(), 1);
+            grad_reshaped = reshape(grad_output, ones_shape);
+        }
+        auto grad_broadcasted = expand(grad_reshaped, input_shape_vec);
+
+        return {mul(grad_broadcasted, mask)};
+    } else {
+        // Dimension-specific median
+        int64_t dim = dim_.value();
+        if (dim < 0) dim += input.shape().size();
+
+        auto grad = grad_output;
+        auto out = output;
+
+        if (!keepdim_) {
+            grad = unsqueeze(grad, dim);
+            out = unsqueeze(out, dim);
+        }
+
+        auto out_expanded = expand(out, input_shape_vec);
+        auto grad_expanded = expand(grad, input_shape_vec);
+
+        // Create mask where input == median value
+        auto diff = sub(input, out_expanded);
+        auto abs_diff = abs(diff);
+
+        double eps_val2;
+        switch (input.dtype()) {
+            case DType::Float64:  eps_val2 = 1e-12; break;
+            case DType::Float16:
+            case DType::BFloat16: eps_val2 = 1e-3; break;
+            default:              eps_val2 = 1e-7; break;
+        }
+        auto epsilon = full(input_shape_vec, eps_val2, input.dtype(), input.device());
+        auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
+        auto scaled_diff = div(abs_diff, epsilon);
+        auto clamped = clamp(scaled_diff, 0.0f, 1.0f);
+        auto mask = sub(ones_tensor, clamped);
+
+        // Normalize mask by tie count along dim
+        auto tie_count = sum(mask, dim, /*keepdim=*/true);
+        mask = div(mask, tie_count);
+
+        return {mul(grad_expanded, mask)};
+    }
+}
+
+auto MedianBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    auto result = backward({grad_outputs[0].tensor()});
+    return {Variable(result[0], grad_outputs[0].requires_grad())};
+}
+
+// ModeBackward implementation
+auto ModeBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+    int64_t dim = dim_.value_or(-1);
+    auto [values, indices] = ::tenzor::mode(inputs[0].tensor(), dim, keepdim_);
+    save_for_backward({inputs[0].tensor(), values});
+    return {Variable(values, true)};
+}
+
+auto ModeBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    const auto& input = saved_tensors_[0];
+    const auto& output = saved_tensors_[1];
+    const auto& grad_output = grad_outputs[0];
+
+    TENZOR_CHECK_SHAPE(input.numel() > 0,
+        "ModeBackward: cannot compute gradient of mode over empty tensor");
+
+    auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+
+    if (!dim_.has_value()) {
+        // Global mode: gradient flows only to the mode element(s)
+        auto output_reshaped = output;
+        if (output.ndim() == 0) {
+            std::vector<int64_t> ones_shape(input_shape_vec.size(), 1);
+            output_reshaped = reshape(output, ones_shape);
+        }
+        auto output_expanded = expand(output_reshaped, input_shape_vec);
+
+        // Create mask where input == mode value (within epsilon)
+        auto diff = sub(input, output_expanded);
+        auto abs_diff = abs(diff);
+        double eps_val;
+        switch (input.dtype()) {
+            case DType::Float64:  eps_val = 1e-12; break;
+            case DType::Float16:
+            case DType::BFloat16: eps_val = 1e-3; break;
+            default:              eps_val = 1e-7; break;
+        }
+        auto epsilon = full(input_shape_vec, eps_val, input.dtype(), input.device());
+        auto mask_bool = lt(abs_diff, epsilon);
+        auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
+        auto zeros_tensor = zeros(input_shape_vec, input.dtype(), input.device());
+        auto mask = where(mask_bool, ones_tensor, zeros_tensor);
+
+        // Normalize mask by tie count so gradient is split among tied elements
+        auto tie_count = sum(mask);
+        mask = div(mask, tie_count);
+
+        // Broadcast grad_output to input shape
+        auto grad_reshaped = grad_output;
+        if (grad_output.ndim() == 0) {
+            std::vector<int64_t> ones_shape(input_shape_vec.size(), 1);
+            grad_reshaped = reshape(grad_output, ones_shape);
+        }
+        auto grad_broadcasted = expand(grad_reshaped, input_shape_vec);
+
+        return {mul(grad_broadcasted, mask)};
+    } else {
+        // Dimension-specific mode
+        int64_t dim = dim_.value();
+        if (dim < 0) dim += input.shape().size();
+
+        auto grad = grad_output;
+        auto out = output;
+
+        if (!keepdim_) {
+            grad = unsqueeze(grad, dim);
+            out = unsqueeze(out, dim);
+        }
+
+        auto out_expanded = expand(out, input_shape_vec);
+        auto grad_expanded = expand(grad, input_shape_vec);
+
+        // Create mask where input == mode value
+        auto diff = sub(input, out_expanded);
+        auto abs_diff = abs(diff);
+
+        double eps_val2;
+        switch (input.dtype()) {
+            case DType::Float64:  eps_val2 = 1e-12; break;
+            case DType::Float16:
+            case DType::BFloat16: eps_val2 = 1e-3; break;
+            default:              eps_val2 = 1e-7; break;
+        }
+        auto epsilon = full(input_shape_vec, eps_val2, input.dtype(), input.device());
+        auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
+        auto scaled_diff = div(abs_diff, epsilon);
+        auto clamped = clamp(scaled_diff, 0.0f, 1.0f);
+        auto mask = sub(ones_tensor, clamped);
+
+        // Normalize mask by tie count along dim
+        auto tie_count = sum(mask, dim, /*keepdim=*/true);
+        mask = div(mask, tie_count);
+
+        return {mul(grad_expanded, mask)};
+    }
+}
+
+auto ModeBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    auto result = backward({grad_outputs[0].tensor()});
+    return {Variable(result[0], grad_outputs[0].requires_grad())};
+}
+
 // ReshapeBackward implementation
 auto ReshapeBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     throw std::runtime_error("ReshapeBackward::forward should not be called");

@@ -2106,5 +2106,175 @@ auto all_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
     return output;
 }
 
+// ============================================================================
+// LogSumExp - Numerically stable log(sum(exp(x)))
+// ============================================================================
+
+struct LogSumExpKernelFloat32Max {};
+struct LogSumExpKernelFloat32SumExp {};
+struct LogSumExpKernelFloat64Max {};
+struct LogSumExpKernelFloat64SumExp {};
+
+auto logsumexp_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor {
+    // Ensure input is contiguous for direct memory access
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+
+    auto shape = in_cont.shape();
+    std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("Dimension " + std::to_string(dim) +
+            " out of range for tensor with " + std::to_string(ndim) + " dimensions");
+    }
+
+    int64_t dim_size = shape[dim];
+    int64_t outer = 1, inner = 1;
+    for (int64_t i = 0; i < dim; ++i) outer *= shape[i];
+    for (int64_t i = dim + 1; i < ndim; ++i) inner *= shape[i];
+
+    // Output shape with reduced dimension
+    auto out_shape = compute_reduction_shape(shape_vec, dim, keepdim);
+    int64_t out_numel = outer * inner;
+    Tensor output(out_shape, in_cont.dtype(), in_cont.device());
+
+    if (in_cont.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+
+        // Step 1: Find max along dim
+        Tensor max_buf({out_numel}, DType::Float32, in_cont.device());
+        float* max_ptr = get_data_ptr<float>(max_buf);
+
+        queue.parallel_for<LogSumExpKernelFloat32Max>(sycl::range<1>(out_numel), [=](sycl::id<1> idx) {
+            int64_t o = idx[0] / inner;
+            int64_t i = idx[0] % inner;
+            float m = -std::numeric_limits<float>::infinity();
+            for (int64_t d = 0; d < dim_size; ++d) {
+                float val = in_ptr[(o * dim_size + d) * inner + i];
+                m = sycl::fmax(m, val);
+            }
+            max_ptr[idx] = m;
+        });
+
+        // Step 2: sum(exp(x - max)) and compute log(...) + max
+        queue.parallel_for<LogSumExpKernelFloat32SumExp>(sycl::range<1>(out_numel), [=](sycl::id<1> idx) {
+            int64_t o = idx[0] / inner;
+            int64_t i = idx[0] % inner;
+            float m = max_ptr[idx];
+            // Handle inf: if max is +/-inf, result should be the same inf
+            if (sycl::isinf(m)) {
+                out_ptr[idx] = m;
+                return;
+            }
+            float sum = 0.0f;
+            for (int64_t d = 0; d < dim_size; ++d) {
+                sum += sycl::exp(in_ptr[(o * dim_size + d) * inner + i] - m);
+            }
+            out_ptr[idx] = sycl::log(sum) + m;
+        });
+    } else if (in_cont.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+
+        Tensor max_buf({out_numel}, DType::Float64, in_cont.device());
+        double* max_ptr = get_data_ptr<double>(max_buf);
+
+        queue.parallel_for<LogSumExpKernelFloat64Max>(sycl::range<1>(out_numel), [=](sycl::id<1> idx) {
+            int64_t o = idx[0] / inner;
+            int64_t i = idx[0] % inner;
+            double m = -std::numeric_limits<double>::infinity();
+            for (int64_t d = 0; d < dim_size; ++d) {
+                double val = in_ptr[(o * dim_size + d) * inner + i];
+                m = sycl::fmax(m, val);
+            }
+            max_ptr[idx] = m;
+        });
+
+        queue.parallel_for<LogSumExpKernelFloat64SumExp>(sycl::range<1>(out_numel), [=](sycl::id<1> idx) {
+            int64_t o = idx[0] / inner;
+            int64_t i = idx[0] % inner;
+            double m = max_ptr[idx];
+            if (sycl::isinf(m)) {
+                out_ptr[idx] = m;
+                return;
+            }
+            double sum = 0.0;
+            for (int64_t d = 0; d < dim_size; ++d) {
+                sum += sycl::exp(in_ptr[(o * dim_size + d) * inner + i] - m);
+            }
+            out_ptr[idx] = sycl::log(sum) + m;
+        });
+    } else if (in_cont.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        Tensor max_buf({out_numel}, DType::Float32, in_cont.device());
+        float* max_ptr = get_data_ptr<float>(max_buf);
+
+        queue.parallel_for(sycl::range<1>(out_numel), [=](sycl::id<1> idx) {
+            int64_t o = idx[0] / inner;
+            int64_t i = idx[0] % inner;
+            float m = -std::numeric_limits<float>::infinity();
+            for (int64_t d = 0; d < dim_size; ++d) {
+                float val = static_cast<float>(in_ptr[(o * dim_size + d) * inner + i]);
+                m = sycl::fmax(m, val);
+            }
+            max_ptr[idx] = m;
+        });
+
+        queue.parallel_for(sycl::range<1>(out_numel), [=](sycl::id<1> idx) {
+            int64_t o = idx[0] / inner;
+            int64_t i = idx[0] % inner;
+            float m = max_ptr[idx];
+            if (sycl::isinf(m)) {
+                out_ptr[idx] = sycl::half(m);
+                return;
+            }
+            float sum = 0.0f;
+            for (int64_t d = 0; d < dim_size; ++d) {
+                sum += sycl::exp(static_cast<float>(in_ptr[(o * dim_size + d) * inner + i]) - m);
+            }
+            out_ptr[idx] = sycl::half(sycl::log(sum) + m);
+        });
+    } else if (in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+
+        Tensor max_buf({out_numel}, DType::Float32, in_cont.device());
+        float* max_ptr = get_data_ptr<float>(max_buf);
+
+        queue.parallel_for(sycl::range<1>(out_numel), [=](sycl::id<1> idx) {
+            int64_t o = idx[0] / inner;
+            int64_t i = idx[0] % inner;
+            float m = -std::numeric_limits<float>::infinity();
+            for (int64_t d = 0; d < dim_size; ++d) {
+                float val = bf16_to_f32(in_ptr[(o * dim_size + d) * inner + i]);
+                m = sycl::fmax(m, val);
+            }
+            max_ptr[idx] = m;
+        });
+
+        queue.parallel_for(sycl::range<1>(out_numel), [=](sycl::id<1> idx) {
+            int64_t o = idx[0] / inner;
+            int64_t i = idx[0] % inner;
+            float m = max_ptr[idx];
+            if (sycl::isinf(m)) {
+                out_ptr[idx] = f32_to_bf16(m);
+                return;
+            }
+            float sum = 0.0f;
+            for (int64_t d = 0; d < dim_size; ++d) {
+                sum += sycl::exp(bf16_to_f32(in_ptr[(o * dim_size + d) * inner + i]) - m);
+            }
+            out_ptr[idx] = f32_to_bf16(sycl::log(sum) + m);
+        });
+    } else {
+        throw std::runtime_error("logsumexp_kernel: unsupported dtype");
+    }
+
+    return output;
+}
+
 } // namespace oneapi
 } // namespace tenzor

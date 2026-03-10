@@ -87,6 +87,44 @@ auto max(const Variable& input,
          std::optional<int64_t> dim = std::nullopt,
          bool keepdim = false) -> Variable;
 
+/**
+ * @brief Median reduction with gradient tracking.
+ *
+ * Computes median of tensor elements along specified dimension.
+ * Gradients flow only to median elements during backpropagation.
+ *
+ * @param input Input variable
+ * @param dim Optional dimension to reduce (nullopt = all dimensions)
+ * @param keepdim If true, keep reduced dimension with size 1
+ * @return Variable containing median values with gradient function
+ *
+ * @note If multiple elements are tied for median, gradient is distributed.
+ *
+ * @see MedianBackward for gradient implementation
+ */
+auto median(const Variable& input,
+            std::optional<int64_t> dim = std::nullopt,
+            bool keepdim = false) -> Variable;
+
+/**
+ * @brief Mode reduction with gradient tracking.
+ *
+ * Computes mode (most frequent value) of tensor elements along specified dimension.
+ * Gradients flow only to mode elements during backpropagation.
+ *
+ * @param input Input variable
+ * @param dim Optional dimension to reduce (nullopt = all dimensions)
+ * @param keepdim If true, keep reduced dimension with size 1
+ * @return Variable containing mode values with gradient function
+ *
+ * @note If multiple elements are tied for mode, gradient is distributed.
+ *
+ * @see ModeBackward for gradient implementation
+ */
+auto mode(const Variable& input,
+          std::optional<int64_t> dim = std::nullopt,
+          bool keepdim = false) -> Variable;
+
 // ============================================================================
 // Element-wise Mathematical Operations
 // ============================================================================

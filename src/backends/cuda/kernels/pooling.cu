@@ -40,10 +40,10 @@ static inline int clamp_grid(int64_t blocks) {
     return static_cast<int>(clamped > 0 ? clamped : 1);
 }
 
-static inline Tensor create_zeros_cuda(const std::vector<int64_t>& shape, DType dtype, Device device) {
+static inline Tensor create_zeros_cuda(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream = nullptr) {
     Tensor t(shape, dtype, device);
     size_t bytes = t.numel() * dtype_size(dtype);
-    cudaMemset(t.data_ptr(), 0, bytes);
+    cudaMemsetAsync(t.data_ptr(), 0, bytes, stream);
     return t;
 }
 
@@ -287,7 +287,7 @@ auto maxpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
     int64_t total_in = N * C * H * W;
 
     if (grad_output.dtype() == DType::Float32) {
-        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float32, grad_output.device());
+        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float32, grad_output.device(), stream);
         auto [grid_out, block_out] = optimal_launch_config(maxpool2d_backward_f32, total_out);
         maxpool2d_backward_f32<<<grid_out, block_out, 0, stream>>>(
             grad_output.data<float>(), indices.data<int64_t>(), grad_input.data<float>(),
@@ -295,7 +295,7 @@ auto maxpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
         CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float64) {
-        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float64, grad_output.device());
+        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float64, grad_output.device(), stream);
         auto [grid_out, block_out] = optimal_launch_config(maxpool2d_backward_f64, total_out);
         maxpool2d_backward_f64<<<grid_out, block_out, 0, stream>>>(
             grad_output.data<double>(), indices.data<int64_t>(), grad_input.data<double>(),
@@ -304,7 +304,7 @@ auto maxpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
         return grad_input;
     } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
         // Accumulate in float32 then convert back
-        Tensor grad_f32 = create_zeros_cuda(input_shape, DType::Float32, grad_output.device());
+        Tensor grad_f32 = create_zeros_cuda(input_shape, DType::Float32, grad_output.device(), stream);
         Tensor go_f32({N, C, H_out, W_out}, DType::Float32, grad_output.device());
 
         // Convert grad_output to float32
@@ -554,7 +554,7 @@ auto avgpool2d_backward_kernel(const Tensor& grad_output,
     int64_t total_in = N * C * H * W;
 
     if (grad_output.dtype() == DType::Float32) {
-        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float32, grad_output.device());
+        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float32, grad_output.device(), stream);
         auto [grid_out, block_out] = optimal_launch_config(avgpool2d_backward_f32, total_out);
         avgpool2d_backward_f32<<<grid_out, block_out, 0, stream>>>(
             grad_output.data<float>(), grad_input.data<float>(),
@@ -562,7 +562,7 @@ auto avgpool2d_backward_kernel(const Tensor& grad_output,
         CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float64) {
-        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float64, grad_output.device());
+        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float64, grad_output.device(), stream);
         auto [grid_out, block_out] = optimal_launch_config(avgpool2d_backward_f64, total_out);
         avgpool2d_backward_f64<<<grid_out, block_out, 0, stream>>>(
             grad_output.data<double>(), grad_input.data<double>(),
@@ -571,7 +571,7 @@ auto avgpool2d_backward_kernel(const Tensor& grad_output,
         return grad_input;
     } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
         // Accumulate in float32 then convert back
-        Tensor grad_f32 = create_zeros_cuda(input_shape, DType::Float32, grad_output.device());
+        Tensor grad_f32 = create_zeros_cuda(input_shape, DType::Float32, grad_output.device(), stream);
         Tensor go_f32({N, C, H_out, W_out}, DType::Float32, grad_output.device());
 
         if (grad_output.dtype() == DType::Float16) {
@@ -809,7 +809,7 @@ auto maxpool1d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
     int64_t total_in = N * C * L;
 
     if (grad_output.dtype() == DType::Float32) {
-        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float32, grad_output.device());
+        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float32, grad_output.device(), stream);
         auto [grid_out, block_out] = optimal_launch_config(maxpool1d_backward_f32, total_out);
         maxpool1d_backward_f32<<<grid_out, block_out, 0, stream>>>(
             grad_output.data<float>(), indices.data<int64_t>(), grad_input.data<float>(),
@@ -817,7 +817,7 @@ auto maxpool1d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
         CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float64) {
-        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float64, grad_output.device());
+        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float64, grad_output.device(), stream);
         auto [grid_out, block_out] = optimal_launch_config(maxpool1d_backward_f64, total_out);
         maxpool1d_backward_f64<<<grid_out, block_out, 0, stream>>>(
             grad_output.data<double>(), indices.data<int64_t>(), grad_input.data<double>(),
@@ -825,7 +825,7 @@ auto maxpool1d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
         CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
-        Tensor grad_f32 = create_zeros_cuda(input_shape, DType::Float32, grad_output.device());
+        Tensor grad_f32 = create_zeros_cuda(input_shape, DType::Float32, grad_output.device(), stream);
         Tensor go_f32({N, C, L_out}, DType::Float32, grad_output.device());
 
         if (grad_output.dtype() == DType::Float16) {
@@ -1043,7 +1043,7 @@ auto avgpool1d_backward_kernel(const Tensor& grad_output,
     int64_t total_in = N * C * L;
 
     if (grad_output.dtype() == DType::Float32) {
-        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float32, grad_output.device());
+        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float32, grad_output.device(), stream);
         auto [grid_out, block_out] = optimal_launch_config(avgpool1d_backward_f32, total_out);
         avgpool1d_backward_f32<<<grid_out, block_out, 0, stream>>>(
             grad_output.data<float>(), grad_input.data<float>(),
@@ -1051,7 +1051,7 @@ auto avgpool1d_backward_kernel(const Tensor& grad_output,
         CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float64) {
-        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float64, grad_output.device());
+        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float64, grad_output.device(), stream);
         auto [grid_out, block_out] = optimal_launch_config(avgpool1d_backward_f64, total_out);
         avgpool1d_backward_f64<<<grid_out, block_out, 0, stream>>>(
             grad_output.data<double>(), grad_input.data<double>(),
@@ -1059,7 +1059,7 @@ auto avgpool1d_backward_kernel(const Tensor& grad_output,
         CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
-        Tensor grad_f32 = create_zeros_cuda(input_shape, DType::Float32, grad_output.device());
+        Tensor grad_f32 = create_zeros_cuda(input_shape, DType::Float32, grad_output.device(), stream);
         Tensor go_f32({N, C, L_out}, DType::Float32, grad_output.device());
 
         if (grad_output.dtype() == DType::Float16) {
@@ -1201,7 +1201,7 @@ auto adaptive_maxpool1d_backward(const Tensor& grad_output, const Tensor& indice
     int64_t total_in = N * C * L;
 
     if (grad_output.dtype() == DType::Float32) {
-        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float32, grad_output.device());
+        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float32, grad_output.device(), stream);
         auto [grid, block] = optimal_launch_config(maxpool1d_backward_f32, total_out);
         maxpool1d_backward_f32<<<grid, block, 0, stream>>>(
             grad_output.data<float>(), indices.data<int64_t>(), grad_input.data<float>(),
@@ -1209,7 +1209,7 @@ auto adaptive_maxpool1d_backward(const Tensor& grad_output, const Tensor& indice
         CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float64) {
-        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float64, grad_output.device());
+        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float64, grad_output.device(), stream);
         auto [grid, block] = optimal_launch_config(maxpool1d_backward_f64, total_out);
         maxpool1d_backward_f64<<<grid, block, 0, stream>>>(
             grad_output.data<double>(), indices.data<int64_t>(), grad_input.data<double>(),
@@ -1217,7 +1217,7 @@ auto adaptive_maxpool1d_backward(const Tensor& grad_output, const Tensor& indice
         CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
-        Tensor grad_f32 = create_zeros_cuda(input_shape, DType::Float32, grad_output.device());
+        Tensor grad_f32 = create_zeros_cuda(input_shape, DType::Float32, grad_output.device(), stream);
         Tensor go_f32({N, C, L_out}, DType::Float32, grad_output.device());
 
         if (grad_output.dtype() == DType::Float16) {
@@ -1374,7 +1374,7 @@ auto adaptive_avgpool1d_backward(const Tensor& grad_output,
     int64_t total_in = N * C * L_in;
 
     if (grad_output.dtype() == DType::Float32) {
-        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float32, grad_output.device());
+        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float32, grad_output.device(), stream);
         auto [grid, block] = optimal_launch_config(adaptive_avgpool1d_backward_impl<float>, total_out);
         adaptive_avgpool1d_backward_impl<float><<<grid, block, 0, stream>>>(
             grad_output.data<float>(), grad_input.data<float>(),
@@ -1383,7 +1383,7 @@ auto adaptive_avgpool1d_backward(const Tensor& grad_output,
         return grad_input;
     } else if (grad_output.dtype() == DType::Float64) {
         // Float64: accumulate in float32 then convert (atomicAdd(double*) is slow)
-        Tensor grad_f32 = create_zeros_cuda(input_shape, DType::Float32, grad_output.device());
+        Tensor grad_f32 = create_zeros_cuda(input_shape, DType::Float32, grad_output.device(), stream);
         Tensor go_f32({N, C, L_out}, DType::Float32, grad_output.device());
 
         auto [grid_conv, block_conv] = optimal_launch_config(convert_to_f32<double>, total_out);
@@ -1404,7 +1404,7 @@ auto adaptive_avgpool1d_backward(const Tensor& grad_output,
         CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
-        Tensor grad_f32 = create_zeros_cuda(input_shape, DType::Float32, grad_output.device());
+        Tensor grad_f32 = create_zeros_cuda(input_shape, DType::Float32, grad_output.device(), stream);
         Tensor go_f32({N, C, L_out}, DType::Float32, grad_output.device());
 
         if (grad_output.dtype() == DType::Float16) {
@@ -1662,7 +1662,7 @@ auto maxpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
     int64_t total_in = N * C * D * H * W;
 
     if (grad_output.dtype() == DType::Float32) {
-        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float32, grad_output.device());
+        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float32, grad_output.device(), stream);
         auto [grid, block] = optimal_launch_config(maxpool3d_backward_f32, total_out);
         maxpool3d_backward_f32<<<grid, block, 0, stream>>>(
             grad_output.data<float>(), indices.data<int64_t>(), grad_input.data<float>(),
@@ -1670,7 +1670,7 @@ auto maxpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
         CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float64) {
-        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float64, grad_output.device());
+        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float64, grad_output.device(), stream);
         auto [grid, block] = optimal_launch_config(maxpool3d_backward_f64, total_out);
         maxpool3d_backward_f64<<<grid, block, 0, stream>>>(
             grad_output.data<double>(), indices.data<int64_t>(), grad_input.data<double>(),
@@ -1678,7 +1678,7 @@ auto maxpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
         CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
-        Tensor grad_f32 = create_zeros_cuda(input_shape, DType::Float32, grad_output.device());
+        Tensor grad_f32 = create_zeros_cuda(input_shape, DType::Float32, grad_output.device(), stream);
         Tensor go_f32({N, C, D_out, H_out, W_out}, DType::Float32, grad_output.device());
 
         if (grad_output.dtype() == DType::Float16) {
@@ -1950,7 +1950,7 @@ auto avgpool3d_backward_kernel(const Tensor& grad_output,
     int64_t total_in = N * C * D * H * W;
 
     if (grad_output.dtype() == DType::Float32) {
-        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float32, grad_output.device());
+        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float32, grad_output.device(), stream);
         auto [grid, block] = optimal_launch_config(avgpool3d_backward_f32, total_out);
         avgpool3d_backward_f32<<<grid, block, 0, stream>>>(
             grad_output.data<float>(), grad_input.data<float>(),
@@ -1958,7 +1958,7 @@ auto avgpool3d_backward_kernel(const Tensor& grad_output,
         CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float64) {
-        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float64, grad_output.device());
+        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float64, grad_output.device(), stream);
         auto [grid, block] = optimal_launch_config(avgpool3d_backward_f64, total_out);
         avgpool3d_backward_f64<<<grid, block, 0, stream>>>(
             grad_output.data<double>(), grad_input.data<double>(),
@@ -1966,7 +1966,7 @@ auto avgpool3d_backward_kernel(const Tensor& grad_output,
         CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
-        Tensor grad_f32 = create_zeros_cuda(input_shape, DType::Float32, grad_output.device());
+        Tensor grad_f32 = create_zeros_cuda(input_shape, DType::Float32, grad_output.device(), stream);
         Tensor go_f32({N, C, D_out, H_out, W_out}, DType::Float32, grad_output.device());
 
         if (grad_output.dtype() == DType::Float16) {
@@ -2270,7 +2270,7 @@ auto adaptive_avgpool3d_backward(const Tensor& grad_output,
     int64_t total_in = N * C * D_in * H_in * W_in;
 
     if (grad_output.dtype() == DType::Float32) {
-        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float32, grad_output.device());
+        Tensor grad_input = create_zeros_cuda(input_shape, DType::Float32, grad_output.device(), stream);
         auto [grid, block] = optimal_launch_config(adaptive_avgpool3d_backward_impl<float>, total_out);
         adaptive_avgpool3d_backward_impl<float><<<grid, block, 0, stream>>>(
             grad_output.data<float>(), grad_input.data<float>(),
@@ -2278,7 +2278,7 @@ auto adaptive_avgpool3d_backward(const Tensor& grad_output,
         CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float64) {
-        Tensor grad_f32 = create_zeros_cuda(input_shape, DType::Float32, grad_output.device());
+        Tensor grad_f32 = create_zeros_cuda(input_shape, DType::Float32, grad_output.device(), stream);
         Tensor go_f32({N, C, D_out, H_out, W_out}, DType::Float32, grad_output.device());
 
         auto [grid_conv, block_conv] = optimal_launch_config(convert_to_f32<double>, total_out);
@@ -2299,7 +2299,7 @@ auto adaptive_avgpool3d_backward(const Tensor& grad_output,
         CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
-        Tensor grad_f32 = create_zeros_cuda(input_shape, DType::Float32, grad_output.device());
+        Tensor grad_f32 = create_zeros_cuda(input_shape, DType::Float32, grad_output.device(), stream);
         Tensor go_f32({N, C, D_out, H_out, W_out}, DType::Float32, grad_output.device());
 
         if (grad_output.dtype() == DType::Float16) {

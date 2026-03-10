@@ -203,7 +203,8 @@ GRU::GRU(int64_t input_size, int64_t hidden_size, int64_t num_layers,
     }
 }
 
-auto GRU::forward(const Variable& input, const Variable& hx)
+auto GRU::forward(const Variable& input, const Variable& hx,
+                  const Tensor& lengths)
     -> std::pair<Variable, Variable> {
 
     auto input_shape = input.shape();
@@ -404,7 +405,21 @@ auto GRU::forward(const Variable& input, const Variable& hx)
             // Extract pre-computed input gates for this timestep
             auto gates_ih_t = gates_ih_tensor.slice(0, t, t + 1).reshape({batch_size, 3 * hidden_size_});
 
-            forward_h = forward_cell->forward_with_precomputed_ih(gates_ih_t, forward_h);
+            auto h_next = forward_cell->forward_with_precomputed_ih(gates_ih_t, forward_h);
+
+            // Apply sequence length masking: preserve old state for padded positions
+            if (lengths.numel() > 0) {
+                auto lengths_dev = lengths.to(input.device()).to(DType::Float32);
+                auto t_scalar = full({batch_size}, static_cast<float>(t), DType::Float32, input.device());
+                auto mask = gt(lengths_dev, t_scalar).to(input.dtype()).reshape({batch_size, 1});
+                auto one_minus_mask = full({batch_size, 1}, 1.0f, input.dtype(), input.device()) - mask;
+
+                forward_h = Variable(
+                    mask * h_next.tensor() + one_minus_mask * forward_h.tensor(),
+                    h_next.requires_grad() || forward_h.requires_grad());
+            } else {
+                forward_h = h_next;
+            }
             forward_outputs.push_back(forward_h);
         }
 
@@ -426,7 +441,21 @@ auto GRU::forward(const Variable& input, const Variable& hx)
             for (int64_t t = seq_len - 1; t >= 0; --t) {
                 auto gates_ih_t = gates_ih_bwd_tensor.slice(0, t, t + 1).reshape({batch_size, 3 * hidden_size_});
 
-                backward_h = backward_cell->forward_with_precomputed_ih(gates_ih_t, backward_h);
+                auto h_next = backward_cell->forward_with_precomputed_ih(gates_ih_t, backward_h);
+
+                // Apply sequence length masking for backward direction
+                if (lengths.numel() > 0) {
+                    auto lengths_dev = lengths.to(input.device()).to(DType::Float32);
+                    auto t_scalar = full({batch_size}, static_cast<float>(t), DType::Float32, input.device());
+                    auto mask = gt(lengths_dev, t_scalar).to(input.dtype()).reshape({batch_size, 1});
+                    auto one_minus_mask = full({batch_size, 1}, 1.0f, input.dtype(), input.device()) - mask;
+
+                    backward_h = Variable(
+                        mask * h_next.tensor() + one_minus_mask * backward_h.tensor(),
+                        h_next.requires_grad() || backward_h.requires_grad());
+                } else {
+                    backward_h = h_next;
+                }
                 backward_outputs.push_back(backward_h);
             }
 

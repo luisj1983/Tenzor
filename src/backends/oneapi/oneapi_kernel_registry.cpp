@@ -174,6 +174,7 @@ namespace oneapi {
     auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
     auto any_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
     auto all_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
+    auto logsumexp_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
 
     // ---- Statistical operations (kernels/statistical.cpp) ----
     auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
@@ -219,6 +220,7 @@ namespace oneapi {
     auto arange_kernel(double start, double end, double step, DType dtype, Device device, sycl::queue& queue) -> Tensor;
     auto linspace_kernel(double start, double end, int64_t steps, DType dtype, Device device, sycl::queue& queue) -> Tensor;
     auto eye_kernel(int64_t n, int64_t m, DType dtype, Device device, sycl::queue& queue) -> Tensor;
+    auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape, DType dtype, Device device, sycl::queue& queue) -> Tensor;
 
     // ---- Comparison operations (kernels/comparison.cpp) ----
     auto eq_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
@@ -1100,6 +1102,13 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return {oneapi::all_kernel(inputs[0], dim, keepdim, get_q(inputs))};
         });
 
+    table.register_kernel(OpId::LogSumExp,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return {oneapi::logsumexp_kernel(inputs[0], dim, keepdim, get_q(inputs))};
+        });
+
     // Statistical operations: these OneAPI kernels take OpAttributes directly
     table.register_kernel(OpId::Prod,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
@@ -1119,6 +1128,13 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::Norm,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             return {oneapi::norm_kernel(inputs[0], attrs, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::LogSumExp,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return {oneapi::logsumexp_kernel(inputs[0], dim, keepdim, get_q(inputs))};
         });
 
     table.register_kernel(OpId::ArgSort,
@@ -1820,6 +1836,17 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
             Device device = inputs.empty() ? Device::oneapi(device_id) : inputs[0].device();
             return {oneapi::randn_kernel(shape, dtype, device, get_q_device(device_id))};
+        });
+
+    table.register_kernel(OpId::Randint,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t low = attrs.get_int(AttrKey::Start, 0);
+            int64_t high = attrs.get_int(AttrKey::End, 0);
+            auto shape = attrs.get_int_list(AttrKey::Shape);
+            DType dtype = parse_dtype(attrs);
+            int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
+            Device device = inputs.empty() ? Device::oneapi(device_id) : inputs[0].device();
+            return {oneapi::randint_kernel(low, high, shape, dtype, device, get_q_device(device_id))};
         });
 
     table.register_kernel(OpId::Arange,

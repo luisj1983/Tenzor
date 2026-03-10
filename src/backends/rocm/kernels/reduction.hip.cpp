@@ -24,7 +24,7 @@ namespace rocm {
 // Constants
 // ============================================================================
 
-constexpr int WAVEFRONT_SIZE = 32;  // AMD GPU wavefront size (32 for RDNA/wave32, compatible with wave64)
+constexpr int WAVEFRONT_SIZE = 64;  // AMD GPU wavefront size (64 for CDNA/RDNA2+)
 constexpr int MAX_BLOCK_SIZE = 1024;
 constexpr int REDUCTION_BLOCK_SIZE = 256;
 

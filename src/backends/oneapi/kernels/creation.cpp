@@ -547,5 +547,51 @@ auto eye_kernel(int64_t n, int64_t m, DType dtype, Device device, sycl::queue& q
     return output;
 }
 
+// ============================================================================
+// Randint - Random integers in [low, high)
+// ============================================================================
+
+struct RandintKernelInt32 {};
+struct RandintKernelInt64 {};
+
+auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape,
+                    DType dtype, Device device, sycl::queue& queue) -> Tensor {
+    Tensor output(shape, dtype, device);
+    const int64_t numel = output.numel();
+    if (numel == 0) return output;
+
+    auto seed = tenzor::get_global_seed();
+    int64_t range = high - low;
+
+    if (dtype == DType::Int32) {
+        int32_t* ptr = get_data_ptr<int32_t>(output);
+        int32_t lo = static_cast<int32_t>(low);
+        int32_t r = static_cast<int32_t>(range);
+        uint64_t s = seed;
+        queue.parallel_for<RandintKernelInt32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            // Philox-inspired hash for uniform random
+            uint64_t x = static_cast<uint64_t>(idx[0]) ^ s;
+            x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+            x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+            x = x ^ (x >> 31);
+            ptr[idx] = lo + static_cast<int32_t>(x % static_cast<uint64_t>(r));
+        });
+    } else if (dtype == DType::Int64) {
+        int64_t* ptr = get_data_ptr<int64_t>(output);
+        uint64_t s = seed;
+        queue.parallel_for<RandintKernelInt64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            uint64_t x = static_cast<uint64_t>(idx[0]) ^ s;
+            x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+            x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+            x = x ^ (x >> 31);
+            ptr[idx] = low + static_cast<int64_t>(x % static_cast<uint64_t>(range));
+        });
+    } else {
+        throw std::runtime_error("randint_kernel: only Int32 and Int64 supported");
+    }
+
+    return output;
+}
+
 } // namespace oneapi
 } // namespace tenzor

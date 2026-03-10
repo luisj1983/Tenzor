@@ -164,7 +164,17 @@ auto logsumexp(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         return full(shape, -std::numeric_limits<double>::infinity(), input.dtype(), input.device());
     }
 
-    // Numerically stable logsumexp: log(sum(exp(x))) = max(x) + log(sum(exp(x - max(x))))
+    // Try fused kernel dispatch (avoids multiple passes over data)
+    if (is_op_supported(OpId::LogSumExp, input.device().type)) {
+        NewOpAttributes attrs;
+        attrs.set(AttrKey::Dim, dim);
+        attrs.set(AttrKey::Keepdim, keepdim);
+        std::vector<Tensor> inputs = {input};
+        return dispatch(OpId::LogSumExp, inputs, attrs)[0];
+    }
+
+    // Composite fallback: numerically stable logsumexp
+    // log(sum(exp(x))) = max(x) + log(sum(exp(x - max(x))))
     // Subtracting the max prevents overflow in exp() for large values.
     auto max_val = tenzor::max(input, dim, /*keepdim=*/true);  // keepdim=true for broadcasting
     auto shifted = input - max_val;                             // subtract max for stability

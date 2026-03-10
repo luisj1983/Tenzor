@@ -495,7 +495,7 @@ auto roi_align_forward(const Tensor& features, const Tensor& rois,
 auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
                         int64_t batch_size, int64_t feat_height, int64_t feat_width,
                         float spatial_scale, int64_t sampling_ratio,
-                        bool aligned) -> Tensor {
+                        bool aligned, cudaStream_t stream) -> Tensor {
     int64_t num_rois = rois.shape()[0];
     int64_t channels = grad_output.shape()[1];
     int64_t output_h = grad_output.shape()[2];
@@ -515,13 +515,13 @@ auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
 
     if (dtype == DType::Float32) {
         Tensor grad_features(grad_shape, DType::Float32, grad_output.device());
-        ROI_CUDA_CHECK(cudaMemset(grad_features.data<float>(), 0, total_features * sizeof(float)));
+        ROI_CUDA_CHECK(cudaMemsetAsync(grad_features.data<float>(), 0, total_features * sizeof(float), stream));
         if (total_grads == 0) return grad_features;
 
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            roi_align_backward_kernel<float>, 0, 0);
         const int blocks = (total_grads + block_size - 1) / block_size;
-        roi_align_backward_kernel<float><<<blocks, block_size>>>(
+        roi_align_backward_kernel<float><<<blocks, block_size, 0, stream>>>(
             grad_output.data<float>(), rois_ptr, grad_features.data<float>(),
             num_rois, channels, feat_height, feat_width,
             output_h, output_w, spatial_scale, sampling_ratio, aligned);
@@ -529,13 +529,13 @@ auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
         return grad_features;
     } else if (dtype == DType::Float64) {
         Tensor grad_features(grad_shape, DType::Float64, grad_output.device());
-        ROI_CUDA_CHECK(cudaMemset(grad_features.data<double>(), 0, total_features * sizeof(double)));
+        ROI_CUDA_CHECK(cudaMemsetAsync(grad_features.data<double>(), 0, total_features * sizeof(double), stream));
         if (total_grads == 0) return grad_features;
 
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            roi_align_backward_kernel<double>, 0, 0);
         const int blocks = (total_grads + block_size - 1) / block_size;
-        roi_align_backward_kernel<double><<<blocks, block_size>>>(
+        roi_align_backward_kernel<double><<<blocks, block_size, 0, stream>>>(
             grad_output.data<double>(), rois_ptr, grad_features.data<double>(),
             num_rois, channels, feat_height, feat_width,
             output_h, output_w, static_cast<double>(spatial_scale),
@@ -545,13 +545,13 @@ auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
     } else if (dtype == DType::Float16) {
         // Accumulate gradients in float for atomicAdd precision, then convert to FP16
         Tensor grad_features_f32(grad_shape, DType::Float32, grad_output.device());
-        ROI_CUDA_CHECK(cudaMemset(grad_features_f32.data<float>(), 0, total_features * sizeof(float)));
+        ROI_CUDA_CHECK(cudaMemsetAsync(grad_features_f32.data<float>(), 0, total_features * sizeof(float), stream));
 
         if (total_grads > 0) {
             cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                                roi_align_backward_fp16_kernel, 0, 0);
             const int blocks = (total_grads + block_size - 1) / block_size;
-            roi_align_backward_fp16_kernel<<<blocks, block_size>>>(
+            roi_align_backward_fp16_kernel<<<blocks, block_size, 0, stream>>>(
                 reinterpret_cast<const __half*>(grad_output.data_ptr()),
                 rois_ptr,
                 grad_features_f32.data<float>(),
@@ -565,7 +565,7 @@ auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            f32_grad_to_fp16_kernel, 0, 0);
         const int conv_blocks = (total_features + block_size - 1) / block_size;
-        f32_grad_to_fp16_kernel<<<conv_blocks, block_size>>>(
+        f32_grad_to_fp16_kernel<<<conv_blocks, block_size, 0, stream>>>(
             grad_features_f32.data<float>(),
             reinterpret_cast<__half*>(grad_features.data_ptr()),
             total_features);

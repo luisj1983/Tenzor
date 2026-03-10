@@ -27,11 +27,11 @@ inline int clamp_blocks(int64_t blocks) {
 }
 
 // Helper to create a zero-initialized CUDA tensor
-inline Tensor create_cuda_zeros(const std::vector<int64_t>& shape, DType dtype, Device device) {
+inline Tensor create_cuda_zeros(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream = nullptr) {
     Tensor t(shape, dtype, device);
     size_t bytes = t.numel() * dtype_size(dtype);
     // Use data_ptr() which returns void* for any dtype
-    cudaMemset(t.data_ptr(), 0, bytes);
+    cudaMemsetAsync(t.data_ptr(), 0, bytes, stream);
     return t;
 }
 
@@ -41,16 +41,17 @@ inline std::vector<int64_t> to_vector(const std::span<const int64_t>& s) {
 }
 
 // Scale a scalar value in device memory using host round-trip (eliminates 1-thread kernel launch)
-inline void scale_scalar_host(float* d_val, float scale) {
+inline void scale_scalar_host(float* d_val, float scale, cudaStream_t stream = nullptr) {
     float host_val;
-    TENZOR_CUDA_CHECK(cudaMemcpy(&host_val, d_val, sizeof(float), cudaMemcpyDeviceToHost));
+    TENZOR_CUDA_CHECK(cudaMemcpyAsync(&host_val, d_val, sizeof(float), cudaMemcpyDeviceToHost, stream));
+    TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream)); // need sync to read host_val
     host_val *= scale;
-    TENZOR_CUDA_CHECK(cudaMemcpy(d_val, &host_val, sizeof(float), cudaMemcpyHostToDevice));
+    TENZOR_CUDA_CHECK(cudaMemcpyAsync(d_val, &host_val, sizeof(float), cudaMemcpyHostToDevice, stream));
 }
 
 // Set a scalar value in device memory using cudaMemcpy (eliminates 1-thread kernel launch)
-inline void set_scalar_host(float* d_dst, float value) {
-    TENZOR_CUDA_CHECK(cudaMemcpy(d_dst, &value, sizeof(float), cudaMemcpyHostToDevice));
+inline void set_scalar_host(float* d_dst, float value, cudaStream_t stream = nullptr) {
+    TENZOR_CUDA_CHECK(cudaMemcpyAsync(d_dst, &value, sizeof(float), cudaMemcpyHostToDevice, stream));
 }
 
 // Helper for computing (optionally scaled) sum of a 1D tensor on GPU

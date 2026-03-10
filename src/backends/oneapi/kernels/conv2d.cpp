@@ -30,6 +30,17 @@ inline auto get_data_ptr(const Tensor& t) -> T* {
 
 #ifdef TENZOR_HAS_ONEDNN
 
+// Map Tenzor DType to oneDNN memory data type
+static auto to_dnnl_dtype(DType dt) -> dnnl::memory::data_type {
+    switch (dt) {
+        case DType::Float32:  return dnnl::memory::data_type::f32;
+        case DType::Float64:  return dnnl::memory::data_type::f64;
+        case DType::BFloat16: return dnnl::memory::data_type::bf16;
+        case DType::Float16:  return dnnl::memory::data_type::f16;
+        default: throw std::runtime_error("Unsupported dtype for oneDNN conv: " + dtype_name(dt));
+    }
+}
+
 // Conv2d forward using oneDNN
 auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias,
                     int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
@@ -70,10 +81,11 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
     memory::dims padding_dims = {padding, padding};
     memory::dims dilation_dims = {dilation - 1, dilation - 1};
 
-    auto src_md = memory::desc(src_dims, memory::data_type::f32, memory::format_tag::nchw);
-    auto weights_md = memory::desc(weights_dims, memory::data_type::f32,
+    auto dt = to_dnnl_dtype(input.dtype());
+    auto src_md = memory::desc(src_dims, dt, memory::format_tag::nchw);
+    auto weights_md = memory::desc(weights_dims, dt,
                                    groups == 1 ? memory::format_tag::oihw : memory::format_tag::goihw);
-    auto dst_md = memory::desc(dst_dims, memory::data_type::f32, memory::format_tag::nchw);
+    auto dst_md = memory::desc(dst_dims, dt, memory::format_tag::nchw);
 
     // Create convolution descriptor
     auto conv_desc = (bias != nullptr) ?
@@ -81,7 +93,7 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
             prop_kind::forward_inference,
             algorithm::convolution_direct,
             src_md, weights_md,
-            memory::desc({C_out}, memory::data_type::f32, memory::format_tag::x),
+            memory::desc({C_out}, dt, memory::format_tag::x),
             dst_md,
             strides_dims, dilation_dims, padding_dims, padding_dims
         ) :
@@ -112,7 +124,7 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
 
     if (bias != nullptr) {
         auto bias_mem = sycl_interop::make_memory(
-            memory::desc({C_out}, memory::data_type::f32, memory::format_tag::x),
+            memory::desc({C_out}, dt, memory::format_tag::x),
             dnnl_engine,
             sycl_interop::memory_kind::usm,
             const_cast<void*>(bias->data_ptr())
@@ -170,10 +182,11 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
     memory::dims padding_dims = {padding, padding};
     memory::dims dilation_dims = {dilation - 1, dilation - 1};
 
-    auto src_md = memory::desc(src_dims, memory::data_type::f32, memory::format_tag::nchw);
-    auto weights_md = memory::desc(weights_dims, memory::data_type::f32,
+    auto dt = to_dnnl_dtype(input.dtype());
+    auto src_md = memory::desc(src_dims, dt, memory::format_tag::nchw);
+    auto weights_md = memory::desc(weights_dims, dt,
                                    groups == 1 ? memory::format_tag::oihw : memory::format_tag::goihw);
-    auto dst_md = memory::desc(dst_dims, memory::data_type::f32, memory::format_tag::nchw);
+    auto dst_md = memory::desc(dst_dims, dt, memory::format_tag::nchw);
 
     // Forward descriptor (needed for backward)
     auto conv_fwd_desc = convolution_forward::desc(
@@ -227,7 +240,7 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
             convolution_backward_weights::desc(
                 algorithm::convolution_direct,
                 src_md, weights_md,
-                memory::desc({C_out}, memory::data_type::f32, memory::format_tag::x),
+                memory::desc({C_out}, dt, memory::format_tag::x),
                 dst_md,
                 strides_dims, dilation_dims, padding_dims, padding_dims
             ) :
@@ -259,7 +272,7 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
             grad_bias = Tensor({C_out}, weight.dtype(), weight.device());
 
             auto diff_bias_mem = sycl_interop::make_memory(
-                memory::desc({C_out}, memory::data_type::f32, memory::format_tag::x),
+                memory::desc({C_out}, dt, memory::format_tag::x),
                 dnnl_engine,
                 sycl_interop::memory_kind::usm,
                 const_cast<void*>(grad_bias.data_ptr())

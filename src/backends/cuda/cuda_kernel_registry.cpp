@@ -291,7 +291,7 @@ namespace cuda {
     auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
                             int64_t batch_size, int64_t feat_height, int64_t feat_width,
                             float spatial_scale, int64_t sampling_ratio,
-                            bool aligned) -> Tensor;
+                            bool aligned, cudaStream_t stream = nullptr) -> Tensor;
 
     // BatchNorm2d operations
     auto batchnorm2d_mean_var(const Tensor& input, Tensor& mean, Tensor& variance, cudaStream_t stream) -> void;

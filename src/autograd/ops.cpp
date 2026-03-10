@@ -364,6 +364,68 @@ auto max(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Var
     return output;
 }
 
+auto median(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Variable {
+    int64_t d = dim.value_or(-1);
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        auto [values, indices] = ::tenzor::median(input.tensor(), d, keepdim);
+        return Variable(values, false);
+    }
+
+    auto grad_fn = std::make_shared<MedianBackward>(dim, keepdim);
+
+    auto [result_tensor, result_indices] = ::tenzor::median(input.tensor(), d, keepdim);
+
+    grad_fn->save_for_backward({input.tensor(), result_tensor});
+
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    next_funcs.push_back(input.grad_fn());
+
+    grad_fn->set_next_functions(next_funcs);
+
+    std::vector<Variable> input_vars;
+    if (input.requires_grad()) {
+        input_vars.push_back(input);
+    }
+
+    grad_fn->set_input_variables(input_vars);
+
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+
+    return output;
+}
+
+auto mode(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Variable {
+    int64_t d = dim.value_or(-1);
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        auto [values, indices] = ::tenzor::mode(input.tensor(), d, keepdim);
+        return Variable(values, false);
+    }
+
+    auto grad_fn = std::make_shared<ModeBackward>(dim, keepdim);
+
+    auto [result_tensor, result_indices] = ::tenzor::mode(input.tensor(), d, keepdim);
+
+    grad_fn->save_for_backward({input.tensor(), result_tensor});
+
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    next_funcs.push_back(input.grad_fn());
+
+    grad_fn->set_next_functions(next_funcs);
+
+    std::vector<Variable> input_vars;
+    if (input.requires_grad()) {
+        input_vars.push_back(input);
+    }
+
+    grad_fn->set_input_variables(input_vars);
+
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+
+    return output;
+}
+
 auto reshape(const Variable& input, const std::vector<int64_t>& shape) -> Variable {
     if (!input.requires_grad() || !is_grad_enabled()) {
         // No gradient needed, just compute

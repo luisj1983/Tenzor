@@ -330,7 +330,8 @@ public:
      *   - h_n: Final hidden state for each layer
      *   - c_n: Final cell state for each layer
      */
-    auto forward(const Variable& input, const std::pair<Variable, Variable>& hx)
+    auto forward(const Variable& input, const std::pair<Variable, Variable>& hx,
+                 const Tensor& lengths = {})
         -> std::pair<Variable, std::pair<Variable, Variable>>;
 
     /**
@@ -494,11 +495,13 @@ public:
      *
      * @param input Input sequence tensor
      * @param hx Initial hidden state. If empty, zero-initialized.
+     * @param lengths Optional tensor of sequence lengths per batch element for masking.
      * @return Tuple of (output, h_n) where:
      *   - output: All hidden states for each time step
      *   - h_n: Final hidden state for each layer
      */
-    auto forward(const Variable& input, const Variable& hx) -> std::pair<Variable, Variable>;
+    auto forward(const Variable& input, const Variable& hx,
+                 const Tensor& lengths = {}) -> std::pair<Variable, Variable>;
 
     /**
      * @brief Override base Module forward (single parameter).

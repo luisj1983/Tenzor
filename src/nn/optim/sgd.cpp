@@ -108,6 +108,9 @@ auto SGD::state_dict() const -> std::unordered_map<std::string, Tensor> {
     state["weight_decay"] = Tensor({1}, DType::Float64, Device::cpu());
     state["weight_decay"].data<double>()[0] = weight_decay_;
 
+    state["nesterov"] = Tensor({1}, DType::Int64, Device::cpu());
+    state["nesterov"].data<int64_t>()[0] = nesterov_ ? 1 : 0;
+
     // Save velocity buffers
     for (size_t i = 0; i < velocity_buffers_.size(); ++i) {
         state["velocity_" + std::to_string(i)] = velocity_buffers_[i].clone();
@@ -132,6 +135,10 @@ auto SGD::load_state_dict(const std::unordered_map<std::string, Tensor>& state) 
 
     if (state.count("weight_decay")) {
         weight_decay_ = state.at("weight_decay").data<double>()[0];
+    }
+
+    if (state.count("nesterov")) {
+        nesterov_ = state.at("nesterov").data<int64_t>()[0] != 0;
     }
 
     // Load velocity buffers

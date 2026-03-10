@@ -636,3 +636,7 @@ def pack_sequence(sequences, enforce_sorted=True):
     """
     cpp_packed = _core.nn.pack_sequence(sequences, enforce_sorted)
     return PackedSequence._from_cpp(cpp_packed)
+
+
+# Make init submodule accessible
+from .tenzor_core.nn import init

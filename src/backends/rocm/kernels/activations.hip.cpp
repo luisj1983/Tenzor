@@ -906,8 +906,8 @@ extern "C" {
 // Shared memory size for reductions
 constexpr int SOFTMAX_BLOCK_SIZE = 256;
 
-// Use wavefront size 32 for RDNA (wave32) compatibility, also works on GCN/CDNA (wave64)
-constexpr int SOFTMAX_WAVEFRONT_SIZE = 32;
+// AMD wavefront size (64 for CDNA/RDNA2+)
+constexpr int SOFTMAX_WAVEFRONT_SIZE = 64;
 
 // Warp-level reduction using shuffle instructions
 template<typename T>

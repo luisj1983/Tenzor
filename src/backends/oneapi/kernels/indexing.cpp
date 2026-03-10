@@ -667,7 +667,7 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask, sycl::queue& 
         // Serial copy (could be optimized with prefix sum)
         float* input_host = new float[numel];
         bool* mask_host2 = new bool[numel];
-        queue.memcpy(input_host, input_ptr, numel * sizeof(float)).wait();
+        queue.memcpy(input_host, input_ptr, numel * sizeof(float));
         queue.memcpy(mask_host2, mask_ptr, numel * sizeof(bool)).wait();
 
         int64_t out_idx = 0;
@@ -686,7 +686,7 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask, sycl::queue& 
 
         double* input_host = new double[numel];
         bool* mask_host2 = new bool[numel];
-        queue.memcpy(input_host, input_ptr, numel * sizeof(double)).wait();
+        queue.memcpy(input_host, input_ptr, numel * sizeof(double));
         queue.memcpy(mask_host2, mask_ptr, numel * sizeof(bool)).wait();
 
         int64_t out_idx = 0;
@@ -705,7 +705,7 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask, sycl::queue& 
 
         sycl::half* input_host = new sycl::half[numel];
         bool* mask_host2 = new bool[numel];
-        queue.memcpy(input_host, input_ptr, numel * sizeof(sycl::half)).wait();
+        queue.memcpy(input_host, input_ptr, numel * sizeof(sycl::half));
         queue.memcpy(mask_host2, mask_ptr, numel * sizeof(bool)).wait();
 
         int64_t out_idx = 0;
@@ -724,7 +724,7 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask, sycl::queue& 
 
         uint16_t* input_host = new uint16_t[numel];
         bool* mask_host2 = new bool[numel];
-        queue.memcpy(input_host, input_ptr, numel * sizeof(uint16_t)).wait();
+        queue.memcpy(input_host, input_ptr, numel * sizeof(uint16_t));
         queue.memcpy(mask_host2, mask_ptr, numel * sizeof(bool)).wait();
 
         int64_t out_idx = 0;
@@ -1206,8 +1206,8 @@ auto scatter_add_kernel(const Tensor& self, int64_t dim, const Tensor& index, co
         std::vector<float> h_out(self.numel());
         std::vector<float> h_src(src.numel());
         std::vector<int64_t> h_idx(idx_numel);
-        queue.memcpy(h_out.data(), output.data_ptr(), self.numel() * sizeof(float)).wait();
-        queue.memcpy(h_src.data(), src.data_ptr(), src.numel() * sizeof(float)).wait();
+        queue.memcpy(h_out.data(), output.data_ptr(), self.numel() * sizeof(float));
+        queue.memcpy(h_src.data(), src.data_ptr(), src.numel() * sizeof(float));
         queue.memcpy(h_idx.data(), index.data_ptr(), idx_numel * sizeof(int64_t)).wait();
 
         for (int64_t flat = 0; flat < idx_numel; ++flat) {
@@ -1231,8 +1231,8 @@ auto scatter_add_kernel(const Tensor& self, int64_t dim, const Tensor& index, co
         std::vector<double> h_out(self.numel());
         std::vector<double> h_src(src.numel());
         std::vector<int64_t> h_idx(idx_numel);
-        queue.memcpy(h_out.data(), output.data_ptr(), self.numel() * sizeof(double)).wait();
-        queue.memcpy(h_src.data(), src.data_ptr(), src.numel() * sizeof(double)).wait();
+        queue.memcpy(h_out.data(), output.data_ptr(), self.numel() * sizeof(double));
+        queue.memcpy(h_src.data(), src.data_ptr(), src.numel() * sizeof(double));
         queue.memcpy(h_idx.data(), index.data_ptr(), idx_numel * sizeof(int64_t)).wait();
 
         for (int64_t flat = 0; flat < idx_numel; ++flat) {
@@ -1254,8 +1254,8 @@ auto scatter_add_kernel(const Tensor& self, int64_t dim, const Tensor& index, co
         std::vector<int32_t> h_out(self.numel());
         std::vector<int32_t> h_src(src.numel());
         std::vector<int64_t> h_idx(idx_numel);
-        queue.memcpy(h_out.data(), output.data_ptr(), self.numel() * sizeof(int32_t)).wait();
-        queue.memcpy(h_src.data(), src.data_ptr(), src.numel() * sizeof(int32_t)).wait();
+        queue.memcpy(h_out.data(), output.data_ptr(), self.numel() * sizeof(int32_t));
+        queue.memcpy(h_src.data(), src.data_ptr(), src.numel() * sizeof(int32_t));
         queue.memcpy(h_idx.data(), index.data_ptr(), idx_numel * sizeof(int64_t)).wait();
 
         for (int64_t flat = 0; flat < idx_numel; ++flat) {
@@ -1277,8 +1277,8 @@ auto scatter_add_kernel(const Tensor& self, int64_t dim, const Tensor& index, co
         std::vector<int64_t> h_out(self.numel());
         std::vector<int64_t> h_src(src.numel());
         std::vector<int64_t> h_idx(idx_numel);
-        queue.memcpy(h_out.data(), output.data_ptr(), self.numel() * sizeof(int64_t)).wait();
-        queue.memcpy(h_src.data(), src.data_ptr(), src.numel() * sizeof(int64_t)).wait();
+        queue.memcpy(h_out.data(), output.data_ptr(), self.numel() * sizeof(int64_t));
+        queue.memcpy(h_src.data(), src.data_ptr(), src.numel() * sizeof(int64_t));
         queue.memcpy(h_idx.data(), index.data_ptr(), idx_numel * sizeof(int64_t)).wait();
 
         for (int64_t flat = 0; flat < idx_numel; ++flat) {
@@ -1337,8 +1337,8 @@ auto put_kernel(
             std::vector<float> h_out(total_size);
             std::vector<float> h_src(source.numel());
             std::vector<int64_t> h_idx(num_indices);
-            queue.memcpy(h_out.data(), output.data_ptr(), total_size * sizeof(float)).wait();
-            queue.memcpy(h_src.data(), source.data_ptr(), source.numel() * sizeof(float)).wait();
+            queue.memcpy(h_out.data(), output.data_ptr(), total_size * sizeof(float));
+            queue.memcpy(h_src.data(), source.data_ptr(), source.numel() * sizeof(float));
             queue.memcpy(h_idx.data(), indices.data_ptr(), num_indices * sizeof(int64_t)).wait();
 
             for (int64_t i = 0; i < num_indices; ++i) {
@@ -1353,8 +1353,8 @@ auto put_kernel(
             std::vector<double> h_out(total_size);
             std::vector<double> h_src(source.numel());
             std::vector<int64_t> h_idx(num_indices);
-            queue.memcpy(h_out.data(), output.data_ptr(), total_size * sizeof(double)).wait();
-            queue.memcpy(h_src.data(), source.data_ptr(), source.numel() * sizeof(double)).wait();
+            queue.memcpy(h_out.data(), output.data_ptr(), total_size * sizeof(double));
+            queue.memcpy(h_src.data(), source.data_ptr(), source.numel() * sizeof(double));
             queue.memcpy(h_idx.data(), indices.data_ptr(), num_indices * sizeof(int64_t)).wait();
 
             for (int64_t i = 0; i < num_indices; ++i) {
@@ -1369,8 +1369,8 @@ auto put_kernel(
             std::vector<int32_t> h_out(total_size);
             std::vector<int32_t> h_src(source.numel());
             std::vector<int64_t> h_idx(num_indices);
-            queue.memcpy(h_out.data(), output.data_ptr(), total_size * sizeof(int32_t)).wait();
-            queue.memcpy(h_src.data(), source.data_ptr(), source.numel() * sizeof(int32_t)).wait();
+            queue.memcpy(h_out.data(), output.data_ptr(), total_size * sizeof(int32_t));
+            queue.memcpy(h_src.data(), source.data_ptr(), source.numel() * sizeof(int32_t));
             queue.memcpy(h_idx.data(), indices.data_ptr(), num_indices * sizeof(int64_t)).wait();
 
             for (int64_t i = 0; i < num_indices; ++i) {
@@ -1385,8 +1385,8 @@ auto put_kernel(
             std::vector<int64_t> h_out(total_size);
             std::vector<int64_t> h_src(source.numel());
             std::vector<int64_t> h_idx(num_indices);
-            queue.memcpy(h_out.data(), output.data_ptr(), total_size * sizeof(int64_t)).wait();
-            queue.memcpy(h_src.data(), source.data_ptr(), source.numel() * sizeof(int64_t)).wait();
+            queue.memcpy(h_out.data(), output.data_ptr(), total_size * sizeof(int64_t));
+            queue.memcpy(h_src.data(), source.data_ptr(), source.numel() * sizeof(int64_t));
             queue.memcpy(h_idx.data(), indices.data_ptr(), num_indices * sizeof(int64_t)).wait();
 
             for (int64_t i = 0; i < num_indices; ++i) {

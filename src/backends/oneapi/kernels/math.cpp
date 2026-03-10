@@ -272,12 +272,28 @@ inline auto calculate_numel(const std::vector<int64_t>& shape) -> int64_t {
 // Kernel name structs for broadcast ops
 struct BroadcastAddFloat32 {};
 struct BroadcastAddFloat64 {};
+struct BroadcastAddInt32 {};
+struct BroadcastAddInt64 {};
+struct BroadcastAddFloat16 {};
+struct BroadcastAddBFloat16 {};
 struct BroadcastSubFloat32 {};
 struct BroadcastSubFloat64 {};
+struct BroadcastSubInt32 {};
+struct BroadcastSubInt64 {};
+struct BroadcastSubFloat16 {};
+struct BroadcastSubBFloat16 {};
 struct BroadcastMulFloat32 {};
 struct BroadcastMulFloat64 {};
+struct BroadcastMulInt32 {};
+struct BroadcastMulInt64 {};
+struct BroadcastMulFloat16 {};
+struct BroadcastMulBFloat16 {};
 struct BroadcastDivFloat32 {};
 struct BroadcastDivFloat64 {};
+struct BroadcastDivInt32 {};
+struct BroadcastDivInt64 {};
+struct BroadcastDivFloat16 {};
+struct BroadcastDivBFloat16 {};
 
 constexpr int MAX_BROADCAST_DIMS = 8;
 
@@ -391,8 +407,23 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             sycl_broadcast_binary<double, BroadcastAddFloat64>(
                 a_cont, b_cont, output, info, queue,
                 [](double x, double y) { return x + y; });
+        } else if (a_cont.dtype() == DType::Int32) {
+            sycl_broadcast_binary<int32_t, BroadcastAddInt32>(
+                a_cont, b_cont, output, info, queue,
+                [](int32_t x, int32_t y) { return x + y; });
+        } else if (a_cont.dtype() == DType::Int64) {
+            sycl_broadcast_binary<int64_t, BroadcastAddInt64>(
+                a_cont, b_cont, output, info, queue,
+                [](int64_t x, int64_t y) { return x + y; });
+        } else if (a_cont.dtype() == DType::Float16) {
+            sycl_broadcast_binary<sycl::half, BroadcastAddFloat16>(
+                a_cont, b_cont, output, info, queue,
+                [](sycl::half x, sycl::half y) { return x + y; });
+        } else if (a_cont.dtype() == DType::BFloat16) {
+            sycl_broadcast_binary<uint16_t, BroadcastAddBFloat16>(
+                a_cont, b_cont, output, info, queue,
+                [](uint16_t x, uint16_t y) { return f32_to_bf16(bf16_to_f32(x) + bf16_to_f32(y)); });
         } else {
-            // Fallback for other dtypes
             auto a_cpu = a_cont.to(Device::cpu());
             auto b_cpu = b_cont.to(Device::cpu());
             return tenzor::add(a_cpu, b_cpu).to(a_cont.device());
@@ -522,6 +553,22 @@ auto sub_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             sycl_broadcast_binary<double, BroadcastSubFloat64>(
                 a_cont, b_cont, output, info, queue,
                 [](double x, double y) { return x - y; });
+        } else if (a_cont.dtype() == DType::Int32) {
+            sycl_broadcast_binary<int32_t, BroadcastSubInt32>(
+                a_cont, b_cont, output, info, queue,
+                [](int32_t x, int32_t y) { return x - y; });
+        } else if (a_cont.dtype() == DType::Int64) {
+            sycl_broadcast_binary<int64_t, BroadcastSubInt64>(
+                a_cont, b_cont, output, info, queue,
+                [](int64_t x, int64_t y) { return x - y; });
+        } else if (a_cont.dtype() == DType::Float16) {
+            sycl_broadcast_binary<sycl::half, BroadcastSubFloat16>(
+                a_cont, b_cont, output, info, queue,
+                [](sycl::half x, sycl::half y) { return x - y; });
+        } else if (a_cont.dtype() == DType::BFloat16) {
+            sycl_broadcast_binary<uint16_t, BroadcastSubBFloat16>(
+                a_cont, b_cont, output, info, queue,
+                [](uint16_t x, uint16_t y) { return f32_to_bf16(bf16_to_f32(x) - bf16_to_f32(y)); });
         } else {
             auto a_cpu = a_cont.to(Device::cpu());
             auto b_cpu = b_cont.to(Device::cpu());
@@ -639,6 +686,22 @@ auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             sycl_broadcast_binary<double, BroadcastMulFloat64>(
                 a_cont, b_cont, output, info, queue,
                 [](double x, double y) { return x * y; });
+        } else if (a_cont.dtype() == DType::Int32) {
+            sycl_broadcast_binary<int32_t, BroadcastMulInt32>(
+                a_cont, b_cont, output, info, queue,
+                [](int32_t x, int32_t y) { return x * y; });
+        } else if (a_cont.dtype() == DType::Int64) {
+            sycl_broadcast_binary<int64_t, BroadcastMulInt64>(
+                a_cont, b_cont, output, info, queue,
+                [](int64_t x, int64_t y) { return x * y; });
+        } else if (a_cont.dtype() == DType::Float16) {
+            sycl_broadcast_binary<sycl::half, BroadcastMulFloat16>(
+                a_cont, b_cont, output, info, queue,
+                [](sycl::half x, sycl::half y) { return x * y; });
+        } else if (a_cont.dtype() == DType::BFloat16) {
+            sycl_broadcast_binary<uint16_t, BroadcastMulBFloat16>(
+                a_cont, b_cont, output, info, queue,
+                [](uint16_t x, uint16_t y) { return f32_to_bf16(bf16_to_f32(x) * bf16_to_f32(y)); });
         } else {
             auto a_cpu = a_cont.to(Device::cpu());
             auto b_cpu = b_cont.to(Device::cpu());
@@ -762,6 +825,22 @@ auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             sycl_broadcast_binary<double, BroadcastDivFloat64>(
                 a_cont, b_cont, output, info, queue,
                 [](double x, double y) { return x / y; });
+        } else if (a_cont.dtype() == DType::Int32) {
+            sycl_broadcast_binary<int32_t, BroadcastDivInt32>(
+                a_cont, b_cont, output, info, queue,
+                [](int32_t x, int32_t y) { return x / y; });
+        } else if (a_cont.dtype() == DType::Int64) {
+            sycl_broadcast_binary<int64_t, BroadcastDivInt64>(
+                a_cont, b_cont, output, info, queue,
+                [](int64_t x, int64_t y) { return x / y; });
+        } else if (a_cont.dtype() == DType::Float16) {
+            sycl_broadcast_binary<sycl::half, BroadcastDivFloat16>(
+                a_cont, b_cont, output, info, queue,
+                [](sycl::half x, sycl::half y) { return x / y; });
+        } else if (a_cont.dtype() == DType::BFloat16) {
+            sycl_broadcast_binary<uint16_t, BroadcastDivBFloat16>(
+                a_cont, b_cont, output, info, queue,
+                [](uint16_t x, uint16_t y) { return f32_to_bf16(bf16_to_f32(x) / bf16_to_f32(y)); });
         } else {
             auto a_cpu = a_cont.to(Device::cpu());
             auto b_cpu = b_cont.to(Device::cpu());

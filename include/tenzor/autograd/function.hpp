@@ -602,6 +602,40 @@ private:
 };
 
 /**
+ * @brief Median reduction gradient function.
+ *
+ * Forward: y = median(x, dim, keepdim)
+ * Backward: dL/dx_i = dL/dy if x_i is the median element, else 0
+ */
+class MedianBackward : public Function {
+public:
+    MedianBackward(std::optional<int64_t> dim, bool keepdim) : dim_(dim), keepdim_(keepdim) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+private:
+    std::optional<int64_t> dim_;
+    bool keepdim_;
+};
+
+/**
+ * @brief Mode reduction gradient function.
+ *
+ * Forward: y = mode(x, dim, keepdim)
+ * Backward: dL/dx_i = dL/dy if x_i is the first occurrence of mode value, else 0
+ */
+class ModeBackward : public Function {
+public:
+    ModeBackward(std::optional<int64_t> dim, bool keepdim) : dim_(dim), keepdim_(keepdim) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+private:
+    std::optional<int64_t> dim_;
+    bool keepdim_;
+};
+
+/**
  * @brief Reshape gradient function.
  *
  * Forward: y = reshape(x, shape)
