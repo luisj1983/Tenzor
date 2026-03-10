@@ -2739,6 +2739,58 @@ PYBIND11_MODULE(tenzor_core, m) {
     // Keep the existing set_grad_enabled function, but also allow context manager usage
 
     // ========================================================================
+    // Inference mode (stronger than no_grad — also skips version counters)
+    // ========================================================================
+    struct PyInferenceModeContext {
+        std::unique_ptr<tenzor::InferenceModeGuard> guard_;
+
+        void enter() {
+            guard_ = std::make_unique<tenzor::InferenceModeGuard>();
+        }
+
+        void exit() {
+            guard_.reset();
+        }
+    };
+
+    py::class_<PyInferenceModeContext>(m, "inference_mode",
+        "Context manager and decorator for inference mode.\n\n"
+        "Stronger than no_grad(): disables gradient computation AND\n"
+        "skips version counter increments for in-place ops.\n\n"
+        "Usage as context manager:\n"
+        "    with tz.inference_mode():\n"
+        "        y = model(x)\n\n"
+        "Usage as decorator:\n"
+        "    @tz.inference_mode()\n"
+        "    def predict(x):\n"
+        "        return model(x)")
+        .def(py::init<>())
+        .def("__enter__", [](PyInferenceModeContext& self) -> PyInferenceModeContext& {
+            self.enter();
+            return self;
+        })
+        .def("__exit__", [](PyInferenceModeContext& self, py::object, py::object, py::object) {
+            self.exit();
+            return false;
+        })
+        .def("__call__", [](PyInferenceModeContext&, py::function func) -> py::object {
+            auto wrapper = py::cpp_function([func](py::args args, py::kwargs kwargs) -> py::object {
+                tenzor::InferenceModeGuard guard;
+                return func(*args, **kwargs);
+            });
+            try {
+                py::module_ functools = py::module_::import("functools");
+                functools.attr("update_wrapper")(wrapper, func);
+            } catch (py::error_already_set&) {
+                PyErr_Clear();
+            }
+            return wrapper;
+        }, py::arg("func"));
+
+    m.def("is_inference_mode", &tenzor::is_inference_mode_enabled,
+          "Check if inference mode is currently active");
+
+    // ========================================================================
     // Anomaly detection (NaN/Inf checking in backward)
     // ========================================================================
     m.def("set_anomaly_detection", &tenzor::set_anomaly_detection,

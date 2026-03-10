@@ -584,6 +584,68 @@ auto flip(const Variable& input, const std::vector<int64_t>& dims) -> Variable;
 auto repeat(const Variable& input, const std::vector<int64_t>& repeats) -> Variable;
 
 // ============================================================================
+// Cumulative, Sorting, and Triangular Operations
+// ============================================================================
+
+/// Cumulative sum. Grad: reverse cumulative sum
+auto cumsum(const Variable& input, int64_t dim) -> Variable;
+
+/// Cumulative product. Grad: reverse cumsum(output*grad)/input (zero-safe)
+auto cumprod(const Variable& input, int64_t dim) -> Variable;
+
+/// TopK values along dimension. Grad: scatter grad to original positions
+auto topk(const Variable& input, int64_t k, int64_t dim = -1,
+          bool largest = true, bool sorted = true) -> std::pair<Variable, Tensor>;
+
+/// Sort along dimension. Grad: scatter grad using inverse permutation
+auto sort(const Variable& input, int64_t dim = -1,
+          bool descending = false) -> std::pair<Variable, Tensor>;
+
+/// Diagonal extraction/construction. Grad: inverse diag operation
+auto diag(const Variable& input, int64_t diagonal = 0) -> Variable;
+
+/// Matrix trace. Grad: grad * eye(n)
+auto trace(const Variable& input) -> Variable;
+
+/// Upper triangular. Grad: triu(grad, k)
+auto triu(const Variable& input, int64_t diagonal = 0) -> Variable;
+
+/// Lower triangular. Grad: tril(grad, k)
+auto tril(const Variable& input, int64_t diagonal = 0) -> Variable;
+
+// ============================================================================
+// FFT Operations
+// ============================================================================
+
+namespace fft_autograd {
+
+/// FFT with gradient tracking. Grad: ifft(grad)
+auto fft(const Variable& input,
+         std::optional<int64_t> n = std::nullopt,
+         int64_t dim = -1,
+         const std::string& norm = "backward") -> Variable;
+
+/// Inverse FFT with gradient tracking. Grad: fft(grad)
+auto ifft(const Variable& input,
+          std::optional<int64_t> n = std::nullopt,
+          int64_t dim = -1,
+          const std::string& norm = "backward") -> Variable;
+
+/// Real FFT with gradient tracking. Grad: irfft(grad, signal_length)
+auto rfft(const Variable& input,
+          std::optional<int64_t> n = std::nullopt,
+          int64_t dim = -1,
+          const std::string& norm = "backward") -> Variable;
+
+/// Inverse real FFT with gradient tracking. Grad: rfft(grad)
+auto irfft(const Variable& input,
+           std::optional<int64_t> n = std::nullopt,
+           int64_t dim = -1,
+           const std::string& norm = "backward") -> Variable;
+
+} // namespace fft_autograd
+
+// ============================================================================
 // Linear Algebra Operations
 // ============================================================================
 

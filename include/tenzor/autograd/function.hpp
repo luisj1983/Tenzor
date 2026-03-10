@@ -1157,6 +1157,245 @@ public:
 };
 
 // =========================================================================
+// Cumulative, Sorting, and Triangular Backward Functions
+// =========================================================================
+
+/**
+ * @brief Cumulative sum gradient function.
+ *
+ * Forward: y = cumsum(x, dim)
+ * Backward: dL/dx = flip(cumsum(flip(dL/dy, dim), dim), dim)
+ *   i.e. reverse cumulative sum of the gradient
+ */
+class CumSumBackward : public Function {
+public:
+    explicit CumSumBackward(int64_t dim) : dim_(dim) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto name() const -> std::string override { return "CumSumBackward"; }
+private:
+    int64_t dim_;
+};
+
+/**
+ * @brief Cumulative product gradient function.
+ *
+ * Forward: y = cumprod(x, dim)
+ * Backward: dL/dx = flip(cumsum(flip(y * dL/dy, dim), dim), dim) / x
+ *   with zero-safe division using nan_to_num
+ *
+ * @note Saves input and output for backward.
+ */
+class CumProdBackward : public Function {
+public:
+    explicit CumProdBackward(int64_t dim) : dim_(dim) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto name() const -> std::string override { return "CumProdBackward"; }
+private:
+    int64_t dim_;
+};
+
+/**
+ * @brief TopK gradient function.
+ *
+ * Forward: (values, indices) = topk(x, k, dim)
+ * Backward: scatter grad into zeros at saved indices positions
+ *
+ * @note Only values receive gradients; indices are non-differentiable.
+ */
+class TopKBackward : public Function {
+public:
+    TopKBackward(int64_t k, int64_t dim) : k_(k), dim_(dim) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto name() const -> std::string override { return "TopKBackward"; }
+private:
+    int64_t k_;
+    int64_t dim_;
+};
+
+/**
+ * @brief Sort gradient function.
+ *
+ * Forward: (sorted_values, indices) = sort(x, dim)
+ * Backward: scatter grad using inverse permutation of sort indices
+ *
+ * @note Only sorted values receive gradients; indices are non-differentiable.
+ */
+class SortBackward : public Function {
+public:
+    explicit SortBackward(int64_t dim) : dim_(dim) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto name() const -> std::string override { return "SortBackward"; }
+private:
+    int64_t dim_;
+};
+
+/**
+ * @brief Diag gradient function.
+ *
+ * Forward: y = diag(x, k)
+ * Backward:
+ *   If input was 1D (output 2D): dL/dx = diag(dL/dy, k) — extract diagonal
+ *   If input was 2D (output 1D): dL/dx = diag(dL/dy, k) — construct diagonal matrix
+ *
+ * @note Saves input ndim to select correct backward path.
+ */
+class DiagBackward : public Function {
+public:
+    DiagBackward(int64_t input_ndim, int64_t diagonal) : input_ndim_(input_ndim), diagonal_(diagonal) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto name() const -> std::string override { return "DiagBackward"; }
+private:
+    int64_t input_ndim_;
+    int64_t diagonal_;
+};
+
+/**
+ * @brief Trace gradient function.
+ *
+ * Forward: y = trace(A)  (sum of diagonal elements)
+ * Backward: dL/dA = dL/dy * eye(n)
+ */
+class TraceBackward : public Function {
+public:
+    explicit TraceBackward(int64_t n) : n_(n) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto name() const -> std::string override { return "TraceBackward"; }
+private:
+    int64_t n_;
+};
+
+/**
+ * @brief Upper triangular gradient function.
+ *
+ * Forward: y = triu(x, k)
+ * Backward: dL/dx = triu(dL/dy, k)
+ */
+class TriuBackward : public Function {
+public:
+    explicit TriuBackward(int64_t diagonal) : diagonal_(diagonal) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto name() const -> std::string override { return "TriuBackward"; }
+private:
+    int64_t diagonal_;
+};
+
+/**
+ * @brief Lower triangular gradient function.
+ *
+ * Forward: y = tril(x, k)
+ * Backward: dL/dx = tril(dL/dy, k)
+ */
+class TrilBackward : public Function {
+public:
+    explicit TrilBackward(int64_t diagonal) : diagonal_(diagonal) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto name() const -> std::string override { return "TrilBackward"; }
+private:
+    int64_t diagonal_;
+};
+
+// =========================================================================
+// FFT Backward Functions
+// =========================================================================
+
+/**
+ * @brief FFT gradient function.
+ *
+ * Forward: y = fft(x, n, dim, norm)
+ * Backward: dL/dx = ifft(dL/dy, n, dim, norm)
+ */
+class FFTBackward : public Function {
+public:
+    FFTBackward(std::optional<int64_t> n, int64_t dim, std::string norm)
+        : n_(n), dim_(dim), norm_(std::move(norm)) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto name() const -> std::string override { return "FFTBackward"; }
+private:
+    std::optional<int64_t> n_;
+    int64_t dim_;
+    std::string norm_;
+};
+
+/**
+ * @brief Inverse FFT gradient function.
+ *
+ * Forward: y = ifft(x, n, dim, norm)
+ * Backward: dL/dx = fft(dL/dy, n, dim, norm)
+ */
+class IFFTBackward : public Function {
+public:
+    IFFTBackward(std::optional<int64_t> n, int64_t dim, std::string norm)
+        : n_(n), dim_(dim), norm_(std::move(norm)) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto name() const -> std::string override { return "IFFTBackward"; }
+private:
+    std::optional<int64_t> n_;
+    int64_t dim_;
+    std::string norm_;
+};
+
+/**
+ * @brief Real FFT gradient function.
+ *
+ * Forward: y = rfft(x, n, dim, norm)
+ * Backward: dL/dx = irfft(dL/dy, n=signal_length, dim, norm)
+ *
+ * @note Saves original signal length for irfft reconstruction.
+ */
+class RFFTBackward : public Function {
+public:
+    RFFTBackward(int64_t signal_length, int64_t dim, std::string norm)
+        : signal_length_(signal_length), dim_(dim), norm_(std::move(norm)) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto name() const -> std::string override { return "RFFTBackward"; }
+private:
+    int64_t signal_length_;
+    int64_t dim_;
+    std::string norm_;
+};
+
+/**
+ * @brief Inverse real FFT gradient function.
+ *
+ * Forward: y = irfft(x, n, dim, norm)
+ * Backward: dL/dx = rfft(dL/dy, dim, norm)
+ */
+class IRFFTBackward : public Function {
+public:
+    IRFFTBackward(int64_t dim, std::string norm)
+        : dim_(dim), norm_(std::move(norm)) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto name() const -> std::string override { return "IRFFTBackward"; }
+private:
+    int64_t dim_;
+    std::string norm_;
+};
+
+// =========================================================================
 // Linear Algebra Backward Functions
 // =========================================================================
 

@@ -6,6 +6,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/indexing.hpp"
+#include "tenzor/utils/profiling.hpp"
 
 namespace tenzor {
 
@@ -23,6 +24,7 @@ static bool is_integer_dtype(DType dt) {
 }
 
 auto sum(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tensor {
+    TENZOR_PROFILE_RANGE("sum");
     // Promote small integer types to Int64 to prevent overflow
     Tensor promoted = is_small_int_dtype(input.dtype()) ? input.to(DType::Int64) : input;
     NewOpAttributes attrs;

@@ -4,6 +4,7 @@
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "tenzor/utils/profiling.hpp"
 #include <sstream>
 #include <cstring>
 #include <limits>

@@ -7,6 +7,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/type_promotion.hpp"
+#include "tenzor/utils/profiling.hpp"
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -49,6 +50,7 @@ static void validate_broadcast_shapes(const char* op_name,
 // Math operation implementations - dispatched to backend kernels
 
 auto add(const Tensor& a, const Tensor& b) -> Tensor {
+    TENZOR_PROFILE_RANGE("add");
     // Validate tensors are initialized
     if (!a.impl() || !b.impl()) {
         throw std::runtime_error("Cannot add uninitialized tensors");
@@ -138,6 +140,7 @@ auto div(const Tensor& a, double scalar) -> Tensor {
 }
 
 auto matmul(const Tensor& a, const Tensor& b) -> Tensor {
+    TENZOR_PROFILE_RANGE("matmul");
     // Auto-promote dtypes if mismatched
     auto [ap, bp] = promote_inputs(a, b);
     // Handle batched matrix multiplication (3D+ tensors)
@@ -164,6 +167,7 @@ auto matmul(const Tensor& a, const Tensor& b) -> Tensor {
 }
 
 auto bmm(const Tensor& a, const Tensor& b) -> Tensor {
+    TENZOR_PROFILE_RANGE("bmm");
     auto [ap, bp] = promote_inputs(a, b);
     // Validate inputs are 3D
     if (ap.shape().size() != 3 || bp.shape().size() != 3) {

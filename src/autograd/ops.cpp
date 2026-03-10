@@ -6,6 +6,8 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/linalg.hpp"
+#include "tenzor/ops/advanced.hpp"
+#include "tenzor/ops/fft.hpp"
 #include "tenzor/sparse/sparse_ops.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
@@ -1441,5 +1443,201 @@ auto spmv(const SparseTensor& sparse, const Variable& vec) -> Variable {
     output.set_grad_fn(grad_fn);
     return output;
 }
+
+// ============================================================================
+// Cumulative, Sorting, and Triangular Operations
+// ============================================================================
+
+auto cumsum(const Variable& input, int64_t dim) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::cumsum(input.tensor(), dim), false);
+    }
+    auto result = tenzor::cumsum(input.tensor(), dim);
+    auto grad_fn = std::make_shared<CumSumBackward>(dim);
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto cumprod(const Variable& input, int64_t dim) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::cumprod(input.tensor(), dim), false);
+    }
+    auto result = tenzor::cumprod(input.tensor(), dim);
+    auto grad_fn = std::make_shared<CumProdBackward>(dim);
+    grad_fn->save_for_backward({input.tensor(), result});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto topk(const Variable& input, int64_t k, int64_t dim,
+          bool largest, bool sorted) -> std::pair<Variable, Tensor> {
+    auto [values, indices] = tenzor::topk(input.tensor(), k, dim, largest, sorted);
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return {Variable(values, false), indices};
+    }
+    auto grad_fn = std::make_shared<TopKBackward>(k, dim);
+    // Save original shape and indices
+    auto shape = input.tensor().shape();
+    auto shape_tensor = zeros({static_cast<int64_t>(shape.size())}, DType::Int64, Device::cpu());
+    auto* sptr = shape_tensor.data<int64_t>();
+    for (size_t i = 0; i < shape.size(); ++i) sptr[i] = shape[i];
+    grad_fn->save_for_backward({shape_tensor, indices});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(values, true);
+    output.set_grad_fn(grad_fn);
+    return {output, indices};
+}
+
+auto sort(const Variable& input, int64_t dim,
+          bool descending) -> std::pair<Variable, Tensor> {
+    auto [sorted_vals, indices] = tenzor::sort(input.tensor(), dim, descending);
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return {Variable(sorted_vals, false), indices};
+    }
+    auto grad_fn = std::make_shared<SortBackward>(dim);
+    // Save original shape and indices
+    auto shape = input.tensor().shape();
+    auto shape_tensor = zeros({static_cast<int64_t>(shape.size())}, DType::Int64, Device::cpu());
+    auto* sptr = shape_tensor.data<int64_t>();
+    for (size_t i = 0; i < shape.size(); ++i) sptr[i] = shape[i];
+    grad_fn->save_for_backward({shape_tensor, indices});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(sorted_vals, true);
+    output.set_grad_fn(grad_fn);
+    return {output, indices};
+}
+
+auto diag(const Variable& input, int64_t diagonal) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::diag(input.tensor(), diagonal), false);
+    }
+    auto result = tenzor::diag(input.tensor(), diagonal);
+    auto grad_fn = std::make_shared<DiagBackward>(input.tensor().ndim(), diagonal);
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto trace(const Variable& input) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::trace(input.tensor()), false);
+    }
+    auto result = tenzor::trace(input.tensor());
+    int64_t n = input.tensor().shape()[0];
+    auto grad_fn = std::make_shared<TraceBackward>(n);
+    grad_fn->save_for_backward({input.tensor()});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto triu(const Variable& input, int64_t diagonal) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::triu(input.tensor(), diagonal), false);
+    }
+    auto result = tenzor::triu(input.tensor(), diagonal);
+    auto grad_fn = std::make_shared<TriuBackward>(diagonal);
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto tril(const Variable& input, int64_t diagonal) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::tril(input.tensor(), diagonal), false);
+    }
+    auto result = tenzor::tril(input.tensor(), diagonal);
+    auto grad_fn = std::make_shared<TrilBackward>(diagonal);
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// ============================================================================
+// FFT Autograd Operations
+// ============================================================================
+
+namespace fft_autograd {
+
+auto fft(const Variable& input,
+         std::optional<int64_t> n, int64_t dim,
+         const std::string& norm) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::fft::fft(input.tensor(), n, dim, norm), false);
+    }
+    auto result = tenzor::fft::fft(input.tensor(), n, dim, norm);
+    auto grad_fn = std::make_shared<FFTBackward>(n, dim, norm);
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto ifft(const Variable& input,
+          std::optional<int64_t> n, int64_t dim,
+          const std::string& norm) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::fft::ifft(input.tensor(), n, dim, norm), false);
+    }
+    auto result = tenzor::fft::ifft(input.tensor(), n, dim, norm);
+    auto grad_fn = std::make_shared<IFFTBackward>(n, dim, norm);
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto rfft(const Variable& input,
+          std::optional<int64_t> n, int64_t dim,
+          const std::string& norm) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::fft::rfft(input.tensor(), n, dim, norm), false);
+    }
+    // Save the original signal length for irfft in backward
+    int64_t actual_dim = dim < 0 ? dim + input.tensor().ndim() : dim;
+    int64_t signal_length = input.tensor().shape()[actual_dim];
+    auto result = tenzor::fft::rfft(input.tensor(), n, dim, norm);
+    auto grad_fn = std::make_shared<RFFTBackward>(signal_length, dim, norm);
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto irfft(const Variable& input,
+           std::optional<int64_t> n, int64_t dim,
+           const std::string& norm) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::fft::irfft(input.tensor(), n, dim, norm), false);
+    }
+    auto result = tenzor::fft::irfft(input.tensor(), n, dim, norm);
+    auto grad_fn = std::make_shared<IRFFTBackward>(dim, norm);
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+} // namespace fft_autograd
 
 } // namespace tenzor

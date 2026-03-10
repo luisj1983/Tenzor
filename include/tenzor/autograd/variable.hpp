@@ -634,6 +634,46 @@ private:
 };
 
 /**
+ * @brief RAII guard for inference mode.
+ *
+ * Stronger than NoGradGuard: disables gradient computation AND
+ * skips version counter increments for in-place ops, enabling
+ * faster inference execution.
+ *
+ * @code
+ * {
+ *     InferenceModeGuard guard;
+ *     // All ops here skip grad tracking and version counting
+ *     auto y = model.forward(x);
+ * }
+ * @endcode
+ *
+ * @warning Thread-local — does NOT propagate to spawned threads.
+ */
+class InferenceModeGuard {
+public:
+    InferenceModeGuard();
+    ~InferenceModeGuard();
+
+    InferenceModeGuard(const InferenceModeGuard&) = delete;
+    InferenceModeGuard& operator=(const InferenceModeGuard&) = delete;
+
+private:
+    bool prev_grad_state_;
+    bool prev_inference_state_;
+};
+
+/**
+ * @brief Check if inference mode is currently active.
+ *
+ * When inference mode is active, gradient tracking and version counter
+ * increments are both disabled.
+ *
+ * @return true if inference mode is enabled
+ */
+auto is_inference_mode_enabled() -> bool;
+
+/**
  * @brief Check if gradient computation is globally enabled.
  *
  * @return true if gradients are being computed

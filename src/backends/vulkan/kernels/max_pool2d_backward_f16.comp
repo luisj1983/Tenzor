@@ -1,5 +1,6 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_atomic_float : require
 
 // Max Pooling 2D Backward Pass for Float16
 // Gradient flows only to max element, recomputes max indices in shader

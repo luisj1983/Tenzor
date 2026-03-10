@@ -185,6 +185,26 @@ set_target_properties(tenzor_core PROPERTIES
 # Internal methods visible only to core + backends
 target_compile_definitions(tenzor_core PRIVATE TENZOR_INTERNAL)
 
+# Profiling annotations (NVTX for CUDA, ROCTX for ROCm)
+if(TENZOR_ENABLE_PROFILING)
+    find_package(CUDAToolkit QUIET)
+    if(CUDAToolkit_FOUND AND TARGET CUDA::nvtx3)
+        target_link_libraries(tenzor_core PRIVATE CUDA::nvtx3)
+        target_compile_definitions(tenzor_core PRIVATE TENZOR_HAS_NVTX)
+        message(STATUS "Profiling: NVTX3 enabled")
+    else()
+        find_library(ROCTX_LIBRARY roctx64 PATHS /opt/rocm/lib)
+        if(ROCTX_LIBRARY)
+            target_link_libraries(tenzor_core PRIVATE ${ROCTX_LIBRARY})
+            target_include_directories(tenzor_core PRIVATE /opt/rocm/include)
+            target_compile_definitions(tenzor_core PRIVATE TENZOR_HAS_ROCTX)
+            message(STATUS "Profiling: ROCTX enabled")
+        else()
+            message(STATUS "Profiling: enabled but no NVTX or ROCTX found")
+        endif()
+    endif()
+endif()
+
 # Pre-compiled headers for faster compilation
 target_precompile_headers(tenzor_core PRIVATE
     <vector>

@@ -12,6 +12,9 @@
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "tenzor/ops/math.hpp"
+#include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/reduction.hpp"
 #include "vulkan_backend.hpp"
 #include <cstdlib>
 #include <limits>
@@ -1598,7 +1601,24 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
 
     VULKAN_CPU_FALLBACK(QuantizedLinear);
     VULKAN_CPU_FALLBACK(QuantizedConv2d);
-    VULKAN_CPU_FALLBACK(LSTMCellForward);
+    table.register_kernel(OpId::LSTMCellForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs)
+        -> std::vector<Tensor> {
+        // BFloat16: Vulkan BFloat16 support is limited, fall back to CPU
+        if (inputs[0].dtype() == DType::BFloat16) {
+            auto device = inputs[0].device();
+            std::vector<Tensor> cpu_inputs;
+            cpu_inputs.reserve(inputs.size());
+            for (size_t i = 0; i < inputs.size(); ++i)
+                cpu_inputs.push_back(inputs[i].to(Device::cpu()));
+            auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
+            auto results = cpu_table.dispatch(OpId::LSTMCellForward, cpu_inputs, attrs);
+            for (auto& r : results) r = r.to(device);
+            return results;
+        }
+        // inputs: [input, hx, cx, weight_ih, weight_hh, bias_ih, bias_hh]
+        return get_vulkan_backend()->dispatchLSTMCellForward(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5], inputs[6]);
+    });
     table.register_kernel(OpId::LSTMCellBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [grad_h, grad_c_next, gates, c_prev, c_out]
         int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 0);
@@ -1607,7 +1627,24 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
             batch_size, hidden_size);
     });
-    VULKAN_CPU_FALLBACK(GRUCellForward);
+    table.register_kernel(OpId::GRUCellForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs)
+        -> std::vector<Tensor> {
+        // BFloat16: Vulkan BFloat16 support is limited, fall back to CPU
+        if (inputs[0].dtype() == DType::BFloat16) {
+            auto device = inputs[0].device();
+            std::vector<Tensor> cpu_inputs;
+            cpu_inputs.reserve(inputs.size());
+            for (size_t i = 0; i < inputs.size(); ++i)
+                cpu_inputs.push_back(inputs[i].to(Device::cpu()));
+            auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
+            auto results = cpu_table.dispatch(OpId::GRUCellForward, cpu_inputs, attrs);
+            for (auto& r : results) r = r.to(device);
+            return results;
+        }
+        // inputs: [input, hx, weight_ih, weight_hh, bias_ih, bias_hh]
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchGRUCellForward(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5])};
+    });
     table.register_kernel(OpId::GRUCellBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [grad_h, gates_x, gates_h, h_prev]
         int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 0);
@@ -1665,7 +1702,50 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     VULKAN_CPU_FALLBACK(FlashAttention);
     VULKAN_CPU_FALLBACK(FlashAttentionBackward);
 
+    // SearchSorted — binary search is rarely GPU-critical, CPU fallback is fine
+    VULKAN_CPU_FALLBACK(SearchSorted);
+
     #undef VULKAN_CPU_FALLBACK
+
+    // GumbelSoftmax — composed from existing Vulkan ops (no dedicated shader needed)
+    table.register_single_output_kernel(OpId::GumbelSoftmax,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            const Tensor& logits = inputs[0];
+            double tau = attrs.get_float(AttrKey::Tau, 1.0);
+            bool hard = attrs.get_bool(AttrKey::Hard, false);
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+
+            auto shape_vec = std::vector<int64_t>(logits.shape().begin(), logits.shape().end());
+
+            // Gumbel noise: -log(-log(U)) where U ~ Uniform(0, 1)
+            Tensor u = tenzor::rand(shape_vec, logits.dtype(), logits.device());
+            Tensor eps_tensor = tenzor::full(shape_vec, 1e-20, logits.dtype(), logits.device());
+            u = tenzor::add(u, eps_tensor);
+
+            Tensor gumbels = tenzor::neg(tenzor::log(tenzor::neg(tenzor::log(u))));
+            Tensor scaled = tenzor::div(tenzor::add(logits, gumbels),
+                                tenzor::full(shape_vec, tau, logits.dtype(), logits.device()));
+
+            NewOpAttributes sm_attrs;
+            sm_attrs.set(AttrKey::Dim, dim);
+            std::array<Tensor, 1> sm_inputs = {scaled};
+            Tensor y_soft = dispatch<OpId::Softmax>(sm_inputs, sm_attrs)[0];
+
+            if (!hard) return y_soft;
+
+            // Straight-through estimator
+            int64_t actual_dim = dim < 0 ? dim + logits.ndim() : dim;
+            Tensor indices = argmax(y_soft, std::make_optional(actual_dim), /*keepdim=*/true);
+            Tensor y_hard = tenzor::zeros(shape_vec, logits.dtype(), logits.device());
+            std::array<Tensor, 3> scatter_inputs = {y_hard, indices,
+                tenzor::full(std::vector<int64_t>(indices.shape().begin(), indices.shape().end()),
+                     1.0, logits.dtype(), logits.device())};
+            NewOpAttributes scatter_attrs;
+            scatter_attrs.set(AttrKey::Dim, actual_dim);
+            y_hard = dispatch<OpId::Scatter>(scatter_inputs, scatter_attrs)[0];
+
+            return tenzor::add(tenzor::sub(y_hard, y_soft.detach()), y_soft);
+        });
 
     // ========================================================================
     // FFT Operations — Native Vulkan compute shaders (Cooley-Tukey radix-2)

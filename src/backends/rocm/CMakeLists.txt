@@ -15,6 +15,7 @@ find_package(rocblas QUIET CONFIG PATHS /opt/rocm)
 find_package(rocsolver QUIET CONFIG PATHS /opt/rocm)
 find_package(hiprand QUIET CONFIG PATHS /opt/rocm)
 find_package(rocfft QUIET CONFIG PATHS /opt/rocm)
+find_package(rocsparse QUIET CONFIG PATHS /opt/rocm)
 find_package(hipcub QUIET CONFIG PATHS /opt/rocm)
 find_package(rocprim QUIET CONFIG PATHS /opt/rocm)
 find_package(rocthrust QUIET CONFIG PATHS /opt/rocm)
@@ -67,6 +68,11 @@ endif()
 # Conditionally add FFT source if rocFFT is found
 if(rocfft_FOUND)
     list(APPEND ROCM_HIP_SOURCES kernels/fft.hip.cpp)
+endif()
+
+# Conditionally add sparse source if rocSPARSE is found
+if(rocsparse_FOUND)
+    list(APPEND ROCM_HIP_SOURCES kernels/sparse.hip.cpp)
 endif()
 
 # Mark .hip.cpp files to be compiled as HIP language
@@ -286,6 +292,15 @@ if(rocsolver_FOUND)
     message(STATUS "ROCm Backend: rocSOLVER support enabled")
 else()
     message(STATUS "ROCm Backend: rocSOLVER not found")
+endif()
+
+# Link rocSPARSE if available (equivalent to cuSPARSE)
+if(rocsparse_FOUND)
+    target_link_libraries(tenzor_backend_rocm PRIVATE roc::rocsparse)
+    target_compile_definitions(tenzor_backend_rocm PRIVATE TENZOR_HAS_ROCSPARSE)
+    message(STATUS "ROCm Backend: rocSPARSE support enabled")
+else()
+    message(STATUS "ROCm Backend: rocSPARSE not found")
 endif()
 
 # Find MIOpen (ROCm's DNN library - equivalent to cuDNN)

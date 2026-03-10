@@ -11256,8 +11256,8 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
         two_step = true;
     } else {
         // Unsupported direct GPU cast — fall back to CPU round-trip
-        Tensor cpu_input = input.to(DType::Float32);  // Ensure known type
-        Tensor cpu_copy = cpu_input.cpu();
+        // Transfer raw bytes to CPU first, then cast there (avoid recursive dispatchCast)
+        Tensor cpu_copy = input.cpu();
         Tensor casted = cpu_copy.to(target_dtype);
         return casted.to(input.device());
     }
@@ -16266,6 +16266,149 @@ auto VulkanBackend::dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Ten
     endSingleTimeCommands(cmd, device_id);
 
     return output;
+}
+
+// ============================================================================
+// LSTM Cell Forward (single timestep)
+// ============================================================================
+
+auto VulkanBackend::dispatchLSTMCellForward(const Tensor& input, const Tensor& hx, const Tensor& cx,
+                                             const Tensor& weight_ih, const Tensor& weight_hh,
+                                             const Tensor& bias_ih, const Tensor& bias_hh)
+    -> std::vector<Tensor> {
+    // Float16/BFloat16: upcast to Float32 on device, compute, downcast
+    // BFloat16 is handled at registry level (CPU fallback), but this covers direct calls too
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        auto results = dispatchLSTMCellForward(
+            input.to(DType::Float32), hx.to(DType::Float32), cx.to(DType::Float32),
+            weight_ih.to(DType::Float32), weight_hh.to(DType::Float32),
+            bias_ih.numel() > 0 ? bias_ih.to(DType::Float32) : bias_ih,
+            bias_hh.numel() > 0 ? bias_hh.to(DType::Float32) : bias_hh);
+        for (auto& r : results) r = r.to(orig);
+        return results;
+    }
+
+    auto in_shape = input.shape();
+    auto hx_shape = hx.shape();
+    int64_t batch_size = in_shape[0];
+    int64_t hidden_size = hx_shape[1];
+    int32_t device_id = input.device().index;
+
+    bool is_f64 = (input.dtype() == DType::Float64);
+    std::string cell_shader = is_f64 ? "lstm_cell_f64" : "lstm_cell";
+
+    // Compute gates = input @ W_ih^T + hx @ W_hh^T + bias_ih + bias_hh
+    Tensor W_ih_t = dispatchTranspose(weight_ih, 0, 1);
+    Tensor W_hh_t = dispatchTranspose(weight_hh, 0, 1);
+    Tensor gates = dispatchMatmul(input, W_ih_t);
+    Tensor h_gates = dispatchMatmul(hx, W_hh_t);
+    gates = dispatchBinaryOp("add", gates, h_gates);
+    if (bias_ih.numel() > 0) gates = dispatchBinaryOp("add", gates, bias_ih);
+    if (bias_hh.numel() > 0) gates = dispatchBinaryOp("add", gates, bias_hh);
+
+    // Allocate outputs
+    Tensor hy({batch_size, hidden_size}, input.dtype(), input.device());
+    Tensor cy({batch_size, hidden_size}, input.dtype(), input.device());
+
+    uint32_t total = static_cast<uint32_t>(batch_size * hidden_size);
+    size_t elem_size = input.dtype_size();
+    size_t gate_bytes = batch_size * 4 * hidden_size * elem_size;
+    size_t state_bytes = batch_size * hidden_size * elem_size;
+
+    struct { uint32_t batch_size; uint32_t hidden_size; } pc;
+    pc.batch_size = static_cast<uint32_t>(batch_size);
+    pc.hidden_size = static_cast<uint32_t>(hidden_size);
+
+    auto* pipeline = getPipeline(cell_shader, device_id);
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, gates.data_ptr()}, {1, cx.data_ptr()},
+        {2, hy.data_ptr()}, {3, cy.data_ptr()}
+    };
+    std::vector<size_t> sizes = {gate_bytes, state_bytes, state_bytes, state_bytes};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(total, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+    synchronize(device_id);
+
+    return {hy, cy};
+}
+
+// ============================================================================
+// GRU Cell Forward (single timestep)
+// ============================================================================
+
+auto VulkanBackend::dispatchGRUCellForward(const Tensor& input, const Tensor& hx,
+                                            const Tensor& weight_ih, const Tensor& weight_hh,
+                                            const Tensor& bias_ih, const Tensor& bias_hh)
+    -> Tensor {
+    // Float16/BFloat16: upcast to Float32 on device, compute, downcast
+    // BFloat16 is handled at registry level (CPU fallback), but this covers direct calls too
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        auto result = dispatchGRUCellForward(
+            input.to(DType::Float32), hx.to(DType::Float32),
+            weight_ih.to(DType::Float32), weight_hh.to(DType::Float32),
+            bias_ih.numel() > 0 ? bias_ih.to(DType::Float32) : bias_ih,
+            bias_hh.numel() > 0 ? bias_hh.to(DType::Float32) : bias_hh);
+        return result.to(orig);
+    }
+
+    auto in_shape = input.shape();
+    auto hx_shape = hx.shape();
+    int64_t batch_size = in_shape[0];
+    int64_t hidden_size = hx_shape[1];
+    int32_t device_id = input.device().index;
+
+    bool is_f64 = (input.dtype() == DType::Float64);
+    std::string cell_shader = is_f64 ? "gru_cell_f64" : "gru_cell";
+
+    // Compute gate projections
+    Tensor W_ih_t = dispatchTranspose(weight_ih, 0, 1);
+    Tensor W_hh_t = dispatchTranspose(weight_hh, 0, 1);
+    Tensor gates_x = dispatchMatmul(input, W_ih_t);
+    if (bias_ih.numel() > 0) gates_x = dispatchBinaryOp("add", gates_x, bias_ih);
+    Tensor gates_h = dispatchMatmul(hx, W_hh_t);
+    if (bias_hh.numel() > 0) gates_h = dispatchBinaryOp("add", gates_h, bias_hh);
+
+    // Allocate output
+    Tensor hy({batch_size, hidden_size}, input.dtype(), input.device());
+
+    uint32_t total = static_cast<uint32_t>(batch_size * hidden_size);
+    size_t elem_size = input.dtype_size();
+    size_t gate_bytes = batch_size * 3 * hidden_size * elem_size;
+    size_t state_bytes = batch_size * hidden_size * elem_size;
+
+    struct { uint32_t batch_size; uint32_t hidden_size; } pc;
+    pc.batch_size = static_cast<uint32_t>(batch_size);
+    pc.hidden_size = static_cast<uint32_t>(hidden_size);
+
+    auto* pipeline = getPipeline(cell_shader, device_id);
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, gates_x.data_ptr()}, {1, gates_h.data_ptr()},
+        {2, hx.data_ptr()}, {3, hy.data_ptr()}
+    };
+    std::vector<size_t> sizes = {gate_bytes, gate_bytes, state_bytes, state_bytes};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(total, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+    synchronize(device_id);
+
+    return hy;
 }
 
 } // namespace tenzor

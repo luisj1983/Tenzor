@@ -15,6 +15,9 @@ static thread_local bool grad_enabled{true};
 // Thread-local create_graph state for higher-order gradients
 static thread_local bool creating_graph{false};
 
+// Thread-local inference mode state
+static thread_local bool inference_mode_enabled{false};
+
 // Thread-local anomaly detection state
 static thread_local bool anomaly_detection_enabled{false};
 
@@ -205,6 +208,22 @@ NoGradGuard::NoGradGuard() : prev_state_(is_grad_enabled()) {
 
 NoGradGuard::~NoGradGuard() {
     set_grad_enabled(prev_state_);
+}
+
+InferenceModeGuard::InferenceModeGuard()
+    : prev_grad_state_(is_grad_enabled()),
+      prev_inference_state_(inference_mode_enabled) {
+    set_grad_enabled(false);
+    inference_mode_enabled = true;
+}
+
+InferenceModeGuard::~InferenceModeGuard() {
+    set_grad_enabled(prev_grad_state_);
+    inference_mode_enabled = prev_inference_state_;
+}
+
+auto is_inference_mode_enabled() -> bool {
+    return inference_mode_enabled;
 }
 
 // Global functions

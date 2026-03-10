@@ -24,6 +24,16 @@ Tensor cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec);
 } // namespace tenzor
 #endif
 
+// Forward declarations for ROCm sparse kernels (defined in kernels/sparse.hip.cpp)
+#ifdef TENZOR_HAS_ROCSPARSE
+namespace tenzor {
+namespace rocm {
+Tensor rocm_spmm_kernel(const SparseTensor& sparse, const Tensor& dense);
+Tensor rocm_spmv_kernel(const SparseTensor& sparse, const Tensor& vec);
+} // namespace rocm
+} // namespace tenzor
+#endif
+
 namespace tenzor {
 namespace sparse {
 
@@ -69,6 +79,29 @@ DType compute_dtype_for(DType dtype) {
 #ifdef TENZOR_HAS_CUSPARSE
     return (vec.device().type == Device::Type::CUDA ||
             sparse.device().type == Device::Type::CUDA);
+#else
+    (void)sparse;
+    (void)vec;
+    return false;
+#endif
+}
+
+/// Return true if sparse/dense are on ROCm and rocSPARSE is available.
+[[maybe_unused]] bool should_use_rocm(const SparseTensor& sparse, const Tensor& dense) {
+#ifdef TENZOR_HAS_ROCSPARSE
+    return (dense.device().type == Device::Type::ROCm ||
+            sparse.device().type == Device::Type::ROCm);
+#else
+    (void)sparse;
+    (void)dense;
+    return false;
+#endif
+}
+
+[[maybe_unused]] bool should_use_rocm_vec(const SparseTensor& sparse, const Tensor& vec) {
+#ifdef TENZOR_HAS_ROCSPARSE
+    return (vec.device().type == Device::Type::ROCm ||
+            sparse.device().type == Device::Type::ROCm);
 #else
     (void)sparse;
     (void)vec;
@@ -517,6 +550,13 @@ auto spmm(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
     }
 #endif
 
+#ifdef TENZOR_HAS_ROCSPARSE
+    if (should_use_rocm(sparse_compute, dense_compute)) {
+        auto result = rocm::rocm_spmm_kernel(sparse_compute, dense_compute);
+        return (orig_dtype != comp_dtype) ? result.to(orig_dtype) : result;
+    }
+#endif
+
     // CPU path: MKL-accelerated with scalar fallback
     auto result = cpu_spmm(sparse_compute, dense_compute, M, K, N);
 
@@ -558,6 +598,13 @@ auto spmv(const SparseTensor& sparse, const Tensor& vec) -> Tensor {
 #ifdef TENZOR_HAS_CUSPARSE
     if (should_use_cuda_vec(sparse_compute, vec_compute)) {
         auto result = cuda::cuda_spmv_kernel(sparse_compute, vec_compute);
+        return (orig_dtype != comp_dtype) ? result.to(orig_dtype) : result;
+    }
+#endif
+
+#ifdef TENZOR_HAS_ROCSPARSE
+    if (should_use_rocm_vec(sparse_compute, vec_compute)) {
+        auto result = rocm::rocm_spmv_kernel(sparse_compute, vec_compute);
         return (orig_dtype != comp_dtype) ? result.to(orig_dtype) : result;
     }
 #endif
