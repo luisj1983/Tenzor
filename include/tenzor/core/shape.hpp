@@ -16,12 +16,13 @@
 #include <numeric>
 #include <stdexcept>
 #include <limits>
+#include "../utils/safe_math.hpp"
 
 namespace tenzor {
 
 namespace detail {
 inline auto checked_mul(int64_t a, int64_t b) -> int64_t {
-    if (b != 0 && std::abs(a) > std::numeric_limits<int64_t>::max() / std::abs(b)) {
+    if (b != 0 && safe_abs(a) > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / safe_abs(b)) {
         throw std::overflow_error("Shape stride/numel computation overflow");
     }
     return a * b;

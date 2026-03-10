@@ -553,6 +553,8 @@ protected:
      *
      * Adds a trainable parameter to this module.
      * Parameters are stored as shared_ptr to ensure stable addresses for autograd.
+     * Thread safety is automatically enabled (make_thread_safe()) for safe
+     * concurrent gradient accumulation in multi-threaded training.
      *
      * @param name Parameter name
      * @param param Parameter variable (will be wrapped in shared_ptr)

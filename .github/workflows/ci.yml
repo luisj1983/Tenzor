@@ -6,7 +6,8 @@ on:
   pull_request:
     branches: [main]
   schedule:
-    - cron: '0 3 * * *'
+    - cron: '0 2 * * *'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -376,6 +377,76 @@ jobs:
           cd build
           ctest --output-on-failure -L python --timeout 60
         timeout-minutes: 10
+
+  # Tier 2.5: Nightly benchmarks (performance regression detection)
+  benchmarks:
+    name: Nightly Benchmarks
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build \
+            libomp-dev \
+            libmkl-dev \
+            libtbb-dev
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} \
+            -DTENZOR_BUILD_CUDA=OFF \
+            -DTENZOR_BUILD_ROCM=OFF \
+            -DTENZOR_BUILD_ONEAPI=OFF \
+            -DTENZOR_BUILD_VULKAN=OFF \
+            -DTENZOR_BUILD_METAL=OFF \
+            -DTENZOR_BUILD_WEBGPU=OFF \
+            -DTENZOR_BUILD_PYTHON=OFF \
+            -DTENZOR_BUILD_TESTS=OFF \
+            -DTENZOR_BUILD_BENCHMARKS=ON \
+            -DTENZOR_BUILD_EXAMPLES=OFF \
+            -DTENZOR_BUILD_MODEL_HUB=OFF
+
+      - name: Run benchmarks
+        run: bash scripts/ci_benchmark.sh
+        timeout-minutes: 60
+
+      - name: Download previous benchmark results
+        id: previous
+        uses: actions/download-artifact@v4
+        with:
+          name: benchmark-results
+          path: previous_benchmark_results
+        continue-on-error: true
+
+      - name: Compare with previous run
+        if: steps.previous.outcome == 'success'
+        run: |
+          python3 scripts/compare_benchmarks.py \
+            previous_benchmark_results/all.json \
+            build/benchmark_results/all.json \
+            | tee benchmark_comparison.md
+        continue-on-error: true
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: build/benchmark_results/
+          retention-days: 90
+
+      - name: Upload comparison report
+        if: steps.previous.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-comparison
+          path: benchmark_comparison.md
+          retention-days: 30
 
   # Tier 3: Nightly comprehensive tests
   nightly:

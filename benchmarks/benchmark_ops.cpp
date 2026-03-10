@@ -15,10 +15,14 @@
 #include "tenzor/utils/benchmark.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include <iostream>
+#include <sstream>
 #include <string>
 
 using namespace tenzor;
 using namespace tenzor::benchmark;
+
+// Forward declarations - defined before main()
+static void collect_result(const BenchmarkResult& result);
 
 // Benchmark configuration
 constexpr size_t WARMUP_ITERATIONS = 5;
@@ -64,6 +68,7 @@ void benchmark_matmul_suite() {
         });
 
         result.print();
+        collect_result(result);
         results.push_back(result);
     }
 
@@ -119,6 +124,7 @@ void benchmark_bmm() {
         });
 
         result.print();
+        collect_result(result);
     }
 }
 
@@ -159,6 +165,7 @@ void benchmark_elementwise() {
                 (void)ptr;
             });
             result.print();
+            collect_result(result);
         }
 
         // Multiplication
@@ -173,6 +180,7 @@ void benchmark_elementwise() {
                 (void)ptr;
             });
             result.print();
+            collect_result(result);
         }
 
         // Exponential
@@ -187,6 +195,7 @@ void benchmark_elementwise() {
                 (void)ptr;
             });
             result.print();
+            collect_result(result);
         }
 
         // Tanh
@@ -201,6 +210,7 @@ void benchmark_elementwise() {
                 (void)ptr;
             });
             result.print();
+            collect_result(result);
         }
     }
 }
@@ -239,6 +249,7 @@ void benchmark_reductions() {
                 (void)ptr;
             });
             result.print();
+            collect_result(result);
         }
 
         // Mean
@@ -253,6 +264,7 @@ void benchmark_reductions() {
                 (void)ptr;
             });
             result.print();
+            collect_result(result);
         }
     }
 }
@@ -285,6 +297,7 @@ void benchmark_backward() {
             b.zero_grad();
         });
         result.print();
+        collect_result(result);
     }
 
     // Element-wise backward
@@ -305,22 +318,46 @@ void benchmark_backward() {
             b.zero_grad();
         });
         result.print();
+        collect_result(result);
     }
 }
 
+// Global results collector for JSON output
+static std::vector<BenchmarkResult> g_all_results;
+
+static void collect_result(const BenchmarkResult& result) {
+    g_all_results.push_back(result);
+}
+
 int main(int argc, char** argv) {
-    std::cout << "\n";
-    std::cout << "========================================\n";
-    std::cout << "  Tenzor Operations Benchmark Suite\n";
-    std::cout << "========================================\n";
-    std::cout << "\nTarget Performance Metrics:\n";
-    std::cout << "  MatMul (4096x4096):  < 20ms (PyTorch: 22ms)\n";
-    std::cout << "  Backward Pass:       < 2x forward time\n";
-    std::cout << "\n";
+    bool json_output = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--json") {
+            json_output = true;
+        }
+    }
+
+    if (!json_output) {
+        std::cout << "\n";
+        std::cout << "========================================\n";
+        std::cout << "  Tenzor Operations Benchmark Suite\n";
+        std::cout << "========================================\n";
+        std::cout << "\nTarget Performance Metrics:\n";
+        std::cout << "  MatMul (4096x4096):  < 20ms (PyTorch: 22ms)\n";
+        std::cout << "  Backward Pass:       < 2x forward time\n";
+        std::cout << "\n";
+    }
 
     try {
         // Initialize Tenzor
         initialize();
+
+        // Suppress stdout for JSON mode by redirecting cout
+        std::streambuf* original_buf = nullptr;
+        std::ostringstream null_stream;
+        if (json_output) {
+            original_buf = std::cout.rdbuf(null_stream.rdbuf());
+        }
 
         // Run benchmark suites
         benchmark_matmul_suite();
@@ -329,9 +366,20 @@ int main(int argc, char** argv) {
         benchmark_reductions();
         benchmark_backward();
 
-        std::cout << "\n========================================\n";
-        std::cout << "  Benchmark Complete\n";
-        std::cout << "========================================\n\n";
+        // Restore cout
+        if (json_output && original_buf) {
+            std::cout.rdbuf(original_buf);
+        }
+
+        if (json_output) {
+            // Output JSON array of all results
+            BenchmarkSuite suite("ops");
+            std::cout << suite.export_json(g_all_results);
+        } else {
+            std::cout << "\n========================================\n";
+            std::cout << "  Benchmark Complete\n";
+            std::cout << "========================================\n\n";
+        }
 
         // Finalize
         finalize();

@@ -1,0 +1,64 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_atomic_int64 : require
+
+// Put operation for Float64: scatter source values to indexed positions
+// Uses uint64_t buffer for output to support CAS-loop atomics for accumulate mode.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Output { uint64_t output_data[]; };    // Destination (uint64_t for atomic CAS)
+layout(binding = 1) buffer Indices { int indices[]; };              // Target indices
+layout(binding = 2) buffer Source { float64_t source_data[]; };    // Values to put
+
+layout(push_constant) uniform PushConstants {
+    uint numel;        // Total number of output elements (for bounds checking)
+    uint num_indices;  // Number of indices (= source size)
+    uint accumulate;   // 0 = replace, 1 = add
+} params;
+
+// Bit-cast helpers between float64_t and uint64_t
+float64_t bitsToF64(uint64_t bits) {
+    return float64_t(packDouble2x32(uvec2(uint(bits), uint(bits >> 32u))));
+}
+
+uint64_t f64ToBits(float64_t val) {
+    uvec2 v = unpackDouble2x32(double(val));
+    return uint64_t(v.x) | (uint64_t(v.y) << 32u);
+}
+
+// Atomic add for float64 using compare-and-swap loop (bounded to prevent hangs)
+void atomicAddF64(uint idx, float64_t val) {
+    uint64_t old_bits = output_data[idx];
+    uint64_t new_bits;
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        float64_t old_val = bitsToF64(old_bits);
+        new_bits = f64ToBits(old_val + val);
+        uint64_t result = atomicCompSwap(output_data[idx], old_bits, new_bits);
+        if (result == old_bits) return;
+        old_bits = result;
+    }
+    // Last-resort direct write (better than hanging indefinitely)
+    output_data[idx] = new_bits;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_indices) return;
+
+    int put_idx = indices[idx];
+
+    // Bounds check: skip out-of-range indices
+    if (put_idx < 0 || put_idx >= int(params.numel)) return;
+
+    float64_t value = source_data[idx];
+    uint dest = uint(put_idx);
+
+    if (params.accumulate == 0) {
+        // Replace mode: direct write (last-write-wins for duplicate indices)
+        output_data[dest] = f64ToBits(value);
+    } else {
+        // Accumulate mode: atomic add via CAS loop
+        atomicAddF64(dest, value);
+    }
+}

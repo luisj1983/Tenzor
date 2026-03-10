@@ -8,6 +8,7 @@
 #include "tenzor/nn/quantization/qconfig.hpp"
 #include "tenzor/nn/layers/linear.hpp"
 #include "tenzor/nn/layers/conv.hpp"
+#include "tenzor/nn/layers/batchnorm.hpp"
 #include "tenzor/nn/module.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/indexing.hpp"
@@ -328,6 +329,209 @@ auto StraightThroughEstimator::backward(
     auto shape = grad_output.shape();
     Tensor zero_grad = zeros(std::vector<int64_t>(shape.begin(), shape.end()), grad_output.dtype(), grad_output.device());
     return tenzor::where(mask, grad_output, zero_grad);
+}
+
+// ============================================================================
+// FakeQuantizeFunction (Autograd)
+// ============================================================================
+
+FakeQuantizeFunction::FakeQuantizeFunction(float scale, float zero_point,
+                                           float quant_min, float quant_max)
+    : scale_(scale), zero_point_(zero_point),
+      quant_min_(quant_min), quant_max_(quant_max) {}
+
+auto FakeQuantizeFunction::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+    auto& input = inputs[0];
+    auto x = input.tensor();
+
+    // Save input for backward (STE needs to know which values were in-range)
+    save_for_backward({x});
+
+    // Fake quantize: quantize then immediately dequantize
+    // scaled = x / scale + zero_point
+    // clamped = clamp(round(scaled), quant_min, quant_max)
+    // output = (clamped - zero_point) * scale
+    Tensor inv_scale = full({1}, 1.0f / scale_, x.dtype(), x.device());
+    Tensor zp = full({1}, zero_point_, x.dtype(), x.device());
+
+    Tensor scaled = x * inv_scale + zp;
+    Tensor rounded = tenzor::round(scaled);
+    Tensor clamped = tenzor::clamp(rounded, quant_min_, quant_max_);
+    Tensor output = (clamped - zp) * full({1}, scale_, x.dtype(), x.device());
+
+    return {Variable(output, input.requires_grad())};
+}
+
+auto FakeQuantizeFunction::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    auto& grad_output = grad_outputs[0];
+    auto& input = saved_tensors()[0];
+
+    // STE: pass gradients through for values within the quantizable range,
+    // zero gradients for values that would be clamped by quantization.
+    // The quantizable range in float space is:
+    //   [quant_min - zero_point) * scale, (quant_max - zero_point) * scale]
+    float range_min = (quant_min_ - zero_point_) * scale_;
+    float range_max = (quant_max_ - zero_point_) * scale_;
+
+    Tensor min_t = full({1}, range_min, input.dtype(), input.device());
+    Tensor max_t = full({1}, range_max, input.dtype(), input.device());
+
+    // Mask: true where input is within quantizable range
+    Tensor mask = ge(input, min_t) * le(input, max_t);
+
+    // Zero out gradients for out-of-range values
+    auto shape = grad_output.shape();
+    Tensor zero_grad = zeros(std::vector<int64_t>(shape.begin(), shape.end()),
+                              grad_output.dtype(), grad_output.device());
+    return {tenzor::where(mask, grad_output, zero_grad)};
+}
+
+auto fake_quantize_with_grad(
+    const Variable& input,
+    float scale,
+    float zero_point,
+    float quant_min,
+    float quant_max
+) -> Variable {
+    auto fn = std::make_shared<FakeQuantizeFunction>(scale, zero_point, quant_min, quant_max);
+    auto outputs = fn->forward({input});
+    if (input.requires_grad()) {
+        outputs[0].set_grad_fn(fn);
+    }
+    return outputs[0];
+}
+
+// ============================================================================
+// BN Folding
+// ============================================================================
+
+auto fold_bn(Module& model) -> void {
+    // Look for Conv2d -> BatchNorm2d patterns in Sequential containers
+    auto* seq = dynamic_cast<Sequential*>(&model);
+    if (!seq) {
+        // For non-Sequential models, we cannot iterate children generically.
+        // Only Sequential models are supported for automatic BN folding.
+        return;
+    }
+
+    auto& modules = seq->modules();
+    if (modules.size() < 2) return;
+
+    // Identify Conv2d -> BatchNorm2d pairs and fold BN into Conv2d weights.
+    // We mark BN indices as "folded" so we can skip them when rebuilding.
+    std::vector<bool> skip(modules.size(), false);
+
+    for (size_t i = 0; i + 1 < modules.size(); ++i) {
+        if (skip[i]) continue;
+
+        auto conv = std::dynamic_pointer_cast<Conv2d>(modules[i]);
+        auto* bn_module = dynamic_cast<BatchNorm2d*>(modules[i + 1].get());
+        if (!conv || !bn_module) continue;
+
+        // Extract BN parameters
+        auto bn_state = bn_module->state_dict();
+        Tensor gamma = bn_state.at("weight");
+        Tensor beta = bn_state.at("bias");
+        Tensor running_mean = bn_state.at("running_mean");
+        Tensor running_var = bn_state.at("running_var");
+        double eps = bn_module->eps();
+
+        // Compute folding factors: bn_scale = gamma / sqrt(var + eps)
+        Tensor sqrt_var = sqrt(running_var + eps);
+        Tensor bn_scale = gamma / sqrt_var;  // [C]
+
+        // Get conv weight and bias
+        auto conv_state = conv->state_dict();
+        Tensor fp_weight = conv_state.at("weight");  // [out_ch, in_ch/groups, kH, kW]
+
+        auto weight_shape = fp_weight.shape();
+        int64_t out_channels = weight_shape[0];
+
+        // Fold BN scale into conv weights: w_new[c] = bn_scale[c] * w_old[c]
+        Tensor folded_weight = fp_weight.clone();
+        auto fw_cpu = (folded_weight.device() == Device::cpu()) ? folded_weight : folded_weight.to(Device::cpu());
+        auto bs_cpu = (bn_scale.device() == Device::cpu()) ? bn_scale : bn_scale.to(Device::cpu());
+
+        float* w_data = fw_cpu.data<float>();
+        const float* s_data = bs_cpu.data<const float>();
+        int64_t channel_size = fw_cpu.numel() / out_channels;
+
+        for (int64_t c = 0; c < out_channels; ++c) {
+            float s = s_data[c];
+            for (int64_t j = 0; j < channel_size; ++j) {
+                w_data[c * channel_size + j] *= s;
+            }
+        }
+
+        // Fold BN into bias: b_new = bn_scale * (b_old - mean) + beta
+        std::optional<Tensor> conv_bias;
+        if (conv_state.find("bias") != conv_state.end()) {
+            conv_bias = conv_state.at("bias");
+        }
+
+        Tensor folded_bias({out_channels}, DType::Float32, Device::cpu());
+        float* fb_data = folded_bias.data<float>();
+
+        auto rm_cpu = (running_mean.device() == Device::cpu()) ? running_mean : running_mean.to(Device::cpu());
+        auto bt_cpu = (beta.device() == Device::cpu()) ? beta : beta.to(Device::cpu());
+        const float* mean_data = rm_cpu.data<const float>();
+        const float* beta_data = bt_cpu.data<const float>();
+
+        for (int64_t c = 0; c < out_channels; ++c) {
+            float b_old = 0.0f;
+            if (conv_bias.has_value()) {
+                auto cb_cpu = (*conv_bias);
+                if (cb_cpu.device() != Device::cpu()) cb_cpu = cb_cpu.to(Device::cpu());
+                b_old = cb_cpu.data<const float>()[c];
+            }
+            fb_data[c] = s_data[c] * (b_old - mean_data[c]) + beta_data[c];
+        }
+
+        // Update conv with folded parameters via state_dict
+        std::unordered_map<std::string, Tensor> new_state;
+        new_state["weight"] = fw_cpu;
+        new_state["bias"] = folded_bias;
+        conv->load_state_dict(new_state);
+
+        // Mark BN module for skipping in rebuild
+        skip[i + 1] = true;
+    }
+
+    // Rebuild the Sequential without the folded BN modules
+    bool any_folded = false;
+    for (bool s : skip) { if (s) { any_folded = true; break; } }
+    if (!any_folded) return;
+
+    // Build a new Sequential and swap it
+    auto new_seq = std::make_shared<Sequential>();
+    for (size_t i = 0; i < modules.size(); ++i) {
+        if (!skip[i]) {
+            new_seq->add_module(modules[i]);
+        }
+    }
+
+    // Load the new sequential's state into the original model.
+    // Since we can't swap the internal modules_ vector directly (it's private),
+    // we copy the rebuilt state dict back. The Conv2d weights are already updated
+    // in-place above, so the folding is effective even without removing BN modules.
+    // The BN modules remain but are functionally dead (their params no longer affect output
+    // because conv already has folded weights). In eval mode the BN just applies
+    // scale=1, bias=0 effectively being identity if we update its state:
+    for (size_t i = 0; i < modules.size(); ++i) {
+        if (skip[i]) {
+            auto* bn = dynamic_cast<BatchNorm2d*>(modules[i].get());
+            if (bn) {
+                auto bn_sd = bn->state_dict();
+                int64_t num_features = bn_sd.at("weight").shape()[0];
+                std::unordered_map<std::string, Tensor> identity_state;
+                identity_state["weight"] = ones({num_features}, DType::Float32, Device::cpu());
+                identity_state["bias"] = zeros({num_features}, DType::Float32, Device::cpu());
+                identity_state["running_mean"] = zeros({num_features}, DType::Float32, Device::cpu());
+                identity_state["running_var"] = ones({num_features}, DType::Float32, Device::cpu());
+                bn->load_state_dict(identity_state);
+            }
+        }
+    }
 }
 
 } // namespace quantization

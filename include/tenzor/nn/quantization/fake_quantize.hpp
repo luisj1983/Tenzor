@@ -14,6 +14,7 @@
 #include "observer.hpp"
 #include "../module.hpp"
 #include "../../autograd/variable.hpp"
+#include "../../autograd/function.hpp"
 
 namespace tenzor {
 namespace nn {
@@ -356,6 +357,92 @@ public:
     static auto backward(const Tensor& grad_output, const Tensor& input,
                         float quant_min, float quant_max) -> Tensor;
 };
+
+/**
+ * @brief Autograd Function for fake quantization with straight-through estimator.
+ *
+ * Implements quantize-then-dequantize in the forward pass. In the backward pass,
+ * uses the straight-through estimator: gradients pass through unchanged for values
+ * within the quantization range [quant_min, quant_max], and are zeroed for
+ * out-of-range values (clamped by the quantization).
+ *
+ * This allows training to adapt to quantization noise while maintaining valid
+ * gradient flow for most of the parameter space.
+ *
+ * @code
+ * auto fn = std::make_shared<FakeQuantizeFunction>(scale, zero_point, quant_min, quant_max);
+ * auto outputs = fn->forward({input_var});
+ * // backward() will use STE gradient
+ * @endcode
+ */
+class FakeQuantizeFunction : public tenzor::Function {
+public:
+    /**
+     * @brief Construct with quantization parameters.
+     *
+     * @param scale Quantization scale factor
+     * @param zero_point Quantization zero point
+     * @param quant_min Minimum quantized value (e.g. -128 for INT8)
+     * @param quant_max Maximum quantized value (e.g. 127 for INT8)
+     */
+    FakeQuantizeFunction(float scale, float zero_point,
+                         float quant_min, float quant_max);
+
+    /**
+     * @brief Forward: quantize then dequantize, saving input for backward.
+     */
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+
+    /**
+     * @brief Backward: STE gradient (pass through within range, zero outside).
+     */
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+
+private:
+    float scale_;
+    float zero_point_;
+    float quant_min_;
+    float quant_max_;
+};
+
+/**
+ * @brief Convenience function to apply fake quantize with autograd support.
+ *
+ * Creates a FakeQuantizeFunction, runs forward, and returns the result
+ * with proper gradient tracking for STE backward.
+ *
+ * @param input Input variable
+ * @param scale Quantization scale
+ * @param zero_point Quantization zero point
+ * @param quant_min Minimum quantized value
+ * @param quant_max Maximum quantized value
+ * @return Fake-quantized variable with STE gradient
+ */
+auto fake_quantize_with_grad(
+    const Variable& input,
+    float scale,
+    float zero_point,
+    float quant_min,
+    float quant_max
+) -> Variable;
+
+/**
+ * @brief Fold BatchNorm2d into a preceding Conv2d layer.
+ *
+ * Walks the model looking for Conv2d -> BatchNorm2d patterns and folds the
+ * BN parameters into the Conv2d weights and bias using the standard formulas:
+ *
+ *   w_folded = gamma / sqrt(var + eps) * w_conv
+ *   b_folded = gamma / sqrt(var + eps) * (b_conv - mean) + beta
+ *
+ * This eliminates the BatchNorm layer entirely, reducing both computation
+ * and memory during inference. The folded model produces identical outputs.
+ *
+ * @param model Model to fold (modified in-place via state_dict)
+ * @note Only folds Conv2d->BatchNorm2d pairs found in Sequential containers.
+ *       Nested or non-sequential patterns are left unchanged.
+ */
+auto fold_bn(Module& model) -> void;
 
 } // namespace quantization
 } // namespace nn

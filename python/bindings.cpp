@@ -558,15 +558,19 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::call_guard<py::gil_scoped_release>())
         // Memory operations
         .def("clone", &tenzor::Tensor::clone,
-             "Return a copy of the tensor with new storage")
+             "Return a copy of the tensor with new storage",
+             py::call_guard<py::gil_scoped_release>())
         .def("detach", &tenzor::Tensor::detach,
              "Return a tensor detached from the computation graph")
         .def("contiguous", &tenzor::Tensor::contiguous,
-             "Return a contiguous tensor (copy if needed)")
+             "Return a contiguous tensor (copy if needed)",
+             py::call_guard<py::gil_scoped_release>())
         .def("fill_", &tenzor::Tensor::fill_, py::arg("value"),
-             "Fill tensor with scalar value in-place")
+             "Fill tensor with scalar value in-place",
+             py::call_guard<py::gil_scoped_release>())
         .def("zero_", &tenzor::Tensor::zero_,
-             "Fill tensor with zeros in-place")
+             "Fill tensor with zeros in-place",
+             py::call_guard<py::gil_scoped_release>())
         // Buffer protocol support (enables memoryview, numpy.asarray, etc.)
         .def_buffer([](tenzor::Tensor& t) -> py::buffer_info {
             if (t.device().type != tenzor::Device::Type::CPU) {
@@ -7603,7 +7607,199 @@ void bind_compression(py::module& m) {
         .def(py::init<int64_t, int64_t, QuantizationParams, float>(),
              py::arg("in_features"), py::arg("out_features"),
              py::arg("weight_qparams"), py::arg("bias_scale") = 1.0f,
-             "INT8 quantized linear layer");
+             "INT8 quantized linear layer")
+        .def("forward_quantized", &QuantizedLinear::forward_quantized,
+             py::arg("input"), "Forward pass with quantized input")
+        .def("set_weight", &QuantizedLinear::set_weight, py::arg("weights"))
+        .def("set_bias", &QuantizedLinear::set_bias, py::arg("bias"))
+        .def_static("from_float", &QuantizedLinear::from_float,
+             py::arg("fp_linear"), py::arg("qconfig"),
+             "Create quantized linear from floating-point layer");
+
+    py::class_<QuantizedConv2d, Module, std::shared_ptr<QuantizedConv2d>>(quant, "QuantizedConv2d")
+        .def(py::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
+                       QuantizationParams, float>(),
+             py::arg("in_channels"), py::arg("out_channels"),
+             py::arg("kernel_size"), py::arg("stride") = 1,
+             py::arg("padding") = 0, py::arg("dilation") = 1,
+             py::arg("groups") = 1, py::arg("weight_qparams"),
+             py::arg("bias_scale") = 1.0f,
+             "INT8 quantized 2D convolution layer")
+        .def("forward_quantized", &QuantizedConv2d::forward_quantized,
+             py::arg("input"), "Forward pass with quantized input")
+        .def("set_weight", &QuantizedConv2d::set_weight, py::arg("weights"))
+        .def("set_bias", &QuantizedConv2d::set_bias, py::arg("bias"))
+        .def_static("from_float", &QuantizedConv2d::from_float,
+             py::arg("fp_conv"), py::arg("qconfig"),
+             "Create quantized conv2d from floating-point layer");
+
+    py::class_<QuantizedConv1d, Module, std::shared_ptr<QuantizedConv1d>>(quant, "QuantizedConv1d")
+        .def(py::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
+                       QuantizationParams, float>(),
+             py::arg("in_channels"), py::arg("out_channels"),
+             py::arg("kernel_size"), py::arg("stride") = 1,
+             py::arg("padding") = 0, py::arg("dilation") = 1,
+             py::arg("groups") = 1, py::arg("weight_qparams"),
+             py::arg("bias_scale") = 1.0f,
+             "INT8 quantized 1D convolution layer")
+        .def("forward_quantized", &QuantizedConv1d::forward_quantized,
+             py::arg("input"), "Forward pass with quantized input")
+        .def("set_weight", &QuantizedConv1d::set_weight, py::arg("weights"))
+        .def("set_bias", &QuantizedConv1d::set_bias, py::arg("bias"))
+        .def_static("from_float", &QuantizedConv1d::from_float,
+             py::arg("fp_conv"), py::arg("qconfig"),
+             "Create quantized conv1d from floating-point layer");
+
+    py::class_<QuantizedConvTranspose2d, Module,
+               std::shared_ptr<QuantizedConvTranspose2d>>(quant, "QuantizedConvTranspose2d")
+        .def(py::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
+                       QuantizationParams, float>(),
+             py::arg("in_channels"), py::arg("out_channels"),
+             py::arg("kernel_size"), py::arg("stride") = 1,
+             py::arg("padding") = 0, py::arg("output_padding") = 0,
+             py::arg("groups") = 1, py::arg("weight_qparams"),
+             py::arg("bias_scale") = 1.0f,
+             "INT8 quantized transposed 2D convolution layer")
+        .def("forward_quantized", &QuantizedConvTranspose2d::forward_quantized,
+             py::arg("input"), "Forward pass with quantized input")
+        .def("set_weight", &QuantizedConvTranspose2d::set_weight, py::arg("weights"))
+        .def("set_bias", &QuantizedConvTranspose2d::set_bias, py::arg("bias"))
+        .def_static("from_float", &QuantizedConvTranspose2d::from_float,
+             py::arg("fp_conv"), py::arg("qconfig"),
+             "Create quantized transposed conv2d from floating-point layer");
+
+    py::class_<QuantizedBatchNorm2d, Module,
+               std::shared_ptr<QuantizedBatchNorm2d>>(quant, "QuantizedBatchNorm2d")
+        .def(py::init<int64_t, Tensor, Tensor>(),
+             py::arg("num_features"), py::arg("scale"), py::arg("bias"),
+             "Quantized batch normalization with folded parameters")
+        .def("forward_quantized", &QuantizedBatchNorm2d::forward_quantized,
+             py::arg("input"), "Forward pass with quantized input")
+        .def_static("from_float", &QuantizedBatchNorm2d::from_float,
+             py::arg("fp_bn"), py::arg("qconfig"),
+             "Create quantized batchnorm from floating-point layer");
+
+    py::class_<QuantizedEmbedding, Module,
+               std::shared_ptr<QuantizedEmbedding>>(quant, "QuantizedEmbedding")
+        .def(py::init<int64_t, int64_t, QuantizationParams, int64_t>(),
+             py::arg("num_embeddings"), py::arg("embedding_dim"),
+             py::arg("weight_qparams"), py::arg("padding_idx") = -1,
+             "INT8 quantized embedding table")
+        .def("forward_quantized", &QuantizedEmbedding::forward_quantized,
+             py::arg("indices"), "Look up and dequantize embeddings")
+        .def("set_weight", &QuantizedEmbedding::set_weight, py::arg("weights"))
+        .def_property_readonly("num_embeddings", &QuantizedEmbedding::num_embeddings)
+        .def_property_readonly("embedding_dim", &QuantizedEmbedding::embedding_dim)
+        .def_static("from_float", &QuantizedEmbedding::from_float,
+             py::arg("fp_embedding"), py::arg("qconfig"),
+             "Create quantized embedding from floating-point layer");
+
+    py::class_<QuantizedLSTMCell, Module,
+               std::shared_ptr<QuantizedLSTMCell>>(quant, "QuantizedLSTMCell")
+        .def(py::init<int64_t, int64_t, bool, QuantizationParams>(),
+             py::arg("input_size"), py::arg("hidden_size"),
+             py::arg("bias") = true,
+             py::arg("weight_qparams") = QuantizationParams(
+                 Tensor(), Tensor(), QuantDType::INT8, QuantizationScheme::PerTensorSymmetric),
+             "INT8 quantized LSTM cell")
+        .def("forward_cell", &QuantizedLSTMCell::forward_cell,
+             py::arg("input"), py::arg("hx"), py::arg("cx"),
+             "Single-step LSTM cell forward with explicit states")
+        .def_property_readonly("input_size", &QuantizedLSTMCell::input_size)
+        .def_property_readonly("hidden_size", &QuantizedLSTMCell::hidden_size)
+        .def_static("from_float", &QuantizedLSTMCell::from_float,
+             py::arg("fp_lstm_cell"), py::arg("qconfig"),
+             "Create quantized LSTM cell from floating-point layer");
+
+    py::class_<QuantizedLSTM, Module,
+               std::shared_ptr<QuantizedLSTM>>(quant, "QuantizedLSTM")
+        .def(py::init<int64_t, int64_t, int64_t, bool, bool, bool, QuantizationParams>(),
+             py::arg("input_size"), py::arg("hidden_size"),
+             py::arg("num_layers") = 1, py::arg("bias") = true,
+             py::arg("batch_first") = true, py::arg("bidirectional") = false,
+             py::arg("weight_qparams") = QuantizationParams(
+                 Tensor(), Tensor(), QuantDType::INT8, QuantizationScheme::PerTensorSymmetric),
+             "INT8 quantized LSTM")
+        .def("forward_with_state", &QuantizedLSTM::forward_with_state,
+             py::arg("input"), py::arg("h0"), py::arg("c0"),
+             "Forward with explicit initial states")
+        .def_static("from_float", &QuantizedLSTM::from_float,
+             py::arg("fp_lstm"), py::arg("qconfig"),
+             "Create quantized LSTM from floating-point layer");
+
+    py::class_<QuantizedGRU, Module,
+               std::shared_ptr<QuantizedGRU>>(quant, "QuantizedGRU")
+        .def(py::init<int64_t, int64_t, int64_t, bool, bool, bool, QuantizationParams>(),
+             py::arg("input_size"), py::arg("hidden_size"),
+             py::arg("num_layers") = 1, py::arg("bias") = true,
+             py::arg("batch_first") = true, py::arg("bidirectional") = false,
+             py::arg("weight_qparams") = QuantizationParams(
+                 Tensor(), Tensor(), QuantDType::INT8, QuantizationScheme::PerTensorSymmetric),
+             "INT8 quantized GRU")
+        .def("forward_with_state", &QuantizedGRU::forward_with_state,
+             py::arg("input"), py::arg("h0"),
+             "Forward with explicit initial hidden state")
+        .def_static("from_float", &QuantizedGRU::from_float,
+             py::arg("fp_gru"), py::arg("qconfig"),
+             "Create quantized GRU from floating-point layer");
+
+    // QAT utilities
+    py::class_<QATHelper>(quant, "QATHelper",
+        "Quantization-aware training helper for model preparation and conversion")
+        .def(py::init<>())
+        .def("prepare_qat", &QATHelper::prepare_qat,
+             py::arg("model"),
+             py::arg("dtype") = QuantDType::INT8,
+             py::arg("scheme") = QuantizationScheme::PerTensorSymmetric,
+             py::arg("learnable") = false,
+             "Prepare model for quantization-aware training")
+        .def("enable_observer", &QATHelper::enable_observer,
+             "Enable observers for all fake quantize modules")
+        .def("disable_observer", &QATHelper::disable_observer,
+             "Disable observers and fix quantization parameters")
+        .def("freeze_bn_stats", &QATHelper::freeze_bn_stats,
+             "Freeze BN statistics and calculate final qparams")
+        .def("convert_to_quantized", &QATHelper::convert_to_quantized,
+             py::arg("model"),
+             "Convert QAT model to quantized inference model");
+
+    quant.def("fake_quantize_with_grad", &fake_quantize_with_grad,
+        py::arg("input"), py::arg("scale"), py::arg("zero_point"),
+        py::arg("quant_min"), py::arg("quant_max"),
+        R"doc(
+        Apply fake quantization with autograd support (STE backward).
+
+        Quantizes then dequantizes the input, with straight-through estimator
+        for the backward pass. Gradients pass through for values within the
+        quantizable range, and are zeroed for out-of-range values.
+
+        Args:
+            input: Input variable
+            scale: Quantization scale factor
+            zero_point: Quantization zero point
+            quant_min: Minimum quantized value (e.g. -128 for INT8)
+            quant_max: Maximum quantized value (e.g. 127 for INT8)
+
+        Returns:
+            Fake-quantized variable with STE gradient
+        )doc");
+
+    quant.def("fold_bn", &fold_bn,
+        py::arg("model"),
+        R"doc(
+        Fold BatchNorm2d into preceding Conv2d layers.
+
+        Walks the model for Conv2d -> BatchNorm2d patterns and folds the BN
+        parameters into the Conv2d weights using:
+            w_folded = gamma / sqrt(var + eps) * w_conv
+            b_folded = gamma / sqrt(var + eps) * (b_conv - mean) + beta
+
+        The BN layers are neutralized (scale=1, bias=0, mean=0, var=1) so
+        they act as identity. This eliminates BN computation at inference.
+
+        Args:
+            model: Sequential model to fold (modified in-place)
+        )doc");
 
     // =============================================================================
     // Memory Management

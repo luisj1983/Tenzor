@@ -20,7 +20,10 @@ namespace nn {
 
 // Forward declarations
 class Linear;
+class Conv1d;
 class Conv2d;
+class ConvTranspose2d;
+class BatchNorm2d;
 
 namespace quantization {
 
@@ -746,6 +749,197 @@ private:
         std::optional<Tensor> bias_hh;
     };
     std::vector<LayerWeights> layers_;
+};
+
+/**
+ * @brief Quantized 1D convolution layer.
+ *
+ * INT8 1D convolution for sequence data (text, audio, time series).
+ * Mirrors Conv1d but with quantized int8 weights, float32 scale/zero_point.
+ * Forward dequantizes, computes, and re-quantizes (or returns float).
+ */
+class QuantizedConv1d : public Module {
+public:
+    /**
+     * @brief Construct quantized conv1d layer.
+     *
+     * @param in_channels Number of input channels
+     * @param out_channels Number of output channels
+     * @param kernel_size Kernel size
+     * @param stride Stride
+     * @param padding Padding
+     * @param dilation Dilation
+     * @param groups Number of groups
+     * @param weight_qparams Weight quantization parameters
+     * @param bias_scale Bias scale factor
+     */
+    QuantizedConv1d(
+        int64_t in_channels,
+        int64_t out_channels,
+        int64_t kernel_size,
+        int64_t stride = 1,
+        int64_t padding = 0,
+        int64_t dilation = 1,
+        int64_t groups = 1,
+        QuantizationParams weight_qparams = QuantizationParams(
+            Tensor(), Tensor(), QuantDType::INT8, QuantizationScheme::PerTensorSymmetric),
+        float bias_scale = 1.0f
+    );
+
+    auto forward_impl(const Variable& input) -> Variable override;
+    auto forward_quantized(const QuantizedTensor& input) -> Tensor;
+    auto forward_quantized_output(const QuantizedTensor& input,
+                                  const QuantizationParams& output_qparams)
+        -> QuantizedTensor;
+
+    auto set_weight(const QuantizedTensor& weights) -> void;
+    auto set_bias(const Tensor& bias) -> void;
+
+    auto stride() const -> int64_t { return stride_; }
+    auto padding() const -> int64_t { return padding_; }
+    auto dilation() const -> int64_t { return dilation_; }
+    auto groups() const -> int64_t { return groups_; }
+
+    /**
+     * @brief Create quantized layer from floating-point Conv1d.
+     *
+     * @param fp_conv Floating-point Conv1d layer
+     * @param qconfig Quantization configuration
+     * @return Quantized conv1d layer
+     */
+    static auto from_float(Module& fp_conv, const QConfig& qconfig)
+        -> std::shared_ptr<QuantizedConv1d>;
+
+private:
+    int64_t in_channels_;
+    int64_t out_channels_;
+    int64_t kernel_size_;
+    int64_t stride_;
+    int64_t padding_;
+    int64_t dilation_;
+    int64_t groups_;
+    QuantizedTensor weight_;
+    std::optional<Tensor> bias_;
+    float bias_scale_;
+};
+
+/**
+ * @brief Quantized transposed 2D convolution layer.
+ *
+ * INT8 transposed convolution for upsampling. Mirrors ConvTranspose2d
+ * but with quantized int8 weights, float32 scale/zero_point.
+ */
+class QuantizedConvTranspose2d : public Module {
+public:
+    QuantizedConvTranspose2d(
+        int64_t in_channels,
+        int64_t out_channels,
+        int64_t kernel_size,
+        int64_t stride = 1,
+        int64_t padding = 0,
+        int64_t output_padding = 0,
+        int64_t groups = 1,
+        QuantizationParams weight_qparams = QuantizationParams(
+            Tensor(), Tensor(), QuantDType::INT8, QuantizationScheme::PerTensorSymmetric),
+        float bias_scale = 1.0f
+    );
+
+    auto forward_impl(const Variable& input) -> Variable override;
+    auto forward_quantized(const QuantizedTensor& input) -> Tensor;
+
+    auto set_weight(const QuantizedTensor& weights) -> void;
+    auto set_bias(const Tensor& bias) -> void;
+
+    auto stride() const -> int64_t { return stride_; }
+    auto padding() const -> int64_t { return padding_; }
+    auto output_padding() const -> int64_t { return output_padding_; }
+    auto groups() const -> int64_t { return groups_; }
+
+    /**
+     * @brief Create quantized layer from floating-point ConvTranspose2d.
+     *
+     * @param fp_conv Floating-point ConvTranspose2d layer
+     * @param qconfig Quantization configuration
+     * @return Quantized transposed conv2d layer
+     */
+    static auto from_float(Module& fp_conv, const QConfig& qconfig)
+        -> std::shared_ptr<QuantizedConvTranspose2d>;
+
+private:
+    int64_t in_channels_;
+    int64_t out_channels_;
+    int64_t kernel_size_;
+    int64_t stride_;
+    int64_t padding_;
+    int64_t output_padding_;
+    int64_t groups_;
+    QuantizedTensor weight_;
+    std::optional<Tensor> bias_;
+    float bias_scale_;
+};
+
+/**
+ * @brief Quantized LSTM cell for single-step recurrence.
+ *
+ * Uses INT8 quantized weights for input-to-hidden and hidden-to-hidden
+ * transforms of all four gates (input, forget, cell, output).
+ * Gate computations (sigmoid, tanh) run in FP32 after dequantization.
+ */
+class QuantizedLSTMCell : public Module {
+public:
+    /**
+     * @brief Construct quantized LSTM cell.
+     *
+     * @param input_size Size of input features
+     * @param hidden_size Size of hidden state
+     * @param bias Whether to use bias (default: true)
+     * @param weight_qparams Weight quantization parameters
+     */
+    QuantizedLSTMCell(
+        int64_t input_size,
+        int64_t hidden_size,
+        bool bias = true,
+        QuantizationParams weight_qparams = QuantizationParams(
+            Tensor(), Tensor(), QuantDType::INT8, QuantizationScheme::PerTensorSymmetric)
+    );
+
+    /**
+     * @brief Forward pass: single timestep LSTM cell.
+     *
+     * @param input Input variable (uses self-attention style, passes input as x with zero state)
+     * @return Output variable (hidden state h)
+     */
+    auto forward_impl(const Variable& input) -> Variable override;
+
+    /**
+     * @brief Forward pass with explicit hidden and cell states.
+     *
+     * @param input Input tensor [batch, input_size]
+     * @param hx Hidden state [batch, hidden_size]
+     * @param cx Cell state [batch, hidden_size]
+     * @return Tuple of (h', c') — new hidden and cell states
+     */
+    auto forward_cell(const Variable& input, const Variable& hx, const Variable& cx)
+        -> std::pair<Variable, Variable>;
+
+    auto input_size() const -> int64_t { return input_size_; }
+    auto hidden_size() const -> int64_t { return hidden_size_; }
+
+    /**
+     * @brief Create quantized LSTM cell from floating-point version.
+     */
+    static auto from_float(Module& fp_lstm_cell, const QConfig& qconfig)
+        -> std::shared_ptr<QuantizedLSTMCell>;
+
+private:
+    int64_t input_size_;
+    int64_t hidden_size_;
+    bool bias_;
+
+    QuantizedTensor weight_ih_;   ///< [4*hidden_size, input_size]
+    QuantizedTensor weight_hh_;   ///< [4*hidden_size, hidden_size]
+    std::optional<Tensor> bias_ih_;
+    std::optional<Tensor> bias_hh_;
 };
 
 } // namespace quantization

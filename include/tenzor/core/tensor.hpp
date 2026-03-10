@@ -88,6 +88,17 @@ class VulkanBackend;
  * device. `.reshape()`, `.transpose()`, `.slice()` also create views sharing
  * storage — NOT copies.
  *
+ * View vs Copy summary:
+ * | View (shares storage)         | Copy (new storage)          |
+ * |-------------------------------|-----------------------------|
+ * | reshape, view                 | clone                       |
+ * | transpose, permute            | contiguous (if non-contig)  |
+ * | squeeze, unsqueeze            | repeat                      |
+ * | flatten (if contiguous)       | flatten (if non-contiguous) |
+ * | slice, select, narrow         |                             |
+ * | expand, chunk                 |                             |
+ * | detach                        |                             |
+ *
  * Tensors use shared storage with reference counting for efficient memory usage.
  *
  * Thread Safety:
@@ -434,7 +445,7 @@ public:
      * Requires tensor to be contiguous.
      *
      * @param new_shape New dimensions
-     * @return View with new shape (shares storage)
+     * @return View — tensor with new shape (shares storage)
      * @throws std::runtime_error if tensor is not contiguous
      */
     auto view(std::vector<int64_t> new_shape) const -> Tensor;
@@ -444,7 +455,7 @@ public:
      *
      * @param dim0 First dimension to swap
      * @param dim1 Second dimension to swap
-     * @return Transposed tensor (shares storage)
+     * @return View — transposed tensor (shares storage)
      *
      * @code
      * Tensor t({2, 3, 4}, DType::Float32, Device::cpu());
@@ -457,7 +468,7 @@ public:
      * @brief Permute dimensions.
      *
      * @param dims New ordering of dimensions
-     * @return Permuted tensor (shares storage)
+     * @return View — permuted tensor (shares storage)
      * @throws std::runtime_error if dims is invalid
      *
      * @code
@@ -471,7 +482,7 @@ public:
      * @brief Remove dimensions of size 1.
      *
      * @param dim Optional specific dimension to squeeze (nullopt = squeeze all)
-     * @return Tensor with size-1 dimensions removed
+     * @return View — tensor with size-1 dimensions removed
      *
      * @code
      * Tensor t({1, 3, 1, 4}, DType::Float32, Device::cpu());
@@ -485,7 +496,7 @@ public:
      * @brief Add dimension of size 1.
      *
      * @param dim Position to insert new dimension
-     * @return Tensor with added dimension
+     * @return View — tensor with added dimension
      *
      * @code
      * Tensor t({3, 4}, DType::Float32, Device::cpu());
@@ -500,7 +511,7 @@ public:
      *
      * @param start_dim First dimension to flatten (default: 0)
      * @param end_dim Last dimension to flatten (default: -1 = last)
-     * @return Flattened tensor
+     * @return View if contiguous, Copy otherwise — flattened tensor
      *
      * @code
      * Tensor t({2, 3, 4}, DType::Float32, Device::cpu());
@@ -517,7 +528,7 @@ public:
      * No data is copied — returns a view with broadcast strides.
      *
      * @param shape Target shape (must be compatible with broadcasting rules)
-     * @return Expanded tensor view
+     * @return View — expanded tensor with broadcast strides
      */
     auto expand(std::vector<int64_t> shape) const -> Tensor;
 
@@ -560,7 +571,7 @@ public:
      * @param start Start index (inclusive)
      * @param end End index (exclusive)
      * @param step Step size (default: 1)
-     * @return Sliced tensor (shares storage)
+     * @return View — sliced tensor (shares storage)
      *
      * @code
      * Tensor t({10, 5}, DType::Float32, Device::cpu());
@@ -778,7 +789,7 @@ public:
      *
      * Allocates new storage and copies all data.
      *
-     * @return New independent tensor with copied data
+     * @return Copy — new independent tensor with copied data
      *
      * @code
      * Tensor a({3, 4}, DType::Float32, Device::cpu());
@@ -793,7 +804,7 @@ public:
      * Creates a new tensor that shares storage but has no gradient history.
      * Use when you want to prevent gradient computation.
      *
-     * @return Detached tensor (shares storage, no gradients)
+     * @return View — detached tensor (shares storage, no gradients)
      *
      * @code
      * Tensor a = some_computation();
@@ -808,7 +819,7 @@ public:
      * If tensor is already contiguous, returns this tensor.
      * Otherwise, creates a new contiguous copy.
      *
-     * @return Contiguous tensor (may be this or new tensor)
+     * @return This tensor if already contiguous, Copy otherwise
      *
      * @code
      * Tensor t = some_tensor.transpose(0, 1);
@@ -983,7 +994,7 @@ public:
      * @param dim Dimension to narrow
      * @param start Start index
      * @param length Number of elements to keep
-     * @return Narrowed tensor view
+     * @return View — narrowed tensor (shares storage)
      */
     auto narrow(int64_t dim, int64_t start, int64_t length) const -> Tensor;
 
@@ -991,7 +1002,7 @@ public:
      * @brief Select a single index along a dimension, removing that dimension.
      * @param dim Dimension to select from
      * @param index Index to select
-     * @return Tensor with dim removed
+     * @return View — tensor with dim removed (shares storage)
      */
     auto select(int64_t dim, int64_t index) const -> Tensor;
 
@@ -999,7 +1010,7 @@ public:
      * @brief Split tensor into chunks along a dimension.
      * @param chunks Number of chunks
      * @param dim Dimension to split along (default: 0)
-     * @return Vector of tensor chunks
+     * @return Views — vector of tensor chunk views (share storage)
      */
     auto chunk(int64_t chunks, int64_t dim = 0) const -> std::vector<Tensor>;
 

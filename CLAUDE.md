@@ -82,6 +82,13 @@ Backend kernels register in `src/backends/*/kernel_registry.cpp`:
 TENZOR_REGISTER_BINARY_KERNEL(table, MatMul, cpu::matmul_kernel);
 ```
 
+### Sparse Dispatch
+
+Sparse tensor operations (OpIds 460-464: SparseSpMM, SparseSpMV, SparseToDense, DenseToSparse,
+SparseAdd) use a **separate dispatch path** through `SparseTensor` in `src/sparse/sparse_ops.cpp`.
+They call MKL SpMV/SpMM on CPU and cuSPARSE/rocSPARSE on GPU directly, bypassing the `OpId`
+dispatch table. The OpIds are reserved for potential future unification of sparse and dense dispatch.
+
 ### Autograd Pattern
 
 Variables wrap Tensors with gradient tracking:

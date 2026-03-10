@@ -88,6 +88,19 @@ struct DeviceInfo {
     DeviceInfo& operator=(const DeviceInfo&) = delete;
 };
 
+/// Validate dtype for linalg ops. ROCm linalg supports Float32 and Float64 only.
+/// Float16 and BFloat16 are upcast to Float32 by the caller; anything else is an error.
+void validate_linalg_dtype(const Tensor& t, const std::string& op_name) {
+    auto dt = t.dtype();
+    if (dt != DType::Float32 && dt != DType::Float64 &&
+        dt != DType::Float16 && dt != DType::BFloat16) {
+        throw std::invalid_argument(
+            "linalg::" + op_name + ": unsupported dtype " +
+            std::string(dtype_name(dt)) +
+            ". Supported: Float32, Float64 (Float16/BFloat16 auto-upcast to Float32).");
+    }
+}
+
 /// Get batch count from shape (product of all dims except last two).
 int64_t batch_size(const Tensor& t) {
     auto shape = t.shape();
@@ -245,6 +258,10 @@ __global__ void copy_q_columns_f64(const double* a_data, double* q_data,
 // ============================================================================
 
 auto linalg_det_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
+    validate_linalg_dtype(A, "det");
+    if (A.dtype() == DType::Float16) {
+        return linalg_det_kernel(A.to(DType::Float32), stream).to(DType::Float16);
+    }
     if (A.dtype() == DType::BFloat16) {
         return linalg_det_kernel(A.to(DType::Float32), stream).to(DType::BFloat16);
     }
@@ -307,6 +324,10 @@ auto linalg_det_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
 // ============================================================================
 
 auto linalg_inv_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
+    validate_linalg_dtype(A, "inv");
+    if (A.dtype() == DType::Float16) {
+        return linalg_inv_kernel(A.to(DType::Float32), stream).to(DType::Float16);
+    }
     if (A.dtype() == DType::BFloat16) {
         return linalg_inv_kernel(A.to(DType::Float32), stream).to(DType::BFloat16);
     }
@@ -384,6 +405,12 @@ auto linalg_inv_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
 // ============================================================================
 
 auto linalg_solve_kernel(const Tensor& A, const Tensor& B, hipStream_t stream) -> Tensor {
+    validate_linalg_dtype(A, "solve");
+    if (A.dtype() == DType::Float16) {
+        auto A_f32 = A.to(DType::Float32);
+        auto B_f32 = B.to(DType::Float32);
+        return linalg_solve_kernel(A_f32, B_f32, stream).to(DType::Float16);
+    }
     if (A.dtype() == DType::BFloat16) {
         auto A_f32 = A.to(DType::Float32);
         auto B_f32 = B.to(DType::Float32);
@@ -446,6 +473,11 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, hipStream_t stream) -
 
 auto linalg_svd_kernel(const Tensor& A, bool full_matrices, hipStream_t stream)
     -> std::tuple<Tensor, Tensor, Tensor> {
+    validate_linalg_dtype(A, "svd");
+    if (A.dtype() == DType::Float16) {
+        auto [U, S, Vt] = linalg_svd_kernel(A.to(DType::Float32), full_matrices, stream);
+        return {U.to(DType::Float16), S.to(DType::Float16), Vt.to(DType::Float16)};
+    }
     if (A.dtype() == DType::BFloat16) {
         auto [U, S, Vt] = linalg_svd_kernel(A.to(DType::Float32), full_matrices, stream);
         return {U.to(DType::BFloat16), S.to(DType::BFloat16), Vt.to(DType::BFloat16)};
@@ -565,6 +597,11 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, hipStream_t stream)
 
 auto linalg_qr_kernel(const Tensor& A, hipStream_t stream)
     -> std::tuple<Tensor, Tensor> {
+    validate_linalg_dtype(A, "qr");
+    if (A.dtype() == DType::Float16) {
+        auto [Q, R] = linalg_qr_kernel(A.to(DType::Float32), stream);
+        return {Q.to(DType::Float16), R.to(DType::Float16)};
+    }
     if (A.dtype() == DType::BFloat16) {
         auto [Q, R] = linalg_qr_kernel(A.to(DType::Float32), stream);
         return {Q.to(DType::BFloat16), R.to(DType::BFloat16)};
@@ -672,6 +709,11 @@ auto linalg_qr_kernel(const Tensor& A, hipStream_t stream)
 
 auto linalg_eigh_kernel(const Tensor& A, hipStream_t stream)
     -> std::tuple<Tensor, Tensor> {
+    validate_linalg_dtype(A, "eigh");
+    if (A.dtype() == DType::Float16) {
+        auto [W, V] = linalg_eigh_kernel(A.to(DType::Float32), stream);
+        return {W.to(DType::Float16), V.to(DType::Float16)};
+    }
     if (A.dtype() == DType::BFloat16) {
         auto [W, V] = linalg_eigh_kernel(A.to(DType::Float32), stream);
         return {W.to(DType::BFloat16), V.to(DType::BFloat16)};
@@ -736,6 +778,10 @@ auto linalg_eigh_kernel(const Tensor& A, hipStream_t stream)
 // ============================================================================
 
 auto linalg_cholesky_kernel(const Tensor& A, bool upper, hipStream_t stream) -> Tensor {
+    validate_linalg_dtype(A, "cholesky");
+    if (A.dtype() == DType::Float16) {
+        return linalg_cholesky_kernel(A.to(DType::Float32), upper, stream).to(DType::Float16);
+    }
     if (A.dtype() == DType::BFloat16) {
         return linalg_cholesky_kernel(A.to(DType::Float32), upper, stream).to(DType::BFloat16);
     }

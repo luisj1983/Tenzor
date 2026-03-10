@@ -161,7 +161,10 @@ auto Module::zero_grad() -> void {
 
 auto Module::register_parameter(std::string name, Variable param) -> void {
     // Wrap Variable in shared_ptr for stable address (prevents dangling pointers in autograd)
-    parameters_[std::move(name)] = std::make_shared<Variable>(std::move(param));
+    auto ptr = std::make_shared<Variable>(std::move(param));
+    // Enable thread-safe gradient accumulation for multi-threaded training
+    ptr->make_thread_safe();
+    parameters_[std::move(name)] = ptr;
 }
 
 auto Module::register_buffer(std::string name, Variable buffer) -> void {
@@ -657,6 +660,7 @@ auto Sequential::load_state_dict(const std::unordered_map<std::string, Tensor>& 
 auto ParameterList::append(Variable param) -> ParameterList& {
     std::string name = std::to_string(params_.size());
     auto param_ptr = std::make_shared<Variable>(std::move(param));
+    param_ptr->make_thread_safe();
     params_.push_back(param_ptr);
     register_parameter(name, *param_ptr);
     return *this;
@@ -711,6 +715,7 @@ auto ParameterList::load_state_dict(const std::unordered_map<std::string, Tensor
 
 auto ParameterDict::insert(const std::string& key, Variable param) -> ParameterDict& {
     auto param_ptr = std::make_shared<Variable>(std::move(param));
+    param_ptr->make_thread_safe();
     if (params_.count(key)) {
         params_[key] = param_ptr;
     } else {

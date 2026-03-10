@@ -17,7 +17,11 @@ Example:
             return self.fc2(x)
 """
 
+from __future__ import annotations
+
 import threading
+from typing import Any, Iterator, Optional
+
 from . import tenzor_core as _core
 
 # Store reference to original C++ Module BEFORE importing *
@@ -147,7 +151,7 @@ class Module(_CppModule):
                 result[name] = buf
         return result
 
-    def __getattr__(self, name: str):
+    def __getattr__(self, name: str) -> Any:
         """
         Get attribute, delegating to C++ accessors for modules/parameters/buffers.
 
@@ -216,7 +220,7 @@ class Module(_CppModule):
             return
         object.__delattr__(self, name)
 
-    def __dir__(self):
+    def __dir__(self) -> list[str]:
         """Combine Python attributes with C++ submodule/parameter/buffer names."""
         result = set(super().__dir__())
         result.update(self.get_submodules().keys())
@@ -242,19 +246,19 @@ class Module(_CppModule):
 
         self.register_module(name, module)
 
-    def children(self):
+    def children(self) -> Iterator[Any]:
         """Returns an iterator over immediate children modules."""
         for name, module in self.get_submodules().items():
             if module is not None:
                 yield module
 
-    def named_children(self):
+    def named_children(self) -> Iterator[tuple[str, Any]]:
         """Returns an iterator over immediate children modules, yielding tuples of (name, module)."""
         for name, module in self.get_submodules().items():
             if module is not None:
                 yield name, module
 
-    def modules(self):
+    def modules(self) -> Iterator[Any]:
         """Returns an iterator over all modules in the network, including self."""
         yield self
         for name, module in self.get_submodules().items():
@@ -264,7 +268,7 @@ class Module(_CppModule):
                 else:
                     yield module
 
-    def named_modules(self, prefix: str = ''):
+    def named_modules(self, prefix: str = '') -> Iterator[tuple[str, Any]]:
         """Returns an iterator over all modules in the network, yielding tuples of (name, module)."""
         yield prefix, self
         for name, module in self.get_submodules().items():
@@ -275,7 +279,7 @@ class Module(_CppModule):
                 else:
                     yield submodule_prefix, module
 
-    def apply(self, fn):
+    def apply(self, fn) -> Module:
         """
         Apply a function recursively to every submodule and self.
 
@@ -316,7 +320,7 @@ class Module(_CppModule):
     # the C++ maps, then recurses into submodules. Since we no longer cache
     # Variable objects in Python dicts, there is no desync.
 
-    def requires_grad_(self, requires_grad: bool = True):
+    def requires_grad_(self, requires_grad: bool = True) -> Module:
         """
         Change if autograd should record operations on parameters.
 
@@ -382,7 +386,7 @@ class Sequential(_CppSequential):
         output = model(input)
     """
 
-    def __init__(self, *args):
+    def __init__(self, *args) -> None:
         """
         Initialize Sequential container.
 

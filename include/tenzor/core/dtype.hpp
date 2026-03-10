@@ -294,6 +294,8 @@ constexpr auto dtype_name(DType dtype) -> std::string_view {
  * 2. Float types dominate over integer:
  *    - Int32 + Float32 -> Float32
  *    - Int64 + Float64 -> Float64
+ *    - Float16 + Int32 -> Float32 (NOT Float16 — Float16 can only represent integers up to 2048)
+ *    - BFloat16 + Int64 -> Float32 (same reason — BFloat16 range insufficient for integers)
  *
  * 3. Higher precision wins within category:
  *    - Float16 + Float32 -> Float32

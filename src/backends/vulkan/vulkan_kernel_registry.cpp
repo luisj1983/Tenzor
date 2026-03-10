@@ -1605,6 +1605,20 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     VULKAN_CPU_FALLBACK(Angle);
     VULKAN_CPU_FALLBACK(Polar);
 
+    // Linear algebra ops (CPU fallback — requires LAPACK/cuSOLVER, impractical in Vulkan)
+    VULKAN_CPU_FALLBACK(LinalgDet);
+    VULKAN_CPU_FALLBACK(LinalgInv);
+    VULKAN_CPU_FALLBACK(LinalgSolve);
+    VULKAN_CPU_FALLBACK(LinalgSVD);
+    VULKAN_CPU_FALLBACK(LinalgQR);
+    VULKAN_CPU_FALLBACK(LinalgEigh);
+    VULKAN_CPU_FALLBACK(LinalgEig);
+    VULKAN_CPU_FALLBACK(LinalgCholesky);
+
+    // Flash attention (CPU fallback — requires specialized memory access patterns)
+    VULKAN_CPU_FALLBACK(FlashAttention);
+    VULKAN_CPU_FALLBACK(FlashAttentionBackward);
+
     #undef VULKAN_CPU_FALLBACK
 
     // ========================================================================

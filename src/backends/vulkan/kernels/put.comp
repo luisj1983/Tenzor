@@ -1,0 +1,53 @@
+#version 450
+
+// Put operation: scatter source values to indexed positions in a flat output
+// Each thread reads an index and writes source[thread_id] to output[index].
+// Supports replace mode and accumulate (add) mode.
+// Uses uint buffer for output to support CAS-loop atomics for accumulate mode.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Output { uint output_data[]; };    // Destination (uint for atomic CAS)
+layout(binding = 1) buffer Indices { int indices[]; };         // Target indices
+layout(binding = 2) buffer Source { float source_data[]; };    // Values to put
+
+layout(push_constant) uniform PushConstants {
+    uint numel;        // Total number of output elements (for bounds checking)
+    uint num_indices;  // Number of indices (= source size)
+    uint accumulate;   // 0 = replace, 1 = add
+} params;
+
+// Atomic add for float using compare-and-swap loop (bounded to prevent hangs)
+void atomicAddFloat(uint idx, float val) {
+    uint old_bits = output_data[idx];
+    uint new_bits;
+    for (int attempt = 0; attempt < 1024; ++attempt) {
+        float old_val = uintBitsToFloat(old_bits);
+        new_bits = floatBitsToUint(old_val + val);
+        uint result = atomicCompSwap(output_data[idx], old_bits, new_bits);
+        if (result == old_bits) return;
+        old_bits = result;
+    }
+    // Last-resort direct write (better than hanging indefinitely)
+    output_data[idx] = new_bits;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_indices) return;
+
+    int put_idx = indices[idx];
+
+    // Bounds check: skip out-of-range indices
+    if (put_idx < 0 || put_idx >= int(params.numel)) return;
+
+    float value = source_data[idx];
+    uint dest = uint(put_idx);
+
+    if (params.accumulate == 0) {
+        // Replace mode: direct write (last-write-wins for duplicate indices)
+        output_data[dest] = floatBitsToUint(value);
+    } else {
+        // Accumulate mode: atomic add via CAS loop
+        atomicAddFloat(dest, value);
+    }
+}

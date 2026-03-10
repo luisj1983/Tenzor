@@ -220,6 +220,25 @@ auto tensor_to_numpy(const Tensor& tensor) -> py::array {
 
 // NumPy to Tensor conversion
 auto numpy_to_tensor(py::array arr, Device device) -> Tensor {
+    // Warn about Fortran-contiguous (column-major) arrays — data will be copied
+    // as row-major which may silently transpose the data layout
+    auto flags = arr.flags();
+    if ((flags & py::array::f_style) && !(flags & py::array::c_style) && arr.ndim() > 1) {
+        PyErr_WarnEx(PyExc_UserWarning,
+            "Converting a Fortran-contiguous (column-major) NumPy array to a "
+            "row-major Tenzor tensor. The data will be copied in C order, which "
+            "may not match the original memory layout. Use np.ascontiguousarray() "
+            "to explicitly convert before passing.", 1);
+    }
+
+    // Warn about misaligned data pointer
+    auto itemsize = arr.dtype().itemsize();
+    if (itemsize > 1 && reinterpret_cast<uintptr_t>(arr.data()) % itemsize != 0) {
+        PyErr_WarnEx(PyExc_UserWarning,
+            "NumPy array data pointer is not aligned to element size. "
+            "This may cause a performance penalty during conversion.", 1);
+    }
+
     // Get NumPy array properties
     auto dtype = numpy_dtype_to_tenzor(arr);
 

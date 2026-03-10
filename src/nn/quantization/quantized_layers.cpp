@@ -8,6 +8,7 @@
 #include "tenzor/nn/layers/conv.hpp"
 #include "tenzor/nn/layers/batchnorm.hpp"
 #include "tenzor/nn/layers/normalization.hpp"
+#include "tenzor/nn/layers/embedding.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/creation.hpp"
@@ -1633,6 +1634,419 @@ auto QuantizedGRU::from_float(Module& fp_gru, const QConfig& qconfig)
                 result->layers_[idx].bias_hh = get_param("bias_hh_" + suffix);
             }
         }
+    }
+
+    return result;
+}
+
+// ============================================================================
+// QuantizedConv1d
+// ============================================================================
+
+QuantizedConv1d::QuantizedConv1d(
+    int64_t in_channels,
+    int64_t out_channels,
+    int64_t kernel_size,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t groups,
+    QuantizationParams weight_qparams,
+    float bias_scale
+) : in_channels_(in_channels),
+    out_channels_(out_channels),
+    kernel_size_(kernel_size),
+    stride_(stride),
+    padding_(padding),
+    dilation_(dilation),
+    groups_(groups),
+    weight_(Tensor({out_channels, in_channels / groups, kernel_size},
+                   DType::Int8, Device::cpu()), std::move(weight_qparams)),
+    bias_scale_(bias_scale) {}
+
+auto QuantizedConv1d::forward_impl(const Variable& input) -> Variable {
+    auto q_input = quantize_per_tensor_symmetric(input.tensor());
+    Tensor output = forward_quantized(q_input);
+    return Variable(output, input.requires_grad());
+}
+
+auto QuantizedConv1d::forward_quantized(const QuantizedTensor& input) -> Tensor {
+    // Dequantize and run FP32 conv1d as fallback
+    // A fused INT8 1D convolution kernel would be more efficient
+    Tensor fp_input = input.dequantize();
+    Tensor fp_weight = weight_.dequantize();
+
+    auto input_shape = fp_input.shape();
+    int64_t batch = input_shape[0];
+    int64_t l_in = input_shape[2];
+
+    int64_t l_out = (l_in + 2 * padding_ - dilation_ * (kernel_size_ - 1) - 1) / stride_ + 1;
+
+    auto original_device = fp_input.device();
+    Tensor output = zeros({batch, out_channels_, l_out}, DType::Float32, Device::cpu());
+
+    auto fp_input_cpu = (fp_input.device() == Device::cpu()) ? fp_input : fp_input.to(Device::cpu());
+    auto fp_weight_cpu = (fp_weight.device() == Device::cpu()) ? fp_weight : fp_weight.to(Device::cpu());
+
+    const float* in_data = fp_input_cpu.data<float>();
+    const float* w_data = fp_weight_cpu.data<float>();
+    float* out_data = output.data<float>();
+
+    int64_t in_c_per_group = in_channels_ / groups_;
+    int64_t out_c_per_group = out_channels_ / groups_;
+
+    for (int64_t n = 0; n < batch; ++n) {
+        for (int64_t g = 0; g < groups_; ++g) {
+            for (int64_t oc = 0; oc < out_c_per_group; ++oc) {
+                int64_t oc_abs = g * out_c_per_group + oc;
+                for (int64_t ol = 0; ol < l_out; ++ol) {
+                    float sum = 0.0f;
+                    if (bias_.has_value()) {
+                        Tensor bias_cpu = *bias_;
+                        if (bias_cpu.device() != Device::cpu())
+                            bias_cpu = bias_cpu.to(Device::cpu());
+                        sum = bias_cpu.data<const float>()[oc_abs];
+                    }
+
+                    for (int64_t ic = 0; ic < in_c_per_group; ++ic) {
+                        int64_t ic_abs = g * in_c_per_group + ic;
+                        for (int64_t k = 0; k < kernel_size_; ++k) {
+                            int64_t il = ol * stride_ - padding_ + k * dilation_;
+                            if (il >= 0 && il < l_in) {
+                                int64_t in_idx = (n * in_channels_ + ic_abs) * l_in + il;
+                                int64_t w_idx = (oc_abs * in_c_per_group + ic) * kernel_size_ + k;
+                                sum += in_data[in_idx] * w_data[w_idx];
+                            }
+                        }
+                    }
+
+                    int64_t out_idx = (n * out_channels_ + oc_abs) * l_out + ol;
+                    out_data[out_idx] = sum;
+                }
+            }
+        }
+    }
+
+    return output.to(original_device);
+}
+
+auto QuantizedConv1d::forward_quantized_output(
+    const QuantizedTensor& input,
+    const QuantizationParams& output_qparams
+) -> QuantizedTensor {
+    Tensor fp_output = forward_quantized(input);
+    return quantize_tensor(fp_output, output_qparams);
+}
+
+auto QuantizedConv1d::set_weight(const QuantizedTensor& weights) -> void {
+    weight_ = weights;
+}
+
+auto QuantizedConv1d::set_bias(const Tensor& bias) -> void {
+    bias_ = bias;
+}
+
+auto QuantizedConv1d::from_float(Module& fp_conv, const QConfig& qconfig)
+    -> std::shared_ptr<QuantizedConv1d> {
+    auto params = fp_conv.named_parameters();
+
+    Tensor weight;
+    bool found_weight = false;
+    for (auto& [name, var] : params) {
+        if (name == "weight") { weight = var->tensor(); found_weight = true; break; }
+    }
+    if (!found_weight) {
+        throw std::runtime_error("QuantizedConv1d::from_float: module has no 'weight' parameter");
+    }
+
+    auto shape = weight.shape();  // [out_channels, in_channels/groups, kernel_size]
+    int64_t out_channels = shape[0];
+    int64_t in_c_per_group = shape[1];
+    int64_t kernel_size = shape[2];
+
+    // Quantize weights
+    auto weight_cpu = (weight.device() == Device::cpu()) ? weight : weight.to(Device::cpu());
+    auto weight_observer = qconfig.create_weight_observer();
+    weight_observer->observe(weight_cpu);
+    auto weight_qparams = weight_observer->calculate_qparams(
+        qconfig.weight_dtype(), qconfig.weight_scheme());
+
+    // Extract stride/padding/dilation/groups from extra_repr if possible,
+    // or use defaults. The Conv1d state_dict only has weight/bias.
+    // Use default values; caller can override via constructor if needed.
+    auto result = std::make_shared<QuantizedConv1d>(
+        in_c_per_group,  // in_channels (assumes groups=1 unless overridden)
+        out_channels, kernel_size,
+        1, 0, 1, 1,     // stride, padding, dilation, groups defaults
+        weight_qparams);
+
+    QuantizedTensor q_weight = quantize_tensor(weight_cpu, weight_qparams);
+    result->set_weight(q_weight);
+
+    for (auto& [name, var] : params) {
+        if (name == "bias") { result->set_bias(var->tensor()); break; }
+    }
+
+    return result;
+}
+
+// ============================================================================
+// QuantizedConvTranspose2d
+// ============================================================================
+
+QuantizedConvTranspose2d::QuantizedConvTranspose2d(
+    int64_t in_channels,
+    int64_t out_channels,
+    int64_t kernel_size,
+    int64_t stride,
+    int64_t padding,
+    int64_t output_padding,
+    int64_t groups,
+    QuantizationParams weight_qparams,
+    float bias_scale
+) : in_channels_(in_channels),
+    out_channels_(out_channels),
+    kernel_size_(kernel_size),
+    stride_(stride),
+    padding_(padding),
+    output_padding_(output_padding),
+    groups_(groups),
+    weight_(Tensor({in_channels, out_channels / groups, kernel_size, kernel_size},
+                   DType::Int8, Device::cpu()), std::move(weight_qparams)),
+    bias_scale_(bias_scale) {}
+
+auto QuantizedConvTranspose2d::forward_impl(const Variable& input) -> Variable {
+    auto q_input = quantize_per_tensor_symmetric(input.tensor());
+    Tensor output = forward_quantized(q_input);
+    return Variable(output, input.requires_grad());
+}
+
+auto QuantizedConvTranspose2d::forward_quantized(const QuantizedTensor& input) -> Tensor {
+    // Dequantize and run FP32 transposed conv2d
+    Tensor fp_input = input.dequantize();
+    Tensor fp_weight = weight_.dequantize();
+
+    auto input_shape = fp_input.shape();
+    int64_t batch = input_shape[0];
+    int64_t h_in = input_shape[2];
+    int64_t w_in = input_shape[3];
+
+    // Transposed conv output dims:
+    // H_out = (H_in - 1) * stride - 2*padding + kernel_size + output_padding
+    int64_t h_out = (h_in - 1) * stride_ - 2 * padding_ + kernel_size_ + output_padding_;
+    int64_t w_out = (w_in - 1) * stride_ - 2 * padding_ + kernel_size_ + output_padding_;
+
+    auto original_device = fp_input.device();
+    Tensor output = zeros({batch, out_channels_, h_out, w_out}, DType::Float32, Device::cpu());
+
+    auto fp_input_cpu = (fp_input.device() == Device::cpu()) ? fp_input : fp_input.to(Device::cpu());
+    auto fp_weight_cpu = (fp_weight.device() == Device::cpu()) ? fp_weight : fp_weight.to(Device::cpu());
+
+    const float* in_data = fp_input_cpu.data<float>();
+    const float* w_data = fp_weight_cpu.data<float>();
+    float* out_data = output.data<float>();
+
+    int64_t in_c_per_group = in_channels_ / groups_;
+    int64_t out_c_per_group = out_channels_ / groups_;
+
+    // Transposed convolution: scatter input through flipped kernel
+    for (int64_t n = 0; n < batch; ++n) {
+        for (int64_t g = 0; g < groups_; ++g) {
+            for (int64_t ic = 0; ic < in_c_per_group; ++ic) {
+                int64_t ic_abs = g * in_c_per_group + ic;
+                for (int64_t ih = 0; ih < h_in; ++ih) {
+                    for (int64_t iw = 0; iw < w_in; ++iw) {
+                        float in_val = in_data[((n * in_channels_ + ic_abs) * h_in + ih) * w_in + iw];
+
+                        for (int64_t oc = 0; oc < out_c_per_group; ++oc) {
+                            int64_t oc_abs = g * out_c_per_group + oc;
+                            for (int64_t kh = 0; kh < kernel_size_; ++kh) {
+                                for (int64_t kw = 0; kw < kernel_size_; ++kw) {
+                                    int64_t oh = ih * stride_ - padding_ + kh;
+                                    int64_t ow = iw * stride_ - padding_ + kw;
+
+                                    if (oh >= 0 && oh < h_out && ow >= 0 && ow < w_out) {
+                                        // Weight layout: [in_channels, out_channels/groups, kH, kW]
+                                        int64_t w_idx = ((ic_abs * out_c_per_group + oc) * kernel_size_ + kh) * kernel_size_ + kw;
+                                        int64_t out_idx = ((n * out_channels_ + oc_abs) * h_out + oh) * w_out + ow;
+                                        out_data[out_idx] += in_val * w_data[w_idx];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Add bias
+    if (bias_.has_value()) {
+        Tensor bias_cpu = *bias_;
+        if (bias_cpu.device() != Device::cpu()) bias_cpu = bias_cpu.to(Device::cpu());
+        const float* b_data = bias_cpu.data<const float>();
+        int64_t spatial = h_out * w_out;
+        for (int64_t n = 0; n < batch; ++n) {
+            for (int64_t c = 0; c < out_channels_; ++c) {
+                float b = b_data[c];
+                float* ch_data = out_data + (n * out_channels_ + c) * spatial;
+                for (int64_t i = 0; i < spatial; ++i) {
+                    ch_data[i] += b;
+                }
+            }
+        }
+    }
+
+    return output.to(original_device);
+}
+
+auto QuantizedConvTranspose2d::set_weight(const QuantizedTensor& weights) -> void {
+    weight_ = weights;
+}
+
+auto QuantizedConvTranspose2d::set_bias(const Tensor& bias) -> void {
+    bias_ = bias;
+}
+
+auto QuantizedConvTranspose2d::from_float(Module& fp_conv, const QConfig& qconfig)
+    -> std::shared_ptr<QuantizedConvTranspose2d> {
+    auto params = fp_conv.named_parameters();
+
+    Tensor weight;
+    bool found_weight = false;
+    for (auto& [name, var] : params) {
+        if (name == "weight") { weight = var->tensor(); found_weight = true; break; }
+    }
+    if (!found_weight) {
+        throw std::runtime_error("QuantizedConvTranspose2d::from_float: module has no 'weight' parameter");
+    }
+
+    auto shape = weight.shape();  // [in_channels, out_channels/groups, kH, kW]
+    int64_t in_channels = shape[0];
+    int64_t out_c_per_group = shape[1];
+    int64_t kernel_h = shape[2];
+
+    // Quantize weights
+    auto weight_cpu = (weight.device() == Device::cpu()) ? weight : weight.to(Device::cpu());
+    auto weight_observer = qconfig.create_weight_observer();
+    weight_observer->observe(weight_cpu);
+    auto weight_qparams = weight_observer->calculate_qparams(
+        qconfig.weight_dtype(), qconfig.weight_scheme());
+
+    // Use defaults for stride/padding/output_padding/groups
+    auto result = std::make_shared<QuantizedConvTranspose2d>(
+        in_channels, out_c_per_group, kernel_h,
+        1, 0, 0, 1,  // stride, padding, output_padding, groups defaults
+        weight_qparams);
+
+    QuantizedTensor q_weight = quantize_tensor(weight_cpu, weight_qparams);
+    result->set_weight(q_weight);
+
+    for (auto& [name, var] : params) {
+        if (name == "bias") { result->set_bias(var->tensor()); break; }
+    }
+
+    return result;
+}
+
+// ============================================================================
+// QuantizedLSTMCell
+// ============================================================================
+
+QuantizedLSTMCell::QuantizedLSTMCell(
+    int64_t input_size,
+    int64_t hidden_size,
+    bool bias,
+    QuantizationParams weight_qparams
+) : input_size_(input_size),
+    hidden_size_(hidden_size),
+    bias_(bias),
+    weight_ih_(Tensor({4 * hidden_size, input_size}, DType::Int8, Device::cpu()),
+               weight_qparams),
+    weight_hh_(Tensor({4 * hidden_size, hidden_size}, DType::Int8, Device::cpu()),
+               weight_qparams) {
+
+    if (bias) {
+        bias_ih_ = zeros({4 * hidden_size}, DType::Float32, Device::cpu());
+        bias_hh_ = zeros({4 * hidden_size}, DType::Float32, Device::cpu());
+    }
+}
+
+auto QuantizedLSTMCell::forward_impl(const Variable& input) -> Variable {
+    // Default: zero initial state
+    auto shape = input.shape();
+    int64_t batch = shape[0];
+
+    auto hx = Variable(zeros({batch, hidden_size_}, DType::Float32, input.tensor().device()), false);
+    auto cx = Variable(zeros({batch, hidden_size_}, DType::Float32, input.tensor().device()), false);
+
+    auto [h, c] = forward_cell(input, hx, cx);
+    return h;
+}
+
+auto QuantizedLSTMCell::forward_cell(const Variable& input,
+                                      const Variable& hx, const Variable& cx)
+    -> std::pair<Variable, Variable> {
+    // Dequantize weights to FP32 for gate computation
+    Tensor w_ih = weight_ih_.dequantize();
+    Tensor w_hh = weight_hh_.dequantize();
+
+    auto x = input.tensor();
+    auto h = hx.tensor();
+    auto c = cx.tensor();
+
+    // gates = x @ w_ih^T + h @ w_hh^T + bias
+    auto gates = matmul(x, w_ih.permute({1, 0}));
+    gates = gates + matmul(h, w_hh.permute({1, 0}));
+    if (bias_ih_) gates = gates + *bias_ih_;
+    if (bias_hh_) gates = gates + *bias_hh_;
+
+    // Split gates: [batch, 4*hidden] -> 4x [batch, hidden]
+    auto i_gate = sigmoid(gates.slice(1, 0, hidden_size_));
+    auto f_gate = sigmoid(gates.slice(1, hidden_size_, 2 * hidden_size_));
+    auto g_gate = tanh(gates.slice(1, 2 * hidden_size_, 3 * hidden_size_));
+    auto o_gate = sigmoid(gates.slice(1, 3 * hidden_size_, 4 * hidden_size_));
+
+    auto c_new = f_gate * c + i_gate * g_gate;
+    auto h_new = o_gate * tanh(c_new);
+
+    return {Variable(h_new, false), Variable(c_new, false)};
+}
+
+auto QuantizedLSTMCell::from_float(Module& fp_lstm_cell, const QConfig& qconfig)
+    -> std::shared_ptr<QuantizedLSTMCell> {
+    auto params = fp_lstm_cell.named_parameters();
+
+    auto get_param = [&](const std::string& name) -> Tensor {
+        for (auto& [pname, var] : params) {
+            if (pname == name) return var->tensor();
+        }
+        throw std::runtime_error("QuantizedLSTMCell::from_float: missing parameter " + name);
+    };
+
+    auto has_param = [&](const std::string& name) -> bool {
+        for (auto& [pname, _] : params) { if (pname == name) return true; }
+        return false;
+    };
+
+    auto w_ih = get_param("weight_ih");
+    auto w_hh = get_param("weight_hh");
+    int64_t hidden_size = w_ih.shape()[0] / 4;
+    int64_t input_size = w_ih.shape()[1];
+    bool has_bias = has_param("bias_ih");
+
+    auto w_ih_cpu = (w_ih.device() == Device::cpu()) ? w_ih : w_ih.to(Device::cpu());
+    auto w_hh_cpu = (w_hh.device() == Device::cpu()) ? w_hh : w_hh.to(Device::cpu());
+
+    auto result = std::make_shared<QuantizedLSTMCell>(
+        input_size, hidden_size, has_bias);
+
+    result->weight_ih_ = quantize_per_tensor_symmetric(w_ih_cpu);
+    result->weight_hh_ = quantize_per_tensor_symmetric(w_hh_cpu);
+
+    if (has_bias) {
+        result->bias_ih_ = get_param("bias_ih");
+        result->bias_hh_ = get_param("bias_hh");
     }
 
     return result;

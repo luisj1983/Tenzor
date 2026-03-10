@@ -10,6 +10,7 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/utils/error.hpp"
+#include "tenzor/utils/safe_math.hpp"
 #include <numeric>
 #include <algorithm>
 #include <array>
@@ -18,16 +19,6 @@
 #include <limits>
 #include <type_traits>
 #include <stdexcept>
-
-namespace {
-// Safe absolute value for int64_t that avoids undefined behavior for INT64_MIN.
-// std::abs(INT64_MIN) is UB because -INT64_MIN overflows signed int64_t.
-inline auto safe_abs(int64_t v) -> uint64_t {
-    if (v == std::numeric_limits<int64_t>::min())
-        return static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) + 1;
-    return static_cast<uint64_t>(v < 0 ? -v : v);
-}
-} // anonymous namespace
 
 namespace tenzor {
 
@@ -77,7 +68,7 @@ auto TensorImpl::numel() const -> int64_t {
     int64_t result = 1;
     for (auto dim : shape) {
         // Check for overflow before multiplying
-        if (dim != 0 && safe_abs(result) > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / safe_abs(dim)) {
+        if (dim != 0 && detail::safe_abs(result) > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / detail::safe_abs(dim)) {
             throw std::overflow_error("Tensor size overflow: shape produces more than INT64_MAX elements");
         }
         result *= dim;
@@ -1360,7 +1351,7 @@ auto Tensor::slice(int64_t dim, int64_t start, int64_t end, int64_t step) const 
             int64_t extent = result.impl_->shape[d] - 1;
             int64_t stride = result.impl_->strides[d];
             // Check multiplication overflow
-            if (stride != 0 && static_cast<uint64_t>(extent) > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / safe_abs(stride)) {
+            if (stride != 0 && static_cast<uint64_t>(extent) > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / detail::safe_abs(stride)) {
                 throw std::overflow_error("Slice offset computation overflows int64_t");
             }
             int64_t delta = extent * stride;

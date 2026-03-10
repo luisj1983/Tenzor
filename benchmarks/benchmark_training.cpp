@@ -26,6 +26,7 @@
 #include <iostream>
 #include <memory>
 #include <iomanip>
+#include <sstream>
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -34,6 +35,12 @@ using namespace tenzor::benchmark;
 // Benchmark configuration
 constexpr size_t WARMUP_ITERATIONS = 3;
 constexpr size_t BENCHMARK_ITERATIONS = 20;
+
+// Global results collector for JSON output
+static std::vector<BenchmarkResult> g_all_results;
+static void collect_result(const BenchmarkResult& result) {
+    g_all_results.push_back(result);
+}
 
 /**
  * @brief Simple MLP model for benchmarking
@@ -208,6 +215,7 @@ void benchmark_training_iteration() {
         });
 
         result.print();
+        collect_result(result);
     }
 }
 
@@ -260,6 +268,7 @@ void benchmark_batch_training() {
         });
 
         result.print();
+        collect_result(result);
     }
 }
 
@@ -315,6 +324,7 @@ void benchmark_cnn_training() {
         });
 
         result.print();
+        collect_result(result);
     }
 }
 
@@ -353,6 +363,7 @@ void benchmark_optimizers() {
         });
 
         result.print();
+        collect_result(result);
     }
 
     // Test Adam
@@ -377,6 +388,7 @@ void benchmark_optimizers() {
         });
 
         result.print();
+        collect_result(result);
     }
 }
 
@@ -429,6 +441,7 @@ void benchmark_gradient_accumulation() {
         });
 
         result.print();
+        collect_result(result);
     }
 }
 
@@ -466,23 +479,39 @@ void benchmark_memory_patterns() {
         });
 
         result.print();
+        collect_result(result);
     }
 }
 
 int main(int argc, char** argv) {
-    std::cout << "\n";
-    std::cout << "========================================\n";
-    std::cout << "  Tenzor Training Benchmark Suite\n";
-    std::cout << "========================================\n";
-    std::cout << "\nTarget Performance Metrics:\n";
-    std::cout << "  Training iteration:  < 5ms for small models\n";
-    std::cout << "  Batch processing:    Linear scaling with batch size\n";
-    std::cout << "  Optimizer overhead:  < 10% of total time\n";
-    std::cout << "\n";
+    bool json_output = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--json") {
+            json_output = true;
+        }
+    }
+
+    if (!json_output) {
+        std::cout << "\n";
+        std::cout << "========================================\n";
+        std::cout << "  Tenzor Training Benchmark Suite\n";
+        std::cout << "========================================\n";
+        std::cout << "\nTarget Performance Metrics:\n";
+        std::cout << "  Training iteration:  < 5ms for small models\n";
+        std::cout << "  Batch processing:    Linear scaling with batch size\n";
+        std::cout << "  Optimizer overhead:  < 10% of total time\n";
+        std::cout << "\n";
+    }
 
     try {
         // Initialize Tenzor
         initialize();
+
+        std::streambuf* original_buf = nullptr;
+        std::ostringstream null_stream;
+        if (json_output) {
+            original_buf = std::cout.rdbuf(null_stream.rdbuf());
+        }
 
         // Run benchmark suites
         benchmark_training_iteration();
@@ -492,9 +521,18 @@ int main(int argc, char** argv) {
         benchmark_gradient_accumulation();
         benchmark_memory_patterns();
 
-        std::cout << "\n========================================\n";
-        std::cout << "  Training Benchmarks Complete\n";
-        std::cout << "========================================\n\n";
+        if (json_output && original_buf) {
+            std::cout.rdbuf(original_buf);
+        }
+
+        if (json_output) {
+            BenchmarkSuite suite("training");
+            std::cout << suite.export_json(g_all_results);
+        } else {
+            std::cout << "\n========================================\n";
+            std::cout << "  Training Benchmarks Complete\n";
+            std::cout << "========================================\n\n";
+        }
 
         // Finalize
         finalize();

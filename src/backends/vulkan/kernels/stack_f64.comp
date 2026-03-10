@@ -1,0 +1,29 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Stack operation for Float64: stack tensors along a new dimension
+// Input tensors are passed as a flat concatenation in a single buffer.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { float64_t input_data[]; };
+layout(binding = 1) buffer Output { float64_t output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_tensors;          // Number of input tensors
+    uint elements_per_tensor;  // Elements in each input tensor
+    uint output_numel;         // Total output elements
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.output_numel) return;
+
+    uint tensor_idx = idx / params.elements_per_tensor;
+    uint elem_idx = idx % params.elements_per_tensor;
+
+    // Bounds check on tensor index
+    if (tensor_idx >= params.num_tensors) return;
+
+    uint input_offset = tensor_idx * params.elements_per_tensor + elem_idx;
+    output_data[idx] = input_data[input_offset];
+}

@@ -153,7 +153,7 @@ auto Function::backward_with_variables(std::vector<Variable> grad_outputs) -> st
                 if (std::string(env) == "warn") return 1;
                 if (std::string(env) == "silent") return 2;
             }
-            return 0; // error by default
+            return 1; // warn by default (allows higher-order grad to work with disconnected graph)
         }();
 
         auto op_name = name();
@@ -187,7 +187,7 @@ auto Function::backward_with_variables(std::vector<Variable> grad_outputs) -> st
     std::vector<Variable> result_vars;
     result_vars.reserve(result_tensors.size());
     for (auto& t : result_tensors) {
-        result_vars.emplace_back(t, false);
+        result_vars.emplace_back(t, any_requires_grad && t.is_valid());
     }
     return result_vars;
 }

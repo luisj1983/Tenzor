@@ -65,10 +65,12 @@ auto promote_types(DType a, DType b) -> DType {
         return b;
     }
 
-    // Float wins over integer
-    // Float16/BFloat16 can only represent integers up to 2048 exactly,
-    // so any integer type mixed with Float16/BFloat16 promotes to Float32
-    // to match NumPy/PyTorch semantics.
+    // Float wins over integer.
+    // Float16/BFloat16 can only represent integers up to 2048 exactly
+    // (mantissa is 10/7 bits respectively), so any integer type mixed with
+    // Float16/BFloat16 promotes to Float32 to avoid silent precision loss.
+    // Examples: Float16 + Int32 -> Float32, BFloat16 + Int64 -> Float32.
+    // This matches NumPy/PyTorch semantics (torch.result_type).
     if (is_floating(a) && is_integer(b)) {
         if (a == DType::Float16 || a == DType::BFloat16) {
             return DType::Float32;

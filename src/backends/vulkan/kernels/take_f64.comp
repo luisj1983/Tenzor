@@ -1,0 +1,29 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Take operation for Float64: index select along the flattened tensor
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { float64_t input_data[]; };
+layout(binding = 1) buffer Indices { int indices[]; };
+layout(binding = 2) buffer Output { float64_t output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint numel;        // Total number of input elements (for bounds checking)
+    uint num_indices;  // Number of indices (= output size)
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_indices) return;
+
+    int take_idx = indices[idx];
+
+    // Bounds check: clamp out-of-range indices to zero output
+    if (take_idx < 0 || take_idx >= int(params.numel)) {
+        output_data[idx] = float64_t(0.0);
+        return;
+    }
+
+    output_data[idx] = input_data[uint(take_idx)];
+}

@@ -1,0 +1,40 @@
+#version 450
+
+// Stack operation: stack tensors along a new dimension
+// Input tensors are passed as a flat concatenation in a single buffer.
+// Each thread copies one element from the correct input position to the output.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_tensors;          // Number of input tensors
+    uint elements_per_tensor;  // Elements in each input tensor
+    uint output_numel;         // Total output elements
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.output_numel) return;
+
+    // Output layout: tensors are interleaved along the new stack dimension.
+    // For stack(dim=0) of N tensors each of size E:
+    //   output[t * E + e] = input_t[e]
+    // The input buffer stores tensors contiguously:
+    //   input_data[t * E + e] = tensor t, element e
+    //
+    // For the general case, output index maps as:
+    //   tensor_idx = idx / elements_per_tensor
+    //   elem_idx   = idx % elements_per_tensor
+    //   input offset = tensor_idx * elements_per_tensor + elem_idx
+
+    uint tensor_idx = idx / params.elements_per_tensor;
+    uint elem_idx = idx % params.elements_per_tensor;
+
+    // Bounds check on tensor index
+    if (tensor_idx >= params.num_tensors) return;
+
+    uint input_offset = tensor_idx * params.elements_per_tensor + elem_idx;
+    output_data[idx] = input_data[input_offset];
+}

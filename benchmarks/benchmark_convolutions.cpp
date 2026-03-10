@@ -14,6 +14,7 @@
 #include "tenzor/nn/layers/pooling.hpp"
 #include "tenzor/utils/benchmark.hpp"
 #include <iostream>
+#include <sstream>
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -21,6 +22,12 @@ using namespace tenzor::benchmark;
 
 constexpr size_t WARMUP_ITERATIONS = 3;
 constexpr size_t BENCHMARK_ITERATIONS = 30;
+
+// Global results collector for JSON output
+static std::vector<BenchmarkResult> g_all_results;
+static void collect_result(const BenchmarkResult& result) {
+    g_all_results.push_back(result);
+}
 
 /**
  * @brief Benchmark Conv2d with various configurations
@@ -94,6 +101,7 @@ void benchmark_conv2d_basic() {
         });
 
         result.print();
+        collect_result(result);
     }
 }
 
@@ -168,6 +176,7 @@ void benchmark_resnet50_layers() {
         });
 
         result.print();
+        collect_result(result);
         results.push_back(result);
     }
 
@@ -240,6 +249,7 @@ void benchmark_pooling() {
         });
 
         result.print();
+        collect_result(result);
     }
 }
 
@@ -271,29 +281,54 @@ void benchmark_avgpool() {
         });
 
         result.print();
+        collect_result(result);
     }
 }
 
 int main(int argc, char** argv) {
-    std::cout << "\n";
-    std::cout << "========================================\n";
-    std::cout << "  Tenzor Convolution Benchmark Suite\n";
-    std::cout << "========================================\n";
-    std::cout << "\nTarget Performance Metrics:\n";
-    std::cout << "  Conv2d (ResNet50):  < 1ms/layer (PyTorch: 1.2ms)\n";
-    std::cout << "\n";
+    bool json_output = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--json") {
+            json_output = true;
+        }
+    }
+
+    if (!json_output) {
+        std::cout << "\n";
+        std::cout << "========================================\n";
+        std::cout << "  Tenzor Convolution Benchmark Suite\n";
+        std::cout << "========================================\n";
+        std::cout << "\nTarget Performance Metrics:\n";
+        std::cout << "  Conv2d (ResNet50):  < 1ms/layer (PyTorch: 1.2ms)\n";
+        std::cout << "\n";
+    }
 
     try {
         initialize();
+
+        std::streambuf* original_buf = nullptr;
+        std::ostringstream null_stream;
+        if (json_output) {
+            original_buf = std::cout.rdbuf(null_stream.rdbuf());
+        }
 
         benchmark_conv2d_basic();
         benchmark_resnet50_layers();
         benchmark_pooling();
         benchmark_avgpool();
 
-        std::cout << "\n========================================\n";
-        std::cout << "  Convolution Benchmark Complete\n";
-        std::cout << "========================================\n\n";
+        if (json_output && original_buf) {
+            std::cout.rdbuf(original_buf);
+        }
+
+        if (json_output) {
+            BenchmarkSuite suite("convolutions");
+            std::cout << suite.export_json(g_all_results);
+        } else {
+            std::cout << "\n========================================\n";
+            std::cout << "  Convolution Benchmark Complete\n";
+            std::cout << "========================================\n\n";
+        }
 
         finalize();
 
