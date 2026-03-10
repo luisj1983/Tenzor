@@ -33,6 +33,10 @@
 #include <omp.h>
 #endif
 
+#ifdef TENZOR_USE_MKL
+#include <mkl.h>
+#endif
+
 namespace tenzor::cpu {
 
 /// Check whether the convolution parameters are eligible for Winograd F(2x2,3x3).
@@ -244,10 +248,22 @@ inline bool can_use_winograd_f4x3(int64_t kH, int64_t kW,
            && out_h >= 8 && out_w >= 8;
 }
 
-/// Winograd F(4x4, 3x3) convolution.
+/// Winograd F(4x4, 3x3) convolution with MKL SGEMM acceleration.
 ///
 /// Uses 6x6 input tiles to produce 4x4 output tiles, reducing from 9 multiplies
 /// per output element (direct) to 2.25 multiplies (36/16 per tile element).
+///
+/// The key optimization over the naive per-tile approach: all input tiles for a
+/// batch element are transformed first, then the element-wise multiply in the
+/// transform domain is expressed as 36 independent GEMM operations:
+///   For each position p in [0, 36):
+///     M_p[C_out, num_tiles] = U_p[C_out, C_in] * V_p[C_in, num_tiles]
+/// This leverages MKL's highly optimized SGEMM for the compute-bound step.
+///
+/// Data layout for batched GEMM:
+///   U_scatter[p][oc * C_in + ic] = U[(oc * C_in + ic) * 36 + p]  (scattered by position)
+///   V_scatter[p][ic * num_tiles + tile] = V[ic][tile * 36 + p]
+///   M_scatter[p][oc * num_tiles + tile] = result
 ///
 /// Transform matrices for F(4, 3):
 ///   B^T (input transform, 6x6)
@@ -273,20 +289,14 @@ inline void winograd_conv2d_f4x3(const float* input_data,
     // =========================================================================
     // Step 1: Pre-transform all filters: U = G * g * G^T  (3x3 -> 6x6)
     // =========================================================================
-    // G (6x3) for F(4,3):
-    //   [[ 1/4,     0,       0     ],
-    //    [-1/6,    -1/6,    -1/6   ],
-    //    [-1/6,     1/6,    -1/6   ],
-    //    [ 1/24,    1/12,    1/6   ],
-    //    [ 1/24,   -1/12,    1/6   ],
-    //    [ 0,       0,       1     ]]
-    std::vector<float> U(C_out * C_in * 36);
+    // Then scatter into position-major layout: U_pos[36][C_out * C_in]
+    // so that U_pos[p] is a contiguous (C_out x C_in) matrix for GEMM.
+    std::vector<float> U_pos(36 * C_out * C_in);
 
     #pragma omp parallel for collapse(2) if(C_out * C_in > OmpThresholds::medium())
     for (int64_t oc = 0; oc < C_out; ++oc) {
         for (int64_t ic = 0; ic < C_in; ++ic) {
             const float* g = weight_data + (oc * C_in + ic) * 9;
-            float* u = U.data() + (oc * C_in + ic) * 36;
 
             // Compute temp = G * g  (6x3 * 3x3 -> 6x3)
             float tmp[6][3];
@@ -299,43 +309,45 @@ inline void winograd_conv2d_f4x3(const float* input_data,
                 tmp[4][s] = g0 / 24.0f - g1 / 12.0f + g2 / 6.0f;
                 tmp[5][s] = g2;
             }
-            // Compute U = temp * G^T  (6x3 * 3x6 -> 6x6)
+            // Compute U = temp * G^T  (6x3 * 3x6 -> 6x6) and scatter to position-major
             for (int r = 0; r < 6; ++r) {
                 float t0 = tmp[r][0], t1 = tmp[r][1], t2 = tmp[r][2];
-                u[r * 6 + 0] = t0 * 0.25f;
-                u[r * 6 + 1] = -(t0 + t1 + t2) / 6.0f;
-                u[r * 6 + 2] = (-t0 + t1 - t2) / 6.0f;
-                u[r * 6 + 3] = t0 / 24.0f + t1 / 12.0f + t2 / 6.0f;
-                u[r * 6 + 4] = t0 / 24.0f - t1 / 12.0f + t2 / 6.0f;
-                u[r * 6 + 5] = t2;
+                float u[6];
+                u[0] = t0 * 0.25f;
+                u[1] = -(t0 + t1 + t2) / 6.0f;
+                u[2] = (-t0 + t1 - t2) / 6.0f;
+                u[3] = t0 / 24.0f + t1 / 12.0f + t2 / 6.0f;
+                u[4] = t0 / 24.0f - t1 / 12.0f + t2 / 6.0f;
+                u[5] = t2;
+                for (int s = 0; s < 6; ++s) {
+                    int p = r * 6 + s;
+                    // Row-major (C_out x C_in) for each position p
+                    U_pos[p * (C_out * C_in) + oc * C_in + ic] = u[s];
+                }
             }
         }
     }
 
     // =========================================================================
-    // Step 2: For each batch/tile, transform input, multiply, inverse-transform
+    // Step 2: For each batch element, transform all tiles, batched GEMM, inverse transform
     // =========================================================================
-    #pragma omp parallel if(batch * num_tiles > OmpThresholds::complex())
+    // V_pos layout: [36][C_in * num_tiles] — position-major, then (C_in x num_tiles)
+    // M_pos layout: [36][C_out * num_tiles] — position-major, then (C_out x num_tiles)
+
+    #pragma omp parallel if(batch > 1 || num_tiles * C_in > OmpThresholds::complex())
     {
-        // Per-thread workspace
-        std::vector<float> V(C_in * 36);    // Transformed input tiles (6x6 each)
-        std::vector<float> M(C_out * 36);   // Element-wise products
+        std::vector<float> V_pos(36 * C_in * num_tiles);
+        std::vector<float> M_pos(36 * C_out * num_tiles);
 
         #pragma omp for
         for (int64_t b = 0; b < batch; ++b) {
+            // ---- Transform all input tiles for this batch element ----
             for (int64_t th = 0; th < tile_h; ++th) {
                 for (int64_t tw = 0; tw < tile_w; ++tw) {
+                    const int64_t tile_idx = th * tile_w + tw;
                     const int64_t tile_start_h = th * 4 - pad_h;
                     const int64_t tile_start_w = tw * 4 - pad_w;
 
-                    // ---- Input transform: V = B^T * d * B ----
-                    // B^T (6x6) for F(4,3):
-                    //   [[ 4,  0, -5,  0,  1,  0],
-                    //    [ 0, -4, -4,  1,  1,  0],
-                    //    [ 0,  4, -4, -1,  1,  0],
-                    //    [ 0, -2, -1,  2,  1,  0],
-                    //    [ 0,  2, -1, -2,  1,  0],
-                    //    [ 0,  4,  0, -5,  0,  1]]
                     for (int64_t ic = 0; ic < C_in; ++ic) {
                         // Load 6x6 input tile (zero-pad out-of-bounds)
                         float d[6][6];
@@ -365,47 +377,82 @@ inline void winograd_conv2d_f4x3(const float* input_data,
                             temp[4][s] = 2*d1 - d2 - 2*d3 + d4;
                             temp[5][s] = 4*d1 - 5*d3 + d5;
                         }
-                        // (B^T * d) * B  (6x6 * 6x6 -> 6x6)
-                        float* v = V.data() + ic * 36;
+                        // (B^T * d) * B  and scatter to position-major layout
                         for (int r = 0; r < 6; ++r) {
                             float t0 = temp[r][0], t1 = temp[r][1], t2 = temp[r][2];
                             float t3 = temp[r][3], t4 = temp[r][4], t5 = temp[r][5];
-                            v[r * 6 + 0] = 4*t0 - 5*t2 + t4;
-                            v[r * 6 + 1] = -4*t1 - 4*t2 + t3 + t4;
-                            v[r * 6 + 2] = 4*t1 - 4*t2 - t3 + t4;
-                            v[r * 6 + 3] = -2*t1 - t2 + 2*t3 + t4;
-                            v[r * 6 + 4] = 2*t1 - t2 - 2*t3 + t4;
-                            v[r * 6 + 5] = 4*t1 - 5*t3 + t5;
-                        }
-                    }
-
-                    // ---- Element-wise multiply: M[oc] = sum_ic U[oc,ic] * V[ic] ----
-                    for (int64_t oc = 0; oc < C_out; ++oc) {
-                        float* m = M.data() + oc * 36;
-                        std::memset(m, 0, 36 * sizeof(float));
-                        for (int64_t ic = 0; ic < C_in; ++ic) {
-                            const float* u = U.data() + (oc * C_in + ic) * 36;
-                            const float* v = V.data() + ic * 36;
-                            for (int i = 0; i < 36; ++i) {
-                                m[i] += u[i] * v[i];
+                            float v[6];
+                            v[0] = 4*t0 - 5*t2 + t4;
+                            v[1] = -4*t1 - 4*t2 + t3 + t4;
+                            v[2] = 4*t1 - 4*t2 - t3 + t4;
+                            v[3] = -2*t1 - t2 + 2*t3 + t4;
+                            v[4] = 2*t1 - t2 - 2*t3 + t4;
+                            v[5] = 4*t1 - 5*t3 + t5;
+                            for (int s = 0; s < 6; ++s) {
+                                int p = r * 6 + s;
+                                // (C_in x num_tiles) row-major
+                                V_pos[p * (C_in * num_tiles) + ic * num_tiles + tile_idx] = v[s];
                             }
                         }
                     }
+                }
+            }
 
-                    // ---- Output transform: out = A^T * M * A ----
-                    // A^T (4x6) for F(4,3):
-                    //   [[ 1,  1,  1,  1,  1,  0],
-                    //    [ 0,  1, -1,  2, -2,  0],
-                    //    [ 0,  1,  1,  4,  4,  0],
-                    //    [ 0,  1, -1,  8, -8,  1]]
+            // ---- Batched GEMM: For each position p, M_p = U_p * V_p ----
+            // M_p[C_out, num_tiles] = U_p[C_out, C_in] * V_p[C_in, num_tiles]
+#ifdef TENZOR_USE_MKL
+            for (int p = 0; p < 36; ++p) {
+                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                            static_cast<int>(C_out),      // M
+                            static_cast<int>(num_tiles),   // N
+                            static_cast<int>(C_in),        // K
+                            1.0f,                          // alpha
+                            U_pos.data() + p * (C_out * C_in),  // A
+                            static_cast<int>(C_in),        // lda
+                            V_pos.data() + p * (C_in * num_tiles),  // B
+                            static_cast<int>(num_tiles),   // ldb
+                            0.0f,                          // beta
+                            M_pos.data() + p * (C_out * num_tiles),  // C
+                            static_cast<int>(num_tiles));  // ldc
+            }
+#else
+            // Fallback: naive GEMM for each position
+            for (int p = 0; p < 36; ++p) {
+                const float* u_p = U_pos.data() + p * (C_out * C_in);
+                const float* v_p = V_pos.data() + p * (C_in * num_tiles);
+                float* m_p = M_pos.data() + p * (C_out * num_tiles);
+                std::memset(m_p, 0, C_out * num_tiles * sizeof(float));
+                for (int64_t oc = 0; oc < C_out; ++oc) {
+                    for (int64_t ic = 0; ic < C_in; ++ic) {
+                        float u_val = u_p[oc * C_in + ic];
+                        for (int64_t t = 0; t < num_tiles; ++t) {
+                            m_p[oc * num_tiles + t] += u_val * v_p[ic * num_tiles + t];
+                        }
+                    }
+                }
+            }
+#endif
+
+            // ---- Inverse transform: gather from position-major and apply A^T * M * A ----
+            for (int64_t th = 0; th < tile_h; ++th) {
+                for (int64_t tw = 0; tw < tile_w; ++tw) {
+                    const int64_t tile_idx = th * tile_w + tw;
+
                     for (int64_t oc = 0; oc < C_out; ++oc) {
-                        const float* m = M.data() + oc * 36;
+                        // Gather 6x6 M values for this (oc, tile) from position-major layout
+                        float m[6][6];
+                        for (int r = 0; r < 6; ++r) {
+                            for (int s = 0; s < 6; ++s) {
+                                int p = r * 6 + s;
+                                m[r][s] = M_pos[p * (C_out * num_tiles) + oc * num_tiles + tile_idx];
+                            }
+                        }
 
                         // A^T * M  (4x6 * 6x6 -> 4x6)
                         float tmp2[4][6];
                         for (int s = 0; s < 6; ++s) {
-                            float m0 = m[0*6+s], m1 = m[1*6+s], m2 = m[2*6+s];
-                            float m3 = m[3*6+s], m4 = m[4*6+s], m5 = m[5*6+s];
+                            float m0 = m[0][s], m1 = m[1][s], m2 = m[2][s];
+                            float m3 = m[3][s], m4 = m[4][s], m5 = m[5][s];
                             tmp2[0][s] = m0 + m1 + m2 + m3 + m4;
                             tmp2[1][s] = m1 - m2 + 2*m3 - 2*m4;
                             tmp2[2][s] = m1 + m2 + 4*m3 + 4*m4;
@@ -422,7 +469,7 @@ inline void winograd_conv2d_f4x3(const float* input_data,
                             out[r][3] = t1 - t2 + 8*t3 - 8*t4 + t5;
                         }
 
-                        // Store 4x4 output tile (handle boundary for non-multiple-of-4 output sizes)
+                        // Store 4x4 output tile (handle boundary)
                         for (int r = 0; r < 4; ++r) {
                             for (int s = 0; s < 4; ++s) {
                                 const int64_t oh = th * 4 + r;

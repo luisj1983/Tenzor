@@ -23,10 +23,11 @@ namespace tenzor::linalg {
 namespace {
 
 /// Try GPU dispatch for a single-output linalg op. Returns true and sets result on success.
-/// CPU linalg ops (Det/Inv/Solve/SVD/QR/Eigh/Cholesky) are NOT registered in the CPU
-/// dispatch table — they are handled directly via LAPACKE below. GPU backends (CUDA/ROCm/
-/// OneAPI) register these ops so the GPU path works via dispatch. Vulkan also falls back
-/// to CPU LAPACKE since it has no native linalg support.
+/// CPU linalg ops are registered in the CPU dispatch table (cpu_kernel_registry.cpp) as
+/// wrappers around the LAPACKE implementations below. GPU backends (CUDA/ROCm/OneAPI)
+/// register native kernels. Vulkan falls back to CPU LAPACKE.
+/// Note: The CPU dispatch table wrappers call these functions, which check device==CPU
+/// and skip try_gpu_dispatch, so there is no circular dispatch.
 bool try_gpu_dispatch(OpId op, std::span<const Tensor> inputs,
                       const OpAttributes& attrs, Tensor& result) {
     if (inputs[0].device().type == Device::Type::CPU) return false;

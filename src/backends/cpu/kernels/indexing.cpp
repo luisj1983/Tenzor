@@ -6,10 +6,13 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/shape.hpp"
+#include "tenzor/backend/backend.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "simd_fast_math.hpp"
 #include <cstring>
 #include <stdexcept>
 #include <type_traits>
+#include <span>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -987,6 +990,86 @@ auto put_kernel(Tensor& input, const Tensor& indices, const Tensor& source,
             if (idx < 0) idx += input_numel;
             std::memcpy(dst + idx * elem_size, src_data + i * elem_size, elem_size);
         }
+    }
+
+    return result;
+}
+
+// ============================================================================
+// SearchSorted: binary search per element in a sorted 1-D sequence
+// ============================================================================
+
+auto searchsorted_kernel(std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+    const Tensor& sorted_sequence = inputs[0];
+    const Tensor& values = inputs[1];
+    bool right = attrs.get_bool(AttrKey::Right, false);
+
+    if (sorted_sequence.ndim() != 1) {
+        throw std::runtime_error("searchsorted: sorted_sequence must be 1-D");
+    }
+
+    Tensor seq_cont = sorted_sequence.contiguous();
+    Tensor val_cont = values.contiguous();
+    int64_t seq_len = seq_cont.shape()[0];
+    int64_t num_values = val_cont.numel();
+
+    Tensor result(std::vector<int64_t>(values.shape().begin(), values.shape().end()),
+                  DType::Int64, values.device());
+
+    auto search_typed = [&](const auto* seq_ptr, const auto* val_ptr, int64_t* out_ptr) {
+        #ifdef _OPENMP
+        #pragma omp parallel for if(num_values > 4096)
+        #endif
+        for (int64_t i = 0; i < num_values; ++i) {
+            auto v = val_ptr[i];
+            int64_t lo = 0, hi = seq_len;
+            while (lo < hi) {
+                int64_t mid = lo + (hi - lo) / 2;
+                bool go_right = right ? (seq_ptr[mid] <= v) : (seq_ptr[mid] < v);
+                if (go_right) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            out_ptr[i] = lo;
+        }
+    };
+
+    auto* out_ptr = result.data<int64_t>();
+    switch (sorted_sequence.dtype()) {
+        case DType::Float32:
+            search_typed(seq_cont.data<float>(), val_cont.data<float>(), out_ptr);
+            break;
+        case DType::Float64:
+            search_typed(seq_cont.data<double>(), val_cont.data<double>(), out_ptr);
+            break;
+        case DType::Int32:
+            search_typed(seq_cont.data<int32_t>(), val_cont.data<int32_t>(), out_ptr);
+            break;
+        case DType::Int64:
+            search_typed(seq_cont.data<int64_t>(), val_cont.data<int64_t>(), out_ptr);
+            break;
+        case DType::Float16:
+        case DType::BFloat16: {
+            // Convert to Float32 for search
+            auto seq_f32 = sorted_sequence.to(DType::Float32).contiguous();
+            auto val_f32 = values.to(DType::Float32).contiguous();
+            search_typed(seq_f32.data<float>(), val_f32.data<float>(), out_ptr);
+            break;
+        }
+        case DType::Int8:
+            search_typed(seq_cont.data<int8_t>(), val_cont.data<int8_t>(), out_ptr);
+            break;
+        case DType::UInt8:
+            search_typed(seq_cont.data<uint8_t>(), val_cont.data<uint8_t>(), out_ptr);
+            break;
+        case DType::Int16:
+            search_typed(seq_cont.data<int16_t>(), val_cont.data<int16_t>(), out_ptr);
+            break;
+        default:
+            throw std::runtime_error("searchsorted: unsupported dtype " +
+                                     std::string(dtype_name(sorted_sequence.dtype())));
     }
 
     return result;

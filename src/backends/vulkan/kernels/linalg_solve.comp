@@ -1,0 +1,110 @@
+#version 450
+
+// Solve Ax = b via LU factorization for small matrices (<= 32x32)
+// Each workgroup solves one system in a batch.
+// A is n x n, b is n x 1 (or n x nrhs for multiple RHS).
+// Uses shared memory for in-place LU decomposition with partial pivoting,
+// then forward/back substitution.
+
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) buffer MatrixA { float a_data[]; };  // Batch of n x n matrices
+layout(set = 0, binding = 1) buffer VectorB { float b_data[]; };  // Batch of n vectors
+layout(set = 0, binding = 2) buffer OutputX { float x_data[]; };  // Batch of n solution vectors
+
+layout(push_constant) uniform PushConstants {
+    uint n;      // Matrix dimension
+    uint batch;  // Batch size
+    uint nrhs;   // Number of right-hand sides (usually 1)
+};
+
+shared float mat[32][32];
+shared float rhs[32];  // Single RHS for simplicity (nrhs=1 path)
+shared uint piv[32];   // Pivot indices
+
+void main() {
+    uint batch_idx = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+
+    if (batch_idx >= batch) return;
+
+    uint a_offset = batch_idx * n * n;
+    uint b_offset = batch_idx * n;
+
+    // Load matrix and RHS
+    for (uint row = 0; row < n; row++) {
+        if (tid < n) {
+            mat[row][tid] = a_data[a_offset + row * n + tid];
+        }
+    }
+    if (tid < n) {
+        rhs[tid] = b_data[b_offset + tid];
+        piv[tid] = tid;
+    }
+    barrier();
+
+    // LU factorization with partial pivoting
+    for (uint col = 0; col < n; col++) {
+        if (tid == 0) {
+            uint max_row = col;
+            float max_val = abs(mat[col][col]);
+            for (uint row = col + 1; row < n; row++) {
+                float val = abs(mat[row][col]);
+                if (val > max_val) {
+                    max_val = val;
+                    max_row = row;
+                }
+            }
+            piv[col] = max_row;
+            if (max_row != col) {
+                // Swap rows in matrix
+                for (uint j = 0; j < n; j++) {
+                    float tmp = mat[col][j];
+                    mat[col][j] = mat[max_row][j];
+                    mat[max_row][j] = tmp;
+                }
+                // Swap in RHS
+                float tmp = rhs[col];
+                rhs[col] = rhs[max_row];
+                rhs[max_row] = tmp;
+            }
+        }
+        barrier();
+
+        // Eliminate below pivot
+        if (tid > col && tid < n) {
+            float pivot = mat[col][col];
+            if (abs(pivot) > 1e-30) {
+                float factor = mat[tid][col] / pivot;
+                mat[tid][col] = factor;  // Store L
+                for (uint j = col + 1; j < n; j++) {
+                    mat[tid][j] -= factor * mat[col][j];
+                }
+                rhs[tid] -= factor * rhs[col];
+            }
+        }
+        barrier();
+    }
+
+    // Back substitution (thread 0 does this serially)
+    if (tid == 0) {
+        // Solve Ux = y (rhs now contains y after forward sub during LU)
+        for (int i = int(n) - 1; i >= 0; i--) {
+            float sum = rhs[i];
+            for (uint j = uint(i) + 1; j < n; j++) {
+                sum -= mat[i][j] * rhs[j];
+            }
+            if (abs(mat[i][i]) > 1e-30) {
+                rhs[i] = sum / mat[i][i];
+            } else {
+                rhs[i] = 0.0;  // Singular
+            }
+        }
+    }
+    barrier();
+
+    // Write solution
+    if (tid < n) {
+        x_data[b_offset + tid] = rhs[tid];
+    }
+}

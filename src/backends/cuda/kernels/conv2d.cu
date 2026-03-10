@@ -1947,9 +1947,10 @@ auto conv_transpose2d_forward_kernel(
 
 
 // ============================================================================
-// Depthwise Conv2d CUDA Kernel
+// Depthwise Conv2d CUDA Kernels
 // ============================================================================
 
+// Original kernel (fallback for large filter sizes > MAX_DEPTHWISE_FILTER)
 template<typename T>
 __global__ void depthwise_conv2d_forward_kernel_impl(
     const T* __restrict__ input,
@@ -1993,6 +1994,130 @@ __global__ void depthwise_conv2d_forward_kernel_impl(
     }
 
     output[idx] = sum;
+}
+
+// ============================================================================
+// Shared Memory Depthwise Conv2d - Caches filter weights in shared memory
+// ============================================================================
+// For typical depthwise convolutions (3x3, 5x5, 7x7), filter weights are
+// small enough to fit entirely in shared memory. Each block handles one
+// channel and loads the filter once, then all threads in the block reuse it.
+// Grid: (ceil(out_h * out_w / blockDim.x), channels, batch)
+//
+// Maximum supported filter size: 11x11 = 121 elements (484 bytes for float)
+
+constexpr int MAX_DEPTHWISE_FILTER_ELEMS = 121;  // 11x11
+
+template<typename T>
+__global__ void depthwise_conv2d_smem_kernel(
+    const T* __restrict__ input,
+    const T* __restrict__ weight,
+    const T* __restrict__ bias,
+    T* __restrict__ output,
+    int64_t in_h, int64_t in_w,
+    int64_t out_h, int64_t out_w,
+    int64_t kernel_h, int64_t kernel_w,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dilation_h, int64_t dilation_w,
+    bool has_bias) {
+
+    // Grid mapping: blockIdx.z = batch, blockIdx.y = channel
+    int64_t n = blockIdx.z;
+    int64_t c = blockIdx.y;
+    int64_t channels = gridDim.y;
+    int64_t filter_size = kernel_h * kernel_w;
+
+    // Load filter weights into shared memory (one load per block)
+    extern __shared__ char smem_raw[];
+    T* smem_filter = reinterpret_cast<T*>(smem_raw);
+
+    for (int i = threadIdx.x; i < filter_size; i += blockDim.x) {
+        smem_filter[i] = weight[c * filter_size + i];
+    }
+    __syncthreads();
+
+    // Each thread computes one output spatial position
+    int64_t spatial_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (spatial_idx >= out_h * out_w) return;
+
+    int64_t oh = spatial_idx / out_w;
+    int64_t ow = spatial_idx % out_w;
+
+    T sum = T(0);
+    for (int64_t kh = 0; kh < kernel_h; ++kh) {
+        int64_t ih = oh * stride_h - pad_h + kh * dilation_h;
+        if (ih < 0 || ih >= in_h) continue;
+
+        for (int64_t kw = 0; kw < kernel_w; ++kw) {
+            int64_t iw = ow * stride_w - pad_w + kw * dilation_w;
+            if (iw < 0 || iw >= in_w) continue;
+
+            int64_t input_idx = ((n * channels + c) * in_h + ih) * in_w + iw;
+            sum += input[input_idx] * smem_filter[kh * kernel_w + kw];
+        }
+    }
+
+    if (has_bias) {
+        sum += bias[c];
+    }
+
+    output[((n * channels + c) * out_h + oh) * out_w + ow] = sum;
+}
+
+// FP16 specialization using FP32 accumulation with shared memory filter cache
+__global__ void depthwise_conv2d_smem_kernel_f16(
+    const __half* __restrict__ input,
+    const __half* __restrict__ weight,
+    const __half* __restrict__ bias,
+    __half* __restrict__ output,
+    int64_t in_h, int64_t in_w,
+    int64_t out_h, int64_t out_w,
+    int64_t kernel_h, int64_t kernel_w,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dilation_h, int64_t dilation_w,
+    bool has_bias) {
+
+    int64_t n = blockIdx.z;
+    int64_t c = blockIdx.y;
+    int64_t channels = gridDim.y;
+    int64_t filter_size = kernel_h * kernel_w;
+
+    extern __shared__ char smem_raw_f16[];
+    __half* smem_filter = reinterpret_cast<__half*>(smem_raw_f16);
+
+    for (int i = threadIdx.x; i < filter_size; i += blockDim.x) {
+        smem_filter[i] = weight[c * filter_size + i];
+    }
+    __syncthreads();
+
+    int64_t spatial_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (spatial_idx >= out_h * out_w) return;
+
+    int64_t oh = spatial_idx / out_w;
+    int64_t ow = spatial_idx % out_w;
+
+    // FP32 accumulation for numerical stability
+    float sum = 0.0f;
+    for (int64_t kh = 0; kh < kernel_h; ++kh) {
+        int64_t ih = oh * stride_h - pad_h + kh * dilation_h;
+        if (ih < 0 || ih >= in_h) continue;
+
+        for (int64_t kw = 0; kw < kernel_w; ++kw) {
+            int64_t iw = ow * stride_w - pad_w + kw * dilation_w;
+            if (iw < 0 || iw >= in_w) continue;
+
+            int64_t input_idx = ((n * channels + c) * in_h + ih) * in_w + iw;
+            sum += __half2float(input[input_idx]) * __half2float(smem_filter[kh * kernel_w + kw]);
+        }
+    }
+
+    if (has_bias) {
+        sum += __half2float(bias[c]);
+    }
+
+    output[((n * channels + c) * out_h + oh) * out_w + ow] = __float2half(sum);
 }
 
 __global__ void depthwise_conv2d_forward_kernel_f16(
@@ -2063,42 +2188,84 @@ auto depthwise_conv2d_forward_kernel(
 
     Tensor output({batch, channels, out_h, out_w}, input.dtype(), input.device());
 
-    int64_t total = batch * channels * out_h * out_w;
-    int block_size = 256;
-    int num_blocks = (total + block_size - 1) / block_size;
-
     bool has_bias = (bias != nullptr);
+    int64_t filter_elems = kernel_h * kernel_w;
 
-    if (input.dtype() == DType::Float32) {
-        depthwise_conv2d_forward_kernel_impl<float><<<num_blocks, block_size, 0, stream>>>(
-            input.data<float>(), weight.data<float>(),
-            has_bias ? bias->data<float>() : nullptr,
-            output.data<float>(),
-            batch, channels, in_h, in_w, out_h, out_w,
-            kernel_h, kernel_w, stride, stride, padding, padding,
-            dilation, dilation, has_bias);
-            TENZOR_CUDA_POST_LAUNCH_CHECK();
-    } else if (input.dtype() == DType::Float64) {
-        depthwise_conv2d_forward_kernel_impl<double><<<num_blocks, block_size, 0, stream>>>(
-            input.data<double>(), weight.data<double>(),
-            has_bias ? bias->data<double>() : nullptr,
-            output.data<double>(),
-            batch, channels, in_h, in_w, out_h, out_w,
-            kernel_h, kernel_w, stride, stride, padding, padding,
-            dilation, dilation, has_bias);
-            TENZOR_CUDA_POST_LAUNCH_CHECK();
-    } else if (input.dtype() == DType::Float16) {
-        depthwise_conv2d_forward_kernel_f16<<<num_blocks, block_size, 0, stream>>>(
-            reinterpret_cast<const __half*>(input.data_ptr()),
-            reinterpret_cast<const __half*>(weight.data_ptr()),
-            has_bias ? reinterpret_cast<const __half*>(bias->data_ptr()) : nullptr,
-            reinterpret_cast<__half*>(output.data_ptr()),
-            batch, channels, in_h, in_w, out_h, out_w,
-            kernel_h, kernel_w, stride, stride, padding, padding,
-            dilation, dilation, has_bias);
-            TENZOR_CUDA_POST_LAUNCH_CHECK();
+    // Use shared memory kernel when filter fits (typical: 3x3, 5x5, 7x7, up to 11x11)
+    bool use_smem = (filter_elems <= MAX_DEPTHWISE_FILTER_ELEMS);
+
+    if (use_smem) {
+        // Grid: (spatial_blocks, channels, batch) — each block handles one (n, c) pair's spatial tile
+        int64_t spatial_total = out_h * out_w;
+        int block_size = 256;
+        int spatial_blocks = static_cast<int>((spatial_total + block_size - 1) / block_size);
+        dim3 grid(spatial_blocks, static_cast<unsigned int>(channels), static_cast<unsigned int>(batch));
+
+        if (input.dtype() == DType::Float32) {
+            size_t smem_bytes = filter_elems * sizeof(float);
+            depthwise_conv2d_smem_kernel<float><<<grid, block_size, smem_bytes, stream>>>(
+                input.data<float>(), weight.data<float>(),
+                has_bias ? bias->data<float>() : nullptr,
+                output.data<float>(),
+                in_h, in_w, out_h, out_w,
+                kernel_h, kernel_w, stride, stride, padding, padding,
+                dilation, dilation, has_bias);
+        } else if (input.dtype() == DType::Float64) {
+            size_t smem_bytes = filter_elems * sizeof(double);
+            depthwise_conv2d_smem_kernel<double><<<grid, block_size, smem_bytes, stream>>>(
+                input.data<double>(), weight.data<double>(),
+                has_bias ? bias->data<double>() : nullptr,
+                output.data<double>(),
+                in_h, in_w, out_h, out_w,
+                kernel_h, kernel_w, stride, stride, padding, padding,
+                dilation, dilation, has_bias);
+        } else if (input.dtype() == DType::Float16) {
+            size_t smem_bytes = filter_elems * sizeof(__half);
+            depthwise_conv2d_smem_kernel_f16<<<grid, block_size, smem_bytes, stream>>>(
+                reinterpret_cast<const __half*>(input.data_ptr()),
+                reinterpret_cast<const __half*>(weight.data_ptr()),
+                has_bias ? reinterpret_cast<const __half*>(bias->data_ptr()) : nullptr,
+                reinterpret_cast<__half*>(output.data_ptr()),
+                in_h, in_w, out_h, out_w,
+                kernel_h, kernel_w, stride, stride, padding, padding,
+                dilation, dilation, has_bias);
+        } else {
+            throw std::runtime_error("depthwise_conv2d_forward: unsupported dtype");
+        }
     } else {
-        throw std::runtime_error("depthwise_conv2d_forward: unsupported dtype");
+        // Fallback: original flat-grid kernel for very large filters
+        int64_t total = batch * channels * out_h * out_w;
+        int block_size = 256;
+        int num_blocks = static_cast<int>((total + block_size - 1) / block_size);
+
+        if (input.dtype() == DType::Float32) {
+            depthwise_conv2d_forward_kernel_impl<float><<<num_blocks, block_size, 0, stream>>>(
+                input.data<float>(), weight.data<float>(),
+                has_bias ? bias->data<float>() : nullptr,
+                output.data<float>(),
+                batch, channels, in_h, in_w, out_h, out_w,
+                kernel_h, kernel_w, stride, stride, padding, padding,
+                dilation, dilation, has_bias);
+        } else if (input.dtype() == DType::Float64) {
+            depthwise_conv2d_forward_kernel_impl<double><<<num_blocks, block_size, 0, stream>>>(
+                input.data<double>(), weight.data<double>(),
+                has_bias ? bias->data<double>() : nullptr,
+                output.data<double>(),
+                batch, channels, in_h, in_w, out_h, out_w,
+                kernel_h, kernel_w, stride, stride, padding, padding,
+                dilation, dilation, has_bias);
+        } else if (input.dtype() == DType::Float16) {
+            depthwise_conv2d_forward_kernel_f16<<<num_blocks, block_size, 0, stream>>>(
+                reinterpret_cast<const __half*>(input.data_ptr()),
+                reinterpret_cast<const __half*>(weight.data_ptr()),
+                has_bias ? reinterpret_cast<const __half*>(bias->data_ptr()) : nullptr,
+                reinterpret_cast<__half*>(output.data_ptr()),
+                batch, channels, in_h, in_w, out_h, out_w,
+                kernel_h, kernel_w, stride, stride, padding, padding,
+                dilation, dilation, has_bias);
+        } else {
+            throw std::runtime_error("depthwise_conv2d_forward: unsupported dtype");
+        }
     }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();

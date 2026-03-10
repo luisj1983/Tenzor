@@ -1,0 +1,35 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Fill operation for Float16: fill tensor with a scalar value
+// F16 packed buffers (2 Float16 per uint32)
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Output { uint data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;              // Number of F16 elements
+    uint value_bits;     // Fill value as raw F16 bits (lower 16 bits)
+} params;
+
+void main() {
+    // Each thread handles one uint32 word (2 F16 elements)
+    uint pair_idx = gl_GlobalInvocationID.x;
+    uint base_element = pair_idx * 2;
+
+    if (base_element >= params.n) return;
+
+    uint f16_bits = params.value_bits & 0xFFFFu;
+
+    // Pack two F16 values into one uint32
+    uint packed;
+    if (base_element + 1 < params.n) {
+        // Both elements valid
+        packed = f16_bits | (f16_bits << 16);
+    } else {
+        // Only first element valid (odd count)
+        packed = f16_bits;
+    }
+
+    data[pair_idx] = packed;
+}

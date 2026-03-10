@@ -1,0 +1,23 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Scale complex array by 1/N for inverse FFT normalization — Float64
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer DataBuf { double data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of complex elements
+    uint padding0;   // Padding for alignment
+    double inv_n;    // 1.0 / n
+};
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    if (tid >= n) return;
+
+    uint base = tid * 2;
+    data[base]     *= inv_n;
+    data[base + 1] *= inv_n;
+}

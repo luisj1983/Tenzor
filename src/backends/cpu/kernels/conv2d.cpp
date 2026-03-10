@@ -1749,6 +1749,102 @@ void depthwise_conv2d_impl(const T* in_data, const T* w_data, const T* b_data, T
     }
 }
 
+// ============================================================================
+// AVX2-optimized Depthwise Conv2d for Float32 (stride=1, dilation=1)
+// ============================================================================
+// Vectorizes across the output width dimension using 8-wide SIMD.
+// For stride=1 and dilation=1, consecutive output positions read from
+// consecutive input positions, enabling efficient vectorized loads.
+
+#ifdef TENZOR_CONV_AVX2
+void depthwise_conv2d_avx2_f32(
+    const float* __restrict__ in_data,
+    const float* __restrict__ w_data,
+    const float* __restrict__ b_data,
+    float* __restrict__ out_data,
+    int64_t N, int64_t C, int64_t H, int64_t W,
+    int64_t kH, int64_t kW, int64_t H_out, int64_t W_out,
+    int64_t padding) {
+    // stride=1, dilation=1 is assumed by the caller
+
+    #pragma omp parallel for collapse(3) if(N * C * H_out > OmpThresholds::medium())
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            for (int64_t oh = 0; oh < H_out; ++oh) {
+                const float* filter = w_data + c * kH * kW;
+                float* out_row = out_data + ((n * C + c) * H_out + oh) * W_out;
+
+                // Vectorized path: process 8 output columns at a time
+                int64_t ow = 0;
+                for (; ow + 8 <= W_out; ow += 8) {
+                    __m256 v_sum = _mm256_setzero_ps();
+
+                    for (int64_t kh = 0; kh < kH; ++kh) {
+                        int64_t ih = oh - padding + kh;
+                        if (ih < 0 || ih >= H) continue;
+
+                        const float* in_row = in_data + ((n * C + c) * H + ih) * W;
+
+                        for (int64_t kw = 0; kw < kW; ++kw) {
+                            int64_t iw_start = ow - padding + kw;
+
+                            // Load filter weight and broadcast to all 8 lanes
+                            __m256 v_w = _mm256_set1_ps(filter[kh * kW + kw]);
+
+                            // Check if all 8 input positions are in bounds
+                            if (iw_start >= 0 && iw_start + 8 <= W) {
+                                // Fast path: all 8 positions in bounds
+                                __m256 v_in = _mm256_loadu_ps(in_row + iw_start);
+                                v_sum = _mm256_fmadd_ps(v_in, v_w, v_sum);
+                            } else {
+                                // Slow path: handle boundaries element-by-element
+                                alignas(32) float tmp[8];
+                                for (int i = 0; i < 8; ++i) {
+                                    int64_t iw = iw_start + i;
+                                    tmp[i] = (iw >= 0 && iw < W) ? in_row[iw] : 0.0f;
+                                }
+                                __m256 v_in = _mm256_load_ps(tmp);
+                                v_sum = _mm256_fmadd_ps(v_in, v_w, v_sum);
+                            }
+                        }
+                    }
+
+                    // Add bias if present
+                    if (b_data) {
+                        __m256 v_bias = _mm256_set1_ps(b_data[c]);
+                        v_sum = _mm256_add_ps(v_sum, v_bias);
+                    }
+
+                    _mm256_storeu_ps(out_row + ow, v_sum);
+                }
+
+                // Scalar tail for remaining columns
+                for (; ow < W_out; ++ow) {
+                    float sum = 0.0f;
+
+                    for (int64_t kh = 0; kh < kH; ++kh) {
+                        int64_t ih = oh - padding + kh;
+                        if (ih < 0 || ih >= H) continue;
+
+                        const float* in_row = in_data + ((n * C + c) * H + ih) * W;
+
+                        for (int64_t kw = 0; kw < kW; ++kw) {
+                            int64_t iw = ow - padding + kw;
+                            if (iw >= 0 && iw < W) {
+                                sum += in_row[iw] * filter[kh * kW + kw];
+                            }
+                        }
+                    }
+
+                    if (b_data) sum += b_data[c];
+                    out_row[ow] = sum;
+                }
+            }
+        }
+    }
+}
+#endif // TENZOR_CONV_AVX2
+
 auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight,
                               const Tensor* bias, int64_t stride,
                               int64_t padding, int64_t dilation) -> Tensor {
@@ -1772,9 +1868,19 @@ auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight,
     auto output = Tensor::empty_uninitialized({N, C, H_out, W_out}, input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
-        depthwise_conv2d_impl<float>(input.data<float>(), weight.data<float>(),
-            bias ? bias->data<float>() : nullptr, output.data<float>(),
-            N, C, H, W, kH, kW, H_out, W_out, stride, padding, dilation);
+#ifdef TENZOR_CONV_AVX2
+        // Use AVX2 SIMD path for stride=1, dilation=1 (contiguous spatial access pattern)
+        if (stride == 1 && dilation == 1) {
+            depthwise_conv2d_avx2_f32(input.data<float>(), weight.data<float>(),
+                bias ? bias->data<float>() : nullptr, output.data<float>(),
+                N, C, H, W, kH, kW, H_out, W_out, padding);
+        } else
+#endif
+        {
+            depthwise_conv2d_impl<float>(input.data<float>(), weight.data<float>(),
+                bias ? bias->data<float>() : nullptr, output.data<float>(),
+                N, C, H, W, kH, kW, H_out, W_out, stride, padding, dilation);
+        }
     } else if (input.dtype() == DType::Float64) {
         depthwise_conv2d_impl<double>(input.data<double>(), weight.data<double>(),
             bias ? bias->data<double>() : nullptr, output.data<double>(),

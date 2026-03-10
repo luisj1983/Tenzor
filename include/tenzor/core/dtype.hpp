@@ -15,9 +15,11 @@
 
 namespace tenzor {
 
-// Forward declarations for half-precision types
+// Forward declarations for half-precision and FP8 types
 struct Float16;
 struct BFloat16;
+struct FP8_E4M3;
+struct FP8_E5M2;
 
 /**
  * @brief Enumeration of supported tensor data types.
@@ -40,7 +42,9 @@ enum class DType : uint8_t {
     UInt64,     ///< 64-bit unsigned integer
     Bool,       ///< Boolean type
     Complex64,  ///< 64-bit complex (two float32)
-    Complex128  ///< 128-bit complex (two float64)
+    Complex128, ///< 128-bit complex (two float64)
+    FP8_E4M3,   ///< 8-bit float (4 exponent, 3 mantissa) - Hopper Tensor Cores
+    FP8_E5M2    ///< 8-bit float (5 exponent, 2 mantissa) - Hopper Tensor Cores
 };
 
 /**
@@ -57,7 +61,9 @@ concept ScalarType = std::is_arithmetic_v<T> ||
                      std::is_same_v<T, std::complex<float>> ||
                      std::is_same_v<T, std::complex<double>> ||
                      std::is_same_v<T, Float16> ||
-                     std::is_same_v<T, BFloat16>;
+                     std::is_same_v<T, BFloat16> ||
+                     std::is_same_v<T, FP8_E4M3> ||
+                     std::is_same_v<T, FP8_E5M2>;
 
 /**
  * @brief Concept for integral types.
@@ -220,6 +226,55 @@ template<> struct type_to_dtype<Float16> { static constexpr DType value = DType:
 template<> struct type_to_dtype<BFloat16> { static constexpr DType value = DType::BFloat16; };
 
 /**
+ * @brief FP8 E4M3 format (1 sign, 4 exponent, 3 mantissa bits)
+ *
+ * Used for forward pass activations and weights on Hopper+ GPUs.
+ * Range: approximately +/-448, Precision: ~1.5 decimal digits
+ * Supported on NVIDIA H100 (SM 9.0+) via Tensor Cores.
+ */
+struct FP8_E4M3 {
+    uint8_t bits{0};
+
+    FP8_E4M3() = default;
+    explicit FP8_E4M3(uint8_t b) : bits(b) {}
+    explicit FP8_E4M3(float f);
+    explicit operator float() const;
+
+    auto operator==(const FP8_E4M3& other) const -> bool { return bits == other.bits; }
+    auto operator!=(const FP8_E4M3& other) const -> bool { return bits != other.bits; }
+};
+
+/**
+ * @brief FP8 E5M2 format (1 sign, 5 exponent, 2 mantissa bits)
+ *
+ * Used primarily for gradient storage on Hopper+ GPUs.
+ * Range: approximately +/-57344, Precision: ~1 decimal digit
+ * Wider range than E4M3 but lower precision, ideal for gradients.
+ * Supported on NVIDIA H100 (SM 9.0+) via Tensor Cores.
+ */
+struct FP8_E5M2 {
+    uint8_t bits{0};
+
+    FP8_E5M2() = default;
+    explicit FP8_E5M2(uint8_t b) : bits(b) {}
+    explicit FP8_E5M2(float f);
+    explicit operator float() const;
+
+    auto operator==(const FP8_E5M2& other) const -> bool { return bits == other.bits; }
+    auto operator!=(const FP8_E5M2& other) const -> bool { return bits != other.bits; }
+};
+
+/// @brief Specialization for FP8_E4M3
+template<> struct dtype_traits<DType::FP8_E4M3> { using type = FP8_E4M3; };
+/// @brief Specialization for FP8_E5M2
+template<> struct dtype_traits<DType::FP8_E5M2> { using type = FP8_E5M2; };
+
+/// @brief Reverse mapping for FP8_E4M3
+template<> struct type_to_dtype<FP8_E4M3> { static constexpr DType value = DType::FP8_E4M3; };
+/// @brief Reverse mapping for FP8_E5M2
+template<> struct type_to_dtype<FP8_E5M2> { static constexpr DType value = DType::FP8_E5M2; };
+
+/**
  * @brief Get the size in bytes of a data type.
  *
  * @param dtype Data type enumeration
@@ -246,6 +301,8 @@ constexpr auto dtype_size(DType dtype) -> size_t {
         case DType::Bool: return 1;
         case DType::Complex64: return 8;
         case DType::Complex128: return 16;
+        case DType::FP8_E4M3: return 1;
+        case DType::FP8_E5M2: return 1;
     }
     return 0;
 }
@@ -277,6 +334,8 @@ constexpr auto dtype_name(DType dtype) -> std::string_view {
         case DType::Bool: return "bool";
         case DType::Complex64: return "complex64";
         case DType::Complex128: return "complex128";
+        case DType::FP8_E4M3: return "fp8_e4m3";
+        case DType::FP8_E5M2: return "fp8_e5m2";
     }
     return "unknown";
 }

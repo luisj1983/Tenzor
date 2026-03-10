@@ -7,11 +7,16 @@
  */
 
 #include "tenzor/backend/dispatch_table.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/kernel_registry.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/linalg.hpp"
+#include "tenzor/ops/math.hpp"
+#include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/reduction.hpp"
 #include <cstdlib>
 #include <climits>
 #include <cstdint>
@@ -171,6 +176,7 @@ namespace cpu {
     auto slice_kernel(const Tensor& input, int64_t dim, int64_t start, int64_t end, int64_t step) -> Tensor;
     auto slice_multi_kernel(const Tensor& input, const std::vector<int64_t>& starts, const std::vector<int64_t>& ends, const std::vector<int64_t>& steps) -> Tensor;
     auto cat_kernel(const std::vector<Tensor>& tensors, int64_t dim) -> Tensor;
+    auto searchsorted_kernel(std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor;
 
     // Normalization
     auto batchnorm2d_mean_var_kernel(const Tensor& input) -> std::vector<Tensor>;
@@ -801,6 +807,10 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     });
 
     TENZOR_REGISTER_TERNARY_KERNEL(table, Where, cpu::where_kernel);
+
+    table.register_single_output_kernel(OpId::SearchSorted, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return cpu::searchsorted_kernel(inputs, attrs);
+    });
 
     table.register_single_output_kernel(OpId::Slice, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         // Support both multi-dim format (CUDA-compatible) and single-dim format
@@ -2092,6 +2102,56 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     });
 
     // =========================================================================
+    // GumbelSoftmax (composition of existing dispatched ops)
+    // =========================================================================
+    table.register_single_output_kernel(OpId::GumbelSoftmax,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            const Tensor& logits = inputs[0];
+            double tau = attrs.get_float(AttrKey::Tau, 1.0);
+            bool hard = attrs.get_bool(AttrKey::Hard, false);
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+
+            auto shape_vec = std::vector<int64_t>(logits.shape().begin(), logits.shape().end());
+
+            // Gumbel noise: -log(-log(U)) where U ~ Uniform(0, 1)
+            Tensor u = rand(shape_vec, logits.dtype(), logits.device());
+            Tensor eps_tensor = full(shape_vec, 1e-20, logits.dtype(), logits.device());
+            u = add(u, eps_tensor);  // avoid exact zeros
+
+            // gumbel = -log(-log(u))
+            Tensor gumbels = neg(log(neg(log(u))));
+
+            // (logits + gumbels) / tau
+            Tensor scaled = div(add(logits, gumbels),
+                                full(shape_vec, tau, logits.dtype(), logits.device()));
+
+            // Softmax
+            std::array<Tensor, 1> sm_inputs = {scaled};
+            NewOpAttributes sm_attrs;
+            sm_attrs.set(AttrKey::Dim, dim);
+            Tensor y_soft = dispatch<OpId::Softmax>(sm_inputs, sm_attrs)[0];
+
+            if (!hard) {
+                return y_soft;
+            }
+
+            // Straight-through estimator
+            int64_t actual_dim = dim < 0 ? dim + logits.ndim() : dim;
+            Tensor indices = argmax(y_soft, std::make_optional(actual_dim), /*keepdim=*/true);
+
+            Tensor y_hard = zeros(shape_vec, logits.dtype(), logits.device());
+            std::array<Tensor, 3> scatter_inputs = {y_hard, indices,
+                full(std::vector<int64_t>(indices.shape().begin(), indices.shape().end()),
+                     1.0, logits.dtype(), logits.device())};
+            NewOpAttributes scatter_attrs;
+            scatter_attrs.set(AttrKey::Dim, actual_dim);
+            y_hard = dispatch<OpId::Scatter>(scatter_inputs, scatter_attrs)[0];
+
+            // Forward: y_hard, backward: gradients flow through y_soft
+            return add(sub(y_hard, y_soft.detach()), y_soft);
+        });
+
+    // =========================================================================
     // Complex Number Operations
     // =========================================================================
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Conj, cpu::conj_kernel);
@@ -2099,6 +2159,51 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Imag, cpu::imag_kernel);
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Angle, cpu::angle_kernel);
     TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Polar, cpu::polar_kernel);
+
+    // =========================================================================
+    // Linear Algebra Operations (CPU LAPACKE)
+    // =========================================================================
+    // These wrap the linalg:: functions which use LAPACKE directly on CPU.
+    // Registering them in the dispatch table enables uniform dispatch for all
+    // backends and allows GPU→CPU fallback to go through the same code path.
+
+    table.register_single_output_kernel(OpId::LinalgDet, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        return linalg::det(inputs[0]);
+    });
+
+    table.register_single_output_kernel(OpId::LinalgInv, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        return linalg::inv(inputs[0]);
+    });
+
+    table.register_single_output_kernel(OpId::LinalgSolve, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        return linalg::solve(inputs[0], inputs[1]);
+    });
+
+    table.register_single_output_kernel(OpId::LinalgCholesky, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        bool upper = attrs.get_bool(AttrKey::Upper, false);
+        return linalg::cholesky(inputs[0], upper);
+    });
+
+    table.register_kernel(OpId::LinalgSVD, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        bool full_matrices = attrs.get_bool(AttrKey::FullMatrices, true);
+        auto [U, S, Vt] = linalg::svd(inputs[0], full_matrices);
+        return {U, S, Vt};
+    });
+
+    table.register_kernel(OpId::LinalgQR, [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+        auto [Q, R] = linalg::qr(inputs[0]);
+        return {Q, R};
+    });
+
+    table.register_kernel(OpId::LinalgEigh, [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+        auto [W, V] = linalg::eigh(inputs[0]);
+        return {W, V};
+    });
+
+    table.register_kernel(OpId::LinalgEig, [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+        auto [Re, Im, V] = linalg::eig(inputs[0]);
+        return {Re, Im, V};
+    });
 }
 
 } // namespace tenzor

@@ -7,9 +7,13 @@
  */
 
 #include "tenzor/backend/dispatch_table.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/kernel_registry.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "tenzor/ops/math.hpp"
+#include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/reduction.hpp"
 #include <hip/hip_runtime.h>
 #include <iostream>
 #include <cstdlib>
@@ -292,6 +296,7 @@ namespace rocm {
     auto index_select_hip(const Tensor& input, int64_t dim, const Tensor& index, hipStream_t stream) -> Tensor;
     auto masked_fill_hip(const Tensor& input, const Tensor& mask, double value, hipStream_t stream) -> Tensor;
     auto masked_select_hip(const Tensor& input, const Tensor& mask, hipStream_t stream) -> Tensor;
+    auto searchsorted_hip(const Tensor& sorted_sequence, const Tensor& values, bool right, hipStream_t stream) -> Tensor;
 
     // LSTM/GRU operations
     auto lstm_cell_forward_kernel(const Tensor& input, const Tensor& hx, const Tensor& cx,
@@ -1492,6 +1497,11 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{rocm::where_hip(inputs[0], inputs[1], inputs[2], get_hip_stream(attrs))};
     });
 
+    table.register_single_output_kernel(OpId::SearchSorted, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        bool right = attrs.get_bool(AttrKey::Right, false);
+        return rocm::searchsorted_hip(inputs[0], inputs[1], right, get_hip_stream(attrs));
+    });
+
     table.register_kernel(OpId::Slice, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         int64_t start = attrs.get_int(AttrKey::Start, 0);
@@ -2656,6 +2666,49 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         return std::vector<Tensor>{rocm::flip_kernel(inputs[0], dim, get_hip_stream(attrs))};
     });
+
+    // =========================================================================
+    // GumbelSoftmax (composition of existing dispatched ops)
+    // =========================================================================
+    table.register_single_output_kernel(OpId::GumbelSoftmax,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            const Tensor& logits = inputs[0];
+            double tau = attrs.get_float(AttrKey::Tau, 1.0);
+            bool hard = attrs.get_bool(AttrKey::Hard, false);
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+
+            auto shape_vec = std::vector<int64_t>(logits.shape().begin(), logits.shape().end());
+
+            Tensor u = rand(shape_vec, logits.dtype(), logits.device());
+            Tensor eps_tensor = full(shape_vec, 1e-20, logits.dtype(), logits.device());
+            u = add(u, eps_tensor);
+
+            Tensor gumbels = neg(log(neg(log(u))));
+            Tensor scaled = div(add(logits, gumbels),
+                                full(shape_vec, tau, logits.dtype(), logits.device()));
+
+            std::array<Tensor, 1> sm_inputs = {scaled};
+            NewOpAttributes sm_attrs;
+            sm_attrs.set(AttrKey::Dim, dim);
+            Tensor y_soft = dispatch<OpId::Softmax>(sm_inputs, sm_attrs)[0];
+
+            if (!hard) {
+                return y_soft;
+            }
+
+            int64_t actual_dim = dim < 0 ? dim + logits.ndim() : dim;
+            Tensor indices = argmax(y_soft, std::make_optional(actual_dim), /*keepdim=*/true);
+
+            Tensor y_hard = zeros(shape_vec, logits.dtype(), logits.device());
+            std::array<Tensor, 3> scatter_inputs = {y_hard, indices,
+                full(std::vector<int64_t>(indices.shape().begin(), indices.shape().end()),
+                     1.0, logits.dtype(), logits.device())};
+            NewOpAttributes scatter_attrs;
+            scatter_attrs.set(AttrKey::Dim, actual_dim);
+            y_hard = dispatch<OpId::Scatter>(scatter_inputs, scatter_attrs)[0];
+
+            return add(sub(y_hard, y_soft.detach()), y_soft);
+        });
 
     std::cout << "ROCm dispatch table initialized with O(1) lookup" << std::endl;
 }

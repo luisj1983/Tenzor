@@ -523,6 +523,47 @@ public:
         }
     }
 
+    /**
+     * @brief Grow the descriptor pool by destroying and recreating with larger capacity.
+     *
+     * Called when VK_ERROR_OUT_OF_POOL_MEMORY or VK_ERROR_FRAGMENTED_POOL is
+     * encountered and a simple reset is not sufficient (e.g., live descriptor sets
+     * still in use). The new pool has 2x the previous maxSets capacity.
+     *
+     * @warning All previously allocated descriptor sets become invalid. Callers must
+     *          ensure no in-flight command buffers reference old descriptor sets.
+     */
+    void grow() {
+        uint32_t new_max = max_sets_ * 2;
+        std::cerr << "[Vulkan WARNING] Descriptor pool exhausted/fragmented (capacity="
+                  << max_sets_ << "). Growing to " << new_max << " sets.\n";
+
+        // Destroy old pool
+        if (pool_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(device_, pool_, nullptr);
+            pool_ = VK_NULL_HANDLE;
+        }
+
+        // Create new, larger pool
+        VkDescriptorPoolSize poolSize{};
+        poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        poolSize.descriptorCount = new_max * 8;  // Up to 8 buffers per set
+
+        VkDescriptorPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.poolSizeCount = 1;
+        poolInfo.pPoolSizes = &poolSize;
+        poolInfo.maxSets = new_max;
+        poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+
+        checkVk(vkCreateDescriptorPool(device_, &poolInfo, nullptr, &pool_),
+                "Failed to create grown descriptor pool");
+
+        max_sets_ = new_max;
+        allocated_sets_ = 0;
+        warning_issued_ = false;
+    }
+
 private:
     VkDevice device_;
     VkDescriptorPool pool_ = VK_NULL_HANDLE;

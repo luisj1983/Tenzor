@@ -561,6 +561,180 @@ static void matmul_blocked_int32(
     }
 }
 
+// ============================================================================
+// Int8 SIMD matrix multiplication
+// ============================================================================
+// AVX-512 VNNI: _mm512_dpbusd_epi32 computes dot products of unsigned×signed
+// int8 pairs with int32 accumulation. Processes 64 int8 elements per instruction.
+// AVX2: _mm256_maddubs_epi16 + _mm256_madd_epi16 for 32 int8 elements.
+// Accumulates in int32 to avoid overflow, saturates to int8 on output.
+
+static void matmul_microkernel_int8(
+    const int8_t* A, const int8_t* B, int32_t* C,
+    int64_t M, int64_t N, int64_t K,
+    int64_t lda, int64_t ldb, int64_t ldc) {
+
+#ifdef __AVX512VNNI__
+    // AVX-512 VNNI path: _mm512_dpbusd_epi32 takes unsigned×signed int8 pairs.
+    // We treat A as unsigned by offsetting: A_u = A_s + 128, then correct the
+    // bias: C -= 128 * sum(B_col). This avoids data conversion overhead.
+    for (int64_t i = 0; i < M; ++i) {
+        for (int64_t j = 0; j < N; ++j) {
+            __m512i acc = _mm512_setzero_si512();
+            int32_t bias_correction = 0;
+            int64_t k = 0;
+
+            for (; k + 64 <= K; k += 64) {
+                // Load A as signed, add 128 to make unsigned for dpbusd
+                __m512i a_s = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(A + i * lda + k));
+                __m512i offset = _mm512_set1_epi8(static_cast<char>(-128));  // 0x80
+                __m512i a_u = _mm512_sub_epi8(a_s, offset);  // signed + 128 = unsigned
+
+                // Load B column values (gather stride = ldb)
+                // For small N, column access is strided — pack into contiguous buffer
+                int8_t b_buf[64];
+                for (int64_t kk = 0; kk < 64; ++kk) {
+                    b_buf[kk] = B[(k + kk) * ldb + j];
+                }
+                __m512i b_val = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(b_buf));
+
+                // dpbusd: acc += dot(unsigned_a[4], signed_b[4]) per 32-bit lane
+                acc = _mm512_dpbusd_epi32(acc, a_u, b_val);
+
+                // Accumulate bias correction: sum of B values * 128
+                // Compute horizontal sum of b_val as signed bytes
+                for (int64_t kk = 0; kk < 64; ++kk) {
+                    bias_correction += static_cast<int32_t>(b_buf[kk]);
+                }
+            }
+
+            // Horizontal sum of acc
+            int32_t sum = _mm512_reduce_add_epi32(acc);
+            sum -= 128 * bias_correction;
+
+            // Scalar remainder
+            for (; k < K; ++k) {
+                sum += static_cast<int32_t>(A[i * lda + k]) * static_cast<int32_t>(B[k * ldb + j]);
+            }
+
+            C[i * ldc + j] += sum;
+        }
+    }
+
+#elif defined(__AVX2__)
+    // AVX2 path: _mm256_maddubs_epi16 (unsigned × signed → int16 pairs)
+    // followed by _mm256_madd_epi16 (horizontal add pairs → int32)
+    for (int64_t i = 0; i < M; ++i) {
+        for (int64_t j = 0; j < N; ++j) {
+            __m256i acc_lo = _mm256_setzero_si256();
+            __m256i acc_hi = _mm256_setzero_si256();
+            int32_t bias_correction = 0;
+            int64_t k = 0;
+
+            for (; k + 32 <= K; k += 32) {
+                // Load A as signed, convert to unsigned for maddubs
+                __m256i a_s = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(A + i * lda + k));
+                __m256i offset = _mm256_set1_epi8(static_cast<char>(-128));
+                __m256i a_u = _mm256_sub_epi8(a_s, offset);
+
+                // Gather B column into contiguous buffer
+                int8_t b_buf[32];
+                for (int64_t kk = 0; kk < 32; ++kk) {
+                    b_buf[kk] = B[(k + kk) * ldb + j];
+                }
+                __m256i b_val = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b_buf));
+
+                // maddubs: pairs of (unsigned_a * signed_b) → int16 with saturation
+                __m256i prod16 = _mm256_maddubs_epi16(a_u, b_val);
+
+                // madd: horizontal add adjacent int16 pairs → int32
+                __m256i ones = _mm256_set1_epi16(1);
+                __m256i prod32 = _mm256_madd_epi16(prod16, ones);
+
+                acc_lo = _mm256_add_epi32(acc_lo, prod32);
+
+                // Bias correction for unsigned offset
+                for (int64_t kk = 0; kk < 32; ++kk) {
+                    bias_correction += static_cast<int32_t>(b_buf[kk]);
+                }
+            }
+
+            // Horizontal sum of acc_lo
+            __m128i lo128 = _mm256_castsi256_si128(acc_lo);
+            __m128i hi128 = _mm256_extracti128_si256(acc_lo, 1);
+            __m128i sum128 = _mm_add_epi32(lo128, hi128);
+            sum128 = _mm_add_epi32(sum128, _mm_shuffle_epi32(sum128, _MM_SHUFFLE(1, 0, 3, 2)));
+            sum128 = _mm_add_epi32(sum128, _mm_shuffle_epi32(sum128, _MM_SHUFFLE(0, 1, 0, 1)));
+            int32_t sum = _mm_cvtsi128_si32(sum128);
+
+            sum -= 128 * bias_correction;
+
+            // Scalar remainder
+            for (; k < K; ++k) {
+                sum += static_cast<int32_t>(A[i * lda + k]) * static_cast<int32_t>(B[k * ldb + j]);
+            }
+
+            C[i * ldc + j] += sum;
+        }
+    }
+
+#else
+    // Scalar fallback
+    for (int64_t i = 0; i < M; ++i) {
+        for (int64_t j = 0; j < N; ++j) {
+            int32_t sum = C[i * ldc + j];
+            for (int64_t k = 0; k < K; ++k) {
+                sum += static_cast<int32_t>(A[i * lda + k]) * static_cast<int32_t>(B[k * ldb + j]);
+            }
+            C[i * ldc + j] = sum;
+        }
+    }
+#endif
+}
+
+// Cache-blocked matrix multiplication (Int8) with OpenMP parallelization
+// Accumulates in int32 to avoid overflow, then saturates back to int8
+static void matmul_blocked_int8(
+    const int8_t* A, const int8_t* B, int8_t* C,
+    int64_t M, int64_t N, int64_t K) {
+
+    // Allocate int32 accumulator
+    std::vector<int32_t> C_i32(M * N, 0);
+
+    // Cache-friendly blocked algorithm with OpenMP parallelization
+    #pragma omp parallel for collapse(2) if(M * N > 10000)
+    for (int64_t ii = 0; ii < M; ii += BLOCK_SIZE_M) {
+        for (int64_t jj = 0; jj < N; jj += BLOCK_SIZE_N) {
+            int64_t i_end = std::min(ii + static_cast<int64_t>(BLOCK_SIZE_M), M);
+            int64_t j_end = std::min(jj + static_cast<int64_t>(BLOCK_SIZE_N), N);
+
+            for (int64_t kk = 0; kk < K; kk += BLOCK_SIZE_K) {
+                int64_t k_end = std::min(kk + static_cast<int64_t>(BLOCK_SIZE_K), K);
+
+                int64_t block_m = i_end - ii;
+                int64_t block_n = j_end - jj;
+                int64_t block_k = k_end - kk;
+
+                matmul_microkernel_int8(
+                    A + ii * K + kk,
+                    B + kk * N + jj,
+                    C_i32.data() + ii * N + jj,
+                    block_m, block_n, block_k,
+                    K, N, N
+                );
+            }
+        }
+    }
+
+    // Saturate int32 results to int8
+    for (int64_t i = 0; i < M * N; ++i) {
+        int32_t val = C_i32[i];
+        if (val > 127) val = 127;
+        else if (val < -128) val = -128;
+        C[i] = static_cast<int8_t>(val);
+    }
+}
+
 // High-performance Float16 matrix multiplication
 // Uses F16C SIMD for conversion and FP32 GEMM for computation
 static void matmul_blocked_float16(
@@ -650,12 +824,35 @@ static void matmul_blocked_float16(
                 #endif
 
                 // Compute FP32 GEMM (accumulate into C_fp32)
+                // MKL > FMA micro-kernel > gemm_optimized > scalar fallback
 #ifdef TENZOR_USE_MKL
                 cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                             static_cast<MKL_INT>(tile_m), static_cast<MKL_INT>(tile_n), static_cast<MKL_INT>(tile_k),
                             1.0f, A_fp32, static_cast<MKL_INT>(tile_k),
                             B_fp32, static_cast<MKL_INT>(tile_n),
                             1.0f, C_fp32, static_cast<MKL_INT>(tile_n));
+#elif defined(__FMA__) && defined(__F16C__)
+                // FMA micro-kernel: process 8 floats per iteration using fused multiply-add
+                // Tuned for F16 tile sizes — avoids overhead of full gemm_optimized dispatch
+                for (int64_t i = 0; i < tile_m; ++i) {
+                    for (int64_t k = 0; k < tile_k; ++k) {
+                        __m256 a_broadcast = _mm256_set1_ps(A_fp32[i * tile_k + k]);
+                        const float* b_row = B_fp32 + k * tile_n;
+                        float* c_row = C_fp32 + i * tile_n;
+                        int64_t j = 0;
+                        for (; j + 8 <= tile_n; j += 8) {
+                            __m256 c_vec = _mm256_loadu_ps(c_row + j);
+                            __m256 b_vec = _mm256_loadu_ps(b_row + j);
+                            c_vec = _mm256_fmadd_ps(a_broadcast, b_vec, c_vec);
+                            _mm256_storeu_ps(c_row + j, c_vec);
+                        }
+                        // Scalar tail
+                        float a_val = A_fp32[i * tile_k + k];
+                        for (; j < tile_n; ++j) {
+                            c_row[j] += a_val * b_row[j];
+                        }
+                    }
+                }
 #else
                 gemm::gemm_optimized(A_fp32, B_fp32, C_fp32, tile_m, tile_n, tile_k, 1.0f, 1.0f);
 #endif
@@ -2283,6 +2480,13 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 
             matmul_blocked_int32(a_data, b_data, c_data, M, K, N);
 
+        } else if (a_contig.dtype() == DType::Int8 && b_contig.dtype() == DType::Int8) {
+            const int8_t* a_data = a_contig.data<int8_t>();
+            const int8_t* b_data = b_contig.data<int8_t>();
+            int8_t* c_data = result.data<int8_t>();
+
+            matmul_blocked_int8(a_data, b_data, c_data, M, K, N);
+
         } else if (a_contig.dtype() == DType::Float16 && b_contig.dtype() == DType::Float16) {
             const Float16* a_data = a_contig.data<Float16>();
             const Float16* b_data = b_contig.data<Float16>();
@@ -2353,6 +2557,13 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         int32_t* c_data = result.data<int32_t>();
 
         matmul_blocked_int32(a_data, b_data, c_data, M, N, K);
+
+    } else if (a_contig.dtype() == DType::Int8 && b_contig.dtype() == DType::Int8) {
+        const int8_t* a_data = a_contig.data<int8_t>();
+        const int8_t* b_data = b_contig.data<int8_t>();
+        int8_t* c_data = result.data<int8_t>();
+
+        matmul_blocked_int8(a_data, b_data, c_data, M, N, K);
 
     } else if (a_contig.dtype() == DType::Float16 && b_contig.dtype() == DType::Float16) {
         const Float16* a_data = a_contig.data<Float16>();

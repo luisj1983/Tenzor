@@ -1,0 +1,83 @@
+#version 450
+
+// Real-to-Complex FFT: Unpack N/2-point complex FFT result to N/2+1 complex output
+// After doing a N/2-point complex FFT on packed real data, this shader
+// extracts the N/2+1 unique complex frequency bins using Hermitian symmetry.
+//
+// Let Z[k] = FFT of packed complex data (length N/2)
+// Then X[k] = 0.5*(Z[k] + conj(Z[N/2-k])) - 0.5*i*W_N^k*(Z[k] - conj(Z[N/2-k]))
+// where W_N^k = exp(-2*pi*i*k/N)
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { float data_in[];  };  // N/2 complex (interleaved)
+layout(set = 0, binding = 1) buffer OutputBuf { float data_out[]; };  // N/2+1 complex (interleaved)
+
+layout(push_constant) uniform PushConstants {
+    uint n;            // Original real FFT size (N)
+    uint batch_offset; // Offset in complex elements into data_in
+};
+
+const float PI = 3.14159265358979323846;
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint half_n = n / 2;
+
+    if (tid > half_n) return;  // Output has N/2+1 elements
+
+    // Special cases: DC and Nyquist
+    if (tid == 0) {
+        float z0_re = data_in[batch_offset * 2];
+        float z0_im = data_in[batch_offset * 2 + 1];
+        // X[0] = Z[0].re + Z[0].im (DC component, purely real)
+        data_out[0] = z0_re + z0_im;
+        data_out[1] = 0.0;
+        return;
+    }
+    if (tid == half_n) {
+        float z0_re = data_in[batch_offset * 2];
+        float z0_im = data_in[batch_offset * 2 + 1];
+        // X[N/2] = Z[0].re - Z[0].im (Nyquist component, purely real)
+        data_out[half_n * 2] = z0_re - z0_im;
+        data_out[half_n * 2 + 1] = 0.0;
+        return;
+    }
+
+    // General case: k in [1, N/2-1]
+    uint k = tid;
+    uint conj_k = half_n - k;
+
+    // Z[k]
+    float zk_re = data_in[(batch_offset + k) * 2];
+    float zk_im = data_in[(batch_offset + k) * 2 + 1];
+    // conj(Z[N/2 - k])
+    float zc_re =  data_in[(batch_offset + conj_k) * 2];
+    float zc_im = -data_in[(batch_offset + conj_k) * 2 + 1];
+
+    // A = Z[k] + conj(Z[N/2-k])
+    float a_re = zk_re + zc_re;
+    float a_im = zk_im + zc_im;
+
+    // B = Z[k] - conj(Z[N/2-k])
+    float b_re = zk_re - zc_re;
+    float b_im = zk_im - zc_im;
+
+    // Twiddle: W = exp(-2*pi*i*k/N)
+    float angle = -2.0 * PI * float(k) / float(n);
+    float w_re = cos(angle);
+    float w_im = sin(angle);
+
+    // -i * W * B = -i * (w_re + i*w_im) * (b_re + i*b_im)
+    //            = (w_im*b_re + w_re*b_im) + i*(-w_re*b_re + w_im*b_im)
+    //   but we want -i*W*B:
+    //   -i*(w_re*b_re - w_im*b_im + i*(w_re*b_im + w_im*b_re))
+    //   = (w_re*b_im + w_im*b_re) + i*(-(w_re*b_re - w_im*b_im))
+    //   = (w_re*b_im + w_im*b_re) + i*(-w_re*b_re + w_im*b_im)
+    float iw_b_re = w_re * b_im + w_im * b_re;
+    float iw_b_im = -w_re * b_re + w_im * b_im;
+
+    // X[k] = 0.5 * (A + (-i*W*B))
+    data_out[k * 2]     = 0.5 * (a_re + iw_b_re);
+    data_out[k * 2 + 1] = 0.5 * (a_im + iw_b_im);
+}

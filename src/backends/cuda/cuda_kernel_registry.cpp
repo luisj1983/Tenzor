@@ -12,6 +12,8 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/math.hpp"
+#include "tenzor/ops/reduction.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/backend/fused_ops.hpp"
 #ifdef TENZOR_HAS_CUDNN
@@ -185,6 +187,7 @@ namespace cuda {
     auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index, cudaStream_t stream) -> Tensor;
     auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src, cudaStream_t stream) -> Tensor;
     auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src, cudaStream_t stream) -> Tensor;
+    auto searchsorted_kernel(const Tensor& sorted_sequence, const Tensor& values, bool right, cudaStream_t stream) -> Tensor;
     auto masked_select_kernel(const Tensor& input, const Tensor& mask, cudaStream_t stream) -> Tensor;
     auto masked_fill_kernel(const Tensor& input, const Tensor& mask, double value, cudaStream_t stream) -> Tensor;
     auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y, cudaStream_t stream) -> Tensor;
@@ -1066,6 +1069,10 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     });
     table.register_single_output_kernel(OpId::MaskedSelect, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         return cuda::masked_select_kernel(inputs[0], inputs[1], get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::SearchSorted, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        bool right = attrs.get_bool(AttrKey::Right, false);
+        return cuda::searchsorted_kernel(inputs[0], inputs[1], right, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::MaskedFill, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         double value = attrs.get_float(AttrKey::Value, 0.0);
@@ -2670,6 +2677,50 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 
         return output;
     });
+
+    // =========================================================================
+    // GumbelSoftmax (composition of existing dispatched ops)
+    // =========================================================================
+    table.register_single_output_kernel(OpId::GumbelSoftmax,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            const Tensor& logits = inputs[0];
+            double tau = attrs.get_float(AttrKey::Tau, 1.0);
+            bool hard = attrs.get_bool(AttrKey::Hard, false);
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+
+            auto shape_vec = std::vector<int64_t>(logits.shape().begin(), logits.shape().end());
+
+            // Gumbel noise: -log(-log(U)) where U ~ Uniform(0, 1)
+            Tensor u = rand(shape_vec, logits.dtype(), logits.device());
+            Tensor eps_tensor = full(shape_vec, 1e-20, logits.dtype(), logits.device());
+            u = add(u, eps_tensor);
+
+            Tensor gumbels = neg(log(neg(log(u))));
+            Tensor scaled = div(add(logits, gumbels),
+                                full(shape_vec, tau, logits.dtype(), logits.device()));
+
+            std::array<Tensor, 1> sm_inputs = {scaled};
+            NewOpAttributes sm_attrs;
+            sm_attrs.set(AttrKey::Dim, dim);
+            Tensor y_soft = dispatch<OpId::Softmax>(sm_inputs, sm_attrs)[0];
+
+            if (!hard) {
+                return y_soft;
+            }
+
+            int64_t actual_dim = dim < 0 ? dim + logits.ndim() : dim;
+            Tensor indices = argmax(y_soft, std::make_optional(actual_dim), /*keepdim=*/true);
+
+            Tensor y_hard = zeros(shape_vec, logits.dtype(), logits.device());
+            std::array<Tensor, 3> scatter_inputs = {y_hard, indices,
+                full(std::vector<int64_t>(indices.shape().begin(), indices.shape().end()),
+                     1.0, logits.dtype(), logits.device())};
+            NewOpAttributes scatter_attrs;
+            scatter_attrs.set(AttrKey::Dim, actual_dim);
+            y_hard = dispatch<OpId::Scatter>(scatter_inputs, scatter_attrs)[0];
+
+            return add(sub(y_hard, y_soft.detach()), y_soft);
+        });
 }
 
 } // namespace tenzor

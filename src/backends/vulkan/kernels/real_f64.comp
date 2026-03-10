@@ -1,0 +1,19 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Extract real parts from interleaved complex Float64 buffer
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input { float64_t in_data[]; };
+layout(binding = 1) buffer Output { float64_t out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_complex;  // Number of complex numbers (output size)
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_complex) return;
+
+    out_data[idx] = in_data[2u * idx];
+}

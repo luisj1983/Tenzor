@@ -1,0 +1,78 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// GRU Cell compute shader for Float16 -- processes one timestep
+// Reads packed F16 pairs, computes in float32 for numerical stability
+//
+// Computes gates from pre-computed linear transforms:
+//   gates_x = x * W_ih^T + bias_ih  [batch, 3*hidden]
+//   gates_h = h * W_hh^T + bias_hh  [batch, 3*hidden]
+// Layout: [r | z | n] for each
+//   r = sigmoid(gates_x[0:H] + gates_h[0:H])     -- reset gate
+//   z = sigmoid(gates_x[H:2H] + gates_h[H:2H])   -- update gate
+//   n = tanh(gates_x[2H:3H] + r * gates_h[2H:3H]) -- new gate
+//   h_new = (1 - z) * n + z * h_prev
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GatesX { uint gates_x[]; };  // Packed F16
+layout(binding = 1) buffer GatesH { uint gates_h[]; };  // Packed F16
+layout(binding = 2) buffer HPrev { uint h_prev[]; };    // Packed F16
+layout(binding = 3) buffer HOut { uint h_out[]; };      // Packed F16
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint hidden_size;
+} params;
+
+float readF16GatesX(uint idx) {
+    uint word_idx = idx >> 1u;
+    uint packed = gates_x[word_idx];
+    vec2 pair = unpackHalf2x16(packed);
+    return (idx & 1u) == 0u ? pair.x : pair.y;
+}
+
+float readF16GatesH(uint idx) {
+    uint word_idx = idx >> 1u;
+    uint packed = gates_h[word_idx];
+    vec2 pair = unpackHalf2x16(packed);
+    return (idx & 1u) == 0u ? pair.x : pair.y;
+}
+
+float readF16HPrev(uint idx) {
+    uint word_idx = idx >> 1u;
+    uint packed = h_prev[word_idx];
+    vec2 pair = unpackHalf2x16(packed);
+    return (idx & 1u) == 0u ? pair.x : pair.y;
+}
+
+void writeF16HOut(uint idx, float val) {
+    uint word_idx = idx >> 1u;
+    uint packed = h_out[word_idx];
+    vec2 pair = unpackHalf2x16(packed);
+    if ((idx & 1u) == 0u) pair.x = val; else pair.y = val;
+    h_out[word_idx] = packHalf2x16(pair);
+}
+
+float sigmoid(float x) {
+    return 1.0 / (1.0 + exp(-x));
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = params.batch_size * params.hidden_size;
+
+    if (idx >= total) return;
+
+    uint b = idx / params.hidden_size;
+    uint h = idx % params.hidden_size;
+
+    uint gate_base = b * (3 * params.hidden_size);
+
+    float r = sigmoid(readF16GatesX(gate_base + h) + readF16GatesH(gate_base + h));
+    float z = sigmoid(readF16GatesX(gate_base + params.hidden_size + h) +
+                      readF16GatesH(gate_base + params.hidden_size + h));
+    float n = tanh(readF16GatesX(gate_base + 2 * params.hidden_size + h) +
+                   r * readF16GatesH(gate_base + 2 * params.hidden_size + h));
+
+    writeF16HOut(idx, (1.0 - z) * n + z * readF16HPrev(idx));
+}

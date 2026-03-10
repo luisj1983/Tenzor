@@ -14,6 +14,7 @@
 #include <expected>
 #include <string>
 #include <vector>
+#include <shared_mutex>
 #include <unordered_map>
 #include "backend.hpp"
 
@@ -182,6 +183,7 @@ public:
 
 private:
     bool shutdown_called_{false};                                            ///< Whether shutdown() has been called
+    mutable std::shared_mutex registry_mutex_;                               ///< Guards backends_ and device_to_backend_ for thread-safe access
     std::unordered_map<std::string, std::unique_ptr<Backend>> backends_;     ///< Registered backends
     std::unordered_map<Device::Type, Backend*> device_to_backend_;           ///< Device type mapping
 

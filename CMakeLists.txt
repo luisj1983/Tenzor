@@ -226,24 +226,41 @@ if(TENZOR_BUILD_PYTHON)
             LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/python/tenzor"
         )
 
-        # Copy Python package files at build time (not just configure time)
-        # so that edits to .py files are picked up by subsequent builds.
-        add_custom_target(copy_python_files ALL
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/__init__.py
-                ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/nn.py
-                ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/functional.py
+        # Copy Python package files incrementally: only re-copy when source
+        # .py/.pyi files change (uses add_custom_command with DEPENDS for
+        # proper dependency tracking instead of always-stale custom target).
+        set(_PY_SOURCES
+            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/__init__.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/nn.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/functional.py
+        )
+        set(_PY_STUBS
+            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/py.typed
+            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/__init__.pyi
+            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/nn.pyi
+            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/functional.pyi
+            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/optim.pyi
+            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/torch_interop.pyi
+        )
+        set(_PY_ALL_INPUTS ${_PY_SOURCES} ${_PY_STUBS})
+
+        # Build list of expected outputs in the build directory
+        set(_PY_OUTPUTS "")
+        foreach(_src ${_PY_ALL_INPUTS})
+            get_filename_component(_fname ${_src} NAME)
+            list(APPEND _PY_OUTPUTS ${CMAKE_BINARY_DIR}/python/tenzor/${_fname})
+        endforeach()
+
+        add_custom_command(
+            OUTPUT ${_PY_OUTPUTS}
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_PY_SOURCES}
                 ${CMAKE_BINARY_DIR}/python/tenzor/
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/py.typed
-                ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/__init__.pyi
-                ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/nn.pyi
-                ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/functional.pyi
-                ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/optim.pyi
-                ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/torch_interop.pyi
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_PY_STUBS}
                 ${CMAKE_BINARY_DIR}/python/tenzor/
+            DEPENDS ${_PY_ALL_INPUTS}
             COMMENT "Copying Python files and type stubs to build directory"
         )
+        add_custom_target(copy_python_files DEPENDS ${_PY_OUTPUTS})
         add_dependencies(tenzor_python copy_python_files)
     else()
         message(WARNING "pybind11 or Python not found, Python bindings will not be built")

@@ -340,7 +340,10 @@ struct alignas(64) BackendDispatchTable {
         if (!fn) [[unlikely]] {
             throw_unsupported(op);
         }
-        return fn(target, others, attrs);
+        auto& result = fn(target, others, attrs);
+        // Auto-bump version counter so kernel authors don't need to remember
+        result.bump_version();
+        return result;
     }
 
 private:

@@ -1,0 +1,90 @@
+#version 450
+
+// Matrix inverse via Gauss-Jordan elimination for small matrices (<= 32x32)
+// Each workgroup inverts one matrix in a batch.
+// Uses shared memory: [A | I] augmented matrix, row-reduce to [I | A^{-1}]
+
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { float data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { float data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;      // Matrix dimension (n x n)
+    uint batch;  // Batch size
+};
+
+// Augmented matrix [A | I]: n rows x 2n cols
+// Max 32x64 = 2048 floats in shared memory
+shared float aug[32][64];
+
+void main() {
+    uint batch_idx = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+
+    if (batch_idx >= batch) return;
+
+    uint mat_offset = batch_idx * n * n;
+    uint n2 = n * 2;
+
+    // Load augmented matrix: left half = A, right half = I
+    for (uint row = 0; row < n; row++) {
+        if (tid < n) {
+            aug[row][tid] = data_in[mat_offset + row * n + tid];
+            aug[row][tid + n] = (row == tid) ? 1.0 : 0.0;
+        }
+    }
+    barrier();
+
+    // Gauss-Jordan elimination
+    for (uint col = 0; col < n; col++) {
+        // Find pivot and swap (thread 0)
+        if (tid == 0) {
+            uint max_row = col;
+            float max_val = abs(aug[col][col]);
+            for (uint row = col + 1; row < n; row++) {
+                float val = abs(aug[row][col]);
+                if (val > max_val) {
+                    max_val = val;
+                    max_row = row;
+                }
+            }
+            if (max_row != col) {
+                for (uint j = 0; j < n2; j++) {
+                    float tmp = aug[col][j];
+                    aug[col][j] = aug[max_row][j];
+                    aug[max_row][j] = tmp;
+                }
+            }
+        }
+        barrier();
+
+        // Scale pivot row so pivot element = 1
+        if (tid == 0) {
+            float pivot = aug[col][col];
+            if (abs(pivot) > 1e-30) {
+                float inv_pivot = 1.0 / pivot;
+                for (uint j = 0; j < n2; j++) {
+                    aug[col][j] *= inv_pivot;
+                }
+            }
+        }
+        barrier();
+
+        // Eliminate column in all other rows — each thread handles one row
+        if (tid < n && tid != col) {
+            float factor = aug[tid][col];
+            for (uint j = 0; j < n2; j++) {
+                aug[tid][j] -= factor * aug[col][j];
+            }
+        }
+        barrier();
+    }
+
+    // Write inverse from right half of augmented matrix
+    for (uint row = 0; row < n; row++) {
+        if (tid < n) {
+            data_out[mat_offset + row * n + tid] = aug[row][tid + n];
+        }
+    }
+}

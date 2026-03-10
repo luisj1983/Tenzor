@@ -1,0 +1,51 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Roll operation for Float16: shift elements along a dimension with wrap-around
+// F16 packed buffers (2 Float16 per uint32)
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input { uint in_data[]; };
+layout(binding = 1) buffer Output { uint out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;              // Total number of elements
+    uint dim_size;       // Size of the roll dimension
+    uint shift;          // Shift amount (already normalized to [0, dim_size))
+    uint inner_size;     // Product of sizes of dims after the roll dim
+} params;
+
+// Read a single float16 element from packed uint buffer
+float readF16(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = in_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+// Write a single float16 element to packed uint buffer
+void writeF16(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint existing = out_data[word_idx];
+    uint mask = 0xFFFFu << (word_offset * 16);
+    out_data[word_idx] = (existing & ~mask) | (bits << (word_offset * 16));
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n) return;
+
+    uint inner_idx = idx % params.inner_size;
+    uint dim_idx = (idx / params.inner_size) % params.dim_size;
+    uint outer_idx = idx / (params.inner_size * params.dim_size);
+
+    // Source index with wrap-around
+    uint src_dim_idx = (dim_idx - params.shift + params.dim_size) % params.dim_size;
+    uint src_idx = (outer_idx * params.dim_size + src_dim_idx) * params.inner_size + inner_idx;
+
+    float val = readF16(src_idx);
+    writeF16(idx, val);
+}

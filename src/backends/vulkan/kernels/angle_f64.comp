@@ -1,0 +1,21 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Compute phase angle of complex Float64 numbers: output[i] = atan2(imag, real)
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input { float64_t in_data[]; };
+layout(binding = 1) buffer Output { float64_t out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_complex;  // Number of complex numbers (output size)
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_complex) return;
+
+    float64_t real_part = in_data[2u * idx];
+    float64_t imag_part = in_data[2u * idx + 1u];
+    out_data[idx] = float64_t(atan(float(imag_part), float(real_part)));
+}

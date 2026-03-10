@@ -1,0 +1,70 @@
+#version 450
+
+// Cooley-Tukey radix-2 decimation-in-frequency FFT (complex-to-complex)
+// Uses shared memory for butterfly operations within a workgroup.
+// Multi-pass approach: each dispatch handles one FFT stage.
+// Data layout: interleaved real/imag pairs — [re0, im0, re1, im1, ...]
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { float data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { float data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;           // FFT size (power of 2)
+    uint stage;       // Current butterfly stage (0 to log2(n)-1)
+    uint direction;   // 0 = forward, 1 = inverse
+    uint batch_offset; // Offset into buffer for batched FFTs (in complex elements)
+};
+
+shared float shared_real[512];
+shared float shared_imag[512];
+
+const float PI = 3.14159265358979323846;
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+
+    // Each thread handles one butterfly pair
+    // For stage s, butterfly groups have size 2^(s+1), half-size 2^s
+    uint half_size = 1u << stage;
+    uint group_size = half_size << 1;
+
+    // Which butterfly group and position within the group
+    uint group_idx = tid / half_size;
+    uint pos_in_group = tid % half_size;
+
+    // Indices of the two elements in this butterfly
+    uint idx_top = group_idx * group_size + pos_in_group;
+    uint idx_bot = idx_top + half_size;
+
+    if (idx_bot >= n) return;
+
+    // Apply batch offset (each complex element = 2 floats)
+    uint base_top = (batch_offset + idx_top) * 2;
+    uint base_bot = (batch_offset + idx_bot) * 2;
+
+    // Load data
+    float a_re = data_in[base_top];
+    float a_im = data_in[base_top + 1];
+    float b_re = data_in[base_bot];
+    float b_im = data_in[base_bot + 1];
+
+    // Compute twiddle factor W_N^k = exp(-2*pi*i * k / N) for forward
+    // For inverse: W_N^k = exp(+2*pi*i * k / N)
+    float angle = -2.0 * PI * float(pos_in_group) / float(group_size);
+    if (direction == 1) angle = -angle;  // inverse
+
+    float w_re = cos(angle);
+    float w_im = sin(angle);
+
+    // Butterfly: multiply bottom by twiddle, then add/sub
+    float tw_re = b_re * w_re - b_im * w_im;
+    float tw_im = b_re * w_im + b_im * w_re;
+
+    // Write results
+    data_out[base_top]     = a_re + tw_re;
+    data_out[base_top + 1] = a_im + tw_im;
+    data_out[base_bot]     = a_re - tw_re;
+    data_out[base_bot + 1] = a_im - tw_im;
+}

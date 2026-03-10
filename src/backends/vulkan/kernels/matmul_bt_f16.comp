@@ -1,0 +1,90 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Matrix multiplication with B transposed for Float16
+// Computes C = A @ B^T where B is stored in transposed layout
+// F16 packed buffers (2 Float16 per uint32), accumulation in float32
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) buffer MatrixA { uint a[]; };
+layout(binding = 1) buffer MatrixB { uint b[]; };  // Stored as B^T with shape [N, K]
+layout(binding = 2) buffer MatrixC { uint c[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint M;  // rows of A and C
+    uint N;  // cols of C (and rows of B^T in memory)
+    uint K;  // cols of A (and cols of B^T in memory)
+} params;
+
+shared float tileA[16][16];
+shared float tileB[16][16];
+
+// Read a single float16 element from packed uint buffer
+float readF16A(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = a[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+float readF16B(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = b[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+void main() {
+    uint row = gl_GlobalInvocationID.y;
+    uint col = gl_GlobalInvocationID.x;
+    uint local_row = gl_LocalInvocationID.y;
+    uint local_col = gl_LocalInvocationID.x;
+
+    float sum = 0.0;
+
+    // Tile-based computation
+    uint num_tiles = (params.K + 15) / 16;
+
+    for (uint t = 0; t < num_tiles; t++) {
+        // Load tile from A
+        uint a_row = row;
+        uint a_col = t * 16 + local_col;
+        if (a_row < params.M && a_col < params.K) {
+            tileA[local_row][local_col] = readF16A(a_row * params.K + a_col);
+        } else {
+            tileA[local_row][local_col] = 0.0;
+        }
+
+        // Load tile from B (transposed access pattern)
+        // B is stored with shape [N, K], so B[j, k] = b[j * K + k]
+        uint b_row = t * 16 + local_row;  // k index
+        uint b_col = col;                  // j index
+        if (b_row < params.K && b_col < params.N) {
+            tileB[local_row][local_col] = readF16B(b_col * params.K + b_row);
+        } else {
+            tileB[local_row][local_col] = 0.0;
+        }
+
+        barrier();
+
+        // Compute partial dot product in float32
+        for (uint k = 0; k < 16; k++) {
+            sum += tileA[local_row][k] * tileB[k][local_col];
+        }
+
+        barrier();
+    }
+
+    // Write result (packed F16)
+    if (row < params.M && col < params.N) {
+        uint out_elem = row * params.N + col;
+        uint out_word = out_elem / 2;
+        uint out_off = out_elem % 2;
+        uint bits = packHalf2x16(vec2(sum, 0.0)) & 0xFFFFu;
+        uint existing = c[out_word];
+        uint mask = 0xFFFFu << (out_off * 16);
+        c[out_word] = (existing & ~mask) | (bits << (out_off * 16));
+    }
+}

@@ -1,0 +1,107 @@
+#version 450
+
+// Conv2d Backward Weight - Gradient w.r.t. weights (Float16 version)
+// Supports grouped convolutions (including depthwise where groups == channels)
+// All computation done in float32 for numerical stability
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { uint grad_output[]; };  // Packed F16: (N, C_out, H_out, W_out)
+layout(binding = 1) buffer Input { uint input_data[]; };        // Packed F16: (N, C_in, H_in, W_in)
+layout(binding = 2) buffer GradWeight { uint grad_weight[]; };  // Packed F16: (C_out, C_in/groups, K_h, K_w)
+
+layout(push_constant) uniform PushConstants {
+    uint batch;
+    uint channels_in;
+    uint channels_out;
+    uint height_in;
+    uint width_in;
+    uint height_out;
+    uint width_out;
+    uint kernel_h;
+    uint kernel_w;
+    uint stride;
+    uint padding;
+    uint dilation;
+    uint groups;
+} params;
+
+float readF16GradOut(uint element_idx) {
+    uint word_idx = element_idx >> 1u;
+    uint packed = grad_output[word_idx];
+    vec2 pair = unpackHalf2x16(packed);
+    return ((element_idx & 1u) == 0u) ? pair.x : pair.y;
+}
+
+float readF16Input(uint element_idx) {
+    uint word_idx = element_idx >> 1u;
+    uint packed = input_data[word_idx];
+    vec2 pair = unpackHalf2x16(packed);
+    return ((element_idx & 1u) == 0u) ? pair.x : pair.y;
+}
+
+void writeF16(uint element_idx, float value) {
+    uint word_idx = element_idx >> 1u;
+    uint word_offset = element_idx & 1u;
+    uint new_bits = packHalf2x16(vec2(value, 0.0)) & 0xFFFFu;
+    uint shift = word_offset * 16u;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = grad_weight[word_idx];
+    for (uint iter = 0u; iter < 64u; iter++) {
+        uint expected = old_val;
+        uint new_val = (expected & ~mask) | (new_bits << shift);
+        old_val = atomicCompSwap(grad_weight[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    uint cur = grad_weight[word_idx];
+    grad_weight[word_idx] = (cur & ~mask) | (new_bits << shift);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    uint in_channels_per_group = params.channels_in / params.groups;
+    uint out_channels_per_group = params.channels_out / params.groups;
+
+    uint total_weight_elements = params.channels_out * in_channels_per_group * params.kernel_h * params.kernel_w;
+
+    if (idx >= total_weight_elements) {
+        return;
+    }
+
+    // Decode flat index to (c_out, c_in_local, kh, kw)
+    uint temp = idx;
+    uint kw = temp % params.kernel_w;
+    temp /= params.kernel_w;
+    uint kh = temp % params.kernel_h;
+    temp /= params.kernel_h;
+    uint c_in_local = temp % in_channels_per_group;
+    uint c_out = temp / in_channels_per_group;
+
+    uint group = c_out / out_channels_per_group;
+    uint c_in = group * in_channels_per_group + c_in_local;
+
+    // Accumulate in float32
+    float sum = 0.0;
+
+    for (uint b = 0; b < params.batch; b++) {
+        for (uint oh = 0; oh < params.height_out; oh++) {
+            for (uint ow = 0; ow < params.width_out; ow++) {
+                int ih = int(oh * params.stride) - int(params.padding) + int(kh * params.dilation);
+                int iw = int(ow * params.stride) - int(params.padding) + int(kw * params.dilation);
+
+                if (ih >= 0 && ih < int(params.height_in) &&
+                    iw >= 0 && iw < int(params.width_in)) {
+
+                    uint grad_out_idx = ((b * params.channels_out + c_out) * params.height_out + oh) * params.width_out + ow;
+                    uint input_idx = ((b * params.channels_in + c_in) * params.height_in + uint(ih)) * params.width_in + uint(iw);
+
+                    sum += readF16GradOut(grad_out_idx) * readF16Input(input_idx);
+                }
+            }
+        }
+    }
+
+    writeF16(idx, sum);
+}

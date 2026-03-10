@@ -1,0 +1,46 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// One-Hot Encoding for Float16
+// Each thread handles one uint32 word (2 F16 elements)
+// Output 1.0 if indices[batch] == class, else 0.0
+// F16 packed buffers (2 Float16 per uint32)
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Indices { int indices_data[]; };    // (batch_size,) class indices
+layout(binding = 1) buffer Output { uint output_data[]; };     // (batch_size, num_classes), packed F16
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint num_classes;
+} params;
+
+void main() {
+    // Each thread handles one uint32 word (2 F16 elements)
+    uint pair_idx = gl_GlobalInvocationID.x;
+    uint gid0 = pair_idx * 2;
+    uint gid1 = pair_idx * 2 + 1;
+
+    uint total = params.batch_size * params.num_classes;
+    if (gid0 >= total) return;
+
+    // Element 0
+    uint batch0 = gid0 / params.num_classes;
+    uint cls0 = gid0 % params.num_classes;
+    int target0 = indices_data[batch0];
+    float val0 = (uint(target0) == cls0) ? 1.0 : 0.0;
+
+    // Element 1
+    float val1 = 0.0;
+    if (gid1 < total) {
+        uint batch1 = gid1 / params.num_classes;
+        uint cls1 = gid1 % params.num_classes;
+        int target1 = indices_data[batch1];
+        val1 = (uint(target1) == cls1) ? 1.0 : 0.0;
+    }
+
+    // Pack two F16 values into one uint32
+    uint bits0 = packHalf2x16(vec2(val0, 0.0)) & 0xFFFFu;
+    uint bits1 = packHalf2x16(vec2(val1, 0.0)) & 0xFFFFu;
+    output_data[pair_idx] = bits0 | (bits1 << 16);
+}

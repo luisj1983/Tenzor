@@ -33,34 +33,43 @@ if [[ ! -d "$BUILD_PATH" ]]; then
     exit 1
 fi
 
-# Step 1: Build benchmark targets
+# Step 1: Build all benchmark targets
 echo "=== Building benchmark targets ==="
 cd "$BUILD_PATH"
-ninja -j4 benchmark_ops benchmark_convolutions benchmark_training
+ninja -j4
 echo "Build complete."
 
 # Step 2: Create results directory
 RESULTS_DIR="$BUILD_PATH/benchmark_results"
 mkdir -p "$RESULTS_DIR"
 
-# Step 3: Run benchmarks with --json output
-BENCHMARKS=(
-    "benchmark_ops:ops"
-    "benchmark_convolutions:convolutions"
-    "benchmark_training:training"
-)
+# Step 3: Discover benchmark binaries automatically
+mapfile -t BENCHMARK_BINARIES < <(find "$BUILD_PATH/bin" -name "benchmark_*" -type f -executable 2>/dev/null | sort)
 
+if [[ ${#BENCHMARK_BINARIES[@]} -eq 0 ]]; then
+    echo "Error: No benchmark binaries found in $BUILD_PATH/bin/" >&2
+    echo "Ensure TENZOR_BUILD_BENCHMARKS=ON and the build succeeded." >&2
+    exit 1
+fi
+
+echo "Discovered ${#BENCHMARK_BINARIES[@]} benchmark binary(ies):"
+for b in "${BENCHMARK_BINARIES[@]}"; do
+    echo "  - $(basename "$b")"
+done
+echo ""
+
+# Step 4: Run benchmarks with --json output
 FAILED=0
 
-for entry in "${BENCHMARKS[@]}"; do
-    IFS=':' read -r binary name <<< "$entry"
-    BINARY_PATH="$BUILD_PATH/bin/$binary"
+# Track discovered names for the merge step
+DISCOVERED_NAMES=()
 
-    if [[ ! -x "$BINARY_PATH" ]]; then
-        echo "Warning: $BINARY_PATH not found or not executable, skipping." >&2
-        FAILED=1
-        continue
-    fi
+for BINARY_PATH in "${BENCHMARK_BINARIES[@]}"; do
+    binary="$(basename "$BINARY_PATH")"
+    # Derive suite name by stripping "benchmark_" prefix
+    name="${binary#benchmark_}"
+
+    DISCOVERED_NAMES+=("$name")
 
     echo "=== Running $binary ==="
     if "$BINARY_PATH" --json > "$RESULTS_DIR/${name}.json" 2>/dev/null; then
@@ -73,7 +82,7 @@ for entry in "${BENCHMARKS[@]}"; do
     fi
 done
 
-# Step 4: Merge all JSON results into all.json
+# Step 5: Merge all JSON results into all.json
 echo "=== Merging results ==="
 {
     echo '{'
@@ -81,8 +90,7 @@ echo "=== Merging results ==="
     echo '  "suites": ['
 
     FIRST=true
-    for entry in "${BENCHMARKS[@]}"; do
-        IFS=':' read -r _ name <<< "$entry"
+    for name in "${DISCOVERED_NAMES[@]}"; do
         JSON_FILE="$RESULTS_DIR/${name}.json"
 
         if [[ ! -f "$JSON_FILE" ]]; then

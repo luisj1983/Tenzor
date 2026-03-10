@@ -1,0 +1,25 @@
+#version 450
+
+// Convert polar coordinates to complex numbers
+// Given abs and angle inputs, produce interleaved (real, imag) output:
+//   output[2*i]   = abs[i] * cos(angle[i])
+//   output[2*i+1] = abs[i] * sin(angle[i])
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer AbsInput { float abs_data[]; };
+layout(binding = 1) readonly buffer AngleInput { float angle_data[]; };
+layout(binding = 2) buffer Output { float out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_complex;  // Number of complex numbers
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_complex) return;
+
+    float r = abs_data[idx];
+    float theta = angle_data[idx];
+    out_data[2u * idx]      = r * cos(theta);
+    out_data[2u * idx + 1u] = r * sin(theta);
+}

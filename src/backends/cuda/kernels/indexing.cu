@@ -2024,5 +2024,97 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
     return output;
 }
 
+// ============================================================================
+// SearchSorted kernel: binary search per element in sorted 1-D sequence
+// ============================================================================
+
+template<typename T>
+__global__ void searchsorted_kernel_impl(
+    const T* sorted_sequence,
+    const T* values,
+    int64_t* output,
+    int64_t seq_len,
+    int64_t num_values,
+    bool right) {
+
+    CUDA_GRID_STRIDE_LOOP(i, num_values) {
+        T v = values[i];
+        int64_t lo = 0, hi = seq_len;
+        while (lo < hi) {
+            int64_t mid = lo + (hi - lo) / 2;
+            bool go_right = right ? (sorted_sequence[mid] <= v) : (sorted_sequence[mid] < v);
+            if (go_right) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        output[i] = lo;
+    }
+}
+
+auto searchsorted_kernel(const Tensor& sorted_sequence, const Tensor& values,
+                          bool right, cudaStream_t stream) -> Tensor {
+    if (sorted_sequence.ndim() != 1) {
+        throw std::runtime_error("searchsorted: sorted_sequence must be 1-D");
+    }
+
+    Tensor seq_cont = sorted_sequence.contiguous();
+    Tensor val_cont = values.contiguous();
+    int64_t seq_len = seq_cont.shape()[0];
+    int64_t num_values = val_cont.numel();
+
+    Tensor result(std::vector<int64_t>(values.shape().begin(), values.shape().end()),
+                  DType::Int64, values.device());
+
+    if (num_values == 0) return result;
+
+    int64_t* out_ptr = result.data<int64_t>();
+
+    switch (sorted_sequence.dtype()) {
+        case DType::Float32:
+            LAUNCH_KERNEL(searchsorted_kernel_impl<float>, num_values, stream,
+                seq_cont.data<float>(), val_cont.data<float>(), out_ptr,
+                seq_len, num_values, right);
+            break;
+        case DType::Float64:
+            LAUNCH_KERNEL(searchsorted_kernel_impl<double>, num_values, stream,
+                seq_cont.data<double>(), val_cont.data<double>(), out_ptr,
+                seq_len, num_values, right);
+            break;
+        case DType::Int32:
+            LAUNCH_KERNEL(searchsorted_kernel_impl<int32_t>, num_values, stream,
+                seq_cont.data<int32_t>(), val_cont.data<int32_t>(), out_ptr,
+                seq_len, num_values, right);
+            break;
+        case DType::Int64:
+            LAUNCH_KERNEL(searchsorted_kernel_impl<int64_t>, num_values, stream,
+                seq_cont.data<int64_t>(), val_cont.data<int64_t>(), out_ptr,
+                seq_len, num_values, right);
+            break;
+        case DType::Float16: {
+            // Convert to Float32 on device
+            auto seq_f32 = sorted_sequence.to(DType::Float32).contiguous();
+            auto val_f32 = values.to(DType::Float32).contiguous();
+            LAUNCH_KERNEL(searchsorted_kernel_impl<float>, num_values, stream,
+                seq_f32.data<float>(), val_f32.data<float>(), out_ptr,
+                seq_len, num_values, right);
+            break;
+        }
+        case DType::BFloat16: {
+            auto seq_f32 = sorted_sequence.to(DType::Float32).contiguous();
+            auto val_f32 = values.to(DType::Float32).contiguous();
+            LAUNCH_KERNEL(searchsorted_kernel_impl<float>, num_values, stream,
+                seq_f32.data<float>(), val_f32.data<float>(), out_ptr,
+                seq_len, num_values, right);
+            break;
+        }
+        default:
+            throw std::runtime_error("searchsorted: unsupported dtype");
+    }
+
+    return result;
+}
+
 } // namespace cuda
 } // namespace tenzor

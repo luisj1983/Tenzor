@@ -78,11 +78,12 @@ inline void insertTransferToComputeBarrier(VkCommandBuffer cmdBuffer) {
     insertBarrier(cmdBuffer, BarrierType::TransferToCompute);
 }
 
-/// Pre-read compute barrier (only in batching mode; redundant otherwise).
+/// Pre-read compute barrier for RAW (Read-After-Write) dependencies between dispatches.
+/// Always inserted regardless of command batching mode — without batching, consecutive
+/// dispatches within a single command buffer still need barriers to ensure write
+/// visibility before the next read.
 inline void insertPreReadBarrier(VkCommandBuffer cmdBuffer) {
-    if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
-        insertBarrier(cmdBuffer, BarrierType::ComputeToCompute);
-    }
+    insertBarrier(cmdBuffer, BarrierType::ComputeToCompute);
 }
 
 /// Post-dispatch compute barrier for GPU-only workloads.

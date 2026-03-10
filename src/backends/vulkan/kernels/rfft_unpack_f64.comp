@@ -1,0 +1,62 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Real-to-Complex FFT: Unpack N/2-point complex FFT to N/2+1 complex output — Float64
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { double data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { double data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint batch_offset;
+};
+
+const double PI_D = 3.14159265358979323846LF;
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint half_n = n / 2;
+
+    if (tid > half_n) return;
+
+    if (tid == 0) {
+        double z0_re = data_in[batch_offset * 2];
+        double z0_im = data_in[batch_offset * 2 + 1];
+        data_out[0] = z0_re + z0_im;
+        data_out[1] = 0.0LF;
+        return;
+    }
+    if (tid == half_n) {
+        double z0_re = data_in[batch_offset * 2];
+        double z0_im = data_in[batch_offset * 2 + 1];
+        data_out[half_n * 2] = z0_re - z0_im;
+        data_out[half_n * 2 + 1] = 0.0LF;
+        return;
+    }
+
+    uint k = tid;
+    uint conj_k = half_n - k;
+
+    double zk_re = data_in[(batch_offset + k) * 2];
+    double zk_im = data_in[(batch_offset + k) * 2 + 1];
+    double zc_re =  data_in[(batch_offset + conj_k) * 2];
+    double zc_im = -data_in[(batch_offset + conj_k) * 2 + 1];
+
+    double a_re = zk_re + zc_re;
+    double a_im = zk_im + zc_im;
+    double b_re = zk_re - zc_re;
+    double b_im = zk_im - zc_im;
+
+    double angle = -2.0LF * PI_D * double(k) / double(n);
+    float angle_f = float(angle);
+    double w_re = double(cos(angle_f));
+    double w_im = double(sin(angle_f));
+
+    double iw_b_re = w_re * b_im + w_im * b_re;
+    double iw_b_im = -w_re * b_re + w_im * b_im;
+
+    data_out[k * 2]     = 0.5LF * (a_re + iw_b_re);
+    data_out[k * 2 + 1] = 0.5LF * (a_im + iw_b_im);
+}

@@ -1,0 +1,88 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Permute operation for Float16: arbitrary dimension reordering
+// F16 packed buffers (2 Float16 per uint32)
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };
+layout(binding = 1) buffer Output { uint output_data[]; };
+layout(binding = 2) buffer InputShape { int shape[]; };       // Input shape
+layout(binding = 3) buffer InputStrides { int strides[]; };   // Input strides
+layout(binding = 4) buffer PermuteDims { int perm[]; };       // Permutation order
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Total number of elements
+    uint ndim;       // Number of dimensions
+} params;
+
+// Read a single float16 element from packed uint input buffer
+float readF16(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = input_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+// Write a single float16 element to packed uint output buffer
+void writeF16(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint existing = output_data[word_idx];
+    uint mask = 0xFFFFu << (word_offset * 16);
+    output_data[word_idx] = (existing & ~mask) | (bits << (word_offset * 16));
+}
+
+// Convert linear index to multi-dimensional indices based on output shape
+void index_to_coords(uint linear_idx, uint ndims, out int coords[8]) {
+    uint remaining = linear_idx;
+    int out_shape[8];
+    for (uint i = 0; i < ndims && i < 8u; i++) {
+        out_shape[i] = max(shape[perm[i]], 1);
+    }
+
+    for (int i = int(ndims) - 1; i >= 0; i--) {
+        int s = out_shape[i];
+        coords[i] = int(remaining % uint(s));
+        remaining /= uint(s);
+    }
+}
+
+// Convert multi-dimensional indices to linear index using strides
+uint coords_to_index(int coords[8], uint ndims, int stride_array[8]) {
+    uint idx = 0;
+    for (uint i = 0; i < ndims; i++) {
+        idx += uint(coords[i] * stride_array[i]);
+    }
+    return idx;
+}
+
+void main() {
+    uint out_idx = gl_GlobalInvocationID.x;
+
+    if (out_idx >= params.n) return;
+    if (params.ndim > 8u) return;
+
+    // Get output coordinates
+    int out_coords[8];
+    index_to_coords(out_idx, params.ndim, out_coords);
+
+    // Permute coordinates to get input coordinates
+    int in_coords[8];
+    for (uint i = 0; i < params.ndim; i++) {
+        in_coords[perm[i]] = out_coords[i];
+    }
+
+    // Convert input coordinates to linear index
+    int in_strides[8];
+    for (uint i = 0; i < params.ndim; i++) {
+        in_strides[i] = strides[i];
+    }
+    uint in_idx = coords_to_index(in_coords, params.ndim, in_strides);
+
+    // Copy data through F16 pack/unpack
+    float val = readF16(in_idx);
+    writeF16(out_idx, val);
+}

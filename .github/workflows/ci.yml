@@ -211,7 +211,7 @@ jobs:
 
       - name: Run thread-safety tests under TSan
         env:
-          TSAN_OPTIONS: halt_on_error=1,second_deadlock_stack=1
+          TSAN_OPTIONS: halt_on_error=1,second_deadlock_stack=1,suppressions=sanitizer_suppressions.txt
         run: |
           cd build
           ctest --output-on-failure -j1 \

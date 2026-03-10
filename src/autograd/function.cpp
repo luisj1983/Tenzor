@@ -83,6 +83,10 @@ auto Function::saved_tensors() const -> const std::vector<Tensor>& {
         if (tensors_offloaded_.load(std::memory_order_relaxed)) {
             reload_saved_tensors();
         }
+        // Check and return while still holding the lock to prevent
+        // concurrent offload from modifying saved_tensors_ under us
+        validate_saved_tensors();
+        return saved_tensors_;
     }
     // Check that saved tensors have not been modified in-place since save
     validate_saved_tensors();

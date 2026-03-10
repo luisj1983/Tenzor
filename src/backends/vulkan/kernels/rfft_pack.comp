@@ -1,0 +1,29 @@
+#version 450
+
+// Real-to-Complex FFT: Pack N real values into N/2 complex values
+// Input:  N real values in data_in[]
+// Output: N/2 complex values in data_out[] (interleaved re/im)
+// Pairs adjacent reals as (re, im) for a half-length complex FFT
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { float data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { float data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;            // Original real FFT size (N)
+    uint batch_offset; // Offset in real elements for batching
+};
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint half_n = n / 2;
+    if (tid >= half_n) return;
+
+    // Pack real[2k] as real part, real[2k+1] as imag part
+    uint src_base = batch_offset + tid * 2;
+    uint dst_base = tid * 2;  // complex interleaved
+
+    data_out[dst_base]     = data_in[src_base];
+    data_out[dst_base + 1] = data_in[src_base + 1];
+}

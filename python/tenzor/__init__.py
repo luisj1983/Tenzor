@@ -87,6 +87,15 @@ _func_spec.loader.exec_module(_func_module)
 _sys.modules['tenzor.nn.functional'] = _func_module
 _nn_module.functional = _func_module
 
+# Load data submodule (Dataset, DataLoader, DistributedSampler, etc.)
+_data_path = _os.path.join(_os.path.dirname(__file__), 'data.py')
+if _os.path.exists(_data_path):
+    _data_spec = _importlib_util.spec_from_file_location('tenzor.data', _data_path)
+    _data_module = _importlib_util.module_from_spec(_data_spec)
+    _data_spec.loader.exec_module(_data_module)
+    _sys.modules['tenzor.data'] = _data_module
+    data = _data_module
+
 __version__ = "1.0.0"
 
 __all__ = [
@@ -246,6 +255,7 @@ __all__ = [
     "fft",
     "sparse",
     "amp",
+    "data",
 
     # Serialization
     "save",

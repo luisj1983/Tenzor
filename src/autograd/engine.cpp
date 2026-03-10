@@ -4,6 +4,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "tenzor/ops/type_promotion.hpp"
 #include "tenzor/utils/error.hpp"
 #include <unordered_set>
 #include <functional>
@@ -66,66 +67,8 @@ static void check_for_anomaly(const std::vector<Tensor>& grads,
     }
 }
 
-// Promote two dtypes for gradient accumulation. Complex types always win
-// over their float counterparts (Float32 + Complex64 → Complex64), and
-// higher precision wins within the same category.
-static auto promote_dtype(DType a, DType b) -> DType {
-    if (a == b) return a;
-
-    // Check if either type is complex
-    bool a_complex = (a == DType::Complex64 || a == DType::Complex128);
-    bool b_complex = (b == DType::Complex64 || b == DType::Complex128);
-
-    if (a_complex || b_complex) {
-        // Both complex: pick higher precision
-        if (a_complex && b_complex) {
-            return (a == DType::Complex128 || b == DType::Complex128)
-                   ? DType::Complex128 : DType::Complex64;
-        }
-        // One complex, one real: promote to complex of max precision
-        DType real_dt = a_complex ? b : a;
-        DType complex_dt = a_complex ? a : b;
-        if (real_dt == DType::Float64 || complex_dt == DType::Complex128) {
-            return DType::Complex128;
-        }
-        return DType::Complex64;
-    }
-
-    // Both real: use precision hierarchy
-    auto prec = [](DType dt) -> int {
-        switch (dt) {
-            case DType::Float64:  return 6;
-            case DType::Float32:  return 5;
-            case DType::Float16:  return 4;
-            case DType::BFloat16: return 3;
-            case DType::Int64:    return 2;
-            case DType::Int32:    return 1;
-            case DType::Int16:    return 1;
-            case DType::Int8:     return 0;
-            case DType::UInt8:    return 0;
-            case DType::UInt16:   return 1;
-            case DType::UInt32:   return 1;
-            case DType::UInt64:   return 2;
-            case DType::Bool:     return -1;
-            default:              return 0;
-        }
-    };
-
-    auto is_float = [](DType dt) -> bool {
-        return dt == DType::Float64 || dt == DType::Float32 ||
-               dt == DType::Float16 || dt == DType::BFloat16;
-    };
-
-    DType result = prec(a) >= prec(b) ? a : b;
-
-    // Gradients are fundamentally floating-point. If either input is float,
-    // the result must be float (e.g. Int64 + Float32 → Float32, not Int64).
-    if (!is_float(result) && (is_float(a) || is_float(b))) {
-        result = is_float(a) ? a : b;
-    }
-
-    return result;
-}
+// Use the shared promote_types() for gradient dtype promotion.
+// This replaces the old local promote_types() that duplicated type_promotion.cpp logic.
 
 auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                              bool retain_graph, bool create_graph) -> void {
@@ -230,7 +173,7 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
             // Pre-compute target dtype to avoid repeated conversions.
             DType target_dtype = accum_grads[0].dtype();
             for (size_t i = 1; i < accum_grads.size(); ++i) {
-                target_dtype = promote_dtype(target_dtype, accum_grads[i].dtype());
+                target_dtype = promote_types(target_dtype, accum_grads[i].dtype());
             }
             Tensor total_grad = (accum_grads[0].dtype() == target_dtype)
                 ? accum_grads[0]
@@ -360,7 +303,7 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                         if (var.has_grad()) {
                             auto existing_grad = var.grad().value();
                             if (grad_to_apply.dtype() != existing_grad.dtype()) {
-                                DType target = promote_dtype(grad_to_apply.dtype(), existing_grad.dtype());
+                                DType target = promote_types(grad_to_apply.dtype(), existing_grad.dtype());
                                 existing_grad = existing_grad.to(target);
                                 grad_to_apply = grad_to_apply.to(target);
                             }
@@ -370,7 +313,9 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                         }
                     };
 
-                    if (var.impl_ && var.impl_->thread_safe_.load(std::memory_order_acquire)) {
+                    if (var.impl_) {
+                        // Always acquire mutex to prevent TOCTOU race:
+                        // thread_safe_ could be set between check and lock acquisition
                         std::lock_guard lock(var.impl_->grad_mutex_);
                         accumulate();
                     } else {
@@ -584,7 +529,7 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
             // Pre-compute target dtype to avoid repeated conversions.
             DType target_dtype = accum_grads[0].dtype();
             for (size_t i = 1; i < accum_grads.size(); ++i) {
-                target_dtype = promote_dtype(target_dtype, accum_grads[i].dtype());
+                target_dtype = promote_types(target_dtype, accum_grads[i].dtype());
             }
             Tensor total_grad = (accum_grads[0].dtype() == target_dtype)
                 ? accum_grads[0]
@@ -647,7 +592,7 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                         if (var.has_grad()) {
                             auto existing_grad = var.grad().value();
                             if (grad_to_apply.dtype() != existing_grad.dtype()) {
-                                DType target = promote_dtype(grad_to_apply.dtype(), existing_grad.dtype());
+                                DType target = promote_types(grad_to_apply.dtype(), existing_grad.dtype());
                                 existing_grad = existing_grad.to(target);
                                 grad_to_apply = grad_to_apply.to(target);
                             }
@@ -657,7 +602,9 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                         }
                     };
 
-                    if (var.impl_ && var.impl_->thread_safe_.load(std::memory_order_acquire)) {
+                    if (var.impl_) {
+                        // Always acquire mutex to prevent TOCTOU race:
+                        // thread_safe_ could be set between check and lock acquisition
                         std::lock_guard lock(var.impl_->grad_mutex_);
                         accumulate();
                     } else {

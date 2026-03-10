@@ -556,6 +556,47 @@ public:
     auto dispatchFusedAdamStep(std::span<const Tensor> inputs,
                                 const OpAttributes& attrs) -> std::vector<Tensor>;
 
+    // Complex number operations
+    auto dispatchConj(const Tensor& input) -> Tensor;
+    auto dispatchReal(const Tensor& input) -> Tensor;
+    auto dispatchImag(const Tensor& input) -> Tensor;
+    auto dispatchAngle(const Tensor& input) -> Tensor;
+    auto dispatchPolar(const Tensor& abs, const Tensor& angle) -> Tensor;
+
+    // Stack/Take/Tile/Put operations (native Vulkan shaders)
+    auto dispatchStack(std::span<const Tensor> inputs, int64_t dim) -> Tensor;
+    auto dispatchTake(const Tensor& input, const Tensor& indices) -> Tensor;
+    auto dispatchTile(const Tensor& input, const std::vector<int64_t>& reps) -> Tensor;
+    auto dispatchPut(const Tensor& input, const Tensor& indices, const Tensor& source, bool accumulate) -> Tensor;
+
+    // FFT operations (native Vulkan compute shaders)
+    auto dispatchFFT(const Tensor& input, int64_t dim, int64_t n,
+                     const std::string& norm) -> Tensor;
+    auto dispatchIFFT(const Tensor& input, int64_t dim, int64_t n,
+                      const std::string& norm) -> Tensor;
+    auto dispatchRFFT(const Tensor& input, int64_t dim, int64_t n,
+                      const std::string& norm) -> Tensor;
+    auto dispatchIRFFT(const Tensor& input, int64_t dim, int64_t n,
+                       const std::string& norm) -> Tensor;
+    auto dispatchFFT2(const Tensor& input, const std::vector<int64_t>& dims,
+                      const std::string& norm) -> Tensor;
+    auto dispatchIFFT2(const Tensor& input, const std::vector<int64_t>& dims,
+                       const std::string& norm) -> Tensor;
+    auto dispatchFFTN(const Tensor& input, const std::vector<int64_t>& dims,
+                      const std::string& norm) -> Tensor;
+    auto dispatchIFFTN(const Tensor& input, const std::vector<int64_t>& dims,
+                       const std::string& norm) -> Tensor;
+
+    // FFT internal helpers
+    auto runFFTButterfly(const Tensor& input, uint32_t fft_size, uint32_t direction,
+                         uint32_t batch_offset) -> Tensor;
+    auto runFFTScale(Tensor& data, uint32_t n, double scale_factor) -> void;
+
+    // Linear algebra operations (native Vulkan shaders for small matrices, CPU fallback for large)
+    auto dispatchLinalgDet(const Tensor& input) -> Tensor;
+    auto dispatchLinalgInv(const Tensor& input) -> Tensor;
+    auto dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Tensor;
+
     // Instance and devices
     VkInstance instance_ = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT debug_messenger_ = VK_NULL_HANDLE;

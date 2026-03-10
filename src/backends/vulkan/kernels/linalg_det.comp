@@ -1,0 +1,89 @@
+#version 450
+
+// Determinant via LU factorization for small matrices (<= 32x32)
+// Each workgroup computes the determinant of one matrix in a batch.
+// Uses shared memory for in-place LU decomposition with partial pivoting.
+// Output: scalar determinant per batch element.
+
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { float data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { float data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;      // Matrix dimension (n x n)
+    uint batch;  // Batch size
+};
+
+// Shared memory: matrix + pivot sign
+shared float mat[32][32];
+shared int pivot_sign;  // +1 or -1 from row swaps
+
+void main() {
+    uint batch_idx = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+
+    if (batch_idx >= batch) return;
+
+    uint mat_offset = batch_idx * n * n;
+
+    // Initialize pivot sign
+    if (tid == 0) pivot_sign = 1;
+    barrier();
+
+    // Load matrix into shared memory (each thread loads one column)
+    for (uint row = 0; row < n; row++) {
+        if (tid < n) {
+            mat[row][tid] = data_in[mat_offset + row * n + tid];
+        }
+    }
+    barrier();
+
+    // LU factorization with partial pivoting
+    for (uint col = 0; col < n; col++) {
+        // Find pivot (thread 0 does this serially for simplicity on small matrices)
+        if (tid == 0) {
+            uint max_row = col;
+            float max_val = abs(mat[col][col]);
+            for (uint row = col + 1; row < n; row++) {
+                float val = abs(mat[row][col]);
+                if (val > max_val) {
+                    max_val = val;
+                    max_row = row;
+                }
+            }
+            // Swap rows if needed
+            if (max_row != col) {
+                pivot_sign = -pivot_sign;
+                for (uint j = 0; j < n; j++) {
+                    float tmp = mat[col][j];
+                    mat[col][j] = mat[max_row][j];
+                    mat[max_row][j] = tmp;
+                }
+            }
+        }
+        barrier();
+
+        // Eliminate below pivot — each thread handles one row
+        if (tid > col && tid < n) {
+            float pivot = mat[col][col];
+            if (abs(pivot) > 1e-30) {
+                float factor = mat[tid][col] / pivot;
+                for (uint j = col + 1; j < n; j++) {
+                    mat[tid][j] -= factor * mat[col][j];
+                }
+                mat[tid][col] = factor;  // Store L factor (not used for det)
+            }
+        }
+        barrier();
+    }
+
+    // Compute determinant = product of diagonal * pivot_sign
+    if (tid == 0) {
+        float det = float(pivot_sign);
+        for (uint i = 0; i < n; i++) {
+            det *= mat[i][i];
+        }
+        data_out[batch_idx] = det;
+    }
+}

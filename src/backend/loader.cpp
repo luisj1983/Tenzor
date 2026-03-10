@@ -1,6 +1,7 @@
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/backend/dispatch_table.hpp"
 #include <mutex>
+#include <shared_mutex>
 #include <cstdlib>
 #include <atomic>
 
@@ -27,6 +28,9 @@ auto BackendLoader::shutdown() -> void {
     // Mark that we're destroying the registry - this prevents DeviceStorage
     // from trying to access backends during static destruction
     g_registry_destroying.store(true, std::memory_order_release);
+
+    // Exclusive lock: shutdown mutates both maps
+    std::unique_lock lock(registry_mutex_);
 
     // Clear device type mapping first
     device_to_backend_.clear();
@@ -138,6 +142,9 @@ auto BackendLoader::register_backend(std::string_view name,
     // Store backend pointer before moving
     auto* backend_ptr = backend.get();
 
+    // Exclusive lock: registration mutates both maps
+    std::unique_lock lock(registry_mutex_);
+
     // Register by name
     backends_[backend_name] = std::move(backend);
 
@@ -146,20 +153,24 @@ auto BackendLoader::register_backend(std::string_view name,
 }
 
 auto BackendLoader::get_backend(std::string_view name) -> Backend* {
+    std::shared_lock lock(registry_mutex_);
     auto it = backends_.find(std::string(name));
     return it != backends_.end() ? it->second.get() : nullptr;
 }
 
 auto BackendLoader::get_backend(Device::Type type) -> Backend* {
+    std::shared_lock lock(registry_mutex_);
     auto it = device_to_backend_.find(type);
     return it != device_to_backend_.end() ? it->second : nullptr;
 }
 
 auto BackendLoader::has_backend(std::string_view name) const -> bool {
+    std::shared_lock lock(registry_mutex_);
     return backends_.contains(std::string(name));
 }
 
 auto BackendLoader::available_backends() const -> std::vector<std::string> {
+    std::shared_lock lock(registry_mutex_);
     std::vector<std::string> names;
     names.reserve(backends_.size());
     for (const auto& [name, _] : backends_) {
@@ -169,6 +180,8 @@ auto BackendLoader::available_backends() const -> std::vector<std::string> {
 }
 
 auto BackendLoader::unload_backend(std::string_view name) -> bool {
+    std::unique_lock lock(registry_mutex_);
+
     auto it = backends_.find(std::string(name));
     if (it == backends_.end()) return false;
 

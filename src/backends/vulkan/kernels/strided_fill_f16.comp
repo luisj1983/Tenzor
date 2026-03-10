@@ -1,0 +1,44 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Strided Fill for Float16: fill a tensor with a value, respecting non-contiguous strides
+// F16 packed buffers (2 Float16 per uint32), value passed as float in push constants
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Data { uint data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;     // Total logical elements
+    uint ndim;           // Number of dimensions (max 8)
+    float fill_value;    // Value to fill (in float32, will be converted to F16)
+    // Interleaved shape[i], stride[i] pairs for compact push constant layout
+    uint shape_stride[16]; // shape_stride[2*d] = shape[d], shape_stride[2*d+1] = stride[d]
+} params;
+
+// Write a single float16 element to packed uint buffer
+void writeF16(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint existing = data[word_idx];
+    uint mask = 0xFFFFu << (word_offset * 16);
+    data[word_idx] = (existing & ~mask) | (bits << (word_offset * 16));
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    // Decompose flat index into multi-dim coordinates, compute strided offset
+    uint physical_offset = 0;
+    uint rem = idx;
+    for (int d = int(params.ndim) - 1; d >= 0; d--) {
+        uint dim_size = params.shape_stride[2 * d];
+        uint dim_stride = params.shape_stride[2 * d + 1];
+        uint coord = rem % dim_size;
+        rem /= dim_size;
+        physical_offset += coord * dim_stride;
+    }
+
+    writeF16(physical_offset, params.fill_value);
+}

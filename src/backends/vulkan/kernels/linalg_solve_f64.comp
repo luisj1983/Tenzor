@@ -1,0 +1,99 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Solve Ax = b via LU factorization for small matrices (<= 32x32) — Float64
+
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) buffer MatrixA { double a_data[]; };
+layout(set = 0, binding = 1) buffer VectorB { double b_data[]; };
+layout(set = 0, binding = 2) buffer OutputX { double x_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint batch;
+    uint nrhs;
+};
+
+shared double mat[32][32];
+shared double rhs[32];
+shared uint piv[32];
+
+void main() {
+    uint batch_idx = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+
+    if (batch_idx >= batch) return;
+
+    uint a_offset = batch_idx * n * n;
+    uint b_offset = batch_idx * n;
+
+    for (uint row = 0; row < n; row++) {
+        if (tid < n) {
+            mat[row][tid] = a_data[a_offset + row * n + tid];
+        }
+    }
+    if (tid < n) {
+        rhs[tid] = b_data[b_offset + tid];
+        piv[tid] = tid;
+    }
+    barrier();
+
+    for (uint col = 0; col < n; col++) {
+        if (tid == 0) {
+            uint max_row = col;
+            double max_val = abs(mat[col][col]);
+            for (uint row = col + 1; row < n; row++) {
+                double val = abs(mat[row][col]);
+                if (val > max_val) {
+                    max_val = val;
+                    max_row = row;
+                }
+            }
+            piv[col] = max_row;
+            if (max_row != col) {
+                for (uint j = 0; j < n; j++) {
+                    double tmp = mat[col][j];
+                    mat[col][j] = mat[max_row][j];
+                    mat[max_row][j] = tmp;
+                }
+                double tmp = rhs[col];
+                rhs[col] = rhs[max_row];
+                rhs[max_row] = tmp;
+            }
+        }
+        barrier();
+
+        if (tid > col && tid < n) {
+            double pivot = mat[col][col];
+            if (abs(pivot) > 1e-300LF) {
+                double factor = mat[tid][col] / pivot;
+                mat[tid][col] = factor;
+                for (uint j = col + 1; j < n; j++) {
+                    mat[tid][j] -= factor * mat[col][j];
+                }
+                rhs[tid] -= factor * rhs[col];
+            }
+        }
+        barrier();
+    }
+
+    if (tid == 0) {
+        for (int i = int(n) - 1; i >= 0; i--) {
+            double sum = rhs[i];
+            for (uint j = uint(i) + 1; j < n; j++) {
+                sum -= mat[i][j] * rhs[j];
+            }
+            if (abs(mat[i][i]) > 1e-300LF) {
+                rhs[i] = sum / mat[i][i];
+            } else {
+                rhs[i] = 0.0LF;
+            }
+        }
+    }
+    barrier();
+
+    if (tid < n) {
+        x_data[b_offset + tid] = rhs[tid];
+    }
+}

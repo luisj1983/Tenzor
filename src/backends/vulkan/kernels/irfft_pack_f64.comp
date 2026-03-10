@@ -1,0 +1,55 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Complex-to-Real IFFT: Pack N/2+1 complex frequency bins into N/2 complex values — Float64
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { double data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { double data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint batch_offset;
+};
+
+const double PI_D = 3.14159265358979323846LF;
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint half_n = n / 2;
+
+    if (tid >= half_n) return;
+
+    if (tid == 0) {
+        double x0_re = data_in[0];
+        double xn_re = data_in[half_n * 2];
+        data_out[batch_offset * 2]     = x0_re + xn_re;
+        data_out[batch_offset * 2 + 1] = x0_re - xn_re;
+        return;
+    }
+
+    uint k = tid;
+    uint conj_k = half_n - k;
+
+    double xk_re = data_in[k * 2];
+    double xk_im = data_in[k * 2 + 1];
+    double xc_re =  data_in[conj_k * 2];
+    double xc_im = -data_in[conj_k * 2 + 1];
+
+    double a_re = xk_re + xc_re;
+    double a_im = xk_im + xc_im;
+    double b_re = xk_re - xc_re;
+    double b_im = xk_im - xc_im;
+
+    double angle = 2.0LF * PI_D * double(k) / double(n);
+    float angle_f = float(angle);
+    double w_re = double(cos(angle_f));
+    double w_im = double(sin(angle_f));
+
+    double iw_b_re = -(w_im * b_re + w_re * b_im);
+    double iw_b_im =   w_re * b_re - w_im * b_im;
+
+    data_out[(batch_offset + k) * 2]     = a_re + iw_b_re;
+    data_out[(batch_offset + k) * 2 + 1] = a_im + iw_b_im;
+}

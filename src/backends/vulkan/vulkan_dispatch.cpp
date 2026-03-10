@@ -119,9 +119,11 @@ auto VulkanBackend::dispatch(const std::string& op_name,
                 // Type-agnostic operations
                 "reshape", "view", "contiguous", "to", "to_dtype",
                 "zeros", "ones", "full", "empty",
+                // Creation ops (native F16 shaders)
+                "arange", "linspace", "eye", "one_hot", "diag",
                 // Clamp (dispatch handles F16 via upcast)
                 "clamp", "clamp_min", "clamp_max",
-                // Conv2d backward (F32 accumulation, safe for F16 inputs)
+                // Conv2d backward (native F16 shaders with F32 accumulation)
                 "conv2d_backward_input", "conv2d_backward_weight", "conv2d_backward_bias",
                 // Shape ops (type-agnostic / metadata-only)
                 "transpose", "permute", "cat", "squeeze", "unsqueeze",
@@ -140,6 +142,16 @@ auto VulkanBackend::dispatch(const std::string& op_name,
                 "elu", "elu_backward", "selu", "selu_backward",
                 "mish", "mish_backward", "softplus", "softplus_backward",
                 "swish_backward",
+                // Pooling (pooling_f16, pooling_backward_f16, pooling_forward_with_indices_f16 shaders)
+                "pooling", "pooling_backward", "pooling_forward_with_indices",
+                // Max pool backward recompute (max_pool2d_backward_f16 shader)
+                "max_pool2d_backward_recompute",
+                // Adaptive max pool backward (adaptive_max_pool2d_backward_f16 shader)
+                "adaptive_max_pool2d_backward",
+                // LSTM cell (lstm_cell_f16, lstm_cell_backward_f16 shaders)
+                "lstm_cell", "lstm_cell_backward",
+                // GRU cell (gru_cell_f16, gru_cell_backward_f16 shaders)
+                "gru_cell", "gru_cell_backward",
             };
 
             if (!f16_native_ops.contains(op_name)) {

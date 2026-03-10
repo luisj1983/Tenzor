@@ -1,0 +1,26 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Complex-to-Real IFFT: Unpack N/2 complex values back to N real values — Float64
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { double data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { double data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint batch_offset;
+};
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint half_n = n / 2;
+    if (tid >= half_n) return;
+
+    uint src_base = tid * 2;
+    uint dst_base = batch_offset + tid * 2;
+
+    data_out[dst_base]     = data_in[src_base];
+    data_out[dst_base + 1] = data_in[src_base + 1];
+}

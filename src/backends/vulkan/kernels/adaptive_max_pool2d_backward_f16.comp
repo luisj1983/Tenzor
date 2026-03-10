@@ -1,0 +1,64 @@
+#version 450
+
+// Adaptive Max Pool 2D Backward Pass (Float16 version)
+// Routes gradients back to the positions recorded by forward pass indices
+// Uses atomicCompSwap-based accumulation since Float16 doesn't support atomicAdd
+// Float16 elements packed 2 per uint32 word
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { uint grad_output[]; };  // Packed F16: [N, C, out_h, out_w]
+layout(binding = 1) buffer Indices { int indices[]; };           // [N, C, out_h, out_w] -- flat index into input
+layout(binding = 2) buffer GradInput { uint grad_input[]; };    // Packed F16: [N, C, in_h, in_w]
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;      // Total elements in grad_output (N * C * out_h * out_w)
+    uint grad_input_size; // Total elements in grad_input (N * C * in_h * in_w)
+    uint channels;
+    uint in_h;
+    uint in_w;
+} params;
+
+float readF16(uint element_idx) {
+    uint word_idx = element_idx >> 1u;
+    uint packed = grad_output[word_idx];
+    vec2 pair = unpackHalf2x16(packed);
+    return ((element_idx & 1u) == 0u) ? pair.x : pair.y;
+}
+
+// Atomic add for Float16 packed in uint32 words
+// Reads current value, adds grad, writes back using CAS loop
+void atomicAddF16(uint element_idx, float grad) {
+    uint word_idx = element_idx >> 1u;
+    uint word_offset = element_idx & 1u;
+    uint shift = word_offset * 16u;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = grad_input[word_idx];
+    for (uint iter = 0u; iter < 1024u; iter++) {
+        uint expected = old_val;
+        // Extract current float16 value
+        uint cur_bits = (expected >> shift) & 0xFFFFu;
+        float cur_val = unpackHalf2x16(cur_bits | (cur_bits << 16u)).x;
+        // Add gradient
+        float new_val_f = cur_val + grad;
+        // Pack back
+        uint new_bits = packHalf2x16(vec2(new_val_f, 0.0)) & 0xFFFFu;
+        uint new_word = (expected & ~mask) | (new_bits << shift);
+
+        old_val = atomicCompSwap(grad_input[word_idx], expected, new_word);
+        if (old_val == expected) return;
+    }
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    float grad = readF16(idx);
+    int target_idx = indices[idx];
+
+    if (target_idx >= 0 && target_idx < int(params.grad_input_size)) {
+        atomicAddF16(uint(target_idx), grad);
+    }
+}

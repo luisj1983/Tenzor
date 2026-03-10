@@ -1574,10 +1574,28 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return results; \
     })
 
-    VULKAN_CPU_FALLBACK(Stack);
-    VULKAN_CPU_FALLBACK(Tile);
-    VULKAN_CPU_FALLBACK(Take);
-    VULKAN_CPU_FALLBACK(Put);
+    // ========================================================================
+    // Stack/Take/Tile/Put (native Vulkan shaders)
+    // ========================================================================
+    table.register_single_output_kernel(OpId::Stack, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        return get_vulkan_backend()->dispatchStack(inputs, dim);
+    });
+
+    table.register_single_output_kernel(OpId::Tile, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto reps = attrs.get_int_list(AttrKey::Reps);
+        return get_vulkan_backend()->dispatchTile(inputs[0], reps);
+    });
+
+    table.register_single_output_kernel(OpId::Take, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        return get_vulkan_backend()->dispatchTake(inputs[0], inputs[1]);
+    });
+
+    table.register_single_output_kernel(OpId::Put, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        bool accumulate = attrs.get_bool(AttrKey::Accumulate, false);
+        return get_vulkan_backend()->dispatchPut(inputs[0], inputs[1], inputs[2], accumulate);
+    });
+
     VULKAN_CPU_FALLBACK(QuantizedLinear);
     VULKAN_CPU_FALLBACK(QuantizedConv2d);
     VULKAN_CPU_FALLBACK(LSTMCellForward);
@@ -1598,17 +1616,45 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             inputs[0], inputs[1], inputs[2], inputs[3],
             batch_size, hidden_size);
     });
-    // Complex number ops
-    VULKAN_CPU_FALLBACK(Conj);
-    VULKAN_CPU_FALLBACK(Real);
-    VULKAN_CPU_FALLBACK(Imag);
-    VULKAN_CPU_FALLBACK(Angle);
-    VULKAN_CPU_FALLBACK(Polar);
 
-    // Linear algebra ops (CPU fallback — requires LAPACK/cuSOLVER, impractical in Vulkan)
-    VULKAN_CPU_FALLBACK(LinalgDet);
-    VULKAN_CPU_FALLBACK(LinalgInv);
-    VULKAN_CPU_FALLBACK(LinalgSolve);
+    // ========================================================================
+    // Complex number ops (native Vulkan shaders)
+    // ========================================================================
+    table.register_single_output_kernel(OpId::Conj, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        return get_vulkan_backend()->dispatchConj(inputs[0]);
+    });
+
+    table.register_single_output_kernel(OpId::Real, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        return get_vulkan_backend()->dispatchReal(inputs[0]);
+    });
+
+    table.register_single_output_kernel(OpId::Imag, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        return get_vulkan_backend()->dispatchImag(inputs[0]);
+    });
+
+    table.register_single_output_kernel(OpId::Angle, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        return get_vulkan_backend()->dispatchAngle(inputs[0]);
+    });
+
+    table.register_single_output_kernel(OpId::Polar, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        return get_vulkan_backend()->dispatchPolar(inputs[0], inputs[1]);
+    });
+
+    // Linear algebra ops — native Vulkan shaders for small matrices (<= 32x32),
+    // automatic CPU fallback for larger matrices (inside dispatch methods)
+    table.register_kernel(OpId::LinalgDet, [](std::span<const Tensor> inputs, const OpAttributes&)
+        -> std::vector<Tensor> {
+        return {get_vulkan_backend()->dispatchLinalgDet(inputs[0])};
+    });
+    table.register_kernel(OpId::LinalgInv, [](std::span<const Tensor> inputs, const OpAttributes&)
+        -> std::vector<Tensor> {
+        return {get_vulkan_backend()->dispatchLinalgInv(inputs[0])};
+    });
+    table.register_kernel(OpId::LinalgSolve, [](std::span<const Tensor> inputs, const OpAttributes&)
+        -> std::vector<Tensor> {
+        return {get_vulkan_backend()->dispatchLinalgSolve(inputs[0], inputs[1])};
+    });
+    // SVD, QR, Eigh, Eig, Cholesky — too complex for GLSL, keep CPU fallback
     VULKAN_CPU_FALLBACK(LinalgSVD);
     VULKAN_CPU_FALLBACK(LinalgQR);
     VULKAN_CPU_FALLBACK(LinalgEigh);
@@ -1622,35 +1668,81 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     #undef VULKAN_CPU_FALLBACK
 
     // ========================================================================
-    // FFT Operations (CPU fallback — FFT is impractical in native Vulkan)
+    // FFT Operations — Native Vulkan compute shaders (Cooley-Tukey radix-2)
+    // Falls back to CPU for non-power-of-2 sizes or non-last-dim transforms
     // ========================================================================
 
-    // Helper: copy inputs to CPU, dispatch FFT on CPU, copy result back to Vulkan
-    #define VULKAN_FFT_CPU_FALLBACK(OP_ID) \
-    table.register_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes& attrs) \
-        -> std::vector<Tensor> { \
-        auto device = inputs[0].device(); \
-        std::vector<Tensor> cpu_inputs; \
-        cpu_inputs.reserve(inputs.size()); \
-        for (size_t i = 0; i < inputs.size(); ++i) { \
-            cpu_inputs.push_back(inputs[i].to(Device::cpu())); \
-        } \
-        auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU); \
-        auto results = cpu_table.dispatch(OpId::OP_ID, cpu_inputs, attrs); \
-        for (auto& r : results) r = r.to(device); \
-        return results; \
-    })
+    table.register_single_output_kernel(OpId::FFT, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        int64_t actual_dim = dim < 0 ? dim + inputs[0].ndim() : dim;
+        int64_t n = attrs.get_int(AttrKey::N, inputs[0].shape()[actual_dim]);
+        std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
+        return get_vulkan_backend()->dispatchFFT(inputs[0], dim, n, norm);
+    });
 
-    VULKAN_FFT_CPU_FALLBACK(FFT);
-    VULKAN_FFT_CPU_FALLBACK(IFFT);
-    VULKAN_FFT_CPU_FALLBACK(RFFT);
-    VULKAN_FFT_CPU_FALLBACK(IRFFT);
-    VULKAN_FFT_CPU_FALLBACK(FFT2);
-    VULKAN_FFT_CPU_FALLBACK(IFFT2);
-    VULKAN_FFT_CPU_FALLBACK(FFTN);
-    VULKAN_FFT_CPU_FALLBACK(IFFTN);
+    table.register_single_output_kernel(OpId::IFFT, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        int64_t actual_dim = dim < 0 ? dim + inputs[0].ndim() : dim;
+        int64_t n = attrs.get_int(AttrKey::N, inputs[0].shape()[actual_dim]);
+        std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
+        return get_vulkan_backend()->dispatchIFFT(inputs[0], dim, n, norm);
+    });
 
-    #undef VULKAN_FFT_CPU_FALLBACK
+    table.register_single_output_kernel(OpId::RFFT, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        int64_t actual_dim = dim < 0 ? dim + inputs[0].ndim() : dim;
+        int64_t n = attrs.get_int(AttrKey::N, inputs[0].shape()[actual_dim]);
+        std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
+        return get_vulkan_backend()->dispatchRFFT(inputs[0], dim, n, norm);
+    });
+
+    table.register_single_output_kernel(OpId::IRFFT, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        int64_t actual_dim = dim < 0 ? dim + inputs[0].ndim() : dim;
+        int64_t n = attrs.get_int(AttrKey::N, inputs[0].shape()[actual_dim]);
+        std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
+        return get_vulkan_backend()->dispatchIRFFT(inputs[0], dim, n, norm);
+    });
+
+    table.register_single_output_kernel(OpId::FFT2, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto dims = attrs.get_int_list(AttrKey::Dims);
+        if (dims.empty()) {
+            int64_t ndim = inputs[0].ndim();
+            dims = {ndim - 2, ndim - 1};
+        }
+        std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
+        return get_vulkan_backend()->dispatchFFT2(inputs[0], dims, norm);
+    });
+
+    table.register_single_output_kernel(OpId::IFFT2, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto dims = attrs.get_int_list(AttrKey::Dims);
+        if (dims.empty()) {
+            int64_t ndim = inputs[0].ndim();
+            dims = {ndim - 2, ndim - 1};
+        }
+        std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
+        return get_vulkan_backend()->dispatchIFFT2(inputs[0], dims, norm);
+    });
+
+    table.register_single_output_kernel(OpId::FFTN, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto dims = attrs.get_int_list(AttrKey::Dims);
+        if (dims.empty()) {
+            dims.resize(inputs[0].ndim());
+            for (int64_t i = 0; i < inputs[0].ndim(); ++i) dims[i] = i;
+        }
+        std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
+        return get_vulkan_backend()->dispatchFFTN(inputs[0], dims, norm);
+    });
+
+    table.register_single_output_kernel(OpId::IFFTN, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto dims = attrs.get_int_list(AttrKey::Dims);
+        if (dims.empty()) {
+            dims.resize(inputs[0].ndim());
+            for (int64_t i = 0; i < inputs[0].ndim(); ++i) dims[i] = i;
+        }
+        std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
+        return get_vulkan_backend()->dispatchIFFTN(inputs[0], dims, norm);
+    });
 
     std::cout << "Vulkan dispatch table initialized with O(1) lookup" << std::endl;
 }

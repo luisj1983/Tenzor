@@ -1,0 +1,20 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Complex conjugate for Float64: negate the imaginary part of each complex number
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input { float64_t in_data[]; };
+layout(binding = 1) buffer Output { float64_t out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;  // Total number of float64 elements (2 * num_complex)
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_elements) return;
+
+    float64_t val = in_data[idx];
+    out_data[idx] = ((idx & 1u) != 0u) ? -val : val;
+}

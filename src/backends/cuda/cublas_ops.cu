@@ -40,6 +40,10 @@ cudaDataType_t dtype_to_cuda(DType dtype) {
         case DType::BFloat16: return CUDA_R_16BF;
         case DType::Int8: return CUDA_R_8I;
         case DType::Int32: return CUDA_R_32I;
+#if CUDA_VERSION >= 11080
+        case DType::FP8_E4M3: return CUDA_R_8F_E4M3;
+        case DType::FP8_E5M2: return CUDA_R_8F_E5M2;
+#endif
         default:
             throw std::runtime_error("Unsupported dtype for cuBLAS");
     }
@@ -1201,6 +1205,263 @@ auto linear_backward_kernel(
 
     return {grad_input, grad_weight, grad_bias};
 }
+
+// ============================================================================
+// FP8 GEMM via cublasLt - Hopper Tensor Core Support (SM 9.0+)
+// ============================================================================
+
+#if CUDA_VERSION >= 11080
+
+#include <cublasLt.h>
+
+namespace {
+
+/// Thread-safe cublasLt handle (one per process, safe for multi-stream use)
+cublasLtHandle_t get_cublaslt_handle() {
+    static cublasLtHandle_t handle = nullptr;
+    static std::once_flag init_flag;
+    std::call_once(init_flag, [] {
+        auto status = cublasLtCreate(&handle);
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            throw std::runtime_error("Failed to create cublasLt handle");
+        }
+    });
+    return handle;
+}
+
+/// Query compute capability of the current device
+int get_compute_capability() {
+    static int cc = -1;
+    static std::once_flag cc_flag;
+    std::call_once(cc_flag, [] {
+        int device;
+        cudaGetDevice(&device);
+        int major, minor;
+        cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device);
+        cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device);
+        cc = major * 10 + minor;
+    });
+    return cc;
+}
+
+/// Map DType to cublasLt data type, including FP8 variants
+cudaDataType_t dtype_to_cublaslt(DType dtype) {
+    switch (dtype) {
+        case DType::Float32:  return CUDA_R_32F;
+        case DType::Float64:  return CUDA_R_64F;
+        case DType::Float16:  return CUDA_R_16F;
+        case DType::BFloat16: return CUDA_R_16BF;
+        case DType::Int8:     return CUDA_R_8I;
+        case DType::Int32:    return CUDA_R_32I;
+        case DType::FP8_E4M3: return CUDA_R_8F_E4M3;
+        case DType::FP8_E5M2: return CUDA_R_8F_E5M2;
+        default:
+            throw std::runtime_error("Unsupported dtype for cublasLt");
+    }
+}
+
+} // anonymous namespace
+
+/**
+ * @brief FP8 matrix multiplication using cublasLt for Hopper Tensor Cores (SM 9.0+)
+ *
+ * Supports mixed FP8 inputs with higher-precision output:
+ * - A (E4M3) x B (E4M3) -> C (Float16 or Float32)
+ * - A (E4M3) x B (E5M2) -> C (Float16 or Float32)
+ * - A (E5M2) x B (E5M2) -> C (Float16 or Float32)
+ *
+ * FP8 Tensor Cores provide ~2x throughput over FP16 on Hopper GPUs.
+ * The computation uses FP32 accumulation internally for numerical stability.
+ *
+ * Per-tensor scaling factors (amax-based) are required for FP8 to compensate
+ * for the limited dynamic range. Callers must provide scale_a and scale_b.
+ *
+ * @param A Input matrix A (M x K), FP8 type
+ * @param B Input matrix B (K x N), FP8 type
+ * @param C Output matrix C (M x N), Float16 or Float32
+ * @param M Number of rows in A and C
+ * @param N Number of columns in B and C
+ * @param K Number of columns in A and rows in B
+ * @param a_dtype Data type of A (FP8_E4M3 or FP8_E5M2)
+ * @param b_dtype Data type of B (FP8_E4M3 or FP8_E5M2)
+ * @param out_dtype Data type of C (Float16 or Float32)
+ * @param scale_a Per-tensor scale factor for A (applied as A_real = A_fp8 * scale_a)
+ * @param scale_b Per-tensor scale factor for B
+ * @param stream CUDA stream for async execution
+ */
+void cublas_fp8_gemm(
+    const void* A,
+    const void* B,
+    void* C,
+    int64_t M,
+    int64_t N,
+    int64_t K,
+    DType a_dtype,
+    DType b_dtype,
+    DType out_dtype,
+    float scale_a,
+    float scale_b,
+    cudaStream_t stream = nullptr
+) {
+    // Runtime check for Hopper (SM 9.0+)
+    if (get_compute_capability() < 90) {
+        throw std::runtime_error(
+            "FP8 GEMM requires Hopper GPU (SM 9.0+), "
+            "current device has SM " + std::to_string(get_compute_capability() / 10) +
+            "." + std::to_string(get_compute_capability() % 10));
+    }
+
+    // Validate FP8 input types
+    if (a_dtype != DType::FP8_E4M3 && a_dtype != DType::FP8_E5M2) {
+        throw std::runtime_error("cublas_fp8_gemm: A must be FP8_E4M3 or FP8_E5M2");
+    }
+    if (b_dtype != DType::FP8_E4M3 && b_dtype != DType::FP8_E5M2) {
+        throw std::runtime_error("cublas_fp8_gemm: B must be FP8_E4M3 or FP8_E5M2");
+    }
+    if (out_dtype != DType::Float16 && out_dtype != DType::Float32 && out_dtype != DType::BFloat16) {
+        throw std::runtime_error("cublas_fp8_gemm: output must be Float16, BFloat16, or Float32");
+    }
+
+    cublasLtHandle_t ltHandle = get_cublaslt_handle();
+
+    cudaDataType_t cuda_a_dtype = dtype_to_cublaslt(a_dtype);
+    cudaDataType_t cuda_b_dtype = dtype_to_cublaslt(b_dtype);
+    cudaDataType_t cuda_out_dtype = dtype_to_cublaslt(out_dtype);
+
+    // FP8 always uses FP32 accumulation
+    cublasComputeType_t compute_type = CUBLAS_COMPUTE_32F;
+
+    // Combined scale: alpha = scale_a * scale_b (FP8 dequantization)
+    float alpha = scale_a * scale_b;
+    float beta = 0.0f;
+
+    // Create matrix descriptors
+    // cuBLAS uses column-major; for row-major C = A @ B, we compute C^T = B^T @ A^T
+    cublasLtMatmulDesc_t matmulDesc = nullptr;
+    cublasLtMatrixLayout_t layoutA = nullptr, layoutB = nullptr, layoutC = nullptr;
+
+    auto cleanup = [&]() {
+        if (matmulDesc) cublasLtMatmulDescDestroy(matmulDesc);
+        if (layoutA) cublasLtMatrixLayoutDestroy(layoutA);
+        if (layoutB) cublasLtMatrixLayoutDestroy(layoutB);
+        if (layoutC) cublasLtMatrixLayoutDestroy(layoutC);
+    };
+
+    try {
+        // Create matmul descriptor
+        auto status = cublasLtMatmulDescCreate(&matmulDesc, compute_type, CUDA_R_32F);
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            throw std::runtime_error("Failed to create cublasLt matmul descriptor");
+        }
+
+        // Row-major: C = A @ B => cuBLAS col-major: C^T = B^T @ A^T
+        // B^T is (N x K), A^T is (K x M), C^T is (N x M)
+        cublasOperation_t transA = CUBLAS_OP_T;  // Transpose for row-major B
+        cublasOperation_t transB = CUBLAS_OP_T;  // Transpose for row-major A
+
+        cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSA,
+                                        &transA, sizeof(transA));
+        cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSB,
+                                        &transB, sizeof(transB));
+
+        // Create matrix layouts (column-major storage for row-major data)
+        // A in row-major (M x K) -> column-major: leading dim = K
+        // B in row-major (K x N) -> column-major: leading dim = N
+        // C in row-major (M x N) -> column-major: leading dim = N
+
+        // In the transposed computation:
+        // cuBLAS A = B (row-major K x N), layout: N x K col-major, ld = N
+        cublasLtMatrixLayoutCreate(&layoutA, cuda_b_dtype, N, K, N);
+        // cuBLAS B = A (row-major M x K), layout: K x M col-major, ld = K
+        cublasLtMatrixLayoutCreate(&layoutB, cuda_a_dtype, K, M, K);
+        // cuBLAS C = C (row-major M x N), layout: N x M col-major, ld = N
+        cublasLtMatrixLayoutCreate(&layoutC, cuda_out_dtype, N, M, N);
+
+        // Perform the FP8 GEMM
+        status = cublasLtMatmul(
+            ltHandle,
+            matmulDesc,
+            &alpha,
+            B,        // cuBLAS "A" matrix (transposed B)
+            layoutA,
+            A,        // cuBLAS "B" matrix (transposed A)
+            layoutB,
+            &beta,
+            C,        // Output
+            layoutC,
+            C,        // D = C (in-place, since beta = 0)
+            layoutC,
+            nullptr,  // algo (nullptr = auto-select)
+            nullptr,  // workspace
+            0,        // workspace size
+            stream
+        );
+
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            throw std::runtime_error(
+                "cublasLtMatmul FP8 GEMM failed with status " + std::to_string(static_cast<int>(status)));
+        }
+
+        cleanup();
+    } catch (...) {
+        cleanup();
+        throw;
+    }
+}
+
+/**
+ * @brief High-level FP8 matrix multiplication for Tensor objects
+ *
+ * Performs C = scale_a * scale_b * (A @ B), where A and B are FP8 tensors.
+ * Output is in a higher-precision type (Float16, BFloat16, or Float32).
+ *
+ * @param a Input tensor A (2D, FP8 type)
+ * @param b Input tensor B (2D, FP8 type)
+ * @param out_dtype Output data type (default: Float16)
+ * @param scale_a Per-tensor scale for A (default: 1.0)
+ * @param scale_b Per-tensor scale for B (default: 1.0)
+ * @return Output tensor in out_dtype
+ */
+auto cublas_fp8_matmul(
+    const Tensor& a,
+    const Tensor& b,
+    DType out_dtype = DType::Float16,
+    float scale_a = 1.0f,
+    float scale_b = 1.0f
+) -> Tensor {
+    if (a.device().type != Device::Type::CUDA || b.device().type != Device::Type::CUDA) {
+        throw std::runtime_error("cublas_fp8_matmul requires CUDA tensors");
+    }
+
+    if (a.ndim() != 2 || b.ndim() != 2) {
+        throw std::runtime_error("cublas_fp8_matmul requires 2D tensors");
+    }
+
+    auto a_shape = a.shape();
+    auto b_shape = b.shape();
+
+    int64_t M = a_shape[0];
+    int64_t K = a_shape[1];
+    int64_t K2 = b_shape[0];
+    int64_t N = b_shape[1];
+
+    if (K != K2) {
+        throw std::runtime_error("Matrix dimension mismatch for FP8 matmul");
+    }
+
+    Tensor result({M, N}, out_dtype, a.device());
+
+    cublas_fp8_gemm(
+        a.data_ptr(), b.data_ptr(), result.data_ptr(),
+        M, N, K,
+        a.dtype(), b.dtype(), out_dtype,
+        scale_a, scale_b
+    );
+
+    return result;
+}
+
+#endif // CUDA_VERSION >= 11080
 
 } // namespace cuda
 } // namespace tenzor

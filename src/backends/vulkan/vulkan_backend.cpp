@@ -926,8 +926,10 @@ VkDescriptorSet VulkanBackend::allocateAndWriteDescriptorSet(
     VkDescriptorSet descriptorSet;
     VkResult result = vkAllocateDescriptorSets(ctx.device, &allocInfo, &descriptorSet);
 
-    // If descriptor pool is exhausted, wait for ALL work to complete, reset, and retry
+    // If descriptor pool is exhausted or fragmented, try reset first, then grow
     if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL) {
+        bool is_fragmented = (result == VK_ERROR_FRAGMENTED_POOL);
+
         // Force-submit any pending batched commands before resetting pools.
         // Without this, activeCommandBuffer references descriptors from the pool
         // we're about to reset, causing use-after-reset corruption.
@@ -945,10 +947,31 @@ VkDescriptorSet VulkanBackend::allocateAndWriteDescriptorSet(
         ctx.submittedFrames = 0;
         ctx.currentFrame = 0;
         ctx.hasPendingWork = false;
-        ctx.descriptorPool->reset();
 
-        // Retry allocation
+        if (is_fragmented) {
+            // Fragmentation means the pool has enough total capacity but can't
+            // satisfy the request due to internal fragmentation. Grow to a larger
+            // pool which will be freshly allocated without fragmentation.
+            std::cerr << "[Vulkan WARNING] Descriptor pool fragmentation detected "
+                      << "(allocated=" << ctx.descriptorPool->allocated_sets()
+                      << "/" << ctx.descriptorPool->max_sets()
+                      << "). Growing pool to reduce fragmentation.\n";
+            ctx.descriptorPool->grow();
+        } else {
+            // Out of pool memory — try a simple reset first
+            ctx.descriptorPool->reset();
+        }
+
+        // Retry allocation after reset
+        allocInfo.descriptorPool = ctx.descriptorPool->pool();
         result = vkAllocateDescriptorSets(ctx.device, &allocInfo, &descriptorSet);
+
+        // If reset wasn't enough (pool capacity is genuinely too small), grow and retry
+        if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL) {
+            ctx.descriptorPool->grow();
+            allocInfo.descriptorPool = ctx.descriptorPool->pool();
+            result = vkAllocateDescriptorSets(ctx.device, &allocInfo, &descriptorSet);
+        }
     }
 
     vulkan::checkVk(result, "Failed to allocate descriptor set");

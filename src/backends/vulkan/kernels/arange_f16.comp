@@ -1,0 +1,34 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Arange for Float16: generate sequential values [start, start+step, start+2*step, ...]
+// F16 packed buffers (2 Float16 per uint32), arithmetic in float32
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    float start;
+    float step;
+    uint num_elements;
+} params;
+
+void main() {
+    // Each thread handles one uint32 word (2 F16 elements)
+    uint pair_idx = gl_GlobalInvocationID.x;
+    uint idx0 = pair_idx * 2;
+    uint idx1 = pair_idx * 2 + 1;
+
+    if (idx0 >= params.num_elements) return;
+
+    // Compute values in float32
+    float val0 = params.start + float(idx0) * params.step;
+    float val1 = (idx1 < params.num_elements)
+                 ? (params.start + float(idx1) * params.step)
+                 : 0.0;
+
+    // Pack two F16 values into one uint32
+    uint bits0 = packHalf2x16(vec2(val0, 0.0)) & 0xFFFFu;
+    uint bits1 = packHalf2x16(vec2(val1, 0.0)) & 0xFFFFu;
+    output_data[pair_idx] = bits0 | (bits1 << 16);
+}

@@ -566,6 +566,7 @@ auto Tensor::to(DType dtype) const -> Tensor {
                 case DType::Bool: convert_elements.template operator()<SrcT, bool>(); break; \
                 case DType::Complex64: convert_elements.template operator()<SrcT, std::complex<float>>(); break; \
                 case DType::Complex128: convert_elements.template operator()<SrcT, std::complex<double>>(); break; \
+                default: break; /* FP8 types require specialized conversion */ \
             } \
             break; \
         }
@@ -587,6 +588,10 @@ auto Tensor::to(DType dtype) const -> Tensor {
         DISPATCH_SRC_DTYPE(DType::Bool, bool)
         DISPATCH_SRC_DTYPE(DType::Complex64, std::complex<float>)
         DISPATCH_SRC_DTYPE(DType::Complex128, std::complex<double>)
+        // FP8 types require specialized conversion through float; not handled by generic cast
+        case DType::FP8_E4M3:
+        case DType::FP8_E5M2:
+            break;
     }
 
     #undef DISPATCH_SRC_DTYPE
@@ -734,7 +739,6 @@ auto Tensor::operator+=(const Tensor& other) -> Tensor& {
                    impl_->storage.get() == other.impl_->storage.get();
     std::array<Tensor, 1> others = {aliased ? other.clone() : other};
     table.dispatch_inplace(OpId::AddInplace, *this, others);
-    bump_version();
     return *this;
 }
 
@@ -745,7 +749,6 @@ auto Tensor::operator-=(const Tensor& other) -> Tensor& {
                    impl_->storage.get() == other.impl_->storage.get();
     std::array<Tensor, 1> others = {aliased ? other.clone() : other};
     table.dispatch_inplace(OpId::SubInplace, *this, others);
-    bump_version();
     return *this;
 }
 
@@ -756,7 +759,6 @@ auto Tensor::operator*=(const Tensor& other) -> Tensor& {
                    impl_->storage.get() == other.impl_->storage.get();
     std::array<Tensor, 1> others = {aliased ? other.clone() : other};
     table.dispatch_inplace(OpId::MulInplace, *this, others);
-    bump_version();
     return *this;
 }
 
@@ -767,7 +769,6 @@ auto Tensor::operator/=(const Tensor& other) -> Tensor& {
                    impl_->storage.get() == other.impl_->storage.get();
     std::array<Tensor, 1> others = {aliased ? other.clone() : other};
     table.dispatch_inplace(OpId::DivInplace, *this, others);
-    bump_version();
     return *this;
 }
 
@@ -785,7 +786,6 @@ auto Tensor::fill_(double value) -> Tensor& {
                 OpAttributes attrs;
                 attrs.set(AttrKey::Value, value);
                 table.dispatch_inplace(OpId::StridedFill, *this, {}, attrs);
-                bump_version();
                 return *this;
             }
             // Fallback for backends without StridedFill: contiguous copy + fill

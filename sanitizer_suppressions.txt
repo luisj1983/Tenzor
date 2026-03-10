@@ -1,8 +1,68 @@
-# ASAN leak suppressions for third-party libraries
-# These libraries manage their own memory pools and report false-positive leaks
-leak:libmkl
+# Sanitizer Suppressions for Tenzor
+# Referenced by .github/workflows/ci.yml sanitizer jobs
+#
+# ASAN_OPTIONS=suppressions=sanitizer_suppressions.txt
+# LSAN_OPTIONS=suppressions=sanitizer_suppressions.txt
+# TSAN_OPTIONS=suppressions=sanitizer_suppressions.txt
+
+# =============================================================================
+# AddressSanitizer / LeakSanitizer Suppressions
+# =============================================================================
+
+# TBB internal allocator: TBB uses scalable_malloc/tbbmalloc which ASAN
+# cannot track. These are not real leaks — TBB pools memory intentionally
+# and frees it at process exit (after leak detection runs).
 leak:libtbb
 leak:libtbbmalloc
+leak:scalable_malloc
+leak:scalable_calloc
+
+# MKL internal allocator: MKL pre-allocates thread-local buffers for BLAS
+# operations that persist until mkl_free_buffers() or process exit.
+leak:libmkl
+leak:libmkl_core
+leak:libmkl_intel
+leak:libmkl_gnu_thread
+leak:libmkl_sequential
+leak:mkl_serv_allocate
+
+# OpenMP runtime: libomp/libgomp allocate per-thread structures that are
+# freed at thread termination, not at scope exit.
 leak:libiomp
+leak:libomp
+leak:libgomp
+leak:GOMP_parallel
+
+# GPU driver libraries (for self-hosted GPU runners)
 leak:libcuda
 leak:libvulkan
+leak:libnvidia
+
+# =============================================================================
+# ThreadSanitizer Suppressions
+# =============================================================================
+
+# TBB internal threading: TBB's work-stealing scheduler uses lock-free
+# data structures with custom memory ordering that TSan cannot fully model.
+# These are benign races in TBB's internal task scheduler.
+race:libtbb
+race:tbb::detail
+race:tbb::internal
+
+# MKL internal threading: MKL uses its own threading layer (TBB or OpenMP)
+# with internal synchronization that TSan does not understand.
+race:libmkl
+race:mkl_serv
+
+# OpenMP runtime internals: The OpenMP runtime has benign races in its
+# barrier and task scheduling implementation.
+race:libiomp
+race:libomp
+race:libgomp
+race:__kmp_
+
+# dl_open/dlsym: Dynamic loading of backend .so files triggers benign
+# races in the dynamic linker's internal bookkeeping.
+race:dl_open
+race:dlsym
+race:_dl_

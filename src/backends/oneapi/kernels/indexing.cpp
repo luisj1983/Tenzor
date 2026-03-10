@@ -1458,5 +1458,83 @@ auto put_kernel(
     return output;
 }
 
+// ============================================================================
+// SearchSorted: binary search per element in a sorted 1-D sequence
+// ============================================================================
+
+class SearchSortedKernelFloat32;
+class SearchSortedKernelFloat64;
+class SearchSortedKernelInt32;
+class SearchSortedKernelInt64;
+
+auto searchsorted_kernel(const Tensor& sorted_sequence, const Tensor& values,
+                          bool right, sycl::queue& queue) -> Tensor {
+    if (sorted_sequence.ndim() != 1) {
+        throw std::runtime_error("searchsorted: sorted_sequence must be 1-D");
+    }
+
+    Tensor seq_cont = sorted_sequence.contiguous();
+    Tensor val_cont = values.contiguous();
+    int64_t seq_len = seq_cont.shape()[0];
+    int64_t num_values = val_cont.numel();
+
+    Tensor result(std::vector<int64_t>(values.shape().begin(), values.shape().end()),
+                  DType::Int64, values.device());
+
+    if (num_values == 0) return result;
+
+    int64_t* out_ptr = get_data_ptr<int64_t>(result);
+
+    auto launch_search = [&]<typename T, typename KernelName>(const T* seq_ptr, const T* val_ptr) {
+        queue.parallel_for<KernelName>(sycl::range<1>(num_values), [=](sycl::id<1> i) {
+            T v = val_ptr[i];
+            int64_t lo = 0, hi = seq_len;
+            while (lo < hi) {
+                int64_t mid = lo + (hi - lo) / 2;
+                bool go_right = right ? (seq_ptr[mid] <= v) : (seq_ptr[mid] < v);
+                if (go_right) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            out_ptr[i] = lo;
+        });
+        queue.wait();
+    };
+
+    switch (sorted_sequence.dtype()) {
+        case DType::Float32:
+            launch_search.template operator()<float, SearchSortedKernelFloat32>(
+                get_data_ptr<const float>(seq_cont), get_data_ptr<const float>(val_cont));
+            break;
+        case DType::Float64:
+            launch_search.template operator()<double, SearchSortedKernelFloat64>(
+                get_data_ptr<const double>(seq_cont), get_data_ptr<const double>(val_cont));
+            break;
+        case DType::Int32:
+            launch_search.template operator()<int32_t, SearchSortedKernelInt32>(
+                get_data_ptr<const int32_t>(seq_cont), get_data_ptr<const int32_t>(val_cont));
+            break;
+        case DType::Int64:
+            launch_search.template operator()<int64_t, SearchSortedKernelInt64>(
+                get_data_ptr<const int64_t>(seq_cont), get_data_ptr<const int64_t>(val_cont));
+            break;
+        case DType::Float16:
+        case DType::BFloat16: {
+            auto seq_f32 = sorted_sequence.to(DType::Float32).contiguous();
+            auto val_f32 = values.to(DType::Float32).contiguous();
+            launch_search.template operator()<float, SearchSortedKernelFloat32>(
+                get_data_ptr<const float>(seq_f32), get_data_ptr<const float>(val_f32));
+            break;
+        }
+        default:
+            throw std::runtime_error("searchsorted: unsupported dtype " +
+                                     std::string(dtype_name(sorted_sequence.dtype())));
+    }
+
+    return result;
+}
+
 } // namespace oneapi
 } // namespace tenzor

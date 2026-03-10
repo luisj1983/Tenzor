@@ -1,0 +1,81 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Matrix inverse via Gauss-Jordan elimination for small matrices (<= 32x32) — Float64
+
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { double data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { double data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint batch;
+};
+
+shared double aug[32][64];
+
+void main() {
+    uint batch_idx = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+
+    if (batch_idx >= batch) return;
+
+    uint mat_offset = batch_idx * n * n;
+    uint n2 = n * 2;
+
+    for (uint row = 0; row < n; row++) {
+        if (tid < n) {
+            aug[row][tid] = data_in[mat_offset + row * n + tid];
+            aug[row][tid + n] = (row == tid) ? 1.0LF : 0.0LF;
+        }
+    }
+    barrier();
+
+    for (uint col = 0; col < n; col++) {
+        if (tid == 0) {
+            uint max_row = col;
+            double max_val = abs(aug[col][col]);
+            for (uint row = col + 1; row < n; row++) {
+                double val = abs(aug[row][col]);
+                if (val > max_val) {
+                    max_val = val;
+                    max_row = row;
+                }
+            }
+            if (max_row != col) {
+                for (uint j = 0; j < n2; j++) {
+                    double tmp = aug[col][j];
+                    aug[col][j] = aug[max_row][j];
+                    aug[max_row][j] = tmp;
+                }
+            }
+        }
+        barrier();
+
+        if (tid == 0) {
+            double pivot = aug[col][col];
+            if (abs(pivot) > 1e-300LF) {
+                double inv_pivot = 1.0LF / pivot;
+                for (uint j = 0; j < n2; j++) {
+                    aug[col][j] *= inv_pivot;
+                }
+            }
+        }
+        barrier();
+
+        if (tid < n && tid != col) {
+            double factor = aug[tid][col];
+            for (uint j = 0; j < n2; j++) {
+                aug[tid][j] -= factor * aug[col][j];
+            }
+        }
+        barrier();
+    }
+
+    for (uint row = 0; row < n; row++) {
+        if (tid < n) {
+            data_out[mat_offset + row * n + tid] = aug[row][tid + n];
+        }
+    }
+}

@@ -1,0 +1,59 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Cooley-Tukey radix-2 decimation-in-frequency FFT (complex-to-complex) — Float64
+// Data layout: interleaved real/imag pairs — [re0, im0, re1, im1, ...]
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { double data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { double data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;           // FFT size (power of 2)
+    uint stage;       // Current butterfly stage (0 to log2(n)-1)
+    uint direction;   // 0 = forward, 1 = inverse
+    uint batch_offset; // Offset into buffer for batched FFTs (in complex elements)
+};
+
+const double PI_D = 3.14159265358979323846LF;
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+
+    uint half_size = 1u << stage;
+    uint group_size = half_size << 1;
+
+    uint group_idx = tid / half_size;
+    uint pos_in_group = tid % half_size;
+
+    uint idx_top = group_idx * group_size + pos_in_group;
+    uint idx_bot = idx_top + half_size;
+
+    if (idx_bot >= n) return;
+
+    uint base_top = (batch_offset + idx_top) * 2;
+    uint base_bot = (batch_offset + idx_bot) * 2;
+
+    double a_re = data_in[base_top];
+    double a_im = data_in[base_top + 1];
+    double b_re = data_in[base_bot];
+    double b_im = data_in[base_bot + 1];
+
+    double angle = -2.0LF * PI_D * double(pos_in_group) / double(group_size);
+    if (direction == 1) angle = -angle;
+
+    // GLSL trig functions only work on float; cast down for twiddle factors
+    // (twiddle precision is sufficient in float for butterfly computation)
+    float angle_f = float(angle);
+    double w_re = double(cos(angle_f));
+    double w_im = double(sin(angle_f));
+
+    double tw_re = b_re * w_re - b_im * w_im;
+    double tw_im = b_re * w_im + b_im * w_re;
+
+    data_out[base_top]     = a_re + tw_re;
+    data_out[base_top + 1] = a_im + tw_im;
+    data_out[base_bot]     = a_re - tw_re;
+    data_out[base_bot + 1] = a_im - tw_im;
+}

@@ -1,0 +1,22 @@
+#version 450
+
+// Complex conjugate: negate the imaginary part of each complex number
+// Input/output are flat float buffers where complex numbers are stored as
+// interleaved (real, imag) pairs.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input { float in_data[]; };
+layout(binding = 1) buffer Output { float out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;  // Total number of float elements (2 * num_complex)
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_elements) return;
+
+    // Negate odd-indexed elements (imaginary parts)
+    float val = in_data[idx];
+    out_data[idx] = ((idx & 1u) != 0u) ? -val : val;
+}

@@ -1,0 +1,19 @@
+#version 450
+
+// Extract imaginary parts from interleaved complex buffer
+// output[i] = input[2*i + 1] for i in [0, num_complex)
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input { float in_data[]; };
+layout(binding = 1) buffer Output { float out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_complex;  // Number of complex numbers (output size)
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_complex) return;
+
+    out_data[idx] = in_data[2u * idx + 1u];
+}

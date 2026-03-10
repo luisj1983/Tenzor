@@ -469,3 +469,170 @@ _core.nn.Parameter = Parameter
 # Expose gradient clipping utilities at nn level (matching PyTorch's torch.nn.utils)
 clip_grad_norm_ = _core.nn.clip_grad_norm_
 clip_grad_value_ = _core.nn.clip_grad_value_
+
+
+# ---------------------------------------------------------------------------
+# PackedSequence and RNN utilities
+# ---------------------------------------------------------------------------
+
+class PackedSequence:
+    """Holds packed variable-length sequences for efficient RNN processing.
+
+    A ``PackedSequence`` stores a batch of variable-length sequences in a
+    compact form that avoids wasted computation on padding tokens.  The data
+    is sorted by decreasing sequence length and concatenated along the time
+    axis, with a ``batch_sizes`` tensor recording how many sequences are
+    active at each timestep.
+
+    You normally do not construct ``PackedSequence`` directly.  Instead use
+    :func:`pack_padded_sequence` or :func:`pack_sequence`.
+
+    Attributes:
+        data (Tensor): Packed tensor of shape ``(total_elements, *features)``.
+        batch_sizes (Tensor): 1-D int64 tensor of length ``max_seq_len``
+            giving the batch size at each timestep.
+        sorted_indices (Tensor or None): Int64 tensor mapping original batch
+            indices to their sorted positions.  ``None`` when the input was
+            already sorted.
+        unsorted_indices (Tensor or None): Int64 tensor that restores the
+            original batch order.  ``None`` when the input was already sorted.
+    """
+
+    def __init__(self, data, batch_sizes, sorted_indices=None, unsorted_indices=None):
+        self.data = data
+        self.batch_sizes = batch_sizes
+        self.sorted_indices = sorted_indices
+        self.unsorted_indices = unsorted_indices
+
+    @classmethod
+    def _from_cpp(cls, cpp_packed):
+        """Wrap a C++ PackedSequence returned by the backend."""
+        obj = cls.__new__(cls)
+        obj.data = cpp_packed.data
+        obj.batch_sizes = cpp_packed.batch_sizes
+        obj.sorted_indices = cpp_packed.sorted_indices
+        obj.unsorted_indices = cpp_packed.unsorted_indices
+        return obj
+
+    def _to_cpp(self):
+        """Convert to C++ PackedSequence for passing into backend functions."""
+        cpp = _core.nn.PackedSequence()
+        cpp.data = self.data
+        cpp.batch_sizes = self.batch_sizes
+        if self.sorted_indices is not None:
+            cpp.sorted_indices = self.sorted_indices
+        if self.unsorted_indices is not None:
+            cpp.unsorted_indices = self.unsorted_indices
+        return cpp
+
+    def __repr__(self):
+        return (
+            f"PackedSequence(data={self.data}, "
+            f"batch_sizes={self.batch_sizes}, "
+            f"sorted_indices={self.sorted_indices}, "
+            f"unsorted_indices={self.unsorted_indices})"
+        )
+
+
+def pack_padded_sequence(input, lengths, batch_first=False, enforce_sorted=True):
+    """Pack a padded batch of variable-length sequences.
+
+    Takes a padded tensor and a tensor of sequence lengths, and returns a
+    :class:`PackedSequence` suitable for efficient RNN processing.
+
+    Parameters
+    ----------
+    input : Tensor
+        Padded input of shape ``(batch, seq_len, *)`` if *batch_first* is
+        ``True``, or ``(seq_len, batch, *)`` otherwise.
+    lengths : Tensor
+        1-D int64 tensor of actual lengths for each sequence in the batch.
+    batch_first : bool, optional
+        If ``True``, *input* is expected in ``(batch, seq_len, *)`` layout.
+        Default: ``False``.
+    enforce_sorted : bool, optional
+        If ``True`` (default), the sequences must already be sorted by
+        length in descending order.  If ``False`` the function will sort
+        them internally and record the permutation so that
+        :func:`pad_packed_sequence` can restore the original order.
+
+    Returns
+    -------
+    PackedSequence
+        The packed representation of the input batch.
+
+    Example
+    -------
+    >>> padded = tz.randn([3, 5, 10])         # 3 seqs, max len 5, 10 feats
+    >>> lengths = tz.tensor([5, 3, 1])
+    >>> packed = tz.nn.pack_padded_sequence(padded, lengths, batch_first=True)
+    """
+    cpp_packed = _core.nn.pack_padded_sequence(input, lengths, batch_first, enforce_sorted)
+    return PackedSequence._from_cpp(cpp_packed)
+
+
+def pad_packed_sequence(sequence, batch_first=False, padding_value=0.0, total_length=None):
+    """Unpack a :class:`PackedSequence` back to a padded tensor.
+
+    This is the inverse of :func:`pack_padded_sequence`.
+
+    Parameters
+    ----------
+    sequence : PackedSequence
+        The packed sequence to unpad.
+    batch_first : bool, optional
+        If ``True``, the returned tensor has shape ``(batch, seq_len, *)``.
+        Default: ``False``.
+    padding_value : float, optional
+        Value used for padding positions.  Default: ``0.0``.
+    total_length : int or None, optional
+        If not ``None``, the output will be padded to this length (must be
+        >= the longest sequence).  Useful for ``DataParallel`` where all
+        workers need identical shapes.  Default: ``None``.
+
+    Returns
+    -------
+    tuple[Tensor, Tensor]
+        A pair ``(padded_output, lengths)`` where *padded_output* is the
+        padded tensor and *lengths* is a 1-D int64 tensor of actual
+        sequence lengths (in the original, unsorted order if the input was
+        sorted internally by :func:`pack_padded_sequence`).
+
+    Example
+    -------
+    >>> padded, lengths = tz.nn.pad_packed_sequence(packed, batch_first=True)
+    """
+    if isinstance(sequence, PackedSequence):
+        cpp_packed = sequence._to_cpp()
+    else:
+        cpp_packed = sequence  # Already a C++ PackedSequence
+    tl = total_length if total_length is not None else -1
+    return _core.nn.pad_packed_sequence(cpp_packed, batch_first, padding_value, tl)
+
+
+def pack_sequence(sequences, enforce_sorted=True):
+    """Pack a list of variable-length tensors into a :class:`PackedSequence`.
+
+    Tensors are sorted by length (descending) and packed.
+
+    Parameters
+    ----------
+    sequences : list[Tensor]
+        A list of tensors, each of shape ``(length_i, *features)``.
+        They must share the same trailing dimensions (feature sizes).
+    enforce_sorted : bool, optional
+        If ``True`` (default), the tensors must already be sorted by
+        length descending.  If ``False``, they will be sorted internally.
+
+    Returns
+    -------
+    PackedSequence
+        The packed representation.
+
+    Example
+    -------
+    >>> seqs = [tz.randn([5, 10]), tz.randn([3, 10]), tz.randn([1, 10])]
+    >>> packed = tz.nn.pack_sequence(seqs)
+    """
+    cpp_packed = _core.nn.pack_sequence(sequences, enforce_sorted)
+    return PackedSequence._from_cpp(cpp_packed)
