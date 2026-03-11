@@ -778,6 +778,94 @@ auto linalg_eigh_kernel(const Tensor& A, cudaStream_t stream)
 }
 
 // ============================================================================
+// Non-symmetric Eigendecomposition (eig)
+// ============================================================================
+
+auto linalg_eig_kernel(const Tensor& A, cudaStream_t stream)
+    -> std::tuple<Tensor, Tensor, Tensor> {
+    auto work = A.contiguous().clone();
+    auto [n, ndim] = check_square(work);
+    int64_t nbatch = batch_size(work);
+
+    std::vector<int64_t> batch_dims;
+    auto shape = A.shape();
+    for (size_t i = 0; i + 2 < shape.size(); i++) batch_dims.push_back(shape[i]);
+
+    std::vector<int64_t> w_shape = batch_dims;
+    w_shape.push_back(n);
+    auto WR = zeros(w_shape, A.dtype(), A.device());
+    auto WI = zeros(w_shape, A.dtype(), A.device());
+
+    std::vector<int64_t> v_shape = batch_dims;
+    v_shape.push_back(n);
+    v_shape.push_back(n);
+    auto V = zeros(v_shape, A.dtype(), A.device());
+
+    auto handle = CuSOLVERHandlePool::get(stream);
+    DeviceInt d_info;
+
+    // Row-major input: A stored row-major = A^T stored column-major
+    // Left eigenvectors of A^T = right eigenvectors of A
+    cusolverEigMode_t jobvl = CUSOLVER_EIG_MODE_VECTOR;
+    cusolverEigMode_t jobvr = CUSOLVER_EIG_MODE_NOVECTOR;
+
+    if (A.dtype() == DType::Float32) {
+        float* a_data = work.data<float>();
+        float* wr_data = WR.data<float>();
+        float* wi_data = WI.data<float>();
+        float* v_data = V.data<float>();
+
+        for (int64_t b = 0; b < nbatch; b++) {
+            float* mat = a_data + b * n * n;
+            float* wr_vec = wr_data + b * n;
+            float* wi_vec = wi_data + b * n;
+            float* vl = v_data + b * n * n;  // left eigvecs of A^T = right eigvecs of A
+
+            int lwork = 0;
+            CUSOLVER_CHECK(cusolverDnSgeev_bufferSize(handle, jobvl, jobvr,
+                n, mat, n, &lwork));
+            DeviceWorkspace workspace(lwork * sizeof(float));
+
+            CUSOLVER_CHECK(cusolverDnSgeev(handle, jobvl, jobvr,
+                n, mat, n, wr_vec, wi_vec,
+                vl, n,      // VL (left eigenvectors — what we want)
+                nullptr, n,  // VR (not computed)
+                static_cast<float*>(workspace.ptr), lwork, d_info.ptr));
+            check_cusolver_info(d_info.ptr, "eig");
+        }
+    } else {
+        double* a_data = work.data<double>();
+        double* wr_data = WR.data<double>();
+        double* wi_data = WI.data<double>();
+        double* v_data = V.data<double>();
+
+        for (int64_t b = 0; b < nbatch; b++) {
+            double* mat = a_data + b * n * n;
+            double* wr_vec = wr_data + b * n;
+            double* wi_vec = wi_data + b * n;
+            double* vl = v_data + b * n * n;
+
+            int lwork = 0;
+            CUSOLVER_CHECK(cusolverDnDgeev_bufferSize(handle, jobvl, jobvr,
+                n, mat, n, &lwork));
+            DeviceWorkspace workspace(lwork * sizeof(double));
+
+            CUSOLVER_CHECK(cusolverDnDgeev(handle, jobvl, jobvr,
+                n, mat, n, wr_vec, wi_vec,
+                vl, n,
+                nullptr, n,
+                static_cast<double*>(workspace.ptr), lwork, d_info.ptr));
+            check_cusolver_info(d_info.ptr, "eig");
+        }
+    }
+
+    CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
+    // V contains left eigenvectors of A^T (= right eigenvectors of A) in column-major
+    // which is the same as right eigenvectors in row-major — exactly what we want
+    return {WR, WI, V};
+}
+
+// ============================================================================
 // Cholesky Decomposition
 // ============================================================================
 

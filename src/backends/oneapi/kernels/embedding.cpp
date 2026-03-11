@@ -1,4 +1,5 @@
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/backend/backend.hpp"
 #include <sycl/sycl.hpp>
 #include <stdexcept>
 #include <cmath>
@@ -22,6 +23,10 @@ class EmbeddingBackwardZeroKernelBFloat16;
 class EmbeddingBagKernelFloat64;
 class EmbeddingBagKernelFloat16;
 class EmbeddingBagKernelBFloat16;
+class EmbeddingBagBackwardKernelFloat32;
+class EmbeddingBagBackwardKernelFloat64;
+class EmbeddingBagBackwardZeroFloat32;
+class EmbeddingBagBackwardZeroFloat64;
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -460,6 +465,113 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
     }
 
     return output;
+}
+
+/**
+ * @brief EmbeddingBag backward kernel for OneAPI/SYCL
+ *
+ * Computes gradient w.r.t. embedding weights for EmbeddingBag.
+ * Uses atomic_ref for scatter-add of gradients.
+ */
+auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& embeddings,
+                                   const Tensor& offsets, const OpAttributes& attrs,
+                                   sycl::queue& queue) -> Tensor {
+    int64_t num_embeddings = attrs.get_int(AttrKey::NumEmbeddings, 0);
+    int64_t embedding_dim = attrs.get_int(AttrKey::EmbeddingDim, 0);
+    std::string mode{attrs.get_string(AttrKey::Mode, "sum")};
+    bool include_last_offset = attrs.get_bool(AttrKey::IncludeLastOffset, false);
+
+    int64_t total_elements = embeddings.shape()[0];
+    int64_t offsets_size = offsets.numel();
+    int64_t num_bags = include_last_offset ? (offsets_size - 1) : offsets_size;
+
+    if (num_bags <= 0) {
+        return Tensor({num_embeddings, embedding_dim}, grad_output.dtype(), grad_output.device());
+    }
+
+    // FP16/BF16: upcast to Float32, recurse, downcast
+    if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
+        auto go_f32 = grad_output.to(DType::Float32);
+        auto emb_f32 = embeddings.to(DType::Float32);
+        auto result = embedding_bag_backward_kernel(go_f32, emb_f32, offsets, attrs, queue);
+        return result.to(grad_output.dtype());
+    }
+
+    int64_t total_weight_elements = num_embeddings * embedding_dim;
+    Tensor grad_weight({num_embeddings, embedding_dim}, grad_output.dtype(), grad_output.device());
+    bool is_mean = (mode == "mean");
+
+    const int64_t* offsets_ptr = get_data_ptr<const int64_t>(offsets);
+
+    if (grad_output.dtype() == DType::Float32) {
+        float* gw_ptr = get_data_ptr<float>(grad_weight);
+        const float* go_ptr = get_data_ptr<const float>(grad_output);
+
+        // Zero grad_weight
+        queue.parallel_for<EmbeddingBagBackwardZeroFloat32>(
+            sycl::range<1>(total_weight_elements),
+            [=](sycl::id<1> idx) { gw_ptr[idx] = 0.0f; }
+        );
+
+        // Scatter-add gradients per bag
+        queue.parallel_for<EmbeddingBagBackwardKernelFloat32>(
+            sycl::range<2>(num_bags, embedding_dim),
+            [=](sycl::id<2> idx) {
+                int64_t bag = idx[0];
+                int64_t j = idx[1];
+                int64_t start = offsets_ptr[bag];
+                int64_t end = (bag + 1 < offsets_size) ? offsets_ptr[bag + 1] : total_elements;
+                int64_t bag_size = end - start;
+                if (bag_size <= 0) return;
+
+                float grad_val = go_ptr[bag * embedding_dim + j];
+                if (is_mean) grad_val /= static_cast<float>(bag_size);
+
+                for (int64_t i = start; i < end; ++i) {
+                    sycl::atomic_ref<float, sycl::memory_order::relaxed,
+                                    sycl::memory_scope::device,
+                                    sycl::access::address_space::global_space>
+                        atomic_gw(gw_ptr[i * embedding_dim + j]);
+                    atomic_gw.fetch_add(grad_val);
+                }
+            }
+        ).wait();
+    } else if (grad_output.dtype() == DType::Float64) {
+        double* gw_ptr = get_data_ptr<double>(grad_weight);
+        const double* go_ptr = get_data_ptr<const double>(grad_output);
+
+        queue.parallel_for<EmbeddingBagBackwardZeroFloat64>(
+            sycl::range<1>(total_weight_elements),
+            [=](sycl::id<1> idx) { gw_ptr[idx] = 0.0; }
+        );
+
+        queue.parallel_for<EmbeddingBagBackwardKernelFloat64>(
+            sycl::range<2>(num_bags, embedding_dim),
+            [=](sycl::id<2> idx) {
+                int64_t bag = idx[0];
+                int64_t j = idx[1];
+                int64_t start = offsets_ptr[bag];
+                int64_t end = (bag + 1 < offsets_size) ? offsets_ptr[bag + 1] : total_elements;
+                int64_t bag_size = end - start;
+                if (bag_size <= 0) return;
+
+                double grad_val = go_ptr[bag * embedding_dim + j];
+                if (is_mean) grad_val /= static_cast<double>(bag_size);
+
+                for (int64_t i = start; i < end; ++i) {
+                    sycl::atomic_ref<double, sycl::memory_order::relaxed,
+                                    sycl::memory_scope::device,
+                                    sycl::access::address_space::global_space>
+                        atomic_gw(gw_ptr[i * embedding_dim + j]);
+                    atomic_gw.fetch_add(grad_val);
+                }
+            }
+        ).wait();
+    } else {
+        throw std::runtime_error("embedding_bag_backward: unsupported dtype");
+    }
+
+    return grad_weight;
 }
 
 /**

@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <numeric>
 #include <optional>
 #include <random>
 #include <sstream>
@@ -12487,8 +12488,8 @@ auto VulkanBackend::dispatchSort(const Tensor& input, int64_t dim, bool descendi
         sort_shader = "";
     }
 
-    // CPU fallback for unsupported dtypes, large sorts, or non-last-dim
-    if (sort_shader.empty() || sort_size > (1 << 20) || dim != ndim - 1) {
+    // CPU fallback for unsupported dtypes or large sorts
+    if (sort_shader.empty() || sort_size > (1 << 20)) {
         Device cpu_device(Device::Type::CPU, 0);
         Tensor cpu_input = input.to(cpu_device);
         std::vector<Tensor> cpu_inputs = {cpu_input};
@@ -12497,6 +12498,22 @@ auto VulkanBackend::dispatchSort(const Tensor& input, int64_t dim, bool descendi
         attrs.set(AttrKey::Descending, descending);
         auto result = tenzor::dispatch(OpId::Sort, cpu_inputs, attrs);
         return {result[0].to(input.device()), result[1].to(input.device())};
+    }
+
+    // Non-last-dim: transpose so sort dim is last, sort, transpose back
+    if (dim != ndim - 1) {
+        std::vector<int64_t> perm(ndim);
+        std::iota(perm.begin(), perm.end(), int64_t(0));
+        std::swap(perm[dim], perm[ndim - 1]);
+
+        std::vector<int64_t> inv_perm(ndim);
+        for (int i = 0; i < ndim; ++i) inv_perm[perm[i]] = i;
+
+        Tensor transposed = dispatchContiguous(dispatchPermute(input, perm));
+        auto [sorted_t, indices_t] = dispatchSort(transposed, ndim - 1, descending);
+
+        return {dispatchContiguous(dispatchPermute(sorted_t, inv_perm)),
+                dispatchContiguous(dispatchPermute(indices_t, inv_perm))};
     }
 
     if (sort_size <= 1) {
@@ -15851,6 +15868,182 @@ auto VulkanBackend::runFFTScale(Tensor& data, uint32_t n, double scale_factor) -
     }
 }
 
+// Helper: next power of 2 >= n
+static int64_t next_power_of_2(int64_t n) {
+    int64_t p = 1;
+    while (p < n) p <<= 1;
+    return p;
+}
+
+auto VulkanBackend::runFFTChirpMultiply(Tensor& data, const Tensor& chirp,
+                                          uint32_t n, bool conjugate) -> void {
+    int32_t device_id = data.device().index;
+    bool is_f64 = (data.dtype() == DType::Complex128);
+
+    std::string shader = is_f64 ? "fft_bluestein_chirp_f64" : "fft_bluestein_chirp";
+    auto* pipeline = getPipeline(shader, device_id);
+
+    struct PushConstants {
+        uint32_t n;
+        uint32_t conjugate;
+    } pc;
+    pc.n = n;
+    pc.conjugate = conjugate ? 1 : 0;
+
+    size_t elem_size = is_f64 ? 16 : 8;  // complex element size
+    size_t data_size = data.numel() * elem_size;
+    size_t chirp_size = chirp.numel() * elem_size;
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, data.data_ptr()}, {1, chirp.data_ptr()}
+    };
+    std::vector<size_t> sizes = {data_size, chirp_size};
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(n, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+}
+
+auto VulkanBackend::dispatchFFTBluestein(const Tensor& input, int64_t signal_len,
+                                           uint32_t direction) -> Tensor {
+    // Bluestein's algorithm converts N-point DFT to circular convolution of
+    // length M >= 2N-1 where M is a power of 2, enabling use of Cooley-Tukey FFT.
+    //
+    // Input: 1D complex tensor of length signal_len (single batch element)
+    // Returns: 1D complex tensor of length signal_len
+
+    bool is_f64 = (input.dtype() == DType::Complex128);
+    DType complex_dtype = input.dtype();
+    size_t elem_size = is_f64 ? 16 : 8;  // bytes per complex element
+
+    int64_t N = signal_len;
+    int64_t M = next_power_of_2(2 * N - 1);
+    int32_t device_id = input.device().index;
+    Device vulkan_dev = input.device();
+
+    // Step 1: Compute chirp sequence on CPU
+    // chirp[k] = exp(sign * j * pi * k^2 / N)
+    // Forward: sign = -1, Inverse: sign = +1
+    double sign = (direction == 0) ? -1.0 : 1.0;
+
+    std::vector<double> chirp_re(N), chirp_im(N);
+    for (int64_t k = 0; k < N; ++k) {
+        double angle = sign * M_PI * static_cast<double>(k) * static_cast<double>(k)
+                       / static_cast<double>(N);
+        chirp_re[k] = std::cos(angle);
+        chirp_im[k] = std::sin(angle);
+    }
+
+    // Create CPU chirp tensor (length N, complex interleaved) and upload to GPU
+    Tensor chirp_cpu({N}, complex_dtype, Device::cpu());
+    if (is_f64) {
+        auto* ptr = static_cast<double*>(chirp_cpu.data_ptr());
+        for (int64_t k = 0; k < N; ++k) {
+            ptr[k * 2]     = chirp_re[k];
+            ptr[k * 2 + 1] = chirp_im[k];
+        }
+    } else {
+        auto* ptr = static_cast<float*>(chirp_cpu.data_ptr());
+        for (int64_t k = 0; k < N; ++k) {
+            ptr[k * 2]     = static_cast<float>(chirp_re[k]);
+            ptr[k * 2 + 1] = static_cast<float>(chirp_im[k]);
+        }
+    }
+    Tensor chirp_gpu = chirp_cpu.to(vulkan_dev);
+
+    // Step 2: Create zero-padded a[M] with a[0..N-1] = input[0..N-1] * chirp[0..N-1]
+    // Tensor constructor zero-initializes, so padding is already zero
+    Tensor a_padded({M}, complex_dtype, vulkan_dev);
+
+    // Copy input data into first N elements of a_padded via vkCmdCopyBuffer
+    {
+        auto [src_buf, src_off] = getVulkanBufferAndOffset(input.data_ptr());
+        auto [dst_buf, dst_off] = getVulkanBufferAndOffset(a_padded.data_ptr());
+
+        VkBufferCopy region{};
+        region.srcOffset = static_cast<VkDeviceSize>(src_off);
+        region.dstOffset = static_cast<VkDeviceSize>(dst_off);
+        region.size = static_cast<VkDeviceSize>(N * elem_size);
+
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdCopyBuffer(cmd, src_buf, dst_buf, 1, &region);
+        insertTransferToComputeBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+    }
+
+    // Multiply first N elements of a_padded by chirp
+    runFFTChirpMultiply(a_padded, chirp_gpu, static_cast<uint32_t>(N), /*conjugate=*/false);
+
+    // Step 3: Build convolution kernel b of length M on CPU, upload to GPU
+    // b[0] = conj(chirp[0]), b[k] = conj(chirp[k]) for k=1..N-1,
+    // b[M-k] = conj(chirp[k]) for k=1..N-1, rest = 0
+    Tensor b_cpu({M}, complex_dtype, Device::cpu());
+    if (is_f64) {
+        auto* ptr = static_cast<double*>(b_cpu.data_ptr());
+        // Already zero-initialized
+        for (int64_t k = 0; k < N; ++k) {
+            ptr[k * 2]     = chirp_re[k];
+            ptr[k * 2 + 1] = -chirp_im[k];
+            if (k > 0) {
+                ptr[(M - k) * 2]     = chirp_re[k];
+                ptr[(M - k) * 2 + 1] = -chirp_im[k];
+            }
+        }
+    } else {
+        auto* ptr = static_cast<float*>(b_cpu.data_ptr());
+        for (int64_t k = 0; k < N; ++k) {
+            ptr[k * 2]     = static_cast<float>(chirp_re[k]);
+            ptr[k * 2 + 1] = static_cast<float>(-chirp_im[k]);
+            if (k > 0) {
+                ptr[(M - k) * 2]     = static_cast<float>(chirp_re[k]);
+                ptr[(M - k) * 2 + 1] = static_cast<float>(-chirp_im[k]);
+            }
+        }
+    }
+    Tensor b_padded = b_cpu.to(vulkan_dev);
+
+    // Step 4: FFT(a), FFT(b) using power-of-2 Cooley-Tukey
+    Tensor A = runFFTButterfly(a_padded, static_cast<uint32_t>(M), 0, 0);
+    Tensor B = runFFTButterfly(b_padded, static_cast<uint32_t>(M), 0, 0);
+
+    // Step 5: Pointwise multiply A *= B
+    runFFTChirpMultiply(A, B, static_cast<uint32_t>(M), /*conjugate=*/false);
+
+    // Step 6: IFFT of the product
+    Tensor conv_result = runFFTButterfly(A, static_cast<uint32_t>(M), 1, 0);
+
+    // Scale by 1/M for the IFFT
+    runFFTScale(conv_result, static_cast<uint32_t>(M), 1.0 / static_cast<double>(M));
+
+    // Step 7: Extract first N elements and multiply by chirp
+    Tensor result({N}, complex_dtype, vulkan_dev);
+    {
+        auto [src_buf, src_off] = getVulkanBufferAndOffset(conv_result.data_ptr());
+        auto [dst_buf, dst_off] = getVulkanBufferAndOffset(result.data_ptr());
+
+        VkBufferCopy region{};
+        region.srcOffset = static_cast<VkDeviceSize>(src_off);
+        region.dstOffset = static_cast<VkDeviceSize>(dst_off);
+        region.size = static_cast<VkDeviceSize>(N * elem_size);
+
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdCopyBuffer(cmd, src_buf, dst_buf, 1, &region);
+        insertTransferToComputeBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+    }
+
+    runFFTChirpMultiply(result, chirp_gpu, static_cast<uint32_t>(N), /*conjugate=*/false);
+
+    return result;
+}
+
 auto VulkanBackend::dispatchFFT(const Tensor& input, int64_t dim, int64_t n,
                                  const std::string& norm) -> Tensor {
     // Input is Complex64 or Complex128 (interleaved re/im)
@@ -15860,12 +16053,12 @@ auto VulkanBackend::dispatchFFT(const Tensor& input, int64_t dim, int64_t n,
 
     int64_t signal_len = shape[dim];
 
-    // For simplicity, we require the FFT dimension to be the last dimension
-    // and the size to be a power of 2. Otherwise, fall back to CPU.
-    bool can_native = is_power_of_2(signal_len) && signal_len <= MAX_VULKAN_FFT_SIZE
-                      && dim == ndim - 1 && n == signal_len;
+    // Check if we can handle this on the GPU
+    bool is_last_dim = (dim == ndim - 1) && (n == signal_len);
+    bool can_cooley_tukey = is_power_of_2(signal_len) && signal_len <= MAX_VULKAN_FFT_SIZE && is_last_dim;
+    bool can_bluestein = !is_power_of_2(signal_len) && signal_len <= MAX_VULKAN_FFT_SIZE / 2 && is_last_dim;
 
-    if (!can_native) {
+    if (!can_cooley_tukey && !can_bluestein) {
         // CPU fallback
         auto cpu_input = input.to(Device::cpu());
         auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
@@ -15882,11 +16075,55 @@ auto VulkanBackend::dispatchFFT(const Tensor& input, int64_t dim, int64_t n,
     int64_t batch_size = 1;
     for (int64_t i = 0; i < ndim - 1; ++i) batch_size *= shape[i];
 
-    // Run FFT for each batch element
     auto result = input.contiguous();
-    for (int64_t b = 0; b < batch_size; ++b) {
-        result = runFFTButterfly(result, static_cast<uint32_t>(signal_len), 0,
-                                  static_cast<uint32_t>(b * signal_len));
+
+    if (can_cooley_tukey) {
+        // Power-of-2: use Cooley-Tukey directly
+        for (int64_t b = 0; b < batch_size; ++b) {
+            result = runFFTButterfly(result, static_cast<uint32_t>(signal_len), 0,
+                                      static_cast<uint32_t>(b * signal_len));
+        }
+    } else {
+        // Non-power-of-2: use Bluestein's algorithm per batch element
+        size_t elem_size = (input.dtype() == DType::Complex128) ? 16 : 8;
+        int32_t device_id = input.device().index;
+
+        for (int64_t b = 0; b < batch_size; ++b) {
+            // Extract batch slice as 1D tensor
+            Tensor batch_slice({signal_len}, input.dtype(), input.device());
+            {
+                auto [src_buf, src_off] = getVulkanBufferAndOffset(result.data_ptr());
+                auto [dst_buf, dst_off] = getVulkanBufferAndOffset(batch_slice.data_ptr());
+
+                VkBufferCopy region{};
+                region.srcOffset = static_cast<VkDeviceSize>(src_off) + b * signal_len * elem_size;
+                region.dstOffset = static_cast<VkDeviceSize>(dst_off);
+                region.size = signal_len * elem_size;
+
+                VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+                vkCmdCopyBuffer(cmd, src_buf, dst_buf, 1, &region);
+                insertTransferToComputeBarrier(cmd);
+                endSingleTimeCommands(cmd, device_id);
+            }
+
+            Tensor bluestein_result = dispatchFFTBluestein(batch_slice, signal_len, 0);
+
+            // Write result back to correct batch position
+            {
+                auto [src_buf, src_off] = getVulkanBufferAndOffset(bluestein_result.data_ptr());
+                auto [dst_buf, dst_off] = getVulkanBufferAndOffset(result.data_ptr());
+
+                VkBufferCopy region{};
+                region.srcOffset = static_cast<VkDeviceSize>(src_off);
+                region.dstOffset = static_cast<VkDeviceSize>(dst_off) + b * signal_len * elem_size;
+                region.size = signal_len * elem_size;
+
+                VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+                vkCmdCopyBuffer(cmd, src_buf, dst_buf, 1, &region);
+                insertTransferToComputeBarrier(cmd);
+                endSingleTimeCommands(cmd, device_id);
+            }
+        }
     }
 
     // Apply normalization
@@ -15907,10 +16144,11 @@ auto VulkanBackend::dispatchIFFT(const Tensor& input, int64_t dim, int64_t n,
 
     int64_t signal_len = shape[dim];
 
-    bool can_native = is_power_of_2(signal_len) && signal_len <= MAX_VULKAN_FFT_SIZE
-                      && dim == ndim - 1 && n == signal_len;
+    bool is_last_dim = (dim == ndim - 1) && (n == signal_len);
+    bool can_cooley_tukey = is_power_of_2(signal_len) && signal_len <= MAX_VULKAN_FFT_SIZE && is_last_dim;
+    bool can_bluestein = !is_power_of_2(signal_len) && signal_len <= MAX_VULKAN_FFT_SIZE / 2 && is_last_dim;
 
-    if (!can_native) {
+    if (!can_cooley_tukey && !can_bluestein) {
         auto cpu_input = input.to(Device::cpu());
         auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
         NewOpAttributes attrs;
@@ -15926,9 +16164,51 @@ auto VulkanBackend::dispatchIFFT(const Tensor& input, int64_t dim, int64_t n,
     for (int64_t i = 0; i < ndim - 1; ++i) batch_size *= shape[i];
 
     auto result = input.contiguous();
-    for (int64_t b = 0; b < batch_size; ++b) {
-        result = runFFTButterfly(result, static_cast<uint32_t>(signal_len), 1,
-                                  static_cast<uint32_t>(b * signal_len));
+
+    if (can_cooley_tukey) {
+        for (int64_t b = 0; b < batch_size; ++b) {
+            result = runFFTButterfly(result, static_cast<uint32_t>(signal_len), 1,
+                                      static_cast<uint32_t>(b * signal_len));
+        }
+    } else {
+        // Non-power-of-2: use Bluestein's algorithm per batch element
+        size_t elem_size = (input.dtype() == DType::Complex128) ? 16 : 8;
+        int32_t device_id = input.device().index;
+
+        for (int64_t b = 0; b < batch_size; ++b) {
+            Tensor batch_slice({signal_len}, input.dtype(), input.device());
+            {
+                auto [src_buf, src_off] = getVulkanBufferAndOffset(result.data_ptr());
+                auto [dst_buf, dst_off] = getVulkanBufferAndOffset(batch_slice.data_ptr());
+
+                VkBufferCopy region{};
+                region.srcOffset = static_cast<VkDeviceSize>(src_off) + b * signal_len * elem_size;
+                region.dstOffset = static_cast<VkDeviceSize>(dst_off);
+                region.size = signal_len * elem_size;
+
+                VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+                vkCmdCopyBuffer(cmd, src_buf, dst_buf, 1, &region);
+                insertTransferToComputeBarrier(cmd);
+                endSingleTimeCommands(cmd, device_id);
+            }
+
+            Tensor bluestein_result = dispatchFFTBluestein(batch_slice, signal_len, 1);
+
+            {
+                auto [src_buf, src_off] = getVulkanBufferAndOffset(bluestein_result.data_ptr());
+                auto [dst_buf, dst_off] = getVulkanBufferAndOffset(result.data_ptr());
+
+                VkBufferCopy region{};
+                region.srcOffset = static_cast<VkDeviceSize>(src_off);
+                region.dstOffset = static_cast<VkDeviceSize>(dst_off) + b * signal_len * elem_size;
+                region.size = signal_len * elem_size;
+
+                VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+                vkCmdCopyBuffer(cmd, src_buf, dst_buf, 1, &region);
+                insertTransferToComputeBarrier(cmd);
+                endSingleTimeCommands(cmd, device_id);
+            }
+        }
     }
 
     // IFFT normalization: default "backward" norm divides by N
@@ -15950,11 +16230,12 @@ auto VulkanBackend::dispatchRFFT(const Tensor& input, int64_t dim, int64_t n,
     int64_t signal_len = shape[dim];
     bool is_f64 = (input.dtype() == DType::Float64);
 
-    // Require power-of-2, last dim, matching size
-    bool can_native = is_power_of_2(signal_len) && signal_len <= MAX_VULKAN_FFT_SIZE
-                      && dim == ndim - 1 && n == signal_len && signal_len >= 2;
+    // Check if we can handle this on the GPU
+    bool is_last_dim = (dim == ndim - 1) && (n == signal_len) && (signal_len >= 2);
+    bool can_cooley_tukey = is_power_of_2(signal_len) && signal_len <= MAX_VULKAN_FFT_SIZE && is_last_dim;
+    bool can_bluestein = !is_power_of_2(signal_len) && signal_len <= MAX_VULKAN_FFT_SIZE / 2 && is_last_dim;
 
-    if (!can_native) {
+    if (!can_cooley_tukey && !can_bluestein) {
         auto cpu_input = input.to(Device::cpu());
         auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
         NewOpAttributes attrs;
@@ -15978,6 +16259,66 @@ auto VulkanBackend::dispatchRFFT(const Tensor& input, int64_t dim, int64_t n,
     std::vector<int64_t> out_shape(shape.begin(), shape.end());
     out_shape[ndim - 1] = half_n + 1;
     Tensor output(out_shape, complex_dtype, input.device());
+
+    // For non-power-of-2: convert real to complex, run full FFT via Bluestein,
+    // then extract first N/2+1 bins
+    if (can_bluestein) {
+        auto cont = input.contiguous();
+
+        for (int64_t b = 0; b < batch_size; ++b) {
+            // Create complex tensor from real input: set imaginary parts to 0
+            // Zero-init handles imag=0, now copy real values into even positions
+            Tensor complex_cpu({signal_len}, complex_dtype, Device::cpu());
+            // Access real input on CPU
+            Tensor cont_cpu = cont.to(Device::cpu());
+            if (is_f64) {
+                const auto* real_ptr = static_cast<const double*>(cont_cpu.data_ptr())
+                                       + b * signal_len;
+                auto* cplx_ptr = static_cast<double*>(complex_cpu.data_ptr());
+                for (int64_t k = 0; k < signal_len; ++k) {
+                    cplx_ptr[k * 2]     = real_ptr[k];
+                    cplx_ptr[k * 2 + 1] = 0.0;
+                }
+            } else {
+                const auto* real_ptr = static_cast<const float*>(cont_cpu.data_ptr())
+                                       + b * signal_len;
+                auto* cplx_ptr = static_cast<float*>(complex_cpu.data_ptr());
+                for (int64_t k = 0; k < signal_len; ++k) {
+                    cplx_ptr[k * 2]     = real_ptr[k];
+                    cplx_ptr[k * 2 + 1] = 0.0f;
+                }
+            }
+            Tensor complex_input = complex_cpu.to(input.device());
+
+            Tensor full_fft = dispatchFFTBluestein(complex_input, signal_len, 0);
+
+            // Copy first N/2+1 complex elements to output batch slice
+            {
+                auto [src_buf, src_off] = getVulkanBufferAndOffset(full_fft.data_ptr());
+                auto [dst_buf, dst_off] = getVulkanBufferAndOffset(output.data_ptr());
+
+                VkBufferCopy region{};
+                region.srcOffset = static_cast<VkDeviceSize>(src_off);
+                region.dstOffset = static_cast<VkDeviceSize>(dst_off)
+                                 + b * (half_n + 1) * complex_elem_size;
+                region.size = (half_n + 1) * complex_elem_size;
+
+                VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+                vkCmdCopyBuffer(cmd, src_buf, dst_buf, 1, &region);
+                insertTransferToComputeBarrier(cmd);
+                endSingleTimeCommands(cmd, device_id);
+            }
+        }
+
+        // Apply normalization
+        double scale = fft_norm_factor(signal_len, norm, /*is_forward=*/true);
+        if (std::abs(scale - 1.0) > 1e-15) {
+            uint32_t total_elems = static_cast<uint32_t>(output.numel());
+            runFFTScale(output, total_elems, scale);
+        }
+
+        return output;
+    }
 
     auto cont = input.contiguous();
 
@@ -16077,10 +16418,11 @@ auto VulkanBackend::dispatchIRFFT(const Tensor& input, int64_t dim, int64_t n,
     int64_t output_len = n;
     bool is_f64 = (input.dtype() == DType::Complex128);
 
-    bool can_native = is_power_of_2(output_len) && output_len <= MAX_VULKAN_FFT_SIZE
-                      && dim == ndim - 1 && freq_bins == output_len / 2 + 1 && output_len >= 2;
+    bool is_last_dim = (dim == ndim - 1) && (freq_bins == output_len / 2 + 1) && (output_len >= 2);
+    bool can_cooley_tukey = is_power_of_2(output_len) && output_len <= MAX_VULKAN_FFT_SIZE && is_last_dim;
+    bool can_bluestein = !is_power_of_2(output_len) && output_len <= MAX_VULKAN_FFT_SIZE / 2 && is_last_dim;
 
-    if (!can_native) {
+    if (!can_cooley_tukey && !can_bluestein) {
         auto cpu_input = input.to(Device::cpu());
         auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
         NewOpAttributes attrs;
@@ -16106,6 +16448,106 @@ auto VulkanBackend::dispatchIRFFT(const Tensor& input, int64_t dim, int64_t n,
     std::vector<int64_t> out_shape(shape.begin(), shape.end());
     out_shape[ndim - 1] = output_len;
     Tensor output(out_shape, real_dtype, input.device());
+
+    // For non-power-of-2: reconstruct full N-point Hermitian spectrum from N/2+1 bins,
+    // run full IFFT via Bluestein, then extract real parts
+    if (can_bluestein) {
+        auto cont = input.contiguous();
+
+        for (int64_t b = 0; b < batch_size; ++b) {
+            // Reconstruct full N-point complex spectrum from Hermitian symmetry:
+            // X[0..N/2] given, X[k] = conj(X[N-k]) for k = N/2+1..N-1
+            Tensor cont_cpu = cont.to(Device::cpu());
+            Tensor full_spectrum_cpu({output_len}, complex_dtype, Device::cpu());
+            // Complex64/128 data is interleaved floats/doubles, access via data_ptr()
+            if (is_f64) {
+                const auto* in_ptr = static_cast<const double*>(cont_cpu.data_ptr())
+                                     + b * freq_bins * 2;
+                auto* out_ptr = static_cast<double*>(full_spectrum_cpu.data_ptr());
+                // Copy first N/2+1 bins
+                for (int64_t k = 0; k < freq_bins; ++k) {
+                    out_ptr[k * 2]     = in_ptr[k * 2];
+                    out_ptr[k * 2 + 1] = in_ptr[k * 2 + 1];
+                }
+                // Fill conjugate mirror: X[N-k] = conj(X[k])
+                for (int64_t k = 1; k < freq_bins - 1 && (output_len - k) >= freq_bins; ++k) {
+                    out_ptr[(output_len - k) * 2]     =  in_ptr[k * 2];
+                    out_ptr[(output_len - k) * 2 + 1] = -in_ptr[k * 2 + 1];
+                }
+            } else {
+                const auto* in_ptr = static_cast<const float*>(cont_cpu.data_ptr())
+                                     + b * freq_bins * 2;
+                auto* out_ptr = static_cast<float*>(full_spectrum_cpu.data_ptr());
+                for (int64_t k = 0; k < freq_bins; ++k) {
+                    out_ptr[k * 2]     = in_ptr[k * 2];
+                    out_ptr[k * 2 + 1] = in_ptr[k * 2 + 1];
+                }
+                for (int64_t k = 1; k < freq_bins - 1 && (output_len - k) >= freq_bins; ++k) {
+                    out_ptr[(output_len - k) * 2]     =  in_ptr[k * 2];
+                    out_ptr[(output_len - k) * 2 + 1] = -in_ptr[k * 2 + 1];
+                }
+            }
+            Tensor full_spectrum = full_spectrum_cpu.to(input.device());
+
+            // Run inverse FFT via Bluestein
+            Tensor ifft_result = dispatchFFTBluestein(full_spectrum, output_len, 1);
+
+            // Scale by 1/N for the IFFT (Bluestein does not apply normalization)
+            runFFTScale(ifft_result, static_cast<uint32_t>(output_len),
+                        1.0 / static_cast<double>(output_len));
+
+            // Extract real parts from complex IFFT result via CPU roundtrip
+            Tensor real_batch_cpu({output_len}, real_dtype, Device::cpu());
+            Tensor ifft_on_cpu = ifft_result.to(Device::cpu());
+            if (is_f64) {
+                const auto* cplx = static_cast<const double*>(ifft_on_cpu.data_ptr());
+                auto* real_out = real_batch_cpu.data<double>();
+                for (int64_t k = 0; k < output_len; ++k) {
+                    real_out[k] = cplx[k * 2];  // real part only
+                }
+            } else {
+                const auto* cplx = static_cast<const float*>(ifft_on_cpu.data_ptr());
+                auto* real_out = real_batch_cpu.data<float>();
+                for (int64_t k = 0; k < output_len; ++k) {
+                    real_out[k] = cplx[k * 2];
+                }
+            }
+            Tensor real_batch_gpu = real_batch_cpu.to(input.device());
+
+            // Copy to output batch slice
+            {
+                auto [src_buf, src_off] = getVulkanBufferAndOffset(real_batch_gpu.data_ptr());
+                auto [dst_buf, dst_off] = getVulkanBufferAndOffset(output.data_ptr());
+
+                VkBufferCopy region{};
+                region.srcOffset = static_cast<VkDeviceSize>(src_off);
+                region.dstOffset = static_cast<VkDeviceSize>(dst_off)
+                                 + b * output_len * real_elem_size;
+                region.size = output_len * real_elem_size;
+
+                VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+                vkCmdCopyBuffer(cmd, src_buf, dst_buf, 1, &region);
+                insertTransferToComputeBarrier(cmd);
+                endSingleTimeCommands(cmd, device_id);
+            }
+        }
+
+        // Apply normalization correction: Bluestein IFFT + 1/N already applied.
+        // Adjust to match requested norm.
+        double applied_scale = 1.0 / static_cast<double>(output_len);
+        double target_scale = fft_norm_factor(output_len, norm, /*is_forward=*/false);
+        if (std::abs(target_scale - 1.0) < 1e-15) {
+            target_scale = 1.0;
+        }
+        double correction = target_scale / applied_scale;
+        if (std::abs(correction - 1.0) > 1e-15) {
+            auto scale_tensor = dispatchFull({1}, static_cast<float>(correction), real_dtype);
+            output = dispatchBinaryOp("mul", output,
+                dispatchExpand(scale_tensor, std::vector<int64_t>(out_shape.begin(), out_shape.end())));
+        }
+
+        return output;
+    }
 
     auto cont = input.contiguous();
 

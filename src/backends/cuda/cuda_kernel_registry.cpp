@@ -202,6 +202,7 @@ namespace cuda {
     auto embedding_kernel(const Tensor& weight, const Tensor& indices, cudaStream_t stream) -> Tensor;
     auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices, int64_t num_embeddings, cudaStream_t stream) -> Tensor;
     auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offsets, const std::string& mode, int64_t embedding_dim, bool include_last_offset, cudaStream_t stream) -> Tensor;
+    auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& embeddings, const Tensor& offsets, const OpAttributes& attrs, cudaStream_t stream) -> Tensor;
 
     // Linear algebra operations (cuSOLVER)
 #ifdef TENZOR_HAS_CUSOLVER
@@ -211,6 +212,7 @@ namespace cuda {
     auto linalg_svd_kernel(const Tensor& A, bool full_matrices, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
     auto linalg_qr_kernel(const Tensor& A, cudaStream_t stream) -> std::tuple<Tensor, Tensor>;
     auto linalg_eigh_kernel(const Tensor& A, cudaStream_t stream) -> std::tuple<Tensor, Tensor>;
+    auto linalg_eig_kernel(const Tensor& A, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
     auto linalg_cholesky_kernel(const Tensor& A, bool upper, cudaStream_t stream) -> Tensor;
 #endif
 
@@ -1452,6 +1454,12 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return cuda::embedding_bag_forward_kernel(inputs[0], inputs[1], mode, embedding_dim, include_last_offset, get_cuda_stream(attrs));
     });
 
+    table.register_kernel(OpId::EmbeddingBagBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [grad_output, embeddings, offsets]
+        return std::vector<Tensor>{cuda::embedding_bag_backward_kernel(
+            inputs[0], inputs[1], inputs[2], attrs, get_cuda_stream(attrs))};
+    });
+
     // =========================================================================
     // Fused Operations (optimized combined kernels)
     // =========================================================================
@@ -2500,6 +2508,10 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::LinalgEigh, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
         auto [W, V] = cuda::linalg_eigh_kernel(inputs[0], get_cuda_stream(attrs));
         return {W, V};
+    });
+    table.register_kernel(OpId::LinalgEig, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto [WR, WI, V] = cuda::linalg_eig_kernel(inputs[0], get_cuda_stream(attrs));
+        return {WR, WI, V};
     });
     table.register_single_output_kernel(OpId::LinalgCholesky, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         bool upper = attrs.get_bool(AttrKey::Upper, false);

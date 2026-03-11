@@ -1,0 +1,33 @@
+#version 450
+
+// Bluestein chirp multiplication for non-power-of-2 FFT
+// Complex multiply: data[k] *= chirp[k] (or conj(chirp[k]))
+// Data layout: interleaved real/imag pairs — [re0, im0, re1, im1, ...]
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer DataBuf  { float data[];  };
+layout(set = 0, binding = 1) buffer ChirpBuf { float chirp[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of complex elements to process
+    uint conjugate;  // 1 = multiply by conj(chirp), 0 = multiply by chirp
+};
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    if (tid >= n) return;
+
+    uint base = tid * 2;
+
+    float dr = data[base];
+    float di = data[base + 1];
+    float cr = chirp[base];
+    float ci = chirp[base + 1];
+
+    if (conjugate != 0) ci = -ci;
+
+    // Complex multiply: (dr + di*j) * (cr + ci*j)
+    data[base]     = dr * cr - di * ci;
+    data[base + 1] = dr * ci + di * cr;
+}

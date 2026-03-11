@@ -774,6 +774,91 @@ auto linalg_eigh_kernel(const Tensor& A, hipStream_t stream)
 }
 
 // ============================================================================
+// Eigendecomposition (non-symmetric)
+// ============================================================================
+
+auto linalg_eig_kernel(const Tensor& A, hipStream_t stream)
+    -> std::tuple<Tensor, Tensor, Tensor> {
+    validate_linalg_dtype(A, "eig");
+    if (A.dtype() == DType::Float16) {
+        auto [wr, wi, V] = linalg_eig_kernel(A.to(DType::Float32), stream);
+        return {wr.to(DType::Float16), wi.to(DType::Float16), V.to(DType::Float16)};
+    }
+    if (A.dtype() == DType::BFloat16) {
+        auto [wr, wi, V] = linalg_eig_kernel(A.to(DType::Float32), stream);
+        return {wr.to(DType::BFloat16), wi.to(DType::BFloat16), V.to(DType::BFloat16)};
+    }
+    auto work = A.contiguous().clone();
+    auto [n, ndim] = check_square(work);
+    int64_t nbatch = batch_size(work);
+
+    std::vector<int64_t> batch_dims;
+    auto shape = A.shape();
+    for (size_t i = 0; i + 2 < shape.size(); i++) batch_dims.push_back(shape[i]);
+
+    std::vector<int64_t> w_shape = batch_dims;
+    w_shape.push_back(n);
+    auto WR = zeros(w_shape, A.dtype(), A.device());
+    auto WI = zeros(w_shape, A.dtype(), A.device());
+
+    std::vector<int64_t> v_shape = batch_dims;
+    v_shape.push_back(n);
+    v_shape.push_back(n);
+    auto V = zeros(v_shape, A.dtype(), A.device());
+
+    auto handle = RocSOLVERHandlePool::get(stream);
+    DeviceInfo d_info;
+
+    // Row-major A = column-major A^T
+    // Left eigenvectors of A^T = right eigenvectors of A
+    rocblas_evect evect_left = rocblas_evect_original;
+    rocblas_evect evect_right = rocblas_evect_none;
+
+    if (A.dtype() == DType::Float32) {
+        float* a_data = work.data<float>();
+        float* wr_data = WR.data<float>();
+        float* wi_data = WI.data<float>();
+        float* v_data = V.data<float>();
+
+        for (int64_t b = 0; b < nbatch; b++) {
+            float* mat = a_data + b * n * n;
+            float* wr_vec = wr_data + b * n;
+            float* wi_vec = wi_data + b * n;
+            float* vl = v_data + b * n * n;
+
+            ROCBLAS_CHECK_LINALG(rocsolver_sgeev(handle, evect_left, evect_right,
+                n, mat, n, wr_vec, wi_vec,
+                vl, n,       // VL
+                nullptr, n,  // VR (not computed)
+                d_info.ptr));
+            check_rocsolver_info(d_info.ptr, "eig");
+        }
+    } else {
+        double* a_data = work.data<double>();
+        double* wr_data = WR.data<double>();
+        double* wi_data = WI.data<double>();
+        double* v_data = V.data<double>();
+
+        for (int64_t b = 0; b < nbatch; b++) {
+            double* mat = a_data + b * n * n;
+            double* wr_vec = wr_data + b * n;
+            double* wi_vec = wi_data + b * n;
+            double* vl = v_data + b * n * n;
+
+            ROCBLAS_CHECK_LINALG(rocsolver_dgeev(handle, evect_left, evect_right,
+                n, mat, n, wr_vec, wi_vec,
+                vl, n,
+                nullptr, n,
+                d_info.ptr));
+            check_rocsolver_info(d_info.ptr, "eig");
+        }
+    }
+
+    HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : 0));
+    return {WR, WI, V};
+}
+
+// ============================================================================
 // Cholesky Decomposition
 // ============================================================================
 

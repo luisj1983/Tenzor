@@ -240,34 +240,54 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
             const int64_t* in_ptr = get_data_ptr<const int64_t>(in_cont);
             int64_t* out_ptr = get_data_ptr<int64_t>(output);
 
-            // Host-side summation for Int64 (avoids SYCL reduction issues with int64)
-            std::vector<int64_t> host_data(total_size);
-            queue.memcpy(host_data.data(), in_ptr, total_size * sizeof(int64_t)).wait();
+            // Device-side reduction using work-group reduce
+            constexpr int64_t WG_SIZE = 256;
+            int64_t num_wgs = (total_size + WG_SIZE - 1) / WG_SIZE;
+            auto partial_buf = sycl::malloc_device<int64_t>(num_wgs, queue);
 
-            int64_t sum = 0;
-            for (int64_t i = 0; i < total_size; ++i) {
-                sum += host_data[i];
-            }
+            queue.parallel_for(
+                sycl::nd_range<1>(num_wgs * WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    int64_t gid = item.get_global_id(0);
+                    int64_t val = (gid < total_size) ? in_ptr[gid] : int64_t(0);
+                    int64_t sum = sycl::reduce_over_group(item.get_group(), val, sycl::plus<int64_t>());
+                    if (item.get_local_id(0) == 0) {
+                        partial_buf[item.get_group(0)] = sum;
+                    }
+                }
+            );
 
-            queue.memcpy(out_ptr, &sum, sizeof(int64_t)).wait();
+            // Second pass: reduce partial sums
+            queue.parallel_for(
+                sycl::nd_range<1>(WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    int64_t lid = item.get_local_id(0);
+                    int64_t val = (lid < num_wgs) ? partial_buf[lid] : int64_t(0);
+                    int64_t sum = sycl::reduce_over_group(item.get_group(), val, sycl::plus<int64_t>());
+                    if (lid == 0) out_ptr[0] = sum;
+                }
+            );
+            queue.wait();
+            sycl::free(partial_buf, queue);
         }
         else if (in_cont.dtype() == DType::Bool) {
-            const bool* in_ptr = get_data_ptr<const bool>(in_cont);
+            const uint8_t* in_ptr = get_data_ptr<const uint8_t>(in_cont);
             // Sum of bools returns Int64
             Tensor bool_output({}, DType::Int64, output.device());
             int64_t* out_ptr = get_data_ptr<int64_t>(bool_output);
 
-            std::vector<bool> host_data(total_size);
-            // Copy bool data to host
-            std::vector<uint8_t> host_raw(total_size);
-            queue.memcpy(host_raw.data(), in_ptr, total_size * sizeof(bool)).wait();
+            auto sum_buf = sycl::malloc_shared<int32_t>(1, queue);
+            sum_buf[0] = 0;
 
-            int64_t sum = 0;
-            for (int64_t i = 0; i < total_size; ++i) {
-                sum += host_raw[i] ? 1 : 0;
-            }
+            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(sum_buf, sycl::plus<int32_t>()),
+                              [=](sycl::id<1> idx, auto& s) {
+                s += static_cast<int32_t>(in_ptr[idx] ? 1 : 0);
+            });
+            queue.wait();
 
+            int64_t sum = static_cast<int64_t>(sum_buf[0]);
             queue.memcpy(out_ptr, &sum, sizeof(int64_t)).wait();
+            sycl::free(sum_buf, queue);
             return bool_output;
         }
         else {
@@ -1440,14 +1460,15 @@ auto sort_kernel(const Tensor& input, int64_t dim, bool descending, sycl::queue&
     int64_t numel = input.numel();
     if (numel == 0) return {values, indices};
 
-    int64_t outer_size = 1, inner_size = 1;
-    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
     for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
-    int64_t dim_size = shape[dim];
 
 #ifdef TENZOR_HAS_ONEDPL
     // Device-side sort for contiguous sort dimension (inner_size == 1)
     if (inner_size == 1) {
+        int64_t outer_size = 1;
+        for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+        int64_t dim_size = shape[dim];
         auto policy = oneapi::dpl::execution::make_device_policy(queue);
 
         auto device_sort_impl = [&](auto* val_ptr, const auto* in_ptr) {
@@ -1509,48 +1530,29 @@ auto sort_kernel(const Tensor& input, int64_t dim, bool descending, sycl::queue&
 
         return {values, indices};
     }
-    // Fall through to host-side sort for non-contiguous sort dimension
-#endif
+    // Fall through: transpose so sort dim is last, sort on device, transpose back
+    {
+        std::vector<int64_t> perm(ndim);
+        std::iota(perm.begin(), perm.end(), 0);
+        std::swap(perm[dim], perm[ndim - 1]);
 
-    // Host-side sort fallback
-    auto host_sort_impl = [&](auto dummy) {
-        using T = decltype(dummy);
-        std::vector<T> h_in(numel), h_out(numel);
-        std::vector<int64_t> h_idx(numel);
-        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(T)).wait();
+        // Build inverse permutation
+        std::vector<int64_t> inv_perm(ndim);
+        for (int64_t i = 0; i < ndim; ++i) inv_perm[perm[i]] = i;
 
-        for (int64_t o = 0; o < outer_size; ++o) {
-            for (int64_t i = 0; i < inner_size; ++i) {
-                std::vector<std::pair<T, int64_t>> pairs(dim_size);
-                for (int64_t d = 0; d < dim_size; ++d) {
-                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
-                    pairs[d] = {h_in[idx], d};
-                }
-                if (descending) {
-                    std::sort(pairs.begin(), pairs.end(), [](auto& a, auto& b) { return a.first > b.first; });
-                } else {
-                    std::sort(pairs.begin(), pairs.end(), [](auto& a, auto& b) { return a.first < b.first; });
-                }
-                for (int64_t d = 0; d < dim_size; ++d) {
-                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
-                    h_out[idx] = pairs[d].first;
-                    h_idx[idx] = pairs[d].second;
-                }
-            }
-        }
-        queue.memcpy(const_cast<void*>(values.data_ptr()), h_out.data(), numel * sizeof(T)).wait();
-        queue.memcpy(const_cast<void*>(indices.data_ptr()), h_idx.data(), numel * sizeof(int64_t)).wait();
-    };
+        Tensor transposed = input.permute(perm).contiguous();
+        auto [sorted_t, indices_t] = sort_kernel(transposed, ndim - 1, descending, queue);
 
-    if (input.dtype() == DType::Float32) {
-        host_sort_impl(float{});
-    } else if (input.dtype() == DType::Float64) {
-        host_sort_impl(double{});
-    } else {
-        throw std::runtime_error("sort: unsupported dtype");
+        // Permute back
+        values = sorted_t.permute(inv_perm).contiguous();
+        indices = indices_t.permute(inv_perm).contiguous();
     }
 
     return {values, indices};
+#else
+    // Without oneDPL, no device-side sort is available
+    throw std::runtime_error("sort: oneDPL required for device-side sort");
+#endif
 }
 
 // ============================================================================
@@ -1569,15 +1571,16 @@ auto topk_kernel(const Tensor& input, int64_t k, int64_t dim, bool largest, bool
     Tensor values(out_shape, input.dtype(), input.device());
     Tensor indices(out_shape, DType::Int64, input.device());
 
-    int64_t outer_size = 1, inner_size = 1;
-    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
     for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
-    int64_t dim_size = shape[dim];
 
 #ifdef TENZOR_HAS_ONEDPL
     // Device-side topk for contiguous sort dimension (inner_size == 1)
     // Strategy: sort each slice on device via oneDPL, then copy first k elements
     if (inner_size == 1) {
+        int64_t outer_size = 1;
+        for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+        int64_t dim_size = shape[dim];
         auto policy = oneapi::dpl::execution::make_device_policy(queue);
         int64_t in_numel = input.numel();
         int64_t out_numel = outer_size * k;
@@ -1650,59 +1653,27 @@ auto topk_kernel(const Tensor& input, int64_t k, int64_t dim, bool largest, bool
 
         return {values, indices};
     }
-    // Fall through to host-side topk for non-contiguous sort dimension
-#endif
+    // Fall through: transpose so sort dim is last, topk on device, transpose back
+    {
+        std::vector<int64_t> perm(ndim);
+        std::iota(perm.begin(), perm.end(), 0);
+        std::swap(perm[dim], perm[ndim - 1]);
 
-    // Host-side topk fallback
-    auto host_topk_impl = [&](auto dummy) {
-        using T = decltype(dummy);
-        int64_t in_numel = input.numel();
-        int64_t out_numel = outer_size * k * inner_size;
-        std::vector<T> h_in(in_numel), h_out(out_numel);
-        std::vector<int64_t> h_idx(out_numel);
-        queue.memcpy(h_in.data(), input.data_ptr(), in_numel * sizeof(T)).wait();
+        std::vector<int64_t> inv_perm(ndim);
+        for (int64_t i = 0; i < ndim; ++i) inv_perm[perm[i]] = i;
 
-        for (int64_t o = 0; o < outer_size; ++o) {
-            for (int64_t i = 0; i < inner_size; ++i) {
-                std::vector<std::pair<T, int64_t>> pairs(dim_size);
-                for (int64_t d = 0; d < dim_size; ++d) {
-                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
-                    pairs[d] = {h_in[idx], d};
-                }
-                if (largest) {
-                    std::partial_sort(pairs.begin(), pairs.begin() + k, pairs.end(),
-                                     [](auto& a, auto& b) { return a.first > b.first; });
-                } else {
-                    std::partial_sort(pairs.begin(), pairs.begin() + k, pairs.end(),
-                                     [](auto& a, auto& b) { return a.first < b.first; });
-                }
-                if (sorted && largest) {
-                    std::sort(pairs.begin(), pairs.begin() + k,
-                              [](auto& a, auto& b) { return a.first > b.first; });
-                } else if (sorted) {
-                    std::sort(pairs.begin(), pairs.begin() + k,
-                              [](auto& a, auto& b) { return a.first < b.first; });
-                }
-                for (int64_t d = 0; d < k; ++d) {
-                    int64_t out_idx = o * k * inner_size + d * inner_size + i;
-                    h_out[out_idx] = pairs[d].first;
-                    h_idx[out_idx] = pairs[d].second;
-                }
-            }
-        }
-        queue.memcpy(const_cast<void*>(values.data_ptr()), h_out.data(), out_numel * sizeof(T)).wait();
-        queue.memcpy(const_cast<void*>(indices.data_ptr()), h_idx.data(), out_numel * sizeof(int64_t)).wait();
-    };
+        Tensor transposed = input.permute(perm).contiguous();
+        auto [vals_t, idxs_t] = topk_kernel(transposed, k, ndim - 1, largest, sorted, queue);
 
-    if (input.dtype() == DType::Float32) {
-        host_topk_impl(float{});
-    } else if (input.dtype() == DType::Float64) {
-        host_topk_impl(double{});
-    } else {
-        throw std::runtime_error("topk: unsupported dtype");
+        values = vals_t.permute(inv_perm).contiguous();
+        indices = idxs_t.permute(inv_perm).contiguous();
     }
 
     return {values, indices};
+#else
+    // Without oneDPL, no device-side topk is available
+    throw std::runtime_error("topk: oneDPL required for device-side topk");
+#endif
 }
 
 // ============================================================================

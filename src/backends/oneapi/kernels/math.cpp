@@ -1783,42 +1783,36 @@ auto dot_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
     if (a.dtype() == DType::Float32) {
         const float* a_data = get_data_ptr<const float>(a);
         const float* b_data = get_data_ptr<const float>(b);
-
-        // Copy to host and compute dot product
-        std::vector<float> a_host(n);
-        std::vector<float> b_host(n);
-        queue.memcpy(a_host.data(), a_data, n * sizeof(float)).wait();
-        queue.memcpy(b_host.data(), b_data, n * sizeof(float)).wait();
-
-        float sum = 0.0f;
-        for (int64_t i = 0; i < n; ++i) {
-            sum += a_host[i] * b_host[i];
-        }
-
-        // Copy result back to device
         float* out_ptr = get_data_ptr<float>(output);
-        queue.fill(out_ptr, sum, 1);
+
+        auto sum_buf = sycl::malloc_shared<float>(1, queue);
+        sum_buf[0] = 0.0f;
+
+        queue.parallel_for(sycl::range<1>(n), sycl::reduction(sum_buf, sycl::plus<float>()),
+                          [=](sycl::id<1> i, auto& s) {
+            s += a_data[i] * b_data[i];
+        });
+        queue.wait();
+        out_ptr[0] = sum_buf[0];
+        sycl::free(sum_buf, queue);
 
         return output;
     }
     else if (a.dtype() == DType::Float64) {
         const double* a_data = get_data_ptr<const double>(a);
         const double* b_data = get_data_ptr<const double>(b);
-
-        // Copy to host and compute dot product
-        std::vector<double> a_host(n);
-        std::vector<double> b_host(n);
-        queue.memcpy(a_host.data(), a_data, n * sizeof(double)).wait();
-        queue.memcpy(b_host.data(), b_data, n * sizeof(double)).wait();
-
-        double sum = 0.0;
-        for (int64_t i = 0; i < n; ++i) {
-            sum += a_host[i] * b_host[i];
-        }
-
-        // Copy result back to device
         double* out_ptr = get_data_ptr<double>(output);
-        queue.fill(out_ptr, sum, 1);
+
+        auto sum_buf = sycl::malloc_shared<double>(1, queue);
+        sum_buf[0] = 0.0;
+
+        queue.parallel_for(sycl::range<1>(n), sycl::reduction(sum_buf, sycl::plus<double>()),
+                          [=](sycl::id<1> i, auto& s) {
+            s += a_data[i] * b_data[i];
+        });
+        queue.wait();
+        out_ptr[0] = sum_buf[0];
+        sycl::free(sum_buf, queue);
 
         return output;
     }
@@ -3219,23 +3213,34 @@ auto has_inf_nan_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         return output;
     }
 
-    // Use host-side check via memcpy (simpler than atomic reduction on device)
     if (input.dtype() == DType::Float32) {
-        std::vector<float> host_data(numel);
-        queue.memcpy(host_data.data(), input.data_ptr(), numel * sizeof(float)).wait();
-        bool found = false;
-        for (int64_t i = 0; i < numel && !found; ++i) {
-            if (std::isinf(host_data[i]) || std::isnan(host_data[i])) found = true;
-        }
+        const float* in_ptr = static_cast<const float*>(input.data_ptr());
+        auto flag_buf = sycl::malloc_shared<int32_t>(1, queue);
+        flag_buf[0] = 0;
+
+        queue.parallel_for(sycl::range<1>(numel), sycl::reduction(flag_buf, sycl::bit_or<int32_t>()),
+                          [=](sycl::id<1> i, auto& f) {
+            float val = in_ptr[i];
+            if (sycl::isinf(val) || sycl::isnan(val)) f |= 1;
+        });
+        queue.wait();
+        bool found = (flag_buf[0] != 0);
         queue.memcpy(out_ptr, &found, sizeof(bool)).wait();
+        sycl::free(flag_buf, queue);
     } else if (input.dtype() == DType::Float64) {
-        std::vector<double> host_data(numel);
-        queue.memcpy(host_data.data(), input.data_ptr(), numel * sizeof(double)).wait();
-        bool found = false;
-        for (int64_t i = 0; i < numel && !found; ++i) {
-            if (std::isinf(host_data[i]) || std::isnan(host_data[i])) found = true;
-        }
+        const double* in_ptr = static_cast<const double*>(input.data_ptr());
+        auto flag_buf = sycl::malloc_shared<int32_t>(1, queue);
+        flag_buf[0] = 0;
+
+        queue.parallel_for(sycl::range<1>(numel), sycl::reduction(flag_buf, sycl::bit_or<int32_t>()),
+                          [=](sycl::id<1> i, auto& f) {
+            double val = in_ptr[i];
+            if (sycl::isinf(val) || sycl::isnan(val)) f |= 1;
+        });
+        queue.wait();
+        bool found = (flag_buf[0] != 0);
         queue.memcpy(out_ptr, &found, sizeof(bool)).wait();
+        sycl::free(flag_buf, queue);
     } else {
         // Integer/bool types never have inf/nan
         bool false_val = false;
@@ -3259,68 +3264,66 @@ auto cumsum_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tens
 
     if (numel == 0) return output;
 
-    // Host-side implementation for correctness (sequential scan along dim)
+    // Device-side per-line parallel scan along dim
     int64_t outer_size = 1, inner_size = 1;
     for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
     for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
     int64_t dim_size = shape[dim];
 
+    int64_t num_lines = outer_size * inner_size;
+
     if (input.dtype() == DType::Float32) {
-        std::vector<float> h_in(numel), h_out(numel);
-        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(float)).wait();
-        for (int64_t o = 0; o < outer_size; ++o) {
-            for (int64_t i = 0; i < inner_size; ++i) {
-                float sum = 0.0f;
-                for (int64_t d = 0; d < dim_size; ++d) {
-                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
-                    sum += h_in[idx];
-                    h_out[idx] = sum;
-                }
+        const float* in_ptr = get_data_ptr<const float>(input);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for(sycl::range<1>(num_lines), [=](sycl::id<1> idx) {
+            int64_t o = idx / inner_size;
+            int64_t i = idx % inner_size;
+            float sum = 0.0f;
+            for (int64_t d = 0; d < dim_size; ++d) {
+                int64_t flat = o * dim_size * inner_size + d * inner_size + i;
+                sum += in_ptr[flat];
+                out_ptr[flat] = sum;
             }
-        }
-        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), numel * sizeof(float)).wait();
+        }).wait();
     } else if (input.dtype() == DType::Float64) {
-        std::vector<double> h_in(numel), h_out(numel);
-        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(double)).wait();
-        for (int64_t o = 0; o < outer_size; ++o) {
-            for (int64_t i = 0; i < inner_size; ++i) {
-                double sum = 0.0;
-                for (int64_t d = 0; d < dim_size; ++d) {
-                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
-                    sum += h_in[idx];
-                    h_out[idx] = sum;
-                }
+        const double* in_ptr = get_data_ptr<const double>(input);
+        double* out_ptr = get_data_ptr<double>(output);
+        queue.parallel_for(sycl::range<1>(num_lines), [=](sycl::id<1> idx) {
+            int64_t o = idx / inner_size;
+            int64_t i = idx % inner_size;
+            double sum = 0.0;
+            for (int64_t d = 0; d < dim_size; ++d) {
+                int64_t flat = o * dim_size * inner_size + d * inner_size + i;
+                sum += in_ptr[flat];
+                out_ptr[flat] = sum;
             }
-        }
-        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), numel * sizeof(double)).wait();
+        }).wait();
     } else if (input.dtype() == DType::Int32) {
-        std::vector<int32_t> h_in(numel), h_out(numel);
-        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(int32_t)).wait();
-        for (int64_t o = 0; o < outer_size; ++o) {
-            for (int64_t i = 0; i < inner_size; ++i) {
-                int32_t sum = 0;
-                for (int64_t d = 0; d < dim_size; ++d) {
-                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
-                    sum += h_in[idx];
-                    h_out[idx] = sum;
-                }
+        const int32_t* in_ptr = get_data_ptr<const int32_t>(input);
+        int32_t* out_ptr = get_data_ptr<int32_t>(output);
+        queue.parallel_for(sycl::range<1>(num_lines), [=](sycl::id<1> idx) {
+            int64_t o = idx / inner_size;
+            int64_t i = idx % inner_size;
+            int32_t sum = 0;
+            for (int64_t d = 0; d < dim_size; ++d) {
+                int64_t flat = o * dim_size * inner_size + d * inner_size + i;
+                sum += in_ptr[flat];
+                out_ptr[flat] = sum;
             }
-        }
-        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), numel * sizeof(int32_t)).wait();
+        }).wait();
     } else if (input.dtype() == DType::Int64) {
-        std::vector<int64_t> h_in(numel), h_out(numel);
-        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(int64_t)).wait();
-        for (int64_t o = 0; o < outer_size; ++o) {
-            for (int64_t i = 0; i < inner_size; ++i) {
-                int64_t sum = 0;
-                for (int64_t d = 0; d < dim_size; ++d) {
-                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
-                    sum += h_in[idx];
-                    h_out[idx] = sum;
-                }
+        const int64_t* in_ptr = get_data_ptr<const int64_t>(input);
+        int64_t* out_ptr = get_data_ptr<int64_t>(output);
+        queue.parallel_for(sycl::range<1>(num_lines), [=](sycl::id<1> idx) {
+            int64_t o = idx / inner_size;
+            int64_t i = idx % inner_size;
+            int64_t sum = 0;
+            for (int64_t d = 0; d < dim_size; ++d) {
+                int64_t flat = o * dim_size * inner_size + d * inner_size + i;
+                sum += in_ptr[flat];
+                out_ptr[flat] = sum;
             }
-        }
-        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), numel * sizeof(int64_t)).wait();
+        }).wait();
     } else {
         throw std::runtime_error("cumsum: unsupported dtype");
     }
@@ -3347,62 +3350,60 @@ auto cumprod_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Ten
     for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
     int64_t dim_size = shape[dim];
 
+    int64_t num_lines = outer_size * inner_size;
+
     if (input.dtype() == DType::Float32) {
-        std::vector<float> h_in(numel), h_out(numel);
-        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(float)).wait();
-        for (int64_t o = 0; o < outer_size; ++o) {
-            for (int64_t i = 0; i < inner_size; ++i) {
-                float prod = 1.0f;
-                for (int64_t d = 0; d < dim_size; ++d) {
-                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
-                    prod *= h_in[idx];
-                    h_out[idx] = prod;
-                }
+        const float* in_ptr = get_data_ptr<const float>(input);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for(sycl::range<1>(num_lines), [=](sycl::id<1> idx) {
+            int64_t o = idx / inner_size;
+            int64_t i = idx % inner_size;
+            float prod = 1.0f;
+            for (int64_t d = 0; d < dim_size; ++d) {
+                int64_t flat = o * dim_size * inner_size + d * inner_size + i;
+                prod *= in_ptr[flat];
+                out_ptr[flat] = prod;
             }
-        }
-        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), numel * sizeof(float)).wait();
+        }).wait();
     } else if (input.dtype() == DType::Float64) {
-        std::vector<double> h_in(numel), h_out(numel);
-        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(double)).wait();
-        for (int64_t o = 0; o < outer_size; ++o) {
-            for (int64_t i = 0; i < inner_size; ++i) {
-                double prod = 1.0;
-                for (int64_t d = 0; d < dim_size; ++d) {
-                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
-                    prod *= h_in[idx];
-                    h_out[idx] = prod;
-                }
+        const double* in_ptr = get_data_ptr<const double>(input);
+        double* out_ptr = get_data_ptr<double>(output);
+        queue.parallel_for(sycl::range<1>(num_lines), [=](sycl::id<1> idx) {
+            int64_t o = idx / inner_size;
+            int64_t i = idx % inner_size;
+            double prod = 1.0;
+            for (int64_t d = 0; d < dim_size; ++d) {
+                int64_t flat = o * dim_size * inner_size + d * inner_size + i;
+                prod *= in_ptr[flat];
+                out_ptr[flat] = prod;
             }
-        }
-        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), numel * sizeof(double)).wait();
+        }).wait();
     } else if (input.dtype() == DType::Int32) {
-        std::vector<int32_t> h_in(numel), h_out(numel);
-        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(int32_t)).wait();
-        for (int64_t o = 0; o < outer_size; ++o) {
-            for (int64_t i = 0; i < inner_size; ++i) {
-                int32_t prod = 1;
-                for (int64_t d = 0; d < dim_size; ++d) {
-                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
-                    prod *= h_in[idx];
-                    h_out[idx] = prod;
-                }
+        const int32_t* in_ptr = get_data_ptr<const int32_t>(input);
+        int32_t* out_ptr = get_data_ptr<int32_t>(output);
+        queue.parallel_for(sycl::range<1>(num_lines), [=](sycl::id<1> idx) {
+            int64_t o = idx / inner_size;
+            int64_t i = idx % inner_size;
+            int32_t prod = 1;
+            for (int64_t d = 0; d < dim_size; ++d) {
+                int64_t flat = o * dim_size * inner_size + d * inner_size + i;
+                prod *= in_ptr[flat];
+                out_ptr[flat] = prod;
             }
-        }
-        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), numel * sizeof(int32_t)).wait();
+        }).wait();
     } else if (input.dtype() == DType::Int64) {
-        std::vector<int64_t> h_in(numel), h_out(numel);
-        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(int64_t)).wait();
-        for (int64_t o = 0; o < outer_size; ++o) {
-            for (int64_t i = 0; i < inner_size; ++i) {
-                int64_t prod = 1;
-                for (int64_t d = 0; d < dim_size; ++d) {
-                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
-                    prod *= h_in[idx];
-                    h_out[idx] = prod;
-                }
+        const int64_t* in_ptr = get_data_ptr<const int64_t>(input);
+        int64_t* out_ptr = get_data_ptr<int64_t>(output);
+        queue.parallel_for(sycl::range<1>(num_lines), [=](sycl::id<1> idx) {
+            int64_t o = idx / inner_size;
+            int64_t i = idx % inner_size;
+            int64_t prod = 1;
+            for (int64_t d = 0; d < dim_size; ++d) {
+                int64_t flat = o * dim_size * inner_size + d * inner_size + i;
+                prod *= in_ptr[flat];
+                out_ptr[flat] = prod;
             }
-        }
-        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), numel * sizeof(int64_t)).wait();
+        }).wait();
     } else {
         throw std::runtime_error("cumprod: unsupported dtype");
     }

@@ -2,6 +2,7 @@
 #include <sycl/sycl.hpp>
 #include <stdexcept>
 #include <algorithm>
+#include <array>
 #include <numeric>
 #include <vector>
 
@@ -1015,19 +1016,17 @@ auto argsort_kernel(const Tensor& input, int64_t dim, bool descending, sycl::que
         return output;
     }
 
-    // Compute outer_size and inner_size
+    // Compute inner_size to decide contiguous vs transpose path
     int64_t inner_size = 1;
     for (int64_t d = dim + 1; d < ndim; ++d) {
         inner_size *= shape_vec[d];
     }
 
-    int64_t total_elems = input.numel();
-    int64_t outer_size = total_elems / (dim_size * inner_size);
-    int64_t num_slices = outer_size * inner_size;
-
 #ifdef TENZOR_HAS_ONEDPL
     // Device-side argsort for contiguous sort dimension (inner_size == 1)
     if (inner_size == 1) {
+        int64_t total_elems = input.numel();
+        int64_t outer_size = total_elems / (dim_size * inner_size);
         auto policy = oneapi::dpl::execution::make_device_policy(queue);
 
         auto device_argsort_impl = [&](const auto* in_ptr) {
@@ -1080,155 +1079,25 @@ auto argsort_kernel(const Tensor& input, int64_t dim, bool descending, sycl::que
 
         return output;
     }
-    // Fall through to host-side argsort for non-contiguous sort dimension
-#endif
+    // Fall through: transpose so sort dim is last, argsort on device, transpose back
+    {
+        std::vector<int64_t> perm(ndim);
+        std::iota(perm.begin(), perm.end(), 0);
+        std::swap(perm[dim], perm[ndim - 1]);
 
-    // Host-side argsort fallback
+        std::vector<int64_t> inv_perm(ndim);
+        for (int64_t i = 0; i < ndim; ++i) inv_perm[perm[i]] = i;
 
-    auto sort_slices = [&](auto* host_input) {
-        using T = std::remove_const_t<std::remove_pointer_t<decltype(host_input)>>;
-
-        // Copy input to host
-        std::vector<T> h_input(total_elems);
-        queue.memcpy(h_input.data(), host_input, total_elems * sizeof(T)).wait();
-
-        // Allocate host output
-        std::vector<int64_t> h_output(total_elems);
-
-        // Sort each slice independently
-        for (int64_t slice = 0; slice < num_slices; ++slice) {
-            int64_t outer = slice / inner_size;
-            int64_t inner = slice % inner_size;
-
-            // Collect values along the dimension
-            std::vector<std::pair<T, int64_t>> values(dim_size);
-            for (int64_t i = 0; i < dim_size; ++i) {
-                int64_t offset = outer * dim_size * inner_size + i * inner_size + inner;
-                values[i] = {h_input[offset], i};
-            }
-
-            // Sort by value
-            if (descending) {
-                std::sort(values.begin(), values.end(),
-                    [](const auto& a, const auto& b) { return a.first > b.first; });
-            } else {
-                std::sort(values.begin(), values.end(),
-                    [](const auto& a, const auto& b) { return a.first < b.first; });
-            }
-
-            // Write sorted indices
-            for (int64_t i = 0; i < dim_size; ++i) {
-                int64_t offset = outer * dim_size * inner_size + i * inner_size + inner;
-                h_output[offset] = values[i].second;
-            }
-        }
-
-        // Copy output to device
-        int64_t* output_ptr = get_data_ptr<int64_t>(output);
-        queue.memcpy(output_ptr, h_output.data(), total_elems * sizeof(int64_t)).wait();
-    };
-
-    if (input.dtype() == DType::Float32) {
-        sort_slices(get_data_ptr<const float>(input));
-    }
-    else if (input.dtype() == DType::Float64) {
-        sort_slices(get_data_ptr<const double>(input));
-    }
-    else if (input.dtype() == DType::Int32) {
-        sort_slices(get_data_ptr<const int32_t>(input));
-    }
-    else if (input.dtype() == DType::Int64) {
-        sort_slices(get_data_ptr<const int64_t>(input));
-    }
-    else if (input.dtype() == DType::Float16) {
-        // Convert Float16 to Float32 for sorting
-        const sycl::half* h_input_ptr = get_data_ptr<const sycl::half>(input);
-        std::vector<sycl::half> h_input_half(total_elems);
-        queue.memcpy(h_input_half.data(), h_input_ptr, total_elems * sizeof(sycl::half)).wait();
-
-        // Convert to float
-        std::vector<float> h_input_f32(total_elems);
-        for (int64_t i = 0; i < total_elems; ++i) {
-            h_input_f32[i] = float(h_input_half[i]);
-        }
-
-        // Allocate host output
-        std::vector<int64_t> h_output(total_elems);
-
-        for (int64_t slice = 0; slice < num_slices; ++slice) {
-            int64_t outer = slice / inner_size;
-            int64_t inner = slice % inner_size;
-
-            std::vector<std::pair<float, int64_t>> values(dim_size);
-            for (int64_t i = 0; i < dim_size; ++i) {
-                int64_t offset = outer * dim_size * inner_size + i * inner_size + inner;
-                values[i] = {h_input_f32[offset], i};
-            }
-
-            if (descending) {
-                std::sort(values.begin(), values.end(),
-                    [](const auto& a, const auto& b) { return a.first > b.first; });
-            } else {
-                std::sort(values.begin(), values.end(),
-                    [](const auto& a, const auto& b) { return a.first < b.first; });
-            }
-
-            for (int64_t i = 0; i < dim_size; ++i) {
-                int64_t offset = outer * dim_size * inner_size + i * inner_size + inner;
-                h_output[offset] = values[i].second;
-            }
-        }
-
-        int64_t* output_ptr = get_data_ptr<int64_t>(output);
-        queue.memcpy(output_ptr, h_output.data(), total_elems * sizeof(int64_t)).wait();
-    }
-    else if (input.dtype() == DType::BFloat16) {
-        // Convert BFloat16 to Float32 for sorting
-        const uint16_t* h_input_ptr = get_data_ptr<const uint16_t>(input);
-        std::vector<uint16_t> h_input_bf16(total_elems);
-        queue.memcpy(h_input_bf16.data(), h_input_ptr, total_elems * sizeof(uint16_t)).wait();
-
-        // Convert to float
-        std::vector<float> h_input_f32(total_elems);
-        for (int64_t i = 0; i < total_elems; ++i) {
-            h_input_f32[i] = bf16_to_f32(h_input_bf16[i]);
-        }
-
-        // Allocate host output
-        std::vector<int64_t> h_output(total_elems);
-
-        for (int64_t slice = 0; slice < num_slices; ++slice) {
-            int64_t outer = slice / inner_size;
-            int64_t inner = slice % inner_size;
-
-            std::vector<std::pair<float, int64_t>> values(dim_size);
-            for (int64_t i = 0; i < dim_size; ++i) {
-                int64_t offset = outer * dim_size * inner_size + i * inner_size + inner;
-                values[i] = {h_input_f32[offset], i};
-            }
-
-            if (descending) {
-                std::sort(values.begin(), values.end(),
-                    [](const auto& a, const auto& b) { return a.first > b.first; });
-            } else {
-                std::sort(values.begin(), values.end(),
-                    [](const auto& a, const auto& b) { return a.first < b.first; });
-            }
-
-            for (int64_t i = 0; i < dim_size; ++i) {
-                int64_t offset = outer * dim_size * inner_size + i * inner_size + inner;
-                h_output[offset] = values[i].second;
-            }
-        }
-
-        int64_t* output_ptr = get_data_ptr<int64_t>(output);
-        queue.memcpy(output_ptr, h_output.data(), total_elems * sizeof(int64_t)).wait();
-    }
-    else {
-        throw std::runtime_error("argsort: unsupported dtype");
+        Tensor transposed = input.permute(perm).contiguous();
+        output = argsort_kernel(transposed, ndim - 1, descending, queue);
+        output = output.permute(inv_perm).contiguous();
     }
 
     return output;
+#else
+    // Without oneDPL, no device-side argsort is available
+    throw std::runtime_error("argsort: oneDPL required for device-side argsort");
+#endif
 }
 
 // ============================================================================
@@ -1265,99 +1134,125 @@ auto scatter_add_kernel(const Tensor& self, int64_t dim, const Tensor& index, co
     { int64_t s = 1; for (int64_t i = ndim - 1; i >= 0; --i) { idx_strides[i] = s; s *= idx_shape_vec[i]; } }
 
     if (self.dtype() == DType::Float32) {
-        std::vector<float> h_out(self.numel());
-        std::vector<float> h_src(src.numel());
-        std::vector<int64_t> h_idx(idx_numel);
-        queue.memcpy(h_out.data(), output.data_ptr(), self.numel() * sizeof(float));
-        queue.memcpy(h_src.data(), src.data_ptr(), src.numel() * sizeof(float));
-        queue.memcpy(h_idx.data(), index.data_ptr(), idx_numel * sizeof(int64_t)).wait();
+        float* out_ptr = get_data_ptr<float>(output);
+        const float* src_ptr = get_data_ptr<const float>(src);
+        const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
 
-        for (int64_t flat = 0; flat < idx_numel; ++flat) {
-            // Decompose flat index to multi-dim
+        std::array<int64_t, 8> d_out_strides{}, d_idx_strides{};
+        for (int64_t d = 0; d < ndim; ++d) {
+            d_out_strides[d] = out_strides[d];
+            d_idx_strides[d] = idx_strides[d];
+        }
+
+        queue.parallel_for(sycl::range<1>(idx_numel), [=](sycl::id<1> id) {
+            int64_t flat = id[0];
             int64_t remaining = flat;
             int64_t out_offset = 0;
-            int64_t src_offset = flat;
             for (int64_t d = 0; d < ndim; ++d) {
-                int64_t coord = remaining / idx_strides[d];
-                remaining %= idx_strides[d];
+                int64_t coord = remaining / d_idx_strides[d];
+                remaining %= d_idx_strides[d];
                 if (d == dim) {
-                    out_offset += h_idx[flat] * out_strides[d];
+                    out_offset += idx_ptr[flat] * d_out_strides[d];
                 } else {
-                    out_offset += coord * out_strides[d];
+                    out_offset += coord * d_out_strides[d];
                 }
             }
-            h_out[out_offset] += h_src[src_offset];
-        }
-        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), self.numel() * sizeof(float)).wait();
+            sycl::atomic_ref<float, sycl::memory_order::relaxed,
+                            sycl::memory_scope::device,
+                            sycl::access::address_space::global_space>
+                atomic_out(out_ptr[out_offset]);
+            atomic_out.fetch_add(src_ptr[flat]);
+        }).wait();
     } else if (self.dtype() == DType::Float64) {
-        std::vector<double> h_out(self.numel());
-        std::vector<double> h_src(src.numel());
-        std::vector<int64_t> h_idx(idx_numel);
-        queue.memcpy(h_out.data(), output.data_ptr(), self.numel() * sizeof(double));
-        queue.memcpy(h_src.data(), src.data_ptr(), src.numel() * sizeof(double));
-        queue.memcpy(h_idx.data(), index.data_ptr(), idx_numel * sizeof(int64_t)).wait();
+        double* out_ptr = get_data_ptr<double>(output);
+        const double* src_ptr = get_data_ptr<const double>(src);
+        const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
 
-        for (int64_t flat = 0; flat < idx_numel; ++flat) {
+        std::array<int64_t, 8> d_out_strides{}, d_idx_strides{};
+        for (int64_t d = 0; d < ndim; ++d) {
+            d_out_strides[d] = out_strides[d];
+            d_idx_strides[d] = idx_strides[d];
+        }
+
+        queue.parallel_for(sycl::range<1>(idx_numel), [=](sycl::id<1> id) {
+            int64_t flat = id[0];
             int64_t remaining = flat;
             int64_t out_offset = 0;
             for (int64_t d = 0; d < ndim; ++d) {
-                int64_t coord = remaining / idx_strides[d];
-                remaining %= idx_strides[d];
+                int64_t coord = remaining / d_idx_strides[d];
+                remaining %= d_idx_strides[d];
                 if (d == dim) {
-                    out_offset += h_idx[flat] * out_strides[d];
+                    out_offset += idx_ptr[flat] * d_out_strides[d];
                 } else {
-                    out_offset += coord * out_strides[d];
+                    out_offset += coord * d_out_strides[d];
                 }
             }
-            h_out[out_offset] += h_src[flat];
-        }
-        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), self.numel() * sizeof(double)).wait();
+            sycl::atomic_ref<double, sycl::memory_order::relaxed,
+                            sycl::memory_scope::device,
+                            sycl::access::address_space::global_space>
+                atomic_out(out_ptr[out_offset]);
+            atomic_out.fetch_add(src_ptr[flat]);
+        }).wait();
     } else if (self.dtype() == DType::Int32) {
-        std::vector<int32_t> h_out(self.numel());
-        std::vector<int32_t> h_src(src.numel());
-        std::vector<int64_t> h_idx(idx_numel);
-        queue.memcpy(h_out.data(), output.data_ptr(), self.numel() * sizeof(int32_t));
-        queue.memcpy(h_src.data(), src.data_ptr(), src.numel() * sizeof(int32_t));
-        queue.memcpy(h_idx.data(), index.data_ptr(), idx_numel * sizeof(int64_t)).wait();
+        int32_t* out_ptr = get_data_ptr<int32_t>(output);
+        const int32_t* src_ptr = get_data_ptr<const int32_t>(src);
+        const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
 
-        for (int64_t flat = 0; flat < idx_numel; ++flat) {
+        std::array<int64_t, 8> d_out_strides{}, d_idx_strides{};
+        for (int64_t d = 0; d < ndim; ++d) {
+            d_out_strides[d] = out_strides[d];
+            d_idx_strides[d] = idx_strides[d];
+        }
+
+        queue.parallel_for(sycl::range<1>(idx_numel), [=](sycl::id<1> id) {
+            int64_t flat = id[0];
             int64_t remaining = flat;
             int64_t out_offset = 0;
             for (int64_t d = 0; d < ndim; ++d) {
-                int64_t coord = remaining / idx_strides[d];
-                remaining %= idx_strides[d];
+                int64_t coord = remaining / d_idx_strides[d];
+                remaining %= d_idx_strides[d];
                 if (d == dim) {
-                    out_offset += h_idx[flat] * out_strides[d];
+                    out_offset += idx_ptr[flat] * d_out_strides[d];
                 } else {
-                    out_offset += coord * out_strides[d];
+                    out_offset += coord * d_out_strides[d];
                 }
             }
-            h_out[out_offset] += h_src[flat];
-        }
-        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), self.numel() * sizeof(int32_t)).wait();
+            sycl::atomic_ref<int32_t, sycl::memory_order::relaxed,
+                            sycl::memory_scope::device,
+                            sycl::access::address_space::global_space>
+                atomic_out(out_ptr[out_offset]);
+            atomic_out.fetch_add(src_ptr[flat]);
+        }).wait();
     } else if (self.dtype() == DType::Int64) {
-        std::vector<int64_t> h_out(self.numel());
-        std::vector<int64_t> h_src(src.numel());
-        std::vector<int64_t> h_idx(idx_numel);
-        queue.memcpy(h_out.data(), output.data_ptr(), self.numel() * sizeof(int64_t));
-        queue.memcpy(h_src.data(), src.data_ptr(), src.numel() * sizeof(int64_t));
-        queue.memcpy(h_idx.data(), index.data_ptr(), idx_numel * sizeof(int64_t)).wait();
+        int64_t* out_ptr = get_data_ptr<int64_t>(output);
+        const int64_t* src_ptr = get_data_ptr<const int64_t>(src);
+        const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
 
-        for (int64_t flat = 0; flat < idx_numel; ++flat) {
+        std::array<int64_t, 8> d_out_strides{}, d_idx_strides{};
+        for (int64_t d = 0; d < ndim; ++d) {
+            d_out_strides[d] = out_strides[d];
+            d_idx_strides[d] = idx_strides[d];
+        }
+
+        queue.parallel_for(sycl::range<1>(idx_numel), [=](sycl::id<1> id) {
+            int64_t flat = id[0];
             int64_t remaining = flat;
             int64_t out_offset = 0;
             for (int64_t d = 0; d < ndim; ++d) {
-                int64_t coord = remaining / idx_strides[d];
-                remaining %= idx_strides[d];
+                int64_t coord = remaining / d_idx_strides[d];
+                remaining %= d_idx_strides[d];
                 if (d == dim) {
-                    out_offset += h_idx[flat] * out_strides[d];
+                    out_offset += idx_ptr[flat] * d_out_strides[d];
                 } else {
-                    out_offset += coord * out_strides[d];
+                    out_offset += coord * d_out_strides[d];
                 }
             }
-            h_out[out_offset] += h_src[flat];
-        }
-        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), self.numel() * sizeof(int64_t)).wait();
+            sycl::atomic_ref<int64_t, sycl::memory_order::relaxed,
+                            sycl::memory_scope::device,
+                            sycl::access::address_space::global_space>
+                atomic_out(out_ptr[out_offset]);
+            atomic_out.fetch_add(src_ptr[flat]);
+        }).wait();
     } else {
         throw std::runtime_error("scatter_add: unsupported dtype");
     }
@@ -1393,72 +1288,75 @@ auto put_kernel(
     if (num_indices == 0) return output;
 
     if (accumulate) {
-        // Accumulate mode: must use host-side loop to avoid data races
-        // (SYCL atomics on float are limited)
+        // Accumulate mode: use device-side parallel_for with atomic operations
         if (input.dtype() == DType::Float32) {
-            std::vector<float> h_out(total_size);
-            std::vector<float> h_src(source.numel());
-            std::vector<int64_t> h_idx(num_indices);
-            queue.memcpy(h_out.data(), output.data_ptr(), total_size * sizeof(float));
-            queue.memcpy(h_src.data(), source.data_ptr(), source.numel() * sizeof(float));
-            queue.memcpy(h_idx.data(), indices.data_ptr(), num_indices * sizeof(int64_t)).wait();
+            float* out_ptr = get_data_ptr<float>(output);
+            const float* src_ptr = get_data_ptr<const float>(source);
+            const int64_t* idx_ptr = get_data_ptr<const int64_t>(indices);
 
-            for (int64_t i = 0; i < num_indices; ++i) {
-                int64_t target_idx = h_idx[i];
+            queue.parallel_for<PutKernelFloat32Acc>(sycl::range<1>(num_indices), [=](sycl::id<1> id) {
+                int64_t i = id[0];
+                int64_t target_idx = idx_ptr[i];
                 if (target_idx < 0) target_idx += total_size;
                 if (target_idx >= 0 && target_idx < total_size) {
-                    h_out[target_idx] += h_src[i];
+                    sycl::atomic_ref<float, sycl::memory_order::relaxed,
+                                    sycl::memory_scope::device,
+                                    sycl::access::address_space::global_space>
+                        atomic_out(out_ptr[target_idx]);
+                    atomic_out.fetch_add(src_ptr[i]);
                 }
-            }
-            queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), total_size * sizeof(float)).wait();
+            }).wait();
         } else if (input.dtype() == DType::Float64) {
-            std::vector<double> h_out(total_size);
-            std::vector<double> h_src(source.numel());
-            std::vector<int64_t> h_idx(num_indices);
-            queue.memcpy(h_out.data(), output.data_ptr(), total_size * sizeof(double));
-            queue.memcpy(h_src.data(), source.data_ptr(), source.numel() * sizeof(double));
-            queue.memcpy(h_idx.data(), indices.data_ptr(), num_indices * sizeof(int64_t)).wait();
+            double* out_ptr = get_data_ptr<double>(output);
+            const double* src_ptr = get_data_ptr<const double>(source);
+            const int64_t* idx_ptr = get_data_ptr<const int64_t>(indices);
 
-            for (int64_t i = 0; i < num_indices; ++i) {
-                int64_t target_idx = h_idx[i];
+            queue.parallel_for<PutKernelFloat64Acc>(sycl::range<1>(num_indices), [=](sycl::id<1> id) {
+                int64_t i = id[0];
+                int64_t target_idx = idx_ptr[i];
                 if (target_idx < 0) target_idx += total_size;
                 if (target_idx >= 0 && target_idx < total_size) {
-                    h_out[target_idx] += h_src[i];
+                    sycl::atomic_ref<double, sycl::memory_order::relaxed,
+                                    sycl::memory_scope::device,
+                                    sycl::access::address_space::global_space>
+                        atomic_out(out_ptr[target_idx]);
+                    atomic_out.fetch_add(src_ptr[i]);
                 }
-            }
-            queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), total_size * sizeof(double)).wait();
+            }).wait();
         } else if (input.dtype() == DType::Int32) {
-            std::vector<int32_t> h_out(total_size);
-            std::vector<int32_t> h_src(source.numel());
-            std::vector<int64_t> h_idx(num_indices);
-            queue.memcpy(h_out.data(), output.data_ptr(), total_size * sizeof(int32_t));
-            queue.memcpy(h_src.data(), source.data_ptr(), source.numel() * sizeof(int32_t));
-            queue.memcpy(h_idx.data(), indices.data_ptr(), num_indices * sizeof(int64_t)).wait();
+            int32_t* out_ptr = get_data_ptr<int32_t>(output);
+            const int32_t* src_ptr = get_data_ptr<const int32_t>(source);
+            const int64_t* idx_ptr = get_data_ptr<const int64_t>(indices);
 
-            for (int64_t i = 0; i < num_indices; ++i) {
-                int64_t target_idx = h_idx[i];
+            queue.parallel_for<PutKernelInt32Acc>(sycl::range<1>(num_indices), [=](sycl::id<1> id) {
+                int64_t i = id[0];
+                int64_t target_idx = idx_ptr[i];
                 if (target_idx < 0) target_idx += total_size;
                 if (target_idx >= 0 && target_idx < total_size) {
-                    h_out[target_idx] += h_src[i];
+                    sycl::atomic_ref<int32_t, sycl::memory_order::relaxed,
+                                    sycl::memory_scope::device,
+                                    sycl::access::address_space::global_space>
+                        atomic_out(out_ptr[target_idx]);
+                    atomic_out.fetch_add(src_ptr[i]);
                 }
-            }
-            queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), total_size * sizeof(int32_t)).wait();
+            }).wait();
         } else if (input.dtype() == DType::Int64) {
-            std::vector<int64_t> h_out(total_size);
-            std::vector<int64_t> h_src(source.numel());
-            std::vector<int64_t> h_idx(num_indices);
-            queue.memcpy(h_out.data(), output.data_ptr(), total_size * sizeof(int64_t));
-            queue.memcpy(h_src.data(), source.data_ptr(), source.numel() * sizeof(int64_t));
-            queue.memcpy(h_idx.data(), indices.data_ptr(), num_indices * sizeof(int64_t)).wait();
+            int64_t* out_ptr = get_data_ptr<int64_t>(output);
+            const int64_t* src_ptr = get_data_ptr<const int64_t>(source);
+            const int64_t* idx_ptr = get_data_ptr<const int64_t>(indices);
 
-            for (int64_t i = 0; i < num_indices; ++i) {
-                int64_t target_idx = h_idx[i];
+            queue.parallel_for<PutKernelInt64Acc>(sycl::range<1>(num_indices), [=](sycl::id<1> id) {
+                int64_t i = id[0];
+                int64_t target_idx = idx_ptr[i];
                 if (target_idx < 0) target_idx += total_size;
                 if (target_idx >= 0 && target_idx < total_size) {
-                    h_out[target_idx] += h_src[i];
+                    sycl::atomic_ref<int64_t, sycl::memory_order::relaxed,
+                                    sycl::memory_scope::device,
+                                    sycl::access::address_space::global_space>
+                        atomic_out(out_ptr[target_idx]);
+                    atomic_out.fetch_add(src_ptr[i]);
                 }
-            }
-            queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), total_size * sizeof(int64_t)).wait();
+            }).wait();
         } else {
             throw std::runtime_error("put_kernel: unsupported dtype for accumulate mode");
         }

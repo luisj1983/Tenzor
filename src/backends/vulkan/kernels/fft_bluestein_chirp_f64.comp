@@ -1,0 +1,34 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Bluestein chirp multiplication for non-power-of-2 FFT — Float64
+// Complex multiply: data[k] *= chirp[k] (or conj(chirp[k]))
+// Data layout: interleaved real/imag pairs — [re0, im0, re1, im1, ...]
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer DataBuf  { double data[];  };
+layout(set = 0, binding = 1) buffer ChirpBuf { double chirp[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of complex elements to process
+    uint conjugate;  // 1 = multiply by conj(chirp), 0 = multiply by chirp
+};
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    if (tid >= n) return;
+
+    uint base = tid * 2;
+
+    double dr = data[base];
+    double di = data[base + 1];
+    double cr = chirp[base];
+    double ci = chirp[base + 1];
+
+    if (conjugate != 0) ci = -ci;
+
+    // Complex multiply: (dr + di*j) * (cr + ci*j)
+    data[base]     = dr * cr - di * ci;
+    data[base + 1] = dr * ci + di * cr;
+}

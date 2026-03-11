@@ -386,6 +386,9 @@ namespace oneapi {
     auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offsets,
                                       const std::string& mode, bool include_last_offset,
                                       sycl::queue& queue) -> Tensor;
+    auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& embeddings,
+                                       const Tensor& offsets, const OpAttributes& attrs,
+                                       sycl::queue& queue) -> Tensor;
 
     // ---- Im2col/Col2im operations (kernels/im2col.cpp) ----
     auto im2col_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
@@ -577,6 +580,7 @@ namespace oneapi {
                             sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor>;
     auto linalg_qr_kernel(const Tensor& input, sycl::queue& queue) -> std::pair<Tensor, Tensor>;
     auto linalg_eigh_kernel(const Tensor& input, sycl::queue& queue) -> std::pair<Tensor, Tensor>;
+    auto linalg_eig_kernel(const Tensor& input, sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor>;
     auto linalg_cholesky_kernel(const Tensor& input, bool upper, sycl::queue& queue) -> Tensor;
 
     // ---- FFT operations (kernels/fft.cpp) ----
@@ -2769,6 +2773,13 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
                                                          include_last_offset, get_q(inputs))};
         });
 
+    table.register_kernel(OpId::EmbeddingBagBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // inputs: [grad_output, embeddings, offsets]
+            return {oneapi::embedding_bag_backward_kernel(
+                inputs[0], inputs[1], inputs[2], attrs, get_q(inputs))};
+        });
+
     table.register_kernel(OpId::DepthwiseConv2d,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             int64_t stride = attrs.get_int(AttrKey::Stride, 1);
@@ -2827,6 +2838,12 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
             auto [W, V] = oneapi::linalg_eigh_kernel(inputs[0], get_q(inputs));
             return {W, V};
+        });
+
+    table.register_kernel(OpId::LinalgEig,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            auto [WR, WI, V] = oneapi::linalg_eig_kernel(inputs[0], get_q(inputs));
+            return {WR, WI, V};
         });
 
     table.register_kernel(OpId::LinalgCholesky,

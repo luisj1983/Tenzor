@@ -566,6 +566,7 @@ namespace rocm {
     auto linalg_svd_kernel(const Tensor& A, bool full_matrices, hipStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
     auto linalg_qr_kernel(const Tensor& A, hipStream_t stream) -> std::tuple<Tensor, Tensor>;
     auto linalg_eigh_kernel(const Tensor& A, hipStream_t stream) -> std::tuple<Tensor, Tensor>;
+    auto linalg_eig_kernel(const Tensor& A, hipStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
     auto linalg_cholesky_kernel(const Tensor& A, bool upper, hipStream_t stream) -> Tensor;
 #endif // TENZOR_HAS_ROCSOLVER
 
@@ -2235,6 +2236,10 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::LinalgEigh, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
         auto [W, V] = rocm::linalg_eigh_kernel(inputs[0], get_hip_stream(attrs));
         return {W, V};
+    });
+    table.register_kernel(OpId::LinalgEig, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto [WR, WI, V] = rocm::linalg_eig_kernel(inputs[0], get_hip_stream(attrs));
+        return {WR, WI, V};
     });
     table.register_single_output_kernel(OpId::LinalgCholesky, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         bool upper = attrs.get_bool(AttrKey::Upper, false);

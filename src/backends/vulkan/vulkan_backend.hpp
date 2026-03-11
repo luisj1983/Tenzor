@@ -599,6 +599,10 @@ public:
     auto runFFTButterfly(const Tensor& input, uint32_t fft_size, uint32_t direction,
                          uint32_t batch_offset) -> Tensor;
     auto runFFTScale(Tensor& data, uint32_t n, double scale_factor) -> void;
+    auto runFFTChirpMultiply(Tensor& data, const Tensor& chirp, uint32_t n,
+                              bool conjugate) -> void;
+    auto dispatchFFTBluestein(const Tensor& input, int64_t signal_len,
+                               uint32_t direction) -> Tensor;
 
     // Linear algebra operations (native Vulkan shaders for small matrices, CPU fallback for large)
     auto dispatchLinalgDet(const Tensor& input) -> Tensor;
