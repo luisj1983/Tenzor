@@ -40,13 +40,13 @@ inline std::vector<int64_t> to_vector(const std::span<const int64_t>& s) {
     return std::vector<int64_t>(s.begin(), s.end());
 }
 
-// Scale a scalar value in device memory using host round-trip (eliminates 1-thread kernel launch)
-inline void scale_scalar_host(float* d_val, float scale, cudaStream_t stream = nullptr) {
-    float host_val;
-    TENZOR_CUDA_CHECK(cudaMemcpyAsync(&host_val, d_val, sizeof(float), cudaMemcpyDeviceToHost, stream));
-    TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream)); // need sync to read host_val
-    host_val *= scale;
-    TENZOR_CUDA_CHECK(cudaMemcpyAsync(d_val, &host_val, sizeof(float), cudaMemcpyHostToDevice, stream));
+// Scale a scalar value in device memory entirely on-device (no D2H sync)
+__global__ void scale_scalar_kernel(float* val, float scale) {
+    *val *= scale;
+}
+
+inline void scale_scalar_device(float* d_val, float scale, cudaStream_t stream = nullptr) {
+    scale_scalar_kernel<<<1, 1, 0, stream>>>(d_val, scale);
 }
 
 // Set a scalar value in device memory using cudaMemcpy (eliminates 1-thread kernel launch)
@@ -78,7 +78,7 @@ inline Tensor cuda_sum_device(const Tensor& t, float scale = 1.0f) {
 
     // Apply scale if needed
     if (scale != 1.0f) {
-        scale_scalar_host(d_out, scale);
+        scale_scalar_device(d_out, scale);
     }
 
     return result;

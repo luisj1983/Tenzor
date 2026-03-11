@@ -1027,7 +1027,7 @@ auto argsort_kernel(const Tensor& input, int64_t dim, bool descending, sycl::que
     if (inner_size == 1) {
         int64_t total_elems = input.numel();
         int64_t outer_size = total_elems / (dim_size * inner_size);
-        auto policy = oneapi::dpl::execution::make_device_policy(queue);
+        auto policy = ::oneapi::dpl::execution::make_device_policy(queue);
 
         auto device_argsort_impl = [&](const auto* in_ptr) {
             using T = std::remove_const_t<std::remove_pointer_t<decltype(in_ptr)>>;
@@ -1047,10 +1047,10 @@ auto argsort_kernel(const Tensor& input, int64_t dim, bool descending, sycl::que
                 T* slice_vals = tmp_vals + o * dim_size;
                 int64_t* slice_idx = idx_ptr + o * dim_size;
                 if (descending) {
-                    oneapi::dpl::sort_by_key(policy, slice_vals, slice_vals + dim_size,
+                    ::oneapi::dpl::sort_by_key(policy, slice_vals, slice_vals + dim_size,
                                               slice_idx, std::greater<T>());
                 } else {
-                    oneapi::dpl::sort_by_key(policy, slice_vals, slice_vals + dim_size,
+                    ::oneapi::dpl::sort_by_key(policy, slice_vals, slice_vals + dim_size,
                                               slice_idx);
                 }
             }

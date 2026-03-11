@@ -520,6 +520,16 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchRandn(attrs.get_int_list(AttrKey::Shape), dtype_from_string(attrs.get_string(AttrKey::Dtype)))};
     });
 
+    table.register_kernel(OpId::Randint, [](std::span<const Tensor>, const OpAttributes& attrs) {
+        int64_t low = attrs.get_int(AttrKey::Start, 0);
+        int64_t high = attrs.get_int(AttrKey::End, 0);
+        auto shape = attrs.get_int_list(AttrKey::Shape);
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "int32"));
+        auto device_id = static_cast<int32_t>(attrs.get_int(AttrKey::Device, 0));
+        Device device(Device::Type::Vulkan, device_id);
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchRandint(low, high, shape, dtype, device)};
+    });
+
     table.register_kernel(OpId::Arange, [](std::span<const Tensor>, const OpAttributes& attrs) {
         auto device_id = static_cast<int32_t>(attrs.get_int(AttrKey::Device, 0));
         return std::vector<Tensor>{get_vulkan_backend()->dispatchArange(
@@ -931,6 +941,18 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             bool include_last_offset = attrs.get_bool(AttrKey::IncludeLastOffset, false);
             return get_vulkan_backend()->dispatchEmbeddingBag(
                 inputs[0], inputs[1], embedding_dim, mode, include_last_offset);
+        });
+
+    table.register_kernel(OpId::EmbeddingBagBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // inputs: [grad_output, indices, offsets]
+            int64_t num_embeddings = attrs.get_int(AttrKey::NumEmbeddings, 0);
+            int64_t embedding_dim = attrs.get_int(AttrKey::EmbeddingDim, 0);
+            std::string mode{attrs.get_string(AttrKey::Mode, "sum")};
+            bool include_last_offset = attrs.get_bool(AttrKey::IncludeLastOffset, false);
+            return {get_vulkan_backend()->dispatchEmbeddingBagBackward(
+                inputs[0], inputs[1], inputs[2], num_embeddings, embedding_dim,
+                mode, include_last_offset)};
         });
 
     // ========================================================================

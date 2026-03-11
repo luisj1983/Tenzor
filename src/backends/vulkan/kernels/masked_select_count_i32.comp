@@ -1,0 +1,77 @@
+#version 450
+
+// Masked select - Pass 1: Count true elements in mask (Int32 variant)
+// Uses parallel reduction to count efficiently.
+// NOTE: The count logic is identical to the float variant — the mask format is the same.
+// This shader exists for consistency with the i32 gather shader, but the count shader
+// is dtype-agnostic (it only reads the mask, not the input data).
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer Mask { uint mask_data[]; };
+layout(binding = 1) buffer Count { uint count[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint mask_is_float;
+    uint pass;
+} params;
+
+shared uint shared_count[WORKGROUP_SIZE];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint gid = gl_GlobalInvocationID.x;
+    uint wid = gl_WorkGroupID.x;
+
+    if (params.pass == 0) {
+        uint local_count = 0;
+
+        if (gid < params.n_elements) {
+            if (params.mask_is_float == 1) {
+                float val = uintBitsToFloat(mask_data[gid]);
+                if (val != 0.0) local_count = 1;
+            } else {
+                uint byte_idx = gid / 4;
+                uint bit_offset = (gid % 4) * 8;
+                uint byte_val = (mask_data[byte_idx] >> bit_offset) & 0xFF;
+                if (byte_val != 0) local_count = 1;
+            }
+        }
+
+        shared_count[tid] = local_count;
+        barrier();
+
+        for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+            if (tid < s) {
+                shared_count[tid] += shared_count[tid + s];
+            }
+            barrier();
+        }
+
+        if (tid == 0) {
+            count[wid] = shared_count[0];
+        }
+    } else {
+        uint n_workgroups = (params.n_elements + 255) / 256;
+
+        uint local_sum = 0;
+        for (uint i = tid; i < n_workgroups; i += WORKGROUP_SIZE) {
+            local_sum += count[i];
+        }
+
+        shared_count[tid] = local_sum;
+        barrier();
+
+        for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+            if (tid < s) {
+                shared_count[tid] += shared_count[tid + s];
+            }
+            barrier();
+        }
+
+        if (tid == 0) {
+            count[0] = shared_count[0];
+        }
+    }
+}

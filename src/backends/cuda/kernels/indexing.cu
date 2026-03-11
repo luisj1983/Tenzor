@@ -17,12 +17,14 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/backend/caching_allocator.hpp"
+#include "tenzor/backend/backend.hpp"
 #include "cuda_launch_utils.cuh"
 #include <stdexcept>
 #include <vector>
 #include <cub/cub.cuh>
 #include "tenzor/utils/config.hpp"
 #include <thrust/iterator/counting_iterator.h>
+#include "cuda_common.cuh"
 
 namespace tenzor {
 
@@ -33,11 +35,6 @@ namespace cuda {
 
 // Centralized error checking
 #include "../cuda_error.hpp"
-
-#define CUDA_GRID_STRIDE_LOOP(i, n) \
-    for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; \
-         i < (n); \
-         i += blockDim.x * gridDim.x)
 
 constexpr int BLOCK_SIZE = 256;
 
@@ -69,7 +66,7 @@ __global__ void index_select_kernel_impl(
     int64_t total_output,
     int* error_flag) {
 
-    CUDA_GRID_STRIDE_LOOP(idx, total_output) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_output) {
         // Decompose output index into (outer, index_pos, inner)
         int64_t inner_idx = idx % inner_size;
         int64_t temp = idx / inner_size;
@@ -228,7 +225,7 @@ __global__ void gather_kernel_impl(
     int64_t total_output,
     int* error_flag) {
 
-    CUDA_GRID_STRIDE_LOOP(idx, total_output) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_output) {
         // Decompose output index into (outer, index_pos, inner)
         int64_t inner_idx = idx % inner_size;
         int64_t temp = idx / inner_size;
@@ -381,7 +378,7 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index,
 // Kernel 1: Copy input to output
 template<typename T>
 __global__ void copy_kernel_impl(const T* input, T* output, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = input[idx];
     }
 }
@@ -399,7 +396,7 @@ __global__ void scatter_values_kernel_impl(
     int64_t total_scatter,
     int* error_flag) {
 
-    CUDA_GRID_STRIDE_LOOP(idx, total_scatter) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_scatter) {
         int64_t inner_idx = idx % inner_size;
         int64_t temp = idx / inner_size;
         int64_t index_pos = temp % index_dim_size;
@@ -623,7 +620,7 @@ __global__ void scatter_add_kernel_impl(
     int64_t total_scatter,
     int* error_flag) {
 
-    CUDA_GRID_STRIDE_LOOP(idx, total_scatter) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_scatter) {
         int64_t inner_idx = idx % inner_size;
         int64_t temp = idx / inner_size;
         int64_t index_pos = temp % index_dim_size;
@@ -844,7 +841,7 @@ __global__ void masked_fill_kernel_impl(
     T* output,
     int64_t n) {
 
-    CUDA_GRID_STRIDE_LOOP(i, n) {
+    TENZOR_CUDA_KERNEL_LOOP(i, n) {
         output[i] = mask[i] ? fill_value : input[i];
     }
 }
@@ -920,7 +917,7 @@ __global__ void where_kernel_impl(
     T* output,
     int64_t n) {
 
-    CUDA_GRID_STRIDE_LOOP(i, n) {
+    TENZOR_CUDA_KERNEL_LOOP(i, n) {
         output[i] = condition[i] ? x[i] : y[i];
     }
 }
@@ -998,7 +995,7 @@ __global__ void embedding_kernel_impl(
 
     int64_t total_elements = num_indices * embedding_dim;
 
-    CUDA_GRID_STRIDE_LOOP(idx, total_elements) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_elements) {
         int64_t i = idx / embedding_dim;  // which index
         int64_t j = idx % embedding_dim;  // which embedding dimension
 
@@ -1122,7 +1119,7 @@ __global__ void embedding_backward_kernel_impl(
 
     int64_t total_elements = num_indices * embedding_dim;
 
-    CUDA_GRID_STRIDE_LOOP(idx, total_elements) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_elements) {
         int64_t i = idx / embedding_dim;  // which index
         int64_t j = idx % embedding_dim;  // which embedding dimension
 
@@ -1145,7 +1142,7 @@ __global__ void embedding_backward_fp16_kernel_impl(
 
     int64_t total_elements = num_indices * embedding_dim;
 
-    CUDA_GRID_STRIDE_LOOP(idx, total_elements) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_elements) {
         int64_t i = idx / embedding_dim;
         int64_t j = idx % embedding_dim;
 
@@ -1181,7 +1178,7 @@ __global__ void embedding_backward_bf16_kernel_impl(
 
     int64_t total_elements = num_indices * embedding_dim;
 
-    CUDA_GRID_STRIDE_LOOP(idx, total_elements) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_elements) {
         int64_t i = idx / embedding_dim;
         int64_t j = idx % embedding_dim;
 
@@ -1299,7 +1296,7 @@ __global__ void one_hot_kernel_impl(
     int64_t num_classes) {
 
     int64_t total = batch_size * num_classes;
-    CUDA_GRID_STRIDE_LOOP(idx, total) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total) {
         int64_t batch = idx / num_classes;
         int64_t cls = idx % num_classes;
         output[idx] = (static_cast<int64_t>(indices[batch]) == cls) ? 1.0f : 0.0f;
@@ -1346,7 +1343,7 @@ __global__ void nonzero_flag_kernel(
     int64_t* flags,
     int64_t n) {
 
-    CUDA_GRID_STRIDE_LOOP(i, n) {
+    TENZOR_CUDA_KERNEL_LOOP(i, n) {
         flags[i] = (input[i] != static_cast<T>(0)) ? 1 : 0;
     }
 }
@@ -1358,7 +1355,7 @@ __global__ void nonzero_flag_kernel<__half>(
     int64_t* flags,
     int64_t n) {
 
-    CUDA_GRID_STRIDE_LOOP(i, n) {
+    TENZOR_CUDA_KERNEL_LOOP(i, n) {
         flags[i] = (__hne(input[i], __float2half(0.0f))) ? 1 : 0;
     }
 }
@@ -1370,7 +1367,7 @@ __global__ void nonzero_flag_kernel<__nv_bfloat16>(
     int64_t* flags,
     int64_t n) {
 
-    CUDA_GRID_STRIDE_LOOP(i, n) {
+    TENZOR_CUDA_KERNEL_LOOP(i, n) {
 #if __CUDA_ARCH__ >= 800
         flags[i] = (__hne(input[i], __float2bfloat16(0.0f))) ? 1 : 0;
 #else
@@ -1387,7 +1384,7 @@ __global__ void decompose_flat_indices_kernel(
     int64_t num_indices,
     int64_t ndim) {
 
-    CUDA_GRID_STRIDE_LOOP(i, num_indices) {
+    TENZOR_CUDA_KERNEL_LOOP(i, num_indices) {
         int64_t flat = flat_indices[i];
         for (int64_t d = ndim - 1; d >= 0; --d) {
             output[i * ndim + d] = flat % shape[d];
@@ -1498,7 +1495,7 @@ __global__ void take_kernel_impl(
     int64_t input_size,
     int64_t indices_size
 ) {
-    CUDA_GRID_STRIDE_LOOP(idx, indices_size) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, indices_size) {
         int64_t index = indices[idx];
         // Handle negative indices
         if (index < 0) {
@@ -1580,7 +1577,7 @@ __global__ void put_kernel_impl(
     int64_t total_size,
     bool accumulate
 ) {
-    CUDA_GRID_STRIDE_LOOP(idx, num_indices) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, num_indices) {
         int64_t target_idx = indices[idx];
         // Handle negative indices
         if (target_idx < 0) {
@@ -1607,7 +1604,7 @@ __global__ void put_kernel_impl<int8_t>(
     int64_t total_size,
     bool accumulate
 ) {
-    CUDA_GRID_STRIDE_LOOP(idx, num_indices) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, num_indices) {
         int64_t target_idx = indices[idx];
         if (target_idx < 0) {
             target_idx += total_size;
@@ -1643,7 +1640,7 @@ __global__ void put_kernel_impl<uint8_t>(
     int64_t total_size,
     bool accumulate
 ) {
-    CUDA_GRID_STRIDE_LOOP(idx, num_indices) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, num_indices) {
         int64_t target_idx = indices[idx];
         if (target_idx < 0) {
             target_idx += total_size;
@@ -1678,7 +1675,7 @@ __global__ void put_kernel_impl<int32_t>(
     int64_t total_size,
     bool accumulate
 ) {
-    CUDA_GRID_STRIDE_LOOP(idx, num_indices) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, num_indices) {
         int64_t target_idx = indices[idx];
         if (target_idx < 0) {
             target_idx += total_size;
@@ -1714,7 +1711,7 @@ __global__ void put_kernel_impl<int64_t>(
     int64_t total_size,
     bool accumulate
 ) {
-    CUDA_GRID_STRIDE_LOOP(idx, num_indices) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, num_indices) {
         int64_t target_idx = indices[idx];
         if (target_idx < 0) {
             target_idx += total_size;
@@ -1739,7 +1736,7 @@ __global__ void put_kernel_impl<__half>(
     int64_t total_size,
     bool accumulate
 ) {
-    CUDA_GRID_STRIDE_LOOP(idx, num_indices) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, num_indices) {
         int64_t target_idx = indices[idx];
         if (target_idx < 0) {
             target_idx += total_size;
@@ -1777,7 +1774,7 @@ __global__ void put_kernel_impl<__nv_bfloat16>(
     int64_t total_size,
     bool accumulate
 ) {
-    CUDA_GRID_STRIDE_LOOP(idx, num_indices) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, num_indices) {
         int64_t target_idx = indices[idx];
         if (target_idx < 0) {
             target_idx += total_size;
@@ -2037,7 +2034,7 @@ __global__ void searchsorted_kernel_impl(
     int64_t num_values,
     bool right) {
 
-    CUDA_GRID_STRIDE_LOOP(i, num_values) {
+    TENZOR_CUDA_KERNEL_LOOP(i, num_values) {
         T v = values[i];
         int64_t lo = 0, hi = seq_len;
         while (lo < hi) {

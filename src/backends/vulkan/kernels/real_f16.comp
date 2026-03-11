@@ -1,0 +1,39 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Extract real parts from interleaved complex buffer — Float16
+// Input: complex float16 values (1 uint32 per complex: real low, imag high)
+// Output: real float16 values packed in uint32 (2 reals per word)
+// output[i] = input_complex[i].real for i in [0, num_complex)
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input { uint in_data[]; };
+layout(binding = 1) buffer Output { uint out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_complex;  // Number of complex numbers (output size)
+} params;
+
+void main() {
+    // Process two output elements per thread (one uint32 output word)
+    uint word_idx = gl_GlobalInvocationID.x;
+    uint num_words = (params.num_complex + 1) / 2;
+    if (word_idx >= num_words) return;
+
+    uint elem0 = word_idx * 2;
+    uint elem1 = word_idx * 2 + 1;
+
+    float r0 = 0.0;
+    float r1 = 0.0;
+
+    if (elem0 < params.num_complex) {
+        vec2 c0 = unpackHalf2x16(in_data[elem0]);
+        r0 = c0.x;
+    }
+    if (elem1 < params.num_complex) {
+        vec2 c1 = unpackHalf2x16(in_data[elem1]);
+        r1 = c1.x;
+    }
+
+    out_data[word_idx] = packHalf2x16(vec2(r0, r1));
+}

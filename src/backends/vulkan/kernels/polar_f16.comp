@@ -1,0 +1,36 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Convert polar coordinates to complex numbers — Float16
+// Input: abs and angle as packed float16 (2 reals per uint32 word)
+// Output: complex float16 (1 uint32 per complex: real low, imag high)
+//   output_complex[i] = abs[i] * cos(angle[i]) + i * abs[i] * sin(angle[i])
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer AbsInput { uint abs_data[]; };
+layout(binding = 1) readonly buffer AngleInput { uint angle_data[]; };
+layout(binding = 2) buffer Output { uint out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_complex;  // Number of complex numbers
+} params;
+
+// Read a single float16 value from a packed real buffer
+float readF16(uint element_idx, uint buf_sel) {
+    uint word_idx = element_idx / 2;
+    uint half_sel = element_idx % 2;
+    uint packed;
+    if (buf_sel == 0) packed = abs_data[word_idx];
+    else packed = angle_data[word_idx];
+    vec2 unpacked = unpackHalf2x16(packed);
+    return (half_sel == 0) ? unpacked.x : unpacked.y;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_complex) return;
+
+    float r = readF16(idx, 0);
+    float theta = readF16(idx, 1);
+    out_data[idx] = packHalf2x16(vec2(r * cos(theta), r * sin(theta)));
+}

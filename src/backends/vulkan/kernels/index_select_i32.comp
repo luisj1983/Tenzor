@@ -1,0 +1,41 @@
+#version 450
+
+// Index select for Int32: select specific indices along a dimension
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { int input_data[]; };
+layout(binding = 1) buffer Indices { int indices[]; };
+layout(binding = 2) buffer Output { int output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_indices;
+    uint dim;
+    uint dim_size;
+    uint inner_size;
+    uint outer_size;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total_output = params.outer_size * params.num_indices * params.inner_size;
+
+    if (idx >= total_output) return;
+
+    uint outer_idx = idx / (params.num_indices * params.inner_size);
+    uint remainder = idx % (params.num_indices * params.inner_size);
+    uint index_pos = remainder / params.inner_size;
+    uint inner_idx = remainder % params.inner_size;
+
+    int select_idx = indices[index_pos];
+
+    if (select_idx < 0 || select_idx >= int(params.dim_size)) {
+        output_data[idx] = 0;
+        return;
+    }
+
+    uint in_idx = outer_idx * (params.dim_size * params.inner_size) +
+                  uint(select_idx) * params.inner_size +
+                  inner_idx;
+
+    output_data[idx] = input_data[in_idx];
+}

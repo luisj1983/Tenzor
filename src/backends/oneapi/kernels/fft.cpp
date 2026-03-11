@@ -4,7 +4,7 @@
  *
  * Implements FFT, IFFT, RFFT, IRFFT, FFT2, IFFT2, FFTN, IFFTN
  * using oneMKL DFT (Discrete Fourier Transform) APIs when available.
- * Falls back to naive O(n^2) DFT when oneMKL is not present.
+ * Falls back to Cooley-Tukey (power-of-2) / Bluestein (general) when oneMKL is not present.
  *
  * Guarded by TENZOR_HAS_ONEMKL.
  */
@@ -1089,7 +1089,7 @@ auto ifftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
     return result;
 }
 
-#else // !TENZOR_HAS_ONEMKL — Cooley-Tukey O(n log n) FFT fallback (naive DFT for non-power-of-2)
+#else // !TENZOR_HAS_ONEMKL — Cooley-Tukey (power-of-2) + Bluestein (general) FFT fallback
 #pragma message("WARNING: Building without oneMKL — using slower FFT fallback")
 
 namespace {
@@ -1165,34 +1165,129 @@ void cooley_tukey_fft_sycl(T* data, int64_t N, T sign, sycl::queue& queue) {
     }
 }
 
-// Naive O(n^2) DFT for non-power-of-2 sizes (host-side)
+// Next power of 2 >= n
+inline int64_t next_pow2(int64_t n) {
+    int64_t p = 1;
+    while (p < n) p <<= 1;
+    return p;
+}
+
+// Bluestein FFT on device for non-power-of-2 sizes.
+// Converts N-point DFT into a 2M-point circular convolution (M = next power of 2 >= 2N-1)
+// using the Cooley-Tukey FFT for the power-of-2 convolution.
+//
+// Input:  d_in  — real input on device, layout [batch_size, signal_len, inner_size]
+// Output: d_out — interleaved complex output on device,
+//                 layout [batch_size, signal_len, inner_size, 2]
 template<typename T>
-void naive_dft_host(const T* h_in, T* h_out,
-                    int64_t signal_len, int64_t batch_size, int64_t inner_size) {
+void bluestein_fft_sycl(const T* d_in, T* d_out,
+                        int64_t signal_len, int64_t batch_size, int64_t inner_size,
+                        sycl::queue& queue) {
+    const int64_t N = signal_len;
+    const int64_t M = next_pow2(2 * N - 1);
     constexpr T PI = static_cast<T>(3.14159265358979323846);
+
+    // Allocate device buffers:
+    // chirp: interleaved complex [N, 2]
+    // b_buf: interleaved complex [M, 2] — convolution kernel (shared across all batches/inner)
+    // B_buf: FFT of b_buf [M, 2] — precomputed once
+    // a_buf: interleaved complex [M, 2] — per-(batch, inner) working buffer
+    T* chirp   = sycl::malloc_device<T>(2 * N, queue);
+    T* b_buf   = sycl::malloc_device<T>(2 * M, queue);
+    T* B_buf   = sycl::malloc_device<T>(2 * M, queue);
+    T* a_buf   = sycl::malloc_device<T>(2 * M, queue);
+
+    // Step 1: Generate chirp sequence: chirp[k] = exp(-j * pi * k^2 / N)
+    queue.parallel_for(sycl::range<1>(N), [=](sycl::id<1> idx) {
+        int64_t k = idx[0];
+        T angle = -PI * static_cast<T>(k) * static_cast<T>(k) / static_cast<T>(N);
+        chirp[2 * k]     = sycl::cos(angle);
+        chirp[2 * k + 1] = sycl::sin(angle);
+    }).wait();
+
+    // Step 2: Build convolution kernel b[k] = conj(chirp[k]) for k=0..N-1,
+    //         b[M-k] = conj(chirp[k]) for k=1..N-1, zeros elsewhere
+    // First zero the entire buffer
+    queue.memset(b_buf, 0, 2 * M * sizeof(T)).wait();
+    // b[0..N-1] = conj(chirp[0..N-1])
+    queue.parallel_for(sycl::range<1>(N), [=](sycl::id<1> idx) {
+        int64_t k = idx[0];
+        b_buf[2 * k]     = chirp[2 * k];       // real part (conj doesn't change)
+        b_buf[2 * k + 1] = -chirp[2 * k + 1];  // negate imaginary
+    }).wait();
+    // b[M-k] = conj(chirp[k]) for k=1..N-1 (wrap-around for circular convolution)
+    if (N > 1) {
+        queue.parallel_for(sycl::range<1>(N - 1), [=](sycl::id<1> idx) {
+            int64_t k = idx[0] + 1;
+            int64_t m_idx = M - k;
+            b_buf[2 * m_idx]     = chirp[2 * k];
+            b_buf[2 * m_idx + 1] = -chirp[2 * k + 1];
+        }).wait();
+    }
+
+    // Step 3: Precompute B = FFT(b) — power-of-2 size M
+    queue.memcpy(B_buf, b_buf, 2 * M * sizeof(T)).wait();
+    cooley_tukey_fft_sycl(B_buf, M, static_cast<T>(-1.0), queue);
+
+    // Steps 4-8: Process each (batch, inner) slice
     for (int64_t b = 0; b < batch_size; ++b) {
         for (int64_t inner = 0; inner < inner_size; ++inner) {
-            for (int64_t k = 0; k < signal_len; ++k) {
-                T re_sum = 0, im_sum = 0;
-                for (int64_t t = 0; t < signal_len; ++t) {
-                    int64_t in_idx = b * signal_len * inner_size + t * inner_size + inner;
-                    T val = h_in[in_idx];
-                    T angle = static_cast<T>(-2.0) * PI * static_cast<T>(k) * static_cast<T>(t) / static_cast<T>(signal_len);
-                    re_sum += val * std::cos(angle);
-                    im_sum += val * std::sin(angle);
-                }
-                int64_t out_idx = (b * signal_len * inner_size + k * inner_size + inner) * 2;
-                h_out[out_idx] = re_sum;
-                h_out[out_idx + 1] = im_sum;
-            }
+            // Step 4: Build a[k] = x[k] * chirp[k] for k=0..N-1, zero-pad to M
+            queue.memset(a_buf, 0, 2 * M * sizeof(T)).wait();
+            queue.parallel_for(sycl::range<1>(N), [=](sycl::id<1> idx) {
+                int64_t k = idx[0];
+                int64_t in_idx = b * N * inner_size + k * inner_size + inner;
+                T val = d_in[in_idx];
+                // a[k] = val * chirp[k] (val is real, so: re = val*chirp_re, im = val*chirp_im)
+                a_buf[2 * k]     = val * chirp[2 * k];
+                a_buf[2 * k + 1] = val * chirp[2 * k + 1];
+            }).wait();
+
+            // Step 5: A = FFT(a)
+            cooley_tukey_fft_sycl(a_buf, M, static_cast<T>(-1.0), queue);
+
+            // Step 6: Pointwise multiply A[k] *= B[k] (complex multiply)
+            queue.parallel_for(sycl::range<1>(M), [=](sycl::id<1> idx) {
+                int64_t k = idx[0];
+                T a_re = a_buf[2 * k];
+                T a_im = a_buf[2 * k + 1];
+                T b_re = B_buf[2 * k];
+                T b_im = B_buf[2 * k + 1];
+                a_buf[2 * k]     = a_re * b_re - a_im * b_im;
+                a_buf[2 * k + 1] = a_re * b_im + a_im * b_re;
+            }).wait();
+
+            // Step 7: IFFT — forward FFT with sign=+1, then divide by M
+            cooley_tukey_fft_sycl(a_buf, M, static_cast<T>(1.0), queue);
+            T inv_M = static_cast<T>(1.0) / static_cast<T>(M);
+            queue.parallel_for(sycl::range<1>(2 * M), [=](sycl::id<1> idx) {
+                a_buf[idx[0]] *= inv_M;
+            }).wait();
+
+            // Step 8: result[k] = a[k] * conj(chirp[k]) for k=0..N-1
+            queue.parallel_for(sycl::range<1>(N), [=](sycl::id<1> idx) {
+                int64_t k = idx[0];
+                T a_re = a_buf[2 * k];
+                T a_im = a_buf[2 * k + 1];
+                T c_re = chirp[2 * k];
+                T c_im = -chirp[2 * k + 1]; // conj
+                int64_t out_idx = (b * N * inner_size + k * inner_size + inner) * 2;
+                d_out[out_idx]     = a_re * c_re - a_im * c_im;
+                d_out[out_idx + 1] = a_re * c_im + a_im * c_re;
+            }).wait();
         }
     }
+
+    sycl::free(chirp, queue);
+    sycl::free(b_buf, queue);
+    sycl::free(B_buf, queue);
+    sycl::free(a_buf, queue);
 }
 
 } // anonymous namespace
 
 // ============================================================================
-// FFT - 1D Forward FFT (Cooley-Tukey for power-of-2, naive DFT otherwise)
+// FFT - 1D Forward FFT (Cooley-Tukey for power-of-2, Bluestein otherwise)
 // ============================================================================
 auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                 const std::string& norm, sycl::queue& queue) -> Tensor {
@@ -1246,21 +1341,24 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
             sycl::free(d_buf, queue);
             return output;
         } else {
-            std::vector<float> h_in(numel);
-            queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(float)).wait();
-            std::vector<float> h_out(out_numel, 0.0f);
-            naive_dft_host(h_in.data(), h_out.data(), signal_len, batch_size, inner_size);
+            // Bluestein FFT on device for non-power-of-2 sizes
+            const float* d_in = static_cast<const float*>(input.data_ptr());
+            float* d_out = sycl::malloc_device<float>(out_numel, queue);
+            queue.memset(d_out, 0, out_numel * sizeof(float)).wait();
+            bluestein_fft_sycl(d_in, d_out, signal_len, batch_size, inner_size, queue);
 
-            if (norm == "ortho") {
-                float scale = 1.0f / std::sqrt(static_cast<float>(signal_len));
-                for (auto& v : h_out) v *= scale;
-            } else if (norm == "forward") {
-                float scale = 1.0f / static_cast<float>(signal_len);
-                for (auto& v : h_out) v *= scale;
+            if (norm == "ortho" || norm == "forward") {
+                float scale = (norm == "ortho")
+                    ? 1.0f / std::sqrt(static_cast<float>(signal_len))
+                    : 1.0f / static_cast<float>(signal_len);
+                queue.parallel_for(sycl::range<1>(out_numel), [=](sycl::id<1> idx) {
+                    d_out[idx[0]] *= scale;
+                }).wait();
             }
 
             Tensor output(out_shape, DType::Float32, input.device());
-            queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), out_numel * sizeof(float)).wait();
+            queue.memcpy(const_cast<void*>(output.data_ptr()), d_out, out_numel * sizeof(float)).wait();
+            sycl::free(d_out, queue);
             return output;
         }
     } else if (input.dtype() == DType::Float64) {
@@ -1298,21 +1396,24 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
             sycl::free(d_buf, queue);
             return output;
         } else {
-            std::vector<double> h_in(numel);
-            queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(double)).wait();
-            std::vector<double> h_out(out_numel, 0.0);
-            naive_dft_host(h_in.data(), h_out.data(), signal_len, batch_size, inner_size);
+            // Bluestein FFT on device for non-power-of-2 sizes
+            const double* d_in = static_cast<const double*>(input.data_ptr());
+            double* d_out = sycl::malloc_device<double>(out_numel, queue);
+            queue.memset(d_out, 0, out_numel * sizeof(double)).wait();
+            bluestein_fft_sycl(d_in, d_out, signal_len, batch_size, inner_size, queue);
 
-            if (norm == "ortho") {
-                double scale = 1.0 / std::sqrt(static_cast<double>(signal_len));
-                for (auto& v : h_out) v *= scale;
-            } else if (norm == "forward") {
-                double scale = 1.0 / static_cast<double>(signal_len);
-                for (auto& v : h_out) v *= scale;
+            if (norm == "ortho" || norm == "forward") {
+                double scale = (norm == "ortho")
+                    ? 1.0 / std::sqrt(static_cast<double>(signal_len))
+                    : 1.0 / static_cast<double>(signal_len);
+                queue.parallel_for(sycl::range<1>(out_numel), [=](sycl::id<1> idx) {
+                    d_out[idx[0]] *= scale;
+                }).wait();
             }
 
             Tensor output(out_shape, DType::Float64, input.device());
-            queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), out_numel * sizeof(double)).wait();
+            queue.memcpy(const_cast<void*>(output.data_ptr()), d_out, out_numel * sizeof(double)).wait();
+            sycl::free(d_out, queue);
             return output;
         }
     } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {

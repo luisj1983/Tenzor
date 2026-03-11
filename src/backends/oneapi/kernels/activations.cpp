@@ -2792,36 +2792,28 @@ auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& inpu
             }
         });
 
-        // Compute grad_weight and grad_bias on host (requires reduction across N)
-        std::vector<float> gw_host(C, 0.0f);
-        std::vector<float> gb_host(C, 0.0f);
-        std::vector<float> in_host(N * C * spatial_size);
-        std::vector<float> g_host(N * C * spatial_size);
-        std::vector<float> mean_host(N * C);
-        std::vector<float> rstd_host(N * C);
-
-        queue.memcpy(in_host.data(), in_ptr, in_host.size() * sizeof(float)).wait();
-        queue.memcpy(g_host.data(), g_ptr, g_host.size() * sizeof(float)).wait();
-        queue.memcpy(mean_host.data(), mean_ptr, mean_host.size() * sizeof(float)).wait();
-        queue.memcpy(rstd_host.data(), rstd_ptr, rstd_host.size() * sizeof(float)).wait();
-
-        for (int64_t n = 0; n < N; ++n) {
-            for (int64_t c = 0; c < C; ++c) {
-                int64_t base_idx = (n * C + c) * spatial_size;
-                float m = mean_host[n * C + c];
-                float r = rstd_host[n * C + c];
-                for (int64_t s = 0; s < spatial_size; ++s) {
-                    float x_hat = (in_host[base_idx + s] - m) * r;
-                    gw_host[c] += g_host[base_idx + s] * x_hat;
-                    gb_host[c] += g_host[base_idx + s];
-                }
-            }
-        }
-
+        // Compute grad_weight and grad_bias on device (reduction across N per channel)
         float* gw_ptr = get_data_ptr<float>(grad_weight);
         float* gb_ptr = get_data_ptr<float>(grad_bias);
-        queue.memcpy(gw_ptr, gw_host.data(), C * sizeof(float)).wait();
-        queue.memcpy(gb_ptr, gb_host.data(), C * sizeof(float)).wait();
+
+        queue.parallel_for<class InstanceNormBackwardGradWBFloat32>(
+            sycl::range<1>(C), [=](sycl::id<1> id) {
+            int64_t c = id[0];
+            float gw_sum = 0.0f;
+            float gb_sum = 0.0f;
+            for (int64_t n = 0; n < N; ++n) {
+                int64_t base = (n * C + c) * spatial_size;
+                float m = mean_ptr[n * C + c];
+                float r = rstd_ptr[n * C + c];
+                for (int64_t s = 0; s < spatial_size; ++s) {
+                    float x_hat = (in_ptr[base + s] - m) * r;
+                    gw_sum += g_ptr[base + s] * x_hat;
+                    gb_sum += g_ptr[base + s];
+                }
+            }
+            gw_ptr[c] = gw_sum;
+            gb_ptr[c] = gb_sum;
+        });
     }
     else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
@@ -2856,36 +2848,28 @@ auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& inpu
             }
         });
 
-        // grad_weight/bias reduction on host
-        std::vector<double> gw_host(C, 0.0);
-        std::vector<double> gb_host(C, 0.0);
-        std::vector<double> in_host(N * C * spatial_size);
-        std::vector<double> g_host(N * C * spatial_size);
-        std::vector<float> mean_host(N * C);
-        std::vector<float> rstd_host(N * C);
-
-        queue.memcpy(in_host.data(), in_ptr, in_host.size() * sizeof(double)).wait();
-        queue.memcpy(g_host.data(), g_ptr, g_host.size() * sizeof(double)).wait();
-        queue.memcpy(mean_host.data(), mean_ptr, mean_host.size() * sizeof(float)).wait();
-        queue.memcpy(rstd_host.data(), rstd_ptr, rstd_host.size() * sizeof(float)).wait();
-
-        for (int64_t n = 0; n < N; ++n) {
-            for (int64_t c = 0; c < C; ++c) {
-                int64_t base_idx = (n * C + c) * spatial_size;
-                double m = static_cast<double>(mean_host[n * C + c]);
-                double r = static_cast<double>(rstd_host[n * C + c]);
-                for (int64_t s = 0; s < spatial_size; ++s) {
-                    double x_hat = (in_host[base_idx + s] - m) * r;
-                    gw_host[c] += g_host[base_idx + s] * x_hat;
-                    gb_host[c] += g_host[base_idx + s];
-                }
-            }
-        }
-
+        // Compute grad_weight and grad_bias on device (reduction across N per channel)
         double* gw_ptr = get_data_ptr<double>(grad_weight);
         double* gb_ptr = get_data_ptr<double>(grad_bias);
-        queue.memcpy(gw_ptr, gw_host.data(), C * sizeof(double)).wait();
-        queue.memcpy(gb_ptr, gb_host.data(), C * sizeof(double)).wait();
+
+        queue.parallel_for<class InstanceNormBackwardGradWBFloat64>(
+            sycl::range<1>(C), [=](sycl::id<1> id) {
+            int64_t c = id[0];
+            double gw_sum = 0.0;
+            double gb_sum = 0.0;
+            for (int64_t n = 0; n < N; ++n) {
+                int64_t base = (n * C + c) * spatial_size;
+                double m = static_cast<double>(mean_ptr[n * C + c]);
+                double r = static_cast<double>(rstd_ptr[n * C + c]);
+                for (int64_t s = 0; s < spatial_size; ++s) {
+                    double x_hat = (in_ptr[base + s] - m) * r;
+                    gw_sum += g_ptr[base + s] * x_hat;
+                    gb_sum += g_ptr[base + s];
+                }
+            }
+            gw_ptr[c] = gw_sum;
+            gb_ptr[c] = gb_sum;
+        });
     }
     else {
         throw std::runtime_error("instance_norm_backward on OneAPI only supports Float32/Float64");

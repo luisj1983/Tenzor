@@ -1469,7 +1469,7 @@ auto sort_kernel(const Tensor& input, int64_t dim, bool descending, sycl::queue&
         int64_t outer_size = 1;
         for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
         int64_t dim_size = shape[dim];
-        auto policy = oneapi::dpl::execution::make_device_policy(queue);
+        auto policy = ::oneapi::dpl::execution::make_device_policy(queue);
 
         auto device_sort_impl = [&](auto* val_ptr, const auto* in_ptr) {
             using T = std::remove_const_t<std::remove_pointer_t<decltype(in_ptr)>>;
@@ -1488,10 +1488,10 @@ auto sort_kernel(const Tensor& input, int64_t dim, bool descending, sycl::queue&
                 T* slice_vals = val_ptr + o * dim_size;
                 int64_t* slice_idx = idx_ptr + o * dim_size;
                 if (descending) {
-                    oneapi::dpl::sort_by_key(policy, slice_vals, slice_vals + dim_size,
+                    ::oneapi::dpl::sort_by_key(policy, slice_vals, slice_vals + dim_size,
                                               slice_idx, std::greater<T>());
                 } else {
-                    oneapi::dpl::sort_by_key(policy, slice_vals, slice_vals + dim_size,
+                    ::oneapi::dpl::sort_by_key(policy, slice_vals, slice_vals + dim_size,
                                               slice_idx);
                 }
             }
@@ -1581,7 +1581,7 @@ auto topk_kernel(const Tensor& input, int64_t k, int64_t dim, bool largest, bool
         int64_t outer_size = 1;
         for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
         int64_t dim_size = shape[dim];
-        auto policy = oneapi::dpl::execution::make_device_policy(queue);
+        auto policy = ::oneapi::dpl::execution::make_device_policy(queue);
         int64_t in_numel = input.numel();
         int64_t out_numel = outer_size * k;
 
@@ -1606,10 +1606,10 @@ auto topk_kernel(const Tensor& input, int64_t k, int64_t dim, bool largest, bool
                 T* slice_vals = tmp_vals + o * dim_size;
                 int64_t* slice_idx = tmp_idx + o * dim_size;
                 if (largest) {
-                    oneapi::dpl::sort_by_key(policy, slice_vals, slice_vals + dim_size,
+                    ::oneapi::dpl::sort_by_key(policy, slice_vals, slice_vals + dim_size,
                                               slice_idx, std::greater<T>());
                 } else {
-                    oneapi::dpl::sort_by_key(policy, slice_vals, slice_vals + dim_size,
+                    ::oneapi::dpl::sort_by_key(policy, slice_vals, slice_vals + dim_size,
                                               slice_idx);
                 }
                 // Copy first k elements to output
@@ -1687,7 +1687,7 @@ auto unique_kernel(const Tensor& input, bool sorted, bool return_inverse, bool r
     // Device-side unique using oneDPL: sort + unique on device
     // Unique operates on flattened 1D input, so always contiguous
     if (sorted && numel > 0) {
-        auto policy = oneapi::dpl::execution::make_device_policy(queue);
+        auto policy = ::oneapi::dpl::execution::make_device_policy(queue);
 
         auto device_unique_impl = [&](const auto* in_ptr) {
             using T = std::remove_const_t<std::remove_pointer_t<decltype(in_ptr)>>;
@@ -1697,10 +1697,10 @@ auto unique_kernel(const Tensor& input, bool sorted, bool return_inverse, bool r
             queue.memcpy(d_sorted, in_ptr, numel * sizeof(T)).wait();
 
             // Sort on device
-            oneapi::dpl::sort(policy, d_sorted, d_sorted + numel);
+            ::oneapi::dpl::sort(policy, d_sorted, d_sorted + numel);
 
             // Find unique elements using oneDPL unique
-            auto new_end = oneapi::dpl::unique(policy, d_sorted, d_sorted + numel);
+            auto new_end = ::oneapi::dpl::unique(policy, d_sorted, d_sorted + numel);
             int64_t n_unique = std::distance(d_sorted, new_end);
 
             // Create output tensor and copy unique values

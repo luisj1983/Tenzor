@@ -1,0 +1,67 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Col2im (Fold) operation for Float64
+// Transforms (N, C*K*K, L) -> (N,C,H,W) with accumulation
+// No atomicAdd for float64 — uses read-modify-write (safe only with
+// non-overlapping output mapping or serial accumulation strategy).
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { float64_t input_data[]; };
+layout(binding = 1) buffer Output { float64_t output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;    // Total elements to process
+    uint batch;
+    uint channels;
+    uint height;
+    uint width;
+    uint kernel_size;
+    uint stride;
+    uint padding;
+    uint dilation;
+    uint out_h;
+    uint out_w;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    // Calculate derived values
+    uint num_blocks = params.out_h * params.out_w;
+    uint col_channels = params.channels * params.kernel_size * params.kernel_size;
+
+    // Decode flat index to (b, col_c, block_idx)
+    uint temp = idx;
+    uint block_idx = temp % num_blocks; temp /= num_blocks;
+    uint col_c = temp % col_channels; temp /= col_channels;
+    uint b = temp;
+
+    // Decode col_c to (c, kh, kw)
+    uint kw = col_c % params.kernel_size;
+    uint kh = (col_c / params.kernel_size) % params.kernel_size;
+    uint c = col_c / (params.kernel_size * params.kernel_size);
+
+    // Calculate output position from block_idx
+    uint oh = block_idx / params.out_w;
+    uint ow = block_idx % params.out_w;
+
+    // Calculate output position in image
+    int ih = int(oh * params.stride) - int(params.padding) + int(kh * params.dilation);
+    int iw = int(ow * params.stride) - int(params.padding) + int(kw * params.dilation);
+
+    // Check bounds
+    if (ih >= 0 && ih < int(params.height) && iw >= 0 && iw < int(params.width)) {
+        uint input_idx = b * (col_channels * num_blocks) +
+                        col_c * num_blocks +
+                        block_idx;
+
+        uint output_idx = b * (params.channels * params.height * params.width) +
+                         c * (params.height * params.width) +
+                         uint(ih) * params.width + uint(iw);
+
+        // Read-modify-write accumulation (no atomic for float64)
+        output_data[output_idx] = output_data[output_idx] + input_data[input_idx];
+    }
+}

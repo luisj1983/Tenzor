@@ -26,12 +26,6 @@ namespace cuda {
 // Centralized error checking
 #include "../cuda_error.hpp"
 
-// Grid-stride loop helper
-#define CUDA_GRID_STRIDE_LOOP(i, n) \
-    for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; \
-         i < (n); \
-         i += blockDim.x * gridDim.x)
-
 // Default block size for element-wise operations (used as fallback)
 constexpr int BLOCK_SIZE = 256;
 
@@ -134,7 +128,7 @@ __device__ __forceinline__ __nv_bfloat16 sigmoid_stable(__nv_bfloat16 x) {
 // Forward: max(0, x)
 template<typename T>
 __global__ void relu_forward_kernel(const T* input, T* output, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = input[idx] > T(0) ? input[idx] : T(0);
     }
 }
@@ -143,7 +137,7 @@ __global__ void relu_forward_kernel(const T* input, T* output, int64_t n) {
 template<typename T>
 __global__ void relu_backward_kernel(const T* grad_output, const T* input,
                                      T* grad_input, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         grad_input[idx] = grad_output[idx] * (input[idx] > T(0) ? T(1) : T(0));
     }
 }
@@ -151,7 +145,7 @@ __global__ void relu_backward_kernel(const T* grad_output, const T* input,
 // Vectorized ReLU backward using float4 for 4x memory throughput
 __global__ void relu_backward_vectorized_kernel(const float4* grad_output, const float4* input,
                                                 float4* grad_input, int64_t n4) {
-    CUDA_GRID_STRIDE_LOOP(idx, n4) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n4) {
         float4 g = grad_output[idx];
         float4 x = input[idx];
         float4 result;
@@ -184,7 +178,7 @@ constexpr int64_t VECTORIZED_THRESHOLD = 1024;
 // Vectorized ReLU forward using float4
 __global__ void relu_forward_vectorized_kernel(const float4* __restrict__ input,
                                                 float4* __restrict__ output, int64_t n4) {
-    CUDA_GRID_STRIDE_LOOP(idx, n4) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n4) {
         float4 x = __ldg(&input[idx]);
         float4 result;
         result.x = fmaxf(0.0f, x.x);
@@ -207,7 +201,7 @@ __global__ void relu_forward_remainder_kernel(const float* input, float* output,
 // Vectorized Sigmoid forward using float4
 __global__ void sigmoid_forward_vectorized_kernel(const float4* __restrict__ input,
                                                    float4* __restrict__ output, int64_t n4) {
-    CUDA_GRID_STRIDE_LOOP(idx, n4) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n4) {
         float4 x = __ldg(&input[idx]);
         float4 result;
         // Numerically stable sigmoid
@@ -232,7 +226,7 @@ __global__ void sigmoid_forward_remainder_kernel(const float* input, float* outp
 // Vectorized Tanh forward using float4
 __global__ void tanh_forward_vectorized_kernel(const float4* __restrict__ input,
                                                 float4* __restrict__ output, int64_t n4) {
-    CUDA_GRID_STRIDE_LOOP(idx, n4) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n4) {
         float4 x = __ldg(&input[idx]);
         float4 result;
         result.x = tanhf(x.x);
@@ -264,7 +258,7 @@ __device__ __forceinline__ float gelu_scalar(float x) {
 // Vectorized GELU forward using float4
 __global__ void gelu_forward_vectorized_kernel(const float4* __restrict__ input,
                                                 float4* __restrict__ output, int64_t n4) {
-    CUDA_GRID_STRIDE_LOOP(idx, n4) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n4) {
         float4 x = __ldg(&input[idx]);
         float4 result;
         result.x = gelu_scalar(x.x);
@@ -293,7 +287,7 @@ __device__ __forceinline__ float swish_scalar(float x) {
 // Vectorized Swish forward using float4
 __global__ void swish_forward_vectorized_kernel(const float4* __restrict__ input,
                                                  float4* __restrict__ output, int64_t n4) {
-    CUDA_GRID_STRIDE_LOOP(idx, n4) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n4) {
         float4 x = __ldg(&input[idx]);
         float4 result;
         result.x = swish_scalar(x.x);
@@ -317,7 +311,7 @@ __global__ void swish_forward_remainder_kernel(const float* input, float* output
 __global__ void leaky_relu_forward_vectorized_kernel(const float4* __restrict__ input,
                                                       float4* __restrict__ output,
                                                       int64_t n4, float alpha) {
-    CUDA_GRID_STRIDE_LOOP(idx, n4) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n4) {
         float4 x = __ldg(&input[idx]);
         float4 result;
         result.x = (x.x > 0.0f) ? x.x : alpha * x.x;
@@ -346,7 +340,7 @@ __global__ void leaky_relu_forward_remainder_kernel(const float* input, float* o
 __global__ void sigmoid_backward_vectorized_kernel(const float4* __restrict__ grad_output,
                                                     const float4* __restrict__ input,
                                                     float4* __restrict__ grad_input, int64_t n4) {
-    CUDA_GRID_STRIDE_LOOP(idx, n4) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n4) {
         float4 g = __ldg(&grad_output[idx]);
         float4 x = __ldg(&input[idx]);
         float4 result;
@@ -373,7 +367,7 @@ __global__ void sigmoid_backward_vectorized_kernel(const float4* __restrict__ gr
 __global__ void tanh_backward_vectorized_kernel(const float4* __restrict__ grad_output,
                                                  const float4* __restrict__ input,
                                                  float4* __restrict__ grad_input, int64_t n4) {
-    CUDA_GRID_STRIDE_LOOP(idx, n4) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n4) {
         float4 g = __ldg(&grad_output[idx]);
         float4 x = __ldg(&input[idx]);
         float4 result;
@@ -398,7 +392,7 @@ __global__ void gelu_backward_vectorized_kernel(const float4* __restrict__ grad_
     constexpr float sqrt_2_over_pi = 0.7978845608f;
     constexpr float coeff = 0.044715f;
 
-    CUDA_GRID_STRIDE_LOOP(idx, n4) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n4) {
         float4 g = __ldg(&grad_output[idx]);
         float4 x = __ldg(&input[idx]);
         float4 result;
@@ -430,7 +424,7 @@ __global__ void leaky_relu_backward_vectorized_kernel(const float4* __restrict__
                                                        const float4* __restrict__ input,
                                                        float4* __restrict__ grad_input,
                                                        int64_t n4, float alpha) {
-    CUDA_GRID_STRIDE_LOOP(idx, n4) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n4) {
         float4 g = __ldg(&grad_output[idx]);
         float4 x = __ldg(&input[idx]);
         float4 result;
@@ -446,7 +440,7 @@ __global__ void leaky_relu_backward_vectorized_kernel(const float4* __restrict__
 __global__ void swish_backward_vectorized_kernel(const float4* __restrict__ grad_output,
                                                   const float4* __restrict__ input,
                                                   float4* __restrict__ grad_input, int64_t n4) {
-    CUDA_GRID_STRIDE_LOOP(idx, n4) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n4) {
         float4 g = __ldg(&grad_output[idx]);
         float4 x = __ldg(&input[idx]);
         float4 result;
@@ -527,7 +521,7 @@ __device__ __forceinline__ __half sigmoid_stable(__half x) {
 
 template<typename T>
 __global__ void sigmoid_forward_kernel(const T* input, T* output, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = sigmoid_stable(input[idx]);
     }
 }
@@ -536,7 +530,7 @@ __global__ void sigmoid_forward_kernel(const T* input, T* output, int64_t n) {
 template<typename T>
 __global__ void sigmoid_backward_kernel(const T* grad_output, const T* input,
                                        T* grad_input, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         T sigmoid_x = sigmoid_stable(input[idx]);
         grad_input[idx] = grad_output[idx] * sigmoid_x * (T(1) - sigmoid_x);
     }
@@ -545,7 +539,7 @@ __global__ void sigmoid_backward_kernel(const T* grad_output, const T* input,
 // Swish activation: swish(x) = x * sigmoid(x)
 template<typename T>
 __global__ void swish_forward_kernel(const T* input, T* output, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         T x = input[idx];
         output[idx] = x * sigmoid_stable(x);
     }
@@ -556,7 +550,7 @@ __global__ void swish_forward_kernel(const T* input, T* output, int64_t n) {
 template<typename T>
 __global__ void swish_backward_cuda_kernel(const T* grad_output, const T* input,
                                             T* grad_input, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         T x = input[idx];
         T sigmoid_x = sigmoid_stable(x);
         // d/dx swish(x) = sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x))
@@ -604,7 +598,7 @@ extern "C" {
 // Forward: tanh(x)
 template<typename T>
 __global__ void tanh_forward_kernel(const T* input, T* output, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = tanh(input[idx]);
     }
 }
@@ -612,7 +606,7 @@ __global__ void tanh_forward_kernel(const T* input, T* output, int64_t n) {
 // Specialization for __half
 template<>
 __global__ void tanh_forward_kernel<__half>(const __half* input, __half* output, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = __float2half(tanhf(__half2float(input[idx])));
     }
 }
@@ -620,7 +614,7 @@ __global__ void tanh_forward_kernel<__half>(const __half* input, __half* output,
 // Specialization for __nv_bfloat16
 template<>
 __global__ void tanh_forward_kernel<__nv_bfloat16>(const __nv_bfloat16* input, __nv_bfloat16* output, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = __float2bfloat16(tanhf(__bfloat162float(input[idx])));
     }
 }
@@ -629,7 +623,7 @@ __global__ void tanh_forward_kernel<__nv_bfloat16>(const __nv_bfloat16* input, _
 template<typename T>
 __global__ void tanh_backward_kernel(const T* grad_output, const T* input,
                                     T* grad_input, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         T tanh_x = tanh(input[idx]);
         grad_input[idx] = grad_output[idx] * (T(1) - tanh_x * tanh_x);
     }
@@ -639,7 +633,7 @@ __global__ void tanh_backward_kernel(const T* grad_output, const T* input,
 template<>
 __global__ void tanh_backward_kernel<__half>(const __half* grad_output, const __half* input,
                                             __half* grad_input, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float tanh_x = tanhf(__half2float(input[idx]));
         grad_input[idx] = __float2half(__half2float(grad_output[idx]) * (1.0f - tanh_x * tanh_x));
     }
@@ -649,7 +643,7 @@ __global__ void tanh_backward_kernel<__half>(const __half* grad_output, const __
 template<>
 __global__ void tanh_backward_kernel<__nv_bfloat16>(const __nv_bfloat16* grad_output, const __nv_bfloat16* input,
                                                    __nv_bfloat16* grad_input, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float tanh_x = tanhf(__bfloat162float(input[idx]));
         grad_input[idx] = __float2bfloat16(__bfloat162float(grad_output[idx]) * (1.0f - tanh_x * tanh_x));
     }
@@ -693,7 +687,7 @@ extern "C" {
 // Forward: x * 0.5 * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
 template<typename T>
 __global__ void gelu_forward_kernel(const T* input, T* output, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         T x = input[idx];
         T x_cubed = x * x * x;
         T tanh_arg = T(0.7978845608) * (x + T(0.044715) * x_cubed);
@@ -704,7 +698,7 @@ __global__ void gelu_forward_kernel(const T* input, T* output, int64_t n) {
 // Specialization for __half
 template<>
 __global__ void gelu_forward_kernel<__half>(const __half* input, __half* output, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float x = __half2float(input[idx]);
         float x_cubed = x * x * x;
         float tanh_arg = 0.7978845608f * (x + 0.044715f * x_cubed);
@@ -715,7 +709,7 @@ __global__ void gelu_forward_kernel<__half>(const __half* input, __half* output,
 // Specialization for __nv_bfloat16
 template<>
 __global__ void gelu_forward_kernel<__nv_bfloat16>(const __nv_bfloat16* input, __nv_bfloat16* output, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float x = __bfloat162float(input[idx]);
         float x_cubed = x * x * x;
         float tanh_arg = 0.7978845608f * (x + 0.044715f * x_cubed);
@@ -731,7 +725,7 @@ __global__ void gelu_forward_kernel<__nv_bfloat16>(const __nv_bfloat16* input, _
 template<typename T>
 __global__ void gelu_backward_kernel(const T* grad_output, const T* input,
                                      T* grad_input, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         T x = input[idx];
         T x_squared = x * x;
         T x_cubed = x_squared * x;
@@ -761,7 +755,7 @@ __global__ void gelu_backward_kernel(const T* grad_output, const T* input,
 template<>
 __global__ void gelu_backward_kernel<__half>(const __half* grad_output, const __half* input,
                                               __half* grad_input, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float x = __half2float(input[idx]);
         float x_squared = x * x;
         float x_cubed = x_squared * x;
@@ -791,7 +785,7 @@ __global__ void gelu_backward_kernel<__half>(const __half* grad_output, const __
 template<>
 __global__ void gelu_backward_kernel<__nv_bfloat16>(const __nv_bfloat16* grad_output, const __nv_bfloat16* input,
                                                     __nv_bfloat16* grad_input, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float x = __bfloat162float(input[idx]);
         float x_squared = x * x;
         float x_cubed = x_squared * x;
@@ -856,7 +850,7 @@ extern "C" {
 template<typename T>
 __global__ void leaky_relu_forward_kernel(const T* input, T* output,
                                          int64_t n, T alpha) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = input[idx] > T(0) ? input[idx] : alpha * input[idx];
     }
 }
@@ -864,7 +858,7 @@ __global__ void leaky_relu_forward_kernel(const T* input, T* output,
 // Float16 forward kernel: compute in Float32 for numerical stability
 __global__ void leaky_relu_forward_fp16_kernel(const __half* input, __half* output,
                                                 int64_t n, float alpha) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float val = __half2float(input[idx]);
         output[idx] = __float2half(val > 0.0f ? val : alpha * val);
     }
@@ -874,7 +868,7 @@ __global__ void leaky_relu_forward_fp16_kernel(const __half* input, __half* outp
 template<typename T>
 __global__ void leaky_relu_backward_kernel(const T* grad_output, const T* input,
                                           T* grad_input, int64_t n, T alpha) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         grad_input[idx] = grad_output[idx] * (input[idx] > T(0) ? T(1) : alpha);
     }
 }
@@ -882,7 +876,7 @@ __global__ void leaky_relu_backward_kernel(const T* grad_output, const T* input,
 // Float16 backward kernel: compute in Float32 for numerical stability
 __global__ void leaky_relu_backward_fp16_kernel(const __half* grad_output, const __half* input,
                                                  __half* grad_input, int64_t n, float alpha) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float grad = __half2float(grad_output[idx]);
         float val = __half2float(input[idx]);
         grad_input[idx] = __float2half(grad * (val > 0.0f ? 1.0f : alpha));
@@ -1495,14 +1489,14 @@ extern "C" {
 // In-place ReLU: x = max(0, x)
 template<typename T>
 __global__ void relu_inplace_cuda_kernel(T* data, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         data[idx] = data[idx] > T(0) ? data[idx] : T(0);
     }
 }
 
 // Vectorized in-place ReLU using float4
 __global__ void relu_inplace_vectorized_kernel(float4* __restrict__ data, int64_t n4) {
-    CUDA_GRID_STRIDE_LOOP(idx, n4) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n4) {
         float4 x = data[idx];
         x.x = fmaxf(0.0f, x.x);
         x.y = fmaxf(0.0f, x.y);
@@ -1522,7 +1516,7 @@ __global__ void relu_inplace_remainder_kernel(float* data, int64_t start, int64_
 // In-place Sigmoid: x = 1 / (1 + exp(-x))
 template<typename T>
 __global__ void sigmoid_inplace_cuda_kernel(T* data, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         data[idx] = T(1) / (T(1) + device_exp(-data[idx]));
     }
 }
@@ -1530,7 +1524,7 @@ __global__ void sigmoid_inplace_cuda_kernel(T* data, int64_t n) {
 // In-place Tanh: x = tanh(x)
 template<typename T>
 __global__ void tanh_inplace_cuda_kernel(T* data, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         data[idx] = tanh(data[idx]);
     }
 }
@@ -1538,7 +1532,7 @@ __global__ void tanh_inplace_cuda_kernel(T* data, int64_t n) {
 // Specialization for __half
 template<>
 __global__ void tanh_inplace_cuda_kernel<__half>(__half* data, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         // Convert to float, apply tanh, convert back
         float val = __half2float(data[idx]);
         data[idx] = __float2half(tanhf(val));
@@ -1548,7 +1542,7 @@ __global__ void tanh_inplace_cuda_kernel<__half>(__half* data, int64_t n) {
 // Specialization for __nv_bfloat16
 template<>
 __global__ void tanh_inplace_cuda_kernel<__nv_bfloat16>(__nv_bfloat16* data, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         // Convert to float, apply tanh, convert back
         float val = __bfloat162float(data[idx]);
         data[idx] = __float2bfloat16(tanhf(val));
@@ -1558,7 +1552,7 @@ __global__ void tanh_inplace_cuda_kernel<__nv_bfloat16>(__nv_bfloat16* data, int
 // In-place LeakyReLU: x = max(alpha * x, x)
 template<typename T>
 __global__ void leaky_relu_inplace_cuda_kernel(T* data, T alpha, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         T val = data[idx];
         data[idx] = val > T(0) ? val : alpha * val;
     }
@@ -1566,7 +1560,7 @@ __global__ void leaky_relu_inplace_cuda_kernel(T* data, T alpha, int64_t n) {
 
 // Float16 inplace kernel: compute in Float32 for numerical stability
 __global__ void leaky_relu_inplace_fp16_kernel(__half* data, float alpha, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float val = __half2float(data[idx]);
         data[idx] = __float2half(val > 0.0f ? val : alpha * val);
     }
@@ -1578,7 +1572,7 @@ __global__ void gelu_inplace_cuda_kernel(T* data, int64_t n) {
     constexpr T sqrt_2_over_pi = T(0.7978845608028654);
     constexpr T coeff = T(0.044715);
 
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         T x = data[idx];
         T x_cubed = x * x * x;
         T inner = sqrt_2_over_pi * (x + coeff * x_cubed);
@@ -1589,7 +1583,7 @@ __global__ void gelu_inplace_cuda_kernel(T* data, int64_t n) {
 // Specialization for __half
 template<>
 __global__ void gelu_inplace_cuda_kernel<__half>(__half* data, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float x = __half2float(data[idx]);
         float x_cubed = x * x * x;
         float inner = 0.7978845608028654f * (x + 0.044715f * x_cubed);
@@ -1600,7 +1594,7 @@ __global__ void gelu_inplace_cuda_kernel<__half>(__half* data, int64_t n) {
 // Specialization for __nv_bfloat16
 template<>
 __global__ void gelu_inplace_cuda_kernel<__nv_bfloat16>(__nv_bfloat16* data, int64_t n) {
-    CUDA_GRID_STRIDE_LOOP(idx, n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float x = __bfloat162float(data[idx]);
         float x_cubed = x * x * x;
         float inner = 0.7978845608028654f * (x + 0.044715f * x_cubed);

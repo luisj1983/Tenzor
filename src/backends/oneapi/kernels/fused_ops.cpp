@@ -246,41 +246,72 @@ auto fused_layer_norm_kernel(
         float* mean_ptr = get_data_ptr<float>(mean);
         float* inv_std_ptr = get_data_ptr<float>(inv_std);
 
-        // Process each batch element
-        for (int64_t b = 0; b < batch_size; ++b) {
-            const float* batch_in = in_ptr + b * norm_size;
-            float* batch_out = out_ptr + b * norm_size;
+        int64_t wg_size = std::min(norm_size, static_cast<int64_t>(256));
+        // Round up to power of 2 for reduction
+        int64_t wg_pow2 = 1;
+        while (wg_pow2 < wg_size) wg_pow2 *= 2;
+        wg_pow2 = std::min(wg_pow2, static_cast<int64_t>(256));
 
-            // Compute mean on host (for simplicity)
-            std::vector<float> host_in(norm_size);
-            queue.memcpy(host_in.data(), batch_in, norm_size * sizeof(float)).wait();
+        queue.submit([&](sycl::handler& cgh) {
+            sycl::local_accessor<float, 1> local_sum(sycl::range<1>(wg_pow2), cgh);
+            cgh.parallel_for<class LayerNormFwdF32>(
+                sycl::nd_range<1>(batch_size * wg_pow2, wg_pow2),
+                [=](sycl::nd_item<1> item) {
+                int64_t b = item.get_group(0);
+                int64_t lid = item.get_local_id(0);
+                int64_t lsize = item.get_local_range(0);
+                const float* batch_in = in_ptr + b * norm_size;
+                float* batch_out = out_ptr + b * norm_size;
 
-            float sum = 0.0f;
-            for (int64_t i = 0; i < norm_size; ++i) {
-                sum += host_in[i];
-            }
-            float batch_mean = sum / static_cast<float>(norm_size);
+                // Step 1: Compute mean
+                float thread_sum = 0.0f;
+                for (int64_t i = lid; i < norm_size; i += lsize) {
+                    thread_sum += batch_in[i];
+                }
+                local_sum[lid] = thread_sum;
+                item.barrier(sycl::access::fence_space::local_space);
 
-            // Compute variance
-            float var_sum = 0.0f;
-            for (int64_t i = 0; i < norm_size; ++i) {
-                float diff = host_in[i] - batch_mean;
-                var_sum += diff * diff;
-            }
-            float variance = var_sum / static_cast<float>(norm_size);
-            float batch_inv_std = 1.0f / sycl::sqrt(variance + epsilon);
+                for (int64_t stride = lsize / 2; stride > 0; stride >>= 1) {
+                    if (lid < stride) {
+                        local_sum[lid] += local_sum[lid + stride];
+                    }
+                    item.barrier(sycl::access::fence_space::local_space);
+                }
+                float batch_mean = local_sum[0] / static_cast<float>(norm_size);
+                item.barrier(sycl::access::fence_space::local_space);
 
-            // Store mean and inv_std
-            queue.fill(mean_ptr + b, batch_mean, 1);
-            queue.fill(inv_std_ptr + b, batch_inv_std, 1);
+                // Step 2: Compute variance
+                float thread_var = 0.0f;
+                for (int64_t i = lid; i < norm_size; i += lsize) {
+                    float diff = batch_in[i] - batch_mean;
+                    thread_var += diff * diff;
+                }
+                local_sum[lid] = thread_var;
+                item.barrier(sycl::access::fence_space::local_space);
 
-            // Normalize and apply scale/shift
-            queue.parallel_for<class LayerNormBatch>(sycl::range<1>(norm_size), [=](sycl::id<1> idx) {
-                int64_t i = idx[0];
-                float normalized = (batch_in[i] - batch_mean) * batch_inv_std;
-                batch_out[i] = normalized * weight_ptr[i] + bias_ptr[i];
+                for (int64_t stride = lsize / 2; stride > 0; stride >>= 1) {
+                    if (lid < stride) {
+                        local_sum[lid] += local_sum[lid + stride];
+                    }
+                    item.barrier(sycl::access::fence_space::local_space);
+                }
+                float variance = local_sum[0] / static_cast<float>(norm_size);
+                float batch_inv_std = 1.0f / sycl::sqrt(variance + epsilon);
+
+                // Store stats
+                if (lid == 0) {
+                    mean_ptr[b] = batch_mean;
+                    inv_std_ptr[b] = batch_inv_std;
+                }
+                item.barrier(sycl::access::fence_space::local_space);
+
+                // Step 3: Normalize
+                for (int64_t i = lid; i < norm_size; i += lsize) {
+                    float normalized = (batch_in[i] - batch_mean) * batch_inv_std;
+                    batch_out[i] = normalized * weight_ptr[i] + bias_ptr[i];
+                }
             });
-        }
+        });
     }
     else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
@@ -290,36 +321,70 @@ auto fused_layer_norm_kernel(
         double* mean_ptr = get_data_ptr<double>(mean);
         double* inv_std_ptr = get_data_ptr<double>(inv_std);
 
-        for (int64_t b = 0; b < batch_size; ++b) {
-            const double* batch_in = in_ptr + b * norm_size;
-            double* batch_out = out_ptr + b * norm_size;
+        int64_t wg_size = std::min(norm_size, static_cast<int64_t>(256));
+        int64_t wg_pow2 = 1;
+        while (wg_pow2 < wg_size) wg_pow2 *= 2;
+        wg_pow2 = std::min(wg_pow2, static_cast<int64_t>(256));
 
-            std::vector<double> host_in(norm_size);
-            queue.memcpy(host_in.data(), batch_in, norm_size * sizeof(double)).wait();
+        queue.submit([&](sycl::handler& cgh) {
+            sycl::local_accessor<double, 1> local_sum(sycl::range<1>(wg_pow2), cgh);
+            cgh.parallel_for<class LayerNormFwdF64>(
+                sycl::nd_range<1>(batch_size * wg_pow2, wg_pow2),
+                [=](sycl::nd_item<1> item) {
+                int64_t b = item.get_group(0);
+                int64_t lid = item.get_local_id(0);
+                int64_t lsize = item.get_local_range(0);
+                const double* batch_in = in_ptr + b * norm_size;
+                double* batch_out = out_ptr + b * norm_size;
 
-            double sum = 0.0;
-            for (int64_t i = 0; i < norm_size; ++i) {
-                sum += host_in[i];
-            }
-            double batch_mean = sum / static_cast<double>(norm_size);
+                // Step 1: Compute mean
+                double thread_sum = 0.0;
+                for (int64_t i = lid; i < norm_size; i += lsize) {
+                    thread_sum += batch_in[i];
+                }
+                local_sum[lid] = thread_sum;
+                item.barrier(sycl::access::fence_space::local_space);
 
-            double var_sum = 0.0;
-            for (int64_t i = 0; i < norm_size; ++i) {
-                double diff = host_in[i] - batch_mean;
-                var_sum += diff * diff;
-            }
-            double variance = var_sum / static_cast<double>(norm_size);
-            double batch_inv_std = 1.0 / sycl::sqrt(variance + static_cast<double>(epsilon));
+                for (int64_t stride = lsize / 2; stride > 0; stride >>= 1) {
+                    if (lid < stride) {
+                        local_sum[lid] += local_sum[lid + stride];
+                    }
+                    item.barrier(sycl::access::fence_space::local_space);
+                }
+                double batch_mean = local_sum[0] / static_cast<double>(norm_size);
+                item.barrier(sycl::access::fence_space::local_space);
 
-            queue.fill(mean_ptr + b, batch_mean, 1);
-            queue.fill(inv_std_ptr + b, batch_inv_std, 1);
+                // Step 2: Compute variance
+                double thread_var = 0.0;
+                for (int64_t i = lid; i < norm_size; i += lsize) {
+                    double diff = batch_in[i] - batch_mean;
+                    thread_var += diff * diff;
+                }
+                local_sum[lid] = thread_var;
+                item.barrier(sycl::access::fence_space::local_space);
 
-            queue.parallel_for<class LayerNormBatchD>(sycl::range<1>(norm_size), [=](sycl::id<1> idx) {
-                int64_t i = idx[0];
-                double normalized = (batch_in[i] - batch_mean) * batch_inv_std;
-                batch_out[i] = normalized * weight_ptr[i] + bias_ptr[i];
+                for (int64_t stride = lsize / 2; stride > 0; stride >>= 1) {
+                    if (lid < stride) {
+                        local_sum[lid] += local_sum[lid + stride];
+                    }
+                    item.barrier(sycl::access::fence_space::local_space);
+                }
+                double variance = local_sum[0] / static_cast<double>(norm_size);
+                double batch_inv_std = 1.0 / sycl::sqrt(variance + static_cast<double>(epsilon));
+
+                if (lid == 0) {
+                    mean_ptr[b] = batch_mean;
+                    inv_std_ptr[b] = batch_inv_std;
+                }
+                item.barrier(sycl::access::fence_space::local_space);
+
+                // Step 3: Normalize
+                for (int64_t i = lid; i < norm_size; i += lsize) {
+                    double normalized = (batch_in[i] - batch_mean) * batch_inv_std;
+                    batch_out[i] = normalized * weight_ptr[i] + bias_ptr[i];
+                }
             });
-        }
+        });
     }
     else if (input.dtype() == DType::Float16) {
         // Float16: use float32 accumulation for numerical stability
@@ -330,40 +395,72 @@ auto fused_layer_norm_kernel(
         sycl::half* mean_ptr = get_data_ptr<sycl::half>(mean);
         sycl::half* inv_std_ptr = get_data_ptr<sycl::half>(inv_std);
 
-        for (int64_t b = 0; b < batch_size; ++b) {
-            const sycl::half* batch_in = in_ptr + b * norm_size;
-            sycl::half* batch_out = out_ptr + b * norm_size;
+        int64_t wg_size = std::min(norm_size, static_cast<int64_t>(256));
+        int64_t wg_pow2 = 1;
+        while (wg_pow2 < wg_size) wg_pow2 *= 2;
+        wg_pow2 = std::min(wg_pow2, static_cast<int64_t>(256));
 
-            std::vector<sycl::half> host_in(norm_size);
-            queue.memcpy(host_in.data(), batch_in, norm_size * sizeof(sycl::half)).wait();
+        queue.submit([&](sycl::handler& cgh) {
+            sycl::local_accessor<float, 1> local_sum(sycl::range<1>(wg_pow2), cgh);
+            cgh.parallel_for<class LayerNormFwdF16>(
+                sycl::nd_range<1>(batch_size * wg_pow2, wg_pow2),
+                [=](sycl::nd_item<1> item) {
+                int64_t b = item.get_group(0);
+                int64_t lid = item.get_local_id(0);
+                int64_t lsize = item.get_local_range(0);
+                const sycl::half* batch_in = in_ptr + b * norm_size;
+                sycl::half* batch_out = out_ptr + b * norm_size;
 
-            float sum = 0.0f;
-            for (int64_t i = 0; i < norm_size; ++i) {
-                sum += static_cast<float>(host_in[i]);
-            }
-            float batch_mean = sum / static_cast<float>(norm_size);
+                // Step 1: Compute mean (float32 accumulation)
+                float thread_sum = 0.0f;
+                for (int64_t i = lid; i < norm_size; i += lsize) {
+                    thread_sum += static_cast<float>(batch_in[i]);
+                }
+                local_sum[lid] = thread_sum;
+                item.barrier(sycl::access::fence_space::local_space);
 
-            float var_sum = 0.0f;
-            for (int64_t i = 0; i < norm_size; ++i) {
-                float diff = static_cast<float>(host_in[i]) - batch_mean;
-                var_sum += diff * diff;
-            }
-            float variance = var_sum / static_cast<float>(norm_size);
-            float batch_inv_std = 1.0f / sycl::sqrt(variance + epsilon);
+                for (int64_t stride = lsize / 2; stride > 0; stride >>= 1) {
+                    if (lid < stride) {
+                        local_sum[lid] += local_sum[lid + stride];
+                    }
+                    item.barrier(sycl::access::fence_space::local_space);
+                }
+                float batch_mean = local_sum[0] / static_cast<float>(norm_size);
+                item.barrier(sycl::access::fence_space::local_space);
 
-            sycl::half h_mean = sycl::half(batch_mean);
-            sycl::half h_inv_std = sycl::half(batch_inv_std);
-            queue.fill(mean_ptr + b, h_mean, 1);
-            queue.fill(inv_std_ptr + b, h_inv_std, 1);
+                // Step 2: Compute variance (float32 accumulation)
+                float thread_var = 0.0f;
+                for (int64_t i = lid; i < norm_size; i += lsize) {
+                    float diff = static_cast<float>(batch_in[i]) - batch_mean;
+                    thread_var += diff * diff;
+                }
+                local_sum[lid] = thread_var;
+                item.barrier(sycl::access::fence_space::local_space);
 
-            queue.parallel_for<FusedLayerNormKernelFloat16>(sycl::range<1>(norm_size), [=](sycl::id<1> idx) {
-                int64_t i = idx[0];
-                float val = static_cast<float>(batch_in[i]);
-                float normalized = (val - batch_mean) * batch_inv_std;
-                float result = normalized * static_cast<float>(weight_ptr[i]) + static_cast<float>(bias_ptr[i]);
-                batch_out[i] = sycl::half(result);
+                for (int64_t stride = lsize / 2; stride > 0; stride >>= 1) {
+                    if (lid < stride) {
+                        local_sum[lid] += local_sum[lid + stride];
+                    }
+                    item.barrier(sycl::access::fence_space::local_space);
+                }
+                float variance = local_sum[0] / static_cast<float>(norm_size);
+                float batch_inv_std = 1.0f / sycl::sqrt(variance + epsilon);
+
+                if (lid == 0) {
+                    mean_ptr[b] = sycl::half(batch_mean);
+                    inv_std_ptr[b] = sycl::half(batch_inv_std);
+                }
+                item.barrier(sycl::access::fence_space::local_space);
+
+                // Step 3: Normalize
+                for (int64_t i = lid; i < norm_size; i += lsize) {
+                    float val = static_cast<float>(batch_in[i]);
+                    float normalized = (val - batch_mean) * batch_inv_std;
+                    float result = normalized * static_cast<float>(weight_ptr[i]) + static_cast<float>(bias_ptr[i]);
+                    batch_out[i] = sycl::half(result);
+                }
             });
-        }
+        });
     }
     else if (input.dtype() == DType::BFloat16) {
         // BFloat16: use float32 accumulation for numerical stability
@@ -374,40 +471,72 @@ auto fused_layer_norm_kernel(
         uint16_t* mean_ptr = get_data_ptr<uint16_t>(mean);
         uint16_t* inv_std_ptr = get_data_ptr<uint16_t>(inv_std);
 
-        for (int64_t b = 0; b < batch_size; ++b) {
-            const uint16_t* batch_in = in_ptr + b * norm_size;
-            uint16_t* batch_out = out_ptr + b * norm_size;
+        int64_t wg_size = std::min(norm_size, static_cast<int64_t>(256));
+        int64_t wg_pow2 = 1;
+        while (wg_pow2 < wg_size) wg_pow2 *= 2;
+        wg_pow2 = std::min(wg_pow2, static_cast<int64_t>(256));
 
-            std::vector<uint16_t> host_in(norm_size);
-            queue.memcpy(host_in.data(), batch_in, norm_size * sizeof(uint16_t)).wait();
+        queue.submit([&](sycl::handler& cgh) {
+            sycl::local_accessor<float, 1> local_sum(sycl::range<1>(wg_pow2), cgh);
+            cgh.parallel_for<class LayerNormFwdBF16>(
+                sycl::nd_range<1>(batch_size * wg_pow2, wg_pow2),
+                [=](sycl::nd_item<1> item) {
+                int64_t b = item.get_group(0);
+                int64_t lid = item.get_local_id(0);
+                int64_t lsize = item.get_local_range(0);
+                const uint16_t* batch_in = in_ptr + b * norm_size;
+                uint16_t* batch_out = out_ptr + b * norm_size;
 
-            float sum = 0.0f;
-            for (int64_t i = 0; i < norm_size; ++i) {
-                sum += bf16_to_f32(host_in[i]);
-            }
-            float batch_mean = sum / static_cast<float>(norm_size);
+                // Step 1: Compute mean (float32 accumulation)
+                float thread_sum = 0.0f;
+                for (int64_t i = lid; i < norm_size; i += lsize) {
+                    thread_sum += bf16_to_f32(batch_in[i]);
+                }
+                local_sum[lid] = thread_sum;
+                item.barrier(sycl::access::fence_space::local_space);
 
-            float var_sum = 0.0f;
-            for (int64_t i = 0; i < norm_size; ++i) {
-                float diff = bf16_to_f32(host_in[i]) - batch_mean;
-                var_sum += diff * diff;
-            }
-            float variance = var_sum / static_cast<float>(norm_size);
-            float batch_inv_std = 1.0f / sycl::sqrt(variance + epsilon);
+                for (int64_t stride = lsize / 2; stride > 0; stride >>= 1) {
+                    if (lid < stride) {
+                        local_sum[lid] += local_sum[lid + stride];
+                    }
+                    item.barrier(sycl::access::fence_space::local_space);
+                }
+                float batch_mean = local_sum[0] / static_cast<float>(norm_size);
+                item.barrier(sycl::access::fence_space::local_space);
 
-            uint16_t h_mean = f32_to_bf16(batch_mean);
-            uint16_t h_inv_std = f32_to_bf16(batch_inv_std);
-            queue.fill(mean_ptr + b, h_mean, 1);
-            queue.fill(inv_std_ptr + b, h_inv_std, 1);
+                // Step 2: Compute variance (float32 accumulation)
+                float thread_var = 0.0f;
+                for (int64_t i = lid; i < norm_size; i += lsize) {
+                    float diff = bf16_to_f32(batch_in[i]) - batch_mean;
+                    thread_var += diff * diff;
+                }
+                local_sum[lid] = thread_var;
+                item.barrier(sycl::access::fence_space::local_space);
 
-            queue.parallel_for<FusedLayerNormKernelBFloat16>(sycl::range<1>(norm_size), [=](sycl::id<1> idx) {
-                int64_t i = idx[0];
-                float val = bf16_to_f32(batch_in[i]);
-                float normalized = (val - batch_mean) * batch_inv_std;
-                float result = normalized * bf16_to_f32(weight_ptr[i]) + bf16_to_f32(bias_ptr[i]);
-                batch_out[i] = f32_to_bf16(result);
+                for (int64_t stride = lsize / 2; stride > 0; stride >>= 1) {
+                    if (lid < stride) {
+                        local_sum[lid] += local_sum[lid + stride];
+                    }
+                    item.barrier(sycl::access::fence_space::local_space);
+                }
+                float variance = local_sum[0] / static_cast<float>(norm_size);
+                float batch_inv_std = 1.0f / sycl::sqrt(variance + epsilon);
+
+                if (lid == 0) {
+                    mean_ptr[b] = f32_to_bf16(batch_mean);
+                    inv_std_ptr[b] = f32_to_bf16(batch_inv_std);
+                }
+                item.barrier(sycl::access::fence_space::local_space);
+
+                // Step 3: Normalize
+                for (int64_t i = lid; i < norm_size; i += lsize) {
+                    float val = bf16_to_f32(batch_in[i]);
+                    float normalized = (val - batch_mean) * batch_inv_std;
+                    float result = normalized * bf16_to_f32(weight_ptr[i]) + bf16_to_f32(bias_ptr[i]);
+                    batch_out[i] = f32_to_bf16(result);
+                }
             });
-        }
+        });
     }
     else {
         throw std::runtime_error("fused_layer_norm: unsupported dtype");

@@ -15,12 +15,6 @@
 namespace tenzor {
 namespace cuda {
 
-// Grid-stride loop helper
-#define CUDA_GRID_STRIDE_LOOP(i, n) \
-    for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; \
-         i < (n); \
-         i += blockDim.x * gridDim.x)
-
 // Optimal block size
 constexpr int BLOCK_SIZE = 256;
 constexpr int BATCHNORM_BLOCK_SIZE = 512;
@@ -223,7 +217,7 @@ __global__ void batchnorm_normalize_kernel(const T* input,
     int64_t spatial_size = H * W;
     int64_t total_size = N * C * spatial_size;
 
-    CUDA_GRID_STRIDE_LOOP(idx, total_size) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_size) {
         // Decode NCHW index
         int64_t w = idx % W;
         int64_t h = (idx / W) % H;
@@ -251,7 +245,7 @@ __global__ void batchnorm_normalize_fp16_kernel(const __half* input,
     int64_t spatial_size = H * W;
     int64_t total_size = N * C * spatial_size;
 
-    CUDA_GRID_STRIDE_LOOP(idx, total_size) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_size) {
         int64_t c = (idx / (W * H)) % C;
 
         float channel_mean = __half2float(mean[c]);
@@ -280,7 +274,7 @@ __global__ void batchnorm_affine_kernel(const T* normalized,
     int64_t spatial_size = H * W;
     int64_t total_size = N * C * spatial_size;
 
-    CUDA_GRID_STRIDE_LOOP(idx, total_size) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_size) {
         // Decode NCHW index
         int64_t c = (idx / (H * W)) % C;
 
@@ -304,7 +298,7 @@ __global__ void batchnorm_forward_affine_kernel(const T* input,
     int64_t spatial_size = H * W;
     int64_t total_size = N * C * spatial_size;
 
-    CUDA_GRID_STRIDE_LOOP(idx, total_size) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_size) {
         // Decode NCHW index
         int64_t c = (idx / (H * W)) % C;
 
@@ -332,7 +326,7 @@ __global__ void batchnorm_forward_affine_fp16_kernel(const __half* input,
     int64_t spatial_size = H * W;
     int64_t total_size = N * C * spatial_size;
 
-    CUDA_GRID_STRIDE_LOOP(idx, total_size) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_size) {
         int64_t c = (idx / (H * W)) % C;
 
         float channel_mean = __half2float(mean[c]);
@@ -478,7 +472,7 @@ __global__ void batchnorm_update_running_stats_kernel(T* running_mean,
                                                       const T* batch_var,
                                                       T momentum,
                                                       int64_t C) {
-    CUDA_GRID_STRIDE_LOOP(c, C) {
+    TENZOR_CUDA_KERNEL_LOOP(c, C) {
         running_mean[c] = (T(1) - momentum) * running_mean[c] + momentum * batch_mean[c];
         running_var[c] = (T(1) - momentum) * running_var[c] + momentum * batch_var[c];
     }

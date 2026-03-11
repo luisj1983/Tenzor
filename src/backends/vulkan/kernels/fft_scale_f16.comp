@@ -1,0 +1,24 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Scale complex array by 1/N for inverse FFT normalization — Float16
+// Each complex element is one uint32 word (real in low 16, imag in high 16)
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer DataBuf { uint data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of complex elements
+    float inv_n;     // 1.0 / n
+};
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    if (tid >= n) return;
+
+    // Unpack, scale, repack
+    vec2 val = unpackHalf2x16(data[tid]);
+    val *= inv_n;
+    data[tid] = packHalf2x16(val);
+}

@@ -2791,5 +2791,345 @@ auto all_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stre
     return output;
 }
 
+// ============================================================================
+// LogSumExp - Numerically stable log(sum(exp(x)))
+// ============================================================================
+
+/**
+ * @brief Find max along a specific dimension for logsumexp
+ * @tparam T Input data type
+ * @tparam Acc Accumulation type (float for __half, T otherwise)
+ */
+template<typename T, typename Acc = T>
+__global__ void logsumexp_max_along_dim_kernel(
+    const T* __restrict__ input,
+    Acc* __restrict__ max_out,
+    const int64_t* __restrict__ input_shape,
+    const int64_t* __restrict__ input_strides,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= output_size) return;
+
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+    for (int64_t d = ndim - 1; d >= 0; --d) {
+        if (d == dim) { indices[d] = 0; continue; }
+        indices[d] = tmp % input_shape[d];
+        tmp /= input_shape[d];
+    }
+
+    Acc m;
+    if constexpr (std::is_same_v<Acc, float>) {
+        m = -FLT_MAX;
+    } else if constexpr (std::is_same_v<Acc, double>) {
+        m = -DBL_MAX;
+    } else {
+        m = Acc(-1e38);
+    }
+
+    for (int64_t i = 0; i < dim_size; i++) {
+        indices[dim] = i;
+        int64_t in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * input_strides[d];
+        }
+        Acc val = Acc(input[in_idx]);
+        if (val > m) m = val;
+    }
+    max_out[out_idx] = m;
+}
+
+/**
+ * @brief Compute sum(exp(x - max)) and result = max + log(sum) along a dimension
+ * @tparam T Input/output data type
+ * @tparam Acc Accumulation type
+ */
+template<typename T, typename Acc = T>
+__global__ void logsumexp_sum_exp_kernel(
+    const T* __restrict__ input,
+    const Acc* __restrict__ max_vals,
+    T* __restrict__ output,
+    const int64_t* __restrict__ input_shape,
+    const int64_t* __restrict__ input_strides,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= output_size) return;
+
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+    for (int64_t d = ndim - 1; d >= 0; --d) {
+        if (d == dim) { indices[d] = 0; continue; }
+        indices[d] = tmp % input_shape[d];
+        tmp /= input_shape[d];
+    }
+
+    Acc m = max_vals[out_idx];
+    // Handle inf: if max is +/-inf, result should be the same inf
+    if (isinf(float(m))) {
+        output[out_idx] = T(m);
+        return;
+    }
+
+    Acc sum = Acc(0);
+    for (int64_t i = 0; i < dim_size; i++) {
+        indices[dim] = i;
+        int64_t in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * input_strides[d];
+        }
+        sum += exp(Acc(input[in_idx]) - m);
+    }
+    output[out_idx] = T(log(sum) + m);
+}
+
+/**
+ * @brief Full tensor logsumexp reduction using shared memory
+ * @tparam T Input/output data type
+ * @tparam Acc Accumulation type
+ */
+template<typename T, typename Acc = T>
+__global__ void logsumexp_full_kernel(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    int64_t n
+) {
+    // Step 1: Find max using shared memory reduction
+    __shared__ Acc smax[REDUCTION_BLOCK_SIZE];
+    int tid = threadIdx.x;
+    Acc local_max;
+    if constexpr (std::is_same_v<Acc, float>) {
+        local_max = -FLT_MAX;
+    } else if constexpr (std::is_same_v<Acc, double>) {
+        local_max = -DBL_MAX;
+    } else {
+        local_max = Acc(-1e38);
+    }
+
+    for (int64_t i = tid; i < n; i += blockDim.x) {
+        Acc val = Acc(input[i]);
+        if (val > local_max) local_max = val;
+    }
+    smax[tid] = local_max;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            if (smax[tid + stride] > smax[tid])
+                smax[tid] = smax[tid + stride];
+        }
+        __syncthreads();
+    }
+    Acc m = smax[0];
+    __syncthreads();
+
+    // Handle inf
+    if (isinf(float(m))) {
+        if (tid == 0) output[0] = T(m);
+        return;
+    }
+
+    // Step 2: Sum exp(x - max) using shared memory reduction
+    __shared__ Acc ssum[REDUCTION_BLOCK_SIZE];
+    Acc local_sum = Acc(0);
+    for (int64_t i = tid; i < n; i += blockDim.x) {
+        local_sum += exp(Acc(input[i]) - m);
+    }
+    ssum[tid] = local_sum;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            ssum[tid] += ssum[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        output[0] = T(log(ssum[0]) + m);
+    }
+}
+
+/**
+ * @brief LogSumExp reduction kernel - numerically stable log(sum(exp(x)))
+ * @param input Input tensor
+ * @param dim Dimension to reduce along (INT64_MIN for full reduction)
+ * @param keepdim Whether to keep the reduced dimension
+ * @param stream HIP stream
+ * @return Output tensor with logsumexp
+ */
+auto logsumexp_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor {
+    const auto dtype = input.dtype();
+    const auto& device = input.device();
+    const auto& input_shape = input.shape();
+    const auto& input_strides = input.strides();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    if (dtype != DType::Float32 && dtype != DType::Float64 &&
+        dtype != DType::Float16 && dtype != DType::BFloat16) {
+        throw std::runtime_error("logsumexp: only Float32, Float64, Float16, and BFloat16 are supported");
+    }
+
+    // BFloat16: upcast to Float32, compute, convert back
+    if (dtype == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = logsumexp_kernel(input_f32, dim, keepdim, stream);
+        return result_f32.to(DType::BFloat16);
+    }
+
+    // Normalize negative dimension (but preserve special value INT64_MIN for full reduction)
+    bool full_reduction = (dim == INT64_MIN);
+    int64_t normalized_dim = dim;
+    if (!full_reduction) {
+        if (dim < 0) normalized_dim = ndim + dim;
+        if (normalized_dim < 0 || normalized_dim >= ndim) {
+            throw std::runtime_error("Dimension " + std::to_string(dim) +
+                " out of range for tensor with " + std::to_string(ndim) + " dimensions");
+        }
+    }
+
+    auto output_shape = compute_reduction_shape(
+        std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+        full_reduction ? -1 : normalized_dim, keepdim
+    );
+
+    Tensor output(output_shape, dtype, device);
+
+    if (full_reduction) {
+        // Full reduction
+        int64_t n = input.numel();
+        if (n == 0) {
+            // logsumexp of empty set is -inf
+            switch (dtype) {
+                case DType::Float32: {
+                    float neg_inf = -FLT_MAX;
+                    HIP_CHECK(hipMemcpyAsync(output.data<float>(), &neg_inf, sizeof(float),
+                              hipMemcpyHostToDevice, stream));
+                    break;
+                }
+                case DType::Float64: {
+                    double neg_inf = -DBL_MAX;
+                    HIP_CHECK(hipMemcpyAsync(output.data<double>(), &neg_inf, sizeof(double),
+                              hipMemcpyHostToDevice, stream));
+                    break;
+                }
+                default: break;
+            }
+            HIP_CHECK(hipStreamSynchronize(stream));
+            return output;
+        }
+
+        switch (dtype) {
+            case DType::Float32:
+                hipLaunchKernelGGL((logsumexp_full_kernel<float, float>),
+                    dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                    input.data<float>(), output.data<float>(), n);
+                break;
+            case DType::Float64:
+                hipLaunchKernelGGL((logsumexp_full_kernel<double, double>),
+                    dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                    input.data<double>(), output.data<double>(), n);
+                break;
+            case DType::Float16:
+                hipLaunchKernelGGL((logsumexp_full_kernel<__half, float>),
+                    dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                    reinterpret_cast<const __half*>(input.data<Float16>()),
+                    reinterpret_cast<__half*>(output.data<Float16>()), n);
+                break;
+            default: break;
+        }
+    } else {
+        // Dim reduction
+        int64_t dim_size = input_shape[normalized_dim];
+        int64_t output_size = 1;
+        for (int64_t i = 0; i < ndim; i++) {
+            if (i != normalized_dim) output_size *= input_shape[i];
+        }
+
+        if (output_size == 0 || dim_size == 0) {
+            return output;
+        }
+
+        auto shape_vec = std::vector<int64_t>(input_shape.begin(), input_shape.end());
+        auto strides_vec = std::vector<int64_t>(input_strides.begin(), input_strides.end());
+
+        // Copy shape and strides to device
+        int64_t* d_shape;
+        int64_t* d_strides;
+        HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
+        HIP_CHECK(hipMalloc(&d_strides, ndim * sizeof(int64_t)));
+        HIP_CHECK(hipMemcpy(d_shape, shape_vec.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+        HIP_CHECK(hipMemcpy(d_strides, strides_vec.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+
+        int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+
+        switch (dtype) {
+            case DType::Float32: {
+                Tensor max_buf({output_size}, DType::Float32, device);
+                hipLaunchKernelGGL((logsumexp_max_along_dim_kernel<float, float>),
+                    dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                    input.data<float>(), max_buf.data<float>(),
+                    d_shape, d_strides, ndim, normalized_dim, output_size, dim_size);
+
+                hipLaunchKernelGGL((logsumexp_sum_exp_kernel<float, float>),
+                    dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                    input.data<float>(), max_buf.data<float>(), output.data<float>(),
+                    d_shape, d_strides, ndim, normalized_dim, output_size, dim_size);
+                break;
+            }
+            case DType::Float64: {
+                Tensor max_buf({output_size}, DType::Float64, device);
+                hipLaunchKernelGGL((logsumexp_max_along_dim_kernel<double, double>),
+                    dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                    input.data<double>(), max_buf.data<double>(),
+                    d_shape, d_strides, ndim, normalized_dim, output_size, dim_size);
+
+                hipLaunchKernelGGL((logsumexp_sum_exp_kernel<double, double>),
+                    dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                    input.data<double>(), max_buf.data<double>(), output.data<double>(),
+                    d_shape, d_strides, ndim, normalized_dim, output_size, dim_size);
+                break;
+            }
+            case DType::Float16: {
+                // Use float accumulator for max values
+                Tensor max_buf({output_size}, DType::Float32, device);
+                hipLaunchKernelGGL((logsumexp_max_along_dim_kernel<__half, float>),
+                    dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                    reinterpret_cast<const __half*>(input.data<Float16>()),
+                    max_buf.data<float>(),
+                    d_shape, d_strides, ndim, normalized_dim, output_size, dim_size);
+
+                hipLaunchKernelGGL((logsumexp_sum_exp_kernel<__half, float>),
+                    dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                    reinterpret_cast<const __half*>(input.data<Float16>()),
+                    max_buf.data<float>(),
+                    reinterpret_cast<__half*>(output.data<Float16>()),
+                    d_shape, d_strides, ndim, normalized_dim, output_size, dim_size);
+                break;
+            }
+            default: break;
+        }
+
+        // Must wait for kernels to complete before freeing device memory they use
+        HIP_CHECK(hipStreamSynchronize(stream));
+        HIP_CHECK(hipFree(d_shape));
+        HIP_CHECK(hipFree(d_strides));
+    }
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        throw std::runtime_error(std::string("HIP error in logsumexp_kernel: ") + hipGetErrorString(err));
+    }
+
+    return output;
+}
+
 } // namespace rocm
 } // namespace tenzor

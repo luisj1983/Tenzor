@@ -111,6 +111,17 @@ std::pair<int64_t, int64_t> check_square(const Tensor& t) {
     return {m, ndim};
 }
 
+/// CUDA kernel to set a batched identity matrix on device.
+template<typename T>
+__global__ void set_identity_kernel(T* data, int64_t n, int64_t total) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+    int64_t mat_offset = idx % (n * n);
+    int64_t row = mat_offset / n;
+    int64_t col = mat_offset % n;
+    data[idx] = (row == col) ? T(1) : T(0);
+}
+
 /// CUDA kernel to compute determinant from LU diagonal + pivot info.
 __global__ void det_from_lu_f32(const float* lu_data, const int* ipiv,
                                  float* det_out, int n, int nbatch) {
@@ -331,16 +342,14 @@ auto linalg_inv_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
         float* data = work.data<float>();
         float* id_data = identity.data<float>();
 
-        // Set identity matrix (copy to host, set, copy back per batch)
-        auto id_cpu = zeros(to_vec(work.shape()), A.dtype(), Device::cpu());
-        float* id_cpu_data = id_cpu.data<float>();
-        for (int64_t b = 0; b < nbatch; b++) {
-            for (int64_t i = 0; i < n; i++) {
-                id_cpu_data[b * n * n + i * n + i] = 1.0f;
-            }
+        // Set identity matrix on device
+        {
+            int64_t total = nbatch * n * n;
+            int threads = 256;
+            int blocks = (total + threads - 1) / threads;
+            set_identity_kernel<<<blocks, threads, 0, stream>>>(id_data, n, total);
+            CUDA_CHECK_LINALG(cudaGetLastError());
         }
-        CUDA_CHECK_LINALG(cudaMemcpy(id_data, id_cpu_data,
-            nbatch * n * n * sizeof(float), cudaMemcpyHostToDevice));
 
         for (int64_t b = 0; b < nbatch; b++) {
             float* mat = data + b * n * n;
@@ -362,15 +371,14 @@ auto linalg_inv_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
         double* data = work.data<double>();
         double* id_data = identity.data<double>();
 
-        auto id_cpu = zeros(to_vec(work.shape()), A.dtype(), Device::cpu());
-        double* id_cpu_data = id_cpu.data<double>();
-        for (int64_t b = 0; b < nbatch; b++) {
-            for (int64_t i = 0; i < n; i++) {
-                id_cpu_data[b * n * n + i * n + i] = 1.0;
-            }
+        // Set identity matrix on device
+        {
+            int64_t total = nbatch * n * n;
+            int threads = 256;
+            int blocks = (total + threads - 1) / threads;
+            set_identity_kernel<<<blocks, threads, 0, stream>>>(id_data, n, total);
+            CUDA_CHECK_LINALG(cudaGetLastError());
         }
-        CUDA_CHECK_LINALG(cudaMemcpy(id_data, id_cpu_data,
-            nbatch * n * n * sizeof(double), cudaMemcpyHostToDevice));
 
         for (int64_t b = 0; b < nbatch; b++) {
             double* mat = data + b * n * n;
@@ -783,6 +791,7 @@ auto linalg_eigh_kernel(const Tensor& A, cudaStream_t stream)
 
 auto linalg_eig_kernel(const Tensor& A, cudaStream_t stream)
     -> std::tuple<Tensor, Tensor, Tensor> {
+#if CUDA_VERSION >= 11010
     auto work = A.contiguous().clone();
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);
@@ -863,6 +872,10 @@ auto linalg_eig_kernel(const Tensor& A, cudaStream_t stream)
     // V contains left eigenvectors of A^T (= right eigenvectors of A) in column-major
     // which is the same as right eigenvectors in row-major — exactly what we want
     return {WR, WI, V};
+#else
+    (void)A; (void)stream;
+    throw std::runtime_error("eig: cusolverDnGeev requires CUDA 11.1+");
+#endif
 }
 
 // ============================================================================

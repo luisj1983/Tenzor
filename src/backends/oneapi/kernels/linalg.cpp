@@ -623,101 +623,14 @@ auto linalg_eigh_kernel(const Tensor& input, sycl::queue& queue) -> std::pair<Te
 
 // ============================================================================
 // LinalgEig - Non-symmetric eigendecomposition via geev
+// NOTE: geev is not available in all oneMKL versions/implementations.
+// When unavailable, this falls back to the CPU LAPACK path.
 // ============================================================================
 auto linalg_eig_kernel(const Tensor& input, sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor> {
-    auto shape = input.shape();
-    int64_t n = shape[shape.size() - 1];
-
-    if (input.dtype() == DType::Float32) {
-        std::vector<float> h_a(n * n);
-        queue.memcpy(h_a.data(), input.data_ptr(), n * n * sizeof(float)).wait();
-
-        // Row-major to column-major
-        std::vector<float> col_a(n * n);
-        for (int64_t i = 0; i < n; ++i)
-            for (int64_t j = 0; j < n; ++j)
-                col_a[j * n + i] = h_a[i * n + j];
-
-        float* d_a = sycl::malloc_device<float>(n * n, queue);
-        float* d_wr = sycl::malloc_device<float>(n, queue);
-        float* d_wi = sycl::malloc_device<float>(n, queue);
-        float* d_vl = sycl::malloc_device<float>(n * n, queue);
-        queue.memcpy(d_a, col_a.data(), n * n * sizeof(float)).wait();
-
-        auto sp = ::oneapi::mkl::lapack::geev_scratchpad_size<float>(
-            queue, ::oneapi::mkl::job::vec, ::oneapi::mkl::job::novec, n, n, n, n);
-        float* scratch = sycl::malloc_device<float>(sp, queue);
-
-        // Left eigenvectors of A^T (col-major) = right eigenvectors of A (row-major)
-        ::oneapi::mkl::lapack::geev(queue, ::oneapi::mkl::job::vec, ::oneapi::mkl::job::novec,
-                                   n, d_a, n, d_wr, d_wi,
-                                   d_vl, n, nullptr, n,
-                                   scratch, sp).wait();
-
-        Tensor WR({n}, input.dtype(), input.device());
-        Tensor WI({n}, input.dtype(), input.device());
-        queue.memcpy(const_cast<void*>(WR.data_ptr()), d_wr, n * sizeof(float));
-        queue.memcpy(const_cast<void*>(WI.data_ptr()), d_wi, n * sizeof(float)).wait();
-
-        // Transpose VL from column-major back to row-major
-        std::vector<float> col_v(n * n);
-        queue.memcpy(col_v.data(), d_vl, n * n * sizeof(float)).wait();
-        std::vector<float> h_v(n * n);
-        for (int64_t i = 0; i < n; ++i)
-            for (int64_t j = 0; j < n; ++j)
-                h_v[i * n + j] = col_v[j * n + i];
-
-        Tensor V({n, n}, input.dtype(), input.device());
-        queue.memcpy(const_cast<void*>(V.data_ptr()), h_v.data(), n * n * sizeof(float)).wait();
-
-        sycl::free(d_a, queue); sycl::free(d_wr, queue); sycl::free(d_wi, queue);
-        sycl::free(d_vl, queue); sycl::free(scratch, queue);
-        return {WR, WI, V};
-    } else if (input.dtype() == DType::Float64) {
-        std::vector<double> h_a(n * n);
-        queue.memcpy(h_a.data(), input.data_ptr(), n * n * sizeof(double)).wait();
-
-        std::vector<double> col_a(n * n);
-        for (int64_t i = 0; i < n; ++i)
-            for (int64_t j = 0; j < n; ++j)
-                col_a[j * n + i] = h_a[i * n + j];
-
-        double* d_a = sycl::malloc_device<double>(n * n, queue);
-        double* d_wr = sycl::malloc_device<double>(n, queue);
-        double* d_wi = sycl::malloc_device<double>(n, queue);
-        double* d_vl = sycl::malloc_device<double>(n * n, queue);
-        queue.memcpy(d_a, col_a.data(), n * n * sizeof(double)).wait();
-
-        auto sp = ::oneapi::mkl::lapack::geev_scratchpad_size<double>(
-            queue, ::oneapi::mkl::job::vec, ::oneapi::mkl::job::novec, n, n, n, n);
-        double* scratch = sycl::malloc_device<double>(sp, queue);
-
-        ::oneapi::mkl::lapack::geev(queue, ::oneapi::mkl::job::vec, ::oneapi::mkl::job::novec,
-                                   n, d_a, n, d_wr, d_wi,
-                                   d_vl, n, nullptr, n,
-                                   scratch, sp).wait();
-
-        Tensor WR({n}, input.dtype(), input.device());
-        Tensor WI({n}, input.dtype(), input.device());
-        queue.memcpy(const_cast<void*>(WR.data_ptr()), d_wr, n * sizeof(double));
-        queue.memcpy(const_cast<void*>(WI.data_ptr()), d_wi, n * sizeof(double)).wait();
-
-        std::vector<double> col_v(n * n);
-        queue.memcpy(col_v.data(), d_vl, n * n * sizeof(double)).wait();
-        std::vector<double> h_v(n * n);
-        for (int64_t i = 0; i < n; ++i)
-            for (int64_t j = 0; j < n; ++j)
-                h_v[i * n + j] = col_v[j * n + i];
-
-        Tensor V({n, n}, input.dtype(), input.device());
-        queue.memcpy(const_cast<void*>(V.data_ptr()), h_v.data(), n * n * sizeof(double)).wait();
-
-        sycl::free(d_a, queue); sycl::free(d_wr, queue); sycl::free(d_wi, queue);
-        sycl::free(d_vl, queue); sycl::free(scratch, queue);
-        return {WR, WI, V};
-    } else {
-        throw std::runtime_error("linalg_eig: only Float32 and Float64 supported");
-    }
+    (void)input; (void)queue;
+    throw std::runtime_error(
+        "linalg_eig: oneapi::mkl::lapack::geev is not available in the installed oneMKL version. "
+        "Non-symmetric eigendecomposition will fall back to the CPU backend.");
 }
 
 // ============================================================================

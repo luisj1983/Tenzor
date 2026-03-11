@@ -1,0 +1,79 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Fused Adam optimizer step (Float64)
+// Standard Adam with bias correction, optional weight decay (decoupled / L2),
+// and optional AMSGrad.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Grad { float64_t grad_data[]; };
+layout(binding = 1) buffer Param { float64_t param_data[]; };
+layout(binding = 2) buffer ExpAvg { float64_t exp_avg[]; };          // First moment (m)
+layout(binding = 3) buffer ExpAvgSq { float64_t exp_avg_sq[]; };     // Second moment (v)
+layout(binding = 4) buffer MaxExpAvgSq { float64_t max_exp_avg_sq[]; }; // AMSGrad max(v)
+
+layout(push_constant) uniform PushConstants {
+    uint numel;
+    float lr;
+    float beta1;
+    float beta2;
+    float eps;
+    float weight_decay;
+    float bias_correction1;  // 1 - beta1^t (precomputed on host)
+    float bias_correction2_sqrt;  // sqrt(1 - beta2^t) (precomputed on host)
+    uint decoupled;          // 0=L2, 1=decoupled (AdamW)
+    uint amsgrad;            // 0=off, 1=on
+    uint padding0;
+    uint padding1;
+} params;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= params.numel) return;
+
+    float64_t g = grad_data[gid];
+    float64_t p = param_data[gid];
+
+    float64_t lr_d = float64_t(params.lr);
+    float64_t beta1_d = float64_t(params.beta1);
+    float64_t beta2_d = float64_t(params.beta2);
+    float64_t eps_d = float64_t(params.eps);
+    float64_t wd_d = float64_t(params.weight_decay);
+
+    // Weight decay
+    if (params.weight_decay > 0.0) {
+        if (params.decoupled != 0) {
+            // Decoupled weight decay (AdamW): subtract directly from param
+            p -= lr_d * wd_d * p;
+        } else {
+            // L2 regularization: add to gradient
+            g += wd_d * p;
+        }
+    }
+
+    // Update first moment: m = beta1 * m + (1 - beta1) * g
+    float64_t m = beta1_d * exp_avg[gid] + (1.0LF - beta1_d) * g;
+    exp_avg[gid] = m;
+
+    // Update second moment: v = beta2 * v + (1 - beta2) * g^2
+    float64_t v = beta2_d * exp_avg_sq[gid] + (1.0LF - beta2_d) * g * g;
+    exp_avg_sq[gid] = v;
+
+    float64_t denom_v = v;
+    if (params.amsgrad != 0) {
+        // AMSGrad: use max of all past v
+        float64_t max_v = max(max_exp_avg_sq[gid], v);
+        max_exp_avg_sq[gid] = max_v;
+        denom_v = max_v;
+    }
+
+    // Bias-corrected estimates
+    float64_t bc1_d = float64_t(params.bias_correction1);
+    float64_t bc2s_d = float64_t(params.bias_correction2_sqrt);
+    float64_t m_hat = m / bc1_d;
+    // GLSL sqrt only works on float — cast down for sqrt
+    float64_t denom_d = float64_t(sqrt(float(denom_v))) / bc2s_d + eps_d;
+
+    p -= lr_d * m_hat / denom_d;
+    param_data[gid] = p;
+}

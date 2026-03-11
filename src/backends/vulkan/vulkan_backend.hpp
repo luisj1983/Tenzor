@@ -433,6 +433,8 @@ public:
     auto dispatchOnes(const std::vector<int64_t>& shape, DType dtype) -> Tensor;
     auto dispatchRand(const std::vector<int64_t>& shape, DType dtype) -> Tensor;
     auto dispatchRandn(const std::vector<int64_t>& shape, DType dtype) -> Tensor;
+    auto dispatchRandint(int64_t low, int64_t high, const std::vector<int64_t>& shape,
+                          DType dtype, const Device& device) -> Tensor;
 
     // Type cast operations
     auto dispatchCast(const Tensor& input, DType target_dtype) -> Tensor;
@@ -555,6 +557,10 @@ public:
     auto dispatchEmbeddingBag(const Tensor& embeddings, const Tensor& offsets,
                                int64_t embedding_dim, const std::string& mode,
                                bool include_last_offset) -> Tensor;
+    auto dispatchEmbeddingBagBackward(const Tensor& grad_output, const Tensor& indices,
+                                       const Tensor& offsets, int64_t num_embeddings,
+                                       int64_t embedding_dim, const std::string& mode,
+                                       bool include_last_offset) -> Tensor;
 
     // Fused optimizer steps
     auto dispatchFusedSGDStep(std::span<const Tensor> inputs,

@@ -14,6 +14,8 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "tenzor/ops/transform.hpp"
+#include "tenzor/core/tensor.hpp"
 #include <hip/hip_runtime.h>
 #include <iostream>
 #include <cstdlib>
@@ -868,6 +870,12 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
         bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return std::vector<Tensor>{rocm::prod_kernel(inputs[0], dim, keepdim, get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::LogSumExp, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        return std::vector<Tensor>{rocm::logsumexp_kernel(inputs[0], dim, keepdim, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Var, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -1816,6 +1824,80 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
         return std::vector<Tensor>{rocm::fused_attention_hip(inputs[0], inputs[1], inputs[2], scale)};
     });
+
+    // ========================================================================
+    // Flash Attention Backward (composed-ops fallback using high-level ops)
+    // ========================================================================
+    table.register_kernel(OpId::FlashAttentionBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // inputs: [dO, Q, K, V, O] — dO = grad_output, O = forward output
+            float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+            bool causal = attrs.get_bool(AttrKey::Causal, false);
+
+            const Tensor& dO = inputs[0];  // [B, H, S, D]
+            const Tensor& Q = inputs[1];
+            const Tensor& K = inputs[2];
+            const Tensor& V = inputs[3];
+
+            // Recompute attention weights: attn = softmax(Q @ K^T * scale)
+            Tensor Kt = tenzor::transpose(K, -1, -2);
+            Tensor scores = tenzor::bmm(Q, Kt);  // [B, H, S, S]
+
+            // Scale
+            auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
+            Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
+                                           scores.dtype(), scores.device());
+            scores = tenzor::mul(scores, scale_t);
+
+            // Apply causal mask if needed
+            if (causal) {
+                int64_t seq_len = scores_shape[scores_shape.size() - 1];
+                Tensor rows = tenzor::arange(0, seq_len, 1, DType::Int64, scores.device());
+                Tensor cols = tenzor::arange(0, seq_len, 1, DType::Int64, scores.device());
+                rows = tenzor::reshape(rows, {seq_len, 1});
+                cols = tenzor::reshape(cols, {1, seq_len});
+                Tensor causal_mask = tenzor::gt(cols.to(DType::Float32), rows.to(DType::Float32));
+                Tensor neg_inf = tenzor::full(scores_shape, -1e9,
+                                              scores.dtype(), scores.device());
+                scores = tenzor::add(scores, tenzor::mul(causal_mask.to(scores.dtype()), neg_inf));
+            }
+
+            // Softmax along last dim
+            NewOpAttributes sm_attrs;
+            sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+            std::vector<Tensor> sm_inputs = {scores};
+            Tensor attn_weights = tenzor::dispatch(OpId::Softmax, sm_inputs, sm_attrs)[0];
+
+            // dV = attn^T @ dO
+            Tensor attn_t = tenzor::transpose(attn_weights, -1, -2);
+            Tensor dV = tenzor::bmm(attn_t, dO);
+
+            // dAttn = dO @ V^T
+            Tensor Vt = tenzor::transpose(V, -1, -2);
+            Tensor dAttn = tenzor::bmm(dO, Vt);
+
+            // softmax backward: ds = attn * (dAttn - sum(attn * dAttn, dim=-1, keepdim=true))
+            Tensor attn_dAttn = tenzor::mul(attn_weights, dAttn);
+            NewOpAttributes sum_attrs;
+            sum_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+            sum_attrs.set(AttrKey::Keepdim, true);
+            std::vector<Tensor> sum_inputs = {attn_dAttn};
+            Tensor sum_ad = tenzor::dispatch(OpId::Sum, sum_inputs, sum_attrs)[0];
+            Tensor dScores = tenzor::mul(attn_weights, tenzor::sub(dAttn, sum_ad));
+
+            // Apply scale
+            Tensor scale_t2 = tenzor::full(
+                std::vector<int64_t>(dScores.shape().begin(), dScores.shape().end()),
+                static_cast<double>(scale), dScores.dtype(), dScores.device());
+            dScores = tenzor::mul(dScores, scale_t2);
+
+            // dQ = dScores @ K, dK = dScores^T @ Q
+            Tensor dQ = tenzor::bmm(dScores, K);
+            Tensor dScores_t = tenzor::transpose(dScores, -1, -2);
+            Tensor dK = tenzor::bmm(dScores_t, Q);
+
+            return {dQ, dK, dV};
+        });
 
     // ========================================================================
     // Fused LayerNorm Backward
