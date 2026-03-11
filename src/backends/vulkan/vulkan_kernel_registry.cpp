@@ -1599,8 +1599,50 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return get_vulkan_backend()->dispatchPut(inputs[0], inputs[1], inputs[2], accumulate);
     });
 
-    VULKAN_CPU_FALLBACK(QuantizedLinear);
-    VULKAN_CPU_FALLBACK(QuantizedConv2d);
+    // ========================================================================
+    // Quantized ops (native Int8 GPU shaders)
+    // ========================================================================
+    table.register_single_output_kernel(OpId::QuantizedLinear,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            const auto& input = inputs[0];
+            const auto& weight = inputs[1];
+
+            // Create a zero bias if not provided
+            auto weight_shape = weight.shape();
+            Tensor bias = (inputs.size() > 2 && inputs[2].numel() > 0)
+                ? inputs[2]
+                : Tensor({weight_shape[0]}, DType::Float32, input.device());
+
+            float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale, 1.0));
+            float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ, 1.0));
+            int32_t input_zp = static_cast<int32_t>(attrs.get_int(AttrKey::InputZeroPoint, 0));
+            int32_t weight_zp = static_cast<int32_t>(attrs.get_int(AttrKey::WeightZeroPoint, 0));
+
+            return get_vulkan_backend()->dispatchQuantizedLinear(
+                input, weight, bias, input_scale, weight_scale, input_zp, weight_zp);
+        });
+
+    table.register_single_output_kernel(OpId::QuantizedConv2d,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            const auto& input = inputs[0];
+            const auto& weight = inputs[1];
+
+            auto weight_shape = weight.shape();
+            Tensor bias = (inputs.size() > 2 && inputs[2].numel() > 0)
+                ? inputs[2]
+                : Tensor({weight_shape[0]}, DType::Float32, input.device());
+
+            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale, 1.0));
+            float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ, 1.0));
+            int32_t input_zp = static_cast<int32_t>(attrs.get_int(AttrKey::InputZeroPoint, 0));
+            int32_t weight_zp = static_cast<int32_t>(attrs.get_int(AttrKey::WeightZeroPoint, 0));
+
+            return get_vulkan_backend()->dispatchQuantizedConv2d(
+                input, weight, bias, stride, padding,
+                input_scale, weight_scale, input_zp, weight_zp);
+        });
     table.register_kernel(OpId::LSTMCellForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs)
         -> std::vector<Tensor> {
         // BFloat16: Vulkan BFloat16 support is limited, fall back to CPU
@@ -1698,12 +1740,24 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     VULKAN_CPU_FALLBACK(LinalgEig);
     VULKAN_CPU_FALLBACK(LinalgCholesky);
 
-    // Flash attention (CPU fallback — requires specialized memory access patterns)
-    VULKAN_CPU_FALLBACK(FlashAttention);
+    // Flash Attention — composed from existing matmul + softmax shaders (not fused)
+    // This avoids the CPU roundtrip of VULKAN_CPU_FALLBACK by keeping all
+    // intermediate data on GPU. FlashAttentionBackward still uses CPU fallback
+    // since backward requires access to intermediate attention weights.
+    table.register_kernel(OpId::FlashAttention,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+            bool causal = attrs.get_bool(AttrKey::Causal, false);
+            return {get_vulkan_backend()->dispatchFlashAttention(
+                inputs[0], inputs[1], inputs[2], scale, causal)};
+        });
     VULKAN_CPU_FALLBACK(FlashAttentionBackward);
 
-    // SearchSorted — binary search is rarely GPU-critical, CPU fallback is fine
-    VULKAN_CPU_FALLBACK(SearchSorted);
+    // SearchSorted — native GPU binary search shader
+    table.register_single_output_kernel(OpId::SearchSorted,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return get_vulkan_backend()->dispatchSearchSorted(inputs[0], inputs[1]);
+        });
 
     #undef VULKAN_CPU_FALLBACK
 

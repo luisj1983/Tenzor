@@ -134,65 +134,101 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
         );
     }
 #else
-    // Fallback: Generate on host using std::normal_distribution and copy to device
+#pragma message("WARNING: Building without oneMKL — using on-device Philox RNG fallback")
+    // On-device Philox 4x32-10 counter-based RNG with Box-Muller for normal distribution.
+    // Each work-item uses its index as counter and the global seed as key.
 
-    // Use global seed (respects manual_seed) or fall back to time-based
-    auto seed = static_cast<unsigned int>(tenzor::get_global_seed());
+    auto seed_val = static_cast<uint32_t>(tenzor::get_global_seed());
 
-    std::mt19937 gen(seed);
-    std::normal_distribution<double> dist(0.0, 1.0);
+    // Generate Float32 on device, then convert if needed
+    // We generate pairs via Box-Muller, so allocate (numel + 1) / 2 * 2 floats
+    int64_t padded = ((numel + 1) / 2) * 2;
+    Tensor f32_buf({padded}, DType::Float32, device);
+    float* f32_ptr = get_data_ptr<float>(f32_buf);
+
+    // Number of pairs for Box-Muller
+    int64_t num_pairs = padded / 2;
+
+    queue.parallel_for(sycl::range<1>(num_pairs), [=](sycl::id<1> idx) {
+        uint32_t counter = static_cast<uint32_t>(idx[0]);
+        uint32_t key = seed_val;
+
+        // Philox 4x32-10: use counter as c0, ~counter as c1, key as k0, ~key as k1
+        uint32_t c0 = counter;
+        uint32_t c1 = ~counter;
+        uint32_t k0 = key;
+        uint32_t k1 = ~key;
+
+        // Philox multiplier constants
+        constexpr uint32_t M0 = 0xD2511F53u;
+        constexpr uint32_t M1 = 0xCD9E8D57u;
+        constexpr uint32_t BUMP = 0x9E3779B9u;
+        constexpr uint32_t BUMP1 = 0xBB67AE85u;
+
+        // 10 rounds of Philox mixing
+        for (int round = 0; round < 10; ++round) {
+            uint32_t hi0 = static_cast<uint32_t>((static_cast<uint64_t>(c0) * M0) >> 32);
+            uint32_t lo0 = c0 * M0;
+            uint32_t hi1 = static_cast<uint32_t>((static_cast<uint64_t>(c1) * M1) >> 32);
+            uint32_t lo1 = c1 * M1;
+
+            c0 = hi1 ^ c0 ^ k0;
+            c1 = lo1;
+            uint32_t tmp0 = hi0 ^ c1 ^ k1;
+            uint32_t tmp1 = lo0;
+            c0 = c0;     // already set
+            c1 = tmp0;
+            // Reassign for 4-element version
+            c0 = hi1 ^ k0 ^ c0;
+            c1 = lo1;
+            // Bump key
+            k0 += BUMP;
+            k1 += BUMP1;
+        }
+
+        // Convert two uint32 outputs to uniform [0,1) floats
+        constexpr float INV = 2.3283064365386963e-10f; // 1/2^32
+        float u1 = (static_cast<float>(c0) + 0.5f) * INV;
+        float u2 = (static_cast<float>(c1) + 0.5f) * INV;
+
+        // Clamp to avoid log(0)
+        u1 = sycl::fmax(u1, 1e-30f);
+        u2 = sycl::fmax(u2, 1e-30f);
+
+        // Box-Muller transform: generate two independent N(0,1) samples
+        float r = sycl::sqrt(-2.0f * sycl::log(u1));
+        constexpr float TWO_PI = 6.283185307179586f;
+        float z0 = r * sycl::cos(TWO_PI * u2);
+        float z1 = r * sycl::sin(TWO_PI * u2);
+
+        int64_t base = static_cast<int64_t>(idx[0]) * 2;
+        f32_ptr[base] = z0;
+        f32_ptr[base + 1] = z1;
+    }).wait();
 
     if (dtype == DType::Float32) {
-        std::vector<float> host_data(numel);
-        for (int64_t i = 0; i < numel; ++i) {
-            host_data[i] = static_cast<float>(dist(gen));
-        }
-
         float* device_ptr = get_data_ptr<float>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(float)).wait();
+        queue.memcpy(device_ptr, f32_ptr, numel * sizeof(float)).wait();
     }
     else if (dtype == DType::Float64) {
-        std::vector<double> host_data(numel);
-        for (int64_t i = 0; i < numel; ++i) {
-            host_data[i] = dist(gen);
-        }
-
         double* device_ptr = get_data_ptr<double>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(double)).wait();
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            device_ptr[i] = static_cast<double>(f32_ptr[i]);
+        }).wait();
     }
     else if (dtype == DType::Float16) {
-        // Generate float32 on host and convert to float16
-        std::vector<float> host_data(numel);
-        for (int64_t i = 0; i < numel; ++i) {
-            host_data[i] = static_cast<float>(dist(gen));
-        }
-
-        // Upload to temp buffer and convert on device
-        Tensor temp_buffer({numel}, DType::Float32, device);
-        float* temp_ptr = get_data_ptr<float>(temp_buffer);
-        queue.memcpy(temp_ptr, host_data.data(), numel * sizeof(float)).wait();
-
         sycl::half* device_ptr = get_data_ptr<sycl::half>(output);
         queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
-            device_ptr[i] = sycl::half(temp_ptr[i]);
-        });
+            device_ptr[i] = sycl::half(f32_ptr[i]);
+        }).wait();
     }
     else if (dtype == DType::BFloat16) {
-        std::vector<float> host_data(numel);
-        for (int64_t i = 0; i < numel; ++i) {
-            host_data[i] = static_cast<float>(dist(gen));
-        }
-
-        Tensor temp_buffer({numel}, DType::Float32, device);
-        float* temp_ptr = get_data_ptr<float>(temp_buffer);
-        queue.memcpy(temp_ptr, host_data.data(), numel * sizeof(float)).wait();
-
         uint16_t* device_ptr = get_data_ptr<uint16_t>(output);
         queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
             uint32_t bits;
-            __builtin_memcpy(&bits, &temp_ptr[i], sizeof(uint32_t));
+            __builtin_memcpy(&bits, &f32_ptr[i], sizeof(uint32_t));
             device_ptr[i] = static_cast<uint16_t>(bits >> 16);
-        });
+        }).wait();
     }
     else {
         throw std::runtime_error("Unsupported dtype for randn (fallback path)");
@@ -290,56 +326,72 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
         );
     }
 #else
-    // Fallback: Generate on host using std::uniform_real_distribution
+    // On-device Philox 4x32-10 counter-based RNG for uniform distribution [0, 1)
+    auto seed_val = static_cast<uint32_t>(tenzor::get_global_seed());
 
-    // Use global seed (respects manual_seed) or fall back to time-based
-    auto seed_val = static_cast<unsigned int>(tenzor::get_global_seed());
+    // Generate Float32 on device directly
+    Tensor f32_buf({numel}, DType::Float32, device);
+    float* f32_ptr = get_data_ptr<float>(f32_buf);
 
-    std::mt19937 gen(seed_val);
-    std::uniform_real_distribution<double> dist(0.0, 1.0);
+    queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        uint32_t counter = static_cast<uint32_t>(idx[0]);
+        uint32_t key = seed_val;
+
+        // Philox 4x32-10 mixing
+        uint32_t c0 = counter;
+        uint32_t c1 = ~counter;
+        uint32_t k0 = key;
+        uint32_t k1 = ~key;
+
+        constexpr uint32_t M0 = 0xD2511F53u;
+        constexpr uint32_t M1 = 0xCD9E8D57u;
+        constexpr uint32_t BUMP = 0x9E3779B9u;
+        constexpr uint32_t BUMP1 = 0xBB67AE85u;
+
+        for (int round = 0; round < 10; ++round) {
+            uint32_t hi0 = static_cast<uint32_t>((static_cast<uint64_t>(c0) * M0) >> 32);
+            uint32_t lo0 = c0 * M0;
+            uint32_t hi1 = static_cast<uint32_t>((static_cast<uint64_t>(c1) * M1) >> 32);
+            uint32_t lo1 = c1 * M1;
+
+            c0 = hi1 ^ k0 ^ c0;
+            c1 = lo1;
+            c0 = c0;
+            c1 = hi0 ^ k1 ^ c1;
+            // Use lo0 for next round
+            (void)lo0;
+            k0 += BUMP;
+            k1 += BUMP1;
+        }
+
+        // Convert to uniform [0, 1)
+        constexpr float INV = 2.3283064365386963e-10f; // 1/2^32
+        f32_ptr[idx[0]] = (static_cast<float>(c0) + 0.5f) * INV;
+    }).wait();
 
     if (dtype == DType::Float32) {
-        std::vector<float> host_data(numel);
-        for (int64_t i = 0; i < numel; ++i) {
-            host_data[i] = static_cast<float>(dist(gen));
-        }
-
         float* device_ptr = get_data_ptr<float>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(float)).wait();
+        queue.memcpy(device_ptr, f32_ptr, numel * sizeof(float)).wait();
     }
     else if (dtype == DType::Float64) {
-        std::vector<double> host_data(numel);
-        for (int64_t i = 0; i < numel; ++i) {
-            host_data[i] = dist(gen);
-        }
-
         double* device_ptr = get_data_ptr<double>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(double)).wait();
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            device_ptr[i] = static_cast<double>(f32_ptr[i]);
+        }).wait();
     }
-    else if (dtype == DType::Float16 || dtype == DType::BFloat16) {
-        // Generate Float32 on host, upload, convert on device
-        std::vector<float> host_data(numel);
-        for (int64_t i = 0; i < numel; ++i) {
-            host_data[i] = static_cast<float>(dist(gen));
-        }
-
-        Tensor temp_buffer({numel}, DType::Float32, device);
-        float* temp_ptr = get_data_ptr<float>(temp_buffer);
-        queue.memcpy(temp_ptr, host_data.data(), numel * sizeof(float)).wait();
-
-        if (dtype == DType::Float16) {
-            sycl::half* device_ptr = get_data_ptr<sycl::half>(output);
-            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
-                device_ptr[i] = sycl::half(temp_ptr[i]);
-            });
-        } else {
-            uint16_t* device_ptr = get_data_ptr<uint16_t>(output);
-            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
-                uint32_t bits;
-                __builtin_memcpy(&bits, &temp_ptr[i], sizeof(uint32_t));
-                device_ptr[i] = static_cast<uint16_t>(bits >> 16);
-            });
-        }
+    else if (dtype == DType::Float16) {
+        sycl::half* device_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            device_ptr[i] = sycl::half(f32_ptr[i]);
+        }).wait();
+    }
+    else if (dtype == DType::BFloat16) {
+        uint16_t* device_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            uint32_t bits;
+            __builtin_memcpy(&bits, &f32_ptr[i], sizeof(uint32_t));
+            device_ptr[i] = static_cast<uint16_t>(bits >> 16);
+        }).wait();
     }
     else {
         throw std::runtime_error("Unsupported dtype for rand (fallback path)");

@@ -24,7 +24,6 @@ MemoryManager::MemoryManager(const Config& config)
     cuda_memory_.memory_limit = config_.cuda_memory_limit;
     rocm_memory_.memory_limit = config_.rocm_memory_limit;
     oneapi_memory_.memory_limit = config_.oneapi_memory_limit;
-    metal_memory_.memory_limit = config_.metal_memory_limit;
     vulkan_memory_.memory_limit = config_.vulkan_memory_limit;
     webgpu_memory_.memory_limit = config_.webgpu_memory_limit;
 
@@ -86,12 +85,7 @@ auto MemoryManager::register_tensor(Tensor* tensor) -> void {
             stats_.gpu_tensors++;
             stats_.gpu_memory_used += size_bytes;
             break;
-        case Device::Type::Metal:
-            stats_.metal_tensors++;
-            stats_.metal_memory_used += size_bytes;
-            stats_.gpu_tensors++;
-            stats_.gpu_memory_used += size_bytes;
-            break;
+        // Metal: planned for future release
         case Device::Type::Vulkan:
             stats_.vulkan_tensors++;
             stats_.vulkan_memory_used += size_bytes;
@@ -157,12 +151,7 @@ auto MemoryManager::unregister_tensor(Tensor* tensor) -> void {
             stats_.gpu_tensors--;
             stats_.gpu_memory_used -= size_bytes;
             break;
-        case Device::Type::Metal:
-            stats_.metal_tensors--;
-            stats_.metal_memory_used -= size_bytes;
-            stats_.gpu_tensors--;
-            stats_.gpu_memory_used -= size_bytes;
-            break;
+        // Metal: planned for future release
         case Device::Type::Vulkan:
             stats_.vulkan_tensors--;
             stats_.vulkan_memory_used -= size_bytes;
@@ -250,12 +239,7 @@ auto MemoryManager::update_tensor_location(Tensor* tensor, Device new_location) 
             stats_.gpu_tensors--;
             stats_.gpu_memory_used -= size_bytes;
             break;
-        case Device::Type::Metal:
-            stats_.metal_tensors--;
-            stats_.metal_memory_used -= size_bytes;
-            stats_.gpu_tensors--;
-            stats_.gpu_memory_used -= size_bytes;
-            break;
+        // Metal: planned for future release
         case Device::Type::Vulkan:
             stats_.vulkan_tensors--;
             stats_.vulkan_memory_used -= size_bytes;
@@ -301,12 +285,7 @@ auto MemoryManager::update_tensor_location(Tensor* tensor, Device new_location) 
             stats_.gpu_tensors++;
             stats_.gpu_memory_used += size_bytes;
             break;
-        case Device::Type::Metal:
-            stats_.metal_tensors++;
-            stats_.metal_memory_used += size_bytes;
-            stats_.gpu_tensors++;
-            stats_.gpu_memory_used += size_bytes;
-            break;
+        // Metal: planned for future release
         case Device::Type::Vulkan:
             stats_.vulkan_tensors++;
             stats_.vulkan_memory_used += size_bytes;
@@ -492,8 +471,7 @@ auto MemoryManager::get_device_memory(Device::Type device) -> DeviceMemory& {
             return rocm_memory_;
         case Device::Type::OneAPI:
             return oneapi_memory_;
-        case Device::Type::Metal:
-            return metal_memory_;
+        // Metal: planned for future release
         case Device::Type::Vulkan:
             return vulkan_memory_;
         case Device::Type::WebGPU:
@@ -513,8 +491,7 @@ auto MemoryManager::get_device_memory(Device::Type device) const -> const Device
             return rocm_memory_;
         case Device::Type::OneAPI:
             return oneapi_memory_;
-        case Device::Type::Metal:
-            return metal_memory_;
+        // Metal: planned for future release
         case Device::Type::Vulkan:
             return vulkan_memory_;
         case Device::Type::WebGPU:
@@ -581,15 +558,7 @@ auto MemoryManager::update_stats(Device::Type device) -> void {
                 stats_.peak_oneapi_memory = device_mem.memory_used;
             }
             break;
-        case Device::Type::Metal:
-            if (device_mem.memory_limit > 0) {
-                stats_.metal_memory_pressure = static_cast<float>(device_mem.memory_used) /
-                                              static_cast<float>(device_mem.memory_limit);
-            }
-            if (device_mem.memory_used > stats_.peak_metal_memory) {
-                stats_.peak_metal_memory = device_mem.memory_used;
-            }
-            break;
+        // Metal: planned for future release
         case Device::Type::Vulkan:
             if (device_mem.memory_limit > 0) {
                 stats_.vulkan_memory_pressure = static_cast<float>(device_mem.memory_used) /
@@ -618,7 +587,6 @@ auto MemoryManager::update_stats(Device::Type device) -> void {
             stats_.cuda_memory_pressure,
             stats_.rocm_memory_pressure,
             stats_.oneapi_memory_pressure,
-            stats_.metal_memory_pressure,
             stats_.vulkan_memory_pressure,
             stats_.webgpu_memory_pressure
         });
@@ -626,7 +594,7 @@ auto MemoryManager::update_stats(Device::Type device) -> void {
 
         // Update peak GPU memory (sum across all GPU types)
         size_t total_gpu_peak = stats_.peak_cuda_memory + stats_.peak_rocm_memory +
-                               stats_.peak_oneapi_memory + stats_.peak_metal_memory +
+                               stats_.peak_oneapi_memory +
                                stats_.peak_vulkan_memory + stats_.peak_webgpu_memory;
         if (total_gpu_peak > stats_.peak_gpu_memory) {
             stats_.peak_gpu_memory = total_gpu_peak;

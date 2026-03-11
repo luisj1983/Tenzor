@@ -351,6 +351,7 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
 }
 
 #else // !TENZOR_HAS_ONEDNN
+#pragma message("WARNING: Building without oneDNN — using slower BatchNorm fallback")
 
 // Pure SYCL implementation (fallback)
 

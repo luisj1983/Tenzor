@@ -83,16 +83,9 @@ inline bool has_rocm(int32_t index = 0) {
 }
 
 /**
- * @brief Check if Metal backend is available.
- */
-inline bool has_metal(int32_t index = 0) {
-    return is_backend_available(Device::Type::Metal, index);
-}
-
-/**
  * @brief Check if a backend is available by name string.
  *
- * Accepts: "cpu", "cuda", "vulkan", "oneapi", "rocm", "metal"
+ * Accepts: "cpu", "cuda", "vulkan", "oneapi", "rocm"
  *
  * @param name Backend name (case-sensitive, lowercase)
  * @return true if available
@@ -103,7 +96,6 @@ inline bool is_backend_name_available(const std::string& name) {
     if (name == "vulkan") return has_vulkan();
     if (name == "oneapi") return has_oneapi();
     if (name == "rocm") return has_rocm();
-    if (name == "metal") return has_metal();
     return false;
 }
 
@@ -120,7 +112,6 @@ inline Device device_from_name(const std::string& name) {
     if (name == "vulkan") return Device::vulkan(0);
     if (name == "oneapi") return Device::oneapi(0);
     if (name == "rocm") return Device::rocm(0);
-    if (name == "metal") return Device::metal(0);
     throw std::runtime_error("Unknown backend name: " + name);
 }
 
@@ -154,7 +145,7 @@ inline std::vector<std::string> get_available_backend_names() {
     if (has_oneapi()) names.push_back("oneapi");
     if (has_vulkan()) names.push_back("vulkan");
     if (has_rocm()) names.push_back("rocm");
-    if (has_metal()) names.push_back("metal");
+    // Metal: planned for future release
     return names;
 }
 
@@ -183,9 +174,6 @@ inline std::vector<std::string> get_available_backend_names() {
 
 #define SKIP_IF_NO_ROCM \
     if (!tenzor::testing::has_rocm()) GTEST_SKIP() << "ROCm backend not available"
-
-#define SKIP_IF_NO_METAL \
-    if (!tenzor::testing::has_metal()) GTEST_SKIP() << "Metal backend not available"
 
 /**
  * @brief Skip test if the named backend is not available.

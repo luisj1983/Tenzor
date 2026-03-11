@@ -258,6 +258,39 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& 
 }
 
 // ============================================================================
+// Randint Kernel - Create tensor with random integers in [low, high)
+// ============================================================================
+
+auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape,
+                    DType dtype, const Device& device) -> Tensor {
+    if (dtype != DType::Int32 && dtype != DType::Int64) {
+        throw std::runtime_error("randint operation only supports Int32 and Int64 dtypes");
+    }
+
+    Tensor result(shape, dtype, device);
+    size_t n = static_cast<size_t>(result.numel());
+
+    if (dtype == DType::Int32) {
+        int32_t* data = result.data<int32_t>();
+        std::uniform_int_distribution<int32_t> dist(
+            static_cast<int32_t>(low), static_cast<int32_t>(high - 1));
+
+        for (size_t i = 0; i < n; ++i) {
+            data[i] = dist(detail::rng);
+        }
+    } else {  // Int64
+        int64_t* data = result.data<int64_t>();
+        std::uniform_int_distribution<int64_t> dist(low, high - 1);
+
+        for (size_t i = 0; i < n; ++i) {
+            data[i] = dist(detail::rng);
+        }
+    }
+
+    return result;
+}
+
+// ============================================================================
 // Full Kernel - Create tensor filled with a specific value
 // ============================================================================
 

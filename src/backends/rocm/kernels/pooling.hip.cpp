@@ -209,7 +209,6 @@ auto maxpool2d_forward_hip(
     }
 
     HIP_CHECK(hipGetLastError());
-    HIP_CHECK(hipDeviceSynchronize());
 
     return {output, indices};
 }
@@ -310,7 +309,6 @@ auto maxpool2d_backward_hip(
     }
 
     HIP_CHECK(hipGetLastError());
-    HIP_CHECK(hipDeviceSynchronize());
 
     return grad_input;
 }
@@ -483,7 +481,6 @@ auto avgpool2d_forward_hip(
     }
 
     HIP_CHECK(hipGetLastError());
-    HIP_CHECK(hipDeviceSynchronize());
 
     return output;
 }
@@ -663,7 +660,6 @@ auto avgpool2d_backward_hip(
     }
 
     HIP_CHECK(hipGetLastError());
-    HIP_CHECK(hipDeviceSynchronize());
 
     return grad_input;
 }
@@ -763,7 +759,6 @@ auto adaptive_avgpool2d_hip(
     }
 
     HIP_CHECK(hipGetLastError());
-    HIP_CHECK(hipDeviceSynchronize());
 
     return output;
 }
@@ -871,7 +866,6 @@ auto adaptive_maxpool2d_hip(
     }
 
     HIP_CHECK(hipGetLastError());
-    HIP_CHECK(hipDeviceSynchronize());
 
     return {output, indices};
 }

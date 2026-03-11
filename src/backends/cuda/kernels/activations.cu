@@ -3531,6 +3531,14 @@ auto dropout_forward_kernel(const Tensor& input, float p, bool training, cudaStr
                 n, p, scale, seed);
             CUDA_CHECK(cudaGetLastError());
             break;
+        case DType::BFloat16:
+            dropout_forward_kernel_impl<__nv_bfloat16><<<num_blocks, block_size, 0, stream>>>(
+                reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+                reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+                mask.data<uint8_t>(),
+                n, p, scale, seed);
+            CUDA_CHECK(cudaGetLastError());
+            break;
         default:
             throw std::runtime_error("dropout_forward: unsupported dtype");
     }
@@ -3574,6 +3582,14 @@ auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, floa
                 reinterpret_cast<const __half*>(grad_output.data_ptr()),
                 mask.data<uint8_t>(),
                 reinterpret_cast<__half*>(grad_input.data_ptr()),
+                n, scale);
+            CUDA_CHECK(cudaGetLastError());
+            break;
+        case DType::BFloat16:
+            dropout_backward_kernel_impl<__nv_bfloat16><<<num_blocks, block_size, 0, stream>>>(
+                reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
+                mask.data<uint8_t>(),
+                reinterpret_cast<__nv_bfloat16*>(grad_input.data_ptr()),
                 n, scale);
             CUDA_CHECK(cudaGetLastError());
             break;

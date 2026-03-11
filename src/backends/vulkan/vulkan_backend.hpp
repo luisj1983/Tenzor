@@ -603,6 +603,22 @@ public:
     auto dispatchLinalgInv(const Tensor& input) -> Tensor;
     auto dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Tensor;
 
+    // SearchSorted (native GPU binary search shader)
+    auto dispatchSearchSorted(const Tensor& sorted, const Tensor& values) -> Tensor;
+
+    // Quantized operations (native Int8 GPU shaders)
+    auto dispatchQuantizedLinear(const Tensor& input, const Tensor& weight, const Tensor& bias,
+                                  float input_scale, float weight_scale,
+                                  int32_t input_zp, int32_t weight_zp) -> Tensor;
+    auto dispatchQuantizedConv2d(const Tensor& input, const Tensor& weight, const Tensor& bias,
+                                  int64_t stride, int64_t padding,
+                                  float input_scale, float weight_scale,
+                                  int32_t input_zp, int32_t weight_zp) -> Tensor;
+
+    // Flash Attention — composed from existing matmul + softmax shaders (not a single fused kernel)
+    auto dispatchFlashAttention(const Tensor& Q, const Tensor& K, const Tensor& V,
+                                 float scale, bool causal) -> Tensor;
+
     // Instance and devices
     VkInstance instance_ = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT debug_messenger_ = VK_NULL_HANDLE;

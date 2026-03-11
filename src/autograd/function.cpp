@@ -840,9 +840,15 @@ auto LogBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable>
 }
 
 auto LogBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    // d(log(x))/dx = 1/x
+    // d(log(x))/dx = 1/x, with zero-safe clamping to prevent NaN
     const auto& input = saved_tensors_[0];
-    auto grad_input = div(grad_outputs[0], input);
+    auto zero = zeros(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                      input.dtype(), input.device());
+    auto eps = full(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                    static_cast<double>(std::numeric_limits<float>::min()),
+                    input.dtype(), input.device());
+    auto safe_input = where(eq(input, zero), eps, input);
+    auto grad_input = div(grad_outputs[0], safe_input);
     return {grad_input};
 }
 

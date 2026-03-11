@@ -548,7 +548,6 @@ auto OffloadEngine::is_gpu_device(const Device& device) const -> bool {
            device.type == Device::Type::ROCm ||
            device.type == Device::Type::OneAPI ||
            device.type == Device::Type::Vulkan ||
-           device.type == Device::Type::Metal ||
            device.type == Device::Type::WebGPU;
 }
 

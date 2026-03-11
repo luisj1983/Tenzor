@@ -94,6 +94,7 @@ namespace cpu {
     auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto max_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
+    auto logsumexp_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto min_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
@@ -260,6 +261,7 @@ namespace cpu {
     auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, const Device& device) -> Tensor;
     auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
     auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
+    auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
     auto arange_kernel(float start, float end, float step, DType dtype, const Device& device) -> Tensor;
     auto linspace_kernel(float start, float end, int64_t steps, DType dtype, const Device& device) -> Tensor;
     auto eye_kernel(int64_t n, int64_t m, DType dtype, const Device& device) -> Tensor;
@@ -309,6 +311,8 @@ namespace cpu {
     auto embedding_kernel(const Tensor& weight, const Tensor& indices) -> Tensor;
     auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices, int64_t num_embeddings) -> Tensor;
     auto embedding_bag_forward_kernel(std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor;
+    auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& embeddings,
+                                       const Tensor& offsets, const OpAttributes& attrs) -> Tensor;
 
     // Linear
     auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias) -> Tensor;
@@ -541,6 +545,7 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     TENZOR_REGISTER_REDUCTION_KERNEL(table, Any, cpu::any_kernel);
     TENZOR_REGISTER_REDUCTION_KERNEL(table, All, cpu::all_kernel);
     TENZOR_REGISTER_REDUCTION_KERNEL(table, HasInfNan, cpu::has_inf_nan_kernel);
+    TENZOR_REGISTER_REDUCTION_KERNEL(table, LogSumExp, cpu::logsumexp_kernel);
 
     // Use INT64_MIN as sentinel for "reduce all dimensions" (no dim specified)
     table.register_single_output_kernel(OpId::Var, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -1286,6 +1291,12 @@ void register_cpu_kernels(BackendDispatchTable& table) {
             return cpu::embedding_bag_forward_kernel(inputs, attrs);
         });
 
+    table.register_single_output_kernel(OpId::EmbeddingBagBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            // inputs[0] = grad_output, inputs[1] = embeddings, inputs[2] = offsets
+            return cpu::embedding_bag_backward_kernel(inputs[0], inputs[1], inputs[2], attrs);
+        });
+
     // =========================================================================
     // Dropout Operations
     // =========================================================================
@@ -1825,6 +1836,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         DType dtype = static_cast<DType>(dtype_int);
         Device device = Device::cpu();
         return std::vector<Tensor>{cpu::randn_kernel(shape, dtype, device)};
+    });
+
+    table.register_kernel(OpId::Randint, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t low = attrs.get_int(AttrKey::Start, 0);
+        int64_t high = attrs.get_int(AttrKey::End, 0);
+        auto shape = attrs.get_int_list(AttrKey::Shape);
+        int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int64_t>(DType::Int32)));
+        DType dtype = static_cast<DType>(dtype_int);
+        Device device = Device::cpu();
+        return std::vector<Tensor>{cpu::randint_kernel(low, high, shape, dtype, device)};
     });
 
     table.register_kernel(OpId::Arange, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {

@@ -126,8 +126,6 @@ inline Device getDeviceFromName(const std::string& backend_name) {
         return Device::oneapi(0);
     } else if (backend_name == "rocm") {
         return Device::rocm(0);
-    } else if (backend_name == "metal") {
-        return Device::metal(0);
     }
     throw std::runtime_error("Unknown backend: " + backend_name);
 }
@@ -146,8 +144,6 @@ inline bool isBackendNameAvailable(const std::string& backend_name) {
         return isBackendAvailable(Device::Type::OneAPI);
     } else if (backend_name == "rocm") {
         return isBackendAvailable(Device::Type::ROCm);
-    } else if (backend_name == "metal") {
-        return isBackendAvailable(Device::Type::Metal);
     }
     return false;
 }
@@ -169,9 +165,6 @@ inline std::vector<std::string> getAvailableBackends() {
     }
     if (isBackendAvailable(Device::Type::ROCm)) {
         backends.push_back("rocm");
-    }
-    if (isBackendAvailable(Device::Type::Metal)) {
-        backends.push_back("metal");
     }
 
     return backends;

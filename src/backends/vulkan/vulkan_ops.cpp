@@ -15500,7 +15500,20 @@ static double fft_norm_factor(int64_t n, const std::string& norm, bool is_forwar
 // Max FFT size we handle natively (must be power of 2)
 static constexpr int64_t MAX_VULKAN_FFT_SIZE = 1 << 20;  // 1M elements
 
-// Max matrix size for native linalg shaders
+// Max matrix size for native linalg shaders.
+//
+// LIMITATION: Vulkan linalg shaders (det, inv, solve) are only implemented for
+// matrices up to 32x32. This is because:
+//   1. GLSL compute shaders lack the shared-memory tiling infrastructure needed
+//      for efficient LU decomposition on large matrices.
+//   2. The det/inv shaders use a single workgroup per matrix with O(n^3) serial
+//      pivoting loops — for n > 32 this becomes both slow and register-starved.
+//   3. Numerical stability of Gaussian elimination in float32 degrades rapidly
+//      beyond 32x32 without partial pivoting (which requires cross-workgroup sync).
+//
+// Matrices larger than 32x32 automatically fall back to CPU LAPACK, which
+// provides optimized blocked LU with full partial pivoting. SVD, QR, Eigh, Eig,
+// and Cholesky always use CPU fallback regardless of size.
 static constexpr int64_t MAX_VULKAN_LINALG_SIZE = 32;
 
 auto VulkanBackend::runFFTButterfly(const Tensor& input, uint32_t fft_size,
@@ -16074,8 +16087,16 @@ auto VulkanBackend::dispatchLinalgDet(const Tensor& input) -> Tensor {
         throw std::runtime_error("linalg.det: input must be square");
     }
 
-    // For matrices larger than 32x32, fall back to CPU
+    // For matrices larger than 32x32, fall back to CPU (see MAX_VULKAN_LINALG_SIZE docs)
     if (n > MAX_VULKAN_LINALG_SIZE) {
+        static bool warned_det = false;
+        if (!warned_det) {
+            fprintf(stderr, "Warning: Vulkan linalg.det falling back to CPU for %ldx%ld matrix "
+                    "(native shaders limited to %ldx%ld). This incurs a GPU->CPU->GPU roundtrip.\n",
+                    static_cast<long>(n), static_cast<long>(n),
+                    static_cast<long>(MAX_VULKAN_LINALG_SIZE), static_cast<long>(MAX_VULKAN_LINALG_SIZE));
+            warned_det = true;
+        }
         auto cpu_input = input.to(Device::cpu());
         auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
         NewOpAttributes attrs;
@@ -16149,6 +16170,14 @@ auto VulkanBackend::dispatchLinalgInv(const Tensor& input) -> Tensor {
     }
 
     if (n > MAX_VULKAN_LINALG_SIZE) {
+        static bool warned_inv = false;
+        if (!warned_inv) {
+            fprintf(stderr, "Warning: Vulkan linalg.inv falling back to CPU for %ldx%ld matrix "
+                    "(native shaders limited to %ldx%ld). This incurs a GPU->CPU->GPU roundtrip.\n",
+                    static_cast<long>(n), static_cast<long>(n),
+                    static_cast<long>(MAX_VULKAN_LINALG_SIZE), static_cast<long>(MAX_VULKAN_LINALG_SIZE));
+            warned_inv = true;
+        }
         auto cpu_input = input.to(Device::cpu());
         auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
         NewOpAttributes attrs;
@@ -16213,6 +16242,14 @@ auto VulkanBackend::dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Ten
     }
 
     if (n > MAX_VULKAN_LINALG_SIZE) {
+        static bool warned_solve = false;
+        if (!warned_solve) {
+            fprintf(stderr, "Warning: Vulkan linalg.solve falling back to CPU for %ldx%ld matrix "
+                    "(native shaders limited to %ldx%ld). This incurs a GPU->CPU->GPU roundtrip.\n",
+                    static_cast<long>(n), static_cast<long>(n),
+                    static_cast<long>(MAX_VULKAN_LINALG_SIZE), static_cast<long>(MAX_VULKAN_LINALG_SIZE));
+            warned_solve = true;
+        }
         auto cpu_a = a.to(Device::cpu());
         auto cpu_b = b.to(Device::cpu());
         auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
@@ -16409,6 +16446,331 @@ auto VulkanBackend::dispatchGRUCellForward(const Tensor& input, const Tensor& hx
     synchronize(device_id);
 
     return hy;
+}
+
+// ===========================================================================
+// SearchSorted — native GPU binary search shader
+// ===========================================================================
+
+auto VulkanBackend::dispatchSearchSorted(const Tensor& sorted, const Tensor& values) -> Tensor {
+    if (sorted.numel() == 0 || values.numel() == 0) {
+        return Tensor(std::vector<int64_t>(values.shape().begin(), values.shape().end()),
+                      DType::Int32, values.device());
+    }
+
+    // BFloat16/Float16: upcast to Float32 for the shader
+    if (sorted.dtype() == DType::Float16 || sorted.dtype() == DType::BFloat16 ||
+        sorted.dtype() == DType::Float64) {
+        auto sorted_f32 = sorted.to(DType::Float32);
+        auto values_f32 = values.to(DType::Float32);
+        return dispatchSearchSorted(sorted_f32, values_f32);
+    }
+
+    int32_t device_id = sorted.device().index;
+
+    auto sorted_contig = sorted.is_contiguous() ? sorted : dispatchContiguous(sorted);
+    auto values_contig = values.is_contiguous() ? values : dispatchContiguous(values);
+
+    std::vector<int64_t> out_shape(values.shape().begin(), values.shape().end());
+    Tensor output(out_shape, DType::Int32, values.device());
+
+    auto* pipeline = getPipeline("searchsorted", device_id);
+
+    struct {
+        uint32_t array_size;
+        uint32_t num_queries;
+    } pc;
+    pc.array_size = static_cast<uint32_t>(sorted.numel());
+    pc.num_queries = static_cast<uint32_t>(values.numel());
+
+    size_t sorted_bytes = sorted_contig.numel() * sorted_contig.dtype_size();
+    size_t values_bytes = values_contig.numel() * values_contig.dtype_size();
+    size_t output_bytes = output.numel() * output.dtype_size();
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, sorted_contig.data_ptr()},
+        {1, values_contig.data_ptr()},
+        {2, output.data_ptr()}
+    };
+    std::vector<size_t> sizes = {sorted_bytes, values_bytes, output_bytes};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(values.numel(), devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return output;
+}
+
+// ===========================================================================
+// Quantized Linear — native Int8 GEMM with Int32 accumulation
+// ===========================================================================
+
+auto VulkanBackend::dispatchQuantizedLinear(
+    const Tensor& input, const Tensor& weight, const Tensor& bias,
+    float input_scale, float weight_scale,
+    int32_t input_zp, int32_t weight_zp) -> Tensor
+{
+    auto input_shape = input.shape();
+    auto weight_shape = weight.shape();
+    int64_t M = input_shape[0];   // batch_size
+    int64_t K = input_shape[1];   // in_features
+    int64_t N = weight_shape[0];  // out_features
+
+    int32_t device_id = input.device().index;
+
+    auto input_contig = input.is_contiguous() ? input : dispatchContiguous(input);
+    auto weight_contig = weight.is_contiguous() ? weight : dispatchContiguous(weight);
+    auto bias_contig = bias.is_contiguous() ? bias : dispatchContiguous(bias);
+
+    Tensor output({M, N}, DType::Float32, input.device());
+
+    auto* pipeline = getPipeline("quantized_linear", device_id);
+
+    struct {
+        uint32_t M;
+        uint32_t N;
+        uint32_t K;
+        float input_scale;
+        float weight_scale;
+        int32_t input_zero_point;
+        int32_t weight_zero_point;
+    } pc;
+    pc.M = static_cast<uint32_t>(M);
+    pc.N = static_cast<uint32_t>(N);
+    pc.K = static_cast<uint32_t>(K);
+    pc.input_scale = input_scale;
+    pc.weight_scale = weight_scale;
+    pc.input_zero_point = input_zp;
+    pc.weight_zero_point = weight_zp;
+
+    size_t input_bytes = input_contig.numel() * input_contig.dtype_size();
+    size_t weight_bytes = weight_contig.numel() * weight_contig.dtype_size();
+    size_t bias_bytes = bias_contig.numel() * bias_contig.dtype_size();
+    size_t output_bytes = output.numel() * output.dtype_size();
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, input_contig.data_ptr()},
+        {1, weight_contig.data_ptr()},
+        {2, bias_contig.data_ptr()},
+        {3, output.data_ptr()}
+    };
+    std::vector<size_t> sizes = {input_bytes, weight_bytes, bias_bytes, output_bytes};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(pc), &pc);
+
+    int64_t total = M * N;
+    vkCmdDispatch(cmd, div_wg(total, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return output;
+}
+
+// ===========================================================================
+// Quantized Conv2d — native Int8 convolution with Int32 accumulation
+// ===========================================================================
+
+auto VulkanBackend::dispatchQuantizedConv2d(
+    const Tensor& input, const Tensor& weight, const Tensor& bias,
+    int64_t stride, int64_t padding,
+    float input_scale, float weight_scale,
+    int32_t input_zp, int32_t weight_zp) -> Tensor
+{
+    auto input_shape = input.shape();
+    auto weight_shape = weight.shape();
+    int64_t batch = input_shape[0];
+    int64_t in_channels = input_shape[1];
+    int64_t h_in = input_shape[2];
+    int64_t w_in = input_shape[3];
+    int64_t out_channels = weight_shape[0];
+    int64_t kernel_size = weight_shape[2];
+
+    int64_t h_out = (h_in + 2 * padding - kernel_size) / stride + 1;
+    int64_t w_out = (w_in + 2 * padding - kernel_size) / stride + 1;
+
+    int32_t device_id = input.device().index;
+
+    auto input_contig = input.is_contiguous() ? input : dispatchContiguous(input);
+    auto weight_contig = weight.is_contiguous() ? weight : dispatchContiguous(weight);
+    auto bias_contig = bias.is_contiguous() ? bias : dispatchContiguous(bias);
+
+    Tensor output({batch, out_channels, h_out, w_out}, DType::Float32, input.device());
+
+    auto* pipeline = getPipeline("quantized_conv2d", device_id);
+
+    struct {
+        uint32_t batch;
+        uint32_t in_channels;
+        uint32_t out_channels;
+        uint32_t h_in;
+        uint32_t w_in;
+        uint32_t h_out;
+        uint32_t w_out;
+        uint32_t kernel_size;
+        uint32_t stride;
+        uint32_t padding;
+        float input_scale;
+        float weight_scale;
+        int32_t input_zero_point;
+        int32_t weight_zero_point;
+    } pc;
+    pc.batch = static_cast<uint32_t>(batch);
+    pc.in_channels = static_cast<uint32_t>(in_channels);
+    pc.out_channels = static_cast<uint32_t>(out_channels);
+    pc.h_in = static_cast<uint32_t>(h_in);
+    pc.w_in = static_cast<uint32_t>(w_in);
+    pc.h_out = static_cast<uint32_t>(h_out);
+    pc.w_out = static_cast<uint32_t>(w_out);
+    pc.kernel_size = static_cast<uint32_t>(kernel_size);
+    pc.stride = static_cast<uint32_t>(stride);
+    pc.padding = static_cast<uint32_t>(padding);
+    pc.input_scale = input_scale;
+    pc.weight_scale = weight_scale;
+    pc.input_zero_point = input_zp;
+    pc.weight_zero_point = weight_zp;
+
+    size_t input_bytes = input_contig.numel() * input_contig.dtype_size();
+    size_t weight_bytes = weight_contig.numel() * weight_contig.dtype_size();
+    size_t bias_bytes = bias_contig.numel() * bias_contig.dtype_size();
+    size_t output_bytes = output.numel() * output.dtype_size();
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, input_contig.data_ptr()},
+        {1, weight_contig.data_ptr()},
+        {2, bias_contig.data_ptr()},
+        {3, output.data_ptr()}
+    };
+    std::vector<size_t> sizes = {input_bytes, weight_bytes, bias_bytes, output_bytes};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(pc), &pc);
+
+    int64_t total = batch * out_channels * h_out * w_out;
+    vkCmdDispatch(cmd, div_wg(total, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return output;
+}
+
+// ===========================================================================
+// Flash Attention — composed dispatch using existing matmul + softmax shaders
+//
+// This is NOT a single fused kernel. It composes existing Vulkan matmul and
+// softmax shaders to avoid the CPU roundtrip of VULKAN_CPU_FALLBACK, keeping
+// all intermediate data on GPU. A truly fused tiled flash attention kernel
+// would require a dedicated shader with shared-memory tiling and online
+// softmax, which is left as a future optimization.
+// ===========================================================================
+
+auto VulkanBackend::dispatchFlashAttention(
+    const Tensor& Q, const Tensor& K, const Tensor& V,
+    float scale, bool causal) -> Tensor
+{
+    // Q, K, V shapes: [batch, heads, seq_len, d_k] or [batch, seq_len, d_k]
+    auto q_shape = Q.shape();
+    bool has_head_dim = (q_shape.size() == 4);
+
+    // For 4D tensors: [B, H, S, D] — use BMM on [B*H, S, D]
+    // For 3D tensors: [B, S, D] — use BMM on [B, S, D]
+
+    // Flatten batch and head dimensions for BMM
+    Tensor q_flat = Q;
+    Tensor k_flat = K;
+    Tensor v_flat = V;
+    int64_t batch_heads, seq_len_q, seq_len_k, d_k;
+
+    if (has_head_dim) {
+        batch_heads = q_shape[0] * q_shape[1];
+        seq_len_q = q_shape[2];
+        d_k = q_shape[3];
+        seq_len_k = K.shape()[2];
+
+        q_flat = Q.reshape({batch_heads, seq_len_q, d_k});
+        k_flat = K.reshape({batch_heads, seq_len_k, d_k});
+        v_flat = V.reshape({batch_heads, seq_len_k, V.shape()[3]});
+    } else {
+        batch_heads = q_shape[0];
+        seq_len_q = q_shape[1];
+        d_k = q_shape[2];
+        seq_len_k = K.shape()[1];
+    }
+
+    // Step 1: Compute attention scores = Q @ K^T, scaled by 1/sqrt(d_k)
+    // K^T is [batch_heads, d_k, seq_len_k]
+    Tensor k_transposed = k_flat.transpose(-2, -1);
+    Tensor scores = dispatchBmm(q_flat, k_transposed);  // [batch_heads, seq_len_q, seq_len_k]
+
+    // Step 2: Scale by the provided scale factor (typically 1/sqrt(d_k))
+    Tensor scale_tensor({1}, scores.dtype(), scores.device());
+    scale_tensor.fill_(scale);
+    scores = dispatchBinaryOp("mul", scores, scale_tensor);
+
+    // Step 3: Apply causal mask if requested
+    if (causal) {
+        // Create a causal mask: for each (i, j) where j > i, set score to -1e9
+        // Uses comparison + where pattern via existing Vulkan shaders
+        Tensor mask_val({1}, scores.dtype(), scores.device());
+        mask_val.fill_(-1e9f);
+
+        // Generate row indices [0..seq_len_q-1] and col indices [0..seq_len_k-1]
+        // and mask where col > row
+        Tensor row_idx = dispatchArange(0, seq_len_q, 1, DType::Int32, scores.device());
+        Tensor col_idx = dispatchArange(0, seq_len_k, 1, DType::Int32, scores.device());
+
+        // Reshape for broadcasting: row_idx [seq_len_q, 1], col_idx [1, seq_len_k]
+        row_idx = row_idx.reshape({seq_len_q, 1});
+        col_idx = col_idx.reshape({1, seq_len_k});
+
+        // Expand to [seq_len_q, seq_len_k]
+        Tensor row_expanded = dispatchExpand(row_idx, {seq_len_q, seq_len_k});
+        Tensor col_expanded = dispatchExpand(col_idx, {seq_len_q, seq_len_k});
+
+        // mask = col > row  (upper triangle = future tokens)
+        Tensor causal_mask = dispatchComparisonOp("gt", col_expanded, row_expanded);
+
+        // Expand mask to [batch_heads, seq_len_q, seq_len_k]
+        causal_mask = causal_mask.unsqueeze(0);
+        causal_mask = dispatchExpand(causal_mask, {batch_heads, seq_len_q, seq_len_k});
+
+        // Apply mask: scores = where(mask, -1e9, scores)
+        Tensor mask_expanded = dispatchExpand(mask_val, std::vector<int64_t>(scores.shape().begin(), scores.shape().end()));
+        scores = dispatchWhere(causal_mask, mask_expanded, scores);
+    }
+
+    // Step 4: Apply softmax along last dimension
+    Tensor attn_weights = dispatchSoftmax(scores, -1);  // [batch_heads, seq_len_q, seq_len_k]
+
+    // Step 5: Compute output = attention_weights @ V
+    Tensor output = dispatchBmm(attn_weights, v_flat);  // [batch_heads, seq_len_q, d_v]
+
+    // Reshape back to original batch/head layout
+    if (has_head_dim) {
+        output = output.reshape({q_shape[0], q_shape[1], seq_len_q, V.shape()[3]});
+    }
+
+    return output;
 }
 
 } // namespace tenzor

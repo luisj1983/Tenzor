@@ -322,6 +322,27 @@ __global__ void scatter_slice_kernel(const T* __restrict__ sorted_vals,
     }
 }
 
+// Conversion kernels for half-type sort/cumsum/cumprod upcast
+template<typename HalfT>
+__global__ void half_to_float_kernel(const HalfT* __restrict__ in, float* __restrict__ out, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) out[idx] = static_cast<float>(in[idx]);
+}
+
+template<typename HalfT>
+__global__ void float_to_half_kernel(const float* __restrict__ in, HalfT* __restrict__ out, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) out[idx] = static_cast<HalfT>(in[idx]);
+}
+
+// Gather original half values by sorted float indices
+template<typename HalfT>
+__global__ void gather_by_indices_kernel(const HalfT* __restrict__ src, const int64_t* __restrict__ indices,
+                                          HalfT* __restrict__ dst, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) dst[idx] = src[indices[idx]];
+}
+
 auto sort_kernel(const Tensor& input, int64_t dim, bool descending,
                  cudaStream_t stream) -> std::pair<Tensor, Tensor>
 {
@@ -369,11 +390,56 @@ auto sort_kernel(const Tensor& input, int64_t dim, bool descending,
         }
     };
 
+    // Half-type sort: upcast to Float32, sort, gather original values by indices
+    auto launch_half = [&]<typename HalfT>() {
+        int64_t numel = input_cont.numel();
+        int cvt_block = 256;
+        int cvt_grid = (numel + cvt_block - 1) / cvt_block;
+
+        // Allocate Float32 buffer
+        Tensor f32_input(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32, device);
+        half_to_float_kernel<HalfT><<<cvt_grid, cvt_block, 0, stream>>>(
+            reinterpret_cast<const HalfT*>(input_cont.data_ptr()),
+            f32_input.data<float>(), numel);
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+        Tensor f32_values(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32, device);
+
+        // Sort Float32 copy
+        backend::CachedMemoryGuard slice_guard(dim_size * sizeof(float));
+        float* d_slice = static_cast<float*>(slice_guard.get());
+        backend::CachedMemoryGuard idx_guard(dim_size * sizeof(int64_t));
+        int64_t* d_idx = static_cast<int64_t*>(idx_guard.get());
+
+        int block = 256;
+        int grid = std::min(int((dim_size + block - 1) / block), 1024);
+
+        for (int64_t outer = 0; outer < outer_size; ++outer) {
+            for (int64_t inner = 0; inner < inner_size; ++inner) {
+                extract_slice_kernel<float><<<grid, block, 0, stream>>>(
+                    f32_input.data<float>(), d_slice, dim_size, inner_size, outer, inner);
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
+                sort_1d_thrust<float>(d_slice, d_slice, d_idx, dim_size, descending, stream);
+                scatter_slice_kernel<float><<<grid, block, 0, stream>>>(
+                    d_slice, d_idx, f32_values.data<float>(), indices.data<int64_t>(),
+                    dim_size, inner_size, outer, inner);
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
+            }
+        }
+
+        // Convert sorted Float32 values back to half
+        float_to_half_kernel<HalfT><<<cvt_grid, cvt_block, 0, stream>>>(
+            f32_values.data<float>(), reinterpret_cast<HalfT*>(values.data_ptr()), numel);
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+    };
+
     switch (dtype) {
         case DType::Float32: launch.template operator()<float>(); break;
         case DType::Float64: launch.template operator()<double>(); break;
         case DType::Int32:   launch.template operator()<int32_t>(); break;
         case DType::Int64:   launch.template operator()<int64_t>(); break;
+        case DType::Float16: launch_half.template operator()<__half>(); break;
+        case DType::BFloat16: launch_half.template operator()<__nv_bfloat16>(); break;
         default: throw std::runtime_error("sort CUDA: unsupported dtype");
     }
 
@@ -469,11 +535,58 @@ auto cumsum_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Ten
         }
     };
 
+    // Half-type cumsum: upcast to Float32, cumsum, convert back
+    auto launch_half_cumsum = [&]<typename HalfT>() {
+        int64_t numel = input_cont.numel();
+        int cvt_block = 256;
+        int cvt_grid = (numel + cvt_block - 1) / cvt_block;
+
+        Tensor f32_input(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32, device);
+        half_to_float_kernel<HalfT><<<cvt_grid, cvt_block, 0, stream>>>(
+            reinterpret_cast<const HalfT*>(input_cont.data_ptr()),
+            f32_input.data<float>(), numel);
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+        Tensor f32_output(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32, device);
+
+        if (inner_size == 1) {
+            for (int64_t outer = 0; outer < outer_size; ++outer) {
+                const float* d_in = f32_input.data<float>() + outer * dim_size;
+                float* d_out = f32_output.data<float>() + outer * dim_size;
+                cumsum_slice_cub<float>(d_in, d_out, dim_size, stream);
+            }
+        } else {
+            backend::CachedMemoryGuard in_guard(dim_size * sizeof(float));
+            backend::CachedMemoryGuard out_guard(dim_size * sizeof(float));
+            float* d_slice_in = static_cast<float*>(in_guard.get());
+            float* d_slice_out = static_cast<float*>(out_guard.get());
+            int block = 256;
+            int grid = std::min(int((dim_size + block - 1) / block), 1024);
+            for (int64_t outer = 0; outer < outer_size; ++outer) {
+                for (int64_t inner = 0; inner < inner_size; ++inner) {
+                    extract_strided_slice<float><<<grid, block, 0, stream>>>(
+                        f32_input.data<float>(), d_slice_in, dim_size, inner_size, outer, inner);
+                    TENZOR_CUDA_POST_LAUNCH_CHECK();
+                    cumsum_slice_cub<float>(d_slice_in, d_slice_out, dim_size, stream);
+                    scatter_strided_slice<float><<<grid, block, 0, stream>>>(
+                        d_slice_out, f32_output.data<float>(), dim_size, inner_size, outer, inner);
+                    TENZOR_CUDA_POST_LAUNCH_CHECK();
+                }
+            }
+        }
+
+        float_to_half_kernel<HalfT><<<cvt_grid, cvt_block, 0, stream>>>(
+            f32_output.data<float>(), reinterpret_cast<HalfT*>(output.data_ptr()), numel);
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+    };
+
     switch (dtype) {
         case DType::Float32: launch.template operator()<float>(); break;
         case DType::Float64: launch.template operator()<double>(); break;
         case DType::Int32:   launch.template operator()<int32_t>(); break;
         case DType::Int64:   launch.template operator()<int64_t>(); break;
+        case DType::Float16: launch_half_cumsum.template operator()<__half>(); break;
+        case DType::BFloat16: launch_half_cumsum.template operator()<__nv_bfloat16>(); break;
         default: throw std::runtime_error("cumsum CUDA: unsupported dtype");
     }
 
@@ -543,11 +656,58 @@ auto cumprod_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Te
         }
     };
 
+    // Half-type cumprod: upcast to Float32, cumprod, convert back
+    auto launch_half_cumprod = [&]<typename HalfT>() {
+        int64_t numel = input_cont.numel();
+        int cvt_block = 256;
+        int cvt_grid = (numel + cvt_block - 1) / cvt_block;
+
+        Tensor f32_input(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32, device);
+        half_to_float_kernel<HalfT><<<cvt_grid, cvt_block, 0, stream>>>(
+            reinterpret_cast<const HalfT*>(input_cont.data_ptr()),
+            f32_input.data<float>(), numel);
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+        Tensor f32_output(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32, device);
+
+        if (inner_size == 1) {
+            for (int64_t outer = 0; outer < outer_size; ++outer) {
+                const float* d_in = f32_input.data<float>() + outer * dim_size;
+                float* d_out = f32_output.data<float>() + outer * dim_size;
+                cumprod_slice_cub<float>(d_in, d_out, dim_size, stream);
+            }
+        } else {
+            backend::CachedMemoryGuard in_guard(dim_size * sizeof(float));
+            backend::CachedMemoryGuard out_guard(dim_size * sizeof(float));
+            float* d_slice_in = static_cast<float*>(in_guard.get());
+            float* d_slice_out = static_cast<float*>(out_guard.get());
+            int block = 256;
+            int grid = std::min(int((dim_size + block - 1) / block), 1024);
+            for (int64_t outer = 0; outer < outer_size; ++outer) {
+                for (int64_t inner = 0; inner < inner_size; ++inner) {
+                    extract_strided_slice<float><<<grid, block, 0, stream>>>(
+                        f32_input.data<float>(), d_slice_in, dim_size, inner_size, outer, inner);
+                    TENZOR_CUDA_POST_LAUNCH_CHECK();
+                    cumprod_slice_cub<float>(d_slice_in, d_slice_out, dim_size, stream);
+                    scatter_strided_slice<float><<<grid, block, 0, stream>>>(
+                        d_slice_out, f32_output.data<float>(), dim_size, inner_size, outer, inner);
+                    TENZOR_CUDA_POST_LAUNCH_CHECK();
+                }
+            }
+        }
+
+        float_to_half_kernel<HalfT><<<cvt_grid, cvt_block, 0, stream>>>(
+            f32_output.data<float>(), reinterpret_cast<HalfT*>(output.data_ptr()), numel);
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+    };
+
     switch (dtype) {
         case DType::Float32: launch.template operator()<float>(); break;
         case DType::Float64: launch.template operator()<double>(); break;
         case DType::Int32:   launch.template operator()<int32_t>(); break;
         case DType::Int64:   launch.template operator()<int64_t>(); break;
+        case DType::Float16: launch_half_cumprod.template operator()<__half>(); break;
+        case DType::BFloat16: launch_half_cumprod.template operator()<__nv_bfloat16>(); break;
         default: throw std::runtime_error("cumprod CUDA: unsupported dtype");
     }
 

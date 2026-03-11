@@ -335,6 +335,7 @@ auto avgpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
 }
 
 #else // !TENZOR_HAS_ONEDNN - Pure SYCL implementation
+#pragma message("WARNING: Building without oneDNN — using slower pooling fallback")
 
 // MaxPool2d forward with indices (pure SYCL) - returns both output and indices for backward pass
 auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, int64_t stride,

@@ -44,10 +44,6 @@ auto Device::from_string(std::string_view str) -> Device {
         return Device::vulkan(parse_device_index(str, 7));
     }
 
-    if (str.starts_with("metal:")) {
-        return Device::metal(parse_device_index(str, 6));
-    }
-
     if (str.starts_with("webgpu:")) {
         return Device::webgpu(parse_device_index(str, 7));
     }

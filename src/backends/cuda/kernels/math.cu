@@ -2978,6 +2978,71 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
 }
 
 // ============================================================================
+// Randint - Random Integer Generation
+// ============================================================================
+
+// CUDA kernel: generate uniform float [0,1), scale to [low, high), cast to int
+template<typename T>
+__global__ void randint_kernel_device(T* output, curandState* states, int64_t n, int64_t low, int64_t high) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        // Generate uniform float in [0, 1)
+        float r = curand_uniform(&states[idx]);
+        // Scale to [low, high) and cast to integer type
+        // curand_uniform returns (0, 1], so clamp to avoid hitting 'high'
+        int64_t range = high - low;
+        int64_t val = low + static_cast<int64_t>(r * static_cast<float>(range));
+        // Clamp in case r == 1.0
+        if (val >= high) val = high - 1;
+        output[idx] = static_cast<T>(val);
+    }
+}
+
+auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape,
+                    DType dtype, Device device, cudaStream_t stream) -> Tensor {
+    if (dtype != DType::Int32 && dtype != DType::Int64) {
+        throw std::runtime_error("randint operation only supports Int32 and Int64 dtypes");
+    }
+
+    Tensor result(shape, dtype, device);
+    int64_t n = result.numel();
+
+    if (n == 0) {
+        return result;
+    }
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    // Allocate cuRAND states
+    backend::CachedMemoryGuard d_states_guard(n * sizeof(curandState));
+    auto* d_states = static_cast<curandState*>(d_states_guard.get());
+
+    // Thread-safe seed generation
+    static std::atomic<uint64_t> seed_counter{0};
+    static std::random_device rd;
+    auto time_seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    auto thread_id = std::hash<std::thread::id>{}(std::this_thread::get_id());
+    auto random_bits = rd();
+    auto counter = seed_counter.fetch_add(1, std::memory_order_relaxed);
+    uint64_t seed = time_seed ^ (thread_id << 32) ^ (random_bits << 16) ^ counter;
+
+    init_curand_states<<<grid, block, 0, stream>>>(d_states, seed, n);
+    CUDA_CHECK(cudaGetLastError());
+
+    if (dtype == DType::Int32) {
+        randint_kernel_device<int32_t><<<grid, block, 0, stream>>>(
+            result.data<int32_t>(), d_states, n, low, high);
+        CUDA_CHECK(cudaGetLastError());
+    } else {  // Int64
+        randint_kernel_device<int64_t><<<grid, block, 0, stream>>>(
+            result.data<int64_t>(), d_states, n, low, high);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    return result;
+}
+
+// ============================================================================
 // Comparison Operations
 // ============================================================================
 

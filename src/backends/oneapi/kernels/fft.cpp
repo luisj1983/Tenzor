@@ -30,6 +30,19 @@ inline auto get_data_ptr(const Tensor& t) -> T* {
 
 auto clone_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
 
+// BFloat16 conversion helpers (BFloat16 stored as uint16_t)
+inline float bf16_to_f32(uint16_t bf16) {
+    uint32_t bits = static_cast<uint32_t>(bf16) << 16;
+    float result;
+    __builtin_memcpy(&result, &bits, sizeof(float));
+    return result;
+}
+inline uint16_t f32_to_bf16(float f32) {
+    uint32_t bits;
+    __builtin_memcpy(&bits, &f32, sizeof(uint32_t));
+    return static_cast<uint16_t>(bits >> 16);
+}
+
 #ifdef TENZOR_HAS_ONEMKL
 
 namespace {
@@ -305,6 +318,50 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
         sycl::free(complex_buf, queue);
         return output;
 
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        // Upcast to Float32, compute FFT, downcast result
+        DType orig_dtype = input.dtype();
+        int64_t numel = input.numel();
+
+        // Copy input to host and convert to float32
+        std::vector<float> host_f32(numel);
+        if (orig_dtype == DType::Float16) {
+            std::vector<sycl::half> host_in(numel);
+            queue.memcpy(host_in.data(), input.data_ptr(), numel * sizeof(sycl::half)).wait();
+            for (int64_t i = 0; i < numel; ++i) host_f32[i] = static_cast<float>(host_in[i]);
+        } else {
+            std::vector<uint16_t> host_in(numel);
+            queue.memcpy(host_in.data(), input.data_ptr(), numel * sizeof(uint16_t)).wait();
+            for (int64_t i = 0; i < numel; ++i) host_f32[i] = bf16_to_f32(host_in[i]);
+        }
+
+        // Create Float32 tensor, compute FFT
+        Tensor f32_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                         DType::Float32, input.device());
+        queue.memcpy(const_cast<void*>(f32_input.data_ptr()), host_f32.data(), numel * sizeof(float)).wait();
+
+        Tensor f32_result = fft_kernel(f32_input, dim, n, norm, queue);
+
+        // Downcast result
+        int64_t out_numel = f32_result.numel();
+        Tensor output(std::vector<int64_t>(f32_result.shape().begin(), f32_result.shape().end()),
+                      orig_dtype, input.device());
+
+        std::vector<float> host_out(out_numel);
+        queue.memcpy(host_out.data(), f32_result.data_ptr(), out_numel * sizeof(float)).wait();
+
+        if (orig_dtype == DType::Float16) {
+            std::vector<sycl::half> host_half(out_numel);
+            for (int64_t i = 0; i < out_numel; ++i) host_half[i] = sycl::half(host_out[i]);
+            queue.memcpy(const_cast<void*>(output.data_ptr()), host_half.data(), out_numel * sizeof(sycl::half)).wait();
+        } else {
+            std::vector<uint16_t> host_bf16(out_numel);
+            for (int64_t i = 0; i < out_numel; ++i) host_bf16[i] = f32_to_bf16(host_out[i]);
+            queue.memcpy(const_cast<void*>(output.data_ptr()), host_bf16.data(), out_numel * sizeof(uint16_t)).wait();
+        }
+
+        return output;
+
     } else {
         throw std::runtime_error("fft_kernel: unsupported dtype (expected Float32 or Float64)");
     }
@@ -469,6 +526,46 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
         }
 
         sycl::free(complex_buf, queue);
+        return output;
+
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig_dtype = input.dtype();
+        int64_t numel = input.numel();
+
+        std::vector<float> host_f32(numel);
+        if (orig_dtype == DType::Float16) {
+            std::vector<sycl::half> host_in(numel);
+            queue.memcpy(host_in.data(), input.data_ptr(), numel * sizeof(sycl::half)).wait();
+            for (int64_t i = 0; i < numel; ++i) host_f32[i] = static_cast<float>(host_in[i]);
+        } else {
+            std::vector<uint16_t> host_in(numel);
+            queue.memcpy(host_in.data(), input.data_ptr(), numel * sizeof(uint16_t)).wait();
+            for (int64_t i = 0; i < numel; ++i) host_f32[i] = bf16_to_f32(host_in[i]);
+        }
+
+        Tensor f32_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                         DType::Float32, input.device());
+        queue.memcpy(const_cast<void*>(f32_input.data_ptr()), host_f32.data(), numel * sizeof(float)).wait();
+
+        Tensor f32_result = ifft_kernel(f32_input, dim, n, norm, queue);
+
+        int64_t out_numel = f32_result.numel();
+        Tensor output(std::vector<int64_t>(f32_result.shape().begin(), f32_result.shape().end()),
+                      orig_dtype, input.device());
+
+        std::vector<float> host_out(out_numel);
+        queue.memcpy(host_out.data(), f32_result.data_ptr(), out_numel * sizeof(float)).wait();
+
+        if (orig_dtype == DType::Float16) {
+            std::vector<sycl::half> host_half(out_numel);
+            for (int64_t i = 0; i < out_numel; ++i) host_half[i] = sycl::half(host_out[i]);
+            queue.memcpy(const_cast<void*>(output.data_ptr()), host_half.data(), out_numel * sizeof(sycl::half)).wait();
+        } else {
+            std::vector<uint16_t> host_bf16(out_numel);
+            for (int64_t i = 0; i < out_numel; ++i) host_bf16[i] = f32_to_bf16(host_out[i]);
+            queue.memcpy(const_cast<void*>(output.data_ptr()), host_bf16.data(), out_numel * sizeof(uint16_t)).wait();
+        }
+
         return output;
 
     } else {
@@ -660,6 +757,46 @@ auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
         sycl::free(real_buf, queue);
         sycl::free(complex_buf, queue);
+        return output;
+
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig_dtype = input.dtype();
+        int64_t numel = input.numel();
+
+        std::vector<float> host_f32(numel);
+        if (orig_dtype == DType::Float16) {
+            std::vector<sycl::half> host_in(numel);
+            queue.memcpy(host_in.data(), input.data_ptr(), numel * sizeof(sycl::half)).wait();
+            for (int64_t i = 0; i < numel; ++i) host_f32[i] = static_cast<float>(host_in[i]);
+        } else {
+            std::vector<uint16_t> host_in(numel);
+            queue.memcpy(host_in.data(), input.data_ptr(), numel * sizeof(uint16_t)).wait();
+            for (int64_t i = 0; i < numel; ++i) host_f32[i] = bf16_to_f32(host_in[i]);
+        }
+
+        Tensor f32_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                         DType::Float32, input.device());
+        queue.memcpy(const_cast<void*>(f32_input.data_ptr()), host_f32.data(), numel * sizeof(float)).wait();
+
+        Tensor f32_result = rfft_kernel(f32_input, dim, n, norm, queue);
+
+        int64_t out_numel = f32_result.numel();
+        Tensor output(std::vector<int64_t>(f32_result.shape().begin(), f32_result.shape().end()),
+                      orig_dtype, input.device());
+
+        std::vector<float> host_out(out_numel);
+        queue.memcpy(host_out.data(), f32_result.data_ptr(), out_numel * sizeof(float)).wait();
+
+        if (orig_dtype == DType::Float16) {
+            std::vector<sycl::half> host_half(out_numel);
+            for (int64_t i = 0; i < out_numel; ++i) host_half[i] = sycl::half(host_out[i]);
+            queue.memcpy(const_cast<void*>(output.data_ptr()), host_half.data(), out_numel * sizeof(sycl::half)).wait();
+        } else {
+            std::vector<uint16_t> host_bf16(out_numel);
+            for (int64_t i = 0; i < out_numel; ++i) host_bf16[i] = f32_to_bf16(host_out[i]);
+            queue.memcpy(const_cast<void*>(output.data_ptr()), host_bf16.data(), out_numel * sizeof(uint16_t)).wait();
+        }
+
         return output;
 
     } else {
@@ -858,6 +995,46 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
         sycl::free(real_buf, queue);
         return output;
 
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig_dtype = input.dtype();
+        int64_t numel = input.numel();
+
+        std::vector<float> host_f32(numel);
+        if (orig_dtype == DType::Float16) {
+            std::vector<sycl::half> host_in(numel);
+            queue.memcpy(host_in.data(), input.data_ptr(), numel * sizeof(sycl::half)).wait();
+            for (int64_t i = 0; i < numel; ++i) host_f32[i] = static_cast<float>(host_in[i]);
+        } else {
+            std::vector<uint16_t> host_in(numel);
+            queue.memcpy(host_in.data(), input.data_ptr(), numel * sizeof(uint16_t)).wait();
+            for (int64_t i = 0; i < numel; ++i) host_f32[i] = bf16_to_f32(host_in[i]);
+        }
+
+        Tensor f32_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                         DType::Float32, input.device());
+        queue.memcpy(const_cast<void*>(f32_input.data_ptr()), host_f32.data(), numel * sizeof(float)).wait();
+
+        Tensor f32_result = irfft_kernel(f32_input, dim, n, norm, queue);
+
+        int64_t out_numel = f32_result.numel();
+        Tensor output(std::vector<int64_t>(f32_result.shape().begin(), f32_result.shape().end()),
+                      orig_dtype, input.device());
+
+        std::vector<float> host_out(out_numel);
+        queue.memcpy(host_out.data(), f32_result.data_ptr(), out_numel * sizeof(float)).wait();
+
+        if (orig_dtype == DType::Float16) {
+            std::vector<sycl::half> host_half(out_numel);
+            for (int64_t i = 0; i < out_numel; ++i) host_half[i] = sycl::half(host_out[i]);
+            queue.memcpy(const_cast<void*>(output.data_ptr()), host_half.data(), out_numel * sizeof(sycl::half)).wait();
+        } else {
+            std::vector<uint16_t> host_bf16(out_numel);
+            for (int64_t i = 0; i < out_numel; ++i) host_bf16[i] = f32_to_bf16(host_out[i]);
+            queue.memcpy(const_cast<void*>(output.data_ptr()), host_bf16.data(), out_numel * sizeof(uint16_t)).wait();
+        }
+
+        return output;
+
     } else {
         throw std::runtime_error("irfft_kernel: unsupported dtype (expected Float32 or Float64)");
     }
@@ -912,10 +1089,110 @@ auto ifftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
     return result;
 }
 
-#else // !TENZOR_HAS_ONEMKL — Naive O(n^2) DFT fallback
+#else // !TENZOR_HAS_ONEMKL — Cooley-Tukey O(n log n) FFT fallback (naive DFT for non-power-of-2)
+#pragma message("WARNING: Building without oneMKL — using slower FFT fallback")
+
+namespace {
+
+// Check if n is a power of 2
+inline bool is_power_of_2(int64_t n) {
+    return n > 0 && (n & (n - 1)) == 0;
+}
+
+// Templated Cooley-Tukey FFT on device using SYCL parallel_for kernels.
+// Operates on interleaved complex data: [re0, im0, re1, im1, ...] of length 2*N.
+// sign = -1.0 for forward FFT, +1.0 for inverse FFT.
+template<typename T>
+void cooley_tukey_fft_sycl(T* data, int64_t N, T sign, sycl::queue& queue) {
+    int log2N = 0;
+    { int64_t tmp = N; while (tmp > 1) { tmp >>= 1; log2N++; } }
+
+    // Step 1: Bit-reverse permutation (on device)
+    const int bits = log2N;
+    queue.parallel_for(sycl::range<1>(N), [=](sycl::id<1> idx) {
+        int64_t i = idx[0];
+        uint32_t rev = 0;
+        uint32_t x = static_cast<uint32_t>(i);
+        for (int b = 0; b < bits; ++b) {
+            rev = (rev << 1) | (x & 1);
+            x >>= 1;
+        }
+        int64_t j = static_cast<int64_t>(rev);
+        if (i < j) {
+            T tmp_re = data[2 * i];
+            T tmp_im = data[2 * i + 1];
+            data[2 * i] = data[2 * j];
+            data[2 * i + 1] = data[2 * j + 1];
+            data[2 * j] = tmp_re;
+            data[2 * j + 1] = tmp_im;
+        }
+    }).wait();
+
+    constexpr T PI = static_cast<T>(3.14159265358979323846);
+
+    // Step 2: Butterfly stages
+    for (int s = 1; s <= log2N; ++s) {
+        int64_t stride = static_cast<int64_t>(1) << s;
+        int64_t half = stride / 2;
+        int64_t num_butterflies = N / 2;
+
+        queue.parallel_for(sycl::range<1>(num_butterflies), [=](sycl::id<1> idx) {
+            int64_t flat = idx[0];
+            int64_t group = flat / half;
+            int64_t k = flat % half;
+            int64_t base_idx = group * stride;
+
+            T angle = sign * static_cast<T>(2.0) * PI * static_cast<T>(k) / static_cast<T>(stride);
+            T w_re = sycl::cos(angle);
+            T w_im = sycl::sin(angle);
+
+            int64_t even_i = base_idx + k;
+            int64_t odd_i = base_idx + k + half;
+
+            T e_re = data[2 * even_i];
+            T e_im = data[2 * even_i + 1];
+            T o_re = data[2 * odd_i];
+            T o_im = data[2 * odd_i + 1];
+
+            T t_re = w_re * o_re - w_im * o_im;
+            T t_im = w_re * o_im + w_im * o_re;
+
+            data[2 * even_i] = e_re + t_re;
+            data[2 * even_i + 1] = e_im + t_im;
+            data[2 * odd_i] = e_re - t_re;
+            data[2 * odd_i + 1] = e_im - t_im;
+        }).wait();
+    }
+}
+
+// Naive O(n^2) DFT for non-power-of-2 sizes (host-side)
+template<typename T>
+void naive_dft_host(const T* h_in, T* h_out,
+                    int64_t signal_len, int64_t batch_size, int64_t inner_size) {
+    constexpr T PI = static_cast<T>(3.14159265358979323846);
+    for (int64_t b = 0; b < batch_size; ++b) {
+        for (int64_t inner = 0; inner < inner_size; ++inner) {
+            for (int64_t k = 0; k < signal_len; ++k) {
+                T re_sum = 0, im_sum = 0;
+                for (int64_t t = 0; t < signal_len; ++t) {
+                    int64_t in_idx = b * signal_len * inner_size + t * inner_size + inner;
+                    T val = h_in[in_idx];
+                    T angle = static_cast<T>(-2.0) * PI * static_cast<T>(k) * static_cast<T>(t) / static_cast<T>(signal_len);
+                    re_sum += val * std::cos(angle);
+                    im_sum += val * std::sin(angle);
+                }
+                int64_t out_idx = (b * signal_len * inner_size + k * inner_size + inner) * 2;
+                h_out[out_idx] = re_sum;
+                h_out[out_idx + 1] = im_sum;
+            }
+        }
+    }
+}
+
+} // anonymous namespace
 
 // ============================================================================
-// FFT - 1D Complex-to-Complex Forward FFT (naive fallback)
+// FFT - 1D Forward FFT (Cooley-Tukey for power-of-2, naive DFT otherwise)
 // ============================================================================
 auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                 const std::string& norm, sycl::queue& queue) -> Tensor {
@@ -931,87 +1208,148 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
     int64_t inner_size = 1;
     for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
 
+    // Use on-device Cooley-Tukey when signal_len is power-of-2 and data is contiguous along dim
+    bool use_cooley_tukey = is_power_of_2(signal_len) && inner_size == 1;
+
     if (input.dtype() == DType::Float32) {
         int64_t numel = input.numel();
-        std::vector<float> h_in(numel);
-        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(float)).wait();
-
         std::vector<int64_t> out_shape = shape;
         out_shape.push_back(2);
         int64_t out_numel = 1;
         for (auto s : out_shape) out_numel *= s;
-        std::vector<float> h_out(out_numel, 0.0f);
 
-        for (int64_t b = 0; b < batch_size; ++b) {
-            for (int64_t inner = 0; inner < inner_size; ++inner) {
-                for (int64_t k = 0; k < signal_len; ++k) {
-                    float re_sum = 0.0f, im_sum = 0.0f;
-                    for (int64_t t = 0; t < signal_len; ++t) {
-                        int64_t in_idx = b * signal_len * inner_size + t * inner_size + inner;
-                        float val = h_in[in_idx];
-                        float angle = -2.0f * 3.14159265358979323846f * k * t / signal_len;
-                        re_sum += val * std::cos(angle);
-                        im_sum += val * std::sin(angle);
-                    }
-                    if (norm == "ortho") {
-                        float scale = 1.0f / std::sqrt(static_cast<float>(signal_len));
-                        re_sum *= scale;
-                        im_sum *= scale;
-                    } else if (norm == "forward") {
-                        float scale = 1.0f / static_cast<float>(signal_len);
-                        re_sum *= scale;
-                        im_sum *= scale;
-                    }
-                    int64_t out_idx = (b * signal_len * inner_size + k * inner_size + inner) * 2;
-                    h_out[out_idx] = re_sum;
-                    h_out[out_idx + 1] = im_sum;
-                }
+        if (use_cooley_tukey) {
+            float* d_buf = sycl::malloc_device<float>(2 * signal_len * batch_size, queue);
+            const float* d_in = static_cast<const float*>(input.data_ptr());
+            int64_t total = signal_len * batch_size;
+            queue.parallel_for(sycl::range<1>(total), [=](sycl::id<1> idx) {
+                int64_t i = idx[0];
+                d_buf[2 * i] = d_in[i];
+                d_buf[2 * i + 1] = 0.0f;
+            }).wait();
+
+            for (int64_t b = 0; b < batch_size; ++b) {
+                cooley_tukey_fft_sycl(d_buf + b * 2 * signal_len, signal_len, -1.0f, queue);
             }
-        }
 
-        Tensor output(out_shape, DType::Float32, input.device());
-        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), out_numel * sizeof(float)).wait();
-        return output;
+            if (norm == "ortho" || norm == "forward") {
+                float scale = (norm == "ortho")
+                    ? 1.0f / std::sqrt(static_cast<float>(signal_len))
+                    : 1.0f / static_cast<float>(signal_len);
+                queue.parallel_for(sycl::range<1>(2 * total), [=](sycl::id<1> idx) {
+                    d_buf[idx[0]] *= scale;
+                }).wait();
+            }
+
+            Tensor output(out_shape, DType::Float32, input.device());
+            queue.memcpy(const_cast<void*>(output.data_ptr()), d_buf, out_numel * sizeof(float)).wait();
+            sycl::free(d_buf, queue);
+            return output;
+        } else {
+            std::vector<float> h_in(numel);
+            queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(float)).wait();
+            std::vector<float> h_out(out_numel, 0.0f);
+            naive_dft_host(h_in.data(), h_out.data(), signal_len, batch_size, inner_size);
+
+            if (norm == "ortho") {
+                float scale = 1.0f / std::sqrt(static_cast<float>(signal_len));
+                for (auto& v : h_out) v *= scale;
+            } else if (norm == "forward") {
+                float scale = 1.0f / static_cast<float>(signal_len);
+                for (auto& v : h_out) v *= scale;
+            }
+
+            Tensor output(out_shape, DType::Float32, input.device());
+            queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), out_numel * sizeof(float)).wait();
+            return output;
+        }
     } else if (input.dtype() == DType::Float64) {
         int64_t numel = input.numel();
-        std::vector<double> h_in(numel);
-        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(double)).wait();
-
         std::vector<int64_t> out_shape = shape;
         out_shape.push_back(2);
         int64_t out_numel = 1;
         for (auto s : out_shape) out_numel *= s;
-        std::vector<double> h_out(out_numel, 0.0);
 
-        for (int64_t b = 0; b < batch_size; ++b) {
-            for (int64_t inner = 0; inner < inner_size; ++inner) {
-                for (int64_t k = 0; k < signal_len; ++k) {
-                    double re_sum = 0.0, im_sum = 0.0;
-                    for (int64_t t = 0; t < signal_len; ++t) {
-                        int64_t in_idx = b * signal_len * inner_size + t * inner_size + inner;
-                        double val = h_in[in_idx];
-                        double angle = -2.0 * 3.14159265358979323846 * k * t / signal_len;
-                        re_sum += val * std::cos(angle);
-                        im_sum += val * std::sin(angle);
-                    }
-                    if (norm == "ortho") {
-                        double scale = 1.0 / std::sqrt(static_cast<double>(signal_len));
-                        re_sum *= scale;
-                        im_sum *= scale;
-                    } else if (norm == "forward") {
-                        double scale = 1.0 / static_cast<double>(signal_len);
-                        re_sum *= scale;
-                        im_sum *= scale;
-                    }
-                    int64_t out_idx = (b * signal_len * inner_size + k * inner_size + inner) * 2;
-                    h_out[out_idx] = re_sum;
-                    h_out[out_idx + 1] = im_sum;
-                }
+        if (use_cooley_tukey) {
+            double* d_buf = sycl::malloc_device<double>(2 * signal_len * batch_size, queue);
+            const double* d_in = static_cast<const double*>(input.data_ptr());
+            int64_t total = signal_len * batch_size;
+            queue.parallel_for(sycl::range<1>(total), [=](sycl::id<1> idx) {
+                int64_t i = idx[0];
+                d_buf[2 * i] = d_in[i];
+                d_buf[2 * i + 1] = 0.0;
+            }).wait();
+
+            for (int64_t b = 0; b < batch_size; ++b) {
+                cooley_tukey_fft_sycl(d_buf + b * 2 * signal_len, signal_len, -1.0, queue);
             }
+
+            if (norm == "ortho" || norm == "forward") {
+                double scale = (norm == "ortho")
+                    ? 1.0 / std::sqrt(static_cast<double>(signal_len))
+                    : 1.0 / static_cast<double>(signal_len);
+                queue.parallel_for(sycl::range<1>(2 * total), [=](sycl::id<1> idx) {
+                    d_buf[idx[0]] *= scale;
+                }).wait();
+            }
+
+            Tensor output(out_shape, DType::Float64, input.device());
+            queue.memcpy(const_cast<void*>(output.data_ptr()), d_buf, out_numel * sizeof(double)).wait();
+            sycl::free(d_buf, queue);
+            return output;
+        } else {
+            std::vector<double> h_in(numel);
+            queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(double)).wait();
+            std::vector<double> h_out(out_numel, 0.0);
+            naive_dft_host(h_in.data(), h_out.data(), signal_len, batch_size, inner_size);
+
+            if (norm == "ortho") {
+                double scale = 1.0 / std::sqrt(static_cast<double>(signal_len));
+                for (auto& v : h_out) v *= scale;
+            } else if (norm == "forward") {
+                double scale = 1.0 / static_cast<double>(signal_len);
+                for (auto& v : h_out) v *= scale;
+            }
+
+            Tensor output(out_shape, DType::Float64, input.device());
+            queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), out_numel * sizeof(double)).wait();
+            return output;
+        }
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig_dtype = input.dtype();
+        int64_t in_numel = input.numel();
+
+        std::vector<float> host_f32(in_numel);
+        if (orig_dtype == DType::Float16) {
+            std::vector<sycl::half> host_in(in_numel);
+            queue.memcpy(host_in.data(), input.data_ptr(), in_numel * sizeof(sycl::half)).wait();
+            for (int64_t i = 0; i < in_numel; ++i) host_f32[i] = static_cast<float>(host_in[i]);
+        } else {
+            std::vector<uint16_t> host_in(in_numel);
+            queue.memcpy(host_in.data(), input.data_ptr(), in_numel * sizeof(uint16_t)).wait();
+            for (int64_t i = 0; i < in_numel; ++i) host_f32[i] = bf16_to_f32(host_in[i]);
         }
 
-        Tensor output(out_shape, DType::Float64, input.device());
-        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), out_numel * sizeof(double)).wait();
+        Tensor f32_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                         DType::Float32, input.device());
+        queue.memcpy(const_cast<void*>(f32_input.data_ptr()), host_f32.data(), in_numel * sizeof(float)).wait();
+        Tensor f32_result = fft_kernel(f32_input, dim, n, norm, queue);
+
+        int64_t out_numel = f32_result.numel();
+        Tensor output(std::vector<int64_t>(f32_result.shape().begin(), f32_result.shape().end()),
+                      orig_dtype, input.device());
+        std::vector<float> host_out(out_numel);
+        queue.memcpy(host_out.data(), f32_result.data_ptr(), out_numel * sizeof(float)).wait();
+
+        if (orig_dtype == DType::Float16) {
+            std::vector<sycl::half> host_half(out_numel);
+            for (int64_t i = 0; i < out_numel; ++i) host_half[i] = sycl::half(host_out[i]);
+            queue.memcpy(const_cast<void*>(output.data_ptr()), host_half.data(), out_numel * sizeof(sycl::half)).wait();
+        } else {
+            std::vector<uint16_t> host_bf16(out_numel);
+            for (int64_t i = 0; i < out_numel; ++i) host_bf16[i] = f32_to_bf16(host_out[i]);
+            queue.memcpy(const_cast<void*>(output.data_ptr()), host_bf16.data(), out_numel * sizeof(uint16_t)).wait();
+        }
         return output;
     } else {
         throw std::runtime_error("fft_kernel: unsupported dtype (expected Float32 or Float64)");
@@ -1115,6 +1453,42 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
         Tensor output(out_shape, DType::Float64, input.device());
         queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), out_numel * sizeof(double)).wait();
+        return output;
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig_dtype = input.dtype();
+        int64_t in_numel = input.numel();
+
+        std::vector<float> host_f32(in_numel);
+        if (orig_dtype == DType::Float16) {
+            std::vector<sycl::half> host_in(in_numel);
+            queue.memcpy(host_in.data(), input.data_ptr(), in_numel * sizeof(sycl::half)).wait();
+            for (int64_t i = 0; i < in_numel; ++i) host_f32[i] = static_cast<float>(host_in[i]);
+        } else {
+            std::vector<uint16_t> host_in(in_numel);
+            queue.memcpy(host_in.data(), input.data_ptr(), in_numel * sizeof(uint16_t)).wait();
+            for (int64_t i = 0; i < in_numel; ++i) host_f32[i] = bf16_to_f32(host_in[i]);
+        }
+
+        Tensor f32_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                         DType::Float32, input.device());
+        queue.memcpy(const_cast<void*>(f32_input.data_ptr()), host_f32.data(), in_numel * sizeof(float)).wait();
+        Tensor f32_result = ifft_kernel(f32_input, dim, n, norm, queue);
+
+        int64_t out_numel = f32_result.numel();
+        Tensor output(std::vector<int64_t>(f32_result.shape().begin(), f32_result.shape().end()),
+                      orig_dtype, input.device());
+        std::vector<float> host_out(out_numel);
+        queue.memcpy(host_out.data(), f32_result.data_ptr(), out_numel * sizeof(float)).wait();
+
+        if (orig_dtype == DType::Float16) {
+            std::vector<sycl::half> host_half(out_numel);
+            for (int64_t i = 0; i < out_numel; ++i) host_half[i] = sycl::half(host_out[i]);
+            queue.memcpy(const_cast<void*>(output.data_ptr()), host_half.data(), out_numel * sizeof(sycl::half)).wait();
+        } else {
+            std::vector<uint16_t> host_bf16(out_numel);
+            for (int64_t i = 0; i < out_numel; ++i) host_bf16[i] = f32_to_bf16(host_out[i]);
+            queue.memcpy(const_cast<void*>(output.data_ptr()), host_bf16.data(), out_numel * sizeof(uint16_t)).wait();
+        }
         return output;
     } else {
         throw std::runtime_error("ifft_kernel: unsupported dtype (expected Float32 or Float64)");
@@ -1222,6 +1596,42 @@ auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
         Tensor output(out_shape, DType::Float64, input.device());
         queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), out_numel * sizeof(double)).wait();
+        return output;
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig_dtype = input.dtype();
+        int64_t in_numel = input.numel();
+
+        std::vector<float> host_f32(in_numel);
+        if (orig_dtype == DType::Float16) {
+            std::vector<sycl::half> host_in(in_numel);
+            queue.memcpy(host_in.data(), input.data_ptr(), in_numel * sizeof(sycl::half)).wait();
+            for (int64_t i = 0; i < in_numel; ++i) host_f32[i] = static_cast<float>(host_in[i]);
+        } else {
+            std::vector<uint16_t> host_in(in_numel);
+            queue.memcpy(host_in.data(), input.data_ptr(), in_numel * sizeof(uint16_t)).wait();
+            for (int64_t i = 0; i < in_numel; ++i) host_f32[i] = bf16_to_f32(host_in[i]);
+        }
+
+        Tensor f32_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                         DType::Float32, input.device());
+        queue.memcpy(const_cast<void*>(f32_input.data_ptr()), host_f32.data(), in_numel * sizeof(float)).wait();
+        Tensor f32_result = rfft_kernel(f32_input, dim, n, norm, queue);
+
+        int64_t out_numel = f32_result.numel();
+        Tensor output(std::vector<int64_t>(f32_result.shape().begin(), f32_result.shape().end()),
+                      orig_dtype, input.device());
+        std::vector<float> host_out(out_numel);
+        queue.memcpy(host_out.data(), f32_result.data_ptr(), out_numel * sizeof(float)).wait();
+
+        if (orig_dtype == DType::Float16) {
+            std::vector<sycl::half> host_half(out_numel);
+            for (int64_t i = 0; i < out_numel; ++i) host_half[i] = sycl::half(host_out[i]);
+            queue.memcpy(const_cast<void*>(output.data_ptr()), host_half.data(), out_numel * sizeof(sycl::half)).wait();
+        } else {
+            std::vector<uint16_t> host_bf16(out_numel);
+            for (int64_t i = 0; i < out_numel; ++i) host_bf16[i] = f32_to_bf16(host_out[i]);
+            queue.memcpy(const_cast<void*>(output.data_ptr()), host_bf16.data(), out_numel * sizeof(uint16_t)).wait();
+        }
         return output;
     } else {
         throw std::runtime_error("rfft_kernel: unsupported dtype (expected Float32 or Float64)");
@@ -1339,6 +1749,41 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
         Tensor output(out_shape, DType::Float64, input.device());
         queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), out_numel * sizeof(double)).wait();
+        return output;
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        // Upcast to Float32, compute, downcast
+        DType orig_dtype = input.dtype();
+        int64_t numel = input.numel();
+        std::vector<float> host_f32(numel);
+        if (orig_dtype == DType::Float16) {
+            std::vector<sycl::half> host_in(numel);
+            queue.memcpy(host_in.data(), input.data_ptr(), numel * sizeof(sycl::half)).wait();
+            for (int64_t i = 0; i < numel; ++i) host_f32[i] = static_cast<float>(host_in[i]);
+        } else {
+            std::vector<uint16_t> host_in(numel);
+            queue.memcpy(host_in.data(), input.data_ptr(), numel * sizeof(uint16_t)).wait();
+            for (int64_t i = 0; i < numel; ++i) host_f32[i] = bf16_to_f32(host_in[i]);
+        }
+        Tensor f32_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                         DType::Float32, input.device());
+        queue.memcpy(const_cast<void*>(f32_input.data_ptr()), host_f32.data(), numel * sizeof(float)).wait();
+        Tensor f32_result = irfft_kernel(f32_input, dim, n, norm, queue);
+
+        // Downcast result to original dtype
+        int64_t out_numel = f32_result.numel();
+        std::vector<float> host_out(out_numel);
+        queue.memcpy(host_out.data(), f32_result.data_ptr(), out_numel * sizeof(float)).wait();
+        Tensor output(std::vector<int64_t>(f32_result.shape().begin(), f32_result.shape().end()),
+                      orig_dtype, input.device());
+        if (orig_dtype == DType::Float16) {
+            std::vector<sycl::half> host_half(out_numel);
+            for (int64_t i = 0; i < out_numel; ++i) host_half[i] = sycl::half(host_out[i]);
+            queue.memcpy(const_cast<void*>(output.data_ptr()), host_half.data(), out_numel * sizeof(sycl::half)).wait();
+        } else {
+            std::vector<uint16_t> host_bf16(out_numel);
+            for (int64_t i = 0; i < out_numel; ++i) host_bf16[i] = f32_to_bf16(host_out[i]);
+            queue.memcpy(const_cast<void*>(output.data_ptr()), host_bf16.data(), out_numel * sizeof(uint16_t)).wait();
+        }
         return output;
     } else {
         throw std::runtime_error("irfft_kernel: unsupported dtype (expected Float32 or Float64)");

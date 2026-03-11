@@ -40,7 +40,7 @@ struct Device {
         ROCm,        ///< AMD ROCm backend
         OneAPI,      ///< Intel OneAPI backend
         Vulkan,      ///< Vulkan cross-platform backend
-        Metal,       ///< Apple Metal backend (macOS/iOS)
+        // Metal: planned for future release
         WebGPU       ///< WebGPU browser/WASM backend
     };
 
@@ -105,16 +105,6 @@ struct Device {
     }
 
     /**
-     * @brief Create a Metal device (macOS/iOS only).
-     *
-     * @param idx Device index (default: 0)
-     * @return Device configured for Metal execution
-     */
-    static auto metal(int32_t idx = 0) -> Device {
-        return Device{Type::Metal, idx};
-    }
-
-    /**
      * @brief Create a WebGPU device (browser/WASM).
      *
      * @param idx Device index (default: 0)
@@ -161,7 +151,6 @@ struct Device {
             case Type::ROCm: return "rocm:" + std::to_string(index);
             case Type::OneAPI: return "oneapi:" + std::to_string(index);
             case Type::Vulkan: return "vulkan:" + std::to_string(index);
-            case Type::Metal: return "metal:" + std::to_string(index);
             case Type::WebGPU: return "webgpu:" + std::to_string(index);
         }
         return "unknown";

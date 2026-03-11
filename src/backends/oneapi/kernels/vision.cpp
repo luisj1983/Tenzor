@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <vector>
+#include <cstring>
 
 namespace tenzor {
 namespace oneapi {
@@ -31,6 +32,29 @@ struct InterpolateBilinearKernelFloat16 {};
 struct InterpolateBicubicKernelFloat32 {};
 struct InterpolateBicubicKernelFloat64 {};
 struct InterpolateBicubicKernelFloat16 {};
+struct ROIAlignKernelBFloat16 {};
+struct ROIAlignBackwardBF16AccumKernel {};
+struct ROIAlignBackwardBF16ConvertKernel {};
+struct GatherRelativePositionBiasKernelBFloat16 {};
+struct InterpolateNearestKernelBFloat16 {};
+struct InterpolateBilinearKernelBFloat16 {};
+struct InterpolateBicubicKernelBFloat16 {};
+struct BoxIoUKernelFloat16 {};
+struct BoxIoUKernelBFloat16 {};
+
+// BFloat16 conversion helpers
+inline float bf16_to_f32(uint16_t bf16) {
+    uint32_t bits = static_cast<uint32_t>(bf16) << 16;
+    float result;
+    std::memcpy(&result, &bits, sizeof(float));
+    return result;
+}
+
+inline uint16_t f32_to_bf16(float f32) {
+    uint32_t bits;
+    std::memcpy(&bits, &f32, sizeof(uint32_t));
+    return static_cast<uint16_t>(bits >> 16);
+}
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -77,6 +101,16 @@ auto nms_kernel(
         queue.memcpy(host_scores_h.data(), scores_ptr_h, num_boxes * sizeof(sycl::half)).wait();
         for (int64_t i = 0; i < num_boxes * 4; ++i) host_boxes[i] = static_cast<float>(host_boxes_h[i]);
         for (int64_t i = 0; i < num_boxes; ++i) host_scores[i] = static_cast<float>(host_scores_h[i]);
+    } else if (boxes.dtype() == DType::BFloat16) {
+        // BFloat16: copy as uint16_t, then convert to float on host
+        std::vector<uint16_t> host_boxes_bf(num_boxes * 4);
+        std::vector<uint16_t> host_scores_bf(num_boxes);
+        const uint16_t* boxes_ptr_bf = get_data_ptr<const uint16_t>(boxes);
+        const uint16_t* scores_ptr_bf = get_data_ptr<const uint16_t>(scores);
+        queue.memcpy(host_boxes_bf.data(), boxes_ptr_bf, num_boxes * 4 * sizeof(uint16_t)).wait();
+        queue.memcpy(host_scores_bf.data(), scores_ptr_bf, num_boxes * sizeof(uint16_t)).wait();
+        for (int64_t i = 0; i < num_boxes * 4; ++i) host_boxes[i] = bf16_to_f32(host_boxes_bf[i]);
+        for (int64_t i = 0; i < num_boxes; ++i) host_scores[i] = bf16_to_f32(host_scores_bf[i]);
     } else if (boxes.dtype() == DType::Float64) {
         std::vector<double> host_boxes_d(num_boxes * 4);
         std::vector<double> host_scores_d(num_boxes);
@@ -491,6 +525,100 @@ auto roi_align_kernel(
             }
         );
     }
+    else if (features.dtype() == DType::BFloat16) {
+        const uint16_t* features_ptr = get_data_ptr<const uint16_t>(features);
+        const uint16_t* rois_ptr = get_data_ptr<const uint16_t>(rois);
+        uint16_t* output_ptr = get_data_ptr<uint16_t>(output);
+
+        const float offset = aligned ? 0.5f : 0.0f;
+
+        queue.parallel_for<ROIAlignKernelBFloat16>(
+            sycl::range<1>(total_elements),
+            [=](sycl::id<1> idx) {
+                int64_t pw = idx % output_width;
+                int64_t ph = (idx / output_width) % output_height;
+                int64_t c = (idx / output_width / output_height) % channels;
+                int64_t n = idx / output_width / output_height / channels;
+
+                const uint16_t* roi = rois_ptr + n * 5;
+                int64_t batch_idx = static_cast<int64_t>(bf16_to_f32(roi[0]));
+                float roi_x1 = bf16_to_f32(roi[1]) * spatial_scale - offset;
+                float roi_y1 = bf16_to_f32(roi[2]) * spatial_scale - offset;
+                float roi_x2 = bf16_to_f32(roi[3]) * spatial_scale - offset;
+                float roi_y2 = bf16_to_f32(roi[4]) * spatial_scale - offset;
+
+                float roi_width = roi_x2 - roi_x1;
+                float roi_height = roi_y2 - roi_y1;
+                if (!aligned) {
+                    roi_width = sycl::fmax(roi_width, 1.0f);
+                    roi_height = sycl::fmax(roi_height, 1.0f);
+                }
+
+                float bin_size_h = roi_height / static_cast<float>(output_height);
+                float bin_size_w = roi_width / static_cast<float>(output_width);
+
+                int64_t roi_bin_grid_h = sampling_ratio > 0 ? sampling_ratio
+                    : static_cast<int64_t>(sycl::ceil(roi_height / output_height));
+                int64_t roi_bin_grid_w = sampling_ratio > 0 ? sampling_ratio
+                    : static_cast<int64_t>(sycl::ceil(roi_width / output_width));
+
+                const float count = roi_bin_grid_h * roi_bin_grid_w;
+
+                float output_val = 0.0f;
+
+                for (int64_t iy = 0; iy < roi_bin_grid_h; ++iy) {
+                    float y = roi_y1 + ph * bin_size_h + (iy + 0.5f) * bin_size_h / roi_bin_grid_h;
+
+                    for (int64_t ix = 0; ix < roi_bin_grid_w; ++ix) {
+                        float x = roi_x1 + pw * bin_size_w + (ix + 0.5f) * bin_size_w / roi_bin_grid_w;
+
+                        if (y < -1.0f || y > height || x < -1.0f || x > width) {
+                            continue;
+                        }
+
+                        y = sycl::fmax(y, 0.0f);
+                        x = sycl::fmax(x, 0.0f);
+
+                        int64_t y_low = static_cast<int64_t>(y);
+                        int64_t x_low = static_cast<int64_t>(x);
+                        int64_t y_high = y_low + 1;
+                        int64_t x_high = x_low + 1;
+
+                        if (y_low >= height - 1) {
+                            y_high = y_low = height - 1;
+                            y = static_cast<float>(y_low);
+                        }
+                        if (x_low >= width - 1) {
+                            x_high = x_low = width - 1;
+                            x = static_cast<float>(x_low);
+                        }
+
+                        float ly = y - y_low;
+                        float lx = x - x_low;
+                        float hy = 1.0f - ly;
+                        float hx = 1.0f - lx;
+
+                        int64_t base = batch_idx * channels * height * width + c * height * width;
+
+                        float v1 = bf16_to_f32(features_ptr[base + y_low * width + x_low]);
+                        float v2 = bf16_to_f32(features_ptr[base + y_low * width + x_high]);
+                        float v3 = bf16_to_f32(features_ptr[base + y_high * width + x_low]);
+                        float v4 = bf16_to_f32(features_ptr[base + y_high * width + x_high]);
+
+                        float w1 = hy * hx;
+                        float w2 = hy * lx;
+                        float w3 = ly * hx;
+                        float w4 = ly * lx;
+
+                        output_val += w1 * v1 + w2 * v2 + w3 * v3 + w4 * v4;
+                    }
+                }
+                output_val /= count;
+
+                output_ptr[idx] = f32_to_bf16(output_val);
+            }
+        );
+    }
     else {
         throw std::runtime_error("roi_align: unsupported dtype");
     }
@@ -824,6 +952,105 @@ auto roi_align_backward_kernel(
 
         sycl::free(accum_ptr, queue);
     }
+    else if (grad_output.dtype() == DType::BFloat16) {
+        const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
+        const uint16_t* rois_ptr = get_data_ptr<const uint16_t>(rois);
+        uint16_t* grad_feat_ptr = get_data_ptr<uint16_t>(grad_features);
+
+        // Accumulate in float32 since BFloat16 doesn't support atomic operations
+        float* accum_ptr = sycl::malloc_device<float>(feat_size, queue);
+        queue.fill(accum_ptr, 0.0f, feat_size);
+
+        const float offset = aligned ? 0.5f : 0.0f;
+
+        queue.parallel_for<ROIAlignBackwardBF16AccumKernel>(
+            sycl::range<1>(total_elements),
+            [=](sycl::id<1> idx) {
+                int64_t pw = idx % output_width;
+                int64_t ph = (idx / output_width) % output_height;
+                int64_t c = (idx / output_width / output_height) % channels;
+                int64_t n = idx / output_width / output_height / channels;
+
+                const uint16_t* roi = rois_ptr + n * 5;
+                int64_t batch_idx = static_cast<int64_t>(bf16_to_f32(roi[0]));
+                float roi_x1 = bf16_to_f32(roi[1]) * spatial_scale - offset;
+                float roi_y1 = bf16_to_f32(roi[2]) * spatial_scale - offset;
+                float roi_x2 = bf16_to_f32(roi[3]) * spatial_scale - offset;
+                float roi_y2 = bf16_to_f32(roi[4]) * spatial_scale - offset;
+
+                float roi_width = roi_x2 - roi_x1;
+                float roi_height = roi_y2 - roi_y1;
+                if (!aligned) {
+                    roi_width = sycl::fmax(roi_width, 1.0f);
+                    roi_height = sycl::fmax(roi_height, 1.0f);
+                }
+
+                float bin_size_h = roi_height / static_cast<float>(output_height);
+                float bin_size_w = roi_width / static_cast<float>(output_width);
+
+                int64_t roi_bin_grid_h = sampling_ratio > 0 ? sampling_ratio
+                    : static_cast<int64_t>(sycl::ceil(roi_height / output_height));
+                int64_t roi_bin_grid_w = sampling_ratio > 0 ? sampling_ratio
+                    : static_cast<int64_t>(sycl::ceil(roi_width / output_width));
+
+                const float count = roi_bin_grid_h * roi_bin_grid_w;
+                const float grad_val = bf16_to_f32(grad_out_ptr[idx]) / count;
+
+                for (int64_t iy = 0; iy < roi_bin_grid_h; ++iy) {
+                    float y = roi_y1 + ph * bin_size_h + (iy + 0.5f) * bin_size_h / roi_bin_grid_h;
+                    for (int64_t ix = 0; ix < roi_bin_grid_w; ++ix) {
+                        float x = roi_x1 + pw * bin_size_w + (ix + 0.5f) * bin_size_w / roi_bin_grid_w;
+
+                        if (y < -1.0f || y > feat_height || x < -1.0f || x > feat_width) continue;
+
+                        y = sycl::fmax(y, 0.0f);
+                        x = sycl::fmax(x, 0.0f);
+
+                        int64_t y_low = static_cast<int64_t>(y);
+                        int64_t x_low = static_cast<int64_t>(x);
+                        int64_t y_high = y_low + 1;
+                        int64_t x_high = x_low + 1;
+
+                        if (y_low >= feat_height - 1) { y_high = y_low = feat_height - 1; y = static_cast<float>(y_low); }
+                        if (x_low >= feat_width - 1) { x_high = x_low = feat_width - 1; x = static_cast<float>(x_low); }
+
+                        float ly = y - y_low;
+                        float lx = x - x_low;
+                        float hy = 1.0f - ly;
+                        float hx = 1.0f - lx;
+
+                        int64_t base = batch_idx * channels * feat_height * feat_width + c * feat_height * feat_width;
+
+                        sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                            a1(accum_ptr[base + y_low * feat_width + x_low]);
+                        a1 += hy * hx * grad_val;
+
+                        sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                            a2(accum_ptr[base + y_low * feat_width + x_high]);
+                        a2 += hy * lx * grad_val;
+
+                        sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                            a3(accum_ptr[base + y_high * feat_width + x_low]);
+                        a3 += ly * hx * grad_val;
+
+                        sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                            a4(accum_ptr[base + y_high * feat_width + x_high]);
+                        a4 += ly * lx * grad_val;
+                    }
+                }
+            }
+        );
+
+        // Convert float32 accumulation buffer back to BFloat16
+        queue.parallel_for<ROIAlignBackwardBF16ConvertKernel>(
+            sycl::range<1>(feat_size),
+            [=](sycl::id<1> i) {
+                grad_feat_ptr[i] = f32_to_bf16(accum_ptr[i]);
+            }
+        ).wait();
+
+        sycl::free(accum_ptr, queue);
+    }
     else {
         throw std::runtime_error("roi_align_backward: unsupported dtype");
     }
@@ -904,6 +1131,24 @@ auto gather_relative_position_bias_kernel(
         sycl::half* output_ptr = get_data_ptr<sycl::half>(output);
 
         queue.parallel_for<GatherRelativePositionBiasKernelFloat16>(
+            sycl::range<1>(total),
+            [=](sycl::id<1> idx) {
+                int64_t flat_idx = idx[0];
+                int64_t h = flat_idx % num_heads;
+                int64_t j = (flat_idx / num_heads) % num_positions;
+                int64_t i = flat_idx / (num_heads * num_positions);
+
+                int64_t table_idx = indices_ptr[i * num_positions + j];
+                output_ptr[flat_idx] = table_ptr[table_idx * num_heads + h];
+            }
+        );
+    }
+    else if (table.dtype() == DType::BFloat16) {
+        const uint16_t* table_ptr = get_data_ptr<const uint16_t>(table);
+        const int64_t* indices_ptr = get_data_ptr<const int64_t>(indices);
+        uint16_t* output_ptr = get_data_ptr<uint16_t>(output);
+
+        queue.parallel_for<GatherRelativePositionBiasKernelBFloat16>(
             sycl::range<1>(total),
             [=](sycl::id<1> idx) {
                 int64_t flat_idx = idx[0];
@@ -1022,6 +1267,25 @@ auto interpolate_kernel(
             const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
             sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
             queue.parallel_for<InterpolateNearestKernelFloat16>(sycl::range<1>(total),
+                [=](sycl::id<1> idx) {
+                    int64_t temp = idx;
+                    const int64_t w = temp % W_out; temp /= W_out;
+                    const int64_t h = temp % H_out; temp /= H_out;
+                    const int64_t c = temp % C;
+                    const int64_t n = temp / C;
+
+                    int64_t h_in = static_cast<int64_t>(static_cast<float>(h) * H_in / H_out);
+                    int64_t w_in = static_cast<int64_t>(static_cast<float>(w) * W_in / W_out);
+                    h_in = sycl::min(h_in, H_in - 1);
+                    w_in = sycl::min(w_in, W_in - 1);
+
+                    out_ptr[idx] = in_ptr[((n * C + c) * H_in + h_in) * W_in + w_in];
+                });
+        }
+        else if (input.dtype() == DType::BFloat16) {
+            const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+            uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+            queue.parallel_for<InterpolateNearestKernelBFloat16>(sycl::range<1>(total),
                 [=](sycl::id<1> idx) {
                     int64_t temp = idx;
                     const int64_t w = temp % W_out; temp /= W_out;
@@ -1175,6 +1439,51 @@ auto interpolate_kernel(
                     float val = (1.0f - h_lambda) * ((1.0f - w_lambda) * v00 + w_lambda * v01)
                               + h_lambda * ((1.0f - w_lambda) * v10 + w_lambda * v11);
                     out_ptr[idx] = sycl::half(val);
+                });
+        }
+        else if (input.dtype() == DType::BFloat16) {
+            const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+            uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+            queue.parallel_for<InterpolateBilinearKernelBFloat16>(sycl::range<1>(total),
+                [=](sycl::id<1> idx) {
+                    int64_t temp = idx;
+                    const int64_t w = temp % W_out; temp /= W_out;
+                    const int64_t h = temp % H_out; temp /= H_out;
+                    const int64_t c = temp % C;
+                    const int64_t n = temp / C;
+
+                    float h_scale = align_corners && H_out > 1
+                        ? static_cast<float>(H_in - 1) / (H_out - 1)
+                        : static_cast<float>(H_in) / H_out;
+                    float w_scale = align_corners && W_out > 1
+                        ? static_cast<float>(W_in - 1) / (W_out - 1)
+                        : static_cast<float>(W_in) / W_out;
+
+                    float h_real = align_corners ? h * h_scale : (h + 0.5f) * h_scale - 0.5f;
+                    float w_real = align_corners ? w * w_scale : (w + 0.5f) * w_scale - 0.5f;
+
+                    h_real = sycl::fmax(h_real, 0.0f);
+                    w_real = sycl::fmax(w_real, 0.0f);
+
+                    int64_t h0 = static_cast<int64_t>(h_real);
+                    int64_t w0 = static_cast<int64_t>(w_real);
+                    int64_t h1 = sycl::min(h0 + 1, H_in - 1);
+                    int64_t w1 = sycl::min(w0 + 1, W_in - 1);
+                    h0 = sycl::min(h0, H_in - 1);
+                    w0 = sycl::min(w0, W_in - 1);
+
+                    float h_lambda = h_real - h0;
+                    float w_lambda = w_real - w0;
+
+                    int64_t base = (n * C + c) * H_in;
+                    float v00 = bf16_to_f32(in_ptr[(base + h0) * W_in + w0]);
+                    float v01 = bf16_to_f32(in_ptr[(base + h0) * W_in + w1]);
+                    float v10 = bf16_to_f32(in_ptr[(base + h1) * W_in + w0]);
+                    float v11 = bf16_to_f32(in_ptr[(base + h1) * W_in + w1]);
+
+                    float val = (1.0f - h_lambda) * ((1.0f - w_lambda) * v00 + w_lambda * v01)
+                              + h_lambda * ((1.0f - w_lambda) * v10 + w_lambda * v11);
+                    out_ptr[idx] = f32_to_bf16(val);
                 });
         }
         else {
@@ -1347,6 +1656,61 @@ auto interpolate_kernel(
                     out_ptr[idx] = sycl::half(val);
                 });
         }
+        else if (input.dtype() == DType::BFloat16) {
+            const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+            uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+            queue.parallel_for<InterpolateBicubicKernelBFloat16>(sycl::range<1>(total),
+                [=](sycl::id<1> idx) {
+                    int64_t temp = idx;
+                    const int64_t w = temp % W_out; temp /= W_out;
+                    const int64_t h = temp % H_out; temp /= H_out;
+                    const int64_t c = temp % C;
+                    const int64_t n = temp / C;
+
+                    float h_scale = align_corners && H_out > 1
+                        ? static_cast<float>(H_in - 1) / (H_out - 1)
+                        : static_cast<float>(H_in) / H_out;
+                    float w_scale = align_corners && W_out > 1
+                        ? static_cast<float>(W_in - 1) / (W_out - 1)
+                        : static_cast<float>(W_in) / W_out;
+
+                    float h_real = align_corners ? h * h_scale : (h + 0.5f) * h_scale - 0.5f;
+                    float w_real = align_corners ? w * w_scale : (w + 0.5f) * w_scale - 0.5f;
+
+                    int64_t h_floor = static_cast<int64_t>(sycl::floor(h_real));
+                    int64_t w_floor = static_cast<int64_t>(sycl::floor(w_real));
+
+                    float val = 0.0f;
+                    for (int64_t dh = -1; dh <= 2; ++dh) {
+                        int64_t hi = sycl::clamp(h_floor + dh, int64_t(0), H_in - 1);
+                        float h_w = sycl::fabs(h_real - (h_floor + dh));
+                        float hw;
+                        if (h_w < 1.0f) {
+                            hw = ((1.5f * h_w - 2.5f) * h_w) * h_w + 1.0f;
+                        } else if (h_w < 2.0f) {
+                            hw = ((-0.5f * h_w + 2.5f) * h_w - 4.0f) * h_w + 2.0f;
+                        } else {
+                            hw = 0.0f;
+                        }
+
+                        for (int64_t dw = -1; dw <= 2; ++dw) {
+                            int64_t wi = sycl::clamp(w_floor + dw, int64_t(0), W_in - 1);
+                            float w_w = sycl::fabs(w_real - (w_floor + dw));
+                            float ww;
+                            if (w_w < 1.0f) {
+                                ww = ((1.5f * w_w - 2.5f) * w_w) * w_w + 1.0f;
+                            } else if (w_w < 2.0f) {
+                                ww = ((-0.5f * w_w + 2.5f) * w_w - 4.0f) * w_w + 2.0f;
+                            } else {
+                                ww = 0.0f;
+                            }
+
+                            val += hw * ww * bf16_to_f32(in_ptr[((n * C + c) * H_in + hi) * W_in + wi]);
+                        }
+                    }
+                    out_ptr[idx] = f32_to_bf16(val);
+                });
+        }
         else {
             throw std::runtime_error("interpolate bicubic: unsupported dtype");
         }
@@ -1478,6 +1842,96 @@ auto box_iou_kernel(
             }
 
             out_ptr[i * M + j] = iou;
+        });
+    } else if (boxes1.dtype() == DType::Float16) {
+        const sycl::half* b1_ptr = get_vision_data_ptr<const sycl::half>(boxes1);
+        const sycl::half* b2_ptr = get_vision_data_ptr<const sycl::half>(boxes2);
+        sycl::half* out_ptr = get_vision_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<BoxIoUKernelFloat16>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            int64_t i = idx / M;
+            int64_t j = idx % M;
+
+            float x1_1 = float(b1_ptr[i * 4 + 0]);
+            float y1_1 = float(b1_ptr[i * 4 + 1]);
+            float x2_1 = float(b1_ptr[i * 4 + 2]);
+            float y2_1 = float(b1_ptr[i * 4 + 3]);
+
+            float x1_2 = float(b2_ptr[j * 4 + 0]);
+            float y1_2 = float(b2_ptr[j * 4 + 1]);
+            float x2_2 = float(b2_ptr[j * 4 + 2]);
+            float y2_2 = float(b2_ptr[j * 4 + 3]);
+
+            float inter_x1 = sycl::fmax(x1_1, x1_2);
+            float inter_y1 = sycl::fmax(y1_1, y1_2);
+            float inter_x2 = sycl::fmin(x2_1, x2_2);
+            float inter_y2 = sycl::fmin(y2_1, y2_2);
+
+            float inter_w = sycl::fmax(0.0f, inter_x2 - inter_x1);
+            float inter_h = sycl::fmax(0.0f, inter_y2 - inter_y1);
+            float inter_area = inter_w * inter_h;
+
+            float area1 = (x2_1 - x1_1) * (y2_1 - y1_1);
+            float area2 = (x2_2 - x1_2) * (y2_2 - y1_2);
+            float union_area = area1 + area2 - inter_area;
+
+            float iou = inter_area / (union_area + 1e-7f);
+
+            if (iou_type == 1) {
+                float enc_x1 = sycl::fmin(x1_1, x1_2);
+                float enc_y1 = sycl::fmin(y1_1, y1_2);
+                float enc_x2 = sycl::fmax(x2_1, x2_2);
+                float enc_y2 = sycl::fmax(y2_1, y2_2);
+                float enc_area = (enc_x2 - enc_x1) * (enc_y2 - enc_y1);
+                iou = iou - (enc_area - union_area) / (enc_area + 1e-7f);
+            }
+
+            out_ptr[i * M + j] = sycl::half(iou);
+        });
+    } else if (boxes1.dtype() == DType::BFloat16) {
+        const uint16_t* b1_ptr = get_vision_data_ptr<const uint16_t>(boxes1);
+        const uint16_t* b2_ptr = get_vision_data_ptr<const uint16_t>(boxes2);
+        uint16_t* out_ptr = get_vision_data_ptr<uint16_t>(output);
+
+        queue.parallel_for<BoxIoUKernelBFloat16>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            int64_t i = idx / M;
+            int64_t j = idx % M;
+
+            float x1_1 = bf16_to_f32(b1_ptr[i * 4 + 0]);
+            float y1_1 = bf16_to_f32(b1_ptr[i * 4 + 1]);
+            float x2_1 = bf16_to_f32(b1_ptr[i * 4 + 2]);
+            float y2_1 = bf16_to_f32(b1_ptr[i * 4 + 3]);
+
+            float x1_2 = bf16_to_f32(b2_ptr[j * 4 + 0]);
+            float y1_2 = bf16_to_f32(b2_ptr[j * 4 + 1]);
+            float x2_2 = bf16_to_f32(b2_ptr[j * 4 + 2]);
+            float y2_2 = bf16_to_f32(b2_ptr[j * 4 + 3]);
+
+            float inter_x1 = sycl::fmax(x1_1, x1_2);
+            float inter_y1 = sycl::fmax(y1_1, y1_2);
+            float inter_x2 = sycl::fmin(x2_1, x2_2);
+            float inter_y2 = sycl::fmin(y2_1, y2_2);
+
+            float inter_w = sycl::fmax(0.0f, inter_x2 - inter_x1);
+            float inter_h = sycl::fmax(0.0f, inter_y2 - inter_y1);
+            float inter_area = inter_w * inter_h;
+
+            float area1 = (x2_1 - x1_1) * (y2_1 - y1_1);
+            float area2 = (x2_2 - x1_2) * (y2_2 - y1_2);
+            float union_area = area1 + area2 - inter_area;
+
+            float iou = inter_area / (union_area + 1e-7f);
+
+            if (iou_type == 1) {
+                float enc_x1 = sycl::fmin(x1_1, x1_2);
+                float enc_y1 = sycl::fmin(y1_1, y1_2);
+                float enc_x2 = sycl::fmax(x2_1, x2_2);
+                float enc_y2 = sycl::fmax(y2_1, y2_2);
+                float enc_area = (enc_x2 - enc_x1) * (enc_y2 - enc_y1);
+                iou = iou - (enc_area - union_area) / (enc_area + 1e-7f);
+            }
+
+            out_ptr[i * M + j] = f32_to_bf16(iou);
         });
     } else {
         throw std::runtime_error("box_iou_kernel: unsupported dtype (need Float32 or Float64)");

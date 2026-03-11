@@ -253,6 +253,10 @@ WebGPUBackend::~WebGPUBackend() {
 }
 
 bool WebGPUBackend::initialize() {
+    throw std::runtime_error(
+        "WebGPU backend is experimental and not yet functional. "
+        "Please use CPU, CUDA, Vulkan, or other backends.");
+
     if (initialized_) {
         return true;
     }

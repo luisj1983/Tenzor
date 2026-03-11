@@ -5161,5 +5161,376 @@ auto all_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
     return output;
 }
 
+// ============================================================================
+// LogSumExp - Numerically stable log(sum(exp(x)))
+// ============================================================================
+
+// Step 1: Find max along dim
+template<typename T>
+__global__ void logsumexp_max_along_dim_kernel(
+    const T* input,
+    typename AccumType<T>::type* max_out,
+    DimMeta meta,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    using Acc = typename AccumType<T>::type;
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= output_size) return;
+
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+    for (int64_t d = ndim - 1; d >= 0; --d) {
+        if (d == dim) { indices[d] = 0; continue; }
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
+    }
+
+    Acc m = Acc(-1e38);
+    for (int64_t i = 0; i < dim_size; i++) {
+        indices[dim] = i;
+        int64_t in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * meta.strides[d];
+        }
+        Acc val = Acc(input[in_idx]);
+        if (val > m) m = val;
+    }
+    max_out[out_idx] = m;
+}
+
+// Specialization for float: use -FLT_MAX
+template<>
+__global__ void logsumexp_max_along_dim_kernel<float>(
+    const float* input,
+    float* max_out,
+    DimMeta meta,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= output_size) return;
+
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+    for (int64_t d = ndim - 1; d >= 0; --d) {
+        if (d == dim) { indices[d] = 0; continue; }
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
+    }
+
+    float m = -FLT_MAX;
+    for (int64_t i = 0; i < dim_size; i++) {
+        indices[dim] = i;
+        int64_t in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * meta.strides[d];
+        }
+        float val = input[in_idx];
+        if (val > m) m = val;
+    }
+    max_out[out_idx] = m;
+}
+
+// Specialization for double: use -DBL_MAX
+template<>
+__global__ void logsumexp_max_along_dim_kernel<double>(
+    const double* input,
+    double* max_out,
+    DimMeta meta,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= output_size) return;
+
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+    for (int64_t d = ndim - 1; d >= 0; --d) {
+        if (d == dim) { indices[d] = 0; continue; }
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
+    }
+
+    double m = -DBL_MAX;
+    for (int64_t i = 0; i < dim_size; i++) {
+        indices[dim] = i;
+        int64_t in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * meta.strides[d];
+        }
+        double val = input[in_idx];
+        if (val > m) m = val;
+    }
+    max_out[out_idx] = m;
+}
+
+// Step 2: Compute sum(exp(x - max)) and result = max + log(sum)
+template<typename T>
+__global__ void logsumexp_sum_exp_kernel(
+    const T* input,
+    const typename AccumType<T>::type* max_vals,
+    T* output,
+    DimMeta meta,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    using Acc = typename AccumType<T>::type;
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= output_size) return;
+
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+    for (int64_t d = ndim - 1; d >= 0; --d) {
+        if (d == dim) { indices[d] = 0; continue; }
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
+    }
+
+    Acc m = max_vals[out_idx];
+    // Handle inf: if max is +/-inf, result should be the same inf
+    if (isinf(float(m))) {
+        output[out_idx] = T(m);
+        return;
+    }
+
+    Acc sum = Acc(0);
+    for (int64_t i = 0; i < dim_size; i++) {
+        indices[dim] = i;
+        int64_t in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * meta.strides[d];
+        }
+        sum += exp(Acc(input[in_idx]) - m);
+    }
+    output[out_idx] = T(log(sum) + m);
+}
+
+// Full reduction version
+template<typename T>
+__global__ void logsumexp_full_kernel(
+    const T* input,
+    T* output,
+    int64_t n
+) {
+    using Acc = typename AccumType<T>::type;
+
+    // Step 1: Find max using shared memory reduction
+    __shared__ Acc smax[REDUCTION_BLOCK_SIZE];
+    int tid = threadIdx.x;
+    Acc local_max = Acc(-1e38);
+
+    for (int64_t i = tid; i < n; i += blockDim.x) {
+        Acc val = Acc(input[i]);
+        if (val > local_max) local_max = val;
+    }
+    smax[tid] = local_max;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            if (smax[tid + stride] > smax[tid])
+                smax[tid] = smax[tid + stride];
+        }
+        __syncthreads();
+    }
+    Acc m = smax[0];
+    __syncthreads();
+
+    // Handle inf
+    if (isinf(float(m))) {
+        if (tid == 0) output[0] = T(m);
+        return;
+    }
+
+    // Step 2: Sum exp(x - max) using shared memory reduction
+    __shared__ Acc ssum[REDUCTION_BLOCK_SIZE];
+    Acc local_sum = Acc(0);
+    for (int64_t i = tid; i < n; i += blockDim.x) {
+        local_sum += exp(Acc(input[i]) - m);
+    }
+    ssum[tid] = local_sum;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            ssum[tid] += ssum[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        output[0] = T(log(ssum[0]) + m);
+    }
+}
+
+auto logsumexp_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+    auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
+    stream = resolved_stream;
+
+    const auto dtype = input.dtype();
+    const auto& device = input.device();
+    const auto& input_shape = input.shape();
+    const auto& input_strides = input.strides();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    if (dtype != DType::Float32 && dtype != DType::Float64 &&
+        dtype != DType::Float16 && dtype != DType::BFloat16) {
+        throw std::runtime_error("logsumexp: only Float32, Float64, Float16, and BFloat16 are supported");
+    }
+
+    // Normalize negative dimension
+    int64_t normalized_dim = dim;
+    if (dim != INT64_MIN) {
+        if (dim < 0) normalized_dim = ndim + dim;
+        if (normalized_dim < 0 || normalized_dim >= ndim) {
+            throw std::runtime_error("Dimension " + std::to_string(dim) +
+                " out of range for tensor with " + std::to_string(ndim) + " dimensions");
+        }
+    }
+
+    auto output_shape = compute_reduction_shape(
+        std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+        normalized_dim, keepdim
+    );
+
+    Tensor output(output_shape, dtype, device);
+
+    auto shape_vec = std::vector<int64_t>(input_shape.begin(), input_shape.end());
+    auto strides_vec = std::vector<int64_t>(input_strides.begin(), input_strides.end());
+
+    if (dim == INT64_MIN) {
+        // Full reduction
+        int64_t n = input.numel();
+        if (n == 0) {
+            // logsumexp of empty set is -inf
+            switch (dtype) {
+                case DType::Float32:
+                    fill_scalar_kernel<<<1, 1, 0, stream>>>(output.data<float>(), -FLT_MAX);
+                    break;
+                case DType::Float64:
+                    fill_scalar_kernel<<<1, 1, 0, stream>>>(output.data<double>(), -DBL_MAX);
+                    break;
+                default: break;
+            }
+            CUDA_CHECK(cudaGetLastError());
+            CUDA_PEEK_AND_THROW(stream, "logsumexp_kernel");
+            return output;
+        }
+
+        switch (dtype) {
+            case DType::Float32:
+                logsumexp_full_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(
+                    input.data<float>(), output.data<float>(), n);
+                break;
+            case DType::Float64:
+                logsumexp_full_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(
+                    input.data<double>(), output.data<double>(), n);
+                break;
+            case DType::Float16:
+                logsumexp_full_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const __half*>(input.data_ptr()),
+                    reinterpret_cast<__half*>(output.data_ptr()), n);
+                break;
+            case DType::BFloat16:
+                logsumexp_full_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+                    reinterpret_cast<__nv_bfloat16*>(output.data_ptr()), n);
+                break;
+            default: break;
+        }
+    } else {
+        // Dim reduction
+        int64_t dim_size = input_shape[normalized_dim];
+        int64_t output_size = 1;
+        for (int64_t i = 0; i < ndim; i++) {
+            if (i != normalized_dim) output_size *= input_shape[i];
+        }
+
+        if (output_size == 0 || dim_size == 0) {
+            CUDA_PEEK_AND_THROW(stream, "logsumexp_kernel");
+            return output;
+        }
+
+        DimMeta meta = make_dim_meta(shape_vec, strides_vec);
+        int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+
+        switch (dtype) {
+            case DType::Float32: {
+                // Allocate temp buffer for max values
+                Tensor max_buf({output_size}, DType::Float32, device);
+                logsumexp_max_along_dim_kernel<float><<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
+                    input.data<float>(), max_buf.data<float>(),
+                    meta, ndim, normalized_dim, output_size, dim_size);
+                CUDA_CHECK(cudaGetLastError());
+
+                logsumexp_sum_exp_kernel<float><<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
+                    input.data<float>(), max_buf.data<float>(), output.data<float>(),
+                    meta, ndim, normalized_dim, output_size, dim_size);
+                CUDA_CHECK(cudaGetLastError());
+                break;
+            }
+            case DType::Float64: {
+                Tensor max_buf({output_size}, DType::Float64, device);
+                logsumexp_max_along_dim_kernel<double><<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
+                    input.data<double>(), max_buf.data<double>(),
+                    meta, ndim, normalized_dim, output_size, dim_size);
+                CUDA_CHECK(cudaGetLastError());
+
+                logsumexp_sum_exp_kernel<double><<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
+                    input.data<double>(), max_buf.data<double>(), output.data<double>(),
+                    meta, ndim, normalized_dim, output_size, dim_size);
+                CUDA_CHECK(cudaGetLastError());
+                break;
+            }
+            case DType::Float16: {
+                // Use float accumulator for max
+                Tensor max_buf({output_size}, DType::Float32, device);
+                logsumexp_max_along_dim_kernel<__half><<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const __half*>(input.data_ptr()),
+                    max_buf.data<float>(),
+                    meta, ndim, normalized_dim, output_size, dim_size);
+                CUDA_CHECK(cudaGetLastError());
+
+                logsumexp_sum_exp_kernel<__half><<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const __half*>(input.data_ptr()),
+                    max_buf.data<float>(),
+                    reinterpret_cast<__half*>(output.data_ptr()),
+                    meta, ndim, normalized_dim, output_size, dim_size);
+                CUDA_CHECK(cudaGetLastError());
+                break;
+            }
+            case DType::BFloat16: {
+                Tensor max_buf({output_size}, DType::Float32, device);
+                logsumexp_max_along_dim_kernel<__nv_bfloat16><<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+                    max_buf.data<float>(),
+                    meta, ndim, normalized_dim, output_size, dim_size);
+                CUDA_CHECK(cudaGetLastError());
+
+                logsumexp_sum_exp_kernel<__nv_bfloat16><<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+                    max_buf.data<float>(),
+                    reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+                    meta, ndim, normalized_dim, output_size, dim_size);
+                CUDA_CHECK(cudaGetLastError());
+                break;
+            }
+            default: break;
+        }
+    }
+
+    CUDA_PEEK_AND_THROW(stream, "logsumexp_kernel");
+    return output;
+}
+
 } // namespace cuda
 } // namespace tenzor

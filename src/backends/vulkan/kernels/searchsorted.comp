@@ -1,0 +1,37 @@
+#version 450
+
+// SearchSorted: binary search per query element over a sorted array
+// Each invocation finds the insertion index for one query value
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer SortedArray { float sorted_data[]; };
+layout(binding = 1) buffer QueryValues { float query_data[]; };
+layout(binding = 2) buffer OutputIndices { int output_indices[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint array_size;    // Length of the sorted array
+    uint num_queries;   // Number of query values
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_queries) return;
+
+    float query = query_data[idx];
+
+    // Standard binary search: find leftmost insertion point
+    uint lo = 0;
+    uint hi = params.array_size;
+
+    while (lo < hi) {
+        uint mid = lo + (hi - lo) / 2;
+        if (sorted_data[mid] < query) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+
+    output_indices[idx] = int(lo);
+}

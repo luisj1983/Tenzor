@@ -187,7 +187,6 @@ auto gather_hip(
     }
 
     HIP_CHECK(hipGetLastError());
-    HIP_CHECK(hipDeviceSynchronize());
 
     return output;
 }
@@ -346,7 +345,6 @@ auto scatter_hip(
     }
 
     HIP_CHECK(hipGetLastError());
-    HIP_CHECK(hipDeviceSynchronize());
 
     return output;
 }
@@ -469,7 +467,6 @@ auto index_select_hip(
     }
 
     HIP_CHECK(hipGetLastError());
-    HIP_CHECK(hipDeviceSynchronize());
 
     return output;
 }
@@ -541,7 +538,6 @@ auto masked_fill_hip(
     }
 
     HIP_CHECK(hipGetLastError());
-    HIP_CHECK(hipDeviceSynchronize());
 
     return output;
 }
@@ -664,7 +660,6 @@ auto masked_select_hip(
     HIP_CHECK(hipFree(d_count));
     HIP_CHECK(hipFree(d_output_idx));
     HIP_CHECK(hipGetLastError());
-    HIP_CHECK(hipDeviceSynchronize());
 
     return output;
 }
@@ -750,7 +745,6 @@ auto take_hip(
     }
 
     HIP_CHECK(hipGetLastError());
-    HIP_CHECK(hipDeviceSynchronize());
 
     return output;
 }

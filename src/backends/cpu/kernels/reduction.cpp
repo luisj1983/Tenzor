@@ -3366,5 +3366,236 @@ auto has_inf_nan_kernel(const Tensor& input, int64_t /*dim*/, bool /*keepdim*/) 
     return result;
 }
 
+// ============================================================================
+// LogSumExp - Numerically stable log(sum(exp(x)))
+// Algorithm: result = max + log(sum(exp(x - max)))
+// Uses Kahan summation for the exp-sum accumulation
+// ============================================================================
+
+template<typename T, typename Acc = T>
+static Acc logsumexp_full_impl(const T* data, int64_t n) {
+    if (n == 0) return Acc(-std::numeric_limits<Acc>::infinity());
+
+    // Step 1: Find max
+    Acc m = Acc(data[0]);
+    for (int64_t i = 1; i < n; i++) {
+        Acc val = Acc(data[i]);
+        if (val > m) m = val;
+    }
+
+    // Handle inf
+    if (std::isinf(m)) return m;
+
+    // Step 2: Sum exp(x - max) with Kahan summation
+    Acc sum = Acc(0);
+    Acc compensation = Acc(0);
+    for (int64_t i = 0; i < n; i++) {
+        Acc y = std::exp(Acc(data[i]) - m) - compensation;
+        Acc t = sum + y;
+        compensation = (t - sum) - y;
+        sum = t;
+    }
+
+    return m + std::log(sum);
+}
+
+template<typename T, typename Acc = T>
+static void logsumexp_along_dim(
+    const T* input_data,
+    T* output_data,
+    const std::vector<int64_t>& input_shape,
+    const std::vector<int64_t>& input_strides,
+    int64_t dim
+) {
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+    const int64_t dim_size = input_shape[dim];
+
+    int64_t output_size = 1;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != dim) output_size *= input_shape[i];
+    }
+
+    const int64_t total_work = output_size * dim_size;
+    #pragma omp parallel for if(total_work > REDUCTION_OMP_THRESHOLD)
+    for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
+        std::vector<int64_t> indices(ndim, 0);
+        int64_t tmp = out_idx;
+
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            if (d == dim) continue;
+            indices[d] = tmp % input_shape[d];
+            tmp /= input_shape[d];
+        }
+
+        // Step 1: Find max along dim
+        Acc m = Acc(-std::numeric_limits<Acc>::infinity());
+        for (int64_t i = 0; i < dim_size; i++) {
+            indices[dim] = i;
+            int64_t in_idx = 0;
+            for (int64_t d = 0; d < ndim; d++) {
+                in_idx += indices[d] * input_strides[d];
+            }
+            Acc val = Acc(input_data[in_idx]);
+            if (val > m) m = val;
+        }
+
+        // Handle inf
+        if (std::isinf(static_cast<float>(m))) {
+            output_data[out_idx] = T(m);
+            continue;
+        }
+
+        // Step 2: Sum exp(x - max) with Kahan summation
+        Acc sum = Acc(0);
+        Acc compensation = Acc(0);
+        for (int64_t i = 0; i < dim_size; i++) {
+            indices[dim] = i;
+            int64_t in_idx = 0;
+            for (int64_t d = 0; d < ndim; d++) {
+                in_idx += indices[d] * input_strides[d];
+            }
+            Acc y = std::exp(Acc(input_data[in_idx]) - m) - compensation;
+            Acc t = sum + y;
+            compensation = (t - sum) - y;
+            sum = t;
+        }
+
+        output_data[out_idx] = T(m + std::log(sum));
+    }
+}
+
+auto logsumexp_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
+    const auto dtype = input.dtype();
+    const auto& device = input.device();
+    const auto& input_shape = input.shape();
+    const auto& input_strides = input.strides();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    if (dtype != DType::Float32 && dtype != DType::Float64 &&
+        dtype != DType::Float16 && dtype != DType::BFloat16) {
+        throw std::runtime_error("logsumexp: only Float32, Float64, Float16, and BFloat16 are supported");
+    }
+
+    dim = normalize_dim(dim, ndim);
+
+    auto output_shape = compute_reduction_shape(
+        std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+        dim, keepdim
+    );
+
+    Tensor output(output_shape, dtype, device);
+
+    switch (dtype) {
+        case DType::Float16: {
+            auto* input_data = input.data<Float16>();
+            auto* output_data = output.data<Float16>();
+
+            if (dim == REDUCE_ALL) {
+                // Upcast to float for computation
+                const int64_t n = input.numel();
+                if (n == 0) {
+                    output_data[0] = Float16(-std::numeric_limits<float>::infinity());
+                } else {
+                    // Find max
+                    float m = static_cast<float>(input_data[0]);
+                    for (int64_t i = 1; i < n; i++) {
+                        float val = static_cast<float>(input_data[i]);
+                        if (val > m) m = val;
+                    }
+                    if (std::isinf(m)) {
+                        output_data[0] = Float16(m);
+                    } else {
+                        float sum = 0.0f, compensation = 0.0f;
+                        for (int64_t i = 0; i < n; i++) {
+                            float y = std::exp(static_cast<float>(input_data[i]) - m) - compensation;
+                            float t = sum + y;
+                            compensation = (t - sum) - y;
+                            sum = t;
+                        }
+                        output_data[0] = Float16(m + std::log(sum));
+                    }
+                }
+            } else {
+                logsumexp_along_dim<Float16, float>(
+                    input_data, output_data,
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    dim);
+            }
+            break;
+        }
+        case DType::BFloat16: {
+            auto* input_data = input.data<BFloat16>();
+            auto* output_data = output.data<BFloat16>();
+
+            if (dim == REDUCE_ALL) {
+                const int64_t n = input.numel();
+                if (n == 0) {
+                    output_data[0] = BFloat16(-std::numeric_limits<float>::infinity());
+                } else {
+                    float m = static_cast<float>(input_data[0]);
+                    for (int64_t i = 1; i < n; i++) {
+                        float val = static_cast<float>(input_data[i]);
+                        if (val > m) m = val;
+                    }
+                    if (std::isinf(m)) {
+                        output_data[0] = BFloat16(m);
+                    } else {
+                        float sum = 0.0f, compensation = 0.0f;
+                        for (int64_t i = 0; i < n; i++) {
+                            float y = std::exp(static_cast<float>(input_data[i]) - m) - compensation;
+                            float t = sum + y;
+                            compensation = (t - sum) - y;
+                            sum = t;
+                        }
+                        output_data[0] = BFloat16(m + std::log(sum));
+                    }
+                }
+            } else {
+                logsumexp_along_dim<BFloat16, float>(
+                    input_data, output_data,
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    dim);
+            }
+            break;
+        }
+        case DType::Float32: {
+            auto* input_data = input.data<float>();
+            auto* output_data = output.data<float>();
+
+            if (dim == REDUCE_ALL) {
+                output_data[0] = logsumexp_full_impl<float>(input_data, input.numel());
+            } else {
+                logsumexp_along_dim<float>(
+                    input_data, output_data,
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    dim);
+            }
+            break;
+        }
+        case DType::Float64: {
+            auto* input_data = input.data<double>();
+            auto* output_data = output.data<double>();
+
+            if (dim == REDUCE_ALL) {
+                output_data[0] = logsumexp_full_impl<double>(input_data, input.numel());
+            } else {
+                logsumexp_along_dim<double>(
+                    input_data, output_data,
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    dim);
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("logsumexp: unsupported dtype");
+    }
+
+    return output;
+}
+
 } // namespace cpu
 } // namespace tenzor

@@ -119,6 +119,7 @@ namespace cuda {
     auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor;
     auto any_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor;
     auto all_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor;
+    auto logsumexp_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor;
 
     // AMP operations
     auto has_inf_nan_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor;
@@ -494,6 +495,7 @@ namespace cuda {
     // Creation operations
     auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor;
     auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor;
+    auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor;
     auto arange_kernel(float start, float end, float step, DType dtype, Device device, cudaStream_t stream) -> Tensor;
     auto linspace_kernel(float start, float end, int64_t steps, DType dtype, Device device, cudaStream_t stream) -> Tensor;
     auto eye_kernel(int64_t n, int64_t m, DType dtype, Device device, cudaStream_t stream) -> Tensor;
@@ -2100,6 +2102,15 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         Device device = Device::cuda(device_idx);
         return std::vector<Tensor>{cuda::randn_kernel(shape, dtype, device, get_cuda_stream(attrs))};
     });
+    table.register_kernel(OpId::Randint, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t low = attrs.get_int(AttrKey::Start, 0);
+        int64_t high = attrs.get_int(AttrKey::End, 0);
+        auto shape = attrs.get_int_list(AttrKey::Shape);
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "int32"));
+        int device_idx = static_cast<int>(attrs.get_int(AttrKey::Device, 0));
+        Device device = Device::cuda(device_idx);
+        return std::vector<Tensor>{cuda::randint_kernel(low, high, shape, dtype, device, get_cuda_stream(attrs))};
+    });
     table.register_kernel(OpId::Arange, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         float start = static_cast<float>(attrs.get_float(AttrKey::Start, 0.0));
         float end = static_cast<float>(attrs.get_float(AttrKey::End, 0.0));
@@ -2172,6 +2183,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
         bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return std::vector<Tensor>{cuda::all_kernel(inputs[0], dim, keepdim, get_cuda_stream(attrs))};
+    });
+    table.register_kernel(OpId::LogSumExp, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        return std::vector<Tensor>{cuda::logsumexp_kernel(inputs[0], dim, keepdim, get_cuda_stream(attrs))};
     });
 
     // =========================================================================

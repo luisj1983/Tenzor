@@ -82,7 +82,7 @@ auto query_gpu_memory(int device_id = 0) -> GPUMemoryInfo {
 
     // Try CUDA first, then ROCm, then other GPU backends
     for (auto device_type : {Device::Type::CUDA, Device::Type::ROCm,
-                             Device::Type::OneAPI, Device::Type::Metal,
+                             Device::Type::OneAPI,
                              Device::Type::Vulkan}) {
         Backend* backend = backend_registry().get_backend(device_type);
         if (backend && backend->is_available() && backend->device_count() > device_id) {
@@ -102,7 +102,7 @@ auto query_gpu_memory(int device_id = 0) -> GPUMemoryInfo {
 auto get_gpu_device() -> Device {
     // Return first available GPU
     for (auto device_type : {Device::Type::CUDA, Device::Type::ROCm,
-                             Device::Type::OneAPI, Device::Type::Metal,
+                             Device::Type::OneAPI,
                              Device::Type::Vulkan}) {
         Backend* backend = backend_registry().get_backend(device_type);
         if (backend && backend->is_available() && backend->device_count() > 0) {
@@ -110,7 +110,6 @@ auto get_gpu_device() -> Device {
                 case Device::Type::CUDA: return Device::cuda(0);
                 case Device::Type::ROCm: return Device::rocm(0);
                 case Device::Type::OneAPI: return Device::oneapi(0);
-                case Device::Type::Metal: return Device::metal(0);
                 case Device::Type::Vulkan: return Device::vulkan(0);
                 default: break;
             }

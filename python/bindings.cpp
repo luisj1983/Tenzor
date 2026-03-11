@@ -417,7 +417,6 @@ PYBIND11_MODULE(tenzor_core, m) {
         .value("ROCm", tenzor::Device::Type::ROCm)
         .value("OneAPI", tenzor::Device::Type::OneAPI)
         .value("Vulkan", tenzor::Device::Type::Vulkan)
-        .value("Metal", tenzor::Device::Type::Metal)
         .value("WebGPU", tenzor::Device::Type::WebGPU);
 
     // Device

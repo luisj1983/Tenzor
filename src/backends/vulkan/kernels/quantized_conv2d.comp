@@ -1,0 +1,84 @@
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+
+// Quantized Conv2d: Int8 convolution with Int32 accumulation, dequantize to Float32
+// Each thread computes one output element: output[n][oc][oh][ow]
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer InputData { int8_t input_data[]; };
+layout(binding = 1) buffer WeightData { int8_t weight_data[]; };
+layout(binding = 2) buffer BiasData { float bias_data[]; };
+layout(binding = 3) buffer OutputData { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint batch;
+    uint in_channels;
+    uint out_channels;
+    uint h_in;
+    uint w_in;
+    uint h_out;
+    uint w_out;
+    uint kernel_size;
+    uint stride;
+    uint padding;
+    float input_scale;
+    float weight_scale;
+    int input_zero_point;
+    int weight_zero_point;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = params.batch * params.out_channels * params.h_out * params.w_out;
+    if (idx >= total) return;
+
+    // Decompose linear index into (n, oc, oh, ow)
+    uint temp = idx;
+    uint ow = temp % params.w_out; temp /= params.w_out;
+    uint oh = temp % params.h_out; temp /= params.h_out;
+    uint oc = temp % params.out_channels;
+    uint n  = temp / params.out_channels;
+
+    int acc = 0;
+    int sum_x = 0;
+    int sum_w = 0;
+    int pad_count = 0;
+
+    for (uint ic = 0; ic < params.in_channels; ++ic) {
+        for (uint kh = 0; kh < params.kernel_size; ++kh) {
+            for (uint kw = 0; kw < params.kernel_size; ++kw) {
+                int ih = int(oh * params.stride) - int(params.padding) + int(kh);
+                int iw = int(ow * params.stride) - int(params.padding) + int(kw);
+
+                if (ih >= 0 && ih < int(params.h_in) && iw >= 0 && iw < int(params.w_in)) {
+                    uint input_idx = ((n * params.in_channels + ic) * params.h_in + uint(ih)) * params.w_in + uint(iw);
+                    uint weight_idx = ((oc * params.in_channels + ic) * params.kernel_size + kh) * params.kernel_size + kw;
+
+                    int iv = int(input_data[input_idx]);
+                    int wv = int(weight_data[weight_idx]);
+                    acc += iv * wv;
+                    sum_x += iv;
+                    sum_w += wv;
+                } else {
+                    pad_count++;
+                }
+            }
+        }
+    }
+
+    // Zero-point correction for non-padded positions
+    uint K = params.in_channels * params.kernel_size * params.kernel_size;
+    acc = acc - params.input_zero_point * sum_w
+              - params.weight_zero_point * sum_x
+              + params.input_zero_point * params.weight_zero_point * int(K - uint(pad_count));
+
+    // Padded positions: (0 - input_zp) * (w - weight_zp) already handled by not
+    // including them in acc/sum_x/sum_w, but zero-point self-interaction still applies
+    acc += params.input_zero_point * params.weight_zero_point * pad_count;
+
+    // Dequantize to float and add bias
+    float result = float(acc) * params.input_scale * params.weight_scale;
+    result += bias_data[oc];
+
+    output_data[idx] = result;
+}

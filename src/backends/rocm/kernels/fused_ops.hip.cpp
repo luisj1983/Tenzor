@@ -216,7 +216,6 @@ auto fused_batchnorm_relu_hip(
     }
 
     HIP_CHECK(hipGetLastError());
-    HIP_CHECK(hipDeviceSynchronize());
 
     return output;
 }
@@ -319,7 +318,6 @@ auto fused_softmax_cross_entropy_hip(
     }
 
     HIP_CHECK(hipGetLastError());
-    HIP_CHECK(hipDeviceSynchronize());
 
     // Apply reduction
     if (reduction == "mean") {
@@ -380,7 +378,6 @@ auto fused_add_relu_hip(const Tensor& a, const Tensor& b) -> Tensor {
     }
 
     HIP_CHECK(hipGetLastError());
-    HIP_CHECK(hipDeviceSynchronize());
 
     return result;
 }
@@ -437,7 +434,6 @@ auto fused_gelu_hip(const Tensor& input) -> Tensor {
     }
 
     HIP_CHECK(hipGetLastError());
-    HIP_CHECK(hipDeviceSynchronize());
 
     return output;
 }
@@ -555,7 +551,6 @@ auto fused_layer_norm_hip(
     }
 
     HIP_CHECK(hipGetLastError());
-    HIP_CHECK(hipDeviceSynchronize());
 
     return output;
 }
@@ -647,7 +642,6 @@ auto fused_conv_batchnorm_relu_hip(
     }
 
     HIP_CHECK(hipGetLastError());
-    HIP_CHECK(hipDeviceSynchronize());
 
     return output;
 }
@@ -755,7 +749,6 @@ auto fused_matmul_add_hip(
     }
 
     HIP_CHECK(hipGetLastError());
-    HIP_CHECK(hipDeviceSynchronize());
 
     return C;
 }
@@ -831,7 +824,6 @@ auto fused_elementwise_chain_hip(
     }
 
     HIP_CHECK(hipGetLastError());
-    HIP_CHECK(hipDeviceSynchronize());
 
     return output;
 }
@@ -971,7 +963,6 @@ auto fused_attention_hip(
     }
 
     HIP_CHECK(hipGetLastError());
-    HIP_CHECK(hipDeviceSynchronize());
 
     return output;
 }
@@ -1075,7 +1066,6 @@ auto fused_rms_norm_hip(
     }
 
     HIP_CHECK(hipGetLastError());
-    HIP_CHECK(hipDeviceSynchronize());
 
     return {output, rrms};
 }
@@ -1230,7 +1220,6 @@ auto fused_conv2d_bn_relu_full_hip(
     }
 
     HIP_CHECK(hipGetLastError());
-    HIP_CHECK(hipDeviceSynchronize());
 
     return output;
 }

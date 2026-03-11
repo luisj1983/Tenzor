@@ -6,11 +6,25 @@
 #include "launch_config.cuh"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cuda_bf16.h>
 #include <stdexcept>
 #include <vector>
 
 namespace tenzor {
 namespace cuda {
+
+// Conversion kernels for half-type upcast/downcast
+template<typename HalfT>
+__global__ void half_to_float_kernel(const HalfT* __restrict__ in, float* __restrict__ out, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) out[idx] = static_cast<float>(in[idx]);
+}
+
+template<typename HalfT>
+__global__ void float_to_half_kernel(const float* __restrict__ in, HalfT* __restrict__ out, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) out[idx] = static_cast<HalfT>(in[idx]);
+}
 
 // ============================================================================
 // Kernel Launch Helpers
@@ -624,6 +638,13 @@ auto interpolate_cuda(const Tensor& input,
                 batch, channels, in_h, in_w, out_h, out_w
             );
             TENZOR_CUDA_POST_LAUNCH_CHECK();
+        } else if (input.dtype() == DType::BFloat16) {
+            interpolate_nearest_kernel<__nv_bfloat16><<<grid, block>>>(
+                reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+                reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+                batch, channels, in_h, in_w, out_h, out_w
+            );
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else {
             throw std::runtime_error("interpolate_cuda: Unsupported dtype");
         }
@@ -652,6 +673,14 @@ auto interpolate_cuda(const Tensor& input,
                 align_corners
             );
             TENZOR_CUDA_POST_LAUNCH_CHECK();
+        } else if (input.dtype() == DType::BFloat16) {
+            interpolate_bilinear_kernel<__nv_bfloat16><<<grid, block>>>(
+                reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+                reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+                batch, channels, in_h, in_w, out_h, out_w,
+                align_corners
+            );
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
         } else {
             throw std::runtime_error("interpolate_cuda: Unsupported dtype");
         }
@@ -676,6 +705,14 @@ auto interpolate_cuda(const Tensor& input,
             interpolate_bicubic_kernel<__half><<<grid, block>>>(
                 reinterpret_cast<const __half*>(input.data_ptr()),
                 reinterpret_cast<__half*>(output.data_ptr()),
+                batch, channels, in_h, in_w, out_h, out_w,
+                align_corners
+            );
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
+        } else if (input.dtype() == DType::BFloat16) {
+            interpolate_bicubic_kernel<__nv_bfloat16><<<grid, block>>>(
+                reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+                reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
                 batch, channels, in_h, in_w, out_h, out_w,
                 align_corners
             );
@@ -775,6 +812,40 @@ auto box_iou_cuda(const Tensor& boxes1, const Tensor& boxes2, int iou_type) -> T
             boxes1.data<double>(), boxes2.data<double>(), output.data<double>(),
             N, M, iou_type);
             TENZOR_CUDA_POST_LAUNCH_CHECK();
+    } else if (boxes1.dtype() == DType::Float16 || boxes1.dtype() == DType::BFloat16) {
+        // Upcast to Float32 for computation
+        Tensor output_f32({N, M}, DType::Float32, boxes1.device());
+        // Cast inputs to Float32
+        Tensor b1_f32({boxes1.shape()[0], 4}, DType::Float32, boxes1.device());
+        Tensor b2_f32({boxes2.shape()[0], 4}, DType::Float32, boxes2.device());
+        int64_t n1 = boxes1.numel(), n2 = boxes2.numel();
+        int cvt_block = 256;
+        if (boxes1.dtype() == DType::Float16) {
+            half_to_float_kernel<<<(n1+cvt_block-1)/cvt_block, cvt_block>>>(
+                reinterpret_cast<const __half*>(boxes1.data_ptr()), b1_f32.data<float>(), n1);
+            half_to_float_kernel<<<(n2+cvt_block-1)/cvt_block, cvt_block>>>(
+                reinterpret_cast<const __half*>(boxes2.data_ptr()), b2_f32.data<float>(), n2);
+        } else {
+            half_to_float_kernel<<<(n1+cvt_block-1)/cvt_block, cvt_block>>>(
+                reinterpret_cast<const __nv_bfloat16*>(boxes1.data_ptr()), b1_f32.data<float>(), n1);
+            half_to_float_kernel<<<(n2+cvt_block-1)/cvt_block, cvt_block>>>(
+                reinterpret_cast<const __nv_bfloat16*>(boxes2.data_ptr()), b2_f32.data<float>(), n2);
+        }
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+        box_iou_kernel<float><<<grid, block>>>(
+            b1_f32.data<float>(), b2_f32.data<float>(), output_f32.data<float>(),
+            N, M, iou_type);
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+        // Convert output back
+        int64_t out_n = N * M;
+        if (boxes1.dtype() == DType::Float16) {
+            float_to_half_kernel<<<(out_n+cvt_block-1)/cvt_block, cvt_block>>>(
+                output_f32.data<float>(), reinterpret_cast<__half*>(output.data_ptr()), out_n);
+        } else {
+            float_to_half_kernel<<<(out_n+cvt_block-1)/cvt_block, cvt_block>>>(
+                output_f32.data<float>(), reinterpret_cast<__nv_bfloat16*>(output.data_ptr()), out_n);
+        }
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("box_iou_cuda: unsupported dtype");
     }

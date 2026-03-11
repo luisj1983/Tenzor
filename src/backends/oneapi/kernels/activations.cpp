@@ -2285,10 +2285,16 @@ auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias
 
 class LinearBackwardGradInputFloat32;
 class LinearBackwardGradInputFloat64;
+class LinearBackwardGradInputFloat16;
+class LinearBackwardGradInputBFloat16;
 class LinearBackwardGradWeightFloat32;
 class LinearBackwardGradWeightFloat64;
+class LinearBackwardGradWeightFloat16;
+class LinearBackwardGradWeightBFloat16;
 class LinearBackwardGradBiasFloat32;
 class LinearBackwardGradBiasFloat64;
+class LinearBackwardGradBiasFloat16;
+class LinearBackwardGradBiasBFloat16;
 
 auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input,
                              const Tensor& weight, sycl::queue& queue) -> std::vector<Tensor> {
@@ -2306,28 +2312,82 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input,
         batch_size *= in_shape[i];
     }
 
-    // For FP16/BF16, compute in FP32
-    if (grad_cont.dtype() == DType::Float16 || grad_cont.dtype() == DType::BFloat16) {
+    // For FP16/BF16, upcast to FP32, compute, downcast back
+    if (grad_cont.dtype() == DType::Float16) {
         DType orig = grad_cont.dtype();
-        // Convert all to float32, use matmul, convert back
-        Tensor g32 = contiguous_kernel(grad_cont, queue);
-        Tensor i32 = contiguous_kernel(in_cont, queue);
-        Tensor w32 = contiguous_kernel(w_cont, queue);
-        // For simplicity, fall back to host compute for half types
-        // (The matmul kernel handles this via oneMKL on OneAPI devices)
-        auto grad_input = Tensor(std::vector<int64_t>(in_shape.begin(), in_shape.end()), orig, in_cont.device());
-        auto grad_weight = Tensor(std::vector<int64_t>(w_shape.begin(), w_shape.end()), orig, weight.device());
-        auto grad_bias = Tensor({out_features}, orig, grad_output.device());
+        Tensor grad_input(std::vector<int64_t>(in_shape.begin(), in_shape.end()), orig, in_cont.device());
+        Tensor grad_weight(std::vector<int64_t>(w_shape.begin(), w_shape.end()), orig, weight.device());
+        Tensor grad_bias({out_features}, orig, grad_output.device());
 
-        // Simple host-side fallback for half precision backward
-        std::vector<float> g_host(batch_size * out_features);
-        std::vector<float> i_host(batch_size * in_features);
-        std::vector<float> w_host(out_features * in_features);
-        queue.memcpy(g_host.data(), grad_cont.data_ptr(), batch_size * out_features * grad_cont.dtype_size()).wait();
-        queue.memcpy(i_host.data(), in_cont.data_ptr(), batch_size * in_features * in_cont.dtype_size()).wait();
-        queue.memcpy(w_host.data(), w_cont.data_ptr(), out_features * in_features * w_cont.dtype_size()).wait();
-        // This is a simplified fallback; for production use oneMKL
-        throw std::runtime_error("linear_backward for FP16/BF16 not yet optimized on OneAPI; use FP32");
+        const sycl::half* g_ptr = get_data_ptr<const sycl::half>(grad_cont);
+        const sycl::half* i_ptr = get_data_ptr<const sycl::half>(in_cont);
+        const sycl::half* w_ptr = get_data_ptr<const sycl::half>(w_cont);
+        sycl::half* gi_ptr = get_data_ptr<sycl::half>(grad_input);
+        sycl::half* gw_ptr = get_data_ptr<sycl::half>(grad_weight);
+        sycl::half* gb_ptr = get_data_ptr<sycl::half>(grad_bias);
+
+        queue.parallel_for<LinearBackwardGradInputFloat16>(
+            sycl::range<2>(batch_size, in_features), [=](sycl::id<2> id) {
+            int64_t b = id[0], i = id[1];
+            float sum = 0.0f;
+            for (int64_t o = 0; o < out_features; ++o)
+                sum += static_cast<float>(g_ptr[b * out_features + o]) * static_cast<float>(w_ptr[o * in_features + i]);
+            gi_ptr[b * in_features + i] = sycl::half(sum);
+        });
+        queue.parallel_for<LinearBackwardGradWeightFloat16>(
+            sycl::range<2>(out_features, in_features), [=](sycl::id<2> id) {
+            int64_t o = id[0], i = id[1];
+            float sum = 0.0f;
+            for (int64_t b = 0; b < batch_size; ++b)
+                sum += static_cast<float>(g_ptr[b * out_features + o]) * static_cast<float>(i_ptr[b * in_features + i]);
+            gw_ptr[o * in_features + i] = sycl::half(sum);
+        });
+        queue.parallel_for<LinearBackwardGradBiasFloat16>(
+            sycl::range<1>(out_features), [=](sycl::id<1> o) {
+            float sum = 0.0f;
+            for (int64_t b = 0; b < batch_size; ++b)
+                sum += static_cast<float>(g_ptr[b * out_features + o]);
+            gb_ptr[o] = sycl::half(sum);
+        });
+        return {grad_input, grad_weight, grad_bias};
+    }
+    if (grad_cont.dtype() == DType::BFloat16) {
+        DType orig = grad_cont.dtype();
+        Tensor grad_input(std::vector<int64_t>(in_shape.begin(), in_shape.end()), orig, in_cont.device());
+        Tensor grad_weight(std::vector<int64_t>(w_shape.begin(), w_shape.end()), orig, weight.device());
+        Tensor grad_bias({out_features}, orig, grad_output.device());
+
+        const uint16_t* g_ptr = get_data_ptr<const uint16_t>(grad_cont);
+        const uint16_t* i_ptr = get_data_ptr<const uint16_t>(in_cont);
+        const uint16_t* w_ptr = get_data_ptr<const uint16_t>(w_cont);
+        uint16_t* gi_ptr = get_data_ptr<uint16_t>(grad_input);
+        uint16_t* gw_ptr = get_data_ptr<uint16_t>(grad_weight);
+        uint16_t* gb_ptr = get_data_ptr<uint16_t>(grad_bias);
+
+        queue.parallel_for<LinearBackwardGradInputBFloat16>(
+            sycl::range<2>(batch_size, in_features), [=](sycl::id<2> id) {
+            int64_t b = id[0], i = id[1];
+            float sum = 0.0f;
+            for (int64_t o = 0; o < out_features; ++o)
+                sum += bf16_to_f32(g_ptr[b * out_features + o]) * bf16_to_f32(w_ptr[o * in_features + i]);
+            gi_ptr[b * in_features + i] = f32_to_bf16(sum);
+        });
+        queue.parallel_for<LinearBackwardGradWeightBFloat16>(
+            sycl::range<2>(out_features, in_features), [=](sycl::id<2> id) {
+            int64_t o = id[0], i = id[1];
+            float sum = 0.0f;
+            for (int64_t b = 0; b < batch_size; ++b)
+                sum += bf16_to_f32(g_ptr[b * out_features + o]) * bf16_to_f32(i_ptr[b * in_features + i]);
+            gw_ptr[o * in_features + i] = f32_to_bf16(sum);
+        });
+        queue.parallel_for<LinearBackwardGradBiasBFloat16>(
+            sycl::range<1>(out_features), [=](sycl::id<1> o) {
+            float sum = 0.0f;
+            for (int64_t b = 0; b < batch_size; ++b)
+                sum += bf16_to_f32(g_ptr[b * out_features + o]);
+            gb_ptr[o] = f32_to_bf16(sum);
+        });
+        return {grad_input, grad_weight, grad_bias};
     }
 
     Tensor grad_input(std::vector<int64_t>(in_shape.begin(), in_shape.end()),

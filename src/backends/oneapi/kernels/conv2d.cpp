@@ -299,6 +299,7 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
 }
 
 #else // !TENZOR_HAS_ONEDNN - Fallback implementation using im2col + GEMM
+#pragma message("WARNING: Building without oneDNN — using slower Conv2d fallback")
 
 // Kernel class declarations for conv2d operations - Float32
 class Conv2dIm2colKernel;

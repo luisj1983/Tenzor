@@ -43,10 +43,6 @@ namespace showcase
         {
             return tenzor::Device::rocm(0);
         }
-        else if(backend_str == "metal")
-        {
-            return tenzor::Device::metal(0);
-        }
         else if(backend_str == "webgpu")
         {
             return tenzor::Device::webgpu(0);

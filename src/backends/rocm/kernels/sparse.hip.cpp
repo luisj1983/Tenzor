@@ -316,7 +316,6 @@ Tensor rocm_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
         workspace.ptr
     ));
 
-    HIP_CHECK_SPARSE(hipDeviceSynchronize());
     return result;
 }
 
@@ -426,7 +425,6 @@ Tensor rocm_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
         workspace.ptr
     ));
 
-    HIP_CHECK_SPARSE(hipDeviceSynchronize());
     return result;
 }
 
