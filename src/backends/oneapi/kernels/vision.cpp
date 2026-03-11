@@ -75,6 +75,8 @@ inline auto get_data_ptr(const Tensor& t) -> T* {
  * @param iou_threshold IoU threshold for suppression
  * @return Indices of kept boxes
  */
+struct NmsIoUKernel {};
+
 auto nms_kernel(
     const Tensor& boxes,
     const Tensor& scores,
@@ -87,12 +89,11 @@ auto nms_kernel(
         return Tensor({0}, DType::Int64, boxes.device());
     }
 
-    // Copy to host for NMS computation (NMS is inherently sequential)
+    // Copy boxes/scores to host (needed for sort + greedy suppression)
     std::vector<float> host_boxes(num_boxes * 4);
     std::vector<float> host_scores(num_boxes);
 
     if (boxes.dtype() == DType::Float16) {
-        // Float16: copy as half, then convert to float on host
         std::vector<sycl::half> host_boxes_h(num_boxes * 4);
         std::vector<sycl::half> host_scores_h(num_boxes);
         const sycl::half* boxes_ptr_h = get_data_ptr<const sycl::half>(boxes);
@@ -102,7 +103,6 @@ auto nms_kernel(
         for (int64_t i = 0; i < num_boxes * 4; ++i) host_boxes[i] = static_cast<float>(host_boxes_h[i]);
         for (int64_t i = 0; i < num_boxes; ++i) host_scores[i] = static_cast<float>(host_scores_h[i]);
     } else if (boxes.dtype() == DType::BFloat16) {
-        // BFloat16: copy as uint16_t, then convert to float on host
         std::vector<uint16_t> host_boxes_bf(num_boxes * 4);
         std::vector<uint16_t> host_scores_bf(num_boxes);
         const uint16_t* boxes_ptr_bf = get_data_ptr<const uint16_t>(boxes);
@@ -134,17 +134,50 @@ auto nms_kernel(
         return host_scores[a] > host_scores[b];
     });
 
-    // Compute areas
-    std::vector<float> areas(num_boxes);
-    for (int64_t i = 0; i < num_boxes; ++i) {
-        float x1 = host_boxes[i * 4 + 0];
-        float y1 = host_boxes[i * 4 + 1];
-        float x2 = host_boxes[i * 4 + 2];
-        float y2 = host_boxes[i * 4 + 3];
-        areas[i] = (x2 - x1) * (y2 - y1);
-    }
+    // Compute NxN IoU matrix on device (embarrassingly parallel)
+    float* d_boxes = sycl::malloc_device<float>(num_boxes * 4, queue);
+    float* d_iou_matrix = sycl::malloc_device<float>(num_boxes * num_boxes, queue);
+    queue.memcpy(d_boxes, host_boxes.data(), num_boxes * 4 * sizeof(float)).wait();
 
-    // NMS
+    int64_t total_pairs = num_boxes * num_boxes;
+    queue.parallel_for<NmsIoUKernel>(
+        sycl::range<1>(total_pairs), [=](sycl::id<1> gid) {
+            int64_t i = static_cast<int64_t>(gid[0]) / num_boxes;
+            int64_t j = static_cast<int64_t>(gid[0]) % num_boxes;
+
+            if (i >= j) {
+                // Only compute upper triangle; IoU is symmetric
+                float x1_i = d_boxes[i * 4 + 0], y1_i = d_boxes[i * 4 + 1];
+                float x2_i = d_boxes[i * 4 + 2], y2_i = d_boxes[i * 4 + 3];
+                float x1_j = d_boxes[j * 4 + 0], y1_j = d_boxes[j * 4 + 1];
+                float x2_j = d_boxes[j * 4 + 2], y2_j = d_boxes[j * 4 + 3];
+
+                float area_i = (x2_i - x1_i) * (y2_i - y1_i);
+                float area_j = (x2_j - x1_j) * (y2_j - y1_j);
+
+                float xx1 = sycl::max(x1_i, x1_j);
+                float yy1 = sycl::max(y1_i, y1_j);
+                float xx2 = sycl::min(x2_i, x2_j);
+                float yy2 = sycl::min(y2_i, y2_j);
+
+                float w = sycl::max(0.0f, xx2 - xx1);
+                float h = sycl::max(0.0f, yy2 - yy1);
+                float intersection = w * h;
+                float iou = intersection / (area_i + area_j - intersection + 1e-6f);
+
+                d_iou_matrix[i * num_boxes + j] = iou;
+                d_iou_matrix[j * num_boxes + i] = iou;
+            }
+        }).wait();
+
+    // Copy thresholded IoU matrix to host for greedy suppression
+    std::vector<float> h_iou(num_boxes * num_boxes);
+    queue.memcpy(h_iou.data(), d_iou_matrix, num_boxes * num_boxes * sizeof(float)).wait();
+
+    sycl::free(d_boxes, queue);
+    sycl::free(d_iou_matrix, queue);
+
+    // Greedy suppression (inherently sequential)
     std::vector<bool> suppressed(num_boxes, false);
     std::vector<int64_t> keep;
 
@@ -154,34 +187,11 @@ auto nms_kernel(
 
         keep.push_back(idx);
 
-        float x1_i = host_boxes[idx * 4 + 0];
-        float y1_i = host_boxes[idx * 4 + 1];
-        float x2_i = host_boxes[idx * 4 + 2];
-        float y2_i = host_boxes[idx * 4 + 3];
-
         for (int64_t j = i + 1; j < num_boxes; ++j) {
             int64_t jdx = order[j];
             if (suppressed[jdx]) continue;
 
-            float x1_j = host_boxes[jdx * 4 + 0];
-            float y1_j = host_boxes[jdx * 4 + 1];
-            float x2_j = host_boxes[jdx * 4 + 2];
-            float y2_j = host_boxes[jdx * 4 + 3];
-
-            // Compute intersection
-            float xx1 = std::max(x1_i, x1_j);
-            float yy1 = std::max(y1_i, y1_j);
-            float xx2 = std::min(x2_i, x2_j);
-            float yy2 = std::min(y2_i, y2_j);
-
-            float w = std::max(0.0f, xx2 - xx1);
-            float h = std::max(0.0f, yy2 - yy1);
-            float intersection = w * h;
-
-            // Compute IoU
-            float iou = intersection / (areas[idx] + areas[jdx] - intersection + 1e-6f);
-
-            if (iou > iou_threshold) {
+            if (h_iou[idx * num_boxes + jdx] > iou_threshold) {
                 suppressed[jdx] = true;
             }
         }

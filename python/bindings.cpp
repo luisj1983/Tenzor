@@ -6526,33 +6526,43 @@ PYBIND11_MODULE(tenzor_core, m) {
     auto linalg_mod = m.def_submodule("linalg", "Linear algebra operations");
 
     linalg_mod.def("det", &tenzor::linalg::det, "Compute matrix determinant",
-                   py::arg("A"));
+                   py::arg("A"),
+                   py::call_guard<py::gil_scoped_release>());
     linalg_mod.def("inv", &tenzor::linalg::inv, "Compute matrix inverse",
-                   py::arg("A"));
+                   py::arg("A"),
+                   py::call_guard<py::gil_scoped_release>());
     linalg_mod.def("solve", &tenzor::linalg::solve, "Solve linear system AX = B",
-                   py::arg("A"), py::arg("B"));
+                   py::arg("A"), py::arg("B"),
+                   py::call_guard<py::gil_scoped_release>());
     linalg_mod.def("cholesky", &tenzor::linalg::cholesky, "Cholesky decomposition",
-                   py::arg("A"), py::arg("upper") = false);
+                   py::arg("A"), py::arg("upper") = false,
+                   py::call_guard<py::gil_scoped_release>());
     linalg_mod.def("norm", &tenzor::linalg::norm, "Matrix norm",
-                   py::arg("A"), py::arg("ord") = "fro");
+                   py::arg("A"), py::arg("ord") = "fro",
+                   py::call_guard<py::gil_scoped_release>());
     linalg_mod.def("slogdet", [](const tenzor::Tensor& A) {
         auto [sign, logabsdet] = tenzor::linalg::slogdet(A);
         return py::make_tuple(sign, logabsdet);
-    }, "Sign and log of absolute determinant", py::arg("A"));
+    }, "Sign and log of absolute determinant", py::arg("A"),
+       py::call_guard<py::gil_scoped_release>());
     linalg_mod.def("svd", [](const tenzor::Tensor& A, bool full_matrices) {
         auto [U, S, Vh] = tenzor::linalg::svd(A, full_matrices);
         return py::make_tuple(U, S, Vh);
-    }, "Singular Value Decomposition", py::arg("A"), py::arg("full_matrices") = true);
+    }, "Singular Value Decomposition", py::arg("A"), py::arg("full_matrices") = true,
+       py::call_guard<py::gil_scoped_release>());
     linalg_mod.def("qr", [](const tenzor::Tensor& A) {
         auto [Q, R] = tenzor::linalg::qr(A);
         return py::make_tuple(Q, R);
-    }, "QR decomposition", py::arg("A"));
+    }, "QR decomposition", py::arg("A"),
+       py::call_guard<py::gil_scoped_release>());
     linalg_mod.def("eigh", [](const tenzor::Tensor& A) {
         auto [eigenvalues, eigenvectors] = tenzor::linalg::eigh(A);
         return py::make_tuple(eigenvalues, eigenvectors);
-    }, "Eigendecomposition of symmetric matrix", py::arg("A"));
+    }, "Eigendecomposition of symmetric matrix", py::arg("A"),
+       py::call_guard<py::gil_scoped_release>());
     linalg_mod.def("eigvalsh", &tenzor::linalg::eigvalsh,
-                   "Eigenvalues of symmetric matrix", py::arg("A"));
+                   "Eigenvalues of symmetric matrix", py::arg("A"),
+                   py::call_guard<py::gil_scoped_release>());
 
     linalg_mod.def("matrix_power", &tenzor::linalg::matrix_power,
                    "Matrix power via binary exponentiation",

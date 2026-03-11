@@ -561,6 +561,8 @@ public:
                                const OpAttributes& attrs) -> std::vector<Tensor>;
     auto dispatchFusedAdamStep(std::span<const Tensor> inputs,
                                 const OpAttributes& attrs) -> std::vector<Tensor>;
+    auto dispatchFusedAdamAtan2Step(std::span<const Tensor> inputs,
+                                    const OpAttributes& attrs) -> std::vector<Tensor>;
 
     // Complex number operations
     auto dispatchConj(const Tensor& input) -> Tensor;

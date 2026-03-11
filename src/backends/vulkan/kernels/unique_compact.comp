@@ -1,0 +1,26 @@
+#version 450
+
+// Compact unique values: for each element where boundary[i]==1,
+// write sorted[i] to output at position prefix_sum[i]-1
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer SortedInput { float sorted_data[]; };
+layout(binding = 1) readonly buffer PrefixSum { uint prefix_sum[]; };
+layout(binding = 2) writeonly buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint numel;
+} params;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= params.numel) return;
+
+    // Check if this is a boundary (prefix_sum changes from previous)
+    uint my_pos = prefix_sum[gid];
+    bool is_boundary = (gid == 0) || (my_pos != prefix_sum[gid - 1]);
+
+    if (is_boundary) {
+        output_data[my_pos - 1] = sorted_data[gid];
+    }
+}

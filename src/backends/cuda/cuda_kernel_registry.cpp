@@ -1431,6 +1431,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return cuda::embedding_kernel(inputs[0], inputs[1], get_cuda_stream(attrs));
     });
 
+    // EmbeddingWithBoundsCheck — CUDA embedding already uses error flag + atomicExch for OOB detection
+    table.register_single_output_kernel(OpId::EmbeddingWithBoundsCheck, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return cuda::embedding_kernel(inputs[0], inputs[1], get_cuda_stream(attrs));
+    });
+
     table.register_single_output_kernel(OpId::EmbeddingBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         // inputs: [grad_output, indices]
         // attrs: num_embeddings

@@ -607,10 +607,19 @@ namespace rocm {
     // BoxIoU (vision.hip.cpp)
     auto box_iou_hip(const Tensor& boxes1, const Tensor& boxes2, int iou_type) -> Tensor;
 
-    // EmbeddingBagForward (indexing.hip.cpp)
+    // EmbeddingBagForward/Backward (indexing.hip.cpp)
     auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offsets,
                                        const std::string& mode, int64_t embedding_dim,
                                        bool include_last_offset, hipStream_t stream) -> Tensor;
+    auto embedding_bag_backward_kernel(const Tensor& grad_output,
+                                       const Tensor& embeddings,
+                                       const Tensor& offsets,
+                                       const OpAttributes& attrs,
+                                       hipStream_t stream) -> Tensor;
+
+    // Randint (math.hip.cpp)
+    auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape,
+                        DType dtype, Device device, hipStream_t stream) -> Tensor;
 
     // Quantized operations (quantization.hip.cpp)
     auto quantized_linear_hip(
@@ -1083,6 +1092,16 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
         Device device = Device::rocm(device_id);
         return std::vector<Tensor>{rocm::randn_kernel(shape, dtype, device, get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::Randint, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t low = attrs.get_int(AttrKey::Start, 0);
+        int64_t high = attrs.get_int(AttrKey::End, 0);
+        auto shape = attrs.get_int_list(AttrKey::Shape);
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "int32"));
+        int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
+        Device device = Device::rocm(device_id);
+        return std::vector<Tensor>{rocm::randint_kernel(low, high, shape, dtype, device, get_hip_stream(attrs))};
     });
 
     // ========================================================================
@@ -2015,6 +2034,10 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{rocm::embedding_kernel(inputs[0], inputs[1], get_hip_stream(attrs))};
     });
 
+    table.register_kernel(OpId::EmbeddingWithBoundsCheck, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::embedding_kernel(inputs[0], inputs[1], get_hip_stream(attrs))};
+    });
+
     table.register_kernel(OpId::EmbeddingBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: grad_output, indices
         int64_t num_embeddings = attrs.get_int(AttrKey::NumEmbeddings, 0);
@@ -2355,6 +2378,15 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         bool include_last_offset = attrs.get_bool(AttrKey::IncludeLastOffset, false);
         return std::vector<Tensor>{rocm::embedding_bag_forward_kernel(
             inputs[0], inputs[1], mode, embedding_dim, include_last_offset, get_hip_stream(attrs))};
+    });
+
+    // ========================================================================
+    // EmbeddingBagBackward Operation
+    // ========================================================================
+    table.register_kernel(OpId::EmbeddingBagBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [grad_output, embeddings, offsets]
+        return std::vector<Tensor>{rocm::embedding_bag_backward_kernel(
+            inputs[0], inputs[1], inputs[2], attrs, get_hip_stream(attrs))};
     });
 
     // ========================================================================

@@ -56,6 +56,20 @@ if(MKL_FOUND)
     endif()
 endif()
 
+# Check for oneDPL (Intel DPC++ Library)
+set(ONEDPL_FOUND FALSE)
+find_path(ONEDPL_INCLUDE_DIR
+    NAMES oneapi/dpl/algorithm
+    HINTS ${SYCL_COMPILER_DIR}/include
+    PATH_SUFFIXES include
+)
+if(ONEDPL_INCLUDE_DIR)
+    set(ONEDPL_FOUND TRUE)
+    message(STATUS "OneAPI Backend: oneDPL found at ${ONEDPL_INCLUDE_DIR}")
+else()
+    message(STATUS "OneAPI Backend: oneDPL not found - using host-side sort fallback")
+endif()
+
 # =========================================================================
 # Common SYCL compile/link flags
 # =========================================================================
@@ -66,6 +80,10 @@ set(SYCL_COMMON_FLAGS
     -O3 -DNDEBUG
     -I${CMAKE_SOURCE_DIR}/include
 )
+
+if(ONEDPL_FOUND)
+    list(APPEND SYCL_COMMON_FLAGS -DTENZOR_HAS_ONEDPL)
+endif()
 
 set(ONEMKL_COMPILE_FLAGS "")
 if(ONEMKL_SYCL_FOUND)
@@ -222,4 +240,9 @@ if(ONEMKL_SYCL_FOUND)
     message(STATUS "  oneMKL SYCL: Enabled")
 else()
     message(STATUS "  oneMKL SYCL: Disabled")
+endif()
+if(ONEDPL_FOUND)
+    message(STATUS "  oneDPL: Enabled")
+else()
+    message(STATUS "  oneDPL: Disabled")
 endif()

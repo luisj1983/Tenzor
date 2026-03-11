@@ -1281,6 +1281,9 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     // =========================================================================
     TENZOR_REGISTER_BINARY_KERNEL(table, Embedding, cpu::embedding_kernel);
 
+    // EmbeddingWithBoundsCheck — same as Embedding since CPU already validates indices
+    TENZOR_REGISTER_BINARY_KERNEL(table, EmbeddingWithBoundsCheck, cpu::embedding_kernel);
+
     table.register_kernel(OpId::EmbeddingBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t num_embeddings = attrs.get_int(AttrKey::NumEmbeddings, 0);
         return std::vector<Tensor>{cpu::embedding_backward_kernel(inputs[0], inputs[1], num_embeddings)};

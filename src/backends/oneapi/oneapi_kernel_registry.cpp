@@ -1895,6 +1895,12 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return {oneapi::embedding_lookup_kernel(inputs[1], inputs[0], padding_idx, get_q(inputs))};
         });
 
+    table.register_kernel(OpId::EmbeddingWithBoundsCheck,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t padding_idx = attrs.get_int(AttrKey::PaddingIdx, -1);
+            return {oneapi::embedding_lookup_kernel(inputs[1], inputs[0], padding_idx, get_q(inputs))};
+        });
+
     table.register_kernel(OpId::EmbeddingBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             int64_t vocab_size = attrs.get_int(AttrKey::NumEmbeddings, 0);

@@ -467,6 +467,11 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             attrs.get_int(AttrKey::PaddingIdx, -1))};
     });
 
+    table.register_kernel(OpId::EmbeddingWithBoundsCheck, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchEmbedding(inputs[0], inputs[1],
+            attrs.get_int(AttrKey::PaddingIdx, -1))};
+    });
+
     table.register_kernel(OpId::MaskedSelect, [](std::span<const Tensor> inputs, const OpAttributes&) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchMaskedSelect(inputs[0], inputs[1])};
     });
@@ -1464,21 +1469,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // Fused Adam-Atan2 Optimizer Step (compose from Adam step with atan2 update)
     // ========================================================================
     table.register_kernel(OpId::FusedAdamAtan2Step, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // CPU fallback: copy to CPU, run CPU kernel, copy back
-        auto device = inputs[0].device();
-        std::vector<Tensor> cpu_inputs;
-        cpu_inputs.reserve(inputs.size());
-        for (size_t i = 0; i < inputs.size(); ++i) {
-            cpu_inputs.push_back(inputs[i].to(Device::cpu()));
-        }
-        auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
-        auto cpu_results = cpu_table.dispatch(OpId::FusedAdamAtan2Step, cpu_inputs, attrs);
-        std::vector<Tensor> results;
-        results.reserve(cpu_results.size());
-        for (auto& r : cpu_results) {
-            results.push_back(r.to(device));
-        }
-        return results;
+        return get_vulkan_backend()->dispatchFusedAdamAtan2Step(inputs, attrs);
     });
 
     // ========================================================================
@@ -1751,7 +1742,96 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             return {get_vulkan_backend()->dispatchFlashAttention(
                 inputs[0], inputs[1], inputs[2], scale, causal)};
         });
-    VULKAN_CPU_FALLBACK(FlashAttentionBackward);
+    // FlashAttentionBackward — composed from Vulkan matmul + softmax backward
+    table.register_kernel(OpId::FlashAttentionBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // inputs: [dO, Q, K, V, O] — dO = grad_output, O = forward output
+            float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+            bool causal = attrs.get_bool(AttrKey::Causal, false);
+
+            const Tensor& dO = inputs[0];  // [B, H, S, D]
+            const Tensor& Q = inputs[1];
+            const Tensor& K = inputs[2];
+            const Tensor& V = inputs[3];
+
+            auto* vk = get_vulkan_backend();
+
+            // Recompute attention weights: attn = softmax(Q @ K^T * scale)
+            Tensor Kt = vk->dispatchTranspose(K, -1, -2);
+            Tensor scores = vk->dispatchBmm(Q, Kt);  // [B, H, S, S]
+
+            // Scale
+            auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
+            Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
+                                           scores.dtype(), scores.device());
+            scores = tenzor::mul(scores, scale_t);
+
+            // Apply causal mask if needed
+            if (causal) {
+                int64_t seq_len = scores_shape[scores_shape.size() - 1];
+                Tensor mask = tenzor::ones({seq_len, seq_len}, DType::Float32, scores.device());
+                // Upper triangle = -inf
+                for (int64_t i = 0; i < seq_len; ++i) {
+                    for (int64_t j = i + 1; j < seq_len; ++j) {
+                        // This is expensive per-element; use triu approach
+                    }
+                }
+                // Simplified: use existing arange + comparison
+                Tensor rows = tenzor::arange(0, seq_len, 1, DType::Int64, scores.device());
+                Tensor cols = tenzor::arange(0, seq_len, 1, DType::Int64, scores.device());
+                rows = vk->dispatchReshape(rows, {seq_len, 1});
+                cols = vk->dispatchReshape(cols, {1, seq_len});
+                Tensor causal_mask = tenzor::gt(cols.to(DType::Float32), rows.to(DType::Float32));
+                Tensor neg_inf = tenzor::full(scores_shape, -1e9,
+                                              scores.dtype(), scores.device());
+                Tensor zero = tenzor::zeros(scores_shape, scores.dtype(), scores.device());
+                // Broadcast causal_mask to scores shape
+                scores = tenzor::add(scores, tenzor::mul(causal_mask.to(scores.dtype()), neg_inf));
+            }
+
+            // Softmax
+            NewOpAttributes sm_attrs;
+            sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+            Tensor attn_weights = vk->dispatchSoftmax(scores, -1);
+
+            // Backward through attention:
+            // dV = attn_weights^T @ dO
+            Tensor attn_t = vk->dispatchTranspose(attn_weights, -1, -2);
+            Tensor dV = vk->dispatchBmm(attn_t, dO);
+
+            // dAttn = dO @ V^T
+            Tensor Vt = vk->dispatchTranspose(V, -1, -2);
+            Tensor dAttn = vk->dispatchBmm(dO, Vt);
+
+            // dScores = softmax_backward(dAttn, attn_weights)
+            // softmax_backward: ds_i = attn_i * (dAttn_i - sum(attn * dAttn))
+            Tensor attn_dAttn = tenzor::mul(attn_weights, dAttn);
+
+            // Sum along last dim
+            NewOpAttributes sum_attrs;
+            sum_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+            sum_attrs.set(AttrKey::Keepdim, true);
+            std::vector<Tensor> sum_inputs = {attn_dAttn};
+            auto sum_result = tenzor::dispatch(OpId::Sum, sum_inputs, sum_attrs);
+            Tensor sum_ad = sum_result[0];
+
+            Tensor dScores = tenzor::mul(attn_weights, tenzor::sub(dAttn, sum_ad));
+
+            // Apply scale
+            Tensor scale_t2 = tenzor::full(
+                std::vector<int64_t>(dScores.shape().begin(), dScores.shape().end()),
+                static_cast<double>(scale), dScores.dtype(), dScores.device());
+            dScores = tenzor::mul(dScores, scale_t2);
+
+            // dQ = dScores @ K
+            Tensor dQ = vk->dispatchBmm(dScores, K);
+
+            // dK = dScores^T @ Q
+            Tensor dScores_t = vk->dispatchTranspose(dScores, -1, -2);
+            Tensor dK = vk->dispatchBmm(dScores_t, Q);
+
+            return {dQ, dK, dV};
+        });
 
     // SearchSorted — native GPU binary search shader
     table.register_single_output_kernel(OpId::SearchSorted,

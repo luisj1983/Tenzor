@@ -463,60 +463,94 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
 }
 
 /**
- * @brief Renormalize embeddings that exceed max_norm
+ * @brief Renormalize embeddings that exceed max_norm (device-side)
+ *
+ * Two-phase approach:
+ * 1. Compute per-row L_p norm for each unique index
+ * 2. Scale rows exceeding max_norm by max_norm / norm
  */
+struct EmbeddingRenormNormKernel {};
+struct EmbeddingRenormScaleKernel {};
+
 auto embedding_renorm_kernel(Tensor& weights, const Tensor& indices,
                              double max_norm, double norm_type,
                              sycl::queue& queue) -> void {
-    auto weights_cpu = weights.to(Device::cpu());
-    auto indices_cpu = indices.to(Device::cpu());
-
-    auto weights_shape = weights_cpu.shape();
+    auto weights_shape = weights.shape();
+    int64_t num_embeddings = weights_shape[0];
     int64_t embedding_dim = weights_shape[1];
-
-    float* weights_ptr = get_data_ptr<float>(weights_cpu);
-    const int64_t* indices_ptr = get_data_ptr<const int64_t>(indices_cpu);
     int64_t num_indices = indices.numel();
 
-    std::vector<bool> processed(weights_shape[0], false);
+    if (num_indices == 0) return;
 
+    // Get unique indices on host (small set typically)
+    std::vector<int64_t> h_indices(num_indices);
+    queue.memcpy(h_indices.data(), get_data_ptr<const int64_t>(indices),
+                 num_indices * sizeof(int64_t)).wait();
+
+    std::vector<int64_t> unique_indices;
+    std::vector<bool> seen(num_embeddings, false);
     for (int64_t i = 0; i < num_indices; ++i) {
-        int64_t vocab_idx = indices_ptr[i];
-
-        if (vocab_idx < 0 || vocab_idx >= weights_shape[0] || processed[vocab_idx]) {
-            continue;
-        }
-
-        processed[vocab_idx] = true;
-
-        double norm = 0.0;
-        for (int64_t j = 0; j < embedding_dim; ++j) {
-            double val = weights_ptr[vocab_idx * embedding_dim + j];
-            if (norm_type == 2.0) {
-                norm += val * val;
-            } else {
-                norm += std::pow(std::abs(val), norm_type);
-            }
-        }
-
-        if (norm_type == 2.0) {
-            norm = std::sqrt(norm);
-        } else {
-            norm = std::pow(norm, 1.0 / norm_type);
-        }
-
-        if (norm > max_norm) {
-            double scale = max_norm / (norm + 1e-8);
-            for (int64_t j = 0; j < embedding_dim; ++j) {
-                weights_ptr[vocab_idx * embedding_dim + j] *= scale;
-            }
+        int64_t idx = h_indices[i];
+        if (idx >= 0 && idx < num_embeddings && !seen[idx]) {
+            seen[idx] = true;
+            unique_indices.push_back(idx);
         }
     }
 
-    float* device_weights_ptr = get_data_ptr<float>(weights);
-    const float* host_weights_ptr = get_data_ptr<const float>(weights_cpu);
-    queue.memcpy(device_weights_ptr, host_weights_ptr,
-                 weights.numel() * sizeof(float)).wait();
+    if (unique_indices.empty()) return;
+
+    int64_t n_unique = static_cast<int64_t>(unique_indices.size());
+
+    // Allocate device buffer for unique indices and norms
+    int64_t* d_unique_idx = sycl::malloc_device<int64_t>(n_unique, queue);
+    float* d_norms = sycl::malloc_device<float>(n_unique, queue);
+    queue.memcpy(d_unique_idx, unique_indices.data(), n_unique * sizeof(int64_t)).wait();
+
+    float* w_ptr = get_data_ptr<float>(weights);
+    float max_norm_f = static_cast<float>(max_norm);
+    float norm_type_f = static_cast<float>(norm_type);
+
+    // Phase 1: Compute per-row norms
+    queue.parallel_for<EmbeddingRenormNormKernel>(
+        sycl::range<1>(n_unique), [=](sycl::id<1> gid) {
+            int64_t row = d_unique_idx[gid];
+            float norm = 0.0f;
+            for (int64_t j = 0; j < embedding_dim; ++j) {
+                float val = w_ptr[row * embedding_dim + j];
+                if (norm_type_f == 2.0f) {
+                    norm += val * val;
+                } else {
+                    norm += sycl::pow(sycl::fabs(val), norm_type_f);
+                }
+            }
+            if (norm_type_f == 2.0f) {
+                norm = sycl::sqrt(norm);
+            } else {
+                norm = sycl::pow(norm, 1.0f / norm_type_f);
+            }
+            d_norms[gid] = norm;
+        }).wait();
+
+    // Phase 2: Scale rows exceeding max_norm
+    queue.parallel_for<EmbeddingRenormScaleKernel>(
+        sycl::nd_range<1>(sycl::range<1>(n_unique * 256), sycl::range<1>(256)),
+        [=](sycl::nd_item<1> item) {
+            int64_t row_idx = item.get_group(0);
+            int64_t tid = item.get_local_id(0);
+            if (row_idx >= n_unique) return;
+
+            float norm = d_norms[row_idx];
+            if (norm <= max_norm_f) return;
+
+            float scale = max_norm_f / (norm + 1e-8f);
+            int64_t row = d_unique_idx[row_idx];
+            for (int64_t j = tid; j < embedding_dim; j += 256) {
+                w_ptr[row * embedding_dim + j] *= scale;
+            }
+        }).wait();
+
+    sycl::free(d_unique_idx, queue);
+    sycl::free(d_norms, queue);
 }
 
 } // namespace oneapi

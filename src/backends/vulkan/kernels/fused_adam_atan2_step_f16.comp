@@ -1,0 +1,93 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Fused Adam-Atan2 optimizer step for Float16 parameters
+// Grad/param buffers are packed F16; state buffers (exp_avg, exp_avg_sq, max) are Float32
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Grad { uint grad_data[]; };                 // Packed F16
+layout(binding = 1) buffer Param { uint param_data[]; };               // Packed F16
+layout(binding = 2) buffer ExpAvg { float exp_avg[]; };                // Float32
+layout(binding = 3) buffer ExpAvgSq { float exp_avg_sq[]; };           // Float32
+layout(binding = 4) buffer MaxExpAvgSq { float max_exp_avg_sq[]; };    // Float32
+
+layout(push_constant) uniform PushConstants {
+    uint numel;
+    float lr;
+    float beta1;
+    float beta2;
+    float eps;
+    float weight_decay;
+    float bias_correction1;
+    float bias_correction2_sqrt;
+    uint decoupled;
+    uint amsgrad;
+    uint padding0;
+    uint padding1;
+} params;
+
+float readF16(uint flat_idx, uint buf_sel) {
+    uint word_idx = flat_idx / 2;
+    uint half_idx = flat_idx % 2;
+    uint packed;
+    if (buf_sel == 0) packed = grad_data[word_idx];
+    else packed = param_data[word_idx];
+    return (half_idx == 0) ? unpackHalf2x16(packed).x : unpackHalf2x16(packed >> 16).x;
+}
+
+float adamAtan2Step(uint idx) {
+    float g = readF16(idx, 0);
+    float p = readF16(idx, 1);
+
+    if (params.weight_decay > 0.0) {
+        if (params.decoupled != 0) {
+            p -= params.lr * params.weight_decay * p;
+        } else {
+            g += params.weight_decay * p;
+        }
+    }
+
+    float m = params.beta1 * exp_avg[idx] + (1.0 - params.beta1) * g;
+    exp_avg[idx] = m;
+
+    float v = params.beta2 * exp_avg_sq[idx] + (1.0 - params.beta2) * g * g;
+    exp_avg_sq[idx] = v;
+
+    float denom_v = v;
+    if (params.amsgrad != 0) {
+        float max_v = max(max_exp_avg_sq[idx], v);
+        max_exp_avg_sq[idx] = max_v;
+        denom_v = max_v;
+    }
+
+    float m_hat = m / params.bias_correction1;
+    float v_hat = denom_v / (params.bias_correction2_sqrt * params.bias_correction2_sqrt);
+
+    // Atan2 update
+    float update = atan(m_hat, sqrt(v_hat) + params.eps);
+    p -= params.lr * update;
+    return p;
+}
+
+void main() {
+    uint word_idx = gl_GlobalInvocationID.x;
+    uint num_words = (params.numel + 1) / 2;
+    if (word_idx >= num_words) return;
+
+    uint elem0 = word_idx * 2;
+    uint elem1 = word_idx * 2 + 1;
+
+    float p0 = 0.0, p1 = 0.0;
+
+    if (elem0 < params.numel) {
+        p0 = adamAtan2Step(elem0);
+    }
+
+    if (elem1 < params.numel) {
+        p1 = adamAtan2Step(elem1);
+    }
+
+    uint bits0 = packHalf2x16(vec2(p0, 0.0)) & 0xFFFFu;
+    uint bits1 = packHalf2x16(vec2(p1, 0.0)) & 0xFFFFu;
+    param_data[word_idx] = bits0 | (bits1 << 16);
+}

@@ -5,6 +5,12 @@
 #include <numeric>
 #include <vector>
 
+#ifdef TENZOR_HAS_ONEDPL
+#include <oneapi/dpl/algorithm>
+#include <oneapi/dpl/execution>
+#include <oneapi/dpl/iterator>
+#endif
+
 namespace tenzor {
 namespace oneapi {
 
@@ -1019,9 +1025,65 @@ auto argsort_kernel(const Tensor& input, int64_t dim, bool descending, sycl::que
     int64_t outer_size = total_elems / (dim_size * inner_size);
     int64_t num_slices = outer_size * inner_size;
 
-    // Copy input data to host for sorting
-    // Argsort is inherently comparison-based and benefits from host-side std::sort
-    // The parallelism comes from processing many independent slices
+#ifdef TENZOR_HAS_ONEDPL
+    // Device-side argsort for contiguous sort dimension (inner_size == 1)
+    if (inner_size == 1) {
+        auto policy = oneapi::dpl::execution::make_device_policy(queue);
+
+        auto device_argsort_impl = [&](const auto* in_ptr) {
+            using T = std::remove_const_t<std::remove_pointer_t<decltype(in_ptr)>>;
+            int64_t* idx_ptr = get_data_ptr<int64_t>(output);
+
+            // Allocate temp device buffer for values (we sort values+indices together)
+            T* tmp_vals = sycl::malloc_device<T>(total_elems, queue);
+            queue.memcpy(tmp_vals, in_ptr, total_elems * sizeof(T)).wait();
+
+            // Initialize indices: each slice gets 0..dim_size-1
+            queue.parallel_for(sycl::range<1>(total_elems), [=](sycl::id<1> gid) {
+                idx_ptr[gid] = static_cast<int64_t>(gid[0]) % dim_size;
+            }).wait();
+
+            // Sort each contiguous slice using oneDPL sort_by_key
+            for (int64_t o = 0; o < outer_size; ++o) {
+                T* slice_vals = tmp_vals + o * dim_size;
+                int64_t* slice_idx = idx_ptr + o * dim_size;
+                if (descending) {
+                    oneapi::dpl::sort_by_key(policy, slice_vals, slice_vals + dim_size,
+                                              slice_idx, std::greater<T>());
+                } else {
+                    oneapi::dpl::sort_by_key(policy, slice_vals, slice_vals + dim_size,
+                                              slice_idx);
+                }
+            }
+
+            sycl::free(tmp_vals, queue);
+        };
+
+        if (input.dtype() == DType::Float32) {
+            device_argsort_impl(get_data_ptr<const float>(input));
+        } else if (input.dtype() == DType::Float64) {
+            device_argsort_impl(get_data_ptr<const double>(input));
+        } else if (input.dtype() == DType::Int32) {
+            device_argsort_impl(get_data_ptr<const int32_t>(input));
+        } else if (input.dtype() == DType::Int64) {
+            device_argsort_impl(get_data_ptr<const int64_t>(input));
+        } else if (input.dtype() == DType::Float16) {
+            // Upcast to Float32 for sorting
+            Tensor input_f32 = input.to(DType::Float32);
+            device_argsort_impl(get_data_ptr<const float>(input_f32));
+        } else if (input.dtype() == DType::BFloat16) {
+            Tensor input_f32 = input.to(DType::Float32);
+            device_argsort_impl(get_data_ptr<const float>(input_f32));
+        } else {
+            throw std::runtime_error("argsort: unsupported dtype");
+        }
+
+        return output;
+    }
+    // Fall through to host-side argsort for non-contiguous sort dimension
+#endif
+
+    // Host-side argsort fallback
 
     auto sort_slices = [&](auto* host_input) {
         using T = std::remove_const_t<std::remove_pointer_t<decltype(host_input)>>;

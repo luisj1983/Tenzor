@@ -321,24 +321,32 @@ struct BroadcastAddInt32 {};
 struct BroadcastAddInt64 {};
 struct BroadcastAddFloat16 {};
 struct BroadcastAddBFloat16 {};
+struct BroadcastAddInt8 {};
+struct BroadcastAddUInt8 {};
 struct BroadcastSubFloat32 {};
 struct BroadcastSubFloat64 {};
 struct BroadcastSubInt32 {};
 struct BroadcastSubInt64 {};
 struct BroadcastSubFloat16 {};
 struct BroadcastSubBFloat16 {};
+struct BroadcastSubInt8 {};
+struct BroadcastSubUInt8 {};
 struct BroadcastMulFloat32 {};
 struct BroadcastMulFloat64 {};
 struct BroadcastMulInt32 {};
 struct BroadcastMulInt64 {};
 struct BroadcastMulFloat16 {};
 struct BroadcastMulBFloat16 {};
+struct BroadcastMulInt8 {};
+struct BroadcastMulUInt8 {};
 struct BroadcastDivFloat32 {};
 struct BroadcastDivFloat64 {};
 struct BroadcastDivInt32 {};
 struct BroadcastDivInt64 {};
 struct BroadcastDivFloat16 {};
 struct BroadcastDivBFloat16 {};
+struct BroadcastDivInt8 {};
+struct BroadcastDivUInt8 {};
 
 constexpr int MAX_BROADCAST_DIMS = 8;
 
@@ -468,10 +476,16 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             sycl_broadcast_binary<uint16_t, BroadcastAddBFloat16>(
                 a_cont, b_cont, output, info, queue,
                 [](uint16_t x, uint16_t y) { return f32_to_bf16(bf16_to_f32(x) + bf16_to_f32(y)); });
+        } else if (a_cont.dtype() == DType::Int8) {
+            sycl_broadcast_binary<int8_t, BroadcastAddInt8>(
+                a_cont, b_cont, output, info, queue,
+                [](int8_t x, int8_t y) { return static_cast<int8_t>(x + y); });
+        } else if (a_cont.dtype() == DType::UInt8) {
+            sycl_broadcast_binary<uint8_t, BroadcastAddUInt8>(
+                a_cont, b_cont, output, info, queue,
+                [](uint8_t x, uint8_t y) { return static_cast<uint8_t>(x + y); });
         } else {
-            auto a_cpu = a_cont.to(Device::cpu());
-            auto b_cpu = b_cont.to(Device::cpu());
-            return tenzor::add(a_cpu, b_cpu).to(a_cont.device());
+            throw std::runtime_error("add broadcast: unsupported dtype");
         }
         return output;
     }
@@ -614,10 +628,16 @@ auto sub_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             sycl_broadcast_binary<uint16_t, BroadcastSubBFloat16>(
                 a_cont, b_cont, output, info, queue,
                 [](uint16_t x, uint16_t y) { return f32_to_bf16(bf16_to_f32(x) - bf16_to_f32(y)); });
+        } else if (a_cont.dtype() == DType::Int8) {
+            sycl_broadcast_binary<int8_t, BroadcastSubInt8>(
+                a_cont, b_cont, output, info, queue,
+                [](int8_t x, int8_t y) { return static_cast<int8_t>(x - y); });
+        } else if (a_cont.dtype() == DType::UInt8) {
+            sycl_broadcast_binary<uint8_t, BroadcastSubUInt8>(
+                a_cont, b_cont, output, info, queue,
+                [](uint8_t x, uint8_t y) { return static_cast<uint8_t>(x - y); });
         } else {
-            auto a_cpu = a_cont.to(Device::cpu());
-            auto b_cpu = b_cont.to(Device::cpu());
-            return tenzor::sub(a_cpu, b_cpu).to(a_cont.device());
+            throw std::runtime_error("sub broadcast: unsupported dtype");
         }
         return output;
     }
@@ -747,10 +767,16 @@ auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             sycl_broadcast_binary<uint16_t, BroadcastMulBFloat16>(
                 a_cont, b_cont, output, info, queue,
                 [](uint16_t x, uint16_t y) { return f32_to_bf16(bf16_to_f32(x) * bf16_to_f32(y)); });
+        } else if (a_cont.dtype() == DType::Int8) {
+            sycl_broadcast_binary<int8_t, BroadcastMulInt8>(
+                a_cont, b_cont, output, info, queue,
+                [](int8_t x, int8_t y) { return static_cast<int8_t>(x * y); });
+        } else if (a_cont.dtype() == DType::UInt8) {
+            sycl_broadcast_binary<uint8_t, BroadcastMulUInt8>(
+                a_cont, b_cont, output, info, queue,
+                [](uint8_t x, uint8_t y) { return static_cast<uint8_t>(x * y); });
         } else {
-            auto a_cpu = a_cont.to(Device::cpu());
-            auto b_cpu = b_cont.to(Device::cpu());
-            return tenzor::mul(a_cpu, b_cpu).to(a_cont.device());
+            throw std::runtime_error("mul broadcast: unsupported dtype");
         }
         return output;
     }
@@ -886,10 +912,16 @@ auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             sycl_broadcast_binary<uint16_t, BroadcastDivBFloat16>(
                 a_cont, b_cont, output, info, queue,
                 [](uint16_t x, uint16_t y) { return f32_to_bf16(bf16_to_f32(x) / bf16_to_f32(y)); });
+        } else if (a_cont.dtype() == DType::Int8) {
+            sycl_broadcast_binary<int8_t, BroadcastDivInt8>(
+                a_cont, b_cont, output, info, queue,
+                [](int8_t x, int8_t y) { return y != 0 ? static_cast<int8_t>(x / y) : int8_t(0); });
+        } else if (a_cont.dtype() == DType::UInt8) {
+            sycl_broadcast_binary<uint8_t, BroadcastDivUInt8>(
+                a_cont, b_cont, output, info, queue,
+                [](uint8_t x, uint8_t y) { return y != 0 ? static_cast<uint8_t>(x / y) : uint8_t(0); });
         } else {
-            auto a_cpu = a_cont.to(Device::cpu());
-            auto b_cpu = b_cont.to(Device::cpu());
-            return tenzor::div(a_cpu, b_cpu).to(a_cont.device());
+            throw std::runtime_error("div broadcast: unsupported dtype");
         }
         return output;
     }

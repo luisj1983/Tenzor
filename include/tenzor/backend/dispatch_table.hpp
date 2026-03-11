@@ -308,7 +308,12 @@ struct alignas(64) BackendDispatchTable {
         if (!multi_fn) [[unlikely]] {
             throw_unsupported(op);
         }
-        return multi_fn(inputs, attrs)[0];
+        auto result = multi_fn(inputs, attrs);
+        if (result.empty()) [[unlikely]] {
+            throw std::runtime_error("dispatch_single: kernel for " +
+                std::string(op_id_to_name(op)) + " returned empty result");
+        }
+        return result[0];
     }
 
     /**

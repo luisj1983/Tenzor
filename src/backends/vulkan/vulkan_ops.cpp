@@ -12647,26 +12647,112 @@ auto VulkanBackend::dispatchTopK(const Tensor& input, int64_t k, int64_t dim,
 }
 
 /**
- * @brief Unique — sort then compact adjacent duplicates. CPU fallback.
+ * @brief Unique — sort on GPU, compact on host, transfer back.
+ *
+ * Hybrid approach: uses Vulkan bitonic sort on device, then reads back sorted
+ * data for O(n) dedup on host. This avoids the full input D2H + CPU sort +
+ * H2D roundtrip of a pure CPU fallback.
  */
 auto VulkanBackend::dispatchUnique(const Tensor& input, bool sorted,
                                      bool return_inverse, bool return_counts) -> std::vector<Tensor> {
-    // Unique is complex to implement purely on GPU (variable-length output).
-    // Use CPU fallback — transfer, compute, transfer back.
-    Device cpu_device(Device::Type::CPU, 0);
-    Tensor cpu_input = input.to(cpu_device);
-    std::vector<Tensor> cpu_inputs = {cpu_input};
-    OpAttributes attrs;
-    attrs.set(AttrKey::Sorted, sorted);
-    attrs.set(AttrKey::ReturnInverse, return_inverse);
-    attrs.set(AttrKey::ReturnCounts, return_counts);
-    auto result = tenzor::dispatch(OpId::Unique, cpu_inputs, attrs);
-
-    std::vector<Tensor> gpu_result;
-    for (auto& t : result) {
-        gpu_result.push_back(t.to(input.device()));
+    int64_t numel = input.numel();
+    if (numel == 0) {
+        Tensor empty_vals({0}, input.dtype(), input.device());
+        Tensor empty_inv({0}, DType::Int64, input.device());
+        Tensor empty_cnt({0}, DType::Int64, input.device());
+        return {empty_vals, empty_inv, empty_cnt};
     }
-    return gpu_result;
+
+    // Flatten input
+    Tensor flat = dispatchContiguous(dispatchReshape(input, {numel}));
+
+    // Sort on GPU using existing bitonic sort
+    auto [sorted_vals, sorted_indices] = dispatchSort(flat, 0, false);
+
+    // Read sorted data to host for linear-time dedup
+    Tensor h_sorted = sorted_vals.to(Device::cpu());
+    Tensor h_indices = sorted_indices.to(Device::cpu());
+
+    // Dedup on host — O(n)
+    std::vector<int64_t> unique_pos;  // positions of unique elements in sorted array
+    unique_pos.push_back(0);
+
+    if (input.dtype() == DType::Float32) {
+        const float* data = h_sorted.data<float>();
+        for (int64_t i = 1; i < numel; ++i) {
+            if (data[i] != data[i - 1]) unique_pos.push_back(i);
+        }
+    } else if (input.dtype() == DType::Float64) {
+        const double* data = h_sorted.data<double>();
+        for (int64_t i = 1; i < numel; ++i) {
+            if (data[i] != data[i - 1]) unique_pos.push_back(i);
+        }
+    } else if (input.dtype() == DType::Int32) {
+        const int32_t* data = h_sorted.data<int32_t>();
+        for (int64_t i = 1; i < numel; ++i) {
+            if (data[i] != data[i - 1]) unique_pos.push_back(i);
+        }
+    } else if (input.dtype() == DType::Int64) {
+        const int64_t* data = h_sorted.data<int64_t>();
+        for (int64_t i = 1; i < numel; ++i) {
+            if (data[i] != data[i - 1]) unique_pos.push_back(i);
+        }
+    } else {
+        // Fallback for other dtypes
+        Device cpu_device(Device::Type::CPU, 0);
+        Tensor cpu_input = input.to(cpu_device);
+        std::vector<Tensor> cpu_inputs = {cpu_input};
+        OpAttributes attrs;
+        attrs.set(AttrKey::Sorted, sorted);
+        attrs.set(AttrKey::ReturnInverse, return_inverse);
+        attrs.set(AttrKey::ReturnCounts, return_counts);
+        auto result = tenzor::dispatch(OpId::Unique, cpu_inputs, attrs);
+        std::vector<Tensor> gpu_result;
+        for (auto& t : result) gpu_result.push_back(t.to(input.device()));
+        return gpu_result;
+    }
+
+    int64_t n_unique = static_cast<int64_t>(unique_pos.size());
+
+    // Gather unique values from sorted (still on host)
+    Tensor out_vals({n_unique}, input.dtype(), Device::cpu());
+    size_t elem_size = dtype_size(input.dtype());
+    auto* vals_dst = static_cast<uint8_t*>(const_cast<void*>(out_vals.data_ptr()));
+    auto* sorted_src = static_cast<const uint8_t*>(h_sorted.data_ptr());
+    for (int64_t i = 0; i < n_unique; ++i) {
+        std::memcpy(vals_dst + i * elem_size, sorted_src + unique_pos[i] * elem_size, elem_size);
+    }
+
+    // Compute inverse mapping if needed
+    Tensor out_inverse({numel}, DType::Int64, Device::cpu());
+    if (return_inverse) {
+        int64_t* inv_ptr = out_inverse.data<int64_t>();
+        const int64_t* idx_ptr = h_indices.data<int64_t>();
+        // sorted_indices[i] = original position of sorted[i]
+        // For each sorted position, assign its unique group index
+        std::vector<int64_t> sorted_to_unique(numel);
+        int64_t group = 0;
+        for (int64_t i = 0; i < numel; ++i) {
+            if (group + 1 < n_unique && i >= unique_pos[group + 1]) ++group;
+            sorted_to_unique[i] = group;
+        }
+        for (int64_t i = 0; i < numel; ++i) {
+            inv_ptr[idx_ptr[i]] = sorted_to_unique[i];
+        }
+    }
+
+    // Compute counts if needed
+    Tensor out_counts({return_counts ? n_unique : 0}, DType::Int64, Device::cpu());
+    if (return_counts && n_unique > 0) {
+        int64_t* cnt_ptr = out_counts.data<int64_t>();
+        for (int64_t i = 0; i < n_unique; ++i) {
+            int64_t end = (i + 1 < n_unique) ? unique_pos[i + 1] : numel;
+            cnt_ptr[i] = end - unique_pos[i];
+        }
+    }
+
+    // Transfer results to GPU
+    return {out_vals.to(input.device()), out_inverse.to(input.device()), out_counts.to(input.device())};
 }
 
 // ============================================================================
@@ -14785,6 +14871,106 @@ auto VulkanBackend::dispatchFusedAdamStep(std::span<const Tensor> inputs,
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return {inputs[0]};  // Return param (modified in-place)
+}
+
+// ============================================================================
+// Fused Adam-Atan2 Optimizer Step
+// ============================================================================
+
+auto VulkanBackend::dispatchFusedAdamAtan2Step(std::span<const Tensor> inputs,
+                                                const OpAttributes& attrs) -> std::vector<Tensor> {
+    // inputs: [param, grad, exp_avg, exp_avg_sq, max_exp_avg_sq(optional)]
+    if (inputs.size() < 4) {
+        throw std::invalid_argument("FusedAdamAtan2Step requires at least 4 inputs");
+    }
+
+    double lr = attrs.get_float(AttrKey::Lr, 0.001);
+    double beta1 = attrs.get_float(AttrKey::Beta1, 0.9);
+    double beta2 = attrs.get_float(AttrKey::Beta2, 0.999);
+    double eps = attrs.get_float(AttrKey::Eps, 1e-8);
+    double weight_decay = attrs.get_float(AttrKey::WeightDecay, 0.0);
+    int64_t step = attrs.get_int(AttrKey::Step, 1);
+    bool decoupled = attrs.get_bool(AttrKey::Decoupled, false);
+    bool amsgrad = attrs.get_bool(AttrKey::Amsgrad, false);
+
+    if (inputs[0].dtype() == DType::Float64 || inputs[0].dtype() == DType::BFloat16) {
+        throw std::runtime_error("Vulkan fused Adam-Atan2 step does not support " +
+            std::string(inputs[0].dtype() == DType::Float64 ? "Float64" : "BFloat16") +
+            ". Use CPU backend or cast to Float32.");
+    }
+
+    float bias_correction1 = static_cast<float>(1.0 - std::pow(beta1, step));
+    float bias_correction2_sqrt = static_cast<float>(std::sqrt(1.0 - std::pow(beta2, step)));
+
+    int64_t numel = inputs[0].numel();
+    int32_t device_id = inputs[0].device().index;
+    bool is_float16 = (inputs[0].dtype() == DType::Float16);
+    std::string shader = is_float16 ? "fused_adam_atan2_step_f16" : "fused_adam_atan2_step";
+    auto* pipeline = getPipeline(shader, device_id);
+
+    size_t f16_buf_size = ((numel + 1) / 2) * 4;
+    size_t param_buf_size = is_float16 ? f16_buf_size : numel * inputs[0].dtype_size();
+    size_t state_buf_size = is_float16 ? numel * sizeof(float) : param_buf_size;
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, inputs[1].data_ptr()},  // grad
+        {1, inputs[0].data_ptr()},  // param
+        {2, inputs[2].data_ptr()},  // exp_avg
+        {3, inputs[3].data_ptr()},  // exp_avg_sq
+    };
+    std::vector<size_t> sizes = {param_buf_size, param_buf_size, state_buf_size, state_buf_size};
+
+    if (amsgrad && inputs.size() > 4) {
+        bindings.push_back({4, inputs[4].data_ptr()});
+        sizes.push_back(state_buf_size);
+    } else {
+        bindings.push_back({4, inputs[0].data_ptr()});
+        sizes.push_back(param_buf_size);
+    }
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    struct PushConstants {
+        uint32_t numel;
+        float lr;
+        float beta1;
+        float beta2;
+        float eps;
+        float weight_decay;
+        float bias_correction1;
+        float bias_correction2_sqrt;
+        uint32_t decoupled;
+        uint32_t amsgrad;
+        uint32_t padding0;
+        uint32_t padding1;
+    } pc;
+
+    pc.numel = static_cast<uint32_t>(numel);
+    pc.lr = static_cast<float>(lr);
+    pc.beta1 = static_cast<float>(beta1);
+    pc.beta2 = static_cast<float>(beta2);
+    pc.eps = static_cast<float>(eps);
+    pc.weight_decay = static_cast<float>(weight_decay);
+    pc.bias_correction1 = bias_correction1;
+    pc.bias_correction2_sqrt = bias_correction2_sqrt;
+    pc.decoupled = decoupled ? 1u : 0u;
+    pc.amsgrad = amsgrad ? 1u : 0u;
+    pc.padding0 = 0;
+    pc.padding1 = 0;
+
+    int64_t dispatch_count = is_float16 ? (numel + 1) / 2 : numel;
+    uint32_t workgroups = div_wg(dispatch_count, devices_[device_id].workgroupSize);
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &pc);
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+    insertComputeBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return {inputs[0]};
 }
 
 // ============================================================================

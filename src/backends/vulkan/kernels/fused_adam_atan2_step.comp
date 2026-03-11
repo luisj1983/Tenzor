@@ -1,0 +1,69 @@
+#version 450
+
+// Fused Adam-Atan2 optimizer step (Float32)
+// Like standard Adam but uses atan2(m_hat, sqrt(v_hat) + eps) for the update,
+// providing better numerical stability for large gradient magnitudes.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Grad { float grad_data[]; };
+layout(binding = 1) buffer Param { float param_data[]; };
+layout(binding = 2) buffer ExpAvg { float exp_avg[]; };          // First moment (m)
+layout(binding = 3) buffer ExpAvgSq { float exp_avg_sq[]; };     // Second moment (v)
+layout(binding = 4) buffer MaxExpAvgSq { float max_exp_avg_sq[]; }; // AMSGrad max(v)
+
+layout(push_constant) uniform PushConstants {
+    uint numel;
+    float lr;
+    float beta1;
+    float beta2;
+    float eps;
+    float weight_decay;
+    float bias_correction1;       // 1 - beta1^t
+    float bias_correction2_sqrt;  // sqrt(1 - beta2^t)
+    uint decoupled;
+    uint amsgrad;
+    uint padding0;
+    uint padding1;
+} params;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= params.numel) return;
+
+    float g = grad_data[gid];
+    float p = param_data[gid];
+
+    // Weight decay
+    if (params.weight_decay > 0.0) {
+        if (params.decoupled != 0) {
+            p -= params.lr * params.weight_decay * p;
+        } else {
+            g += params.weight_decay * p;
+        }
+    }
+
+    // Update first moment: m = beta1 * m + (1 - beta1) * g
+    float m = params.beta1 * exp_avg[gid] + (1.0 - params.beta1) * g;
+    exp_avg[gid] = m;
+
+    // Update second moment: v = beta2 * v + (1 - beta2) * g^2
+    float v = params.beta2 * exp_avg_sq[gid] + (1.0 - params.beta2) * g * g;
+    exp_avg_sq[gid] = v;
+
+    float denom_v = v;
+    if (params.amsgrad != 0) {
+        float max_v = max(max_exp_avg_sq[gid], v);
+        max_exp_avg_sq[gid] = max_v;
+        denom_v = max_v;
+    }
+
+    // Bias-corrected estimates
+    float m_hat = m / params.bias_correction1;
+    float v_hat = denom_v / (params.bias_correction2_sqrt * params.bias_correction2_sqrt);
+
+    // Atan2 update (key difference from standard Adam)
+    float update = atan(m_hat, sqrt(v_hat) + params.eps);
+    p -= params.lr * update;
+
+    param_data[gid] = p;
+}
