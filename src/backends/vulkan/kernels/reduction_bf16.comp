@@ -1,0 +1,188 @@
+#version 450
+
+// Reduction operations for BFloat16: sum, mean, max, min
+// BFloat16 elements are packed 2 per 32-bit word
+// Uses paired writes to avoid race conditions
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer Input { uint input_data[]; };
+layout(binding = 1) buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;              // Total number of elements in input
+    uint reduce_size;    // Size of dimension to reduce
+    uint outer_size;     // Number of output elements
+    uint inner_size;     // Product of dimensions after reduction dim
+    uint op;             // 0=sum, 1=mean, 2=max, 3=min
+} params;
+
+shared float shared_data[WORKGROUP_SIZE];
+
+// Helper to read bfloat16 at element index
+float readBF16(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = input_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+// Helper to pack two bfloat16 values (round-to-nearest-even)
+uint packBF16Pair(float v0, float v1) {
+    uint b0 = floatBitsToUint(v0);
+    uint b1 = floatBitsToUint(v1);
+    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
+    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
+    return bf0 | (bf1 << 16);
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    // Each workgroup handles TWO adjacent output elements (one packed word)
+    uint output_pair_idx = gl_WorkGroupID.x;
+    uint output_idx0 = output_pair_idx * 2;
+    uint output_idx1 = output_pair_idx * 2 + 1;
+
+    // Process first output element
+    float result0 = 0.0;
+    if (output_idx0 < params.outer_size) {
+        // Initialize accumulator based on operation
+        float accum;
+        if (params.op == 2) { // max
+            accum = -1.0 / 0.0; // -infinity
+        } else if (params.op == 3) { // min
+            accum = 1.0 / 0.0; // +infinity
+        } else {
+            accum = 0.0;
+        }
+
+        // Calculate the position in output space
+        uint outer_idx = output_idx0 / params.inner_size;
+        uint inner_idx = output_idx0 % params.inner_size;
+        uint base_idx = outer_idx * params.reduce_size * params.inner_size + inner_idx;
+
+        // Each thread processes multiple elements along the reduction dimension
+        for (uint i = tid; i < params.reduce_size; i += WORKGROUP_SIZE) {
+            uint idx = base_idx + i * params.inner_size;
+            if (idx < params.n) {
+                float val = readBF16(idx);
+                switch (params.op) {
+                    case 0: // sum
+                    case 1: // mean
+                        accum += val;
+                        break;
+                    case 2: // max
+                        accum = max(accum, val);
+                        break;
+                    case 3: // min
+                        accum = min(accum, val);
+                        break;
+                }
+            }
+        }
+
+        shared_data[tid] = accum;
+        barrier();
+
+        // Parallel reduction in shared memory
+        for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+            if (tid < s) {
+                switch (params.op) {
+                    case 0: // sum
+                    case 1: // mean
+                        shared_data[tid] += shared_data[tid + s];
+                        break;
+                    case 2: // max
+                        shared_data[tid] = max(shared_data[tid], shared_data[tid + s]);
+                        break;
+                    case 3: // min
+                        shared_data[tid] = min(shared_data[tid], shared_data[tid + s]);
+                        break;
+                }
+            }
+            barrier();
+        }
+
+        if (tid == 0) {
+            result0 = shared_data[0];
+            if (params.op == 1) { // mean
+                result0 /= float(params.reduce_size);
+            }
+        }
+    }
+    barrier();
+
+    // Process second output element
+    float result1 = 0.0;
+    if (output_idx1 < params.outer_size) {
+        // Initialize accumulator based on operation
+        float accum;
+        if (params.op == 2) { // max
+            accum = -1.0 / 0.0; // -infinity
+        } else if (params.op == 3) { // min
+            accum = 1.0 / 0.0; // +infinity
+        } else {
+            accum = 0.0;
+        }
+
+        // Calculate the position in output space
+        uint outer_idx = output_idx1 / params.inner_size;
+        uint inner_idx = output_idx1 % params.inner_size;
+        uint base_idx = outer_idx * params.reduce_size * params.inner_size + inner_idx;
+
+        // Each thread processes multiple elements along the reduction dimension
+        for (uint i = tid; i < params.reduce_size; i += WORKGROUP_SIZE) {
+            uint idx = base_idx + i * params.inner_size;
+            if (idx < params.n) {
+                float val = readBF16(idx);
+                switch (params.op) {
+                    case 0: // sum
+                    case 1: // mean
+                        accum += val;
+                        break;
+                    case 2: // max
+                        accum = max(accum, val);
+                        break;
+                    case 3: // min
+                        accum = min(accum, val);
+                        break;
+                }
+            }
+        }
+
+        shared_data[tid] = accum;
+        barrier();
+
+        // Parallel reduction in shared memory
+        for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+            if (tid < s) {
+                switch (params.op) {
+                    case 0: // sum
+                    case 1: // mean
+                        shared_data[tid] += shared_data[tid + s];
+                        break;
+                    case 2: // max
+                        shared_data[tid] = max(shared_data[tid], shared_data[tid + s]);
+                        break;
+                    case 3: // min
+                        shared_data[tid] = min(shared_data[tid], shared_data[tid + s]);
+                        break;
+                }
+            }
+            barrier();
+        }
+
+        if (tid == 0) {
+            result1 = shared_data[0];
+            if (params.op == 1) { // mean
+                result1 /= float(params.reduce_size);
+            }
+        }
+    }
+
+    // Write both results as a packed pair
+    if (tid == 0) {
+        output_data[output_pair_idx] = packBF16Pair(result0, result1);
+    }
+}

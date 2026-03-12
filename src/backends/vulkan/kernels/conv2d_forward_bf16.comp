@@ -1,0 +1,88 @@
+#version 450
+
+// 2D Convolution Forward Pass - BFloat16 version (with groups support)
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Weight { float weight_data[]; };
+layout(binding = 2) buffer Bias { float bias_data[]; };
+layout(binding = 3) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;      // Total output elements
+    uint batch;           // Batch size
+    uint in_channels;     // Input channels
+    uint out_channels;    // Output channels
+    uint in_height;       // Input height
+    uint in_width;        // Input width
+    uint kernel_h;        // Kernel height
+    uint kernel_w;        // Kernel width
+    uint stride;          // Stride
+    uint padding;         // Padding
+    uint dilation;        // Dilation
+    uint groups;          // Groups (for grouped convolution)
+    uint out_h;           // Output height
+    uint out_w;           // Output width
+    uint has_bias;        // 1 if bias present, 0 otherwise
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) {
+        return;
+    }
+
+    // Decode index to (n, oc, oh, ow)
+    uint ow = idx % params.out_w;
+    uint temp = idx / params.out_w;
+    uint oh = temp % params.out_h;
+    temp /= params.out_h;
+    uint oc = temp % params.out_channels;
+    uint n = temp / params.out_channels;
+
+    // Use float32 for accumulation to maintain precision
+    float sum = 0.0;
+
+    // Compute which input channels this output channel uses (for grouped convolution)
+    uint channels_per_group = params.in_channels / params.groups;
+    uint out_channels_per_group = params.out_channels / params.groups;
+    uint group_id = oc / out_channels_per_group;
+    uint ic_start = group_id * channels_per_group;
+    uint ic_end = ic_start + channels_per_group;
+
+    // Perform convolution
+    for (uint ic = ic_start; ic < ic_end; ic++) {
+        for (uint kh = 0; kh < params.kernel_h; kh++) {
+            for (uint kw = 0; kw < params.kernel_w; kw++) {
+                // Calculate input position with stride, padding, and dilation
+                int ih = int(oh * params.stride) - int(params.padding) + int(kh * params.dilation);
+                int iw = int(ow * params.stride) - int(params.padding) + int(kw * params.dilation);
+
+                // Check bounds
+                if (ih >= 0 && ih < int(params.in_height) && iw >= 0 && iw < int(params.in_width)) {
+                    // Calculate input index: [n, ic, ih, iw]
+                    uint input_idx = n * (params.in_channels * params.in_height * params.in_width) +
+                                    ic * (params.in_height * params.in_width) +
+                                    uint(ih) * params.in_width + uint(iw);
+
+                    // Calculate weight index: [oc, ic_local, kh, kw]
+                    // ic_local is the local index within the group
+                    uint ic_local = ic - ic_start;
+                    uint weight_idx = oc * (channels_per_group * params.kernel_h * params.kernel_w) +
+                                     ic_local * (params.kernel_h * params.kernel_w) +
+                                     kh * params.kernel_w + kw;
+
+                    // Convert to float for accumulation, then convert back
+                    sum += float(input_data[input_idx]) * float(weight_data[weight_idx]);
+                }
+            }
+        }
+    }
+
+    // Add bias if present
+    if (params.has_bias == 1) {
+        sum += float(bias_data[oc]);
+    }
+
+    output_data[idx] = float(sum);
+}

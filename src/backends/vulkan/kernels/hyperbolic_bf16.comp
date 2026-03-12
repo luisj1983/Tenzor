@@ -1,0 +1,57 @@
+#version 450
+
+// Hyperbolic functions for BFloat16: sinh, cosh, tanh
+// BFloat16 elements are packed 2 per 32-bit word
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };
+layout(binding = 1) buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of elements
+    uint op;         // Operation: 0=sinh, 1=cosh, 2=tanh
+} params;
+
+// Helper to read bfloat16 from packed buffer
+float readBF16(uint packed, uint offset) {
+    uint bits = (packed >> (offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+// Helper to pack two bfloat16 values (round-to-nearest-even)
+uint packBF16Pair(float v0, float v1) {
+    uint b0 = floatBitsToUint(v0);
+    uint b1 = floatBitsToUint(v1);
+    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
+    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
+    return bf0 | (bf1 << 16);
+}
+
+float compute_hyp(float val) {
+    switch (params.op) {
+        case 0: return sinh(val);
+        case 1: return cosh(val);
+        case 2: return tanh(val);
+        default: return 0.0;
+    }
+}
+
+void main() {
+    uint pair_idx = gl_GlobalInvocationID.x;
+    uint idx0 = pair_idx * 2;
+
+    if (idx0 >= params.n) return;
+
+    uint packed = input_data[pair_idx];
+    float v0 = readBF16(packed, 0);
+    float v1 = readBF16(packed, 1);
+
+    float res0 = float(compute_hyp(float(v0)));
+    float res1 = float(0.0);
+
+    if (idx0 + 1 < params.n) {
+        res1 = float(compute_hyp(float(v1)));
+    }
+
+    output_data[pair_idx] = packBF16Pair(res0, res1);
+}

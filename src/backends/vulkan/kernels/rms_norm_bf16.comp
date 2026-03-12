@@ -1,0 +1,97 @@
+#version 450
+
+// RMS Normalization (BFloat16)
+// BFloat16 elements are packed 2 per 32-bit word
+// Uses atomicCompSwap for safe packed BF16 writes
+// One workgroup per batch element
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer Input { uint input_data[]; };
+layout(binding = 1) buffer Output { uint output_data[]; };
+layout(binding = 2) buffer Weight { uint weight_data[]; };
+layout(binding = 3) buffer RrmsOut { float rrms_out[]; };   // rrms stored as float32
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint normalized_shape;
+    float epsilon;
+    uint padding;
+} params;
+
+shared float shared_sum_sq[WORKGROUP_SIZE];
+
+float readBF16(uint buffer_idx, uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed;
+    if (buffer_idx == 0) {
+        packed = input_data[word_idx];
+    } else {
+        packed = weight_data[word_idx];
+    }
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+// Helper to write bfloat16 to packed uint output buffer using atomicCompSwap
+void writeBF16(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint bits = ((floatBitsToUint(val) + 0x7FFFu + ((floatBitsToUint(val) >> 16) & 1u)) >> 16);
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = output_data[word_idx];
+    uint new_val, expected;
+    do {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(output_data[word_idx], expected, new_val);
+    } while (old_val != expected);
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint batch_idx = gl_WorkGroupID.x;
+
+    if (batch_idx >= params.batch_size) {
+        return;
+    }
+
+    uint base_idx = batch_idx * params.normalized_shape;
+
+    // Step 1: Compute sum of squares (accumulate in float32)
+    float local_sum_sq = 0.0;
+    for (uint i = tid; i < params.normalized_shape; i += WORKGROUP_SIZE) {
+        float val = readBF16(0, base_idx + i);
+        local_sum_sq += val * val;
+    }
+    shared_sum_sq[tid] = local_sum_sq;
+    barrier();
+
+    // Parallel reduction for sum of squares
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_sum_sq[tid] += shared_sum_sq[tid + s];
+        }
+        barrier();
+    }
+
+    float rms = sqrt(shared_sum_sq[0] / float(params.normalized_shape) + params.epsilon);
+    float rrms = 1.0 / rms;
+    barrier();
+
+    // Store rrms for backward pass (as float32)
+    if (tid == 0) {
+        rrms_out[batch_idx] = rrms;
+    }
+
+    // Step 2: Normalize and apply weight
+    for (uint i = tid; i < params.normalized_shape; i += WORKGROUP_SIZE) {
+        float input_val = readBF16(0, base_idx + i);
+        float w = readBF16(2, i);
+        float result = input_val * rrms * w;
+        writeBF16(base_idx + i, result);
+    }
+}

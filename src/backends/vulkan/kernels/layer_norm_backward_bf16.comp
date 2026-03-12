@@ -1,0 +1,155 @@
+#version 450
+#extension GL_EXT_shader_atomic_float : enable
+
+// Layer Normalization Backward Pass for BFloat16
+// Input/grad tensors are packed BF16 (2 elements per 32-bit word)
+// Mean, rstd, weight are packed BF16. Grad_weight and grad_bias are Float32
+// (since these accumulate across batch elements).
+//
+// One workgroup per batch element. Each workgroup computes:
+// 1. Shared memory reductions for sum_dy_w and sum_dy_w_xhat (in Float32)
+// 2. Per-element grad_input (written as packed BF16 via atomicCompSwap)
+// 3. Atomic accumulation of grad_weight and grad_bias (Float32 buffers)
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer GradOutput { uint grad_output[]; };     // Packed BF16 (batch_size, normalized_shape)
+layout(binding = 1) buffer Input { uint input_data[]; };            // Packed BF16 (batch_size, normalized_shape)
+layout(binding = 2) buffer Mean { uint mean_data[]; };              // Packed BF16 (batch_size)
+layout(binding = 3) buffer Rstd { uint rstd_data[]; };              // Packed BF16 (batch_size)
+layout(binding = 4) buffer Weight { uint weight_data[]; };          // Packed BF16 (normalized_shape)
+layout(binding = 5) buffer GradInput { uint grad_input[]; };        // Packed BF16 (batch_size, normalized_shape)
+layout(binding = 6) buffer GradWeight { float grad_weight[]; };     // Float32 (normalized_shape) - accumulated atomically
+layout(binding = 7) buffer GradBias { float grad_bias[]; };         // Float32 (normalized_shape) - accumulated atomically
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint normalized_shape;
+    uint affine;           // 0=no affine, 1=with affine
+    uint padding;
+} params;
+
+shared float shared_sum_dy_w[WORKGROUP_SIZE];
+shared float shared_sum_dy_w_xhat[WORKGROUP_SIZE];
+
+float readBF16(uint buffer_idx, uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed;
+    if (buffer_idx == 0) {
+        packed = grad_output[word_idx];
+    } else if (buffer_idx == 1) {
+        packed = input_data[word_idx];
+    } else if (buffer_idx == 2) {
+        packed = mean_data[word_idx];
+    } else if (buffer_idx == 3) {
+        packed = rstd_data[word_idx];
+    } else {
+        packed = weight_data[word_idx];
+    }
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+// Helper to write a single BF16 element using atomicCompSwap
+void writeBF16(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint bits = ((floatBitsToUint(val) + 0x7FFFu + ((floatBitsToUint(val) >> 16) & 1u)) >> 16);
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = grad_input[word_idx];
+    for (uint iter = 0; iter < 1024; iter++) {
+        uint expected = old_val;
+        uint new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(grad_input[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    // Fallback: direct write after exceeding retry limit
+    grad_input[word_idx] = (grad_input[word_idx] & ~mask) | (bits << shift);
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint batch_idx = gl_WorkGroupID.x;
+
+    if (batch_idx >= params.batch_size) {
+        return;
+    }
+
+    uint base_idx = batch_idx * params.normalized_shape;
+
+    // Read mean and rstd for this batch element (stored as packed BF16)
+    float mean = readBF16(2, batch_idx);
+    float rstd = readBF16(3, batch_idx);
+
+    // Zero-variance guard: when variance is essentially zero (rstd > 100),
+    // input gradients should be zero because small changes to input don't
+    // change the normalized output. This matches the CPU backward path and
+    // prevents gradient overflow when rstd is very large (e.g., 1/sqrt(1e-6) = 1000).
+    bool zero_variance = (rstd > 100.0);
+
+    if (zero_variance) {
+        // Zero out grad_input for this batch element
+        for (uint i = tid; i < params.normalized_shape; i += WORKGROUP_SIZE) {
+            writeBF16(base_idx + i, 0.0);
+
+            // Still accumulate grad_bias
+            if (params.affine > 0) {
+                float dy = readBF16(0, base_idx + i);
+                atomicAdd(grad_bias[i], dy);
+            }
+        }
+        return;
+    }
+
+    // Step 1: Compute sum_dy_w and sum_dy_w_xhat via shared memory reduction
+    // Accumulate in Float32 for numerical stability
+    float local_sum_dy_w = 0.0;
+    float local_sum_dy_w_xhat = 0.0;
+    for (uint i = tid; i < params.normalized_shape; i += WORKGROUP_SIZE) {
+        float dy = readBF16(0, base_idx + i);
+        float w = (params.affine > 0) ? readBF16(4, i) : 1.0;
+        float xhat = (readBF16(1, base_idx + i) - mean) * rstd;
+
+        local_sum_dy_w += dy * w;
+        local_sum_dy_w_xhat += dy * w * xhat;
+    }
+    shared_sum_dy_w[tid] = local_sum_dy_w;
+    shared_sum_dy_w_xhat[tid] = local_sum_dy_w_xhat;
+    barrier();
+
+    // Parallel reduction for sum_dy_w and sum_dy_w_xhat
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_sum_dy_w[tid] += shared_sum_dy_w[tid + s];
+            shared_sum_dy_w_xhat[tid] += shared_sum_dy_w_xhat[tid + s];
+        }
+        barrier();
+    }
+
+    float sum_dy_w = shared_sum_dy_w[0];
+    float sum_dy_w_xhat = shared_sum_dy_w_xhat[0];
+    float inv_n = 1.0 / float(params.normalized_shape);
+    barrier();
+
+    // Step 2: Compute grad_input and accumulate grad_weight, grad_bias
+    for (uint i = tid; i < params.normalized_shape; i += WORKGROUP_SIZE) {
+        float dy = readBF16(0, base_idx + i);
+        float w = (params.affine > 0) ? readBF16(4, i) : 1.0;
+        float xhat = (readBF16(1, base_idx + i) - mean) * rstd;
+
+        // grad_input = rstd * (dy * w - sum_dy_w / N - xhat * sum_dy_w_xhat / N)
+        float grad_in = rstd * (dy * w - sum_dy_w * inv_n - xhat * sum_dy_w_xhat * inv_n);
+
+        // Write grad_input as packed BF16 using atomic CAS
+        writeBF16(base_idx + i, grad_in);
+
+        // Accumulate grad_weight and grad_bias atomically (Float32 buffers)
+        if (params.affine > 0) {
+            atomicAdd(grad_weight[i], dy * xhat);
+            atomicAdd(grad_bias[i], dy);
+        }
+    }
+}

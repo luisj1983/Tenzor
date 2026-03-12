@@ -1,0 +1,94 @@
+#version 450
+
+// BF16 utility: unpack two bfloat16 values from a uint32 word
+vec2 unpackBF16x2(uint packed) {
+    float lo = uintBitsToFloat((packed & 0xFFFFu) << 16);
+    float hi = uintBitsToFloat(packed & 0xFFFF0000u);
+    return vec2(lo, hi);
+}
+
+// BF16 utility: pack two float values into a uint32 as bfloat16 (round-to-nearest-even)
+uint packBF16x2(vec2 v) {
+    uint b0 = floatBitsToUint(v.x);
+    uint b1 = floatBitsToUint(v.y);
+    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
+    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
+    return bf0 | (bf1 << 16);
+}
+
+// Real-to-Complex FFT: Unpack N/2-point complex FFT result to N/2+1 complex output — BFloat16
+// Each complex element is one uint32 word (real in low 16, imag in high 16)
+//
+// Let Z[k] = FFT of packed complex data (length N/2)
+// Then X[k] = 0.5*(Z[k] + conj(Z[N/2-k])) - 0.5*i*W_N^k*(Z[k] - conj(Z[N/2-k]))
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { uint data_in[];  };  // N/2 complex
+layout(set = 0, binding = 1) buffer OutputBuf { uint data_out[]; };  // N/2+1 complex
+
+layout(push_constant) uniform PushConstants {
+    uint n;            // Original real FFT size (N)
+    uint batch_offset; // Offset in complex elements into data_in
+};
+
+const float PI = 3.14159265358979323846;
+
+vec2 readComplex(uint idx) {
+    return unpackBF16x2(data_in[batch_offset + idx]);
+}
+
+void writeComplex(uint idx, vec2 val) {
+    data_out[idx] = packBF16x2(val);
+}
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint half_n = n / 2;
+
+    if (tid > half_n) return;  // Output has N/2+1 elements
+
+    // Special cases: DC and Nyquist
+    if (tid == 0) {
+        vec2 z0 = readComplex(0);
+        // X[0] = Z[0].re + Z[0].im (DC component, purely real)
+        writeComplex(0, vec2(z0.x + z0.y, 0.0));
+        return;
+    }
+    if (tid == half_n) {
+        vec2 z0 = readComplex(0);
+        // X[N/2] = Z[0].re - Z[0].im (Nyquist component, purely real)
+        writeComplex(half_n, vec2(z0.x - z0.y, 0.0));
+        return;
+    }
+
+    // General case: k in [1, N/2-1]
+    uint k = tid;
+    uint conj_k = half_n - k;
+
+    // Z[k]
+    vec2 zk = readComplex(k);
+    // conj(Z[N/2 - k])
+    vec2 zc_raw = readComplex(conj_k);
+    vec2 zc = vec2(zc_raw.x, -zc_raw.y);
+
+    // A = Z[k] + conj(Z[N/2-k])
+    float a_re = zk.x + zc.x;
+    float a_im = zk.y + zc.y;
+
+    // B = Z[k] - conj(Z[N/2-k])
+    float b_re = zk.x - zc.x;
+    float b_im = zk.y - zc.y;
+
+    // Twiddle: W = exp(-2*pi*i*k/N)
+    float angle = -2.0 * PI * float(k) / float(n);
+    float w_re = cos(angle);
+    float w_im = sin(angle);
+
+    // -i * W * B
+    float iw_b_re = w_re * b_im + w_im * b_re;
+    float iw_b_im = -w_re * b_re + w_im * b_im;
+
+    // X[k] = 0.5 * (A + (-i*W*B))
+    writeComplex(k, vec2(0.5 * (a_re + iw_b_re), 0.5 * (a_im + iw_b_im)));
+}

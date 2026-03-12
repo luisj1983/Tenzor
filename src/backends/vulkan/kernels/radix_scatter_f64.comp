@@ -1,0 +1,48 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer KeysIn   { float64_t keys_in[];  };
+layout(set = 0, binding = 1) readonly buffer IdxIn    { int idx_in[];         };
+layout(set = 0, binding = 2) buffer KeysOut            { float64_t keys_out[]; };
+layout(set = 0, binding = 3) buffer IdxOut             { int idx_out[];        };
+layout(set = 0, binding = 4) buffer Histograms         { uint histos[];        };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint digit;
+    uint n_wgs;
+};
+
+shared uint local_offsets[256];
+
+uint64_t double_to_sortable(float64_t val) {
+    uvec2 v = unpackDouble2x32(double(val));
+    uint64_t bits = uint64_t(v.x) | (uint64_t(v.y) << 32u);
+    uint64_t mask = -int64_t(bits >> 63) | 0x8000000000000000ul;
+    return bits ^ mask;
+}
+
+void main() {
+    uint lid = gl_LocalInvocationID.x;
+    uint wg_id = gl_WorkGroupID.x;
+
+    if (lid < 256) {
+        local_offsets[lid] = histos[lid * n_wgs + wg_id];
+    }
+    barrier();
+
+    uint tile_size = (n + n_wgs - 1) / n_wgs;
+    uint tile_start = wg_id * tile_size;
+    uint tile_end = min(tile_start + tile_size, n);
+
+    for (uint i = tile_start + lid; i < tile_end; i += 256) {
+        uint64_t sortable = double_to_sortable(keys_in[i]);
+        uint digit_val = uint((sortable >> (digit * 8)) & 0xFFul);
+        uint dest = atomicAdd(local_offsets[digit_val], 1);
+        keys_out[dest] = keys_in[i];
+        idx_out[dest] = idx_in[i];
+    }
+}

@@ -1,0 +1,92 @@
+#version 450
+
+// BF16 utility: unpack two bfloat16 values from a uint32 word
+vec2 unpackBF16x2(uint packed) {
+    float lo = uintBitsToFloat((packed & 0xFFFFu) << 16);
+    float hi = uintBitsToFloat(packed & 0xFFFF0000u);
+    return vec2(lo, hi);
+}
+
+// BF16 utility: pack two float values into a uint32 as bfloat16 (round-to-nearest-even)
+uint packBF16x2(vec2 v) {
+    uint b0 = floatBitsToUint(v.x);
+    uint b1 = floatBitsToUint(v.y);
+    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
+    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
+    return bf0 | (bf1 << 16);
+}
+
+// Tile operation for BFloat16: repeat tensor along dimensions using modular indexing
+// BFloat16 elements are packed 2 per 32-bit word in uint buffers
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };       // Packed BF16 pairs
+layout(binding = 1) buffer Output { uint output_data[]; };     // Packed BF16 pairs
+layout(binding = 2) buffer InputShape { uint input_shape[]; };
+layout(binding = 3) buffer OutputShape { uint output_shape[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint output_numel;  // Total output elements
+    uint ndims;         // Number of dimensions
+} params;
+
+// Read a single BFloat16 element from packed uint32 input array
+float readBF16(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint half_offset = (element_idx % 2) * 16;
+    uint bits = (input_data[word_idx] >> half_offset) & 0xFFFFu;
+    return unpackBF16x2(bits).x;
+}
+
+// Write a single BFloat16 element to packed uint32 output array using CAS loop
+void writeBF16(uint element_idx, float value) {
+    uint word_idx = element_idx / 2;
+    uint half_offset = (element_idx % 2) * 16;
+    uint new_bits = ((floatBitsToUint(value) + 0x7FFFu + ((floatBitsToUint(value) >> 16) & 1u)) >> 16);
+    uint mask = 0xFFFFu << half_offset;
+
+    uint old_word = output_data[word_idx];
+    for (int attempt = 0; attempt < 1024; ++attempt) {
+        uint new_word = (old_word & ~mask) | (new_bits << half_offset);
+        uint result = atomicCompSwap(output_data[word_idx], old_word, new_word);
+        if (result == old_word) return;
+        old_word = result;
+    }
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.output_numel) return;
+
+    // Decompose output flat index into multi-dimensional coordinates,
+    // then map each coordinate to input space via modulo.
+    uint in_coords[8];
+    uint in_strides[8];
+
+    uint dims = min(params.ndims, 8u);
+    if (dims > 0) {
+        in_strides[dims - 1] = 1;
+        for (int d = int(dims) - 2; d >= 0; d--) {
+            in_strides[d] = in_strides[d + 1] * input_shape[d + 1];
+        }
+    }
+
+    // Decompose output index and map to input via modulo
+    uint temp = idx;
+    for (int d = int(dims) - 1; d >= 0; d--) {
+        uint out_coord = temp % output_shape[d];
+        temp /= output_shape[d];
+
+        // Map output coordinate to input coordinate via modulo
+        uint in_coord = out_coord % input_shape[d];
+        in_coords[d] = in_coord;
+    }
+
+    // Compute input flat index from input coordinates and strides
+    uint input_idx = 0;
+    for (uint d = 0; d < dims; d++) {
+        input_idx += in_coords[d] * in_strides[d];
+    }
+
+    writeBF16(idx, readBF16(input_idx));
+}

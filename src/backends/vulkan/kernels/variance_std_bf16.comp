@@ -1,0 +1,92 @@
+#version 450
+
+// Variance and Standard Deviation for BFloat16
+// BFloat16 elements are packed 2 per 32-bit word
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer Input { uint input_data[]; };
+layout(binding = 1) buffer Output { uint output_data[]; };
+layout(binding = 2) buffer Mean { uint mean_data[]; };  // Pre-computed mean (BFloat16)
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint reduce_size;
+    uint outer_size;
+    uint op;        // 0=variance, 1=std
+    uint unbiased;  // 0=biased, 1=unbiased
+} params;
+
+shared float shared_data[WORKGROUP_SIZE];
+
+// Read a single bfloat16 value from packed buffer
+float readBF16Input(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = input_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+float readBF16Mean(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = mean_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+// Write a single bfloat16 value to packed output buffer
+void writeBF16Output(uint element_idx, float value) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint bits = ((floatBitsToUint(value) + 0x7FFFu + ((floatBitsToUint(value) >> 16) & 1u)) >> 16);
+    if (word_offset == 0) {
+        uint existing = output_data[word_idx] & 0xFFFF0000u;
+        output_data[word_idx] = existing | bits;
+    } else {
+        uint existing = output_data[word_idx] & 0x0000FFFFu;
+        output_data[word_idx] = existing | (bits << 16);
+    }
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint gid = gl_GlobalInvocationID.x;
+    uint wid = gl_WorkGroupID.x;
+
+    // Compute squared differences from mean (in float32 for precision)
+    float value = 0.0;
+    if (gid < params.n) {
+        uint mean_idx = gid / params.reduce_size;
+        float diff = readBF16Input(gid) - readBF16Mean(mean_idx);
+        value = diff * diff;
+    }
+    shared_data[tid] = value;
+    barrier();
+
+    // Parallel reduction for sum of squared differences
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s && (gid + s) < params.n) {
+            shared_data[tid] += shared_data[tid + s];
+        }
+        barrier();
+    }
+
+    // Write result
+    if (tid == 0) {
+        float result = shared_data[0];
+
+        uint divisor = params.reduce_size;
+        if (params.unbiased > 0 && divisor > 1) {
+            divisor -= 1;
+        }
+        result /= float(divisor);
+
+        if (params.op == 1) {
+            result = sqrt(result);
+        }
+
+        writeBF16Output(wid, result);
+    }
+}

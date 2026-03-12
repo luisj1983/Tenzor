@@ -1,0 +1,78 @@
+#version 450
+
+// Diagonal operations for BFloat16:
+//   op=0: extract diagonal from 2D matrix -> 1D vector
+//   op=1: construct diagonal matrix from 1D vector -> 2D matrix
+// BF16 packed buffers (2 BFloat16 per uint32), arithmetic in float32
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer InputA { uint a[]; };
+layout(binding = 1) buffer Output { uint result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;         // number of output elements
+    uint rows;      // rows of matrix
+    uint cols;      // cols of matrix
+    int diagonal;   // diagonal offset (positive=above main, negative=below main)
+    uint op;        // 0=extract, 1=construct
+};
+
+// Read a single bfloat16 element from input buffer
+float readBF16Input(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = a[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+// Write a single bfloat16 element to output buffer
+void writeBF16Output(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint bits = ((floatBitsToUint(val) + 0x7FFFu + ((floatBitsToUint(val) >> 16) & 1u)) >> 16);
+    uint existing = result[word_idx];
+    uint mask = 0xFFFFu << (word_offset * 16);
+    result[word_idx] = (existing & ~mask) | (bits << (word_offset * 16));
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= n) return;
+
+    if (op == 0) {
+        // Extract: output[idx] = input[row, col] where row,col walk the diagonal
+        uint row, col;
+        if (diagonal >= 0) {
+            row = idx;
+            col = idx + uint(diagonal);
+        } else {
+            row = idx + uint(-diagonal);
+            col = idx;
+        }
+        float val = readBF16Input(row * cols + col);
+        writeBF16Output(idx, val);
+    } else {
+        // Construct: output is a matrix of size rows x cols
+        // n = rows * cols, check if this element is on the diagonal
+        uint row = idx / cols;
+        uint col = idx % cols;
+
+        bool on_diag;
+        uint diag_idx;
+        if (diagonal >= 0) {
+            on_diag = (col >= uint(diagonal)) && (col - uint(diagonal) == row);
+            diag_idx = row;
+        } else {
+            on_diag = (row >= uint(-diagonal)) && (row - uint(-diagonal) == col);
+            diag_idx = col;
+        }
+
+        if (on_diag) {
+            float val = readBF16Input(diag_idx);
+            writeBF16Output(idx, val);
+        } else {
+            writeBF16Output(idx, 0.0);
+        }
+    }
+}

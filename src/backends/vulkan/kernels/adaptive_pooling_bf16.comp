@@ -1,0 +1,121 @@
+#version 450
+
+// Adaptive pooling for BFloat16: AdaptiveAvgPool2d and AdaptiveMaxPool2d
+// BFloat16 elements are packed 2 per 32-bit word
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };
+layout(binding = 1) buffer Output { uint output_data[]; };
+layout(binding = 2) buffer Indices { int max_indices[]; };  // For adaptive max pool
+
+layout(push_constant) uniform PushConstants {
+    uint batch;
+    uint channels;
+    uint in_height;
+    uint in_width;
+    uint out_height;
+    uint out_width;
+    uint pool_type; // 0=max, 1=avg
+} params;
+
+// Helper to read bfloat16 at element index
+float readBF16(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = input_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+// Helper to write bfloat16 at element index using atomic compare-exchange
+// Two threads writing adjacent elements share the same uint32 word,
+// so we must use atomicCompSwap to avoid clobbering each other's data.
+void writeBF16(uint element_idx, float value) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+
+    uint new_bits = ((floatBitsToUint(value) + 0x7FFFu + ((floatBitsToUint(value) >> 16) & 1u)) >> 16);
+    uint shift = word_offset * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = output_data[word_idx];
+    uint new_val, expected;
+    do {
+        expected = old_val;
+        new_val = (expected & ~mask) | (new_bits << shift);
+        old_val = atomicCompSwap(output_data[word_idx], expected, new_val);
+    } while (old_val != expected);
+}
+
+// Helper to compute start index for adaptive pooling
+int start_index(int a, int b, int c) {
+    return int(floor(float(a * c) / float(b)));
+}
+
+// Helper to compute end index for adaptive pooling
+int end_index(int a, int b, int c) {
+    return int(ceil(float((a + 1) * c) / float(b)));
+}
+
+void main() {
+    uint out_x = gl_GlobalInvocationID.x;
+    uint out_y = gl_GlobalInvocationID.y;
+    uint c = gl_GlobalInvocationID.z;
+
+    if (out_x >= params.out_width || out_y >= params.out_height ||
+        c >= params.channels) {
+        return;
+    }
+
+    // Compute input window for this output position
+    int in_start_y = start_index(int(out_y), int(params.out_height), int(params.in_height));
+    int in_end_y = end_index(int(out_y), int(params.out_height), int(params.in_height));
+    int in_start_x = start_index(int(out_x), int(params.out_width), int(params.in_width));
+    int in_end_x = end_index(int(out_x), int(params.out_width), int(params.in_width));
+
+    float result;
+    int max_idx = -1;
+
+    if (params.pool_type == 0) {
+        // Adaptive MaxPool
+        result = -1.0 / 0.0; // -infinity
+    } else {
+        // Adaptive AvgPool
+        result = 0.0;
+    }
+
+    uint count = 0;
+
+    for (int iy = in_start_y; iy < in_end_y; iy++) {
+        for (int ix = in_start_x; ix < in_end_x; ix++) {
+            uint input_idx = c * params.in_height * params.in_width +
+                            uint(iy) * params.in_width + uint(ix);
+            float value = readBF16(input_idx);
+
+            if (params.pool_type == 0) {
+                // MaxPool
+                if (value > result) {
+                    result = value;
+                    max_idx = int(input_idx);
+                }
+            } else {
+                // AvgPool
+                result += value;
+                count++;
+            }
+        }
+    }
+
+    if (params.pool_type == 1 && count > 0) {
+        result /= float(count);
+    }
+
+    // Write output
+    uint output_idx = c * params.out_height * params.out_width +
+                     out_y * params.out_width + out_x;
+    writeBF16(output_idx, result);
+
+    if (params.pool_type == 0) {
+        max_indices[output_idx] = max_idx;
+    }
+}

@@ -1,0 +1,107 @@
+#version 450
+
+// BatchNorm running statistics update for BFloat16
+// Works on packed uint16 pairs
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer RunningMean { uint running_mean[]; };
+layout(binding = 1) buffer RunningVar { uint running_var[]; };
+layout(binding = 2) buffer BatchMean { uint batch_mean[]; };
+layout(binding = 3) buffer BatchVar { uint batch_var[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_channels;
+    float momentum;
+} params;
+
+float half_to_float(uint h) {
+    uint sign = (h & 0x8000u) << 16;
+    uint exp = (h >> 10) & 0x1Fu;
+    uint mant = h & 0x3FFu;
+
+    if (exp == 0u) {
+        if (mant == 0u) return uintBitsToFloat(sign);
+        while ((mant & 0x400u) == 0u) { mant <<= 1; exp--; }
+        exp++; mant &= ~0x400u;
+        exp += 127u - 15u;
+        return uintBitsToFloat(sign | (exp << 23) | (mant << 13));
+    } else if (exp == 31u) {
+        return uintBitsToFloat(sign | 0x7F800000u | (mant << 13));
+    }
+    exp += 127u - 15u;
+    return uintBitsToFloat(sign | (exp << 23) | (mant << 13));
+}
+
+uint float_to_half(float f) {
+    uint bits = floatBitsToUint(f);
+    uint sign = (bits >> 16) & 0x8000u;
+    int exp = int((bits >> 23) & 0xFFu) - 127 + 15;
+    uint mant = bits & 0x7FFFFFu;
+
+    if (exp <= 0) {
+        if (exp < -10) return sign;
+        mant |= 0x800000u;
+        uint shift = uint(14 - exp);
+        mant >>= shift;
+        return sign | mant;
+    } else if (exp >= 31) {
+        return sign | 0x7C00u;
+    }
+    return sign | (uint(exp) << 10) | (mant >> 13);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n_channels) {
+        return;
+    }
+
+    float one_minus_momentum = 1.0 - params.momentum;
+
+    // Read packed values
+    uint word_idx = idx / 2;
+    uint half_idx = idx % 2;
+
+    // Read running mean
+    uint rm_packed = running_mean[word_idx];
+    uint rm_half = (half_idx == 0) ? (rm_packed & 0xFFFFu) : (rm_packed >> 16);
+    float rm_val = half_to_float(rm_half);
+
+    // Read batch mean
+    uint bm_packed = batch_mean[word_idx];
+    uint bm_half = (half_idx == 0) ? (bm_packed & 0xFFFFu) : (bm_packed >> 16);
+    float bm_val = half_to_float(bm_half);
+
+    // Update running mean
+    float new_rm = one_minus_momentum * rm_val + params.momentum * bm_val;
+    uint new_rm_half = float_to_half(new_rm);
+
+    // Write back
+    if (half_idx == 0) {
+        running_mean[word_idx] = (rm_packed & 0xFFFF0000u) | new_rm_half;
+    } else {
+        running_mean[word_idx] = (rm_packed & 0x0000FFFFu) | (new_rm_half << 16);
+    }
+
+    // Read running var
+    uint rv_packed = running_var[word_idx];
+    uint rv_half = (half_idx == 0) ? (rv_packed & 0xFFFFu) : (rv_packed >> 16);
+    float rv_val = half_to_float(rv_half);
+
+    // Read batch var
+    uint bv_packed = batch_var[word_idx];
+    uint bv_half = (half_idx == 0) ? (bv_packed & 0xFFFFu) : (bv_packed >> 16);
+    float bv_val = half_to_float(bv_half);
+
+    // Update running var
+    float new_rv = one_minus_momentum * rv_val + params.momentum * bv_val;
+    uint new_rv_half = float_to_half(new_rv);
+
+    // Write back
+    if (half_idx == 0) {
+        running_var[word_idx] = (rv_packed & 0xFFFF0000u) | new_rv_half;
+    } else {
+        running_var[word_idx] = (rv_packed & 0x0000FFFFu) | (new_rv_half << 16);
+    }
+}

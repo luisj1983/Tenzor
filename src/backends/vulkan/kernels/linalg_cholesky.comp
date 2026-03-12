@@ -1,0 +1,76 @@
+#version 450
+
+// Cholesky decomposition for small matrices (<= 32x32)
+// L * L^T = A (lower=true) or U^T * U = A (upper=true)
+// Each workgroup handles one matrix in a batch.
+
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { float data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { float data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint batch;
+    uint upper;  // 0=lower, 1=upper
+};
+
+shared float L[32][32];
+
+void main() {
+    uint batch_idx = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (batch_idx >= batch) return;
+
+    uint mat_offset = batch_idx * n * n;
+
+    // Load matrix into shared memory
+    for (uint row = 0; row < n; row++) {
+        if (tid < n) {
+            L[row][tid] = data_in[mat_offset + row * n + tid];
+        }
+    }
+    barrier();
+
+    // Column-by-column Cholesky-Crout
+    for (uint j = 0; j < n; j++) {
+        // Thread 0: compute diagonal element L[j][j]
+        if (tid == 0) {
+            float sum = L[j][j];
+            for (uint k = 0; k < j; k++) {
+                sum -= L[j][k] * L[j][k];
+            }
+            L[j][j] = (sum > 0.0) ? sqrt(sum) : 0.0;
+        }
+        barrier();
+
+        // All threads: compute sub-diagonal elements L[i][j] for i > j
+        if (tid > j && tid < n) {
+            float sum = L[tid][j];
+            for (uint k = 0; k < j; k++) {
+                sum -= L[tid][k] * L[j][k];
+            }
+            float diag = L[j][j];
+            L[tid][j] = (abs(diag) > 1e-30) ? sum / diag : 0.0;
+        }
+        barrier();
+
+        // Zero out upper triangle entries in this column
+        if (tid < j && tid < n) {
+            L[tid][j] = 0.0;
+        }
+        barrier();
+    }
+
+    // Write output
+    for (uint row = 0; row < n; row++) {
+        if (tid < n) {
+            if (upper != 0) {
+                // Transpose: output U = L^T
+                data_out[mat_offset + tid * n + row] = L[row][tid];
+            } else {
+                data_out[mat_offset + row * n + tid] = L[row][tid];
+            }
+        }
+    }
+}

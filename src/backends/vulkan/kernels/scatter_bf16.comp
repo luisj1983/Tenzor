@@ -1,0 +1,162 @@
+#version 450
+
+// BF16 utility: unpack two bfloat16 values from a uint32 word
+vec2 unpackBF16x2(uint packed) {
+    float lo = uintBitsToFloat((packed & 0xFFFFu) << 16);
+    float hi = uintBitsToFloat(packed & 0xFFFF0000u);
+    return vec2(lo, hi);
+}
+
+// BF16 utility: pack two float values into a uint32 as bfloat16 (round-to-nearest-even)
+uint packBF16x2(vec2 v) {
+    uint b0 = floatBitsToUint(v.x);
+    uint b1 = floatBitsToUint(v.y);
+    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
+    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
+    return bf0 | (bf1 << 16);
+}
+
+// Scatter operation for BFloat16: scatter elements along specified dimension
+// BFloat16 elements are packed 2 per 32-bit word in uint buffers
+// Uses atomic operations for the packed output buffer
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };       // Packed BF16 pairs (source)
+layout(binding = 1) buffer Indices { int indices[]; };          // Scatter indices
+layout(binding = 2) buffer Output { uint output_data[]; };     // Packed BF16 pairs (destination, uint for atomics)
+layout(binding = 3) buffer Values { uint values[]; };          // Packed BF16 pairs (values to scatter)
+
+layout(push_constant) uniform PushConstants {
+    uint input_size;       // Size of input/indices (in elements)
+    uint output_size;      // Total output size (in elements)
+    uint dim;              // Dimension to scatter along
+    uint dim_size;         // Size of the dimension being scattered to (output)
+    uint input_dim_size;   // Size of the dimension in input/values tensor
+    uint inner_size;       // Product of dimensions after dim
+    uint outer_size;       // Product of dimensions before dim
+    uint reduction;        // 0=none, 1=add, 2=multiply
+    uint use_values;       // 0=use input_data, 1=use values buffer
+} params;
+
+// Read a single BFloat16 element from packed uint32 array
+float readBF16FromInput(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint half_offset = (element_idx % 2) * 16;
+    uint bits = (input_data[word_idx] >> half_offset) & 0xFFFFu;
+    return unpackBF16x2(bits).x;
+}
+
+float readBF16FromValues(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint half_offset = (element_idx % 2) * 16;
+    uint bits = (values[word_idx] >> half_offset) & 0xFFFFu;
+    return unpackBF16x2(bits).x;
+}
+
+float readBF16FromOutput(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint half_offset = (element_idx % 2) * 16;
+    uint bits = (output_data[word_idx] >> half_offset) & 0xFFFFu;
+    return unpackBF16x2(bits).x;
+}
+
+// Write a single BFloat16 element to packed output using CAS loop
+// Two separate atomicAnd/atomicOr would race when multiple threads
+// scatter to the same element (OR of bits instead of last-writer-wins).
+void writeBF16(uint element_idx, float value) {
+    uint word_idx = element_idx / 2;
+    uint half_offset = (element_idx % 2) * 16;
+    uint new_bits = ((floatBitsToUint(value) + 0x7FFFu + ((floatBitsToUint(value) >> 16) & 1u)) >> 16);
+    uint mask = 0xFFFFu << half_offset;
+
+    uint old_word = output_data[word_idx];
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        uint new_word = (old_word & ~mask) | (new_bits << half_offset);
+        uint result = atomicCompSwap(output_data[word_idx], old_word, new_word);
+        if (result == old_word) return;
+        old_word = result;
+    }
+}
+
+// Atomic add for BFloat16 using CAS loop on the uint32 word
+void atomicAddBF16(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_offset = (element_idx % 2) * 16;
+
+    uint old_word = output_data[word_idx];
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        // Extract current BF16 value
+        uint old_bits = (old_word >> half_offset) & 0xFFFFu;
+        float old_val = unpackBF16x2(old_bits).x;
+        float new_val = old_val + val;
+        uint new_bits = ((floatBitsToUint(new_val) + 0x7FFFu + ((floatBitsToUint(new_val) >> 16) & 1u)) >> 16);
+
+        // Build new word with updated half
+        uint new_word = (old_word & ~(0xFFFFu << half_offset)) | (new_bits << half_offset);
+        uint result = atomicCompSwap(output_data[word_idx], old_word, new_word);
+        if (result == old_word) return;
+        old_word = result;
+    }
+}
+
+// Atomic multiply for BFloat16 using CAS loop
+void atomicMulBF16(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_offset = (element_idx % 2) * 16;
+
+    uint old_word = output_data[word_idx];
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        uint old_bits = (old_word >> half_offset) & 0xFFFFu;
+        float old_val = unpackBF16x2(old_bits).x;
+        float new_val = old_val * val;
+        uint new_bits = ((floatBitsToUint(new_val) + 0x7FFFu + ((floatBitsToUint(new_val) >> 16) & 1u)) >> 16);
+
+        uint new_word = (old_word & ~(0xFFFFu << half_offset)) | (new_bits << half_offset);
+        uint result = atomicCompSwap(output_data[word_idx], old_word, new_word);
+        if (result == old_word) return;
+        old_word = result;
+    }
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.input_size) {
+        return;
+    }
+
+    // Decompose input index based on VALUES tensor shape
+    uint outer_idx = idx / (params.inner_size * params.input_dim_size);
+    uint remainder = idx % (params.inner_size * params.input_dim_size);
+    uint inner_idx = remainder % params.inner_size;
+
+    // Get the scatter destination index
+    int scatter_idx = indices[idx];
+
+    // Bounds check
+    if (scatter_idx < 0 || scatter_idx >= int(params.dim_size)) {
+        return;
+    }
+
+    // Compute output index
+    uint out_idx = outer_idx * (params.dim_size * params.inner_size) +
+                   uint(scatter_idx) * params.inner_size +
+                   inner_idx;
+
+    // Get value to scatter
+    float value;
+    if (params.use_values > 0) {
+        value = readBF16FromValues(idx);
+    } else {
+        value = readBF16FromInput(idx);
+    }
+
+    // Perform scatter with reduction
+    if (params.reduction == 0) {
+        writeBF16(out_idx, value);
+    } else if (params.reduction == 1) {
+        atomicAddBF16(out_idx, value);
+    } else if (params.reduction == 2) {
+        atomicMulBF16(out_idx, value);
+    }
+}

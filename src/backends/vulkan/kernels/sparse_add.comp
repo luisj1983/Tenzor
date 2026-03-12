@@ -1,0 +1,31 @@
+#version 450
+
+// Sparse + Dense: result = sparse + dense (result is dense)
+// The output buffer must be pre-filled with dense matrix values before dispatch.
+// This kernel adds CSR sparse values at the appropriate positions.
+// One workgroup per row, threads handle a subset of nonzeros in that row.
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer RowOffsets { int row_offsets[]; };
+layout(set = 0, binding = 1) readonly buffer ColIndices { int col_indices[]; };
+layout(set = 0, binding = 2) readonly buffer Values     { float values[];     };
+layout(set = 0, binding = 3) buffer Output              { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_rows;
+    uint n_cols;
+};
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (row >= n_rows) return;
+
+    uint row_start = uint(row_offsets[row]);
+    uint row_end = uint(row_offsets[row + 1]);
+
+    for (uint i = row_start + tid; i < row_end; i += 256) {
+        uint col = uint(col_indices[i]);
+        output_data[row * n_cols + col] += values[i];
+    }
+}

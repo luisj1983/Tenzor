@@ -1,0 +1,88 @@
+#version 450
+
+// Fused SGD optimizer step for BFloat16 parameters
+// Grad/param buffers are packed BF16; momentum buffer is Float32 (master weights)
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Grad { uint grad_data[]; };            // Packed BF16
+layout(binding = 1) buffer Param { uint param_data[]; };          // Packed BF16
+layout(binding = 2) buffer MomentumBuf { float momentum_buf[]; }; // Float32
+
+layout(push_constant) uniform PushConstants {
+    uint numel;
+    float lr;
+    float momentum;
+    float weight_decay;
+    float dampening;
+    uint nesterov;
+    uint has_momentum;
+    uint padding;
+} params;
+
+// Helper to read bfloat16 from packed buffer
+float readBF16(uint packed, uint offset) {
+    uint bits = (packed >> (offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+void main() {
+    // Process pairs of elements for safe packed writes
+    uint word_idx = gl_GlobalInvocationID.x;
+    uint num_words = (params.numel + 1) / 2;
+    if (word_idx >= num_words) return;
+
+    uint elem0 = word_idx * 2;
+    uint elem1 = word_idx * 2 + 1;
+
+    float p0 = 0.0, p1 = 0.0;
+
+    // Process element 0
+    if (elem0 < params.numel) {
+        float g = readBF16(elem0, 0);
+        float p = readBF16(elem0, 1);
+
+        if (params.weight_decay > 0.0) {
+            g += params.weight_decay * p;
+        }
+
+        if (params.has_momentum != 0 && params.momentum > 0.0) {
+            float buf = params.momentum * momentum_buf[elem0] + (1.0 - params.dampening) * g;
+            momentum_buf[elem0] = buf;
+            if (params.nesterov != 0) {
+                g = g + params.momentum * buf;
+            } else {
+                g = buf;
+            }
+        }
+
+        p0 = p - params.lr * g;
+    }
+
+    // Process element 1
+    if (elem1 < params.numel) {
+        float g = readBF16(elem1, 0);
+        float p = readBF16(elem1, 1);
+
+        if (params.weight_decay > 0.0) {
+            g += params.weight_decay * p;
+        }
+
+        if (params.has_momentum != 0 && params.momentum > 0.0) {
+            float buf = params.momentum * momentum_buf[elem1] + (1.0 - params.dampening) * g;
+            momentum_buf[elem1] = buf;
+            if (params.nesterov != 0) {
+                g = g + params.momentum * buf;
+            } else {
+                g = buf;
+            }
+        }
+
+        p0 = (elem0 == word_idx * 2) ? p0 : p0; // keep p0
+        p1 = p - params.lr * g;
+    }
+
+    // Write both as a packed pair
+    uint bits0 = ((floatBitsToUint(p0) + 0x7FFFu + ((floatBitsToUint(p0) >> 16) & 1u)) >> 16);
+    uint bits1 = ((floatBitsToUint(p1) + 0x7FFFu + ((floatBitsToUint(p1) >> 16) & 1u)) >> 16);
+    param_data[word_idx] = bits0 | (bits1 << 16);
+}

@@ -1,0 +1,85 @@
+#version 450
+
+// MaxPool2d forward pass with index tracking for BFloat16
+// Reads packed BF16 pairs, computes in float32 for stability
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };    // Packed BF16
+layout(binding = 1) buffer Output { uint output_data[]; };  // Packed BF16
+layout(binding = 2) buffer Indices { int max_indices[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint batch;
+    uint channels;
+    uint in_height;
+    uint in_width;
+    uint out_height;
+    uint out_width;
+    uint kernel_h;
+    uint kernel_w;
+    uint stride_h;
+    uint stride_w;
+    uint padding_h;
+    uint padding_w;
+} params;
+
+float readBF16Element(uint idx) {
+    uint pair_idx = idx / 2;
+    uint offset = idx % 2;
+    uint packed = input_data[pair_idx];
+    uint bits = (packed >> (offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+void writeBF16Element(uint idx, float val) {
+    uint pair_idx = idx / 2;
+    uint offset = idx % 2;
+    uint b = floatBitsToUint(val);
+    uint bits = (b + 0x7FFFu + ((b >> 16) & 1u)) >> 16;
+    if (offset == 0) {
+        uint existing = output_data[pair_idx] & 0xFFFF0000u;
+        output_data[pair_idx] = existing | bits;
+    } else {
+        uint existing = output_data[pair_idx] & 0x0000FFFFu;
+        output_data[pair_idx] = existing | (bits << 16);
+    }
+}
+
+void main() {
+    uint out_x = gl_GlobalInvocationID.x;
+    uint out_y = gl_GlobalInvocationID.y;
+    uint c = gl_GlobalInvocationID.z;
+
+    if (out_x >= params.out_width || out_y >= params.out_height ||
+        c >= params.channels) {
+        return;
+    }
+
+    float max_val = -1.0 / 0.0; // -infinity
+    int max_idx = -1;
+
+    for (uint kh = 0; kh < params.kernel_h; kh++) {
+        for (uint kw = 0; kw < params.kernel_w; kw++) {
+            int in_y = int(out_y * params.stride_h) - int(params.padding_h) + int(kh);
+            int in_x = int(out_x * params.stride_w) - int(params.padding_w) + int(kw);
+
+            if (in_y >= 0 && in_y < int(params.in_height) &&
+                in_x >= 0 && in_x < int(params.in_width)) {
+                uint input_idx = c * params.in_height * params.in_width +
+                                uint(in_y) * params.in_width + uint(in_x);
+                float value = readBF16Element(input_idx);
+
+                if (value > max_val) {
+                    max_val = value;
+                    max_idx = int(input_idx);
+                }
+            }
+        }
+    }
+
+    // Write output
+    uint output_idx = c * params.out_height * params.out_width +
+                     out_y * params.out_width + out_x;
+    writeBF16Element(output_idx, max_val);
+    max_indices[output_idx] = max_idx;
+}

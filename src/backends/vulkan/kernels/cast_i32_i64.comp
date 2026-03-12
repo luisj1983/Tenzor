@@ -1,0 +1,23 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+// Cast Int32 to Int64
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuffer {
+    int data[];
+} input_buf;
+
+layout(set = 0, binding = 1) writeonly buffer OutputBuffer {
+    int64_t data[];
+} output_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.num_elements) return;
+    output_buf.data[idx] = int64_t(input_buf.data[idx]);
+}

@@ -1,0 +1,99 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+// Argmax and Argmin for BFloat16 inputs
+// Reads packed BF16 pairs, uses float32 shared memory for reduction
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer Input { uint input_data[]; };    // Packed BF16 pairs
+layout(binding = 1) buffer Output { int64_t output_indices[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;              // Total number of elements
+    uint reduce_size;    // Size of dimension to reduce
+    uint outer_size;     // Number of output elements
+    uint inner_size;     // Product of dimensions after reduction dim
+    uint op;             // 0=argmax, 1=argmin
+} params;
+
+// Helper to read bfloat16 from packed buffer
+float readBF16(uint packed, uint offset) {
+    uint bits = (packed >> (offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+float readBF16Element(uint flat_idx) {
+    uint pair_idx = flat_idx / 2;
+    uint offset = flat_idx % 2;
+    uint packed = input_data[pair_idx];
+    uint bits = (packed >> (offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+shared float shared_vals[WORKGROUP_SIZE];
+shared int64_t shared_indices[WORKGROUP_SIZE];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint output_idx = gl_WorkGroupID.x;
+
+    if (output_idx >= params.outer_size) return;
+
+    float best_value;
+    int64_t best_index = -1L;
+
+    if (params.op == 0) {
+        best_value = -1.0 / 0.0;
+    } else {
+        best_value = 1.0 / 0.0;
+    }
+
+    uint outer_idx = output_idx / params.inner_size;
+    uint inner_idx = output_idx % params.inner_size;
+    uint base_idx = outer_idx * params.reduce_size * params.inner_size + inner_idx;
+
+    for (uint i = tid; i < params.reduce_size; i += WORKGROUP_SIZE) {
+        uint idx = base_idx + i * params.inner_size;
+        if (idx < params.n) {
+            float val = readBF16Element(idx);
+
+            if (params.op == 0) {
+                if (val > best_value) {
+                    best_value = val;
+                    best_index = int64_t(i);
+                }
+            } else {
+                if (val < best_value) {
+                    best_value = val;
+                    best_index = int64_t(i);
+                }
+            }
+        }
+    }
+
+    shared_vals[tid] = best_value;
+    shared_indices[tid] = best_index;
+    barrier();
+
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            if (params.op == 0) {
+                if (shared_vals[tid + s] > shared_vals[tid]) {
+                    shared_vals[tid] = shared_vals[tid + s];
+                    shared_indices[tid] = shared_indices[tid + s];
+                }
+            } else {
+                if (shared_vals[tid + s] < shared_vals[tid]) {
+                    shared_vals[tid] = shared_vals[tid + s];
+                    shared_indices[tid] = shared_indices[tid + s];
+                }
+            }
+        }
+        barrier();
+    }
+
+    if (tid == 0) {
+        output_indices[output_idx] = shared_indices[0];
+    }
+}

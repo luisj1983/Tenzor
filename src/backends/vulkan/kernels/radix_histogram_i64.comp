@@ -1,0 +1,40 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer Keys { int64_t keys[]; };
+layout(set = 0, binding = 1) buffer Histograms     { uint histos[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint digit;
+    uint n_wgs;
+};
+
+shared uint local_histo[256];
+
+uint64_t int64_to_sortable(int64_t val) {
+    return uint64_t(val) ^ 0x8000000000000000ul;
+}
+
+void main() {
+    uint lid = gl_LocalInvocationID.x;
+    uint wg_id = gl_WorkGroupID.x;
+
+    local_histo[lid] = 0;
+    barrier();
+
+    uint tile_size = (n + n_wgs - 1) / n_wgs;
+    uint tile_start = wg_id * tile_size;
+    uint tile_end = min(tile_start + tile_size, n);
+
+    for (uint i = tile_start + lid; i < tile_end; i += 256) {
+        uint64_t sortable = int64_to_sortable(keys[i]);
+        uint digit_val = uint((sortable >> (digit * 8)) & 0xFFul);
+        atomicAdd(local_histo[digit_val], 1);
+    }
+    barrier();
+
+    histos[lid * n_wgs + wg_id] = local_histo[lid];
+}

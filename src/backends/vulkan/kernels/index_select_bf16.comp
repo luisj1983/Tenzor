@@ -1,0 +1,65 @@
+#version 450
+
+// Index select for BFloat16: select specific indices along a dimension
+// Reads/writes packed BF16 pairs using element-level indexing
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };    // Packed BF16
+layout(binding = 1) buffer Indices { int indices[]; };
+layout(binding = 2) buffer Output { uint output_data[]; };  // Packed BF16
+
+layout(push_constant) uniform PushConstants {
+    uint num_indices;
+    uint dim;
+    uint dim_size;
+    uint inner_size;
+    uint outer_size;
+} params;
+
+float readBF16(uint flat_idx) {
+    uint word_idx = flat_idx / 2;
+    uint half_idx = flat_idx % 2;
+    uint packed = input_data[word_idx];
+    uint bits = (packed >> (half_idx * 16)) & 0xFFFFu;
+    return float(uintBitsToFloat(bits << 16));
+}
+
+void writeBF16(uint flat_idx, float val) {
+    uint word_idx = flat_idx / 2;
+    uint half_offset = (flat_idx % 2) * 16;
+    uint new_bits = ((floatBitsToUint(float(val)) + 0x7FFFu + ((floatBitsToUint(float(val)) >> 16) & 1u)) >> 16);
+    uint mask = 0xFFFFu << half_offset;
+
+    uint old_word = output_data[word_idx];
+    for (int attempt = 0; attempt < 1024; ++attempt) {
+        uint new_word = (old_word & ~mask) | (new_bits << half_offset);
+        uint result = atomicCompSwap(output_data[word_idx], old_word, new_word);
+        if (result == old_word) return;
+        old_word = result;
+    }
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total_output = params.outer_size * params.num_indices * params.inner_size;
+
+    if (idx >= total_output) return;
+
+    uint outer_idx = idx / (params.num_indices * params.inner_size);
+    uint remainder = idx % (params.num_indices * params.inner_size);
+    uint index_pos = remainder / params.inner_size;
+    uint inner_idx = remainder % params.inner_size;
+
+    int select_idx = indices[index_pos];
+
+    if (select_idx < 0 || select_idx >= int(params.dim_size)) {
+        writeBF16(idx, float(0.0));
+        return;
+    }
+
+    uint in_idx = outer_idx * (params.dim_size * params.inner_size) +
+                  uint(select_idx) * params.inner_size +
+                  inner_idx;
+
+    writeBF16(idx, readBF16(in_idx));
+}

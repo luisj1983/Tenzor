@@ -643,12 +643,66 @@ __global__ void scatter_add_kernel_impl(
     }
 }
 
+// Helper kernel: compute flat output indices for each scatter element
+template<typename IndexT>
+__global__ void compute_flat_scatter_indices_kernel(
+    const IndexT* indices,
+    int64_t* flat_indices,
+    int64_t outer_size,
+    int64_t dim_size,
+    int64_t inner_size,
+    int64_t index_dim_size,
+    int64_t total_scatter,
+    int* error_flag) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_scatter) {
+        int64_t inner_idx = idx % inner_size;
+        int64_t temp = idx / inner_size;
+        int64_t index_pos = temp % index_dim_size;
+        int64_t outer_idx = temp / index_dim_size;
+
+        int64_t index_offset = outer_idx * index_dim_size * inner_size +
+                               index_pos * inner_size + inner_idx;
+        int64_t scatter_idx = static_cast<int64_t>(indices[index_offset]);
+        if (scatter_idx < 0) scatter_idx += dim_size;
+        if (scatter_idx < 0 || scatter_idx >= dim_size) {
+            atomicExch(error_flag, 1);
+            flat_indices[idx] = -1;  // sentinel for invalid
+            continue;
+        }
+
+        flat_indices[idx] = outer_idx * dim_size * inner_size +
+                            scatter_idx * inner_size +
+                            inner_idx;
+    }
+}
+
+// Helper kernel: deterministic segment accumulate after sorting by output index
+template<typename T>
+__global__ void deterministic_segment_accumulate_kernel(
+    const int64_t* sorted_flat_indices,
+    const T* sorted_values,
+    T* output,
+    int64_t total_scatter) {
+    // Each thread processes one segment boundary
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_scatter) {
+        int64_t flat_idx = sorted_flat_indices[idx];
+        if (flat_idx < 0) continue;  // skip invalid indices
+
+        // Check if this is the start of a new segment
+        bool is_segment_start = (idx == 0) || (sorted_flat_indices[idx - 1] != flat_idx);
+        if (!is_segment_start) continue;
+
+        // Accumulate all values in this segment sequentially
+        T sum = sorted_values[idx];
+        for (int64_t j = idx + 1; j < total_scatter && sorted_flat_indices[j] == flat_idx; ++j) {
+            sum += sorted_values[j];
+        }
+        output[flat_idx] += sum;
+    }
+}
+
 auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                         const Tensor& src, cudaStream_t stream) -> Tensor {
-    if (tenzor::is_deterministic()) {
-        throw std::runtime_error("scatter_add: deterministic mode not yet implemented for CUDA");
-    }
-
     int64_t ndim = input.ndim();
     if (dim < 0) dim += ndim;
     if (dim < 0 || dim >= ndim) {
@@ -677,7 +731,104 @@ auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                                total_input * dtype_size(input.dtype()),
                                cudaMemcpyDeviceToDevice, stream));
 
-    // Step 2: Scatter-add with atomicAdd
+    if (tenzor::is_deterministic()) {
+        // Deterministic scatter_add: sort by output index, then segment-reduce
+        if (total_scatter == 0) return output;
+
+        constexpr int BLOCK_SIZE_DET = 256;
+        int num_blocks_det = static_cast<int>((total_scatter + BLOCK_SIZE_DET - 1) / BLOCK_SIZE_DET);
+
+        // Step 1: Compute flat output indices
+        CudaBuffer flat_indices_buf(total_scatter * sizeof(int64_t));
+        CudaBuffer error_buf_det(sizeof(int));
+        CUDA_CHECK(cudaMemsetAsync(error_buf_det.as<int>(), 0, sizeof(int), stream));
+
+        if (idx_is_int32) {
+            compute_flat_scatter_indices_kernel<int32_t><<<num_blocks_det, BLOCK_SIZE_DET, 0, stream>>>(
+                index.data<int32_t>(), flat_indices_buf.as<int64_t>(),
+                outer_size, dim_size, inner_size, index_dim_size, total_scatter,
+                error_buf_det.as<int>());
+        } else {
+            compute_flat_scatter_indices_kernel<int64_t><<<num_blocks_det, BLOCK_SIZE_DET, 0, stream>>>(
+                index.data<int64_t>(), flat_indices_buf.as<int64_t>(),
+                outer_size, dim_size, inner_size, index_dim_size, total_scatter,
+                error_buf_det.as<int>());
+        }
+        CUDA_CHECK(cudaGetLastError());
+
+        // Check for OOB errors
+        int host_error_det = 0;
+        CUDA_CHECK(cudaMemcpyAsync(&host_error_det, error_buf_det.as<int>(), sizeof(int),
+                                    cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        if (host_error_det) {
+            throw std::out_of_range(
+                "scatter_add: index out of range for dimension of size " +
+                std::to_string(dim_size));
+        }
+
+        // Step 2: Sort (flat_index, value) pairs by flat_index using CUB
+        CudaBuffer sorted_indices_buf(total_scatter * sizeof(int64_t));
+
+        // Determine temp storage for CUB sort
+        size_t temp_storage_bytes = 0;
+
+        auto do_sort = [&](auto* src_vals, auto* out_vals) {
+            using ValT = std::remove_const_t<std::remove_pointer_t<decltype(src_vals)>>;
+            CudaBuffer sorted_vals_buf(total_scatter * sizeof(ValT));
+
+            {
+                void* d_temp = nullptr;
+                cub::DeviceRadixSort::SortPairs(
+                    d_temp, temp_storage_bytes,
+                    flat_indices_buf.as<int64_t>(), sorted_indices_buf.as<int64_t>(),
+                    static_cast<const ValT*>(src_vals), sorted_vals_buf.as<ValT>(),
+                    static_cast<int>(total_scatter), 0, static_cast<int>(sizeof(int64_t) * 8), stream);
+            }
+
+            CudaBuffer temp_storage(temp_storage_bytes);
+
+            cub::DeviceRadixSort::SortPairs(
+                temp_storage.as<void>(), temp_storage_bytes,
+                flat_indices_buf.as<int64_t>(), sorted_indices_buf.as<int64_t>(),
+                src_vals, sorted_vals_buf.as<ValT>(),
+                static_cast<int>(total_scatter), 0, static_cast<int>(sizeof(int64_t) * 8), stream);
+            CUDA_CHECK(cudaGetLastError());
+
+            // Step 3: Deterministic segment accumulate
+            deterministic_segment_accumulate_kernel<ValT><<<num_blocks_det, BLOCK_SIZE_DET, 0, stream>>>(
+                sorted_indices_buf.as<int64_t>(),
+                sorted_vals_buf.as<ValT>(),
+                out_vals,  // output tensor data
+                total_scatter);
+            CUDA_CHECK(cudaGetLastError());
+        };
+
+        if (input.dtype() == DType::Float32) {
+            do_sort(src.data<float>(), output.data<float>());
+        } else if (input.dtype() == DType::Float64) {
+            do_sort(src.data<double>(), output.data<double>());
+        } else if (input.dtype() == DType::Int32) {
+            do_sort(src.data<int32_t>(), output.data<int32_t>());
+        } else if (input.dtype() == DType::Int64) {
+            do_sort(src.data<int64_t>(), output.data<int64_t>());
+        } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+            // Upcast to float32 for deterministic path
+            Tensor src_f32 = src.to(DType::Float32);
+            Tensor output_f32 = output.to(DType::Float32);
+            do_sort(src_f32.data<float>(), output_f32.data<float>());
+            // Copy back
+            Tensor result = output_f32.to(input.dtype());
+            CUDA_CHECK(cudaMemcpyAsync(output.data_ptr(), result.data_ptr(),
+                                        output.numel() * dtype_size(input.dtype()),
+                                        cudaMemcpyDeviceToDevice, stream));
+        }
+
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        return output;
+    }
+
+    // Step 2: Scatter-add with atomicAdd (non-deterministic path)
     if (total_scatter == 0) return output;
     int num_blocks_scatter = get_num_blocks(total_scatter);
 

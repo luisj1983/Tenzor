@@ -1,0 +1,55 @@
+#version 450
+
+// Cumulative Product along a dimension — BFloat16 variant
+// Uses packed uint32 words (2 bfloat16 elements per word)
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };
+layout(binding = 1) buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint total_lines;
+    uint reduce_size;
+    uint inner_size;
+} params;
+
+float readBF16(uint flat_idx) {
+    uint word_idx = flat_idx / 2;
+    uint half_idx = flat_idx % 2;
+    uint packed = input_data[word_idx];
+    uint bits = (packed >> (half_idx * 16)) & 0xFFFFu;
+    return float(uintBitsToFloat(bits << 16));
+}
+
+void writeBF16(uint flat_idx, float val) {
+    uint word_idx = flat_idx / 2;
+    uint half_offset = (flat_idx % 2) * 16;
+    uint new_bits = ((floatBitsToUint(float(val)) + 0x7FFFu + ((floatBitsToUint(float(val)) >> 16) & 1u)) >> 16);
+    uint mask = 0xFFFFu << half_offset;
+
+    uint old_word = output_data[word_idx];
+    for (int attempt = 0; attempt < 1024; ++attempt) {
+        uint new_word = (old_word & ~mask) | (new_bits << half_offset);
+        uint result = atomicCompSwap(output_data[word_idx], old_word, new_word);
+        if (result == old_word) return;
+        old_word = result;
+    }
+}
+
+void main() {
+    uint line_idx = gl_GlobalInvocationID.x;
+    if (line_idx >= params.total_lines) return;
+
+    uint outer_idx = line_idx / params.inner_size;
+    uint inner_idx = line_idx % params.inner_size;
+
+    uint base = outer_idx * params.reduce_size * params.inner_size + inner_idx;
+
+    // Accumulate in float32 for precision
+    float running_prod = 1.0;
+    for (uint i = 0; i < params.reduce_size; i++) {
+        uint idx = base + i * params.inner_size;
+        running_prod *= float(readBF16(idx));
+        writeBF16(idx, float(running_prod));
+    }
+}

@@ -1,0 +1,33 @@
+#version 450
+
+// Arange for BFloat16: generate sequential values [start, start+step, start+2*step, ...]
+// BF16 packed buffers (2 BFloat16 per uint32), arithmetic in float32
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    float start;
+    float step;
+    uint num_elements;
+} params;
+
+void main() {
+    // Each thread handles one uint32 word (2 BF16 elements)
+    uint pair_idx = gl_GlobalInvocationID.x;
+    uint idx0 = pair_idx * 2;
+    uint idx1 = pair_idx * 2 + 1;
+
+    if (idx0 >= params.num_elements) return;
+
+    // Compute values in float32
+    float val0 = params.start + float(idx0) * params.step;
+    float val1 = (idx1 < params.num_elements)
+                 ? (params.start + float(idx1) * params.step)
+                 : 0.0;
+
+    // Pack two BF16 values into one uint32
+    uint bits0 = ((floatBitsToUint(val0) + 0x7FFFu + ((floatBitsToUint(val0) >> 16) & 1u)) >> 16);
+    uint bits1 = ((floatBitsToUint(val1) + 0x7FFFu + ((floatBitsToUint(val1) >> 16) & 1u)) >> 16);
+    output_data[pair_idx] = bits0 | (bits1 << 16);
+}

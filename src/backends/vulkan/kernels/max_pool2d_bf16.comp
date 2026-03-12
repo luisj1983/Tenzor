@@ -1,0 +1,87 @@
+#version 450
+
+// Max Pooling 2D Forward Pass for BFloat16
+// Reads packed BF16 pairs, computes in float32 for stability
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };    // Packed BF16 (N, C, H, W)
+layout(binding = 1) buffer Output { uint output_data[]; };  // Packed BF16 (N, C, H_out, W_out)
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint batch;
+    uint channels;
+    uint in_height;
+    uint in_width;
+    uint out_height;
+    uint out_width;
+    uint kernel_h;
+    uint kernel_w;
+    uint stride_h;
+    uint stride_w;
+    uint padding_h;
+    uint padding_w;
+    uint dilation_h;
+    uint dilation_w;
+} params;
+
+float readBF16Element(uint flat_idx) {
+    uint pair_idx = flat_idx / 2;
+    uint offset = flat_idx % 2;
+    uint packed = input_data[pair_idx];
+    uint bits = (packed >> (offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+void writeBF16Element(uint flat_idx, float val) {
+    uint word_idx = flat_idx / 2;
+    uint half_offset = (flat_idx % 2) * 16;
+    uint b = floatBitsToUint(val);
+    uint new_bits = (b + 0x7FFFu + ((b >> 16) & 1u)) >> 16;
+    uint mask = 0xFFFFu << half_offset;
+
+    uint old_word = output_data[word_idx];
+    for (int attempt = 0; attempt < 1024; ++attempt) {
+        uint new_word = (old_word & ~mask) | (new_bits << half_offset);
+        uint r = atomicCompSwap(output_data[word_idx], old_word, new_word);
+        if (r == old_word) return;
+        old_word = r;
+    }
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    uint temp = idx;
+    uint w_out = temp % params.out_width;
+    temp /= params.out_width;
+    uint h_out = temp % params.out_height;
+    temp /= params.out_height;
+    uint c = temp % params.channels;
+    uint n = temp / params.channels;
+
+    int h_start = int(h_out * params.stride_h) - int(params.padding_h);
+    int w_start = int(w_out * params.stride_w) - int(params.padding_w);
+
+    float max_val = -1.0 / 0.0;
+
+    for (uint kh = 0; kh < params.kernel_h; kh++) {
+        for (uint kw = 0; kw < params.kernel_w; kw++) {
+            int h_in = h_start + int(kh * params.dilation_h);
+            int w_in = w_start + int(kw * params.dilation_w);
+
+            if (h_in >= 0 && h_in < int(params.in_height) &&
+                w_in >= 0 && w_in < int(params.in_width)) {
+                uint input_idx = n * params.channels * params.in_height * params.in_width +
+                                c * params.in_height * params.in_width +
+                                uint(h_in) * params.in_width +
+                                uint(w_in);
+                float val = float(readBF16Element(input_idx));
+                max_val = max(max_val, val);
+            }
+        }
+    }
+
+    writeBF16Element(idx, float(max_val));
+}

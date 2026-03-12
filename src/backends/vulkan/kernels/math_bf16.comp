@@ -1,0 +1,203 @@
+#version 450
+
+// Math operations for BFloat16: add, sub, mul, div, sqrt, exp, log, neg, abs, pow, sign,
+//   floor, ceil, round, trunc, reciprocal, log2, log10, log1p, exp2, expm1, erf, erfc,
+//   atan2, fmod, remainder, minimum, maximum
+// BFloat16 elements are packed 2 per 32-bit word
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer InputA { uint a[]; };
+layout(binding = 1) buffer InputB { uint b[]; };
+layout(binding = 2) buffer Output { uint result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of elements
+    uint op;         // Operation code
+    float param;     // Parameter for operations like pow
+} params;
+
+// Helper to read bfloat16 from packed buffer
+float readBF16(uint packed, uint offset) {
+    uint bits = (packed >> (offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+// Helper to pack two bfloat16 values (round-to-nearest-even)
+uint packBF16Pair(float v0, float v1) {
+    uint b0 = floatBitsToUint(v0);
+    uint b1 = floatBitsToUint(v1);
+    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
+    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
+    return bf0 | (bf1 << 16);
+}
+
+void main() {
+    // Process 2 elements per thread
+    uint pair_idx = gl_GlobalInvocationID.x;
+    uint idx0 = pair_idx * 2;
+    uint idx1 = pair_idx * 2 + 1;
+
+    if (idx0 >= params.n) {
+        return;
+    }
+
+    uint a_packed = a[pair_idx];
+    uint b_packed = b[pair_idx];
+
+    float val_a0 = readBF16(a_packed, 0);
+    float val_b0 = readBF16(b_packed, 0);
+    float val_a1 = readBF16(a_packed, 1);
+    float val_b1 = readBF16(b_packed, 1);
+
+    float res0, res1;
+
+    // Binary ops: compute in float32 to avoid overflow in bfloat16 range (±65504).
+    // This matches the CPU backend which upcasts BF16→F32 before computing.
+    float fa0 = float(val_a0), fb0 = float(val_b0);
+    float fa1 = float(val_a1), fb1 = float(val_b1);
+
+    switch (params.op) {
+        case 0: // add
+            res0 = float(fa0 + fb0);
+            res1 = float(fa1 + fb1);
+            break;
+        case 1: // sub
+            res0 = float(fa0 - fb0);
+            res1 = float(fa1 - fb1);
+            break;
+        case 2: // mul
+            res0 = float(fa0 * fb0);
+            res1 = float(fa1 * fb1);
+            break;
+        case 3: // div
+            res0 = float(fa0 / fb0);
+            res1 = float(fa1 / fb1);
+            break;
+        case 4: // sqrt (unary)
+            res0 = float(sqrt(float(val_a0)));
+            res1 = float(sqrt(float(val_a1)));
+            break;
+        case 5: // exp (unary)
+            res0 = float(exp(float(val_a0)));
+            res1 = float(exp(float(val_a1)));
+            break;
+        case 6: // log (unary)
+            res0 = float(log(float(val_a0)));
+            res1 = float(log(float(val_a1)));
+            break;
+        case 7: // neg (unary)
+            res0 = -val_a0;
+            res1 = -val_a1;
+            break;
+        case 8: // abs (unary)
+            res0 = abs(val_a0);
+            res1 = abs(val_a1);
+            break;
+        case 9: // pow (unary with parameter)
+            res0 = float(pow(float(val_a0), params.param));
+            res1 = float(pow(float(val_a1), params.param));
+            break;
+        case 10: // sign (unary)
+            res0 = float(sign(float(val_a0)));
+            res1 = float(sign(float(val_a1)));
+            break;
+        case 11: // floor
+            res0 = float(floor(float(val_a0)));
+            res1 = float(floor(float(val_a1)));
+            break;
+        case 12: // ceil
+            res0 = float(ceil(float(val_a0)));
+            res1 = float(ceil(float(val_a1)));
+            break;
+        case 13: // round
+            res0 = float(round(float(val_a0)));
+            res1 = float(round(float(val_a1)));
+            break;
+        case 14: // trunc
+            res0 = float(trunc(float(val_a0)));
+            res1 = float(trunc(float(val_a1)));
+            break;
+        case 15: // reciprocal
+            res0 = float(1.0 / float(val_a0));
+            res1 = float(1.0 / float(val_a1));
+            break;
+        case 16: // log2
+            res0 = float(log2(fa0));
+            res1 = float(log2(fa1));
+            break;
+        case 17: // log10
+            res0 = float(log2(fa0) / log2(10.0));
+            res1 = float(log2(fa1) / log2(10.0));
+            break;
+        case 18: // log1p
+            res0 = float(log(1.0 + fa0));
+            res1 = float(log(1.0 + fa1));
+            break;
+        case 19: // exp2
+            res0 = float(exp2(fa0));
+            res1 = float(exp2(fa1));
+            break;
+        case 20: // expm1
+            res0 = float(exp(fa0) - 1.0);
+            res1 = float(exp(fa1) - 1.0);
+            break;
+        case 21: { // erf - Abramowitz & Stegun approximation
+            float ax0 = abs(fa0);
+            float t0 = 1.0 / (1.0 + 0.3275911 * ax0);
+            float y0 = 1.0 - (((((1.061405429 * t0 - 1.453152027) * t0) + 1.421413741) * t0 - 0.284496736) * t0 + 0.254829592) * t0 * exp(-ax0 * ax0);
+            res0 = float(fa0 < 0.0 ? -y0 : y0);
+            float ax1 = abs(fa1);
+            float t1 = 1.0 / (1.0 + 0.3275911 * ax1);
+            float y1 = 1.0 - (((((1.061405429 * t1 - 1.453152027) * t1) + 1.421413741) * t1 - 0.284496736) * t1 + 0.254829592) * t1 * exp(-ax1 * ax1);
+            res1 = float(fa1 < 0.0 ? -y1 : y1);
+            break;
+        }
+        case 22: { // erfc
+            float ax0 = abs(fa0);
+            float t0 = 1.0 / (1.0 + 0.3275911 * ax0);
+            float y0 = 1.0 - (((((1.061405429 * t0 - 1.453152027) * t0) + 1.421413741) * t0 - 0.284496736) * t0 + 0.254829592) * t0 * exp(-ax0 * ax0);
+            float erf0 = fa0 < 0.0 ? -y0 : y0;
+            res0 = float(1.0 - erf0);
+            float ax1 = abs(fa1);
+            float t1 = 1.0 / (1.0 + 0.3275911 * ax1);
+            float y1 = 1.0 - (((((1.061405429 * t1 - 1.453152027) * t1) + 1.421413741) * t1 - 0.284496736) * t1 + 0.254829592) * t1 * exp(-ax1 * ax1);
+            float erf1 = fa1 < 0.0 ? -y1 : y1;
+            res1 = float(1.0 - erf1);
+            break;
+        }
+        case 23: // atan2 (binary)
+            res0 = float(atan(fa0, fb0));
+            res1 = float(atan(fa1, fb1));
+            break;
+        case 24: // fmod (binary)
+            res0 = float(fa0 - trunc(fa0 / fb0) * fb0);
+            res1 = float(fa1 - trunc(fa1 / fb1) * fb1);
+            break;
+        case 25: { // remainder (binary)
+            float r0 = round(fa0 / fb0);
+            res0 = float(fa0 - r0 * fb0);
+            float r1 = round(fa1 / fb1);
+            res1 = float(fa1 - r1 * fb1);
+            break;
+        }
+        case 26: // minimum (binary)
+            res0 = float(min(fa0, fb0));
+            res1 = float(min(fa1, fb1));
+            break;
+        case 27: // maximum (binary)
+            res0 = float(max(fa0, fb0));
+            res1 = float(max(fa1, fb1));
+            break;
+        default:
+            res0 = float(0.0);
+            res1 = float(0.0);
+            break;
+    }
+
+    // Handle odd number of elements
+    if (idx1 >= params.n) {
+        res1 = float(0.0);
+    }
+
+    result[pair_idx] = packBF16Pair(res0, res1);
+}

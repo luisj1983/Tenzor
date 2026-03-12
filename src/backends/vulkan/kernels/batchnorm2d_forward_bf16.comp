@@ -1,0 +1,113 @@
+#version 450
+
+// BF16 utility: unpack two bfloat16 values from a uint32 word
+vec2 unpackBF16x2(uint packed) {
+    float lo = uintBitsToFloat((packed & 0xFFFFu) << 16);
+    float hi = uintBitsToFloat(packed & 0xFFFF0000u);
+    return vec2(lo, hi);
+}
+
+// BF16 utility: pack two float values into a uint32 as bfloat16 (round-to-nearest-even)
+uint packBF16x2(vec2 v) {
+    uint b0 = floatBitsToUint(v.x);
+    uint b1 = floatBitsToUint(v.y);
+    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
+    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
+    return bf0 | (bf1 << 16);
+}
+
+// Batch Normalization 2D Forward Pass for BFloat16
+// Input/output are packed BF16 (2 elements per 32-bit word)
+// Mean/var/gamma/beta are Float32 (channel-level statistics)
+// Computation done in float32 for numerical stability
+//
+// Each thread processes a pair of BF16 elements (one 32-bit word) to avoid
+// race conditions when writing packed data.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };       // Packed BF16 (N, C, H, W)
+layout(binding = 1) buffer Mean { float mean_data[]; };        // (C) - Float32
+layout(binding = 2) buffer Variance { float var_data[]; };     // (C) - Float32
+layout(binding = 3) buffer Gamma { float gamma_data[]; };      // (C) - Float32
+layout(binding = 4) buffer Beta { float beta_data[]; };        // (C) - Float32
+layout(binding = 5) buffer Output { uint output_data[]; };     // Packed BF16 (N, C, H, W)
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint batch;
+    uint channels;
+    uint spatial_size;
+    float eps;
+    uint has_affine;
+} params;
+
+// Unpack a 32-bit word containing two BF16 values
+vec2 unpackBF16Pair(uint packed) {
+    float lo = unpackBF16x2(packed).x;
+    float hi = unpackBF16x2(packed >> 16).x;
+    return vec2(lo, hi);
+}
+
+// Helper to pack two bfloat16 values (round-to-nearest-even)
+uint packBF16Pair(float v0, float v1) {
+    uint b0 = floatBitsToUint(v0);
+    uint b1 = floatBitsToUint(v1);
+    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
+    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
+    return bf0 | (bf1 << 16);
+}
+
+// Process a single element and return the result
+float processElement(uint flat_idx) {
+    // Decode to get channel
+    uint temp = flat_idx;
+    uint w = temp % params.spatial_size;
+    temp /= params.spatial_size;
+    uint c = temp % params.channels;
+
+    // Read the element
+    uint word_idx = flat_idx / 2;
+    uint half_idx = flat_idx % 2;
+    uint packed = input_data[word_idx];
+    float x = (half_idx == 0) ? unpackBF16x2(packed).x : unpackBF16x2(packed >> 16).x;
+
+    // Normalize
+    float mean = mean_data[c];
+    float variance = var_data[c];
+    float normalized = (x - mean) / sqrt(variance + params.eps);
+
+    // Apply affine if needed
+    float result = normalized;
+    if (params.has_affine != 0) {
+        result = normalized * gamma_data[c] + beta_data[c];
+    }
+
+    return result;
+}
+
+void main() {
+    // Each thread processes one 32-bit word (2 BF16 elements)
+    uint word_idx = gl_GlobalInvocationID.x;
+    uint num_words = (params.n_elements + 1) / 2;
+
+    if (word_idx >= num_words) return;
+
+    uint elem0 = word_idx * 2;
+    uint elem1 = word_idx * 2 + 1;
+
+    float result0 = 0.0;
+    float result1 = 0.0;
+
+    // Process first element (always valid if word is valid)
+    if (elem0 < params.n_elements) {
+        result0 = processElement(elem0);
+    }
+
+    // Process second element (may be padding if n_elements is odd)
+    if (elem1 < params.n_elements) {
+        result1 = processElement(elem1);
+    }
+
+    // Write both elements as a single word - no race condition
+    output_data[word_idx] = packBF16Pair(result0, result1);
+}

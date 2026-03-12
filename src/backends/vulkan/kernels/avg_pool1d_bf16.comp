@@ -1,0 +1,79 @@
+#version 450
+
+// Average Pooling 1D Forward Pass for BFloat16
+// Reads packed BF16 pairs, computes in float32 for stability
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };    // Packed BF16 (N, C, L)
+layout(binding = 1) buffer Output { uint output_data[]; };  // Packed BF16 (N, C, L_out)
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint batch;
+    uint channels;
+    uint in_length;
+    uint out_length;
+    uint kernel_size;
+    uint stride;
+    uint padding;
+    uint count_include_pad;
+} params;
+
+float readBF16Element(uint flat_idx) {
+    uint pair_idx = flat_idx / 2;
+    uint offset = flat_idx % 2;
+    uint packed = input_data[pair_idx];
+    uint bits = (packed >> (offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+void writeBF16Element(uint flat_idx, float val) {
+    uint word_idx = flat_idx / 2;
+    uint half_offset = (flat_idx % 2) * 16;
+    uint b = floatBitsToUint(val);
+    uint new_bits = (b + 0x7FFFu + ((b >> 16) & 1u)) >> 16;
+    uint mask = 0xFFFFu << half_offset;
+
+    uint old_word = output_data[word_idx];
+    for (int attempt = 0; attempt < 1024; ++attempt) {
+        uint new_word = (old_word & ~mask) | (new_bits << half_offset);
+        uint r = atomicCompSwap(output_data[word_idx], old_word, new_word);
+        if (r == old_word) return;
+        old_word = r;
+    }
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    uint temp = idx;
+    uint l_out = temp % params.out_length;
+    temp /= params.out_length;
+    uint c = temp % params.channels;
+    uint n = temp / params.channels;
+
+    int l_start = int(l_out * params.stride) - int(params.padding);
+
+    float sum = 0.0;
+    uint count = 0;
+
+    for (uint k = 0; k < params.kernel_size; k++) {
+        int l_in = l_start + int(k);
+        if (l_in >= 0 && l_in < int(params.in_length)) {
+            uint input_idx = n * params.channels * params.in_length +
+                            c * params.in_length + uint(l_in);
+            sum += float(readBF16Element(input_idx));
+            count++;
+        } else if (params.count_include_pad != 0) {
+            count++;
+        }
+    }
+
+    float result = 0.0;
+    if (count > 0) {
+        result = sum / float(count);
+    }
+
+    writeBF16Element(idx, float(result));
+}

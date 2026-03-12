@@ -1,0 +1,38 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_16bit_storage : require
+
+// Gather relative position bias for Swin Transformer attention (BFloat16)
+// table: [table_size*table_size, num_heads]
+// indices: [num_positions, num_positions] (int64_t)
+// output: [num_positions, num_positions, num_heads]
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Table { float table_data[]; };
+layout(binding = 1) buffer Indices { int64_t indices_data[]; };
+layout(binding = 2) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_positions;    // Number of positions per window dimension
+    uint num_heads;        // Number of attention heads
+    uint total_elements;   // Total output elements
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.total_elements) return;
+
+    // Decompose linear index to (i, j, h)
+    // output layout: [num_positions, num_positions, num_heads]
+    uint h = idx % params.num_heads;
+    uint j = (idx / params.num_heads) % params.num_positions;
+    uint i = idx / (params.num_heads * params.num_positions);
+
+    // Look up table index from indices
+    int64_t table_idx = indices_data[i * params.num_positions + j];
+
+    // Gather from table: table[table_idx, h]
+    output_data[idx] = table_data[uint(table_idx) * params.num_heads + h];
+}

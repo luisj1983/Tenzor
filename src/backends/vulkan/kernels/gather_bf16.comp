@@ -1,0 +1,90 @@
+#version 450
+
+// BF16 utility: unpack two bfloat16 values from a uint32 word
+vec2 unpackBF16x2(uint packed) {
+    float lo = uintBitsToFloat((packed & 0xFFFFu) << 16);
+    float hi = uintBitsToFloat(packed & 0xFFFF0000u);
+    return vec2(lo, hi);
+}
+
+// BF16 utility: pack two float values into a uint32 as bfloat16 (round-to-nearest-even)
+uint packBF16x2(vec2 v) {
+    uint b0 = floatBitsToUint(v.x);
+    uint b1 = floatBitsToUint(v.y);
+    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
+    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
+    return bf0 | (bf1 << 16);
+}
+
+// Gather operation for BFloat16: gather elements along specified dimension
+// BFloat16 elements are packed 2 per 32-bit word in uint buffers
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };    // Packed BF16 pairs
+layout(binding = 1) buffer Indices { int indices[]; };
+layout(binding = 2) buffer Output { uint output_data[]; };  // Packed BF16 pairs
+
+layout(push_constant) uniform PushConstants {
+    uint input_size;       // Total input size (in elements, not words)
+    uint output_size;      // Total output size (in elements)
+    uint dim;              // Dimension to gather along
+    uint dim_size;         // Size of the dimension being gathered
+    uint inner_size;       // Product of dimensions after dim
+    uint outer_size;       // Product of dimensions before dim
+} params;
+
+// Read a single BFloat16 element from packed uint32 array
+float readBF16(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint half_offset = (element_idx % 2) * 16;
+    uint bits = (input_data[word_idx] >> half_offset) & 0xFFFFu;
+    return unpackBF16x2(bits).x;
+}
+
+// Write a single BFloat16 element to packed uint32 output array using CAS loop
+// Two separate atomicAnd/atomicOr would race when multiple threads
+// write to the same word (OR of bits instead of last-writer-wins).
+void writeBF16(uint element_idx, float value) {
+    uint word_idx = element_idx / 2;
+    uint half_offset = (element_idx % 2) * 16;
+    uint new_bits = ((floatBitsToUint(value) + 0x7FFFu + ((floatBitsToUint(value) >> 16) & 1u)) >> 16);
+    uint mask = 0xFFFFu << half_offset;
+
+    uint old_word = output_data[word_idx];
+    for (int attempt = 0; attempt < 1024; ++attempt) {
+        uint new_word = (old_word & ~mask) | (new_bits << half_offset);
+        uint result = atomicCompSwap(output_data[word_idx], old_word, new_word);
+        if (result == old_word) return;
+        old_word = result;
+    }
+}
+
+void main() {
+    uint out_idx = gl_GlobalInvocationID.x;
+
+    if (out_idx >= params.output_size) {
+        return;
+    }
+
+    // Decompose output index
+    uint outer_idx = out_idx / (params.inner_size * params.dim_size);
+    uint remainder = out_idx % (params.inner_size * params.dim_size);
+    uint dim_idx = remainder / params.inner_size;
+    uint inner_idx = remainder % params.inner_size;
+
+    // Get the index to gather from
+    int gather_idx = indices[out_idx];
+
+    // Bounds check
+    if (gather_idx < 0 || gather_idx >= int(params.dim_size)) {
+        writeBF16(out_idx, 0.0);
+        return;
+    }
+
+    // Compute input index
+    uint in_idx = outer_idx * (params.dim_size * params.inner_size) +
+                  uint(gather_idx) * params.inner_size +
+                  inner_idx;
+
+    writeBF16(out_idx, readBF16(in_idx));
+}

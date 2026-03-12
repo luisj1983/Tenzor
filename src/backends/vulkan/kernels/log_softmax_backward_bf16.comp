@@ -1,0 +1,70 @@
+#version 450
+
+// Log softmax backward for BFloat16
+// grad_input = grad_output - exp(output) * sum(grad_output)
+// BFloat16 elements are packed 2 per 32-bit word
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { uint grad_output[]; };
+layout(binding = 1) buffer OutputBuffer { uint output_data[]; };  // log_softmax output
+layout(binding = 2) buffer GradInput { uint grad_input[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint outer_size;
+    uint dim_size;
+    uint inner_size;
+} params;
+
+// Read a single bfloat16 value from packed buffer
+float readBF16From(uint buf_id, uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed;
+    if (buf_id == 0) packed = grad_output[word_idx];
+    else packed = output_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+// Write a single bfloat16 value to grad_input buffer
+void writeBF16(uint element_idx, float value) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint bits = ((floatBitsToUint(value) + 0x7FFFu + ((floatBitsToUint(value) >> 16) & 1u)) >> 16);
+    if (word_offset == 0) {
+        uint existing = grad_input[word_idx] & 0xFFFF0000u;
+        grad_input[word_idx] = existing | bits;
+    } else {
+        uint existing = grad_input[word_idx] & 0x0000FFFFu;
+        grad_input[word_idx] = existing | (bits << 16);
+    }
+}
+
+void main() {
+    uint global_idx = gl_GlobalInvocationID.x;
+    uint total_threads = params.outer_size * params.inner_size;
+
+    if (global_idx >= total_threads) {
+        return;
+    }
+
+    uint outer_idx = global_idx / params.inner_size;
+    uint inner_idx = global_idx % params.inner_size;
+    uint offset = (outer_idx * params.dim_size * params.inner_size) + inner_idx;
+
+    // Compute sum of gradients along dimension
+    float sum_grad = 0.0;
+    for (uint d = 0; d < params.dim_size; ++d) {
+        uint idx = offset + d * params.inner_size;
+        sum_grad += readBF16From(0, idx);
+    }
+
+    // Compute gradient: grad_output - exp(log_softmax) * sum_grad
+    for (uint d = 0; d < params.dim_size; ++d) {
+        uint idx = offset + d * params.inner_size;
+        float go = readBF16From(0, idx);
+        float out_val = readBF16From(1, idx);
+        float result = go - exp(out_val) * sum_grad;
+        writeBF16(idx, result);
+    }
+}

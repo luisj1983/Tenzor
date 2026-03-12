@@ -1,0 +1,46 @@
+#version 450
+
+// BF16 utility: unpack two bfloat16 values from a uint32 word
+vec2 unpackBF16x2(uint packed) {
+    float lo = uintBitsToFloat((packed & 0xFFFFu) << 16);
+    float hi = uintBitsToFloat(packed & 0xFFFF0000u);
+    return vec2(lo, hi);
+}
+
+// BF16 utility: pack two float values into a uint32 as bfloat16 (round-to-nearest-even)
+uint packBF16x2(vec2 v) {
+    uint b0 = floatBitsToUint(v.x);
+    uint b1 = floatBitsToUint(v.y);
+    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
+    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
+    return bf0 | (bf1 << 16);
+}
+
+// Complex-to-Real IFFT: Unpack N/2 complex values back to N real values — BFloat16
+// After N/2-point inverse FFT, extract interleaved real parts
+// Input:  N/2 complex bfloat16 (1 uint32 per complex element)
+// Output: N real bfloat16 values in packed uint32 buffer (2 reals per word)
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { uint data_in[];  };  // N/2 complex
+layout(set = 0, binding = 1) buffer OutputBuf { uint data_out[]; };  // N real (packed)
+
+layout(push_constant) uniform PushConstants {
+    uint n;            // Original real FFT size (N)
+    uint batch_offset; // Offset in real elements for output
+};
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint half_n = n / 2;
+    if (tid >= half_n) return;
+
+    // Complex element k holds (real[2k], real[2k+1])
+    vec2 complex_val = unpackBF16x2(data_in[tid]);
+
+    // Write two real values to output as one packed uint32
+    // real[2k] = complex_val.x, real[2k+1] = complex_val.y
+    uint dst_word = (batch_offset / 2) + tid;
+    data_out[dst_word] = packBF16x2(complex_val);
+}

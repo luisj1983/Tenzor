@@ -1,0 +1,58 @@
+#version 450
+
+// Swish backward pass for BFloat16
+// grad_input = grad_output * swish'(x)
+// where swish(x) = x * sigmoid(x)
+// and swish'(x) = sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x))
+// BF16 packed buffers (2 BFloat16 per uint32), all arithmetic in float32
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { uint grad_output[]; };
+layout(binding = 1) buffer InputData { uint input_data[]; };
+layout(binding = 2) buffer GradInput { uint grad_input[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;  // Number of elements
+} params;
+
+void main() {
+    // Process 2 elements per thread (packed BF16 pair)
+    uint pair_idx = gl_GlobalInvocationID.x;
+    uint idx0 = pair_idx * 2;
+    uint idx1 = pair_idx * 2 + 1;
+
+    if (idx0 >= params.n) return;
+
+    // Read packed inputs
+    uint packed_grad = grad_output[pair_idx];
+    uint packed_input = input_data[pair_idx];
+
+    // Unpack first element
+    uint g_bits0 = packed_grad & 0xFFFFu;
+    uint x_bits0 = packed_input & 0xFFFFu;
+    float g_out0 = uintBitsToFloat(g_bits0 << 16);
+    float x0 = uintBitsToFloat(x_bits0 << 16);
+
+    // Compute swish derivative for element 0
+    float sigmoid_x0 = 1.0 / (1.0 + exp(-x0));
+    float swish_deriv0 = sigmoid_x0 + x0 * sigmoid_x0 * (1.0 - sigmoid_x0);
+    float result0 = g_out0 * swish_deriv0;
+
+    // Unpack and compute second element
+    float result1 = 0.0;
+    if (idx1 < params.n) {
+        uint g_bits1 = (packed_grad >> 16) & 0xFFFFu;
+        uint x_bits1 = (packed_input >> 16) & 0xFFFFu;
+        float g_out1 = uintBitsToFloat(g_bits1 << 16);
+        float x1 = uintBitsToFloat(x_bits1 << 16);
+
+        float sigmoid_x1 = 1.0 / (1.0 + exp(-x1));
+        float swish_deriv1 = sigmoid_x1 + x1 * sigmoid_x1 * (1.0 - sigmoid_x1);
+        result1 = g_out1 * swish_deriv1;
+    }
+
+    // Pack and write output
+    uint out_bits0 = ((floatBitsToUint(result0) + 0x7FFFu + ((floatBitsToUint(result0) >> 16) & 1u)) >> 16);
+    uint out_bits1 = ((floatBitsToUint(result1) + 0x7FFFu + ((floatBitsToUint(result1) >> 16) & 1u)) >> 16);
+    grad_input[pair_idx] = out_bits0 | (out_bits1 << 16);
+}

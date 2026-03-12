@@ -1,0 +1,52 @@
+#version 450
+
+// Clamp operation for BFloat16: clamp values to [min, max] range
+// BFloat16 elements are packed 2 per uint32
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };
+layout(binding = 1) buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;    // Number of elements (in bfloat16 count)
+    float min_value;    // Minimum value (as float, cast to bf16 in shader)
+    float max_value;    // Maximum value (as float, cast to bf16 in shader)
+} params;
+
+// Helper to read bfloat16 from packed buffer
+float readBF16(uint packed, uint offset) {
+    uint bits = (packed >> (offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+// Helper to pack two bfloat16 values (round-to-nearest-even)
+uint packBF16Pair(float v0, float v1) {
+    uint b0 = floatBitsToUint(v0);
+    uint b1 = floatBitsToUint(v1);
+    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
+    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
+    return bf0 | (bf1 << 16);
+}
+
+void main() {
+    uint pair_idx = gl_GlobalInvocationID.x;
+    uint idx0 = pair_idx * 2;
+    uint idx1 = pair_idx * 2 + 1;
+
+    if (idx0 >= params.n_elements) return;
+
+    uint packed = input_data[pair_idx];
+    float val0 = float(readBF16(packed, 0));
+    float val1 = float(readBF16(packed, 1));
+
+    // Clamp in float32 for precision, then convert back
+    val0 = max(params.min_value, min(params.max_value, val0));
+    val1 = max(params.min_value, min(params.max_value, val1));
+
+    // Handle odd number of elements
+    if (idx1 >= params.n_elements) {
+        val1 = 0.0;
+    }
+
+    output_data[pair_idx] = packBF16Pair(float(val0), float(val1));
+}

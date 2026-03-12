@@ -1,0 +1,129 @@
+#version 450
+
+// BF16 utility: unpack two bfloat16 values from a uint32 word
+vec2 unpackBF16x2(uint packed) {
+    float lo = uintBitsToFloat((packed & 0xFFFFu) << 16);
+    float hi = uintBitsToFloat(packed & 0xFFFF0000u);
+    return vec2(lo, hi);
+}
+
+// BF16 utility: pack two float values into a uint32 as bfloat16 (round-to-nearest-even)
+uint packBF16x2(vec2 v) {
+    uint b0 = floatBitsToUint(v.x);
+    uint b1 = floatBitsToUint(v.y);
+    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
+    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
+    return bf0 | (bf1 << 16);
+}
+
+// Instance Normalization for BFloat16
+// Input/output are packed BF16 (2 elements per 32-bit word)
+// Weight/bias/mean/var are Float32 (channel-level statistics)
+// One workgroup per (N, C) pair
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer Input { uint input_data[]; };       // Packed BF16
+layout(binding = 1) buffer Output { uint output_data[]; };     // Packed BF16
+layout(binding = 2) buffer Weight { float weight_data[]; };    // Float32
+layout(binding = 3) buffer Bias { float bias_data[]; };        // Float32
+layout(binding = 4) buffer Mean { float mean_data[]; };        // Float32
+layout(binding = 5) buffer Var { float var_data[]; };          // Float32
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint channels;
+    uint spatial_size;
+    float epsilon;
+    uint affine;
+} params;
+
+shared float shared_sum[WORKGROUP_SIZE];
+shared float shared_sum_sq[WORKGROUP_SIZE];
+
+float readBF16(uint flat_idx) {
+    uint word_idx = flat_idx / 2;
+    uint half_idx = flat_idx % 2;
+    uint packed = input_data[word_idx];
+    return (half_idx == 0) ? unpackBF16x2(packed).x : unpackBF16x2(packed >> 16).x;
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint nc_idx = gl_WorkGroupID.x;
+
+    uint total_nc = params.batch_size * params.channels;
+    if (nc_idx >= total_nc) return;
+
+    uint c = nc_idx % params.channels;
+    uint base = nc_idx * params.spatial_size;
+
+    // Step 1: Compute mean
+    float local_sum = 0.0;
+    for (uint i = tid; i < params.spatial_size; i += WORKGROUP_SIZE) {
+        local_sum += readBF16(base + i);
+    }
+    shared_sum[tid] = local_sum;
+    barrier();
+
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) shared_sum[tid] += shared_sum[tid + s];
+        barrier();
+    }
+
+    float mean = shared_sum[0] / float(params.spatial_size);
+    barrier();
+
+    // Step 2: Compute variance
+    float local_sum_sq = 0.0;
+    for (uint i = tid; i < params.spatial_size; i += WORKGROUP_SIZE) {
+        float diff = readBF16(base + i) - mean;
+        local_sum_sq += diff * diff;
+    }
+    shared_sum_sq[tid] = local_sum_sq;
+    barrier();
+
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) shared_sum_sq[tid] += shared_sum_sq[tid + s];
+        barrier();
+    }
+
+    float variance = shared_sum_sq[0] / float(params.spatial_size);
+    float inv_std = 1.0 / sqrt(variance + params.epsilon);
+
+    if (tid == 0) {
+        mean_data[nc_idx] = mean;
+        var_data[nc_idx] = inv_std;
+    }
+    barrier();
+
+    // Step 3: Normalize and write pairs
+    uint num_words = (params.spatial_size + 1) / 2;
+    for (uint w = tid; w < num_words; w += WORKGROUP_SIZE) {
+        uint elem0 = w * 2;
+        uint elem1 = w * 2 + 1;
+
+        float r0 = 0.0, r1 = 0.0;
+
+        if (elem0 < params.spatial_size) {
+            float normalized = (readBF16(base + elem0) - mean) * inv_std;
+            if (params.affine > 0) {
+                normalized = normalized * weight_data[c] + bias_data[c];
+            }
+            r0 = normalized;
+        }
+
+        if (elem1 < params.spatial_size) {
+            float normalized = (readBF16(base + elem1) - mean) * inv_std;
+            if (params.affine > 0) {
+                normalized = normalized * weight_data[c] + bias_data[c];
+            }
+            r1 = normalized;
+        }
+
+        uint out_word_idx = (base + elem0) / 2;
+        uint bits0 = ((floatBitsToUint(r0) + 0x7FFFu + ((floatBitsToUint(r0) >> 16) & 1u)) >> 16);
+        uint bits1 = ((floatBitsToUint(r1) + 0x7FFFu + ((floatBitsToUint(r1) >> 16) & 1u)) >> 16);
+        output_data[out_word_idx] = bits0 | (bits1 << 16);
+    }
+}

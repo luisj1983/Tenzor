@@ -1,0 +1,36 @@
+#version 450
+
+// Cast BFloat16 to Float32
+// BF16 stored as packed pairs in uint32: lower 16 bits = elem0, upper 16 bits = elem1
+// BF16 -> F32: left-shift by 16 (BF16 is upper 16 bits of IEEE 754 float)
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuffer {
+    uint data[];  // packed bf16 pairs
+} input_buf;
+
+layout(set = 0, binding = 1) writeonly buffer OutputBuffer {
+    float data[];
+} output_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+} pc;
+
+void main() {
+    uint pair_idx = gl_GlobalInvocationID.x;
+    uint elem_idx = pair_idx * 2;
+
+    if (elem_idx >= pc.num_elements) return;
+
+    uint packed = input_buf.data[pair_idx];
+
+    // Extract lower BF16 and convert to F32 by left-shifting
+    uint bf16_low = packed & 0xFFFFu;
+    output_buf.data[elem_idx] = uintBitsToFloat(bf16_low << 16);
+
+    if (elem_idx + 1 < pc.num_elements) {
+        uint bf16_high = (packed >> 16) & 0xFFFFu;
+        output_buf.data[elem_idx + 1] = uintBitsToFloat(bf16_high << 16);
+    }
+}

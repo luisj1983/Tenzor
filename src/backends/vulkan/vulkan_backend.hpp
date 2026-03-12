@@ -612,11 +612,20 @@ public:
                               bool conjugate) -> void;
     auto dispatchFFTBluestein(const Tensor& input, int64_t signal_len,
                                uint32_t direction) -> Tensor;
+    auto runMixedRadixFFT(const Tensor& input, int64_t N, uint32_t direction,
+                           uint32_t batch_offset) -> Tensor;
+
+    // Radix sort for large arrays (> 65K elements)
+    auto dispatchRadixSort(const Tensor& input, bool descending) -> std::pair<Tensor, Tensor>;
 
     // Linear algebra operations (native Vulkan shaders for small matrices, CPU fallback for large)
     auto dispatchLinalgDet(const Tensor& input) -> Tensor;
     auto dispatchLinalgInv(const Tensor& input) -> Tensor;
     auto dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Tensor;
+    auto dispatchLinalgCholesky(const Tensor& input, bool upper) -> Tensor;
+    auto dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor>;
+    auto dispatchLinalgSVD(const Tensor& input, bool full_matrices) -> std::vector<Tensor>;
+    auto dispatchLinalgEigh(const Tensor& input) -> std::vector<Tensor>;
 
     // SearchSorted (native GPU binary search shader)
     auto dispatchSearchSorted(const Tensor& sorted, const Tensor& values) -> Tensor;

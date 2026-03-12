@@ -1,0 +1,96 @@
+#version 450
+
+// Activation functions for BFloat16: ReLU, Sigmoid, Tanh, GELU, LeakyReLU, Swish
+// BFloat16 elements are packed 2 per 32-bit word
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };
+layout(binding = 1) buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of elements
+    uint activation; // 0=ReLU, 1=Sigmoid, 2=Tanh, 3=GELU, 4=LeakyReLU, 5=Swish
+    float alpha;     // Parameter for LeakyReLU
+} params;
+
+const float PI = 3.14159265359;
+
+// Helper to read bfloat16 from input
+float readBF16(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = input_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return float(uintBitsToFloat(bits << 16));
+}
+
+// Helper to pack two bfloat16 values (round-to-nearest-even)
+uint packBF16Pair(float v0, float v1) {
+    uint b0 = floatBitsToUint(v0);
+    uint b1 = floatBitsToUint(v1);
+    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
+    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
+    return bf0 | (bf1 << 16);
+}
+
+float relu(float x) {
+    return max(0.0, x);
+}
+
+float sigmoid(float x) {
+    return 1.0 / (1.0 + exp(-x));
+}
+
+float gelu(float x) {
+    // Approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+    float cdf = 0.5 * (1.0 + tanh(sqrt(2.0 / PI) * (x + 0.044715 * x * x * x)));
+    return x * cdf;
+}
+
+float leaky_relu(float x, float alpha) {
+    return x > 0.0 ? x : alpha * x;
+}
+
+float swish(float x) {
+    // Swish/SiLU: x * sigmoid(x) = x / (1 + exp(-x))
+    return x / (1.0 + exp(-x));
+}
+
+float apply_activation(float x) {
+    switch (params.activation) {
+        case 0: return relu(x);
+        case 1: return sigmoid(x);
+        case 2: return tanh(x);
+        case 3: return gelu(x);
+        case 4: return leaky_relu(x, params.alpha);
+        case 5: return swish(x);
+        default: return x;
+    }
+}
+
+void main() {
+    // Process 2 elements per thread (since bfloat16 is packed 2 per uint32)
+    uint pair_idx = gl_GlobalInvocationID.x;
+    uint idx0 = pair_idx * 2;
+    uint idx1 = pair_idx * 2 + 1;
+
+    if (idx0 >= params.n) {
+        return;
+    }
+
+    // Read packed input
+    uint packed_input = input_data[pair_idx];
+
+    // Unpack and convert to float for computation
+    uint bits0 = packed_input & 0xFFFFu;
+    uint bits1 = (packed_input >> 16) & 0xFFFFu;
+    float x0 = uintBitsToFloat(bits0 << 16);
+    float x1 = uintBitsToFloat(bits1 << 16);
+
+    // Apply activation
+    float result0 = apply_activation(x0);
+    float result1 = (idx1 < params.n) ? apply_activation(x1) : 0.0;
+
+    // Pack and write output
+    output_data[pair_idx] = packBF16Pair(float(result0), float(result1));
+}

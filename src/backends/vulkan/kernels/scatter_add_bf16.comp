@@ -1,0 +1,80 @@
+#version 450
+
+// BF16 utility: unpack two bfloat16 values from a uint32 word
+vec2 unpackBF16x2(uint packed) {
+    float lo = uintBitsToFloat((packed & 0xFFFFu) << 16);
+    float hi = uintBitsToFloat(packed & 0xFFFF0000u);
+    return vec2(lo, hi);
+}
+
+// BF16 utility: pack two float values into a uint32 as bfloat16 (round-to-nearest-even)
+uint packBF16x2(vec2 v) {
+    uint b0 = floatBitsToUint(v.x);
+    uint b1 = floatBitsToUint(v.y);
+    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
+    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
+    return bf0 | (bf1 << 16);
+}
+
+// ScatterAdd for BFloat16: atomically accumulates source values into output along a dimension.
+// BFloat16 elements are packed 2 per 32-bit word in uint buffers.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Src { uint src_data[]; };     // Packed BF16 pairs (source)
+layout(binding = 1) buffer Index { int idx_data[]; };     // Index tensor
+layout(binding = 2) buffer Output { uint out_data[]; };   // Packed BF16 pairs (output, uint for CAS)
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint dim_size;
+    uint inner_size;
+    uint src_dim_size;
+} params;
+
+// Helper to read bfloat16 from packed buffer
+float readBF16(uint packed, uint offset) {
+    uint bits = (packed >> (offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+// Atomic add for BFloat16 using CAS loop on the uint32 word
+void atomicAddBF16(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_offset = (element_idx % 2) * 16;
+
+    uint old_word = out_data[word_idx];
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        uint old_bits = (old_word >> half_offset) & 0xFFFFu;
+        float old_val = unpackBF16x2(old_bits).x;
+        float new_val = old_val + val;
+        uint new_bits = ((floatBitsToUint(new_val) + 0x7FFFu + ((floatBitsToUint(new_val) >> 16) & 1u)) >> 16);
+
+        uint new_word = (old_word & ~(0xFFFFu << half_offset)) | (new_bits << half_offset);
+        uint result = atomicCompSwap(out_data[word_idx], old_word, new_word);
+        if (result == old_word) return;
+        old_word = result;
+    }
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= params.n) return;
+
+    uint inner_idx = i % params.inner_size;
+    uint outer_idx = i / (params.inner_size * params.src_dim_size);
+
+    int dest_dim_idx = idx_data[i];
+    if (dest_dim_idx < 0 || dest_dim_idx >= int(params.dim_size)) return;
+
+    uint out_idx = outer_idx * (params.dim_size * params.inner_size) +
+                   uint(dest_dim_idx) * params.inner_size +
+                   inner_idx;
+
+    // Read source value
+    uint src_word_idx = i / 2;
+    uint src_half_offset = (i % 2) * 16;
+    uint src_bits = (src_data[src_word_idx] >> src_half_offset) & 0xFFFFu;
+    float value = unpackBF16x2(src_bits).x;
+
+    atomicAddBF16(out_idx, value);
+}

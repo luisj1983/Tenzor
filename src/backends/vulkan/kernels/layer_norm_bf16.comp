@@ -1,0 +1,127 @@
+#version 450
+
+// Layer Normalization for BFloat16
+// BFloat16 elements are packed 2 per 32-bit word
+// Uses paired writes to avoid race conditions
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer Input { uint input_data[]; };
+layout(binding = 1) buffer Output { uint output_data[]; };
+layout(binding = 2) buffer Gamma { uint gamma_data[]; };    // Optional affine parameter (packed bf16)
+layout(binding = 3) buffer Beta { uint beta_data[]; };      // Optional affine parameter (packed bf16)
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint normalized_shape;  // Size of dimensions to normalize over
+    float epsilon;
+    uint affine;           // 0=no affine, 1=with affine
+} params;
+
+shared float shared_sum[WORKGROUP_SIZE];
+shared float shared_sum_sq[WORKGROUP_SIZE];
+
+float readBF16(uint buffer_idx, uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed;
+    if (buffer_idx == 0) {
+        packed = input_data[word_idx];
+    } else if (buffer_idx == 2) {
+        packed = gamma_data[word_idx];
+    } else {
+        packed = beta_data[word_idx];
+    }
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+// Helper to pack two bfloat16 values (round-to-nearest-even)
+uint packBF16Pair(float v0, float v1) {
+    uint b0 = floatBitsToUint(v0);
+    uint b1 = floatBitsToUint(v1);
+    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
+    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
+    return bf0 | (bf1 << 16);
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint batch_idx = gl_WorkGroupID.x;
+
+    if (batch_idx >= params.batch_size) {
+        return;
+    }
+
+    uint base_idx = batch_idx * params.normalized_shape;
+
+    // Step 1: Compute mean (use float for accumulation)
+    float local_sum = 0.0;
+    for (uint i = tid; i < params.normalized_shape; i += WORKGROUP_SIZE) {
+        local_sum += readBF16(0, base_idx + i);
+    }
+    shared_sum[tid] = local_sum;
+    barrier();
+
+    // Parallel reduction for sum
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_sum[tid] += shared_sum[tid + s];
+        }
+        barrier();
+    }
+
+    float mean = shared_sum[0] / float(params.normalized_shape);
+    barrier();
+
+    // Step 2: Compute variance
+    float local_sum_sq = 0.0;
+    for (uint i = tid; i < params.normalized_shape; i += WORKGROUP_SIZE) {
+        float val = readBF16(0, base_idx + i);
+        float diff = val - mean;
+        local_sum_sq += diff * diff;
+    }
+    shared_sum_sq[tid] = local_sum_sq;
+    barrier();
+
+    // Parallel reduction for sum of squares
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_sum_sq[tid] += shared_sum_sq[tid + s];
+        }
+        barrier();
+    }
+
+    float variance = shared_sum_sq[0] / float(params.normalized_shape);
+    float inv_std = 1.0 / sqrt(variance + params.epsilon);
+    barrier();
+
+    // Step 3: Normalize and write output per-element
+    // Use atomicCompSwap to handle non-word-aligned batch boundaries
+    // (when normalized_shape is odd, base_idx can be odd for some batches)
+    for (uint i = tid; i < params.normalized_shape; i += WORKGROUP_SIZE) {
+        float input_val = readBF16(0, base_idx + i);
+        float val = (input_val - mean) * inv_std;
+        if (params.affine > 0) {
+            float gamma = readBF16(2, i);
+            float beta = readBF16(3, i);
+            val = val * gamma + beta;
+        }
+
+        // Write using atomic CAS to safely handle packed BF16 words
+        uint global_idx = base_idx + i;
+        uint word_idx = global_idx / 2;
+        uint half_idx = global_idx % 2;
+        uint bits = ((floatBitsToUint(val) + 0x7FFFu + ((floatBitsToUint(val) >> 16) & 1u)) >> 16);
+        uint shift = half_idx * 16;
+        uint mask = 0xFFFFu << shift;
+
+        uint old_val = output_data[word_idx];
+        uint new_val, expected;
+        do {
+            expected = old_val;
+            new_val = (expected & ~mask) | (bits << shift);
+            old_val = atomicCompSwap(output_data[word_idx], expected, new_val);
+        } while (old_val != expected);
+    }
+}

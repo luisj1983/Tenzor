@@ -1,0 +1,103 @@
+#version 450
+
+// Symmetric eigenvalue decomposition (Jacobi method) for small matrices (<= 32x32)
+// Output: eigenvalues (binding 1), eigenvectors (binding 2)
+
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) buffer InputBuf { float data_in[];   };
+layout(set = 0, binding = 1) buffer WBuf     { float data_w[];    };  // eigenvalues
+layout(set = 0, binding = 2) buffer VBuf     { float data_v[];    };  // eigenvectors
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint batch;
+};
+
+shared float D[32][32];
+shared float V[32][32];
+shared float converged;
+
+void main() {
+    uint batch_idx = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (batch_idx >= batch) return;
+
+    uint mat_offset = batch_idx * n * n;
+
+    // Load D = A (symmetric)
+    for (uint row = 0; row < n; row++) {
+        if (tid < n) {
+            D[row][tid] = data_in[mat_offset + row * n + tid];
+        }
+        // V = I
+        if (tid < n) {
+            V[row][tid] = (row == tid) ? 1.0 : 0.0;
+        }
+    }
+    barrier();
+
+    // Jacobi sweeps
+    for (uint sweep = 0; sweep < 30; sweep++) {
+        if (tid == 0) converged = 1.0;
+        barrier();
+
+        for (uint p = 0; p < n; p++) {
+            for (uint q = p + 1; q < n; q++) {
+                if (tid == 0) {
+                    float app = D[p][p], aqq = D[q][q], apq = D[p][q];
+
+                    if (abs(apq) > 1e-10 * sqrt(abs(app * aqq))) {
+                        converged = 0.0;
+
+                        float tau_val = (aqq - app) / (2.0 * apq);
+                        float t = sign(tau_val) / (abs(tau_val) + sqrt(1.0 + tau_val * tau_val));
+                        float c = 1.0 / sqrt(1.0 + t * t);
+                        float s = t * c;
+
+                        // Apply Givens rotation: D = G^T D G
+                        // Update rows/cols p and q of D
+                        for (uint i = 0; i < n; i++) {
+                            if (i != p && i != q) {
+                                float dip = D[i][p], diq = D[i][q];
+                                D[i][p] = c * dip - s * diq;
+                                D[p][i] = D[i][p];
+                                D[i][q] = s * dip + c * diq;
+                                D[q][i] = D[i][q];
+                            }
+                        }
+
+                        float new_pp = c*c*app - 2.0*s*c*apq + s*s*aqq;
+                        float new_qq = s*s*app + 2.0*s*c*apq + c*c*aqq;
+                        D[p][p] = new_pp;
+                        D[q][q] = new_qq;
+                        D[p][q] = 0.0;
+                        D[q][p] = 0.0;
+
+                        // Update eigenvector matrix V
+                        for (uint i = 0; i < n; i++) {
+                            float vip = V[i][p], viq = V[i][q];
+                            V[i][p] = c * vip - s * viq;
+                            V[i][q] = s * vip + c * viq;
+                        }
+                    }
+                }
+                barrier();
+            }
+        }
+
+        if (converged > 0.5) break;
+        barrier();
+    }
+
+    // Write eigenvalues (diagonal of D) and eigenvectors (columns of V)
+    if (tid < n) {
+        data_w[batch_idx * n + tid] = D[tid][tid];
+    }
+
+    for (uint row = 0; row < n; row++) {
+        if (tid < n) {
+            data_v[mat_offset + row * n + tid] = V[row][tid];
+        }
+    }
+}

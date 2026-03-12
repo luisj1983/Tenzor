@@ -155,6 +155,7 @@ set(ONEAPI_SYCL_SOURCES
     kernels/rnn.cpp
     kernels/linalg.cpp
     kernels/fft.cpp
+    kernels/sparse.cpp
 )
 
 set(ALL_OBJECTS "")

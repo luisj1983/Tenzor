@@ -1,0 +1,109 @@
+#version 450
+
+// QR decomposition for small matrices (<= 32x32)
+// Householder reflections, column by column
+// Output: Q (binding 1), R (binding 2)
+
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { float data_in[];  };
+layout(set = 0, binding = 1) buffer QBuf      { float data_q[];   };
+layout(set = 0, binding = 2) buffer RBuf      { float data_r[];   };
+
+layout(push_constant) uniform PushConstants {
+    uint m;      // rows
+    uint n_cols; // columns
+    uint batch;
+};
+
+shared float R[32][32];
+shared float Q[32][32];
+shared float v[32];
+shared float norm_val;
+shared float tau;
+
+void main() {
+    uint batch_idx = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (batch_idx >= batch) return;
+
+    uint mat_offset = batch_idx * m * n_cols;
+
+    // Load R = A, Q = I
+    for (uint row = 0; row < m; row++) {
+        if (tid < n_cols) {
+            R[row][tid] = data_in[mat_offset + row * n_cols + tid];
+        }
+        // Initialize Q as identity
+        if (tid < m) {
+            Q[row][tid] = (row == tid) ? 1.0 : 0.0;
+        }
+    }
+    barrier();
+
+    uint min_mn = min(m, n_cols);
+
+    for (uint col = 0; col < min_mn; col++) {
+        // Thread 0: compute Householder vector from column below diagonal
+        if (tid == 0) {
+            float sigma = 0.0;
+            for (uint i = col; i < m; i++) {
+                v[i] = R[i][col];
+                sigma += v[i] * v[i];
+            }
+            float norm = sqrt(sigma);
+            float sign_val = (v[col] >= 0.0) ? 1.0 : -1.0;
+            v[col] += sign_val * norm;
+
+            // Recompute norm of v
+            float v_norm_sq = 0.0;
+            for (uint i = col; i < m; i++) {
+                v_norm_sq += v[i] * v[i];
+            }
+            norm_val = v_norm_sq;
+            tau = (v_norm_sq > 1e-30) ? 2.0 / v_norm_sq : 0.0;
+        }
+        barrier();
+
+        if (norm_val < 1e-30) {
+            barrier();
+            continue;
+        }
+
+        // Apply H = I - tau * v * v^T to R columns
+        if (tid < n_cols && tid >= col) {
+            float dot = 0.0;
+            for (uint i = col; i < m; i++) {
+                dot += v[i] * R[i][tid];
+            }
+            dot *= tau;
+            for (uint i = col; i < m; i++) {
+                R[i][tid] -= dot * v[i];
+            }
+        }
+        barrier();
+
+        // Apply H to Q columns: Q = Q * H
+        if (tid < m) {
+            float dot = 0.0;
+            for (uint i = col; i < m; i++) {
+                dot += Q[tid][i] * v[i];
+            }
+            dot *= tau;
+            for (uint i = col; i < m; i++) {
+                Q[tid][i] -= dot * v[i];
+            }
+        }
+        barrier();
+    }
+
+    // Write Q and R
+    for (uint row = 0; row < m; row++) {
+        if (tid < m) {
+            data_q[mat_offset + row * m + tid] = Q[row][tid];
+        }
+        if (tid < n_cols) {
+            data_r[mat_offset + row * n_cols + tid] = R[row][tid];
+        }
+    }
+}

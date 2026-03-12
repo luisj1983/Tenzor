@@ -1,0 +1,43 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer KeysIn   { int keys_in[];   };
+layout(set = 0, binding = 1) readonly buffer IdxIn    { int idx_in[];    };
+layout(set = 0, binding = 2) buffer KeysOut            { int keys_out[];  };
+layout(set = 0, binding = 3) buffer IdxOut             { int idx_out[];   };
+layout(set = 0, binding = 4) buffer Histograms         { uint histos[];   };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint digit;
+    uint n_wgs;
+};
+
+shared uint local_offsets[256];
+
+uint int32_to_sortable(int val) {
+    return uint(val) ^ 0x80000000u;
+}
+
+void main() {
+    uint lid = gl_LocalInvocationID.x;
+    uint wg_id = gl_WorkGroupID.x;
+
+    if (lid < 256) {
+        local_offsets[lid] = histos[lid * n_wgs + wg_id];
+    }
+    barrier();
+
+    uint tile_size = (n + n_wgs - 1) / n_wgs;
+    uint tile_start = wg_id * tile_size;
+    uint tile_end = min(tile_start + tile_size, n);
+
+    for (uint i = tile_start + lid; i < tile_end; i += 256) {
+        uint sortable = int32_to_sortable(keys_in[i]);
+        uint digit_val = (sortable >> (digit * 8)) & 0xFFu;
+        uint dest = atomicAdd(local_offsets[digit_val], 1);
+        keys_out[dest] = keys_in[i];
+        idx_out[dest] = idx_in[i];
+    }
+}

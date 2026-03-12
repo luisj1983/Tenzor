@@ -1,0 +1,124 @@
+#version 450
+
+// Broadcasting-aware binary operations for Vulkan with BFloat16 support
+// Supports NumPy-style broadcasting rules
+// BFloat16 elements are packed 2 per 32-bit word
+layout(local_size_x_id = 0) in;
+
+// For BFloat16, we use uint buffers and pack/unpack manually
+layout(binding = 0) buffer InputA { uint a[]; };
+layout(binding = 1) buffer InputB { uint b[]; };
+layout(binding = 2) buffer Output { uint result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint output_size;      // Total number of output elements
+    uint op;               // Operation: 0=add, 1=sub, 2=mul, 3=div
+    uint dtype;            // Data type (unused in this shader)
+    uint ndim_a;           // Number of dimensions in tensor A
+    uint ndim_b;           // Number of dimensions in tensor B
+    uint ndim_out;         // Number of dimensions in output
+    // Strides for tensor A (up to 8 dimensions)
+    uint strides_a[8];
+    // Strides for tensor B (up to 8 dimensions)
+    uint strides_b[8];
+    // Output shape (up to 8 dimensions)
+    uint shape_out[8];
+} params;
+
+// Helper functions to pack/unpack bfloat16 from uint
+float unpackBFloat16(uint packed, uint offset) {
+    uint bits = (packed >> (offset * 16)) & 0xFFFFu;
+    return float(uintBitsToFloat(bits << 16));
+}
+
+uint packBFloat16Pair(float v0, float v1) {
+    uint bits0 = ((floatBitsToUint(float(v0)) + 0x7FFFu + ((floatBitsToUint(float(v0)) >> 16) & 1u)) >> 16);
+    uint bits1 = ((floatBitsToUint(float(v1)) + 0x7FFFu + ((floatBitsToUint(float(v1)) >> 16) & 1u)) >> 16);
+    return bits0 | (bits1 << 16);
+}
+
+// Read bfloat16 at element index from input A
+float readA(uint idx) {
+    uint word_idx = idx / 2;
+    uint word_offset = idx % 2;
+    return unpackBFloat16(a[word_idx], word_offset);
+}
+
+// Read bfloat16 at element index from input B
+float readB(uint idx) {
+    uint word_idx = idx / 2;
+    uint word_offset = idx % 2;
+    return unpackBFloat16(b[word_idx], word_offset);
+}
+
+// Compute input index from output index using broadcasting strides
+uint computeInputIdxA(uint out_idx) {
+    uint idx = 0;
+    uint tmp = out_idx;
+    for (uint i = 0; i < params.ndim_out; i++) {
+        uint dim_idx = params.ndim_out - 1 - i;
+        uint coord = tmp % params.shape_out[dim_idx];
+        tmp /= params.shape_out[dim_idx];
+        idx += coord * params.strides_a[dim_idx];
+    }
+    return idx;
+}
+
+uint computeInputIdxB(uint out_idx) {
+    uint idx = 0;
+    uint tmp = out_idx;
+    for (uint i = 0; i < params.ndim_out; i++) {
+        uint dim_idx = params.ndim_out - 1 - i;
+        uint coord = tmp % params.shape_out[dim_idx];
+        tmp /= params.shape_out[dim_idx];
+        idx += coord * params.strides_b[dim_idx];
+    }
+    return idx;
+}
+
+// Compute in float32 to avoid overflow in bfloat16 range (±65504).
+// This matches the CPU backend which upcasts BF16→F32 before computing.
+float compute_op(float val_a, float val_b) {
+    float fa = float(val_a);
+    float fb = float(val_b);
+    float res;
+    switch (params.op) {
+        case 0: res = fa + fb; break;
+        case 1: res = fa - fb; break;
+        case 2: res = fa * fb; break;
+        case 3: res = fa / fb; break;
+        default: res = 0.0; break;
+    }
+    return float(res);
+}
+
+void main() {
+    // Process 2 elements per thread (since bfloat16 is packed 2 per uint32)
+    uint pair_idx = gl_GlobalInvocationID.x;
+    uint out_idx0 = pair_idx * 2;
+    uint out_idx1 = pair_idx * 2 + 1;
+
+    if (out_idx0 >= params.output_size) {
+        return;
+    }
+
+    // Process first element
+    uint idx_a0 = computeInputIdxA(out_idx0);
+    uint idx_b0 = computeInputIdxB(out_idx0);
+    float val_a0 = readA(idx_a0);
+    float val_b0 = readB(idx_b0);
+    float res0 = compute_op(val_a0, val_b0);
+
+    // Process second element if within bounds
+    float res1 = float(0.0);
+    if (out_idx1 < params.output_size) {
+        uint idx_a1 = computeInputIdxA(out_idx1);
+        uint idx_b1 = computeInputIdxB(out_idx1);
+        float val_a1 = readA(idx_a1);
+        float val_b1 = readB(idx_b1);
+        res1 = compute_op(val_a1, val_b1);
+    }
+
+    // Write both results packed
+    result[pair_idx] = packBFloat16Pair(res0, res1);
+}

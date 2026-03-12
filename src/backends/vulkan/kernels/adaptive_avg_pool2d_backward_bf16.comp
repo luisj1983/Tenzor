@@ -1,0 +1,101 @@
+#version 450
+
+// Adaptive Average Pool 2D Backward for BFloat16
+// Distributes gradients from output back to input positions
+// BFloat16 doesn't support atomics, so we iterate over INPUT positions
+// and accumulate contributions from all output positions that map to each input
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { uint grad_output[]; };  // Packed bfloat16 (2 per uint)
+layout(binding = 1) buffer GradInput { uint grad_input[]; };    // Packed bfloat16 (2 per uint)
+
+layout(push_constant) uniform PushConstants {
+    uint batch;
+    uint channels;
+    uint H_in;
+    uint W_in;
+    uint H_out;
+    uint W_out;
+} params;
+
+// Helper to read bfloat16 at element index from a specified buffer
+float readBF16(uint element_idx, uint buffer_type) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed;
+    if (buffer_type == 0) {
+        packed = grad_output[word_idx];
+    } else {
+        packed = grad_input[word_idx];
+    }
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+// Helper to write bfloat16 at element index using atomic compare-exchange
+// Two threads writing adjacent elements share the same uint32 word,
+// so we must use atomicCompSwap to avoid clobbering each other's data.
+void writeBF16(uint element_idx, float value) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+
+    // Convert value to bfloat16 bits (round-to-nearest-even)
+    uint b = floatBitsToUint(value);
+    uint new_bits = (b + 0x7FFFu + ((b >> 16) & 1u)) >> 16;
+    uint shift = word_offset * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = grad_input[word_idx];
+    for (uint iter = 0; iter < 1024; iter++) {
+        uint expected = old_val;
+        uint new_val = (expected & ~mask) | (new_bits << shift);
+        old_val = atomicCompSwap(grad_input[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    // Fallback: direct write after exceeding retry limit
+    grad_input[word_idx] = (grad_input[word_idx] & ~mask) | (new_bits << shift);
+}
+
+void main() {
+    // Process input positions - each thread handles one input position
+    uint idx = gl_GlobalInvocationID.x;
+    uint total_input = params.batch * params.channels * params.H_in * params.W_in;
+
+    if (idx >= total_input) return;
+
+    // Decode input index
+    uint w_in = idx % params.W_in;
+    uint h_in = (idx / params.W_in) % params.H_in;
+    uint c = (idx / (params.W_in * params.H_in)) % params.channels;
+    uint n = idx / (params.W_in * params.H_in * params.channels);
+
+    // Initialize gradient sum
+    float grad_sum = 0.0;
+
+    // Find all output positions that map to this input position
+    // and accumulate their contributions
+    for (uint h_out = 0; h_out < params.H_out; ++h_out) {
+        uint h_start = (h_out * params.H_in) / params.H_out;
+        uint h_end = ((h_out + 1) * params.H_in) / params.H_out;
+
+        // Check if this input h is in the window
+        if (h_in >= h_start && h_in < h_end) {
+            for (uint w_out = 0; w_out < params.W_out; ++w_out) {
+                uint w_start = (w_out * params.W_in) / params.W_out;
+                uint w_end = ((w_out + 1) * params.W_in) / params.W_out;
+
+                // Check if this input w is in the window
+                if (w_in >= w_start && w_in < w_end) {
+                    uint count = (h_end - h_start) * (w_end - w_start);
+                    if (count > 0) {
+                        uint out_idx = ((n * params.channels + c) * params.H_out + h_out) * params.W_out + w_out;
+                        float grad_val = readBF16(out_idx, 0);
+                        grad_sum += grad_val / float(count);
+                    }
+                }
+            }
+        }
+    }
+
+    writeBF16(idx, grad_sum);
+}

@@ -1,0 +1,35 @@
+#version 450
+
+// Convert CSR sparse matrix to dense (row-major)
+// One workgroup per row: zero the row, then scatter non-zero values
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer RowOffsets { int row_offsets[]; };
+layout(set = 0, binding = 1) readonly buffer ColIndices { int col_indices[]; };
+layout(set = 0, binding = 2) readonly buffer Values     { float values[];     };
+layout(set = 0, binding = 3) buffer Dense               { float dense[];      };
+
+layout(push_constant) uniform PushConstants {
+    uint n_rows;
+    uint n_cols;
+};
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (row >= n_rows) return;
+
+    // Zero out this row first
+    for (uint col = tid; col < n_cols; col += 256) {
+        dense[row * n_cols + col] = 0.0;
+    }
+    barrier();
+
+    // Scatter non-zero values
+    uint row_start = uint(row_offsets[row]);
+    uint row_end = uint(row_offsets[row + 1]);
+    for (uint i = row_start + tid; i < row_end; i += 256) {
+        uint col = uint(col_indices[i]);
+        dense[row * n_cols + col] = values[i];
+    }
+}

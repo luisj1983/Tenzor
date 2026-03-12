@@ -1,0 +1,89 @@
+#version 450
+
+// Average Pooling 1D Backward Pass for BFloat16
+// Uses atomics to distribute gradients to packed BF16 output
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { uint grad_output[]; };  // Packed BF16 (N, C, L_out)
+layout(binding = 1) buffer GradInput { uint grad_input[]; };    // Packed BF16 (N, C, L) - atomically accumulated
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint batch;
+    uint channels;
+    uint in_length;
+    uint out_length;
+    uint kernel_size;
+    uint stride;
+    uint padding;
+    uint count_include_pad;
+} params;
+
+float readBF16Element(uint flat_idx) {
+    uint pair_idx = flat_idx / 2;
+    uint offset = flat_idx % 2;
+    uint packed = grad_output[pair_idx];
+    uint bits = (packed >> (offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+// Atomically add an BF16 value to a packed BF16 buffer element
+void atomicAddBF16(uint flat_idx, float add_val) {
+    uint word_idx = flat_idx / 2;
+    uint half_idx = flat_idx % 2;
+    uint mask = 0xFFFFu << (half_idx * 16);
+
+    uint old_val = grad_input[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0; iter < 1024; iter++) {
+        expected = old_val;
+        uint bits = (expected >> (half_idx * 16)) & 0xFFFFu;
+        float current = uintBitsToFloat(bits << 16);
+        float updated = current + add_val;
+        uint new_bits = ((floatBitsToUint(updated) + 0x7FFFu + ((floatBitsToUint(updated) >> 16) & 1u)) >> 16);
+
+        new_val = (expected & ~mask) | (new_bits << (half_idx * 16));
+
+        old_val = atomicCompSwap(grad_input[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    uint temp = idx;
+    uint l_out = temp % params.out_length;
+    temp /= params.out_length;
+    uint c = temp % params.channels;
+    uint n = temp / params.channels;
+
+    float grad_out = float(readBF16Element(idx));
+
+    int l_start = int(l_out * params.stride) - int(params.padding);
+
+    uint count = 0;
+    for (uint k = 0; k < params.kernel_size; k++) {
+        int l_in = l_start + int(k);
+        if (l_in >= 0 && l_in < int(params.in_length)) {
+            count++;
+        } else if (params.count_include_pad != 0) {
+            count++;
+        }
+    }
+
+    float grad_per_element = 0.0;
+    if (count > 0) {
+        grad_per_element = grad_out / float(count);
+    }
+
+    for (uint k = 0; k < params.kernel_size; k++) {
+        int l_in = l_start + int(k);
+        if (l_in >= 0 && l_in < int(params.in_length)) {
+            uint input_idx = n * params.channels * params.in_length +
+                            c * params.in_length + uint(l_in);
+            atomicAddBF16(input_idx, grad_per_element);
+        }
+    }
+}

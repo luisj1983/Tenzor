@@ -1,0 +1,54 @@
+#version 450
+
+// BF16 utility: unpack two bfloat16 values from a uint32 word
+vec2 unpackBF16x2(uint packed) {
+    float lo = uintBitsToFloat((packed & 0xFFFFu) << 16);
+    float hi = uintBitsToFloat(packed & 0xFFFF0000u);
+    return vec2(lo, hi);
+}
+
+// BF16 utility: pack two float values into a uint32 as bfloat16 (round-to-nearest-even)
+uint packBF16x2(vec2 v) {
+    uint b0 = floatBitsToUint(v.x);
+    uint b1 = floatBitsToUint(v.y);
+    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
+    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
+    return bf0 | (bf1 << 16);
+}
+
+// Extract imaginary parts from interleaved complex buffer — BFloat16
+// Input: complex bfloat16 values (1 uint32 per complex: real low, imag high)
+// Output: real bfloat16 values packed in uint32 (2 reals per word)
+// output[i] = input_complex[i].imag for i in [0, num_complex)
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input { uint in_data[]; };
+layout(binding = 1) buffer Output { uint out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_complex;  // Number of complex numbers (output size)
+} params;
+
+void main() {
+    // Process two output elements per thread (one uint32 output word)
+    uint word_idx = gl_GlobalInvocationID.x;
+    uint num_words = (params.num_complex + 1) / 2;
+    if (word_idx >= num_words) return;
+
+    uint elem0 = word_idx * 2;
+    uint elem1 = word_idx * 2 + 1;
+
+    float i0 = 0.0;
+    float i1 = 0.0;
+
+    if (elem0 < params.num_complex) {
+        vec2 c0 = unpackBF16x2(in_data[elem0]);
+        i0 = c0.y;
+    }
+    if (elem1 < params.num_complex) {
+        vec2 c1 = unpackBF16x2(in_data[elem1]);
+        i1 = c1.y;
+    }
+
+    out_data[word_idx] = packBF16x2(vec2(i0, i1));
+}

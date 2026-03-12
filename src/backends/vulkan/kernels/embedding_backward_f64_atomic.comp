@@ -1,0 +1,53 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_atomic_int64 : require
+
+// Embedding Backward Pass (Float64) — CAS-based atomic accumulation
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { float64_t grad_output_data[]; };
+layout(binding = 1) buffer Indices { int indices_data[]; };
+layout(binding = 2) buffer GradWeight { uint64_t grad_weight_data[]; }; // uint64_t for CAS
+
+layout(push_constant) uniform PushConstants {
+    uint num_indices;
+    uint embedding_dim;
+    uint num_embeddings;
+} params;
+
+float64_t bitsToF64(uint64_t bits) {
+    return float64_t(packDouble2x32(uvec2(uint(bits), uint(bits >> 32u))));
+}
+
+uint64_t f64ToBits(float64_t val) {
+    uvec2 v = unpackDouble2x32(double(val));
+    return uint64_t(v.x) | (uint64_t(v.y) << 32u);
+}
+
+void atomicAddF64(uint idx, float64_t val) {
+    uint64_t old_bits = grad_weight_data[idx];
+    uint64_t new_bits;
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        float64_t old_val = bitsToF64(old_bits);
+        new_bits = f64ToBits(old_val + val);
+        uint64_t result = atomicCompSwap(grad_weight_data[idx], old_bits, new_bits);
+        if (result == old_bits) return;
+        old_bits = result;
+    }
+    grad_weight_data[idx] = new_bits;
+}
+
+void main() {
+    uint global_id = gl_GlobalInvocationID.x;
+    uint index_pos = global_id / params.embedding_dim;
+    uint dim = global_id % params.embedding_dim;
+
+    if (index_pos >= params.num_indices) return;
+
+    uint target_row = uint(indices_data[index_pos]);
+    if (target_row >= params.num_embeddings) return;
+
+    atomicAddF64(target_row * params.embedding_dim + dim,
+                 grad_output_data[index_pos * params.embedding_dim + dim]);
+}

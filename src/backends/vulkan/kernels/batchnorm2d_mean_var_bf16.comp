@@ -1,0 +1,56 @@
+#version 450
+#extension GL_EXT_shader_atomic_float : enable
+
+// Batch Normalization 2D - Compute Mean and Variance for BFloat16 input
+// Input is packed BF16; accumulation and output (mean/var) are Float32
+//
+// Each thread processes one input element and atomically accumulates
+// into per-channel global buffers. This handles any number of channels.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };       // Packed BF16 (N, C, H, W)
+layout(binding = 1) buffer Mean { float mean_data[]; };        // (C) Float32
+layout(binding = 2) buffer Variance { float var_data[]; };     // (C) Float32
+layout(binding = 3) buffer TempSum { float temp_sum[]; };      // (C) Float32
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint batch;
+    uint channels;
+    uint spatial_size;
+    uint pass_id;        // 0 = compute mean, 1 = compute variance
+} params;
+
+float readBF16AsFloat(uint flat_idx) {
+    uint word_idx = flat_idx / 2;
+    uint half_idx = flat_idx % 2;
+    uint packed = input_data[word_idx];
+    uint bits = (packed >> (half_idx * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n_elements) {
+        return;
+    }
+
+    // Compute channel index from flat index
+    uint temp = idx;
+    uint w = temp % params.spatial_size;
+    temp /= params.spatial_size;
+    uint c = temp % params.channels;
+
+    float value = readBF16AsFloat(idx);
+
+    if (params.pass_id == 0) {
+        // Pass 0: accumulate sum for mean computation
+        atomicAdd(temp_sum[c], value);
+    } else {
+        // Pass 1: accumulate squared differences for variance
+        float mean = mean_data[c];
+        float diff = value - mean;
+        atomicAdd(var_data[c], diff * diff);
+    }
+}

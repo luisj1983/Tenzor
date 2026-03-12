@@ -1,0 +1,131 @@
+#version 450
+
+// Softmax with numerical stability for BFloat16
+// BFloat16 elements are packed 2 per 32-bit word
+// Uses shared memory for max and sum - no external buffers needed
+//
+// IMPORTANT: Output writes use atomicCompSwap to handle cases where
+// batch boundaries don't align to word boundaries (odd num_classes).
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer Input { uint input_data[]; };
+layout(binding = 1) buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint num_classes;
+    uint dim;           // Dimension to apply softmax (usually last)
+    uint mode;          // 0=forward, 1=backward
+} params;
+
+shared float shared_max[WORKGROUP_SIZE];
+shared float shared_sum[WORKGROUP_SIZE];
+// Temporary storage for computed values
+shared float shared_exp[512];  // Up to 512 elements per batch
+
+// Helper to read bfloat16 at element index (global index into packed buffer)
+float readBF16(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = input_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+// Write a single BF16 element at a global element index using atomic CAS
+// This is safe when two threads write to different halves of the same word
+void writeBF16(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint bits = ((floatBitsToUint(val) + 0x7FFFu + ((floatBitsToUint(val) >> 16) & 1u)) >> 16);
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = output_data[word_idx];
+    uint new_val, expected;
+    // Bounded CAS loop to prevent GPU hangs from infinite spinning
+    for (uint iter = 0; iter < 1024; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(output_data[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    // Fallback: direct write if CAS never converges (extremely rare)
+    output_data[word_idx] = new_val;
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint batch_idx = gl_WorkGroupID.x;
+
+    if (batch_idx >= params.batch_size) {
+        return;
+    }
+
+    uint base_idx = batch_idx * params.num_classes;
+
+    if (params.mode == 0) {
+        // Forward pass
+
+        // Step 1: Find maximum for numerical stability (use float for reduction)
+        float local_max = -1.0 / 0.0; // -infinity
+        for (uint i = tid; i < params.num_classes; i += WORKGROUP_SIZE) {
+            float val = readBF16(base_idx + i);
+            local_max = max(local_max, val);
+        }
+        shared_max[tid] = local_max;
+        barrier();
+
+        // Parallel reduction for max
+        for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+            if (tid < s) {
+                shared_max[tid] = max(shared_max[tid], shared_max[tid + s]);
+            }
+            barrier();
+        }
+
+        float row_max = shared_max[0];
+        barrier();
+
+        // Step 2: Compute exp(x - max) and store in shared memory, accumulate sum
+        float local_sum = 0.0;
+        for (uint i = tid; i < params.num_classes; i += WORKGROUP_SIZE) {
+            float val = readBF16(base_idx + i);
+            float exp_val = exp(val - row_max);
+            // Store in shared memory for later
+            if (i < 512) {
+                shared_exp[i] = exp_val;
+            }
+            local_sum += exp_val;
+        }
+        shared_sum[tid] = local_sum;
+        barrier();
+
+        // Parallel reduction for sum
+        for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+            if (tid < s) {
+                shared_sum[tid] += shared_sum[tid + s];
+            }
+            barrier();
+        }
+
+        float row_sum = shared_sum[0];
+        float inv_sum = 1.0 / row_sum;
+        barrier();
+
+        // Step 3: Write output elements
+        // Use per-element writes with atomicCompSwap to handle non-word-aligned
+        // batch boundaries (when num_classes is odd)
+        for (uint i = tid; i < params.num_classes; i += WORKGROUP_SIZE) {
+            float val;
+            if (i < 512) {
+                val = shared_exp[i] * inv_sum;
+            } else {
+                float input_val = readBF16(base_idx + i);
+                val = exp(input_val - row_max) * inv_sum;
+            }
+            writeBF16(base_idx + i, val);
+        }
+    }
+}

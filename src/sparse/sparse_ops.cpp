@@ -34,6 +34,16 @@ Tensor rocm_spmv_kernel(const SparseTensor& sparse, const Tensor& vec);
 } // namespace tenzor
 #endif
 
+// Forward declarations for OneAPI sparse kernels (defined in oneapi/kernels/sparse.cpp)
+#ifdef TENZOR_HAS_ONEMKL
+namespace tenzor {
+namespace oneapi {
+Tensor oneapi_spmm_kernel(const SparseTensor& sparse, const Tensor& dense);
+Tensor oneapi_spmv_kernel(const SparseTensor& sparse, const Tensor& vec);
+} // namespace oneapi
+} // namespace tenzor
+#endif
+
 namespace tenzor {
 namespace sparse {
 
@@ -102,6 +112,29 @@ DType compute_dtype_for(DType dtype) {
 #ifdef TENZOR_HAS_ROCSPARSE
     return (vec.device().type == Device::Type::ROCm ||
             sparse.device().type == Device::Type::ROCm);
+#else
+    (void)sparse;
+    (void)vec;
+    return false;
+#endif
+}
+
+/// Return true if sparse/dense are on OneAPI/SYCL and oneMKL sparse is available.
+[[maybe_unused]] bool should_use_oneapi(const SparseTensor& sparse, const Tensor& dense) {
+#ifdef TENZOR_HAS_ONEMKL
+    return (dense.device().type == Device::Type::OneAPI ||
+            sparse.device().type == Device::Type::OneAPI);
+#else
+    (void)sparse;
+    (void)dense;
+    return false;
+#endif
+}
+
+[[maybe_unused]] bool should_use_oneapi_vec(const SparseTensor& sparse, const Tensor& vec) {
+#ifdef TENZOR_HAS_ONEMKL
+    return (vec.device().type == Device::Type::OneAPI ||
+            sparse.device().type == Device::Type::OneAPI);
 #else
     (void)sparse;
     (void)vec;
@@ -557,6 +590,13 @@ auto spmm(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
     }
 #endif
 
+#ifdef TENZOR_HAS_ONEMKL
+    if (should_use_oneapi(sparse_compute, dense_compute)) {
+        auto result = oneapi::oneapi_spmm_kernel(sparse_compute, dense_compute);
+        return (orig_dtype != comp_dtype) ? result.to(orig_dtype) : result;
+    }
+#endif
+
     // CPU path: MKL-accelerated with scalar fallback
     auto result = cpu_spmm(sparse_compute, dense_compute, M, K, N);
 
@@ -605,6 +645,13 @@ auto spmv(const SparseTensor& sparse, const Tensor& vec) -> Tensor {
 #ifdef TENZOR_HAS_ROCSPARSE
     if (should_use_rocm_vec(sparse_compute, vec_compute)) {
         auto result = rocm::rocm_spmv_kernel(sparse_compute, vec_compute);
+        return (orig_dtype != comp_dtype) ? result.to(orig_dtype) : result;
+    }
+#endif
+
+#ifdef TENZOR_HAS_ONEMKL
+    if (should_use_oneapi_vec(sparse_compute, vec_compute)) {
+        auto result = oneapi::oneapi_spmv_kernel(sparse_compute, vec_compute);
         return (orig_dtype != comp_dtype) ? result.to(orig_dtype) : result;
     }
 #endif

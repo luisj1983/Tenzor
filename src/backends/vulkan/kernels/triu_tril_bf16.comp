@@ -1,0 +1,64 @@
+#version 450
+
+// Triangular matrix operations for BFloat16: triu (upper) and tril (lower)
+// BFloat16 stored as packed uint32 words (2 elements per word)
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer InputA { uint a[]; };
+layout(binding = 1) buffer Output { uint result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;         // total elements
+    uint rows;      // number of rows in last 2 dims
+    uint cols;      // number of cols in last 2 dims
+    int diagonal;   // diagonal offset
+    uint op;        // 0=triu, 1=tril
+};
+
+void main() {
+    // Each thread handles one packed uint32 word (2 BFloat16 elements)
+    uint word_idx = gl_GlobalInvocationID.x;
+    uint num_words = (n + 1) / 2;
+    if (word_idx >= num_words) return;
+
+    uint packed = a[word_idx];
+    uint elem0_idx = word_idx * 2;
+    uint elem1_idx = elem0_idx + 1;
+
+    // Unpack BF16
+    float val0 = uintBitsToFloat((packed & 0xFFFFu) << 16);
+    float val1 = uintBitsToFloat(packed & 0xFFFF0000u);
+
+    // Element 0
+    {
+        uint matrix_size = rows * cols;
+        uint pos = elem0_idx % matrix_size;
+        uint row = pos / cols;
+        uint col = pos % cols;
+        bool keep;
+        if (op == 0) keep = (int(col) >= int(row) + diagonal);
+        else keep = (int(col) <= int(row) + diagonal);
+        if (!keep) val0 = 0.0;
+    }
+
+    // Element 1
+    if (elem1_idx < n) {
+        uint matrix_size = rows * cols;
+        uint pos = elem1_idx % matrix_size;
+        uint row = pos / cols;
+        uint col = pos % cols;
+        bool keep;
+        if (op == 0) keep = (int(col) >= int(row) + diagonal);
+        else keep = (int(col) <= int(row) + diagonal);
+        if (!keep) val1 = 0.0;
+    } else {
+        val1 = 0.0;
+    }
+
+    // Repack as BF16 (round-to-nearest-even)
+    uint b0 = floatBitsToUint(val0);
+    uint b1 = floatBitsToUint(val1);
+    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
+    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
+    result[word_idx] = bf0 | (bf1 << 16);
+}

@@ -1,0 +1,73 @@
+#version 450
+
+// Memory format conversion for BFloat16: NCHW <-> NHWC
+// format=0: NCHW->NHWC, format=1: NHWC->NCHW
+// BF16 packed buffers (2 BFloat16 per uint32)
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };
+layout(binding = 1) buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;  // Total elements
+    uint N;           // Batch size
+    uint C;           // Channels
+    uint H;           // Height
+    uint W;           // Width
+    uint format;      // 0 = NCHW->NHWC, 1 = NHWC->NCHW
+} params;
+
+// Read a single bfloat16 element from packed uint input buffer
+float readBF16(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = input_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+// Write a single bfloat16 element to packed uint output buffer
+void writeBF16(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint bits = ((floatBitsToUint(val) + 0x7FFFu + ((floatBitsToUint(val) >> 16) & 1u)) >> 16);
+    uint existing = output_data[word_idx];
+    uint mask = 0xFFFFu << (word_offset * 16);
+    output_data[word_idx] = (existing & ~mask) | (bits << (word_offset * 16));
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    uint src_idx;
+
+    if (params.format == 0) {
+        // NCHW -> NHWC: output[n,h,w,c] = input[n,c,h,w]
+        uint c = idx % params.C;
+        uint temp = idx / params.C;
+        uint w = temp % params.W;
+        temp /= params.W;
+        uint h = temp % params.H;
+        uint n = temp / params.H;
+
+        src_idx = n * (params.C * params.H * params.W) +
+                  c * (params.H * params.W) +
+                  h * params.W + w;
+    } else {
+        // NHWC -> NCHW: output[n,c,h,w] = input[n,h,w,c]
+        uint w = idx % params.W;
+        uint temp = idx / params.W;
+        uint h = temp % params.H;
+        temp /= params.H;
+        uint c = temp % params.C;
+        uint n = temp / params.C;
+
+        src_idx = n * (params.H * params.W * params.C) +
+                  h * (params.W * params.C) +
+                  w * params.C + c;
+    }
+
+    float val = readBF16(src_idx);
+    writeBF16(idx, val);
+}

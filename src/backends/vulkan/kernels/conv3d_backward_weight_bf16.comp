@@ -1,0 +1,141 @@
+#version 450
+
+// BF16 utility: unpack two bfloat16 values from a uint32 word
+vec2 unpackBF16x2(uint packed) {
+    float lo = uintBitsToFloat((packed & 0xFFFFu) << 16);
+    float hi = uintBitsToFloat(packed & 0xFFFF0000u);
+    return vec2(lo, hi);
+}
+
+// BF16 utility: pack two float values into a uint32 as bfloat16 (round-to-nearest-even)
+uint packBF16x2(vec2 v) {
+    uint b0 = floatBitsToUint(v.x);
+    uint b1 = floatBitsToUint(v.y);
+    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
+    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
+    return bf0 | (bf1 << 16);
+}
+
+// Conv3d Backward Weight - Gradient w.r.t. weights (BFloat16 version)
+// Supports grouped convolutions
+// All computation done in float32 for numerical stability
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { uint grad_output[]; };  // Packed BF16: (N, C_out, D_out, H_out, W_out)
+layout(binding = 1) buffer Input { uint input_data[]; };        // Packed BF16: (N, C_in, D_in, H_in, W_in)
+layout(binding = 2) buffer GradWeight { uint grad_weight[]; };  // Packed BF16: (C_out, C_in/groups, kD, kH, kW)
+
+layout(push_constant) uniform PushConstants {
+    uint batch;
+    uint channels_in;
+    uint channels_out;
+    uint depth_in;
+    uint height_in;
+    uint width_in;
+    uint depth_out;
+    uint height_out;
+    uint width_out;
+    uint kernel_d;
+    uint kernel_h;
+    uint kernel_w;
+    uint stride_d;
+    uint stride_h;
+    uint stride_w;
+    uint padding_d;
+    uint padding_h;
+    uint padding_w;
+    uint dilation_d;
+    uint dilation_h;
+    uint dilation_w;
+    uint groups;
+} params;
+
+float readBF16GradOut(uint element_idx) {
+    uint word_idx = element_idx >> 1u;
+    uint packed = grad_output[word_idx];
+    vec2 pair = unpackBF16x2(packed);
+    return ((element_idx & 1u) == 0u) ? pair.x : pair.y;
+}
+
+float readBF16Input(uint element_idx) {
+    uint word_idx = element_idx >> 1u;
+    uint packed = input_data[word_idx];
+    vec2 pair = unpackBF16x2(packed);
+    return ((element_idx & 1u) == 0u) ? pair.x : pair.y;
+}
+
+void writeBF16(uint element_idx, float value) {
+    uint word_idx = element_idx >> 1u;
+    uint word_offset = element_idx & 1u;
+    uint new_bits = ((floatBitsToUint(value) + 0x7FFFu + ((floatBitsToUint(value) >> 16) & 1u)) >> 16);
+    uint shift = word_offset * 16u;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = grad_weight[word_idx];
+    for (uint iter = 0u; iter < 64u; iter++) {
+        uint expected = old_val;
+        uint new_val = (expected & ~mask) | (new_bits << shift);
+        old_val = atomicCompSwap(grad_weight[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    uint cur = grad_weight[word_idx];
+    grad_weight[word_idx] = (cur & ~mask) | (new_bits << shift);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    uint in_channels_per_group = params.channels_in / params.groups;
+    uint out_channels_per_group = params.channels_out / params.groups;
+
+    uint total_weight_elements = params.channels_out * in_channels_per_group *
+                                 params.kernel_d * params.kernel_h * params.kernel_w;
+
+    if (idx >= total_weight_elements) {
+        return;
+    }
+
+    // Decode flat index to (c_out, c_in_local, kd, kh, kw)
+    uint temp = idx;
+    uint kw = temp % params.kernel_w;
+    temp /= params.kernel_w;
+    uint kh = temp % params.kernel_h;
+    temp /= params.kernel_h;
+    uint kd = temp % params.kernel_d;
+    temp /= params.kernel_d;
+    uint c_in_local = temp % in_channels_per_group;
+    uint c_out = temp / in_channels_per_group;
+
+    uint group = c_out / out_channels_per_group;
+    uint c_in = group * in_channels_per_group + c_in_local;
+
+    float sum = 0.0;
+
+    for (uint b = 0; b < params.batch; b++) {
+        for (uint od = 0; od < params.depth_out; od++) {
+            for (uint oh = 0; oh < params.height_out; oh++) {
+                for (uint ow = 0; ow < params.width_out; ow++) {
+                    int id = int(od * params.stride_d) - int(params.padding_d) + int(kd * params.dilation_d);
+                    int ih = int(oh * params.stride_h) - int(params.padding_h) + int(kh * params.dilation_h);
+                    int iw = int(ow * params.stride_w) - int(params.padding_w) + int(kw * params.dilation_w);
+
+                    if (id >= 0 && id < int(params.depth_in) &&
+                        ih >= 0 && ih < int(params.height_in) &&
+                        iw >= 0 && iw < int(params.width_in)) {
+
+                        uint grad_out_idx = (((b * params.channels_out + c_out) * params.depth_out + od) *
+                                             params.height_out + oh) * params.width_out + ow;
+
+                        uint input_idx = (((b * params.channels_in + c_in) * params.depth_in + uint(id)) *
+                                          params.height_in + uint(ih)) * params.width_in + uint(iw);
+
+                        sum += readBF16GradOut(grad_out_idx) * readBF16Input(input_idx);
+                    }
+                }
+            }
+        }
+    }
+
+    writeBF16(idx, sum);
+}

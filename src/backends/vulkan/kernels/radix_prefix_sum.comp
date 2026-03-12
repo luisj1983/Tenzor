@@ -1,0 +1,27 @@
+#version 450
+
+// Exclusive prefix sum over the column-major histogram matrix
+// Input/output: histogram array of size [256 * n_workgroups]
+// After prefix sum, histos[digit * n_wgs + wg] = starting offset for (digit, wg)
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer Histograms { uint histos[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint total_entries;  // 256 * n_workgroups
+};
+
+shared uint temp[512];  // Blelloch scan workspace
+
+void main() {
+    // Simple sequential scan for moderate sizes (histogram matrix typically small)
+    // Thread 0 does the whole scan
+    if (gl_GlobalInvocationID.x != 0) return;
+
+    uint running_sum = 0;
+    for (uint i = 0; i < total_entries; i++) {
+        uint val = histos[i];
+        histos[i] = running_sum;
+        running_sum += val;
+    }
+}

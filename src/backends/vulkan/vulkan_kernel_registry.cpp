@@ -1752,12 +1752,30 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         -> std::vector<Tensor> {
         return {get_vulkan_backend()->dispatchLinalgSolve(inputs[0], inputs[1])};
     });
-    // SVD, QR, Eigh, Eig, Cholesky — too complex for GLSL, keep CPU fallback
-    VULKAN_CPU_FALLBACK(LinalgSVD);
-    VULKAN_CPU_FALLBACK(LinalgQR);
-    VULKAN_CPU_FALLBACK(LinalgEigh);
+    // Cholesky — native GPU shader for ≤32×32, CPU fallback for larger
+    table.register_kernel(OpId::LinalgCholesky, [](std::span<const Tensor> inputs, const OpAttributes& attrs)
+        -> std::vector<Tensor> {
+        bool upper = attrs.get_bool(AttrKey::Upper, false);
+        return {get_vulkan_backend()->dispatchLinalgCholesky(inputs[0], upper)};
+    });
+    // QR — native GPU shader for ≤32×32, CPU fallback for larger
+    table.register_kernel(OpId::LinalgQR, [](std::span<const Tensor> inputs, const OpAttributes&)
+        -> std::vector<Tensor> {
+        return get_vulkan_backend()->dispatchLinalgQR(inputs[0]);
+    });
+    // SVD — native GPU Jacobi for ≤32×32, CPU fallback for larger
+    table.register_kernel(OpId::LinalgSVD, [](std::span<const Tensor> inputs, const OpAttributes& attrs)
+        -> std::vector<Tensor> {
+        bool full = attrs.get_bool(AttrKey::FullMatrices, true);
+        return get_vulkan_backend()->dispatchLinalgSVD(inputs[0], full);
+    });
+    // Eigh — native GPU Jacobi for ≤32×32, CPU fallback for larger
+    table.register_kernel(OpId::LinalgEigh, [](std::span<const Tensor> inputs, const OpAttributes&)
+        -> std::vector<Tensor> {
+        return get_vulkan_backend()->dispatchLinalgEigh(inputs[0]);
+    });
+    // Eig — general eigenvalue, keep CPU fallback (complex output)
     VULKAN_CPU_FALLBACK(LinalgEig);
-    VULKAN_CPU_FALLBACK(LinalgCholesky);
 
     // Flash Attention — composed from existing matmul + softmax shaders (not fused)
     // This avoids the CPU roundtrip of VULKAN_CPU_FALLBACK by keeping all

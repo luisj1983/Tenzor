@@ -1,0 +1,57 @@
+#version 450
+#extension GL_EXT_shader_atomic_float : require
+
+// EmbeddingBag Backward Pass (BFloat16)
+// Scatter-add gradients back to embedding table. grad_output is bfloat16,
+// computation and accumulation in float32 for precision.
+// grad_weight is stored as float32; the dispatch method handles conversion back to bfloat16.
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer GradOutput { float grad_output_data[]; };
+layout(binding = 1) buffer Indices { int indices_data[]; };
+layout(binding = 2) buffer Offsets { int offset_data[]; };
+layout(binding = 3) buffer GradWeight { float grad_weight_data[]; };  // Accumulate in f32
+
+layout(push_constant) uniform PushConstants {
+    uint num_bags;
+    uint embedding_dim;
+    uint num_embeddings;
+    uint mode;
+    uint include_last_offset;
+    uint num_offsets;
+} params;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint total_output = params.num_bags * params.embedding_dim;
+    if (gid >= total_output) return;
+
+    uint bag = gid / params.embedding_dim;
+    uint j = gid % params.embedding_dim;
+
+    int start = offset_data[bag];
+    int end_val;
+    if (bag + 1 < params.num_offsets) {
+        end_val = offset_data[bag + 1];
+    } else {
+        return;
+    }
+
+    int bag_size = end_val - start;
+    if (bag_size <= 0) return;
+
+    // Read bfloat16 gradient and promote to float32 for accumulation
+    float grad_val = float(grad_output_data[bag * params.embedding_dim + j]);
+
+    if (params.mode == 1) {
+        grad_val /= float(bag_size);
+    }
+
+    for (int i = start; i < end_val; ++i) {
+        int idx = indices_data[i];
+        if (idx >= 0 && idx < int(params.num_embeddings)) {
+            atomicAdd(grad_weight_data[uint(idx) * params.embedding_dim + j], grad_val);
+        }
+    }
+}

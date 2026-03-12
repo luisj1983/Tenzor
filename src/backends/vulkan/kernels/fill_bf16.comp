@@ -1,0 +1,34 @@
+#version 450
+
+// Fill operation for BFloat16: fill tensor with a scalar value
+// BF16 packed buffers (2 BFloat16 per uint32)
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Output { uint data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;              // Number of BF16 elements
+    uint value_bits;     // Fill value as raw BF16 bits (lower 16 bits)
+} params;
+
+void main() {
+    // Each thread handles one uint32 word (2 BF16 elements)
+    uint pair_idx = gl_GlobalInvocationID.x;
+    uint base_element = pair_idx * 2;
+
+    if (base_element >= params.n) return;
+
+    uint bf16_bits = params.value_bits & 0xFFFFu;
+
+    // Pack two BF16 values into one uint32
+    uint packed;
+    if (base_element + 1 < params.n) {
+        // Both elements valid
+        packed = bf16_bits | (bf16_bits << 16);
+    } else {
+        // Only first element valid (odd count)
+        packed = bf16_bits;
+    }
+
+    data[pair_idx] = packed;
+}

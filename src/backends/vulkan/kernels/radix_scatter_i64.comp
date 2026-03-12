@@ -1,0 +1,44 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer KeysIn   { int64_t keys_in[];  };
+layout(set = 0, binding = 1) readonly buffer IdxIn    { int idx_in[];       };
+layout(set = 0, binding = 2) buffer KeysOut            { int64_t keys_out[]; };
+layout(set = 0, binding = 3) buffer IdxOut             { int idx_out[];      };
+layout(set = 0, binding = 4) buffer Histograms         { uint histos[];      };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint digit;
+    uint n_wgs;
+};
+
+shared uint local_offsets[256];
+
+uint64_t int64_to_sortable(int64_t val) {
+    return uint64_t(val) ^ 0x8000000000000000ul;
+}
+
+void main() {
+    uint lid = gl_LocalInvocationID.x;
+    uint wg_id = gl_WorkGroupID.x;
+
+    if (lid < 256) {
+        local_offsets[lid] = histos[lid * n_wgs + wg_id];
+    }
+    barrier();
+
+    uint tile_size = (n + n_wgs - 1) / n_wgs;
+    uint tile_start = wg_id * tile_size;
+    uint tile_end = min(tile_start + tile_size, n);
+
+    for (uint i = tile_start + lid; i < tile_end; i += 256) {
+        uint64_t sortable = int64_to_sortable(keys_in[i]);
+        uint digit_val = uint((sortable >> (digit * 8)) & 0xFFul);
+        uint dest = atomicAdd(local_offsets[digit_val], 1);
+        keys_out[dest] = keys_in[i];
+        idx_out[dest] = idx_in[i];
+    }
+}

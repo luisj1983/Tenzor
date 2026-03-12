@@ -1,0 +1,47 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
+
+// Comparison operations for BFloat16: eq, ne, lt, le, gt, ge
+// Input: packed BF16 pairs in uint32. Output: uint8 booleans per element.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer InputA { uint a[]; };
+layout(binding = 1) buffer InputB { uint b[]; };
+layout(binding = 2) buffer Output { uint8_t result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of elements
+    uint op;         // Operation: 0=eq, 1=ne, 2=lt, 3=le, 4=gt, 5=ge
+} params;
+
+// Helper to read bfloat16 from packed buffer
+float readBF16(uint packed, uint offset) {
+    uint bits = (packed >> (offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n) return;
+
+    // Read from packed BF16 buffer
+    uint word_idx = idx / 2;
+    uint half_idx = idx % 2;
+
+    float val_a = float(readBF16(a[word_idx], half_idx));
+    float val_b = float(readBF16(b[word_idx], half_idx));
+
+    uint8_t result_val;
+    switch (params.op) {
+        case 0: result_val = (val_a == val_b) ? uint8_t(1) : uint8_t(0); break;
+        case 1: result_val = (val_a != val_b) ? uint8_t(1) : uint8_t(0); break;
+        case 2: result_val = (val_a < val_b) ? uint8_t(1) : uint8_t(0); break;
+        case 3: result_val = (val_a <= val_b) ? uint8_t(1) : uint8_t(0); break;
+        case 4: result_val = (val_a > val_b) ? uint8_t(1) : uint8_t(0); break;
+        case 5: result_val = (val_a >= val_b) ? uint8_t(1) : uint8_t(0); break;
+        default: result_val = uint8_t(0); break;
+    }
+
+    result[idx] = result_val;
+}

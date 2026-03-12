@@ -1,0 +1,83 @@
+#version 450
+
+// Im2col (Unfold) operation for BFloat16
+// Transforms (N,C,H,W) -> (N, C*K*K, L) where L=out_h*out_w
+// BFloat16 elements are packed 2 per 32-bit word
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };
+layout(binding = 1) buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint batch;
+    uint channels;
+    uint height;
+    uint width;
+    uint kernel_size;
+    uint stride;
+    uint padding;
+    uint dilation;
+    uint out_h;
+    uint out_w;
+} params;
+
+// Read a single bfloat16 value from packed input buffer
+float readBF16(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = input_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+// Write a single bfloat16 value to packed output buffer
+void writeBF16(uint element_idx, float value) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint bits = ((floatBitsToUint(value) + 0x7FFFu + ((floatBitsToUint(value) >> 16) & 1u)) >> 16);
+    if (word_offset == 0) {
+        uint existing = output_data[word_idx] & 0xFFFF0000u;
+        output_data[word_idx] = existing | bits;
+    } else {
+        uint existing = output_data[word_idx] & 0x0000FFFFu;
+        output_data[word_idx] = existing | (bits << 16);
+    }
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    uint num_blocks = params.out_h * params.out_w;
+
+    // Decode flat index to (b, c, kh, kw, block_idx)
+    uint temp = idx;
+    uint block_idx = temp % num_blocks; temp /= num_blocks;
+    uint kw = temp % params.kernel_size; temp /= params.kernel_size;
+    uint kh = temp % params.kernel_size; temp /= params.kernel_size;
+    uint c = temp % params.channels; temp /= params.channels;
+    uint b = temp;
+
+    uint oh = block_idx / params.out_w;
+    uint ow = block_idx % params.out_w;
+
+    int ih = int(oh * params.stride) - int(params.padding) + int(kh * params.dilation);
+    int iw = int(ow * params.stride) - int(params.padding) + int(kw * params.dilation);
+
+    uint col_c = c * params.kernel_size * params.kernel_size +
+                 kh * params.kernel_size + kw;
+
+    uint output_idx = b * (params.channels * params.kernel_size * params.kernel_size * num_blocks) +
+                      col_c * num_blocks +
+                      block_idx;
+
+    if (ih >= 0 && ih < int(params.height) && iw >= 0 && iw < int(params.width)) {
+        uint input_idx = b * (params.channels * params.height * params.width) +
+                        c * (params.height * params.width) +
+                        uint(ih) * params.width + uint(iw);
+        writeBF16(output_idx, readBF16(input_idx));
+    } else {
+        writeBF16(output_idx, 0.0);
+    }
+}

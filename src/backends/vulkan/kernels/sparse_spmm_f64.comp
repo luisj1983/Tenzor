@@ -1,0 +1,35 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// SpMM: C = A * B where A is CSR sparse, B and C are dense (row-major, Float64)
+// One workgroup per output row, threads iterate dense matrix columns
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer RowOffsets { int row_offsets[]; };
+layout(set = 0, binding = 1) readonly buffer ColIndices { int col_indices[]; };
+layout(set = 0, binding = 2) readonly buffer Values     { float64_t values[]; };
+layout(set = 0, binding = 3) readonly buffer MatB       { float64_t B[];      };
+layout(set = 0, binding = 4) buffer MatC                { float64_t C[];      };
+
+layout(push_constant) uniform PushConstants {
+    uint m;
+    uint k;
+    uint n_cols;
+};
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (row >= m) return;
+
+    uint row_start = uint(row_offsets[row]);
+    uint row_end = uint(row_offsets[row + 1]);
+
+    for (uint col = tid; col < n_cols; col += 256) {
+        float64_t sum = 0.0lf;
+        for (uint i = row_start; i < row_end; i++) {
+            sum += values[i] * B[uint(col_indices[i]) * n_cols + col];
+        }
+        C[row * n_cols + col] = sum;
+    }
+}

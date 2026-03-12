@@ -1,0 +1,112 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) buffer InputBuf { float64_t data_in[]; };
+layout(set = 0, binding = 1) buffer UBuf     { float64_t data_u[];  };
+layout(set = 0, binding = 2) buffer SBuf     { float64_t data_s[];  };
+layout(set = 0, binding = 3) buffer VtBuf    { float64_t data_vt[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint m;
+    uint n_cols;
+    uint batch;
+    uint full_matrices;
+};
+
+shared float64_t U[32][32];
+shared float64_t V[32][32];
+shared float64_t converged;
+
+void main() {
+    uint batch_idx = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (batch_idx >= batch) return;
+
+    uint mat_offset_mn = batch_idx * m * n_cols;
+    uint k = min(m, n_cols);
+
+    for (uint row = 0; row < m; row++) {
+        if (tid < n_cols) {
+            U[row][tid] = data_in[mat_offset_mn + row * n_cols + tid];
+        }
+    }
+
+    for (uint row = 0; row < n_cols; row++) {
+        if (tid < n_cols) {
+            V[row][tid] = (row == tid) ? 1.0lf : 0.0lf;
+        }
+    }
+    barrier();
+
+    for (uint sweep = 0; sweep < 30; sweep++) {
+        if (tid == 0) converged = 1.0lf;
+        barrier();
+
+        for (uint p = 0; p < n_cols; p++) {
+            for (uint q = p + 1; q < n_cols; q++) {
+                if (tid == 0) {
+                    float64_t a = 0.0lf, b = 0.0lf, d = 0.0lf;
+                    for (uint i = 0; i < m; i++) {
+                        a += U[i][p] * U[i][p];
+                        b += U[i][q] * U[i][q];
+                        d += U[i][p] * U[i][q];
+                    }
+
+                    if (abs(d) > 1e-14lf * sqrt(a * b)) {
+                        converged = 0.0lf;
+                        float64_t zeta = (b - a) / (2.0lf * d);
+                        float64_t t = sign(zeta) / (abs(zeta) + sqrt(1.0lf + zeta * zeta));
+                        float64_t c = 1.0lf / sqrt(1.0lf + t * t);
+                        float64_t s = t * c;
+
+                        for (uint i = 0; i < m; i++) {
+                            float64_t up = U[i][p], uq = U[i][q];
+                            U[i][p] = c * up - s * uq;
+                            U[i][q] = s * up + c * uq;
+                        }
+                        for (uint i = 0; i < n_cols; i++) {
+                            float64_t vp = V[i][p], vq = V[i][q];
+                            V[i][p] = c * vp - s * vq;
+                            V[i][q] = s * vp + c * vq;
+                        }
+                    }
+                }
+                barrier();
+            }
+        }
+
+        if (converged > 0.5lf) break;
+        barrier();
+    }
+
+    if (tid < k) {
+        float64_t norm = 0.0lf;
+        for (uint i = 0; i < m; i++) {
+            norm += U[i][tid] * U[i][tid];
+        }
+        norm = sqrt(norm);
+        data_s[batch_idx * k + tid] = norm;
+
+        if (norm > 1e-30lf) {
+            for (uint i = 0; i < m; i++) {
+                U[i][tid] /= norm;
+            }
+        }
+    }
+    barrier();
+
+    for (uint row = 0; row < m; row++) {
+        if (tid < k) {
+            data_u[mat_offset_mn + row * k + tid] = U[row][tid];
+        }
+    }
+
+    uint vt_offset = batch_idx * n_cols * n_cols;
+    for (uint row = 0; row < n_cols; row++) {
+        if (tid < n_cols) {
+            data_vt[vt_offset + tid * n_cols + row] = V[row][tid];
+        }
+    }
+}

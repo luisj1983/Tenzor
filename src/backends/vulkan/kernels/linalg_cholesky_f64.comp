@@ -1,0 +1,66 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { float64_t data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { float64_t data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint batch;
+    uint upper;
+};
+
+shared float64_t L[32][32];
+
+void main() {
+    uint batch_idx = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (batch_idx >= batch) return;
+
+    uint mat_offset = batch_idx * n * n;
+
+    for (uint row = 0; row < n; row++) {
+        if (tid < n) {
+            L[row][tid] = data_in[mat_offset + row * n + tid];
+        }
+    }
+    barrier();
+
+    for (uint j = 0; j < n; j++) {
+        if (tid == 0) {
+            float64_t sum = L[j][j];
+            for (uint k = 0; k < j; k++) {
+                sum -= L[j][k] * L[j][k];
+            }
+            L[j][j] = (sum > 0.0lf) ? sqrt(sum) : 0.0lf;
+        }
+        barrier();
+
+        if (tid > j && tid < n) {
+            float64_t sum = L[tid][j];
+            for (uint k = 0; k < j; k++) {
+                sum -= L[tid][k] * L[j][k];
+            }
+            float64_t diag = L[j][j];
+            L[tid][j] = (abs(diag) > 1e-30lf) ? sum / diag : 0.0lf;
+        }
+        barrier();
+
+        if (tid < j && tid < n) {
+            L[tid][j] = 0.0lf;
+        }
+        barrier();
+    }
+
+    for (uint row = 0; row < n; row++) {
+        if (tid < n) {
+            if (upper != 0) {
+                data_out[mat_offset + tid * n + row] = L[row][tid];
+            } else {
+                data_out[mat_offset + row * n + tid] = L[row][tid];
+            }
+        }
+    }
+}

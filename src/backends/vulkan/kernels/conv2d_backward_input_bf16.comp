@@ -1,0 +1,111 @@
+#version 450
+
+// Conv2d Backward Input - Gradient w.r.t. input (BFloat16 version)
+// Supports grouped convolutions (including depthwise where groups == channels)
+// All computation done in float32 for numerical stability, stored as bfloat16
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { uint grad_output[]; };  // Packed BF16: (N, C_out, H_out, W_out)
+layout(binding = 1) buffer Weight { uint weight[]; };           // Packed BF16: (C_out, C_in/groups, K_h, K_w)
+layout(binding = 2) buffer GradInput { uint grad_input[]; };    // Packed BF16: (N, C_in, H_in, W_in)
+
+layout(push_constant) uniform PushConstants {
+    uint batch;
+    uint channels_in;
+    uint channels_out;
+    uint height_in;
+    uint width_in;
+    uint height_out;
+    uint width_out;
+    uint kernel_h;
+    uint kernel_w;
+    uint stride;
+    uint padding;
+    uint dilation;
+    uint groups;
+} params;
+
+// Helper to read bfloat16 from packed buffer
+float readBF16(uint packed, uint offset) {
+    uint bits = (packed >> (offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+// Write a bfloat16 element to grad_input using atomicCompSwap to avoid races
+// on the other half of the packed uint32 word
+void writeBF16(uint element_idx, float value) {
+    uint word_idx = element_idx >> 1u;
+    uint word_offset = element_idx & 1u;
+    uint new_bits = ((floatBitsToUint(value) + 0x7FFFu + ((floatBitsToUint(value) >> 16) & 1u)) >> 16);
+    uint shift = word_offset * 16u;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = grad_input[word_idx];
+    for (uint iter = 0u; iter < 64u; iter++) {
+        uint expected = old_val;
+        uint new_val = (expected & ~mask) | (new_bits << shift);
+        old_val = atomicCompSwap(grad_input[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    // Fallback
+    uint cur = grad_input[word_idx];
+    grad_input[word_idx] = (cur & ~mask) | (new_bits << shift);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total_elements = params.batch * params.channels_in * params.height_in * params.width_in;
+
+    if (idx >= total_elements) {
+        return;
+    }
+
+    // Decode flat index to (b, c_in, ih, iw)
+    uint temp = idx;
+    uint iw = temp % params.width_in;
+    temp /= params.width_in;
+    uint ih = temp % params.height_in;
+    temp /= params.height_in;
+    uint c_in = temp % params.channels_in;
+    uint b = temp / params.channels_in;
+
+    // Grouped convolution parameters
+    uint in_channels_per_group = params.channels_in / params.groups;
+    uint out_channels_per_group = params.channels_out / params.groups;
+    uint group = c_in / in_channels_per_group;
+    uint c_in_local = c_in % in_channels_per_group;
+
+    // Output channels for this group
+    uint c_out_start = group * out_channels_per_group;
+    uint c_out_end = c_out_start + out_channels_per_group;
+
+    // Accumulate gradient in float32 for precision
+    float sum = 0.0;
+
+    for (uint kh = 0; kh < params.kernel_h; kh++) {
+        for (uint kw = 0; kw < params.kernel_w; kw++) {
+            int ih_shifted = int(ih) + int(params.padding) - int(kh * params.dilation);
+            int iw_shifted = int(iw) + int(params.padding) - int(kw * params.dilation);
+
+            if (ih_shifted % int(params.stride) == 0 && iw_shifted % int(params.stride) == 0) {
+                int oh = ih_shifted / int(params.stride);
+                int ow = iw_shifted / int(params.stride);
+
+                if (oh >= 0 && oh < int(params.height_out) &&
+                    ow >= 0 && ow < int(params.width_out)) {
+
+                    for (uint c_out = c_out_start; c_out < c_out_end; c_out++) {
+                        uint grad_out_idx = ((b * params.channels_out + c_out) * params.height_out + uint(oh)) * params.width_out + uint(ow);
+                        uint weight_idx = ((c_out * in_channels_per_group + c_in_local) * params.kernel_h + kh) * params.kernel_w + kw;
+
+                        sum += readBF16(grad_out_idx, 0u) * readBF16(weight_idx, 1u);
+                    }
+                }
+            }
+        }
+    }
+
+    // Write gradient (convert float32 accumulator to bfloat16)
+    writeBF16(idx, sum);
+}

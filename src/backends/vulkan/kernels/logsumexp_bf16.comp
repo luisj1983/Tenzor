@@ -1,0 +1,174 @@
+#version 450
+
+// LogSumExp reduction for BFloat16: log(sum(exp(x))) with numerical stability
+// BFloat16 elements are packed 2 per 32-bit word
+// All computation done in float32 for numerical stability
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer Input { uint input_data[]; };
+layout(binding = 1) buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;              // Total number of elements in input
+    uint reduce_size;    // Size of dimension to reduce
+    uint outer_size;     // Number of output elements
+    uint inner_size;     // Product of dimensions after reduction dim
+} params;
+
+shared float shared_max[WORKGROUP_SIZE];
+shared float shared_sum[WORKGROUP_SIZE];
+shared float shared_comp[WORKGROUP_SIZE]; // Kahan compensation
+
+// Helper to read bfloat16 at element index (global index into packed buffer)
+float readBF16(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = input_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+// Write a single BF16 element at a global element index using atomic CAS
+void writeBF16(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint bits = ((floatBitsToUint(val) + 0x7FFFu + ((floatBitsToUint(val) >> 16) & 1u)) >> 16);
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = output_data[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0; iter < 1024; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(output_data[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    output_data[word_idx] = new_val;
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint output_idx = gl_WorkGroupID.x;
+
+    // For BF16, each workgroup handles TWO adjacent output elements (one packed word)
+    uint out_elem0 = output_idx * 2;
+    uint out_elem1 = out_elem0 + 1;
+
+    if (out_elem0 >= params.outer_size) {
+        return;
+    }
+
+    // Process first output element
+    {
+        uint outer_idx = out_elem0 / params.inner_size;
+        uint inner_idx = out_elem0 % params.inner_size;
+        uint base_idx = outer_idx * params.reduce_size * params.inner_size + inner_idx;
+
+        // Pass 1: Find max
+        float local_max = -1.0 / 0.0;
+        for (uint i = tid; i < params.reduce_size; i += WORKGROUP_SIZE) {
+            uint idx = base_idx + i * params.inner_size;
+            if (idx < params.n) {
+                local_max = max(local_max, readBF16(idx));
+            }
+        }
+        shared_max[tid] = local_max;
+        barrier();
+
+        for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+            if (tid < s) {
+                shared_max[tid] = max(shared_max[tid], shared_max[tid + s]);
+            }
+            barrier();
+        }
+
+        float row_max = shared_max[0];
+        barrier();
+
+        // Pass 2: sum(exp(x - max)) with Kahan
+        float local_sum = 0.0;
+        float local_comp = 0.0;
+        for (uint i = tid; i < params.reduce_size; i += WORKGROUP_SIZE) {
+            uint idx = base_idx + i * params.inner_size;
+            if (idx < params.n) {
+                float val = exp(readBF16(idx) - row_max);
+                float y = val - local_comp;
+                float t = local_sum + y;
+                local_comp = (t - local_sum) - y;
+                local_sum = t;
+            }
+        }
+        shared_sum[tid] = local_sum;
+        barrier();
+
+        for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+            if (tid < s) {
+                shared_sum[tid] += shared_sum[tid + s];
+            }
+            barrier();
+        }
+
+        if (tid == 0) {
+            writeBF16(out_elem0, row_max + log(shared_sum[0]));
+        }
+    }
+
+    barrier();
+
+    // Process second output element (if valid)
+    if (out_elem1 < params.outer_size) {
+        uint outer_idx = out_elem1 / params.inner_size;
+        uint inner_idx = out_elem1 % params.inner_size;
+        uint base_idx = outer_idx * params.reduce_size * params.inner_size + inner_idx;
+
+        // Pass 1: Find max
+        float local_max = -1.0 / 0.0;
+        for (uint i = tid; i < params.reduce_size; i += WORKGROUP_SIZE) {
+            uint idx = base_idx + i * params.inner_size;
+            if (idx < params.n) {
+                local_max = max(local_max, readBF16(idx));
+            }
+        }
+        shared_max[tid] = local_max;
+        barrier();
+
+        for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+            if (tid < s) {
+                shared_max[tid] = max(shared_max[tid], shared_max[tid + s]);
+            }
+            barrier();
+        }
+
+        float row_max = shared_max[0];
+        barrier();
+
+        // Pass 2: sum(exp(x - max)) with Kahan
+        float local_sum = 0.0;
+        float local_comp = 0.0;
+        for (uint i = tid; i < params.reduce_size; i += WORKGROUP_SIZE) {
+            uint idx = base_idx + i * params.inner_size;
+            if (idx < params.n) {
+                float val = exp(readBF16(idx) - row_max);
+                float y = val - local_comp;
+                float t = local_sum + y;
+                local_comp = (t - local_sum) - y;
+                local_sum = t;
+            }
+        }
+        shared_sum[tid] = local_sum;
+        barrier();
+
+        for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+            if (tid < s) {
+                shared_sum[tid] += shared_sum[tid + s];
+            }
+            barrier();
+        }
+
+        if (tid == 0) {
+            writeBF16(out_elem1, row_max + log(shared_sum[0]));
+        }
+    }
+}

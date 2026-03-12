@@ -1,0 +1,67 @@
+#version 450
+#extension GL_EXT_shader_atomic_float : enable
+
+// Max Pooling 2D Backward Pass for BFloat16 using pre-computed indices
+// We work in float32 for the atomic operations, then pack back to bfloat16
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { uint grad_output[]; };   // Packed bfloat16 pairs
+layout(binding = 1) buffer Indices { uint indices_data[]; };     // Packed bfloat16 pairs
+layout(binding = 2) buffer GradInput { float grad_input[]; };    // Work in float32 for atomic ops
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint grad_input_size;
+} params;
+
+// Convert half to float
+float half_to_float(uint h) {
+    uint sign = (h & 0x8000u) << 16;
+    uint exp = (h >> 10) & 0x1Fu;
+    uint mant = h & 0x3FFu;
+
+    if (exp == 0u) {
+        if (mant == 0u) {
+            return uintBitsToFloat(sign);
+        }
+        // Denormalized
+        while ((mant & 0x400u) == 0u) {
+            mant <<= 1;
+            exp--;
+        }
+        exp++;
+        mant &= ~0x400u;
+        exp += 127u - 15u;
+        return uintBitsToFloat(sign | (exp << 23) | (mant << 13));
+    } else if (exp == 31u) {
+        return uintBitsToFloat(sign | 0x7F800000u | (mant << 13));
+    }
+    exp += 127u - 15u;
+    return uintBitsToFloat(sign | (exp << 23) | (mant << 13));
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n_elements) {
+        return;
+    }
+
+    // Read gradient from packed bfloat16
+    uint grad_word_idx = idx / 2;
+    uint grad_half_idx = idx % 2;
+    uint grad_packed = grad_output[grad_word_idx];
+    uint grad_half = (grad_half_idx == 0) ? (grad_packed & 0xFFFFu) : (grad_packed >> 16);
+    float grad = half_to_float(grad_half);
+
+    // Read index from packed bfloat16
+    uint idx_word_idx = idx / 2;
+    uint idx_half_idx = idx % 2;
+    uint idx_packed = indices_data[idx_word_idx];
+    uint idx_half = (idx_half_idx == 0) ? (idx_packed & 0xFFFFu) : (idx_packed >> 16);
+    int target_idx = int(half_to_float(idx_half));
+
+    if (target_idx >= 0 && target_idx < int(params.grad_input_size)) {
+        atomicAdd(grad_input[target_idx], grad);
+    }
+}

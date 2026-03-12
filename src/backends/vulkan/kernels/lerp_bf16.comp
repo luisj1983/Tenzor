@@ -1,0 +1,63 @@
+#version 450
+
+// Lerp (linear interpolation) for BFloat16: result = start + weight * (end - start)
+// BFloat16 elements are packed 2 per 32-bit word
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer InputStart { uint start_buf[]; };
+layout(binding = 1) buffer InputEnd { uint end_buf[]; };
+layout(binding = 2) buffer InputWeight { uint weight_buf[]; };
+layout(binding = 3) buffer Output { uint result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of elements
+} params;
+
+// Helper to read bfloat16 from packed buffer
+float readBF16(uint packed, uint offset) {
+    uint bits = (packed >> (offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+// Helper to pack two bfloat16 values (round-to-nearest-even)
+uint packBF16Pair(float v0, float v1) {
+    uint b0 = floatBitsToUint(v0);
+    uint b1 = floatBitsToUint(v1);
+    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
+    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
+    return bf0 | (bf1 << 16);
+}
+
+void main() {
+    // Process 2 elements per thread
+    uint pair_idx = gl_GlobalInvocationID.x;
+    uint idx0 = pair_idx * 2;
+    uint idx1 = pair_idx * 2 + 1;
+
+    if (idx0 >= params.n) {
+        return;
+    }
+
+    uint s_packed = start_buf[pair_idx];
+    uint e_packed = end_buf[pair_idx];
+    uint w_packed = weight_buf[pair_idx];
+
+    // Upcast to float32 for computation
+    float s0 = float(readBF16(s_packed, 0));
+    float e0 = float(readBF16(e_packed, 0));
+    float w0 = float(readBF16(w_packed, 0));
+
+    float s1 = float(readBF16(s_packed, 1));
+    float e1 = float(readBF16(e_packed, 1));
+    float w1 = float(readBF16(w_packed, 1));
+
+    float res0 = float(s0 + w0 * (e0 - s0));
+    float res1 = float(s1 + w1 * (e1 - s1));
+
+    // Handle odd number of elements
+    if (idx1 >= params.n) {
+        res1 = float(0.0);
+    }
+
+    result[pair_idx] = packBF16Pair(res0, res1);
+}

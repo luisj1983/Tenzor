@@ -1,0 +1,157 @@
+#version 450
+
+// BF16 utility: unpack two bfloat16 values from a uint32 word
+vec2 unpackBF16x2(uint packed) {
+    float lo = uintBitsToFloat((packed & 0xFFFFu) << 16);
+    float hi = uintBitsToFloat(packed & 0xFFFF0000u);
+    return vec2(lo, hi);
+}
+
+// BF16 utility: pack two float values into a uint32 as bfloat16 (round-to-nearest-even)
+uint packBF16x2(vec2 v) {
+    uint b0 = floatBitsToUint(v.x);
+    uint b1 = floatBitsToUint(v.y);
+    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
+    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
+    return bf0 | (bf1 << 16);
+}
+
+// GRU Cell backward compute shader for BFloat16 -- computes gradients for one timestep
+// Recomputes forward activations from saved pre-activation gates, then
+// backpropagates through the GRU equations.
+//
+// Inputs:
+//   binding 0: grad_h -- gradient from next layer [batch, hidden]
+//   binding 1: gates_x -- pre-activation input gates [batch, 3*hidden]
+//   binding 2: gates_h -- pre-activation hidden gates [batch, 3*hidden]
+//   binding 3: h_prev -- previous hidden state [batch, hidden]
+// Outputs:
+//   binding 4: grad_gates_x -- gradient w.r.t. gates_x [batch, 3*hidden]
+//   binding 5: grad_gates_h -- gradient w.r.t. gates_h [batch, 3*hidden]
+//   binding 6: grad_h_prev -- gradient w.r.t. h_prev [batch, hidden]
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradH     { uint grad_h[]; };        // Packed BF16
+layout(binding = 1) buffer GatesX    { uint gates_x[]; };       // Packed BF16
+layout(binding = 2) buffer GatesH    { uint gates_h[]; };       // Packed BF16
+layout(binding = 3) buffer HPrev     { uint h_prev[]; };        // Packed BF16
+layout(binding = 4) buffer GradGX    { uint grad_gates_x[]; };  // Packed BF16
+layout(binding = 5) buffer GradGH    { uint grad_gates_h[]; };  // Packed BF16
+layout(binding = 6) buffer GradHPrev { uint grad_h_prev[]; };   // Packed BF16
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint hidden_size;
+} params;
+
+float readBF16GradH(uint idx) {
+    uint word_idx = idx >> 1u;
+    uint packed = grad_h[word_idx];
+    vec2 pair = unpackBF16x2(packed);
+    return (idx & 1u) == 0u ? pair.x : pair.y;
+}
+
+float readBF16GatesX(uint idx) {
+    uint word_idx = idx >> 1u;
+    uint packed = gates_x[word_idx];
+    vec2 pair = unpackBF16x2(packed);
+    return (idx & 1u) == 0u ? pair.x : pair.y;
+}
+
+float readBF16GatesH(uint idx) {
+    uint word_idx = idx >> 1u;
+    uint packed = gates_h[word_idx];
+    vec2 pair = unpackBF16x2(packed);
+    return (idx & 1u) == 0u ? pair.x : pair.y;
+}
+
+float readBF16HPrev(uint idx) {
+    uint word_idx = idx >> 1u;
+    uint packed = h_prev[word_idx];
+    vec2 pair = unpackBF16x2(packed);
+    return (idx & 1u) == 0u ? pair.x : pair.y;
+}
+
+void writeBF16GradGX(uint idx, float val) {
+    uint word_idx = idx >> 1u;
+    uint packed = grad_gates_x[word_idx];
+    vec2 pair = unpackBF16x2(packed);
+    if ((idx & 1u) == 0u) pair.x = val; else pair.y = val;
+    grad_gates_x[word_idx] = packBF16x2(pair);
+}
+
+void writeBF16GradGH(uint idx, float val) {
+    uint word_idx = idx >> 1u;
+    uint packed = grad_gates_h[word_idx];
+    vec2 pair = unpackBF16x2(packed);
+    if ((idx & 1u) == 0u) pair.x = val; else pair.y = val;
+    grad_gates_h[word_idx] = packBF16x2(pair);
+}
+
+void writeBF16GradHPrev(uint idx, float val) {
+    uint word_idx = idx >> 1u;
+    uint packed = grad_h_prev[word_idx];
+    vec2 pair = unpackBF16x2(packed);
+    if ((idx & 1u) == 0u) pair.x = val; else pair.y = val;
+    grad_h_prev[word_idx] = packBF16x2(pair);
+}
+
+float sigmoid(float x) {
+    return 1.0 / (1.0 + exp(-x));
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = params.batch_size * params.hidden_size;
+
+    if (idx >= total) return;
+
+    uint b = idx / params.hidden_size;
+    uint h = idx % params.hidden_size;
+
+    uint H = params.hidden_size;
+    uint gate_base = b * (3 * H);
+
+    // Indices into the gate arrays
+    uint r_idx = gate_base + h;
+    uint z_idx = gate_base + H + h;
+    uint n_idx = gate_base + 2 * H + h;
+
+    // ---- Recompute forward activations ----
+    float r = sigmoid(readBF16GatesX(r_idx) + readBF16GatesH(r_idx));
+    float z = sigmoid(readBF16GatesX(z_idx) + readBF16GatesH(z_idx));
+    float gh_n = readBF16GatesH(n_idx);
+    float n_combined = readBF16GatesX(n_idx) + r * gh_n;
+    float n = tanh(n_combined);
+
+    // ---- Backward through h_out = (1 - z) * n + z * h_prev ----
+    float dh = readBF16GradH(idx);
+    float dn = dh * (1.0 - z);
+    float dz = dh * (readBF16HPrev(idx) - n);
+    float dh_p = dh * z;
+
+    // ---- Backward through tanh: n = tanh(n_combined) ----
+    float dn_comb = dn * (1.0 - n * n);
+
+    // ---- Backward through n_combined = gx_n + r * gh_n ----
+    float d_gx_n = dn_comb;
+    float d_gh_n = dn_comb * r;
+    float dr = dn_comb * gh_n;
+
+    // ---- Backward through sigmoid gates ----
+    float dz_raw = dz * z * (1.0 - z);
+    float dr_raw = dr * r * (1.0 - r);
+
+    // ---- Write grad_gates_x: [dr_raw, dz_raw, d_gx_n] ----
+    writeBF16GradGX(r_idx, dr_raw);
+    writeBF16GradGX(z_idx, dz_raw);
+    writeBF16GradGX(n_idx, d_gx_n);
+
+    // ---- Write grad_gates_h: [dr_raw, dz_raw, d_gh_n] ----
+    writeBF16GradGH(r_idx, dr_raw);
+    writeBF16GradGH(z_idx, dz_raw);
+    writeBF16GradGH(n_idx, d_gh_n);
+
+    // ---- Write grad_h_prev ----
+    writeBF16GradHPrev(idx, dh_p);
+}

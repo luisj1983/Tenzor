@@ -1,0 +1,53 @@
+#version 450
+
+// BF16 utility: unpack two bfloat16 values from a uint32 word
+vec2 unpackBF16x2(uint packed) {
+    float lo = uintBitsToFloat((packed & 0xFFFFu) << 16);
+    float hi = uintBitsToFloat(packed & 0xFFFF0000u);
+    return vec2(lo, hi);
+}
+
+// BF16 utility: pack two float values into a uint32 as bfloat16 (round-to-nearest-even)
+uint packBF16x2(vec2 v) {
+    uint b0 = floatBitsToUint(v.x);
+    uint b1 = floatBitsToUint(v.y);
+    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
+    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
+    return bf0 | (bf1 << 16);
+}
+
+// Real-to-Complex FFT: Pack N real values into N/2 complex values — BFloat16
+// Input:  N real bfloat16 values in packed uint32 buffer (2 reals per word)
+// Output: N/2 complex bfloat16 values (1 complex per uint32 word: real low, imag high)
+// Pairs adjacent reals as (re, im) for a half-length complex FFT
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { uint data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { uint data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;            // Original real FFT size (N)
+    uint batch_offset; // Offset in real elements for batching
+};
+
+// Read a single bfloat16 from packed real buffer
+float readReal(uint element_idx) {
+    uint adjusted = batch_offset + element_idx;
+    uint word_idx = adjusted / 2;
+    uint half_sel = adjusted % 2;
+    vec2 unpacked = unpackBF16x2(data_in[word_idx]);
+    return (half_sel == 0) ? unpacked.x : unpacked.y;
+}
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint half_n = n / 2;
+    if (tid >= half_n) return;
+
+    // Pack real[2k] as real part, real[2k+1] as imag part
+    float re = readReal(tid * 2);
+    float im = readReal(tid * 2 + 1);
+
+    data_out[tid] = packBF16x2(vec2(re, im));
+}

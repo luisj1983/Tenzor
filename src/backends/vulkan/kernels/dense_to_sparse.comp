@@ -1,0 +1,36 @@
+#version 450
+
+// Dense to CSR: Pass 1 — count nonzeros per row
+// Output: row_counts[row] = number of nonzero elements in that row
+// A prefix sum (on the host or a separate pass) converts row_counts to row_offsets
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer Dense     { float dense[];     };
+layout(set = 0, binding = 1) buffer RowCounts          { uint row_counts[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_rows;
+    uint n_cols;
+};
+
+shared uint local_count;
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (row >= n_rows) return;
+
+    if (tid == 0) local_count = 0;
+    barrier();
+
+    for (uint col = tid; col < n_cols; col += 256) {
+        if (dense[row * n_cols + col] != 0.0) {
+            atomicAdd(local_count, 1);
+        }
+    }
+    barrier();
+
+    if (tid == 0) {
+        row_counts[row] = local_count;
+    }
+}

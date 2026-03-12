@@ -1,0 +1,67 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+// BF16 sort: keys stored as individual uint16 values packed in uint32 pairs
+// But for sorting we need individual access, so we use a flat uint16 view via uint buffer
+layout(set = 0, binding = 0) readonly buffer KeysIn   { uint keys_in[];   };  // packed bf16 pairs
+layout(set = 0, binding = 1) readonly buffer IdxIn    { int idx_in[];     };
+layout(set = 0, binding = 2) buffer KeysOut            { uint keys_out[];  };
+layout(set = 0, binding = 3) buffer IdxOut             { int idx_out[];    };
+layout(set = 0, binding = 4) buffer Histograms         { uint histos[];    };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint digit;  // 0 or 1 for 16-bit keys
+    uint n_wgs;
+};
+
+shared uint local_offsets[256];
+
+uint bf16_to_sortable(uint bits16) {
+    // BFloat16 sign-bit flip for correct ordering
+    uint mask = uint(-int(bits16 >> 15)) | 0x8000u;
+    return (bits16 ^ mask) & 0xFFFFu;
+}
+
+uint readBF16Bits(uint element_idx) {
+    uint pair_idx = element_idx / 2;
+    uint offset = element_idx % 2;
+    uint packed = keys_in[pair_idx];
+    return (packed >> (offset * 16)) & 0xFFFFu;
+}
+
+void writeBF16Bits(uint element_idx, uint bits16) {
+    uint pair_idx = element_idx / 2;
+    uint offset = element_idx % 2;
+    if (offset == 0) {
+        uint existing = keys_out[pair_idx] & 0xFFFF0000u;
+        keys_out[pair_idx] = existing | (bits16 & 0xFFFFu);
+    } else {
+        uint existing = keys_out[pair_idx] & 0x0000FFFFu;
+        keys_out[pair_idx] = existing | ((bits16 & 0xFFFFu) << 16);
+    }
+}
+
+void main() {
+    uint lid = gl_LocalInvocationID.x;
+    uint wg_id = gl_WorkGroupID.x;
+
+    if (lid < 256) {
+        local_offsets[lid] = histos[lid * n_wgs + wg_id];
+    }
+    barrier();
+
+    uint tile_size = (n + n_wgs - 1) / n_wgs;
+    uint tile_start = wg_id * tile_size;
+    uint tile_end = min(tile_start + tile_size, n);
+
+    for (uint i = tile_start + lid; i < tile_end; i += 256) {
+        uint bits16 = readBF16Bits(i);
+        uint sortable = bf16_to_sortable(bits16);
+        uint digit_val = (sortable >> (digit * 8)) & 0xFFu;
+        uint dest = atomicAdd(local_offsets[digit_val], 1);
+        writeBF16Bits(dest, bits16);
+        idx_out[dest] = idx_in[i];
+    }
+}

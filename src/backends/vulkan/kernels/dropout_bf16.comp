@@ -1,0 +1,123 @@
+#version 450
+
+// Dropout forward for BFloat16
+// Each thread processes 2 elements (one packed uint32 word)
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };
+layout(binding = 1) buffer Output { uint output_data[]; };
+layout(binding = 2) buffer Mask { uint mask_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint seed;
+    uint offset;
+    float p;
+    float scale;
+} params;
+
+const uint PHILOX_M0 = 0xD2511F53u;
+const uint PHILOX_M1 = 0xCD9E8D57u;
+const uint PHILOX_W0 = 0x9E3779B9u;
+const uint PHILOX_W1 = 0xBB67AE85u;
+
+uint mulhi(uint a, uint b) {
+    uint a_lo = a & 0xFFFFu;
+    uint a_hi = a >> 16;
+    uint b_lo = b & 0xFFFFu;
+    uint b_hi = b >> 16;
+    uint p0 = a_lo * b_lo;
+    uint p1 = a_lo * b_hi;
+    uint p2 = a_hi * b_lo;
+    uint p3 = a_hi * b_hi;
+    uint carry = ((p0 >> 16) + (p1 & 0xFFFFu) + (p2 & 0xFFFFu)) >> 16;
+    return p3 + (p1 >> 16) + (p2 >> 16) + carry;
+}
+
+void philox_round(inout uvec4 ctr, uvec2 key) {
+    uint hi0 = mulhi(ctr.x, PHILOX_M0);
+    uint lo0 = ctr.x * PHILOX_M0;
+    uint hi1 = mulhi(ctr.z, PHILOX_M1);
+    uint lo1 = ctr.z * PHILOX_M1;
+    ctr = uvec4(hi1 ^ ctr.y ^ key.x, lo1, hi0 ^ ctr.w ^ key.y, lo0);
+}
+
+uvec4 philox4x32(uvec4 ctr, uvec2 key) {
+    for (int i = 0; i < 10; i++) {
+        philox_round(ctr, key);
+        key.x += PHILOX_W0;
+        key.y += PHILOX_W1;
+    }
+    return ctr;
+}
+
+float uint_to_float01(uint x) {
+    return float(x >> 8) * (1.0 / 16777216.0);
+}
+
+uint float_to_half(float f) {
+    uint bits = floatBitsToUint(f);
+    uint sign = (bits >> 16) & 0x8000;
+    int exp = int((bits >> 23) & 0xFF) - 127 + 15;
+    uint mant = bits & 0x7FFFFF;
+
+    if (exp <= 0) {
+        if (exp < -10) return sign;
+        mant |= 0x800000;
+        uint shift = uint(14 - exp);
+        mant >>= shift;
+        return sign | mant;
+    } else if (exp >= 31) {
+        return sign | 0x7C00;
+    }
+    return sign | (uint(exp) << 10) | (mant >> 13);
+}
+
+float readInput(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = input_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return float(uintBitsToFloat(bits << 16));
+}
+
+void main() {
+    uint word_idx = gl_GlobalInvocationID.x;
+    uint elem0 = word_idx * 2;
+    uint elem1 = word_idx * 2 + 1;
+
+    if (elem0 >= params.n_elements) {
+        return;
+    }
+
+    // Generate random numbers for both elements
+    uint element_idx0 = elem0 + params.offset;
+    uvec4 ctr0 = uvec4(element_idx0, element_idx0 >> 16, 0, 0);
+    uvec2 key = uvec2(params.seed, params.seed ^ 0xDEADBEEF);
+    uvec4 rand_vals = philox4x32(ctr0, key);
+
+    float rand0 = uint_to_float01(rand_vals.x);
+    float rand1 = uint_to_float01(rand_vals.y);
+
+    float in0 = float(readInput(elem0));
+    float keep0 = (rand0 >= params.p) ? 1.0 : 0.0;
+    float out0 = in0 * keep0 * params.scale;
+
+    float out1 = 0.0;
+    float keep1 = 0.0;
+    if (elem1 < params.n_elements) {
+        float in1 = float(readInput(elem1));
+        keep1 = (rand1 >= params.p) ? 1.0 : 0.0;
+        out1 = in1 * keep1 * params.scale;
+    }
+
+    // Write output packed
+    uint half_out0 = float_to_half(out0);
+    uint half_out1 = float_to_half(out1);
+    output_data[word_idx] = half_out0 | (half_out1 << 16);
+
+    // Write mask packed (1.0 or 0.0 as bfloat16)
+    uint half_mask0 = float_to_half(keep0);
+    uint half_mask1 = float_to_half(keep1);
+    mask_data[word_idx] = half_mask0 | (half_mask1 << 16);
+}

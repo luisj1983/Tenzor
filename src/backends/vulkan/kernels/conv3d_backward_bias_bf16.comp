@@ -1,0 +1,83 @@
+#version 450
+
+// BF16 utility: unpack two bfloat16 values from a uint32 word
+vec2 unpackBF16x2(uint packed) {
+    float lo = uintBitsToFloat((packed & 0xFFFFu) << 16);
+    float hi = uintBitsToFloat(packed & 0xFFFF0000u);
+    return vec2(lo, hi);
+}
+
+// BF16 utility: pack two float values into a uint32 as bfloat16 (round-to-nearest-even)
+uint packBF16x2(vec2 v) {
+    uint b0 = floatBitsToUint(v.x);
+    uint b1 = floatBitsToUint(v.y);
+    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
+    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
+    return bf0 | (bf1 << 16);
+}
+
+// Conv3d Backward Bias - Gradient w.r.t. bias (BFloat16 version)
+// Sum grad_output across batch, depth, height, and width for each output channel
+// Accumulates in float32 for numerical stability
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { uint grad_output[]; };  // Packed BF16: (N, C_out, D_out, H_out, W_out)
+layout(binding = 1) buffer GradBias { uint grad_bias[]; };      // Packed BF16: (C_out)
+
+layout(push_constant) uniform PushConstants {
+    uint batch;
+    uint channels_out;
+    uint depth_out;
+    uint height_out;
+    uint width_out;
+} params;
+
+float readBF16(uint element_idx) {
+    uint word_idx = element_idx >> 1u;
+    uint packed = grad_output[word_idx];
+    vec2 pair = unpackBF16x2(packed);
+    return ((element_idx & 1u) == 0u) ? pair.x : pair.y;
+}
+
+void writeBF16(uint element_idx, float value) {
+    uint word_idx = element_idx >> 1u;
+    uint word_offset = element_idx & 1u;
+    uint new_bits = ((floatBitsToUint(value) + 0x7FFFu + ((floatBitsToUint(value) >> 16) & 1u)) >> 16);
+    uint shift = word_offset * 16u;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = grad_bias[word_idx];
+    for (uint iter = 0u; iter < 64u; iter++) {
+        uint expected = old_val;
+        uint new_val = (expected & ~mask) | (new_bits << shift);
+        old_val = atomicCompSwap(grad_bias[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    uint cur = grad_bias[word_idx];
+    grad_bias[word_idx] = (cur & ~mask) | (new_bits << shift);
+}
+
+void main() {
+    uint c = gl_GlobalInvocationID.x;
+
+    if (c >= params.channels_out) {
+        return;
+    }
+
+    float sum = 0.0;
+
+    for (uint b = 0; b < params.batch; b++) {
+        for (uint d = 0; d < params.depth_out; d++) {
+            for (uint h = 0; h < params.height_out; h++) {
+                for (uint w = 0; w < params.width_out; w++) {
+                    uint idx = (((b * params.channels_out + c) * params.depth_out + d) *
+                                params.height_out + h) * params.width_out + w;
+                    sum += readBF16(idx);
+                }
+            }
+        }
+    }
+
+    writeBF16(c, sum);
+}

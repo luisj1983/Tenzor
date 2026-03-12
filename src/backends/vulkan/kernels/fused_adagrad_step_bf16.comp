@@ -1,0 +1,57 @@
+#version 450
+
+// Fused Adagrad optimizer step for BFloat16 parameters
+// Grad/param buffers are packed BF16; sum_sq is Float32 (master weights)
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Grad { uint grad_data[]; };       // Packed BF16
+layout(binding = 1) buffer Param { uint param_data[]; };     // Packed BF16
+layout(binding = 2) buffer SumSq { float sum_sq[]; };        // Float32
+
+layout(push_constant) uniform PushConstants {
+    uint numel;
+    float lr;
+    float eps;
+    float weight_decay;
+} params;
+
+// Helper to read bfloat16 from packed buffer
+float readBF16(uint packed, uint offset) {
+    uint bits = (packed >> (offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+float adagradStep(uint idx) {
+    float g = readBF16(idx, 0);
+    float p = readBF16(idx, 1);
+
+    if (params.weight_decay > 0.0) {
+        g += params.weight_decay * p;
+    }
+
+    sum_sq[idx] += g * g;
+    p -= params.lr * g / (sqrt(sum_sq[idx]) + params.eps);
+    return p;
+}
+
+void main() {
+    uint word_idx = gl_GlobalInvocationID.x;
+    uint num_words = (params.numel + 1) / 2;
+    if (word_idx >= num_words) return;
+
+    uint elem0 = word_idx * 2;
+    uint elem1 = word_idx * 2 + 1;
+
+    float p0 = 0.0, p1 = 0.0;
+
+    if (elem0 < params.numel) {
+        p0 = adagradStep(elem0);
+    }
+    if (elem1 < params.numel) {
+        p1 = adagradStep(elem1);
+    }
+
+    uint bits0 = ((floatBitsToUint(p0) + 0x7FFFu + ((floatBitsToUint(p0) >> 16) & 1u)) >> 16);
+    uint bits1 = ((floatBitsToUint(p1) + 0x7FFFu + ((floatBitsToUint(p1) >> 16) & 1u)) >> 16);
+    param_data[word_idx] = bits0 | (bits1 << 16);
+}

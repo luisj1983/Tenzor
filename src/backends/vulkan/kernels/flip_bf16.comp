@@ -1,0 +1,71 @@
+#version 450
+
+// Flip (reverse) elements along a dimension for BFloat16
+// BFloat16 stored as packed uint32 words (2 elements per word)
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer InputA { uint a[]; };
+layout(binding = 1) buffer Output { uint result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // total elements (in BFloat16 units)
+    uint dim_size;   // size of the dimension being flipped
+    uint inner_size; // product of dims after the flip dim
+};
+
+// Helper to read a single BFloat16 element from packed storage
+float read_bf16(uint elem_idx) {
+    uint word_idx = elem_idx / 2;
+    uint packed = a[word_idx];
+    uint bits;
+    if ((elem_idx & 1) == 0) {
+        bits = packed & 0xFFFFu;
+    } else {
+        bits = packed >> 16;
+    }
+    return uintBitsToFloat(bits << 16);
+}
+
+// Helper to pack two bfloat16 values (round-to-nearest-even)
+uint packBF16Pair(float v0, float v1) {
+    uint b0 = floatBitsToUint(v0);
+    uint b1 = floatBitsToUint(v1);
+    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
+    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
+    return bf0 | (bf1 << 16);
+}
+
+void main() {
+    // Each thread handles one packed uint32 word (2 BFloat16 elements)
+    uint word_idx = gl_GlobalInvocationID.x;
+    uint num_words = (n + 1) / 2;
+    if (word_idx >= num_words) return;
+
+    uint elem0_idx = word_idx * 2;
+    uint elem1_idx = elem0_idx + 1;
+
+    // Compute flipped source for element 0
+    float val0;
+    {
+        uint inner_idx = elem0_idx % inner_size;
+        uint dim_pos = (elem0_idx / inner_size) % dim_size;
+        uint outer_idx = elem0_idx / (dim_size * inner_size);
+        uint flipped = dim_size - 1 - dim_pos;
+        uint src = outer_idx * (dim_size * inner_size) + flipped * inner_size + inner_idx;
+        val0 = read_bf16(src);
+    }
+
+    // Compute flipped source for element 1
+    float val1 = 0.0;
+    if (elem1_idx < n) {
+        uint inner_idx = elem1_idx % inner_size;
+        uint dim_pos = (elem1_idx / inner_size) % dim_size;
+        uint outer_idx = elem1_idx / (dim_size * inner_size);
+        uint flipped = dim_size - 1 - dim_pos;
+        uint src = outer_idx * (dim_size * inner_size) + flipped * inner_size + inner_idx;
+        val1 = read_bf16(src);
+    }
+
+    // Pack and write
+    result[word_idx] = packBF16Pair(val0, val1);
+}

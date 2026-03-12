@@ -1,0 +1,39 @@
+#version 450
+
+// Full operation: create tensor filled with specific value for BFloat16 dtype
+// BFloat16 elements are packed 2 per 32-bit word
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;       // Number of bfloat16 elements
+    uint fill_value_bf16;   // Fill value as bfloat16 bits (only lower 16 bits used)
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    // Each thread handles 2 bfloat16 elements packed in one uint32
+    uint element_pair_idx = idx;
+    uint base_element = element_pair_idx * 2;
+
+    if (base_element >= params.n_elements) {
+        return;
+    }
+
+    // Extract bfloat16 value from push constant (lower 16 bits)
+    uint value_bf16 = params.fill_value_bf16 & 0xFFFFu;
+
+    // Pack two bfloat16 values into one uint32
+    uint packed_value;
+    if (base_element + 1 < params.n_elements) {
+        // Both elements are valid
+        packed_value = value_bf16 | (value_bf16 << 16);
+    } else {
+        // Only one element is valid (odd number of elements)
+        packed_value = value_bf16;
+    }
+
+    output_data[element_pair_idx] = packed_value;
+}

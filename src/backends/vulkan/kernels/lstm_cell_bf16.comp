@@ -1,0 +1,95 @@
+#version 450
+
+// BF16 utility: unpack two bfloat16 values from a uint32 word
+vec2 unpackBF16x2(uint packed) {
+    float lo = uintBitsToFloat((packed & 0xFFFFu) << 16);
+    float hi = uintBitsToFloat(packed & 0xFFFF0000u);
+    return vec2(lo, hi);
+}
+
+// BF16 utility: pack two float values into a uint32 as bfloat16 (round-to-nearest-even)
+uint packBF16x2(vec2 v) {
+    uint b0 = floatBitsToUint(v.x);
+    uint b1 = floatBitsToUint(v.y);
+    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
+    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
+    return bf0 | (bf1 << 16);
+}
+
+// LSTM Cell compute shader for BFloat16 -- processes one timestep
+// Reads packed BF16 pairs, computes in float32 for numerical stability
+//
+// Inputs:
+//   binding 0: gates buffer (pre-computed linear: x*W_ih^T + h*W_hh^T + biases)
+//              shape: [batch_size, 4 * hidden_size] -- layout: [i|f|g|o]
+//   binding 1: c_prev -- previous cell state [batch_size, hidden_size]
+//   binding 2: h_out -- output hidden state [batch_size, hidden_size]
+//   binding 3: c_out -- output cell state [batch_size, hidden_size]
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Gates { uint gates[]; };       // Packed BF16
+layout(binding = 1) buffer CellPrev { uint c_prev[]; };   // Packed BF16
+layout(binding = 2) buffer HiddenOut { uint h_out[]; };   // Packed BF16
+layout(binding = 3) buffer CellOut { uint c_out[]; };     // Packed BF16
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint hidden_size;
+} params;
+
+float readBF16Gates(uint idx) {
+    uint word_idx = idx >> 1u;
+    uint packed = gates[word_idx];
+    vec2 pair = unpackBF16x2(packed);
+    return (idx & 1u) == 0u ? pair.x : pair.y;
+}
+
+float readBF16CPrev(uint idx) {
+    uint word_idx = idx >> 1u;
+    uint packed = c_prev[word_idx];
+    vec2 pair = unpackBF16x2(packed);
+    return (idx & 1u) == 0u ? pair.x : pair.y;
+}
+
+void writeBF16HOut(uint idx, float val) {
+    uint word_idx = idx >> 1u;
+    uint packed = h_out[word_idx];
+    vec2 pair = unpackBF16x2(packed);
+    if ((idx & 1u) == 0u) pair.x = val; else pair.y = val;
+    h_out[word_idx] = packBF16x2(pair);
+}
+
+void writeBF16COut(uint idx, float val) {
+    uint word_idx = idx >> 1u;
+    uint packed = c_out[word_idx];
+    vec2 pair = unpackBF16x2(packed);
+    if ((idx & 1u) == 0u) pair.x = val; else pair.y = val;
+    c_out[word_idx] = packBF16x2(pair);
+}
+
+float sigmoid(float x) {
+    return 1.0 / (1.0 + exp(-x));
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = params.batch_size * params.hidden_size;
+
+    if (idx >= total) return;
+
+    uint b = idx / params.hidden_size;
+    uint h = idx % params.hidden_size;
+
+    uint gate_base = b * (4 * params.hidden_size);
+
+    float i_gate = sigmoid(readBF16Gates(gate_base + h));                              // input gate
+    float f_gate = sigmoid(readBF16Gates(gate_base + params.hidden_size + h));         // forget gate
+    float g_gate = tanh(readBF16Gates(gate_base + 2 * params.hidden_size + h));        // cell gate
+    float o_gate = sigmoid(readBF16Gates(gate_base + 3 * params.hidden_size + h));     // output gate
+
+    float c_new = f_gate * readBF16CPrev(idx) + i_gate * g_gate;
+    float h_new = o_gate * tanh(c_new);
+
+    writeBF16COut(idx, c_new);
+    writeBF16HOut(idx, h_new);
+}

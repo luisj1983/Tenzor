@@ -1,0 +1,50 @@
+#version 450
+
+// SpMV: y = A * x where A is CSR sparse, x and y are dense vectors
+// One workgroup per row, threads reduce products within row
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer RowOffsets { int row_offsets[]; };
+layout(set = 0, binding = 1) readonly buffer ColIndices { int col_indices[]; };
+layout(set = 0, binding = 2) readonly buffer Values     { float values[];     };
+layout(set = 0, binding = 3) readonly buffer VecX       { float x[];          };
+layout(set = 0, binding = 4) buffer VecY                { float y[];          };
+
+layout(push_constant) uniform PushConstants {
+    uint n_rows;
+    uint n_cols;
+};
+
+shared float partial_sums[256];
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (row >= n_rows) return;
+
+    uint row_start = uint(row_offsets[row]);
+    uint row_end = uint(row_offsets[row + 1]);
+    uint row_nnz = row_end - row_start;
+
+    // Each thread accumulates partial products
+    float sum = 0.0;
+    for (uint i = tid; i < row_nnz; i += 256) {
+        uint idx = row_start + i;
+        sum += values[idx] * x[col_indices[idx]];
+    }
+
+    partial_sums[tid] = sum;
+    barrier();
+
+    // Parallel reduction
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            partial_sums[tid] += partial_sums[tid + stride];
+        }
+        barrier();
+    }
+
+    if (tid == 0) {
+        y[row] = partial_sums[0];
+    }
+}

@@ -1,0 +1,72 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Stockham mixed-radix FFT: radix-3 butterfly stage (Float64)
+// Data layout: interleaved real/imag pairs
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { float64_t data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { float64_t data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint N;
+    uint stage_stride;
+    uint direction;
+    uint batch_offset;
+};
+
+const float64_t PI = 3.14159265358979323846lf;
+const float64_t COS_2PI_3 = -0.5lf;
+const float64_t SIN_2PI_3 = 0.86602540378443864676lf;
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint n_butterflies = N / 3;
+    if (tid >= n_butterflies) return;
+
+    uint group = tid / stage_stride;
+    uint pos = tid % stage_stride;
+
+    uint i0 = group * stage_stride * 3 + pos;
+    uint i1 = i0 + stage_stride;
+    uint i2 = i1 + stage_stride;
+
+    uint o0 = group * stage_stride + pos;
+    uint o1 = o0 + n_butterflies;
+    uint o2 = o1 + n_butterflies;
+
+    uint b0_in = (batch_offset + i0) * 2;
+    uint b1_in = (batch_offset + i1) * 2;
+    uint b2_in = (batch_offset + i2) * 2;
+    uint b0_out = (batch_offset + o0) * 2;
+    uint b1_out = (batch_offset + o1) * 2;
+    uint b2_out = (batch_offset + o2) * 2;
+
+    float64_t a0_re = data_in[b0_in], a0_im = data_in[b0_in + 1];
+    float64_t a1_re = data_in[b1_in], a1_im = data_in[b1_in + 1];
+    float64_t a2_re = data_in[b2_in], a2_im = data_in[b2_in + 1];
+
+    float64_t angle1 = -2.0lf * PI * float64_t(pos) / float64_t(stage_stride * 3);
+    float64_t angle2 = 2.0lf * angle1;
+    if (direction == 1) { angle1 = -angle1; angle2 = -angle2; }
+
+    float64_t w1_re = float64_t(cos(float(angle1))), w1_im = float64_t(sin(float(angle1)));
+    float64_t w2_re = float64_t(cos(float(angle2))), w2_im = float64_t(sin(float(angle2)));
+
+    float64_t t1_re = a1_re * w1_re - a1_im * w1_im;
+    float64_t t1_im = a1_re * w1_im + a1_im * w1_re;
+    float64_t t2_re = a2_re * w2_re - a2_im * w2_im;
+    float64_t t2_im = a2_re * w2_im + a2_im * w2_re;
+
+    float64_t s1_re = t1_re + t2_re;
+    float64_t s1_im = t1_im + t2_im;
+    float64_t d1_re = t1_re - t2_re;
+    float64_t d1_im = t1_im - t2_im;
+
+    data_out[b0_out]     = a0_re + s1_re;
+    data_out[b0_out + 1] = a0_im + s1_im;
+    data_out[b1_out]     = a0_re + COS_2PI_3 * s1_re - SIN_2PI_3 * d1_im;
+    data_out[b1_out + 1] = a0_im + COS_2PI_3 * s1_im + SIN_2PI_3 * d1_re;
+    data_out[b2_out]     = a0_re + COS_2PI_3 * s1_re + SIN_2PI_3 * d1_im;
+    data_out[b2_out + 1] = a0_im + COS_2PI_3 * s1_im - SIN_2PI_3 * d1_re;
+}

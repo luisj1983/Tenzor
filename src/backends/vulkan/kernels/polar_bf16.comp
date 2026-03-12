@@ -1,0 +1,46 @@
+#version 450
+
+// BF16 utility: unpack two bfloat16 values from a uint32 word
+vec2 unpackBF16x2(uint packed) {
+    float lo = uintBitsToFloat((packed & 0xFFFFu) << 16);
+    float hi = uintBitsToFloat(packed & 0xFFFF0000u);
+    return vec2(lo, hi);
+}
+
+// BF16 utility: pack two float values into a uint32 as bfloat16 (round-to-nearest-even)
+uint packBF16x2(vec2 v) {
+    uint b0 = floatBitsToUint(v.x);
+    uint b1 = floatBitsToUint(v.y);
+    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
+    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
+    return bf0 | (bf1 << 16);
+}
+
+// Convert polar coordinates to complex numbers — BFloat16
+// Input: abs and angle as packed bfloat16 (2 reals per uint32 word)
+// Output: complex bfloat16 (1 uint32 per complex: real low, imag high)
+//   output_complex[i] = abs[i] * cos(angle[i]) + i * abs[i] * sin(angle[i])
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer AbsInput { uint abs_data[]; };
+layout(binding = 1) readonly buffer AngleInput { uint angle_data[]; };
+layout(binding = 2) buffer Output { uint out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_complex;  // Number of complex numbers
+} params;
+
+// Helper to read bfloat16 from packed buffer
+float readBF16(uint packed, uint offset) {
+    uint bits = (packed >> (offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_complex) return;
+
+    float r = readBF16(idx, 0);
+    float theta = readBF16(idx, 1);
+    out_data[idx] = packBF16x2(vec2(r * cos(theta), r * sin(theta)));
+}
