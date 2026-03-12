@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <vector>
 #include <chrono>
+#include <thread>
 
 namespace tenzor {
 namespace rocm {

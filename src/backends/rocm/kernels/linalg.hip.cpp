@@ -814,55 +814,11 @@ auto linalg_eig_kernel(const Tensor& A, hipStream_t stream)
     v_shape.push_back(n);
     auto V = zeros(v_shape, A.dtype(), A.device());
 
-    auto handle = RocSOLVERHandlePool::get(stream);
-    DeviceInfo d_info;
-
-    // Row-major A = column-major A^T
-    // Left eigenvectors of A^T = right eigenvectors of A
-    rocblas_evect evect_left = rocblas_evect_original;
-    rocblas_evect evect_right = rocblas_evect_none;
-
-    if (A.dtype() == DType::Float32) {
-        float* a_data = work.data<float>();
-        float* wr_data = WR.data<float>();
-        float* wi_data = WI.data<float>();
-        float* v_data = V.data<float>();
-
-        for (int64_t b = 0; b < nbatch; b++) {
-            float* mat = a_data + b * n * n;
-            float* wr_vec = wr_data + b * n;
-            float* wi_vec = wi_data + b * n;
-            float* vl = v_data + b * n * n;
-
-            ROCBLAS_CHECK_LINALG(rocsolver_sgeev(handle, evect_left, evect_right,
-                n, mat, n, wr_vec, wi_vec,
-                vl, n,       // VL
-                nullptr, n,  // VR (not computed)
-                d_info.ptr));
-            check_rocsolver_info(d_info.ptr, "eig");
-        }
-    } else {
-        double* a_data = work.data<double>();
-        double* wr_data = WR.data<double>();
-        double* wi_data = WI.data<double>();
-        double* v_data = V.data<double>();
-
-        for (int64_t b = 0; b < nbatch; b++) {
-            double* mat = a_data + b * n * n;
-            double* wr_vec = wr_data + b * n;
-            double* wi_vec = wi_data + b * n;
-            double* vl = v_data + b * n * n;
-
-            ROCBLAS_CHECK_LINALG(rocsolver_dgeev(handle, evect_left, evect_right,
-                n, mat, n, wr_vec, wi_vec,
-                vl, n,
-                nullptr, n,
-                d_info.ptr));
-            check_rocsolver_info(d_info.ptr, "eig");
-        }
-    }
-
-    HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : 0));
+    // rocsolver_sgeev/rocsolver_dgeev are not available in rocSOLVER < 7.3
+    // Fall back to CPU for non-symmetric eigendecomposition
+    (void)stream;
+    throw std::runtime_error("linalg.eig is not supported on ROCm (rocsolver_geev unavailable). "
+                             "Use CPU backend or linalg.eigh for symmetric matrices.");
     return {WR, WI, V};
 }
 

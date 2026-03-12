@@ -12,7 +12,9 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/math.hpp"
-#include "tenzor/ops/creation.hpp"
+// Note: creation.hpp not included directly — it pulls in loader.hpp which uses
+// std::expected (C++23), incompatible with ROCm's C++20 compilation mode.
+// The tenzor:: creation functions used here (full, arange, etc.) are declared below.
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/core/tensor.hpp"
@@ -25,6 +27,19 @@
 #include <tuple>
 
 namespace tenzor {
+
+// Forward declarations for creation functions (from creation.hpp, which can't be
+// included here due to its loader.hpp dependency using std::expected / C++23)
+auto zeros(std::vector<int64_t> shape, DType dtype = DType::Float32,
+           Device device = Device::cpu()) -> Tensor;
+auto full(std::vector<int64_t> shape, float value, DType dtype = DType::Float32,
+          Device device = Device::cpu()) -> Tensor;
+auto full(std::vector<int64_t> shape, double value, DType dtype, Device device) -> Tensor;
+auto rand(std::vector<int64_t> shape, DType dtype = DType::Float32,
+          Device device = Device::cpu()) -> Tensor;
+auto arange(double start, double end, double step = 1.0,
+           DType dtype = DType::Float32,
+           Device device = Device::cpu()) -> Tensor;
 
 // Helper to extract HIP stream from attributes
 inline hipStream_t get_hip_stream(const OpAttributes& attrs) {
@@ -161,6 +176,7 @@ namespace rocm {
     auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor;
     auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor;
     auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor;
+    auto logsumexp_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor;
     auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, bool unbiased, hipStream_t stream) -> Tensor;
     auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, bool unbiased, hipStream_t stream) -> Tensor;
     auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor;

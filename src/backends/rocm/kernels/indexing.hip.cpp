@@ -2,6 +2,7 @@
 #include <hip/hip_fp16.h>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/backend/backend.hpp"
 #include <hipcub/hipcub.hpp>
 #include <thrust/iterator/counting_iterator.h>
 #include <stdexcept>
