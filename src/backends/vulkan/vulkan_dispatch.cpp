@@ -1632,6 +1632,9 @@ auto VulkanBackend::dispatch(const std::string& op_name,
             uint32_t centered;
             uint32_t has_momentum;
         } pc;
+        if (numel > static_cast<int64_t>(UINT32_MAX)) {
+            throw std::runtime_error("Vulkan: tensor numel exceeds uint32_t push constant limit");
+        }
         pc.numel = static_cast<uint32_t>(numel);
         pc.lr = lr;
         pc.alpha = alpha;
@@ -1690,6 +1693,9 @@ auto VulkanBackend::dispatch(const std::string& op_name,
             uint32_t padding1;
             uint32_t padding2;
         } pc;
+        if (numel > static_cast<int64_t>(UINT32_MAX)) {
+            throw std::runtime_error("Vulkan: tensor numel exceeds uint32_t push constant limit");
+        }
         pc.numel = static_cast<uint32_t>(numel);
         pc.lr = lr;
         pc.rho = rho;
@@ -1742,6 +1748,9 @@ auto VulkanBackend::dispatch(const std::string& op_name,
             float eps;
             float weight_decay;
         } pc;
+        if (numel > static_cast<int64_t>(UINT32_MAX)) {
+            throw std::runtime_error("Vulkan: tensor numel exceeds uint32_t push constant limit");
+        }
         pc.numel = static_cast<uint32_t>(numel);
         pc.lr = lr;
         pc.eps = eps;

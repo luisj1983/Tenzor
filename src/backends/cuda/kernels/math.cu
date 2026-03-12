@@ -3349,6 +3349,7 @@ __global__ void dot_product_kernel(const T* a, const T* b, T* output, int64_t n)
         }
         __syncthreads();
     }
+    __syncthreads();
 
     // Warp-level reduction
     if (tid < 32) {

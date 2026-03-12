@@ -472,6 +472,15 @@ void VulkanBackend::createLogicalDevices() {
         // Determine optimal 1D workgroup size from device limits
         ctx.workgroupSize = vulkan::optimalWorkgroupSize(ctx.physicalDevice);
 
+        // Store maximum workgroup counts for dispatch validation
+        {
+            VkPhysicalDeviceProperties props;
+            vkGetPhysicalDeviceProperties(ctx.physicalDevice, &props);
+            ctx.maxComputeWorkGroupCount[0] = props.limits.maxComputeWorkGroupCount[0];
+            ctx.maxComputeWorkGroupCount[1] = props.limits.maxComputeWorkGroupCount[1];
+            ctx.maxComputeWorkGroupCount[2] = props.limits.maxComputeWorkGroupCount[2];
+        }
+
         // Create pipeline cache (try loading from disk)
         {
             VkPipelineCacheCreateInfo cacheCreateInfo{};

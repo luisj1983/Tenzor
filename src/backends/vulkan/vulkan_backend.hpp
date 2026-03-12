@@ -94,6 +94,7 @@ private:
         bool hasSubgroupArithmetic = false;   // Whether GPU supports subgroup arithmetic ops
         uint32_t subgroupSize = 0;            // Subgroup (warp) size for this device
         uint32_t workgroupSize = 256;         // Optimal 1D workgroup size (power-of-2, from device limits)
+        uint32_t maxComputeWorkGroupCount[3] = {65535, 65535, 65535};  // Vulkan minimum guaranteed
         VkPipelineCache pipelineCache = VK_NULL_HANDLE;  // Persistent pipeline cache
 
         // Configurable fence timeout (default 30s, override with TENZOR_VULKAN_FENCE_TIMEOUT_S)
@@ -138,6 +139,7 @@ private:
             , canPreserveDenormsF32(other.canPreserveDenormsF32)
             , hasAtomicInt64(other.hasAtomicInt64)
             , workgroupSize(other.workgroupSize)
+            , maxComputeWorkGroupCount{other.maxComputeWorkGroupCount[0], other.maxComputeWorkGroupCount[1], other.maxComputeWorkGroupCount[2]}
             , pipelineCache(other.pipelineCache)
             , pendingFence(other.pendingFence)
             , hasPendingWork(other.hasPendingWork)
@@ -391,6 +393,7 @@ public:
     auto dispatchAny(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto dispatchBooleanReduction(const std::string& op_name, const Tensor& input,
                                   int64_t dim, bool keepdim) -> Tensor;
+    auto dispatchLogSumExp(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto dispatchTriuTril(const std::string& op_name, const Tensor& input,
                           int64_t diagonal) -> Tensor;
     auto dispatchDiag(const Tensor& input, int64_t diagonal) -> Tensor;

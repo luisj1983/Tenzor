@@ -201,22 +201,26 @@ class Module(_CppModule):
         Calls C++ unregister methods for parameters, buffers, and submodules.
         For regular Python attributes, delegates to object.__delattr__.
         """
+        lock = object.__getattribute__(self, '_cache_lock')
         submodules = self.get_submodules()
         if name in submodules:
-            self.unregister_module(name)
-            # Invalidate caches
-            self._param_cache = None
-            self._buffer_cache = None
+            with lock:
+                self.unregister_module(name)
+                self._param_cache = None
+                self._buffer_cache = None
+                self._submodule_cache = None
             return
         own_params = self._get_own_named_params()
         if name in own_params:
-            self.unregister_parameter(name)
-            self._param_cache = None
+            with lock:
+                self.unregister_parameter(name)
+                self._param_cache = None
             return
         own_buffers = self._get_own_named_buffers()
         if name in own_buffers:
-            self.unregister_buffer(name)
-            self._buffer_cache = None
+            with lock:
+                self.unregister_buffer(name)
+                self._buffer_cache = None
             return
         object.__delattr__(self, name)
 

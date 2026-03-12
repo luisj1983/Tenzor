@@ -63,7 +63,7 @@ auto Variable::mutable_grad() -> std::optional<Tensor>& {
 
 auto Variable::has_grad() const -> bool {
     if (!impl_) return false;
-    if (impl_->thread_safe_.load(std::memory_order_relaxed)) {
+    if (impl_->thread_safe_.load(std::memory_order_acquire)) {
         std::lock_guard lock(impl_->grad_mutex_);
         return impl_->grad_.has_value();
     }
@@ -74,7 +74,7 @@ auto Variable::set_grad(Tensor gradient) -> void {
     if (!impl_) {
         throw std::runtime_error("Cannot set grad of uninitialized Variable");
     }
-    if (impl_->thread_safe_.load(std::memory_order_relaxed)) {
+    if (impl_->thread_safe_.load(std::memory_order_acquire)) {
         std::lock_guard lock(impl_->grad_mutex_);
         impl_->grad_ = std::move(gradient);
     } else {
@@ -138,7 +138,7 @@ auto Variable::retains_grad() const -> bool {
 
 auto Variable::zero_grad() -> void {
     if (impl_) {
-        if (impl_->thread_safe_.load(std::memory_order_relaxed)) {
+        if (impl_->thread_safe_.load(std::memory_order_acquire)) {
             std::lock_guard lock(impl_->grad_mutex_);
             impl_->grad_.reset();
         } else {
@@ -404,9 +404,7 @@ auto Variable::operator/(const Variable& other) const -> Variable {
 // Helper: create scalar tensor directly on target device via full() dispatch.
 // Avoids the old 2-step CPU alloc + .to(device) pattern for GPU tensors.
 static auto make_scalar_var(double value, DType dtype, Device device) -> Variable {
-    Tensor t = (dtype == DType::Float64)
-        ? full({}, value, dtype, device)
-        : full({}, static_cast<float>(value), dtype, device);
+    Tensor t = full({}, value, dtype, device);
     return Variable(t, false);
 }
 

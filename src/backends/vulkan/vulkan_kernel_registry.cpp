@@ -297,6 +297,12 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             attrs.get_bool(AttrKey::Keepdim, false))};
     });
 
+    table.register_kernel(OpId::LogSumExp, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchLogSumExp(inputs[0], dim, keepdim)};
+    });
+
     // ========================================================================
     // Activation Functions
     // ========================================================================

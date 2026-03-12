@@ -1,0 +1,94 @@
+#version 450
+
+// LogSumExp reduction: log(sum(exp(x))) with numerical stability
+// Two-pass algorithm: (1) max reduction, (2) sum(exp(x - max)) with Kahan summation
+// Result: max + log(sum(exp(x - max)))
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;              // Total number of elements in input
+    uint reduce_size;    // Size of dimension to reduce
+    uint outer_size;     // Number of output elements
+    uint inner_size;     // Product of dimensions after reduction dim
+} params;
+
+shared float shared_max[WORKGROUP_SIZE];
+shared float shared_sum[WORKGROUP_SIZE];
+shared float shared_comp[WORKGROUP_SIZE]; // Kahan compensation
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint output_idx = gl_WorkGroupID.x;
+
+    if (output_idx >= params.outer_size) {
+        return;
+    }
+
+    // Calculate position in output space
+    uint outer_idx = output_idx / params.inner_size;
+    uint inner_idx = output_idx % params.inner_size;
+    uint base_idx = outer_idx * params.reduce_size * params.inner_size + inner_idx;
+
+    // Pass 1: Find maximum for numerical stability
+    float local_max = -1.0 / 0.0; // -infinity
+    for (uint i = tid; i < params.reduce_size; i += WORKGROUP_SIZE) {
+        uint idx = base_idx + i * params.inner_size;
+        if (idx < params.n) {
+            local_max = max(local_max, input_data[idx]);
+        }
+    }
+
+    shared_max[tid] = local_max;
+    barrier();
+
+    // Parallel reduction for max
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_max[tid] = max(shared_max[tid], shared_max[tid + s]);
+        }
+        barrier();
+    }
+
+    float row_max = shared_max[0];
+    barrier();
+
+    // Pass 2: Compute sum(exp(x - max)) with Kahan summation
+    float local_sum = 0.0;
+    float local_comp = 0.0;
+    for (uint i = tid; i < params.reduce_size; i += WORKGROUP_SIZE) {
+        uint idx = base_idx + i * params.inner_size;
+        if (idx < params.n) {
+            float val = exp(input_data[idx] - row_max);
+            // Kahan summation
+            float y = val - local_comp;
+            float t = local_sum + y;
+            local_comp = (t - local_sum) - y;
+            local_sum = t;
+        }
+    }
+
+    shared_sum[tid] = local_sum;
+    shared_comp[tid] = local_comp;
+    barrier();
+
+    // Parallel reduction for sum (with compensation)
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            // Add compensation from both halves
+            float y = shared_sum[tid + s] - (shared_comp[tid] + shared_comp[tid + s]);
+            float t = shared_sum[tid] + y;
+            shared_comp[tid] = (t - shared_sum[tid]) - y;
+            shared_sum[tid] = t;
+        }
+        barrier();
+    }
+
+    // Write result: max + log(sum)
+    if (tid == 0) {
+        output_data[output_idx] = row_max + log(shared_sum[0]);
+    }
+}

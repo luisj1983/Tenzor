@@ -179,7 +179,20 @@ static inline bool isSimpleTranspose2D(const Tensor& t) {
 /// Compute number of workgroups for a given element count and workgroup size.
 /// Equivalent to ceil(n / wg_size).
 inline uint32_t div_wg(uint64_t n, uint32_t wg_size) {
-    return static_cast<uint32_t>((n + wg_size - 1) / wg_size);
+    uint64_t result = (n + wg_size - 1) / wg_size;
+    if (result > UINT32_MAX) {
+        throw std::runtime_error("Vulkan: workgroup count exceeds uint32_t limit");
+    }
+    return static_cast<uint32_t>(result);
+}
+
+/// Dispatch compute work with device-limit validation.
+inline void safeDispatch(VkCommandBuffer cmd, uint32_t gx, uint32_t gy, uint32_t gz,
+                         const uint32_t maxCounts[3]) {
+    if (gx > maxCounts[0] || gy > maxCounts[1] || gz > maxCounts[2]) {
+        throw std::runtime_error("Vulkan: workgroup count exceeds device limits");
+    }
+    vkCmdDispatch(cmd, gx, gy, gz);
 }
 
 } // namespace tenzor

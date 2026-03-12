@@ -786,17 +786,35 @@ PYBIND11_MODULE(tenzor_core, m) {
         // Numeric protocol
         .def("__float__", [](const tenzor::Tensor& t) -> double {
              if (t.numel() != 1) throw py::value_error("only one element tensors can be converted to Python scalars");
-             if (t.dtype() == tenzor::DType::Float64) return t.item<double>();
-             if (t.dtype() == tenzor::DType::Int32) return static_cast<double>(t.item<int32_t>());
-             if (t.dtype() == tenzor::DType::Int64) return static_cast<double>(t.item<int64_t>());
-             return static_cast<double>(t.item<float>());
+             switch (t.dtype()) {
+                 case tenzor::DType::Float64: return t.item<double>();
+                 case tenzor::DType::Float32: return static_cast<double>(t.item<float>());
+                 case tenzor::DType::Float16: return static_cast<double>(static_cast<float>(t.item<tenzor::Float16>()));
+                 case tenzor::DType::BFloat16: return static_cast<double>(static_cast<float>(t.item<tenzor::BFloat16>()));
+                 case tenzor::DType::Int64: return static_cast<double>(t.item<int64_t>());
+                 case tenzor::DType::Int32: return static_cast<double>(t.item<int32_t>());
+                 case tenzor::DType::Int16: return static_cast<double>(t.item<int16_t>());
+                 case tenzor::DType::Int8: return static_cast<double>(t.item<int8_t>());
+                 case tenzor::DType::UInt8: return static_cast<double>(t.item<uint8_t>());
+                 case tenzor::DType::Bool: return static_cast<double>(t.item<bool>());
+                 default: throw py::type_error("Cannot convert " + std::string(tenzor::dtype_name(t.dtype())) + " to float");
+             }
              })
         .def("__int__", [](const tenzor::Tensor& t) -> int64_t {
              if (t.numel() != 1) throw py::value_error("only one element tensors can be converted to Python scalars");
-             if (t.dtype() == tenzor::DType::Int64) return t.item<int64_t>();
-             if (t.dtype() == tenzor::DType::Int32) return static_cast<int64_t>(t.item<int32_t>());
-             if (t.dtype() == tenzor::DType::Float64) return static_cast<int64_t>(t.item<double>());
-             return static_cast<int64_t>(t.item<float>());
+             switch (t.dtype()) {
+                 case tenzor::DType::Int64: return t.item<int64_t>();
+                 case tenzor::DType::Int32: return static_cast<int64_t>(t.item<int32_t>());
+                 case tenzor::DType::Int16: return static_cast<int64_t>(t.item<int16_t>());
+                 case tenzor::DType::Int8: return static_cast<int64_t>(t.item<int8_t>());
+                 case tenzor::DType::UInt8: return static_cast<int64_t>(t.item<uint8_t>());
+                 case tenzor::DType::Bool: return static_cast<int64_t>(t.item<bool>());
+                 case tenzor::DType::Float64: return static_cast<int64_t>(t.item<double>());
+                 case tenzor::DType::Float32: return static_cast<int64_t>(t.item<float>());
+                 case tenzor::DType::Float16: return static_cast<int64_t>(static_cast<float>(t.item<tenzor::Float16>()));
+                 case tenzor::DType::BFloat16: return static_cast<int64_t>(static_cast<float>(t.item<tenzor::BFloat16>()));
+                 default: throw py::type_error("Cannot convert " + std::string(tenzor::dtype_name(t.dtype())) + " to int");
+             }
              })
         .def("__index__", [](const tenzor::Tensor& t) -> int64_t {
              if (t.numel() != 1) {
@@ -1130,14 +1148,14 @@ PYBIND11_MODULE(tenzor_core, m) {
             },
             // __setstate__: deserialize from (shape, dtype_int, device_str, bytes)
             [](py::tuple state) {
-                if (state.size() != 4) throw std::runtime_error("Invalid pickle state");
+                if (state.size() != 4) throw py::value_error("Invalid pickle state");
 
                 auto shape = state[0].cast<std::vector<int64_t>>();
                 auto dtype_int = state[1].cast<int>();
                 if (dtype_int < 0 || dtype_int > static_cast<int>(tenzor::DType::Complex128))
-                    throw std::runtime_error("Invalid dtype in pickle state: " + std::to_string(dtype_int));
+                    throw py::value_error("Invalid dtype in pickle state: " + std::to_string(dtype_int));
                 for (auto d : shape)
-                    if (d < 0) throw std::runtime_error("Negative dimension in pickle state");
+                    if (d < 0) throw py::value_error("Negative dimension in pickle state");
                 auto dtype = static_cast<tenzor::DType>(dtype_int);
                 auto device_str = state[2].cast<std::string>();
                 auto data = state[3].cast<std::string>();
@@ -1146,7 +1164,7 @@ PYBIND11_MODULE(tenzor_core, m) {
                 tenzor::Tensor t(shape, dtype, tenzor::Device::cpu());
                 size_t nbytes = static_cast<size_t>(t.numel()) * tenzor::dtype_size(dtype);
                 if (data.size() != nbytes) {
-                    throw std::runtime_error("Pickle data size mismatch");
+                    throw py::value_error("Pickle data size mismatch");
                 }
                 std::memcpy(t.data_ptr(), data.data(), nbytes);
 
@@ -1369,13 +1387,17 @@ PYBIND11_MODULE(tenzor_core, m) {
             bool is_integer_scalar = false;
             if (py::isinstance<tenzor::Tensor>(value)) {
                 value_tensor = py::cast<tenzor::Tensor>(value);
-            } else if (py::isinstance<py::int_>(value) && !py::isinstance<py::bool_>(value)) {
+            } else if (py::isinstance<py::bool_>(value)) {
+                is_scalar_value = true;
+                is_integer_scalar = true;
+                int_scalar_value = py::cast<bool>(value) ? 1 : 0;
+                scalar_value = static_cast<double>(int_scalar_value);
+            } else if (py::isinstance<py::int_>(value)) {
                 is_scalar_value = true;
                 is_integer_scalar = true;
                 int_scalar_value = py::cast<int64_t>(value);
                 scalar_value = static_cast<double>(int_scalar_value);
-            } else if (py::isinstance<py::float_>(value) ||
-                       (py::isinstance<py::int_>(value) && !py::isinstance<py::bool_>(value))) {
+            } else if (py::isinstance<py::float_>(value)) {
                 is_scalar_value = true;
                 scalar_value = py::cast<double>(value);
             } else {

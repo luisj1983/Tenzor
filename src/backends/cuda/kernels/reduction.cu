@@ -368,6 +368,7 @@ __global__ void sum_reduce_kernel(const T* input, T* output, int64_t n) {
         }
         __syncthreads();
     }
+    __syncthreads();
 
     // Warp-level reduction
     if (tid < WARP_SIZE) {
@@ -408,6 +409,7 @@ __global__ void max_reduce_kernel(const T* input, T* output, int64_t n) {
         }
         __syncthreads();
     }
+    __syncthreads();
 
     // Warp-level reduction
     if (tid < WARP_SIZE) {
@@ -448,6 +450,7 @@ __global__ void min_reduce_kernel(const T* input, T* output, int64_t n) {
         }
         __syncthreads();
     }
+    __syncthreads();
 
     // Warp-level reduction
     if (tid < WARP_SIZE) {
@@ -492,6 +495,7 @@ __global__ void max_reduce_kernel_half(const __half* input, __half* output, int6
         }
         __syncthreads();
     }
+    __syncthreads();
 
     // Warp-level reduction
     if (tid < WARP_SIZE) {
@@ -532,6 +536,7 @@ __global__ void min_reduce_kernel_half(const __half* input, __half* output, int6
         }
         __syncthreads();
     }
+    __syncthreads();
 
     // Warp-level reduction
     if (tid < WARP_SIZE) {
@@ -576,6 +581,7 @@ __global__ void max_reduce_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16
         }
         __syncthreads();
     }
+    __syncthreads();
 
     // Warp-level reduction
     if (tid < WARP_SIZE) {
@@ -616,6 +622,7 @@ __global__ void min_reduce_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16
         }
         __syncthreads();
     }
+    __syncthreads();
 
     // Warp-level reduction
     if (tid < WARP_SIZE) {
@@ -1941,6 +1948,7 @@ __global__ void argmax_full_kernel(const T* input, int64_t* output, int64_t n) {
         }
         __syncthreads();
     }
+    __syncthreads();
 
     // Warp-level reduction (last 32 threads)
     if (tid < 32) {
@@ -2000,6 +2008,7 @@ __global__ void argmin_full_kernel(const T* input, int64_t* output, int64_t n) {
         }
         __syncthreads();
     }
+    __syncthreads();
 
     // Warp-level reduction (last 32 threads)
     if (tid < 32) {
@@ -2168,6 +2177,7 @@ __global__ void argmax_full_kernel_half(const __half* input, int64_t* output, in
         }
         __syncthreads();
     }
+    __syncthreads();
 
     // Warp-level reduction (last 32 threads)
     if (tid < 32) {
@@ -2226,6 +2236,7 @@ __global__ void argmin_full_kernel_half(const __half* input, int64_t* output, in
         }
         __syncthreads();
     }
+    __syncthreads();
 
     // Warp-level reduction (last 32 threads)
     if (tid < 32) {
@@ -2482,6 +2493,7 @@ __global__ void argmax_full_kernel_bf16(const __nv_bfloat16* input, int64_t* out
         }
         __syncthreads();
     }
+    __syncthreads();
 
     // Warp-level reduction (last 32 threads)
     if (tid < 32) {
@@ -2540,6 +2552,7 @@ __global__ void argmin_full_kernel_bf16(const __nv_bfloat16* input, int64_t* out
         }
         __syncthreads();
     }
+    __syncthreads();
 
     // Warp-level reduction (last 32 threads)
     if (tid < 32) {
@@ -3334,6 +3347,7 @@ __global__ void prod_reduce_kernel(const T* input, T* output, int64_t n) {
         }
         __syncthreads();
     }
+    __syncthreads();
 
     // Warp-level reduction
     if (tid < WARP_SIZE) {
@@ -3792,6 +3806,7 @@ __global__ void sum_reduce_sqrt_kernel(const T* input, T* output, int64_t n) {
         if (tid < stride) shared[tid] = shared[tid] + shared[tid + stride];
         __syncthreads();
     }
+    __syncthreads();
     if (tid < WARP_SIZE) {
         Acc val = shared[tid];
         val = warp_reduce_sum(val);
@@ -3820,6 +3835,7 @@ __global__ void sum_reduce_pow_kernel(const T* input, T* output, int64_t n, T ex
         if (tid < stride) shared[tid] = shared[tid] + shared[tid + stride];
         __syncthreads();
     }
+    __syncthreads();
     if (tid < WARP_SIZE) {
         Acc val = shared[tid];
         val = warp_reduce_sum(val);
@@ -3912,6 +3928,7 @@ __global__ void l1_norm_kernel(const T* input, T* output, int64_t n) {
         }
         __syncthreads();
     }
+    __syncthreads();
 
     if (tid < WARP_SIZE) {
         T val = shared[tid];
@@ -3950,6 +3967,7 @@ __global__ void l2_norm_squared_kernel(const T* input, T* output, int64_t n) {
         }
         __syncthreads();
     }
+    __syncthreads();
 
     if (tid < WARP_SIZE) {
         T val = shared[tid];
@@ -3987,6 +4005,7 @@ __global__ void lp_norm_kernel(const T* input, T* output, int64_t n, float p) {
         }
         __syncthreads();
     }
+    __syncthreads();
 
     if (tid < WARP_SIZE) {
         T val = shared[tid];
