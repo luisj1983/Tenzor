@@ -1,0 +1,83 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Put operation for Float16: scatter source values to indexed positions in a flat output
+// Float16 elements are packed 2 per 32-bit word in uint buffers
+// Uses CAS loop for both replace and accumulate modes (packed half-word writes)
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Output { uint output_data[]; };    // Destination (packed F16, uint for atomics)
+layout(binding = 1) buffer Indices { int indices[]; };         // Target indices
+layout(binding = 2) buffer Source { uint source_data[]; };     // Values to put (packed F16)
+
+layout(push_constant) uniform PushConstants {
+    uint numel;        // Total number of output elements (for bounds checking)
+    uint num_indices;  // Number of indices (= source size)
+    uint accumulate;   // 0 = replace, 1 = add
+} params;
+
+// Read a single Float16 element from packed uint32 source array
+float readF16Source(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint half_offset = (element_idx % 2) * 16;
+    uint bits = (source_data[word_idx] >> half_offset) & 0xFFFFu;
+    return unpackHalf2x16(bits).x;
+}
+
+// Write a single Float16 element to packed uint32 output array using CAS loop
+void writeF16(uint element_idx, float value) {
+    uint word_idx = element_idx / 2;
+    uint half_offset = (element_idx % 2) * 16;
+    uint new_bits = packHalf2x16(vec2(value, 0.0)) & 0xFFFFu;
+    uint mask = 0xFFFFu << half_offset;
+
+    uint old_word = output_data[word_idx];
+    for (int attempt = 0; attempt < 1024; ++attempt) {
+        uint new_word = (old_word & ~mask) | (new_bits << half_offset);
+        uint result = atomicCompSwap(output_data[word_idx], old_word, new_word);
+        if (result == old_word) return;
+        old_word = result;
+    }
+}
+
+// Atomic add for Float16 using CAS loop on the uint32 word
+void atomicAddF16(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_offset = (element_idx % 2) * 16;
+
+    uint old_word = output_data[word_idx];
+    for (int attempt = 0; attempt < 1024; ++attempt) {
+        // Extract current F16 value
+        uint old_bits = (old_word >> half_offset) & 0xFFFFu;
+        float old_val = unpackHalf2x16(old_bits).x;
+        float new_val = old_val + val;
+        uint new_bits = packHalf2x16(vec2(new_val, 0.0)) & 0xFFFFu;
+
+        // Build new word with updated half
+        uint new_word = (old_word & ~(0xFFFFu << half_offset)) | (new_bits << half_offset);
+        uint result = atomicCompSwap(output_data[word_idx], old_word, new_word);
+        if (result == old_word) return;
+        old_word = result;
+    }
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_indices) return;
+
+    int put_idx = indices[idx];
+
+    // Bounds check: skip out-of-range indices
+    if (put_idx < 0 || put_idx >= int(params.numel)) return;
+
+    float value = readF16Source(idx);
+    uint dest = uint(put_idx);
+
+    if (params.accumulate == 0) {
+        // Replace mode: CAS write (last-write-wins for duplicate indices)
+        writeF16(dest, value);
+    } else {
+        // Accumulate mode: atomic add via CAS loop
+        atomicAddF16(dest, value);
+    }
+}

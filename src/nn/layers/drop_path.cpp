@@ -74,56 +74,17 @@ auto DropPath::forward_impl(const Variable& input) -> Variable {
     std::vector<int64_t> mask_shape(shape_span.size(), 1);
     mask_shape[0] = batch_size;
 
-    // Generate Bernoulli mask on CPU: keep probability = 1 - p
-    auto random_tensor = rand(mask_shape, input.tensor().dtype(), Device::cpu());
-    auto mask_cpu = zeros(mask_shape, input.tensor().dtype(), Device::cpu());
-
-    size_t numel = random_tensor.numel();
-    void* random_ptr = random_tensor.storage()->data();
-    void* mask_ptr = mask_cpu.storage()->data();
-
-    if (random_tensor.dtype() == DType::Float32) {
-        float* rand_data = static_cast<float*>(random_ptr);
-        float* mask_out = static_cast<float*>(mask_ptr);
-        for (size_t i = 0; i < numel; ++i) {
-            mask_out[i] = rand_data[i] > static_cast<float>(p_) ? 1.0f : 0.0f;
-        }
-    } else if (random_tensor.dtype() == DType::Float64) {
-        double* rand_data = static_cast<double*>(random_ptr);
-        double* mask_out = static_cast<double*>(mask_ptr);
-        for (size_t i = 0; i < numel; ++i) {
-            mask_out[i] = rand_data[i] > p_ ? 1.0 : 0.0;
-        }
-    } else if (random_tensor.dtype() == DType::Float16) {
-        Float16* rand_data = static_cast<Float16*>(random_ptr);
-        Float16* mask_out = static_cast<Float16*>(mask_ptr);
-        for (size_t i = 0; i < numel; ++i) {
-            float rand_val = static_cast<float>(rand_data[i]);
-            mask_out[i] = Float16(rand_val > static_cast<float>(p_) ? 1.0f : 0.0f);
-        }
-    } else if (random_tensor.dtype() == DType::BFloat16) {
-        BFloat16* rand_data = static_cast<BFloat16*>(random_ptr);
-        BFloat16* mask_out = static_cast<BFloat16*>(mask_ptr);
-        for (size_t i = 0; i < numel; ++i) {
-            float rand_val = static_cast<float>(rand_data[i]);
-            mask_out[i] = BFloat16(rand_val > static_cast<float>(p_) ? 1.0f : 0.0f);
-        }
-    } else {
-        throw std::runtime_error("DropPath only supports Float16, BFloat16, Float32 and Float64 dtypes");
-    }
-
-    // Transfer mask to target device if needed
-    Tensor mask_data = (input.tensor().device().type == Device::Type::CPU) ?
-                mask_cpu : mask_cpu.to(input.tensor().device());
+    // Generate Bernoulli mask on target device using tensor ops
+    Device dev = input.tensor().device();
+    DType dt = input.tensor().dtype();
+    auto random_tensor = rand(mask_shape, dt, dev);
+    auto threshold = full(mask_shape, static_cast<float>(p_), dt, dev);
+    auto mask_data = gt(random_tensor, threshold).to(dt);
 
     // Apply inverted drop path: output = input * mask / (1 - p)
     // mask broadcasts from (batch, 1, ..., 1) to input shape
     double scale = 1.0 / (1.0 - p_);
-
-    auto input_shape = input.tensor().shape();
-    std::vector<int64_t> full_shape(input_shape.begin(), input_shape.end());
-    auto scale_tensor = full(full_shape, static_cast<float>(scale),
-                            input.tensor().dtype(), input.tensor().device());
+    auto scale_tensor = full({1}, static_cast<float>(scale), dt, dev);
     auto output_tensor = mul(mul(input.tensor(), mask_data), scale_tensor);
 
     Variable output(output_tensor, input.requires_grad());

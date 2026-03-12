@@ -1,0 +1,42 @@
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
+
+// Masked select - Pass 2: Gather selected elements (Bool variant)
+// Bool values are stored as uint8_t (1 byte per element)
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { uint8_t input_data[]; };
+layout(binding = 1) buffer Mask { uint mask_data[]; };
+layout(binding = 2) buffer Output { uint8_t output_data[]; };
+layout(binding = 3) buffer PrefixSums { uint prefix_sums[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint mask_is_float;
+    uint output_size;
+} params;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+
+    if (gid >= params.n_elements) return;
+
+    bool selected = false;
+    if (params.mask_is_float == 1) {
+        float val = uintBitsToFloat(mask_data[gid]);
+        selected = (val != 0.0);
+    } else {
+        uint byte_idx = gid / 4;
+        uint bit_offset = (gid % 4) * 8;
+        uint byte_val = (mask_data[byte_idx] >> bit_offset) & 0xFF;
+        selected = (byte_val != 0);
+    }
+
+    if (selected) {
+        uint out_idx = prefix_sums[gid];
+        if (out_idx < params.output_size) {
+            output_data[out_idx] = input_data[gid];
+        }
+    }
+}

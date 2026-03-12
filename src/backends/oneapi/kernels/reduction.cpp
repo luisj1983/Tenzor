@@ -52,6 +52,25 @@ class ArgminKernelFloat64;
 class ArgminKernelFloat16;
 class ArgminKernelInt32;
 
+// Two-phase argmax/argmin full-reduction kernel names
+class ArgmaxFullPhase1Float32;
+class ArgmaxFullPhase1Float64;
+class ArgmaxFullPhase1Float16;
+class ArgmaxFullPhase1Int32;
+class ArgmaxFullPhase2Float32;
+class ArgmaxFullPhase2Float64;
+class ArgmaxFullPhase2Float16;
+class ArgmaxFullPhase2Int32;
+class ArgminFullPhase1Float32;
+class ArgminFullPhase1Float64;
+class ArgminFullPhase1Float16;
+class ArgminFullPhase1Int32;
+class ArgminFullPhase2Float32;
+class ArgminFullPhase2Float64;
+class ArgminFullPhase2Float16;
+class ArgminFullPhase2Int32;
+
+
 // Helper function to get typed pointer from tensor
 template<typename T>
 inline auto get_data_ptr(const Tensor& t) -> T* {
@@ -1010,10 +1029,155 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
 }
 
 /**
+ * @brief Two-phase device-side argmax/argmin full reduction.
+ *
+ * Phase 1: Each work-group reduces its portion into a (value, index) pair
+ *          stored in partial result buffers using local memory + group barriers.
+ * Phase 2: A single work-group reduces the partial results to the final answer.
+ *
+ * Template parameters:
+ *   T         - element type (float, double, int32_t, or float for half promotion)
+ *   Phase1Name, Phase2Name - SYCL kernel name types
+ *   IsMax     - true for argmax, false for argmin
+ *   ReadT     - the actual device pointer type (may differ from T for Float16)
+ */
+template<typename T, typename Phase1Name, typename Phase2Name, bool IsMax, typename ReadT = T>
+static void sycl_arg_reduce_full(const ReadT* in_ptr, int64_t* out_ptr,
+                                 int64_t total_size, sycl::queue& queue) {
+    constexpr int64_t WG_SIZE = 256;
+    const int64_t num_wgs = std::min((total_size + WG_SIZE - 1) / WG_SIZE, int64_t{1024});
+
+    // Allocate partial results on device
+    T* partial_vals = sycl::malloc_device<T>(num_wgs, queue);
+    int64_t* partial_idxs = sycl::malloc_device<int64_t>(num_wgs, queue);
+
+    // Phase 1: Each work-group reduces its chunk
+    queue.submit([&](sycl::handler& cgh) {
+        sycl::local_accessor<T, 1> local_vals(sycl::range<1>(WG_SIZE), cgh);
+        sycl::local_accessor<int64_t, 1> local_idxs(sycl::range<1>(WG_SIZE), cgh);
+
+        cgh.parallel_for<Phase1Name>(
+            sycl::nd_range<1>(num_wgs * WG_SIZE, WG_SIZE),
+            [=](sycl::nd_item<1> item) {
+                const int64_t gid = item.get_global_id(0);
+                const int64_t lid = item.get_local_id(0);
+                const int64_t wg_id = item.get_group(0);
+
+                // Each thread processes multiple elements with stride
+                T best_val;
+                if constexpr (IsMax) {
+                    best_val = std::numeric_limits<T>::lowest();
+                } else {
+                    best_val = std::numeric_limits<T>::max();
+                }
+                int64_t best_idx = 0;
+
+                for (int64_t i = gid; i < total_size; i += num_wgs * WG_SIZE) {
+                    T val;
+                    if constexpr (std::is_same_v<ReadT, T>) {
+                        val = in_ptr[i];
+                    } else {
+                        // Float16 path: read sycl::half, promote to float
+                        val = static_cast<T>(in_ptr[i]);
+                    }
+                    if constexpr (IsMax) {
+                        if (val > best_val) { best_val = val; best_idx = i; }
+                    } else {
+                        if (val < best_val) { best_val = val; best_idx = i; }
+                    }
+                }
+
+                local_vals[lid] = best_val;
+                local_idxs[lid] = best_idx;
+                sycl::group_barrier(item.get_group());
+
+                // Tree reduction in shared memory
+                for (int64_t stride = WG_SIZE / 2; stride > 0; stride >>= 1) {
+                    if (lid < stride) {
+                        if constexpr (IsMax) {
+                            if (local_vals[lid + stride] > local_vals[lid]) {
+                                local_vals[lid] = local_vals[lid + stride];
+                                local_idxs[lid] = local_idxs[lid + stride];
+                            }
+                        } else {
+                            if (local_vals[lid + stride] < local_vals[lid]) {
+                                local_vals[lid] = local_vals[lid + stride];
+                                local_idxs[lid] = local_idxs[lid + stride];
+                            }
+                        }
+                    }
+                    sycl::group_barrier(item.get_group());
+                }
+
+                if (lid == 0) {
+                    partial_vals[wg_id] = local_vals[0];
+                    partial_idxs[wg_id] = local_idxs[0];
+                }
+            });
+    });
+
+    // Phase 2: Single work-group reduces partial results
+    // Use a work-group size that covers all partials (round up to power of 2)
+    int64_t phase2_wg = 1;
+    while (phase2_wg < num_wgs) phase2_wg <<= 1;
+    if (phase2_wg > WG_SIZE) phase2_wg = WG_SIZE; // cap at WG_SIZE
+
+    queue.submit([&](sycl::handler& cgh) {
+        sycl::local_accessor<T, 1> local_vals(sycl::range<1>(phase2_wg), cgh);
+        sycl::local_accessor<int64_t, 1> local_idxs(sycl::range<1>(phase2_wg), cgh);
+
+        const int64_t n_partials = num_wgs;
+
+        cgh.parallel_for<Phase2Name>(
+            sycl::nd_range<1>(phase2_wg, phase2_wg),
+            [=](sycl::nd_item<1> item) {
+                const int64_t lid = item.get_local_id(0);
+
+                if (lid < n_partials) {
+                    local_vals[lid] = partial_vals[lid];
+                    local_idxs[lid] = partial_idxs[lid];
+                } else {
+                    if constexpr (IsMax) {
+                        local_vals[lid] = std::numeric_limits<T>::lowest();
+                    } else {
+                        local_vals[lid] = std::numeric_limits<T>::max();
+                    }
+                    local_idxs[lid] = 0;
+                }
+                sycl::group_barrier(item.get_group());
+
+                for (int64_t stride = phase2_wg / 2; stride > 0; stride >>= 1) {
+                    if (lid < stride) {
+                        if constexpr (IsMax) {
+                            if (local_vals[lid + stride] > local_vals[lid]) {
+                                local_vals[lid] = local_vals[lid + stride];
+                                local_idxs[lid] = local_idxs[lid + stride];
+                            }
+                        } else {
+                            if (local_vals[lid + stride] < local_vals[lid]) {
+                                local_vals[lid] = local_vals[lid + stride];
+                                local_idxs[lid] = local_idxs[lid + stride];
+                            }
+                        }
+                    }
+                    sycl::group_barrier(item.get_group());
+                }
+
+                if (lid == 0) {
+                    out_ptr[0] = local_idxs[0];
+                }
+            });
+    }).wait();
+
+    sycl::free(partial_vals, queue);
+    sycl::free(partial_idxs, queue);
+}
+
+/**
  * @brief Argmax operation - returns indices of maximum values.
  *
  * Finds the indices of maximum values along a dimension.
- * Currently supports reduction over all dimensions (dim=-1) or last dimension.
+ * Uses two-phase device-side reduction for full (dim=-1) case.
  *
  * @param input Input tensor
  * @param dim Dimension to reduce along (-1 for all dimensions)
@@ -1036,77 +1200,20 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& 
         int64_t* out_ptr = get_data_ptr<int64_t>(output);
 
         if (input.dtype() == DType::Float32) {
-            const float* in_ptr = get_data_ptr<const float>(input);
-
-            // Copy data to host and find argmax
-            std::vector<float> host_data(total_size);
-            queue.memcpy(host_data.data(), in_ptr, total_size * sizeof(float)).wait();
-
-            int64_t max_idx = 0;
-            float max_val = host_data[0];
-            for (int64_t i = 1; i < total_size; ++i) {
-                if (host_data[i] > max_val) {
-                    max_val = host_data[i];
-                    max_idx = i;
-                }
-            }
-
-            queue.memcpy(out_ptr, &max_idx, sizeof(int64_t)).wait();
+            sycl_arg_reduce_full<float, ArgmaxFullPhase1Float32, ArgmaxFullPhase2Float32, true>(
+                get_data_ptr<const float>(input), out_ptr, total_size, queue);
         }
         else if (input.dtype() == DType::Float64) {
-            const double* in_ptr = get_data_ptr<const double>(input);
-
-            // Copy data to host and find argmax
-            std::vector<double> host_data(total_size);
-            queue.memcpy(host_data.data(), in_ptr, total_size * sizeof(double)).wait();
-
-            int64_t max_idx = 0;
-            double max_val = host_data[0];
-            for (int64_t i = 1; i < total_size; ++i) {
-                if (host_data[i] > max_val) {
-                    max_val = host_data[i];
-                    max_idx = i;
-                }
-            }
-
-            queue.memcpy(out_ptr, &max_idx, sizeof(int64_t)).wait();
+            sycl_arg_reduce_full<double, ArgmaxFullPhase1Float64, ArgmaxFullPhase2Float64, true>(
+                get_data_ptr<const double>(input), out_ptr, total_size, queue);
         }
         else if (input.dtype() == DType::Float16) {
-            const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
-
-            // Copy data to host and find argmax
-            std::vector<sycl::half> host_data(total_size);
-            queue.memcpy(host_data.data(), in_ptr, total_size * sizeof(sycl::half)).wait();
-
-            int64_t max_idx = 0;
-            float max_val = static_cast<float>(host_data[0]);
-            for (int64_t i = 1; i < total_size; ++i) {
-                float val = static_cast<float>(host_data[i]);
-                if (val > max_val) {
-                    max_val = val;
-                    max_idx = i;
-                }
-            }
-
-            queue.memcpy(out_ptr, &max_idx, sizeof(int64_t)).wait();
+            sycl_arg_reduce_full<float, ArgmaxFullPhase1Float16, ArgmaxFullPhase2Float16, true, sycl::half>(
+                get_data_ptr<const sycl::half>(input), out_ptr, total_size, queue);
         }
         else if (input.dtype() == DType::Int32) {
-            const int32_t* in_ptr = get_data_ptr<const int32_t>(input);
-
-            // Copy data to host and find argmax
-            std::vector<int32_t> host_data(total_size);
-            queue.memcpy(host_data.data(), in_ptr, total_size * sizeof(int32_t)).wait();
-
-            int64_t max_idx = 0;
-            int32_t max_val = host_data[0];
-            for (int64_t i = 1; i < total_size; ++i) {
-                if (host_data[i] > max_val) {
-                    max_val = host_data[i];
-                    max_idx = i;
-                }
-            }
-
-            queue.memcpy(out_ptr, &max_idx, sizeof(int64_t)).wait();
+            sycl_arg_reduce_full<int32_t, ArgmaxFullPhase1Int32, ArgmaxFullPhase2Int32, true>(
+                get_data_ptr<const int32_t>(input), out_ptr, total_size, queue);
         }
         else {
             throw std::runtime_error("Unsupported dtype for argmax");
@@ -1242,7 +1349,7 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& 
 auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor {
     const auto& shape = input.shape();
 
-    // For full reduction (dim=-1)
+    // For full reduction (dim=-1) — two-phase device-side reduction
     if (dim == -1) {
         int64_t total_size = 1;
         for (auto s : shape) {
@@ -1254,77 +1361,20 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& 
         int64_t* out_ptr = get_data_ptr<int64_t>(output);
 
         if (input.dtype() == DType::Float32) {
-            const float* in_ptr = get_data_ptr<const float>(input);
-
-            // Copy data to host and find argmin
-            std::vector<float> host_data(total_size);
-            queue.memcpy(host_data.data(), in_ptr, total_size * sizeof(float)).wait();
-
-            int64_t min_idx = 0;
-            float min_val = host_data[0];
-            for (int64_t i = 1; i < total_size; ++i) {
-                if (host_data[i] < min_val) {
-                    min_val = host_data[i];
-                    min_idx = i;
-                }
-            }
-
-            queue.memcpy(out_ptr, &min_idx, sizeof(int64_t)).wait();
+            sycl_arg_reduce_full<float, ArgminFullPhase1Float32, ArgminFullPhase2Float32, false>(
+                get_data_ptr<const float>(input), out_ptr, total_size, queue);
         }
         else if (input.dtype() == DType::Float64) {
-            const double* in_ptr = get_data_ptr<const double>(input);
-
-            // Copy data to host and find argmin
-            std::vector<double> host_data(total_size);
-            queue.memcpy(host_data.data(), in_ptr, total_size * sizeof(double)).wait();
-
-            int64_t min_idx = 0;
-            double min_val = host_data[0];
-            for (int64_t i = 1; i < total_size; ++i) {
-                if (host_data[i] < min_val) {
-                    min_val = host_data[i];
-                    min_idx = i;
-                }
-            }
-
-            queue.memcpy(out_ptr, &min_idx, sizeof(int64_t)).wait();
+            sycl_arg_reduce_full<double, ArgminFullPhase1Float64, ArgminFullPhase2Float64, false>(
+                get_data_ptr<const double>(input), out_ptr, total_size, queue);
         }
         else if (input.dtype() == DType::Float16) {
-            const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
-
-            // Copy data to host and find argmin
-            std::vector<sycl::half> host_data(total_size);
-            queue.memcpy(host_data.data(), in_ptr, total_size * sizeof(sycl::half)).wait();
-
-            int64_t min_idx = 0;
-            float min_val = static_cast<float>(host_data[0]);
-            for (int64_t i = 1; i < total_size; ++i) {
-                float val = static_cast<float>(host_data[i]);
-                if (val < min_val) {
-                    min_val = val;
-                    min_idx = i;
-                }
-            }
-
-            queue.memcpy(out_ptr, &min_idx, sizeof(int64_t)).wait();
+            sycl_arg_reduce_full<float, ArgminFullPhase1Float16, ArgminFullPhase2Float16, false, sycl::half>(
+                get_data_ptr<const sycl::half>(input), out_ptr, total_size, queue);
         }
         else if (input.dtype() == DType::Int32) {
-            const int32_t* in_ptr = get_data_ptr<const int32_t>(input);
-
-            // Copy data to host and find argmin
-            std::vector<int32_t> host_data(total_size);
-            queue.memcpy(host_data.data(), in_ptr, total_size * sizeof(int32_t)).wait();
-
-            int64_t min_idx = 0;
-            int32_t min_val = host_data[0];
-            for (int64_t i = 1; i < total_size; ++i) {
-                if (host_data[i] < min_val) {
-                    min_val = host_data[i];
-                    min_idx = i;
-                }
-            }
-
-            queue.memcpy(out_ptr, &min_idx, sizeof(int64_t)).wait();
+            sycl_arg_reduce_full<int32_t, ArgminFullPhase1Int32, ArgminFullPhase2Int32, false>(
+                get_data_ptr<const int32_t>(input), out_ptr, total_size, queue);
         }
         else {
             throw std::runtime_error("Unsupported dtype for argmin");
@@ -1729,35 +1779,55 @@ auto unique_kernel(const Tensor& input, bool sorted, bool return_inverse, bool r
                 }).wait();
             }
 
-            // Compute counts if needed
+            // Compute counts if needed — device-side using atomic_ref
             Tensor out_counts({return_counts ? n_unique : 0}, DType::Int64, input.device());
             if (return_counts && n_unique > 0) {
                 int64_t* cnt_ptr = get_data_ptr<int64_t>(out_counts);
-                const T* unique_ptr = get_data_ptr<const T>(out_vals);
-                // Initialize counts to 0
                 queue.memset(cnt_ptr, 0, n_unique * sizeof(int64_t)).wait();
-                // Count occurrences: for each input element, find its unique index and increment
-                // Use host-side counting since atomic int64 add isn't universally supported
-                std::vector<int64_t> h_counts(n_unique, 0);
-                std::vector<int64_t> h_inverse(numel);
+
+                // Ensure we have inverse indices on device
+                const int64_t* inv_ptr;
+                int64_t* tmp_inv = nullptr;
                 if (return_inverse) {
-                    queue.memcpy(h_inverse.data(), get_data_ptr<int64_t>(out_inverse),
-                                 numel * sizeof(int64_t)).wait();
+                    inv_ptr = get_data_ptr<const int64_t>(out_inverse);
                 } else {
-                    // Need to compute inverse for counting
-                    std::vector<T> h_unique(n_unique), h_input(numel);
-                    queue.memcpy(h_unique.data(), get_data_ptr<const T>(out_vals),
-                                 n_unique * sizeof(T)).wait();
-                    queue.memcpy(h_input.data(), in_ptr, numel * sizeof(T)).wait();
-                    for (int64_t i = 0; i < numel; ++i) {
-                        auto it = std::lower_bound(h_unique.begin(), h_unique.end(), h_input[i]);
-                        h_inverse[i] = std::distance(h_unique.begin(), it);
-                    }
+                    // Compute inverse on device for counting
+                    tmp_inv = sycl::malloc_device<int64_t>(numel, queue);
+                    const T* unique_ptr = get_data_ptr<const T>(out_vals);
+                    queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> gid) {
+                        T val = in_ptr[gid];
+                        int64_t lo = 0, hi = n_unique;
+                        while (lo < hi) {
+                            int64_t mid = lo + (hi - lo) / 2;
+                            if (unique_ptr[mid] < val) lo = mid + 1;
+                            else hi = mid;
+                        }
+                        tmp_inv[gid] = lo;
+                    }).wait();
+                    inv_ptr = tmp_inv;
                 }
-                for (int64_t i = 0; i < numel; ++i) {
-                    h_counts[h_inverse[i]]++;
-                }
-                queue.memcpy(cnt_ptr, h_counts.data(), n_unique * sizeof(int64_t)).wait();
+
+                // Atomically increment counts on device using int32 atomics
+                // (int64 atomic not universally supported; use two int32 halves or int32 counts)
+                // Use int32 counts buffer, then widen to int64
+                int32_t* d_counts32 = sycl::malloc_device<int32_t>(n_unique, queue);
+                queue.memset(d_counts32, 0, n_unique * sizeof(int32_t)).wait();
+
+                queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> gid) {
+                    int64_t idx = inv_ptr[gid];
+                    sycl::atomic_ref<int32_t, sycl::memory_order::relaxed,
+                                     sycl::memory_scope::device,
+                                     sycl::access::address_space::global_space> aref(d_counts32[idx]);
+                    aref.fetch_add(1);
+                }).wait();
+
+                // Widen int32 counts to int64
+                queue.parallel_for(sycl::range<1>(n_unique), [=](sycl::id<1> i) {
+                    cnt_ptr[i] = static_cast<int64_t>(d_counts32[i]);
+                }).wait();
+
+                sycl::free(d_counts32, queue);
+                if (tmp_inv) sycl::free(tmp_inv, queue);
             }
 
             sycl::free(d_sorted, queue);

@@ -1,0 +1,89 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Bitonic sort (Float16 variant)
+// One compare-and-swap pass per dispatch
+// Operates on (value, index) pairs: sorts by value, produces sorted indices
+// Values stored as packed uint32 (2 x float16 per word)
+// Multiple dispatches required: log2(N) * (log2(N)+1) / 2 passes total
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Values { uint values[]; };       // Packed float16 pairs
+layout(binding = 1) buffer Indices { int indices[]; };       // Corresponding indices (output)
+
+layout(push_constant) uniform PushConstants {
+    uint n;               // Original (unpadded) number of elements
+    uint padded_n;        // Padded to power-of-2
+    uint stage;           // Current stage (0, 1, 2, ...)
+    uint substage;        // Current substage within stage
+    uint descending;      // 0 = ascending, 1 = descending
+} params;
+
+// Read a float16 element from packed buffer, returning as float for comparison
+float readF16(uint elem_idx) {
+    uint word_idx = elem_idx / 2;
+    uint half_idx = elem_idx % 2;
+    uint packed = values[word_idx];
+    uint bits = (half_idx == 0) ? (packed & 0xFFFFu) : (packed >> 16);
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+// Write a float value back as float16 into the packed buffer
+void writeF16(uint elem_idx, float val) {
+    uint word_idx = elem_idx / 2;
+    uint half_idx = elem_idx % 2;
+    uint new_bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+
+    uint old_packed = values[word_idx];
+    uint new_packed;
+    if (half_idx == 0) {
+        new_packed = (old_packed & 0xFFFF0000u) | new_bits;
+    } else {
+        new_packed = (old_packed & 0x0000FFFFu) | (new_bits << 16);
+    }
+    values[word_idx] = new_packed;
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+
+    // Each thread handles one compare-and-swap
+    if (gid >= params.padded_n / 2) return;
+
+    // Compute the pair of elements to compare
+    uint block_size = 1u << (params.stage + 1);
+    uint half_block = 1u << params.substage;
+
+    // Determine position within the block structure
+    uint block_id = gid / half_block;
+    uint offset = gid % half_block;
+
+    uint i = block_id * (half_block * 2) + offset;
+    uint j = i + half_block;
+
+    if (j >= params.padded_n) return;
+
+    // Determine sort direction for this block
+    uint sort_block = i / block_size;
+    bool ascending_block = ((sort_block % 2) == 0);
+    if (params.descending != 0) ascending_block = !ascending_block;
+
+    // Read float16 values as float32 for comparison
+    float val_i = readF16(i);
+    float val_j = readF16(j);
+
+    bool should_swap;
+    if (ascending_block) {
+        should_swap = (val_i > val_j);
+    } else {
+        should_swap = (val_i < val_j);
+    }
+
+    if (should_swap) {
+        writeF16(i, val_j);
+        writeF16(j, val_i);
+        int tmp = indices[i];
+        indices[i] = indices[j];
+        indices[j] = tmp;
+    }
+}

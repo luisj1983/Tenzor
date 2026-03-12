@@ -5,6 +5,7 @@
 
 #include <hip/hip_runtime.h>
 #include <algorithm>
+#include <numeric>
 #include <vector>
 #include <cstdint>
 #include "tenzor/core/tensor.hpp"
@@ -123,28 +124,21 @@ extern "C" void nms_hip(const float* boxes, const float* scores,
         return;
     }
 
-    // Sort indices by score on CPU
-    std::vector<int64_t> sorted_indices(num_boxes);
-    std::vector<float> scores_cpu(num_boxes);
-
-    // Copy scores to host
-    NMS_HIP_CHECK(hipMemcpy(scores_cpu.data(), scores, num_boxes * sizeof(float),
+    // Sort indices by score on host (scores are small, suppression is already host-side)
+    std::vector<float> h_scores(num_boxes);
+    NMS_HIP_CHECK(hipMemcpy(h_scores.data(), scores, num_boxes * sizeof(float),
                              hipMemcpyDeviceToHost));
 
-    // Sort indices
-    for (int64_t i = 0; i < num_boxes; ++i) {
-        sorted_indices[i] = i;
-    }
-    std::sort(sorted_indices.begin(), sorted_indices.end(),
-              [&scores_cpu](int64_t i, int64_t j) {
-                  return scores_cpu[i] > scores_cpu[j];
-              });
+    std::vector<int64_t> h_sorted(num_boxes);
+    std::iota(h_sorted.begin(), h_sorted.end(), int64_t(0));
+    std::sort(h_sorted.begin(), h_sorted.end(),
+              [&](int64_t a, int64_t b) { return h_scores[a] > h_scores[b]; });
 
-    // Allocate device memory with RAII guards
+    // Upload sorted indices to device
     HipDevicePtr d_sorted_guard;
     NMS_HIP_CHECK(hipMalloc(&d_sorted_guard.ptr, num_boxes * sizeof(int64_t)));
     auto* d_sorted_indices = static_cast<int64_t*>(d_sorted_guard.ptr);
-    NMS_HIP_CHECK(hipMemcpy(d_sorted_indices, sorted_indices.data(),
+    NMS_HIP_CHECK(hipMemcpy(d_sorted_indices, h_sorted.data(),
                              num_boxes * sizeof(int64_t), hipMemcpyHostToDevice));
 
     // Allocate suppression mask with RAII guard
@@ -172,7 +166,7 @@ extern "C" void nms_hip(const float* boxes, const float* scores,
     keep.reserve(num_boxes);
 
     for (int64_t i = 0; i < num_boxes; ++i) {
-        const int64_t idx = sorted_indices[i];
+        const int64_t idx = h_sorted[i];
         if (suppressed[idx]) continue;
 
         keep.push_back(idx);
@@ -186,7 +180,7 @@ extern "C" void nms_hip(const float* boxes, const float* scores,
                 if (mask & (1ULL << bit)) {
                     const int64_t box_idx = start_idx + bit;
                     if (box_idx < num_boxes) {
-                        suppressed[sorted_indices[box_idx]] = true;
+                        suppressed[h_sorted[box_idx]] = true;
                     }
                 }
             }

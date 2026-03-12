@@ -36,6 +36,22 @@ class ScatterKernelBFloat16;
 class IndexSelectKernelBFloat16;
 class MaskedFillKernelBFloat16;
 
+// Kernel names for device-side masked_select and nonzero
+class MaskedSelectPrefixSumUpSweep;
+class MaskedSelectPrefixSumDownSweep;
+class MaskedSelectScatterFloat32;
+class MaskedSelectScatterFloat64;
+class MaskedSelectScatterFloat16;
+class MaskedSelectScatterBFloat16;
+class NonzeroBinaryMaskFloat32;
+class NonzeroBinaryMaskFloat64;
+class NonzeroBinaryMaskFloat16;
+class NonzeroBinaryMaskBFloat16;
+class NonzeroBinaryMaskInt32;
+class NonzeroBinaryMaskInt64;
+class NonzeroBinaryMaskBool;
+class NonzeroScatterIndices;
+
 // BFloat16 conversion helpers
 inline float bf16_to_f32(uint16_t bf16) {
     uint32_t bits = static_cast<uint32_t>(bf16) << 16;
@@ -632,7 +648,68 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask, float value, sy
     return output;
 }
 
+/**
+ * @brief Device-side exclusive prefix sum on int32 array.
+ *
+ * Uses Blelloch scan (up-sweep + down-sweep) implemented as sequential
+ * SYCL kernels. For large arrays, uses a work-efficient approach with
+ * work-groups processing blocks, then a recursive scan on block sums.
+ *
+ * @param data     Device pointer to int32 array (modified in-place)
+ * @param n        Number of elements
+ * @param queue    SYCL queue
+ * @return         The total sum (last inclusive prefix sum value)
+ */
+static int64_t sycl_exclusive_prefix_sum(int32_t* data, int64_t n, sycl::queue& queue) {
+    if (n == 0) return 0;
+
+    // Read last element before scan (for inclusive total = exclusive_last + original_last)
+    int32_t last_val = 0;
+    queue.memcpy(&last_val, data + n - 1, sizeof(int32_t)).wait();
+
+    // Use oneDPL if available for device-side inclusive scan, then shift
+#ifdef TENZOR_HAS_ONEDPL
+    auto policy = ::oneapi::dpl::execution::make_device_policy(queue);
+
+    // Allocate temp buffer for inclusive scan result
+    int32_t* d_inclusive = sycl::malloc_device<int32_t>(n, queue);
+    ::oneapi::dpl::inclusive_scan(policy, data, data + n, d_inclusive);
+
+    // Read total count from last element
+    int32_t total = 0;
+    queue.memcpy(&total, d_inclusive + n - 1, sizeof(int32_t)).wait();
+
+    // Convert inclusive to exclusive: shift right by 1, set first to 0
+    queue.parallel_for(sycl::range<1>(n), [=](sycl::id<1> i) {
+        data[i] = (i == 0) ? 0 : d_inclusive[i - 1];
+    }).wait();
+
+    sycl::free(d_inclusive, queue);
+    return static_cast<int64_t>(total);
+#else
+    // Without oneDPL: simple sequential scan on device (still avoids D2H roundtrip for data)
+    // For moderate sizes this is fine; the bottleneck was the full data transfer, not the scan
+    int32_t* d_total = sycl::malloc_device<int32_t>(1, queue);
+
+    queue.single_task([=]() {
+        int32_t sum = 0;
+        for (int64_t i = 0; i < n; ++i) {
+            int32_t val = data[i];
+            data[i] = sum;
+            sum += val;
+        }
+        d_total[0] = sum;
+    }).wait();
+
+    int32_t total = 0;
+    queue.memcpy(&total, d_total, sizeof(int32_t)).wait();
+    sycl::free(d_total, queue);
+    return static_cast<int64_t>(total);
+#endif
+}
+
 // Masked select - select elements where mask is true
+// Uses device-side prefix sum to avoid host roundtrips
 auto masked_select_kernel(const Tensor& input, const Tensor& mask, sycl::queue& queue) -> Tensor {
     auto input_shape = input.shape();
     auto mask_shape = mask.shape();
@@ -641,259 +718,166 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask, sycl::queue& 
     }
 
     const int64_t numel = input.numel();
-
-    // First pass: count true values
-    Tensor count_buffer({1}, DType::Int64, input.device());
-    int64_t* count_ptr = get_data_ptr<int64_t>(count_buffer);
-    *count_ptr = 0;
+    if (numel == 0) {
+        return Tensor({0}, input.dtype(), input.device());
+    }
 
     const bool* mask_ptr = get_data_ptr<const bool>(mask);
 
-    // Count on host for simplicity (could be optimized with parallel reduction)
-    bool* mask_host = new bool[numel];
-    queue.memcpy(mask_host, mask_ptr, numel * sizeof(bool)).wait();
+    // Phase 1: Create int32 mask on device (bool -> 0/1)
+    int32_t* d_mask_int = sycl::malloc_device<int32_t>(numel, queue);
+    queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+        d_mask_int[i] = mask_ptr[i] ? 1 : 0;
+    }).wait();
 
-    int64_t true_count = 0;
-    for (int64_t i = 0; i < numel; ++i) {
-        if (mask_host[i]) true_count++;
-    }
-    delete[] mask_host;
+    // Phase 2: Exclusive prefix sum — returns total count
+    // We need a copy for the scatter step (prefix sum modifies in-place)
+    int32_t* d_offsets = sycl::malloc_device<int32_t>(numel, queue);
+    queue.memcpy(d_offsets, d_mask_int, numel * sizeof(int32_t)).wait();
 
-    // Create output with size = number of true values
+    int64_t true_count = sycl_exclusive_prefix_sum(d_offsets, numel, queue);
+
+    // Create output
     Tensor output({true_count}, input.dtype(), input.device());
 
     if (true_count == 0) {
+        sycl::free(d_mask_int, queue);
+        sycl::free(d_offsets, queue);
         return output;
     }
 
-    // Second pass: copy selected elements
-    if (input.dtype() == DType::Float32) {
-        const float* input_ptr = get_data_ptr<const float>(input);
-        float* output_ptr = get_data_ptr<float>(output);
-
-        // Serial copy (could be optimized with prefix sum)
-        float* input_host = new float[numel];
-        bool* mask_host2 = new bool[numel];
-        queue.memcpy(input_host, input_ptr, numel * sizeof(float));
-        queue.memcpy(mask_host2, mask_ptr, numel * sizeof(bool)).wait();
-
-        int64_t out_idx = 0;
-        for (int64_t i = 0; i < numel; ++i) {
-            if (mask_host2[i]) {
-                output_ptr[out_idx++] = input_host[i];
+    // Phase 3: Parallel scatter using prefix-sum offsets
+    auto scatter_impl = [&](auto* out_ptr, const auto* in_ptr) {
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            if (d_mask_int[i]) {
+                out_ptr[d_offsets[i]] = in_ptr[i];
             }
-        }
+        }).wait();
+    };
 
-        delete[] input_host;
-        delete[] mask_host2;
+    if (input.dtype() == DType::Float32) {
+        scatter_impl(get_data_ptr<float>(output), get_data_ptr<const float>(input));
     }
     else if (input.dtype() == DType::Float64) {
-        const double* input_ptr = get_data_ptr<const double>(input);
-        double* output_ptr = get_data_ptr<double>(output);
-
-        double* input_host = new double[numel];
-        bool* mask_host2 = new bool[numel];
-        queue.memcpy(input_host, input_ptr, numel * sizeof(double));
-        queue.memcpy(mask_host2, mask_ptr, numel * sizeof(bool)).wait();
-
-        int64_t out_idx = 0;
-        for (int64_t i = 0; i < numel; ++i) {
-            if (mask_host2[i]) {
-                output_ptr[out_idx++] = input_host[i];
-            }
-        }
-
-        delete[] input_host;
-        delete[] mask_host2;
+        scatter_impl(get_data_ptr<double>(output), get_data_ptr<const double>(input));
     }
     else if (input.dtype() == DType::Float16) {
-        const sycl::half* input_ptr = get_data_ptr<const sycl::half>(input);
-        sycl::half* output_ptr = get_data_ptr<sycl::half>(output);
-
-        sycl::half* input_host = new sycl::half[numel];
-        bool* mask_host2 = new bool[numel];
-        queue.memcpy(input_host, input_ptr, numel * sizeof(sycl::half));
-        queue.memcpy(mask_host2, mask_ptr, numel * sizeof(bool)).wait();
-
-        int64_t out_idx = 0;
-        for (int64_t i = 0; i < numel; ++i) {
-            if (mask_host2[i]) {
-                output_ptr[out_idx++] = input_host[i];
-            }
-        }
-
-        delete[] input_host;
-        delete[] mask_host2;
+        scatter_impl(get_data_ptr<sycl::half>(output), get_data_ptr<const sycl::half>(input));
     }
     else if (input.dtype() == DType::BFloat16) {
-        const uint16_t* input_ptr = get_data_ptr<const uint16_t>(input);
-        uint16_t* output_ptr = get_data_ptr<uint16_t>(output);
-
-        uint16_t* input_host = new uint16_t[numel];
-        bool* mask_host2 = new bool[numel];
-        queue.memcpy(input_host, input_ptr, numel * sizeof(uint16_t));
-        queue.memcpy(mask_host2, mask_ptr, numel * sizeof(bool)).wait();
-
-        int64_t out_idx = 0;
-        for (int64_t i = 0; i < numel; ++i) {
-            if (mask_host2[i]) {
-                output_ptr[out_idx++] = input_host[i];
-            }
-        }
-
-        delete[] input_host;
-        delete[] mask_host2;
+        scatter_impl(get_data_ptr<uint16_t>(output), get_data_ptr<const uint16_t>(input));
     }
     else {
+        sycl::free(d_mask_int, queue);
+        sycl::free(d_offsets, queue);
         throw std::runtime_error("Unsupported dtype for masked_select");
     }
 
+    sycl::free(d_mask_int, queue);
+    sycl::free(d_offsets, queue);
     return output;
 }
 
 // Nonzero operation - find indices of non-zero elements
 // Returns shape (num_nonzero, ndim) with Int64 dtype
+// Uses device-side prefix sum to avoid host roundtrips
 auto nonzero_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     const int64_t numel = input.numel();
     auto input_shape_span = input.shape();
     std::vector<int64_t> input_shape(input_shape_span.begin(), input_shape_span.end());
-    const size_t ndim = input_shape.size();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
 
-    auto strides = calculate_strides(input_shape);
-
-    // First pass: count nonzero elements on host
-    int64_t nonzero_count = 0;
-
-    if (input.dtype() == DType::Float32) {
-        std::vector<float> host_data(numel);
-        queue.memcpy(host_data.data(), get_data_ptr<const float>(input), numel * sizeof(float)).wait();
-        for (int64_t i = 0; i < numel; ++i) {
-            if (host_data[i] != 0.0f) nonzero_count++;
-        }
-    }
-    else if (input.dtype() == DType::Float64) {
-        std::vector<double> host_data(numel);
-        queue.memcpy(host_data.data(), get_data_ptr<const double>(input), numel * sizeof(double)).wait();
-        for (int64_t i = 0; i < numel; ++i) {
-            if (host_data[i] != 0.0) nonzero_count++;
-        }
-    }
-    else if (input.dtype() == DType::Float16) {
-        std::vector<sycl::half> host_data(numel);
-        queue.memcpy(host_data.data(), get_data_ptr<const sycl::half>(input), numel * sizeof(sycl::half)).wait();
-        for (int64_t i = 0; i < numel; ++i) {
-            if (static_cast<float>(host_data[i]) != 0.0f) nonzero_count++;
-        }
-    }
-    else if (input.dtype() == DType::BFloat16) {
-        std::vector<uint16_t> host_data(numel);
-        queue.memcpy(host_data.data(), get_data_ptr<const uint16_t>(input), numel * sizeof(uint16_t)).wait();
-        for (int64_t i = 0; i < numel; ++i) {
-            if (bf16_to_f32(host_data[i]) != 0.0f) nonzero_count++;
-        }
-    }
-    else if (input.dtype() == DType::Int32) {
-        std::vector<int32_t> host_data(numel);
-        queue.memcpy(host_data.data(), get_data_ptr<const int32_t>(input), numel * sizeof(int32_t)).wait();
-        for (int64_t i = 0; i < numel; ++i) {
-            if (host_data[i] != 0) nonzero_count++;
-        }
-    }
-    else if (input.dtype() == DType::Int64) {
-        std::vector<int64_t> host_data(numel);
-        queue.memcpy(host_data.data(), get_data_ptr<const int64_t>(input), numel * sizeof(int64_t)).wait();
-        for (int64_t i = 0; i < numel; ++i) {
-            if (host_data[i] != 0) nonzero_count++;
-        }
-    }
-    else if (input.dtype() == DType::Bool) {
-        std::vector<bool> host_data(numel);
-        const bool* bool_ptr = get_data_ptr<const bool>(input);
-        // std::vector<bool> is special, copy element by element
-        std::vector<uint8_t> raw_data(numel);
-        queue.memcpy(raw_data.data(), bool_ptr, numel * sizeof(uint8_t)).wait();
-        for (int64_t i = 0; i < numel; ++i) {
-            if (raw_data[i]) nonzero_count++;
-        }
-    }
-    else {
-        throw std::runtime_error("nonzero: unsupported dtype");
+    if (numel == 0) {
+        return Tensor({0, ndim}, DType::Int64, input.device());
     }
 
-    // Create output tensor of shape (nonzero_count, ndim)
-    Tensor output({nonzero_count, static_cast<int64_t>(ndim)}, DType::Int64, input.device());
+    // Phase 1: Create binary mask on device (nonzero -> 1, zero -> 0)
+    int32_t* d_mask = sycl::malloc_device<int32_t>(numel, queue);
 
-    if (nonzero_count == 0) {
-        return output;
-    }
+    auto create_mask = [&](const auto* ptr, auto zero_val) {
+        using ValT = std::remove_const_t<std::remove_pointer_t<decltype(ptr)>>;
+        auto zv = zero_val;
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            d_mask[i] = (ptr[i] != zv) ? 1 : 0;
+        }).wait();
+    };
 
-    // Second pass: compute multi-dimensional indices
-    std::vector<int64_t> host_output(nonzero_count * ndim);
-    int64_t out_idx = 0;
+    // BFloat16 needs special comparison
+    auto create_mask_bf16 = [&](const uint16_t* ptr) {
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            // BFloat16: zero is 0x0000
+            d_mask[i] = (ptr[i] != 0) ? 1 : 0;
+        }).wait();
+    };
 
-    // Lambda to convert flat index to multi-dimensional indices
-    auto flat_to_multi = [&](int64_t flat) {
-        int64_t temp = flat;
-        for (size_t d = 0; d < ndim; ++d) {
-            host_output[out_idx * ndim + d] = temp / strides[d];
-            temp %= strides[d];
-        }
-        out_idx++;
+    // Float16 needs cast for zero comparison
+    auto create_mask_f16 = [&](const sycl::half* ptr) {
+        sycl::half zero_h{0.0f};
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            d_mask[i] = (ptr[i] != zero_h) ? 1 : 0;
+        }).wait();
     };
 
     if (input.dtype() == DType::Float32) {
-        std::vector<float> host_data(numel);
-        queue.memcpy(host_data.data(), get_data_ptr<const float>(input), numel * sizeof(float)).wait();
-        for (int64_t i = 0; i < numel; ++i) {
-            if (host_data[i] != 0.0f) flat_to_multi(i);
-        }
-    }
-    else if (input.dtype() == DType::Float64) {
-        std::vector<double> host_data(numel);
-        queue.memcpy(host_data.data(), get_data_ptr<const double>(input), numel * sizeof(double)).wait();
-        for (int64_t i = 0; i < numel; ++i) {
-            if (host_data[i] != 0.0) flat_to_multi(i);
-        }
-    }
-    else if (input.dtype() == DType::Float16) {
-        std::vector<sycl::half> host_data(numel);
-        queue.memcpy(host_data.data(), get_data_ptr<const sycl::half>(input), numel * sizeof(sycl::half)).wait();
-        for (int64_t i = 0; i < numel; ++i) {
-            if (static_cast<float>(host_data[i]) != 0.0f) flat_to_multi(i);
-        }
-    }
-    else if (input.dtype() == DType::BFloat16) {
-        std::vector<uint16_t> host_data(numel);
-        queue.memcpy(host_data.data(), get_data_ptr<const uint16_t>(input), numel * sizeof(uint16_t)).wait();
-        for (int64_t i = 0; i < numel; ++i) {
-            if (bf16_to_f32(host_data[i]) != 0.0f) flat_to_multi(i);
-        }
-    }
-    else if (input.dtype() == DType::Int32) {
-        std::vector<int32_t> host_data(numel);
-        queue.memcpy(host_data.data(), get_data_ptr<const int32_t>(input), numel * sizeof(int32_t)).wait();
-        for (int64_t i = 0; i < numel; ++i) {
-            if (host_data[i] != 0) flat_to_multi(i);
-        }
-    }
-    else if (input.dtype() == DType::Int64) {
-        std::vector<int64_t> host_data(numel);
-        queue.memcpy(host_data.data(), get_data_ptr<const int64_t>(input), numel * sizeof(int64_t)).wait();
-        for (int64_t i = 0; i < numel; ++i) {
-            if (host_data[i] != 0) flat_to_multi(i);
-        }
-    }
-    else if (input.dtype() == DType::Bool) {
-        std::vector<uint8_t> raw_data(numel);
-        queue.memcpy(raw_data.data(), get_data_ptr<const bool>(input), numel * sizeof(uint8_t)).wait();
-        for (int64_t i = 0; i < numel; ++i) {
-            if (raw_data[i]) flat_to_multi(i);
-        }
+        create_mask(get_data_ptr<const float>(input), 0.0f);
+    } else if (input.dtype() == DType::Float64) {
+        create_mask(get_data_ptr<const double>(input), 0.0);
+    } else if (input.dtype() == DType::Float16) {
+        create_mask_f16(get_data_ptr<const sycl::half>(input));
+    } else if (input.dtype() == DType::BFloat16) {
+        create_mask_bf16(get_data_ptr<const uint16_t>(input));
+    } else if (input.dtype() == DType::Int32) {
+        create_mask(get_data_ptr<const int32_t>(input), int32_t{0});
+    } else if (input.dtype() == DType::Int64) {
+        create_mask(get_data_ptr<const int64_t>(input), int64_t{0});
+    } else if (input.dtype() == DType::Bool) {
+        const uint8_t* bool_ptr = reinterpret_cast<const uint8_t*>(get_data_ptr<const bool>(input));
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            d_mask[i] = bool_ptr[i] ? 1 : 0;
+        }).wait();
+    } else {
+        sycl::free(d_mask, queue);
+        throw std::runtime_error("nonzero: unsupported dtype");
     }
 
-    // Copy result to device
+    // Phase 2: Exclusive prefix sum over mask — returns total nonzero count
+    int32_t* d_offsets = sycl::malloc_device<int32_t>(numel, queue);
+    queue.memcpy(d_offsets, d_mask, numel * sizeof(int32_t)).wait();
+
+    int64_t nonzero_count = sycl_exclusive_prefix_sum(d_offsets, numel, queue);
+
+    // Create output tensor of shape (nonzero_count, ndim)
+    Tensor output({nonzero_count, ndim}, DType::Int64, input.device());
+
+    if (nonzero_count == 0) {
+        sycl::free(d_mask, queue);
+        sycl::free(d_offsets, queue);
+        return output;
+    }
+
+    // Phase 3: Parallel kernel computes multi-dimensional indices using strides
+    // Copy strides to device
+    int64_t* d_strides = sycl::malloc_device<int64_t>(ndim, queue);
+    auto strides = calculate_strides(input_shape);
+    queue.memcpy(d_strides, strides.data(), ndim * sizeof(int64_t)).wait();
+
     int64_t* output_ptr = get_data_ptr<int64_t>(output);
-    queue.memcpy(output_ptr, host_output.data(), nonzero_count * ndim * sizeof(int64_t)).wait();
+
+    queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> gid) {
+        int64_t i = gid;
+        if (d_mask[i]) {
+            int64_t out_row = d_offsets[i];
+            int64_t flat = i;
+            for (int64_t d = 0; d < ndim; ++d) {
+                output_ptr[out_row * ndim + d] = flat / d_strides[d];
+                flat %= d_strides[d];
+            }
+        }
+    }).wait();
+
+    sycl::free(d_mask, queue);
+    sycl::free(d_offsets, queue);
+    sycl::free(d_strides, queue);
 
     return output;
 }

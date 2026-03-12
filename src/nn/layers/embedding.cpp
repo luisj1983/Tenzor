@@ -384,14 +384,7 @@ public:
         Device original_device = emb_tensor.device();
         DType original_dtype = emb_tensor.dtype();
 
-        // Transfer to CPU Float32 for computation
-        Tensor emb_cpu = (original_device == Device::cpu()) ? emb_tensor : emb_tensor.to(Device::cpu());
-        if (emb_cpu.dtype() != DType::Float32) {
-            emb_cpu = emb_cpu.to(DType::Float32);
-        }
-        auto emb_ptr = emb_cpu.data<float>();
-
-        // Determine bag boundaries
+        // Determine bag boundaries (needed for backward regardless of path)
         int64_t num_bags;
         Tensor offsets_cpu;
         const int64_t* offsets_ptr = nullptr;
@@ -404,7 +397,6 @@ public:
             num_bags = 1;
         }
 
-        // Save bag sizes for backward (needed for mean mode)
         std::vector<int64_t> bag_starts(num_bags);
         std::vector<int64_t> bag_ends(num_bags);
         for (int64_t bag = 0; bag < num_bags; ++bag) {
@@ -430,7 +422,34 @@ public:
         original_device_ = original_device;
         original_dtype_ = original_dtype;
 
-        // Compute aggregated output
+        // Try dispatching to backend kernel (avoids CPU roundtrip on GPU)
+        try {
+            OpAttributes bag_attrs;
+            bag_attrs.set(AttrKey::Mode, mode_);
+            bag_attrs.set(AttrKey::EmbeddingDim, embedding_dim_);
+            bag_attrs.set(AttrKey::IncludeLastOffset, include_last_offset_);
+
+            Tensor offsets_dev;
+            if (has_offsets_) {
+                offsets_dev = (offsets_.device() == original_device) ? offsets_ : offsets_.to(original_device);
+            } else {
+                offsets_dev = zeros({1}, DType::Int64, original_device);
+            }
+
+            std::array<Tensor, 2> bag_inputs = {emb_tensor, offsets_dev};
+            auto result = dispatch_single<OpId::EmbeddingBagForward>(bag_inputs, bag_attrs);
+            return {Variable(result, inputs[0].requires_grad())};
+        } catch (const std::runtime_error&) {
+            // Fall through to CPU computation
+        }
+
+        // CPU fallback: transfer to CPU Float32 for computation
+        Tensor emb_cpu = (original_device == Device::cpu()) ? emb_tensor : emb_tensor.to(Device::cpu());
+        if (emb_cpu.dtype() != DType::Float32) {
+            emb_cpu = emb_cpu.to(DType::Float32);
+        }
+        auto emb_ptr = emb_cpu.data<float>();
+
         auto output = zeros({num_bags_, embedding_dim_}, DType::Float32, Device::cpu());
         auto output_ptr = output.data<float>();
 

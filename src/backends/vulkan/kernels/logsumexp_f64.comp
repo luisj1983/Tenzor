@@ -63,7 +63,7 @@ void main() {
     for (uint i = tid; i < params.reduce_size; i += WORKGROUP_SIZE) {
         uint idx = base_idx + i * params.inner_size;
         if (idx < params.n) {
-            float64_t val = exp(input_data[idx] - row_max);
+            float64_t val = float64_t(exp(float(input_data[idx] - row_max)));
             // Kahan summation
             float64_t y = val - local_comp;
             float64_t t = local_sum + y;
@@ -89,6 +89,6 @@ void main() {
 
     // Write result: max + log(sum)
     if (tid == 0) {
-        output_data[output_idx] = row_max + log(shared_sum[0]);
+        output_data[output_idx] = row_max + float64_t(log(float(shared_sum[0])));
     }
 }

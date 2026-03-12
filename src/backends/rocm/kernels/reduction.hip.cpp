@@ -1459,7 +1459,7 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stre
 // ============================================================================
 
 template<typename T>
-__global__ void argmax_kernel(const T* input, int64_t* output, int64_t n) {
+__global__ void argmax_kernel(const T* input, int64_t* output_idx, T* output_val, int64_t n) {
     __shared__ T sdata[REDUCTION_BLOCK_SIZE];
     __shared__ int64_t sidx[REDUCTION_BLOCK_SIZE];
 
@@ -1493,13 +1493,54 @@ __global__ void argmax_kernel(const T* input, int64_t* output, int64_t n) {
     }
 
     if (tid == 0) {
-        output[blockIdx.x] = sidx[0];
-        // Store max value in a temporary location for multi-block reduction
+        output_idx[blockIdx.x] = sidx[0];
+        output_val[blockIdx.x] = sdata[0];
+    }
+}
+
+/**
+ * @brief Second-pass argmax kernel: reduces partial (value, index) pairs to a single result
+ */
+template<typename T>
+__global__ void argmax_final_kernel(const T* partial_vals, const int64_t* partial_idx,
+                                     int64_t* output, int num_partials) {
+    __shared__ T sdata[REDUCTION_BLOCK_SIZE];
+    __shared__ int64_t sidx[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    T max_val = std::numeric_limits<T>::lowest();
+    int64_t max_idx = 0;
+
+    // Grid-stride load (single block, so stride = blockDim.x)
+    for (int i = tid; i < num_partials; i += blockDim.x) {
+        T v = partial_vals[i];
+        if (v > max_val) {
+            max_val = v;
+            max_idx = partial_idx[i];
+        }
+    }
+
+    sdata[tid] = max_val;
+    sidx[tid] = max_idx;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            if (sdata[tid + s] > sdata[tid]) {
+                sdata[tid] = sdata[tid + s];
+                sidx[tid] = sidx[tid + s];
+            }
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        output[0] = sidx[0];
     }
 }
 
 template<typename T>
-__global__ void argmin_kernel(const T* input, int64_t* output, int64_t n) {
+__global__ void argmin_kernel(const T* input, int64_t* output_idx, T* output_val, int64_t n) {
     __shared__ T sdata[REDUCTION_BLOCK_SIZE];
     __shared__ int64_t sidx[REDUCTION_BLOCK_SIZE];
 
@@ -1531,7 +1572,48 @@ __global__ void argmin_kernel(const T* input, int64_t* output, int64_t n) {
     }
 
     if (tid == 0) {
-        output[blockIdx.x] = sidx[0];
+        output_idx[blockIdx.x] = sidx[0];
+        output_val[blockIdx.x] = sdata[0];
+    }
+}
+
+/**
+ * @brief Second-pass argmin kernel: reduces partial (value, index) pairs to a single result
+ */
+template<typename T>
+__global__ void argmin_final_kernel(const T* partial_vals, const int64_t* partial_idx,
+                                     int64_t* output, int num_partials) {
+    __shared__ T sdata[REDUCTION_BLOCK_SIZE];
+    __shared__ int64_t sidx[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    T min_val = std::numeric_limits<T>::max();
+    int64_t min_idx = 0;
+
+    for (int i = tid; i < num_partials; i += blockDim.x) {
+        T v = partial_vals[i];
+        if (v < min_val) {
+            min_val = v;
+            min_idx = partial_idx[i];
+        }
+    }
+
+    sdata[tid] = min_val;
+    sidx[tid] = min_idx;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            if (sdata[tid + s] < sdata[tid]) {
+                sdata[tid] = sdata[tid + s];
+                sidx[tid] = sidx[tid + s];
+            }
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        output[0] = sidx[0];
     }
 }
 
@@ -1564,11 +1646,12 @@ __global__ void prod_kernel(const T* input, T* output, int64_t n) {
 }
 
 template<typename T>
-__global__ void var_kernel(const T* input, T mean, T* output, int64_t n) {
+__global__ void var_kernel(const T* input, const T* mean_ptr, T* output, int64_t n) {
     __shared__ T sdata[REDUCTION_BLOCK_SIZE];
 
     int tid = threadIdx.x;
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    T mean = *mean_ptr;
 
     T sum = T(0);
     while (idx < n) {
@@ -1623,6 +1706,148 @@ __global__ void norm_kernel(const T* input, T* output, int64_t n, T p) {
 }
 
 /**
+ * @brief Second-pass prod kernel: reduces partial products via multiplication
+ */
+template<typename T>
+__global__ void prod_final_kernel(const T* partials, T* output, int num_partials) {
+    __shared__ T sdata[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    T val = T(1);
+    for (int i = tid; i < num_partials; i += blockDim.x) {
+        val *= partials[i];
+    }
+
+    sdata[tid] = val;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] *= sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        output[0] = sdata[0];
+    }
+}
+
+/**
+ * @brief Second-pass var kernel: sums partials and divides by count
+ * @param partials Partial sum-of-squared-differences from first pass
+ * @param output Final variance result
+ * @param num_partials Number of partial results
+ * @param count Divisor: n for population variance, (n-1) for sample variance
+ */
+template<typename T>
+__global__ void var_final_kernel(const T* partials, T* output, int num_partials, T count) {
+    __shared__ T sdata[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    T val = T(0);
+    for (int i = tid; i < num_partials; i += blockDim.x) {
+        val += partials[i];
+    }
+
+    sdata[tid] = val;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        output[0] = sdata[0] / count;
+    }
+}
+
+/**
+ * @brief Second-pass norm kernel: sums partials and applies pow(sum, 1/p)
+ */
+template<typename T>
+__global__ void norm_final_kernel(const T* partials, T* output, int num_partials, T p) {
+    __shared__ T sdata[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    T val = T(0);
+    for (int i = tid; i < num_partials; i += blockDim.x) {
+        val += partials[i];
+    }
+
+    sdata[tid] = val;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        output[0] = pow(sdata[0], T(1) / p);
+    }
+}
+
+/**
+ * @brief Second-pass any kernel: OR reduction over uint8_t partial results
+ */
+__global__ void any_final_kernel(const uint8_t* partials, uint8_t* output, int num_partials) {
+    __shared__ uint8_t sdata[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    uint8_t val = 0;
+    for (int i = tid; i < num_partials; i += blockDim.x) {
+        val = val | partials[i];
+    }
+
+    sdata[tid] = val;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] = sdata[tid] | sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        output[0] = sdata[0];
+    }
+}
+
+/**
+ * @brief Second-pass all kernel: AND reduction over uint8_t partial results
+ */
+__global__ void all_final_kernel(const uint8_t* partials, uint8_t* output, int num_partials) {
+    __shared__ uint8_t sdata[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    uint8_t val = (tid < num_partials) ? partials[tid] : 1;
+    for (int i = tid + blockDim.x; i < num_partials; i += blockDim.x) {
+        val = val & partials[i];
+    }
+
+    sdata[tid] = val;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] = sdata[tid] & sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        output[0] = sdata[0];
+    }
+}
+
+/**
  * @brief ArgMax reduction kernel
  */
 auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor {
@@ -1650,65 +1875,42 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t s
         int num_blocks = std::min((n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE, static_cast<int64_t>(1024));
 
         if (dtype == DType::Float32) {
-            int64_t* d_partial;
-            float* d_vals;
-            HIP_CHECK(hipMalloc(&d_partial, num_blocks * sizeof(int64_t)));
-            HIP_CHECK(hipMalloc(&d_vals, num_blocks * sizeof(float)));
+            int64_t* d_partial_idx;
+            float* d_partial_vals;
+            HIP_CHECK(hipMalloc(&d_partial_idx, num_blocks * sizeof(int64_t)));
+            HIP_CHECK(hipMalloc(&d_partial_vals, num_blocks * sizeof(float)));
 
             hipLaunchKernelGGL(argmax_kernel<float>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
-                input.data<float>(), d_partial, n);
+                input.data<float>(), d_partial_idx, d_partial_vals, n);
 
-            // Single block for final reduction if needed
             if (num_blocks > 1) {
-                // For simplicity, use the first result
-                std::vector<int64_t> h_partial(num_blocks);
-                HIP_CHECK(hipMemcpy(h_partial.data(), d_partial, num_blocks * sizeof(int64_t), hipMemcpyDeviceToHost));
-
-                // Find the actual max among partial results
-                float max_val = std::numeric_limits<float>::lowest();
-                int64_t max_idx = 0;
-                for (int i = 0; i < num_blocks; ++i) {
-                    float val;
-                    HIP_CHECK(hipMemcpy(&val, input.data<float>() + h_partial[i], sizeof(float), hipMemcpyDeviceToHost));
-                    if (val > max_val) {
-                        max_val = val;
-                        max_idx = h_partial[i];
-                    }
-                }
-                HIP_CHECK(hipMemcpy(output.data<int64_t>(), &max_idx, sizeof(int64_t), hipMemcpyHostToDevice));
+                // Second-pass: single block reduces partial (value, index) pairs on device
+                hipLaunchKernelGGL(argmax_final_kernel<float>, dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                    d_partial_vals, d_partial_idx, output.data<int64_t>(), num_blocks);
             } else {
-                HIP_CHECK(hipMemcpy(output.data<int64_t>(), d_partial, sizeof(int64_t), hipMemcpyDeviceToDevice));
+                HIP_CHECK(hipMemcpy(output.data<int64_t>(), d_partial_idx, sizeof(int64_t), hipMemcpyDeviceToDevice));
             }
 
-            HIP_CHECK(hipFree(d_partial));
-            HIP_CHECK(hipFree(d_vals));
+            HIP_CHECK(hipFree(d_partial_idx));
+            HIP_CHECK(hipFree(d_partial_vals));
         } else if (dtype == DType::Float64) {
-            int64_t* d_partial;
-            HIP_CHECK(hipMalloc(&d_partial, num_blocks * sizeof(int64_t)));
+            int64_t* d_partial_idx;
+            double* d_partial_vals;
+            HIP_CHECK(hipMalloc(&d_partial_idx, num_blocks * sizeof(int64_t)));
+            HIP_CHECK(hipMalloc(&d_partial_vals, num_blocks * sizeof(double)));
 
             hipLaunchKernelGGL(argmax_kernel<double>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
-                input.data<double>(), d_partial, n);
+                input.data<double>(), d_partial_idx, d_partial_vals, n);
 
             if (num_blocks > 1) {
-                std::vector<int64_t> h_partial(num_blocks);
-                HIP_CHECK(hipMemcpy(h_partial.data(), d_partial, num_blocks * sizeof(int64_t), hipMemcpyDeviceToHost));
-
-                double max_val = std::numeric_limits<double>::lowest();
-                int64_t max_idx = 0;
-                for (int i = 0; i < num_blocks; ++i) {
-                    double val;
-                    HIP_CHECK(hipMemcpy(&val, input.data<double>() + h_partial[i], sizeof(double), hipMemcpyDeviceToHost));
-                    if (val > max_val) {
-                        max_val = val;
-                        max_idx = h_partial[i];
-                    }
-                }
-                HIP_CHECK(hipMemcpy(output.data<int64_t>(), &max_idx, sizeof(int64_t), hipMemcpyHostToDevice));
+                hipLaunchKernelGGL(argmax_final_kernel<double>, dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                    d_partial_vals, d_partial_idx, output.data<int64_t>(), num_blocks);
             } else {
-                HIP_CHECK(hipMemcpy(output.data<int64_t>(), d_partial, sizeof(int64_t), hipMemcpyDeviceToDevice));
+                HIP_CHECK(hipMemcpy(output.data<int64_t>(), d_partial_idx, sizeof(int64_t), hipMemcpyDeviceToDevice));
             }
 
-            HIP_CHECK(hipFree(d_partial));
+            HIP_CHECK(hipFree(d_partial_idx));
+            HIP_CHECK(hipFree(d_partial_vals));
         } else if (dtype == DType::BFloat16) {
             auto input_f32 = input.to(DType::Float32);
             return argmax_kernel(input_f32, dim, keepdim, stream);
@@ -1792,59 +1994,41 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t s
         int num_blocks = std::min((n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE, static_cast<int64_t>(1024));
 
         if (dtype == DType::Float32) {
-            int64_t* d_partial;
-            HIP_CHECK(hipMalloc(&d_partial, num_blocks * sizeof(int64_t)));
+            int64_t* d_partial_idx;
+            float* d_partial_vals;
+            HIP_CHECK(hipMalloc(&d_partial_idx, num_blocks * sizeof(int64_t)));
+            HIP_CHECK(hipMalloc(&d_partial_vals, num_blocks * sizeof(float)));
 
             hipLaunchKernelGGL(argmin_kernel<float>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
-                input.data<float>(), d_partial, n);
+                input.data<float>(), d_partial_idx, d_partial_vals, n);
 
             if (num_blocks > 1) {
-                std::vector<int64_t> h_partial(num_blocks);
-                HIP_CHECK(hipMemcpy(h_partial.data(), d_partial, num_blocks * sizeof(int64_t), hipMemcpyDeviceToHost));
-
-                float min_val = std::numeric_limits<float>::max();
-                int64_t min_idx = 0;
-                for (int i = 0; i < num_blocks; ++i) {
-                    float val;
-                    HIP_CHECK(hipMemcpy(&val, input.data<float>() + h_partial[i], sizeof(float), hipMemcpyDeviceToHost));
-                    if (val < min_val) {
-                        min_val = val;
-                        min_idx = h_partial[i];
-                    }
-                }
-                HIP_CHECK(hipMemcpy(output.data<int64_t>(), &min_idx, sizeof(int64_t), hipMemcpyHostToDevice));
+                hipLaunchKernelGGL(argmin_final_kernel<float>, dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                    d_partial_vals, d_partial_idx, output.data<int64_t>(), num_blocks);
             } else {
-                HIP_CHECK(hipMemcpy(output.data<int64_t>(), d_partial, sizeof(int64_t), hipMemcpyDeviceToDevice));
+                HIP_CHECK(hipMemcpy(output.data<int64_t>(), d_partial_idx, sizeof(int64_t), hipMemcpyDeviceToDevice));
             }
 
-            HIP_CHECK(hipFree(d_partial));
+            HIP_CHECK(hipFree(d_partial_idx));
+            HIP_CHECK(hipFree(d_partial_vals));
         } else if (dtype == DType::Float64) {
-            int64_t* d_partial;
-            HIP_CHECK(hipMalloc(&d_partial, num_blocks * sizeof(int64_t)));
+            int64_t* d_partial_idx;
+            double* d_partial_vals;
+            HIP_CHECK(hipMalloc(&d_partial_idx, num_blocks * sizeof(int64_t)));
+            HIP_CHECK(hipMalloc(&d_partial_vals, num_blocks * sizeof(double)));
 
             hipLaunchKernelGGL(argmin_kernel<double>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
-                input.data<double>(), d_partial, n);
+                input.data<double>(), d_partial_idx, d_partial_vals, n);
 
             if (num_blocks > 1) {
-                std::vector<int64_t> h_partial(num_blocks);
-                HIP_CHECK(hipMemcpy(h_partial.data(), d_partial, num_blocks * sizeof(int64_t), hipMemcpyDeviceToHost));
-
-                double min_val = std::numeric_limits<double>::max();
-                int64_t min_idx = 0;
-                for (int i = 0; i < num_blocks; ++i) {
-                    double val;
-                    HIP_CHECK(hipMemcpy(&val, input.data<double>() + h_partial[i], sizeof(double), hipMemcpyDeviceToHost));
-                    if (val < min_val) {
-                        min_val = val;
-                        min_idx = h_partial[i];
-                    }
-                }
-                HIP_CHECK(hipMemcpy(output.data<int64_t>(), &min_idx, sizeof(int64_t), hipMemcpyHostToDevice));
+                hipLaunchKernelGGL(argmin_final_kernel<double>, dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                    d_partial_vals, d_partial_idx, output.data<int64_t>(), num_blocks);
             } else {
-                HIP_CHECK(hipMemcpy(output.data<int64_t>(), d_partial, sizeof(int64_t), hipMemcpyDeviceToDevice));
+                HIP_CHECK(hipMemcpy(output.data<int64_t>(), d_partial_idx, sizeof(int64_t), hipMemcpyDeviceToDevice));
             }
 
-            HIP_CHECK(hipFree(d_partial));
+            HIP_CHECK(hipFree(d_partial_idx));
+            HIP_CHECK(hipFree(d_partial_vals));
         } else if (dtype == DType::BFloat16) {
             auto input_f32 = input.to(DType::Float32);
             return argmin_kernel(input_f32, dim, keepdim, stream);
@@ -1929,14 +2113,8 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t str
                 input.data<float>(), d_partial, n);
 
             if (num_blocks > 1) {
-                std::vector<float> h_partial(num_blocks);
-                HIP_CHECK(hipMemcpy(h_partial.data(), d_partial, num_blocks * sizeof(float), hipMemcpyDeviceToHost));
-
-                float prod = 1.0f;
-                for (int i = 0; i < num_blocks; ++i) {
-                    prod *= h_partial[i];
-                }
-                HIP_CHECK(hipMemcpy(output.data<float>(), &prod, sizeof(float), hipMemcpyHostToDevice));
+                hipLaunchKernelGGL(prod_final_kernel<float>, dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                    d_partial, output.data<float>(), num_blocks);
             } else {
                 HIP_CHECK(hipMemcpy(output.data<float>(), d_partial, sizeof(float), hipMemcpyDeviceToDevice));
             }
@@ -1950,14 +2128,8 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t str
                 input.data<double>(), d_partial, n);
 
             if (num_blocks > 1) {
-                std::vector<double> h_partial(num_blocks);
-                HIP_CHECK(hipMemcpy(h_partial.data(), d_partial, num_blocks * sizeof(double), hipMemcpyDeviceToHost));
-
-                double prod = 1.0;
-                for (int i = 0; i < num_blocks; ++i) {
-                    prod *= h_partial[i];
-                }
-                HIP_CHECK(hipMemcpy(output.data<double>(), &prod, sizeof(double), hipMemcpyHostToDevice));
+                hipLaunchKernelGGL(prod_final_kernel<double>, dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                    d_partial, output.data<double>(), num_blocks);
             } else {
                 HIP_CHECK(hipMemcpy(output.data<double>(), d_partial, sizeof(double), hipMemcpyDeviceToDevice));
             }
@@ -1971,14 +2143,8 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t str
                 input.data<int32_t>(), d_partial, n);
 
             if (num_blocks > 1) {
-                std::vector<int32_t> h_partial(num_blocks);
-                HIP_CHECK(hipMemcpy(h_partial.data(), d_partial, num_blocks * sizeof(int32_t), hipMemcpyDeviceToHost));
-
-                int32_t prod = 1;
-                for (int i = 0; i < num_blocks; ++i) {
-                    prod *= h_partial[i];
-                }
-                HIP_CHECK(hipMemcpy(output.data<int32_t>(), &prod, sizeof(int32_t), hipMemcpyHostToDevice));
+                hipLaunchKernelGGL(prod_final_kernel<int32_t>, dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                    d_partial, output.data<int32_t>(), num_blocks);
             } else {
                 HIP_CHECK(hipMemcpy(output.data<int32_t>(), d_partial, sizeof(int32_t), hipMemcpyDeviceToDevice));
             }
@@ -1992,14 +2158,8 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t str
                 input.data<int64_t>(), d_partial, n);
 
             if (num_blocks > 1) {
-                std::vector<int64_t> h_partial(num_blocks);
-                HIP_CHECK(hipMemcpy(h_partial.data(), d_partial, num_blocks * sizeof(int64_t), hipMemcpyDeviceToHost));
-
-                int64_t prod = 1;
-                for (int i = 0; i < num_blocks; ++i) {
-                    prod *= h_partial[i];
-                }
-                HIP_CHECK(hipMemcpy(output.data<int64_t>(), &prod, sizeof(int64_t), hipMemcpyHostToDevice));
+                hipLaunchKernelGGL(prod_final_kernel<int64_t>, dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                    d_partial, output.data<int64_t>(), num_blocks);
             } else {
                 HIP_CHECK(hipMemcpy(output.data<int64_t>(), d_partial, sizeof(int64_t), hipMemcpyDeviceToDevice));
             }
@@ -2097,46 +2257,28 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, bool unbiased, h
         int num_blocks = std::min((n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE, static_cast<int64_t>(1024));
 
         if (dtype == DType::Float32) {
-            float mean;
-            HIP_CHECK(hipMemcpy(&mean, mean_tensor.data<float>(), sizeof(float), hipMemcpyDeviceToHost));
-
             float* d_partial;
             HIP_CHECK(hipMalloc(&d_partial, num_blocks * sizeof(float)));
 
             hipLaunchKernelGGL(var_kernel<float>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
-                input.data<float>(), mean, d_partial, n);
+                input.data<float>(), mean_tensor.data<float>(), d_partial, n);
 
-            std::vector<float> h_partial(num_blocks);
-            HIP_CHECK(hipMemcpy(h_partial.data(), d_partial, num_blocks * sizeof(float), hipMemcpyDeviceToHost));
+            float divisor = static_cast<float>(unbiased ? (n - 1) : n);
+            hipLaunchKernelGGL(var_final_kernel<float>, dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                d_partial, output.data<float>(), num_blocks, divisor);
 
-            float sum = 0.0f;
-            for (int i = 0; i < num_blocks; ++i) {
-                sum += h_partial[i];
-            }
-
-            float var = sum / (unbiased ? (n - 1) : n);
-            HIP_CHECK(hipMemcpy(output.data<float>(), &var, sizeof(float), hipMemcpyHostToDevice));
             HIP_CHECK(hipFree(d_partial));
         } else {
-            double mean;
-            HIP_CHECK(hipMemcpy(&mean, mean_tensor.data<double>(), sizeof(double), hipMemcpyDeviceToHost));
-
             double* d_partial;
             HIP_CHECK(hipMalloc(&d_partial, num_blocks * sizeof(double)));
 
             hipLaunchKernelGGL(var_kernel<double>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
-                input.data<double>(), mean, d_partial, n);
+                input.data<double>(), mean_tensor.data<double>(), d_partial, n);
 
-            std::vector<double> h_partial(num_blocks);
-            HIP_CHECK(hipMemcpy(h_partial.data(), d_partial, num_blocks * sizeof(double), hipMemcpyDeviceToHost));
+            double divisor = static_cast<double>(unbiased ? (n - 1) : n);
+            hipLaunchKernelGGL(var_final_kernel<double>, dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                d_partial, output.data<double>(), num_blocks, divisor);
 
-            double sum = 0.0;
-            for (int i = 0; i < num_blocks; ++i) {
-                sum += h_partial[i];
-            }
-
-            double var = sum / (unbiased ? (n - 1) : n);
-            HIP_CHECK(hipMemcpy(output.data<double>(), &var, sizeof(double), hipMemcpyHostToDevice));
             HIP_CHECK(hipFree(d_partial));
         }
     } else {
@@ -2218,16 +2360,15 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, hipStr
             hipLaunchKernelGGL(norm_kernel<float>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
                 input.data<float>(), d_partial, n, p);
 
-            std::vector<float> h_partial(num_blocks);
-            HIP_CHECK(hipMemcpy(h_partial.data(), d_partial, num_blocks * sizeof(float), hipMemcpyDeviceToHost));
-
-            float sum = 0.0f;
-            for (int i = 0; i < num_blocks; ++i) {
-                sum += h_partial[i];
+            if (num_blocks > 1) {
+                hipLaunchKernelGGL(norm_final_kernel<float>, dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                    d_partial, output.data<float>(), num_blocks, p);
+            } else {
+                // Single block: still need to apply pow(sum, 1/p)
+                hipLaunchKernelGGL(norm_final_kernel<float>, dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                    d_partial, output.data<float>(), 1, p);
             }
 
-            float norm = powf(sum, 1.0f / p);
-            HIP_CHECK(hipMemcpy(output.data<float>(), &norm, sizeof(float), hipMemcpyHostToDevice));
             HIP_CHECK(hipFree(d_partial));
         } else {
             double* d_partial;
@@ -2236,16 +2377,15 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, hipStr
             hipLaunchKernelGGL(norm_kernel<double>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
                 input.data<double>(), d_partial, n, static_cast<double>(p));
 
-            std::vector<double> h_partial(num_blocks);
-            HIP_CHECK(hipMemcpy(h_partial.data(), d_partial, num_blocks * sizeof(double), hipMemcpyDeviceToHost));
-
-            double sum = 0.0;
-            for (int i = 0; i < num_blocks; ++i) {
-                sum += h_partial[i];
+            double p_double = static_cast<double>(p);
+            if (num_blocks > 1) {
+                hipLaunchKernelGGL(norm_final_kernel<double>, dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                    d_partial, output.data<double>(), num_blocks, p_double);
+            } else {
+                hipLaunchKernelGGL(norm_final_kernel<double>, dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                    d_partial, output.data<double>(), 1, p_double);
             }
 
-            double norm = pow(sum, 1.0 / p);
-            HIP_CHECK(hipMemcpy(output.data<double>(), &norm, sizeof(double), hipMemcpyHostToDevice));
             HIP_CHECK(hipFree(d_partial));
         }
     } else {
@@ -2486,16 +2626,10 @@ static void launch_full_any(const T* d_input, uint8_t* d_output, int64_t n, hipS
         hipLaunchKernelGGL(any_reduce_kernel<T>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
             d_input, d_temp, n);
 
-        // Phase 2: Final OR reduction over intermediates
-        // Read back partial results and reduce on host (simpler for uint8_t)
-        std::vector<uint8_t> h_temp(num_blocks);
-        HIP_CHECK(hipMemcpy(h_temp.data(), d_temp, num_blocks * sizeof(uint8_t), hipMemcpyDeviceToHost));
+        // Phase 2: Final OR reduction over intermediates on device
+        hipLaunchKernelGGL(any_final_kernel, dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+            d_temp, d_output, num_blocks);
 
-        uint8_t result = 0;
-        for (int i = 0; i < num_blocks; i++) {
-            result |= h_temp[i];
-        }
-        HIP_CHECK(hipMemcpy(d_output, &result, sizeof(uint8_t), hipMemcpyHostToDevice));
         HIP_CHECK(hipFree(d_temp));
     }
     HIP_CHECK(hipStreamSynchronize(stream));
@@ -2526,15 +2660,10 @@ static void launch_full_all(const T* d_input, uint8_t* d_output, int64_t n, hipS
         hipLaunchKernelGGL(all_reduce_kernel<T>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
             d_input, d_temp, n);
 
-        // Read back partial results and reduce on host
-        std::vector<uint8_t> h_temp(num_blocks);
-        HIP_CHECK(hipMemcpy(h_temp.data(), d_temp, num_blocks * sizeof(uint8_t), hipMemcpyDeviceToHost));
+        // Phase 2: Final AND reduction over intermediates on device
+        hipLaunchKernelGGL(all_final_kernel, dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+            d_temp, d_output, num_blocks);
 
-        uint8_t result = 1;
-        for (int i = 0; i < num_blocks; i++) {
-            result &= h_temp[i];
-        }
-        HIP_CHECK(hipMemcpy(d_output, &result, sizeof(uint8_t), hipMemcpyHostToDevice));
         HIP_CHECK(hipFree(d_temp));
     }
     HIP_CHECK(hipStreamSynchronize(stream));

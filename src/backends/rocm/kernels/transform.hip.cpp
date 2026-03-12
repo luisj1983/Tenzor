@@ -1674,6 +1674,51 @@ __global__ void trace_kernel_impl(
     }
 }
 
+// CAS-based atomicAdd for int64_t (not natively available in HIP)
+__device__ inline long long atomicAddInt64(long long* addr, long long val) {
+    unsigned long long* uaddr = reinterpret_cast<unsigned long long*>(addr);
+    unsigned long long old = atomicCAS(uaddr, 0ULL, 0ULL);  // atomic initial read
+    unsigned long long assumed;
+    do {
+        assumed = old;
+        old = atomicCAS(uaddr, assumed, assumed + static_cast<unsigned long long>(val));
+    } while (assumed != old);
+    return static_cast<long long>(old);
+}
+
+// Specialization for int64_t trace using CAS atomicAdd
+__global__ void trace_kernel_impl_i64(
+    const int64_t* input,
+    int64_t* output,
+    int64_t diag_size,
+    int64_t cols
+) {
+    __shared__ int64_t shared[256];
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    int64_t thread_sum = 0;
+    for (int64_t i = idx; i < diag_size; i += grid_size) {
+        thread_sum += input[i * cols + i];
+    }
+
+    shared[tid] = thread_sum;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            shared[tid] += shared[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        atomicAddInt64(reinterpret_cast<long long*>(output), static_cast<long long>(shared[0]));
+    }
+}
+
 // Specialization for double atomicAdd (not natively available on all HIP devices)
 __global__ void trace_kernel_impl_f64(
     const double* input,
@@ -1758,21 +1803,10 @@ auto trace_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
             input.data<int32_t>(), result.data<int32_t>(),
             diag_size, cols);
     } else if (input.dtype() == DType::Int64) {
-        // Use single-block reduction for int64 to avoid atomicAdd issues
-        // For simplicity, sum on host for int64
-        if (diag_size <= 65536) {
-            // Read diagonal elements to host, sum there
-            std::vector<int64_t> h_input(rows * cols);
-            HIP_CHECK(hipMemcpy(h_input.data(), input.data<int64_t>(),
-                rows * cols * sizeof(int64_t), hipMemcpyDeviceToHost));
-            int64_t sum = 0;
-            for (int64_t i = 0; i < diag_size; ++i) {
-                sum += h_input[i * cols + i];
-            }
-            HIP_CHECK(hipMemcpy(result.data<int64_t>(), &sum, sizeof(int64_t), hipMemcpyHostToDevice));
-        } else {
-            throw std::runtime_error("trace: Int64 not supported for very large matrices");
-        }
+        hipLaunchKernelGGL(trace_kernel_impl_i64,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<int64_t>(), result.data<int64_t>(),
+            diag_size, cols);
     } else {
         throw std::runtime_error("trace: unsupported dtype (supports Float32, Float64, Int32, Int64)");
     }

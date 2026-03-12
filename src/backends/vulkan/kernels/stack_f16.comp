@@ -1,0 +1,54 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Stack operation for Float16: stack tensors along a new dimension
+// Float16 elements are packed 2 per 32-bit word in uint buffers
+// Input tensors are passed as a flat concatenation in a single buffer.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };   // Packed F16 pairs
+layout(binding = 1) buffer Output { uint output_data[]; }; // Packed F16 pairs
+
+layout(push_constant) uniform PushConstants {
+    uint num_tensors;          // Number of input tensors
+    uint elements_per_tensor;  // Elements in each input tensor
+    uint output_numel;         // Total output elements
+} params;
+
+// Read a single Float16 element from packed uint32 input array
+float readF16(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint half_offset = (element_idx % 2) * 16;
+    uint bits = (input_data[word_idx] >> half_offset) & 0xFFFFu;
+    return unpackHalf2x16(bits).x;
+}
+
+// Write a single Float16 element to packed uint32 output array using CAS loop
+void writeF16(uint element_idx, float value) {
+    uint word_idx = element_idx / 2;
+    uint half_offset = (element_idx % 2) * 16;
+    uint new_bits = packHalf2x16(vec2(value, 0.0)) & 0xFFFFu;
+    uint mask = 0xFFFFu << half_offset;
+
+    uint old_word = output_data[word_idx];
+    for (int attempt = 0; attempt < 1024; ++attempt) {
+        uint new_word = (old_word & ~mask) | (new_bits << half_offset);
+        uint result = atomicCompSwap(output_data[word_idx], old_word, new_word);
+        if (result == old_word) return;
+        old_word = result;
+    }
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.output_numel) return;
+
+    uint tensor_idx = idx / params.elements_per_tensor;
+    uint elem_idx = idx % params.elements_per_tensor;
+
+    // Bounds check on tensor index
+    if (tensor_idx >= params.num_tensors) return;
+
+    uint input_offset = tensor_idx * params.elements_per_tensor + elem_idx;
+    writeF16(idx, readF16(input_offset));
+}

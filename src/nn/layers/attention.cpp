@@ -384,28 +384,14 @@ auto MultiheadAttention::scaled_dot_product_attention(
 
     // Apply causal mask if is_causal_ is set (masks future tokens)
     if (is_causal_) {
-        // Create rectangular causal mask (seq_q, seq_k) — future positions get -inf
-        // Build directly in Float32 (sufficient precision for mask values)
-        Tensor causal = zeros({seq_len_q, seq_len_k}, DType::Float32, Device::cpu());
-        auto* causal_data = causal.data<float>();
-        // When scores are in Float32 (upcast from FP16/BF16), use -inf directly
-        // Otherwise use dtype-appropriate mask value: 1e4 for FP16/BF16, inf for FP32+
+        // Create rectangular causal mask on target device using tensor ops
+        // triu with diagonal=1 gives upper-triangular 1s above the main diagonal
         float neg_inf_val = -std::numeric_limits<float>::infinity();
         if (!needs_attn_upcast && (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16)) {
             neg_inf_val = -1e4f;
         }
-        for (int64_t i = 0; i < seq_len_q; ++i) {
-            for (int64_t j = i + 1; j < seq_len_k; ++j) {
-                causal_data[i * seq_len_k + j] = neg_inf_val;
-            }
-        }
-        // Convert to score dtype and device
-        if (score_dtype != DType::Float32) {
-            causal = causal.to(score_dtype);
-        }
-        if (query.device() != Device::cpu()) {
-            causal = causal.to(query.device());
-        }
+        auto causal = triu(ones({seq_len_q, seq_len_k}, score_dtype, query.device()), 1);
+        causal = causal * full({1}, neg_inf_val, score_dtype, query.device());
         Variable causal_var(causal, false);
         scores = scores + causal_var;
     }

@@ -190,15 +190,18 @@ auto fft(const Tensor& input, std::optional<int64_t> n, int64_t dim,
         // CPU inline fallback using naive DFT
     }
 
-    // Naive O(n^2) DFT fallback
+    // Naive O(n^2) DFT fallback — must run on CPU
     auto cont = inp.contiguous();
+    Device orig_device = cont.device();
+    if (orig_device != Device::cpu()) cont = cont.to(Device::cpu());
+
     auto shape = cont.shape();
     int64_t N_in = shape[dim];
     int64_t N_out = signal_len;
 
     std::vector<int64_t> out_shape(shape.begin(), shape.end());
     out_shape[dim] = N_out;
-    auto result = Tensor(out_shape, out_dtype, input.device());
+    auto result = Tensor(out_shape, out_dtype, Device::cpu());
 
     auto layout = compute_dim_layout(shape, dim);
     double scale = get_norm_factor(N_out, norm, /*is_forward=*/true);
@@ -215,6 +218,7 @@ auto fft(const Tensor& input, std::optional<int64_t> n, int64_t dim,
                      -1.0, scale);
     }
 
+    if (orig_device != Device::cpu()) result = result.to(orig_device);
     return result;
 }
 
@@ -243,15 +247,18 @@ auto ifft(const Tensor& input, std::optional<int64_t> n, int64_t dim,
         // CPU inline fallback using naive IDFT
     }
 
-    // Naive O(n^2) IDFT fallback (positive exponent)
+    // Naive O(n^2) IDFT fallback (positive exponent) — must run on CPU
     auto cont = inp.contiguous();
+    Device orig_device = cont.device();
+    if (orig_device != Device::cpu()) cont = cont.to(Device::cpu());
+
     auto shape = cont.shape();
     int64_t N_in = shape[dim];
     int64_t N_out = signal_len;
 
     std::vector<int64_t> out_shape(shape.begin(), shape.end());
     out_shape[dim] = N_out;
-    auto result = Tensor(out_shape, out_dtype, input.device());
+    auto result = Tensor(out_shape, out_dtype, Device::cpu());
 
     auto layout = compute_dim_layout(shape, dim);
     double scale = get_norm_factor(N_out, norm, /*is_forward=*/false);
@@ -268,6 +275,7 @@ auto ifft(const Tensor& input, std::optional<int64_t> n, int64_t dim,
                      +1.0, scale);
     }
 
+    if (orig_device != Device::cpu()) result = result.to(orig_device);
     return result;
 }
 
@@ -318,18 +326,21 @@ auto irfft(const Tensor& input, std::optional<int64_t> n, int64_t dim,
         // CPU inline fallback using naive IRFFT with Hermitian reconstruction
     }
 
-    // Naive O(n^2) IRFFT fallback: Hermitian input -> real output
+    // Naive O(n^2) IRFFT fallback: Hermitian input -> real output — must run on CPU
     DType real_dtype = to_real_dtype(input.dtype());
     DType complex_dtype = to_complex_dtype(input.dtype());
     Tensor inp = (input.dtype() == DType::Float32 || input.dtype() == DType::Float64)
                  ? input.to(complex_dtype) : input;
     auto cont = inp.contiguous();
+    Device orig_device = cont.device();
+    if (orig_device != Device::cpu()) cont = cont.to(Device::cpu());
+
     auto shape = cont.shape();
     int64_t N_in = shape[dim];  // n/2+1 complex elements
 
     std::vector<int64_t> out_shape(shape.begin(), shape.end());
     out_shape[dim] = signal_len;
-    auto result = Tensor(out_shape, real_dtype, input.device());
+    auto result = Tensor(out_shape, real_dtype, Device::cpu());
 
     auto layout = compute_dim_layout(shape, dim);
     double scale = get_norm_factor(signal_len, norm, /*is_forward=*/false);
@@ -346,6 +357,7 @@ auto irfft(const Tensor& input, std::optional<int64_t> n, int64_t dim,
                        scale);
     }
 
+    if (orig_device != Device::cpu()) result = result.to(orig_device);
     return result;
 }
 

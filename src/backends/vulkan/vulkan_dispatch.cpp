@@ -152,6 +152,8 @@ auto VulkanBackend::dispatch(const std::string& op_name,
                 "lstm_cell", "lstm_cell_backward",
                 // GRU cell (gru_cell_f16, gru_cell_backward_f16 shaders)
                 "gru_cell", "gru_cell_backward",
+                // Indexing ops (put_f16, take_f16, tile_f16, stack_f16, searchsorted_f16 shaders)
+                "put", "take", "tile", "stack", "searchsorted",
             };
 
             if (!f16_native_ops.contains(op_name)) {

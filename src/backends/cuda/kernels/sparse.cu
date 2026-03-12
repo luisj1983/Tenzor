@@ -413,7 +413,7 @@ Tensor cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec, cudaStrea
     ));
 
     // Synchronize
-    CUDA_CHECK_SPARSE(cudaDeviceSynchronize());
+    CUDA_CHECK_SPARSE(cudaStreamSynchronize(stream));
 
     return result;
 }

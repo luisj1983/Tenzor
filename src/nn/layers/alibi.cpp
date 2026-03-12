@@ -1,5 +1,7 @@
 #include "tenzor/nn/layers/alibi.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/math.hpp"
+#include "tenzor/ops/transform.hpp"
 #include <cmath>
 #include <stdexcept>
 
@@ -55,25 +57,28 @@ auto ALiBi::compute_slopes() -> void {
 }
 
 auto ALiBi::get_bias(int64_t seq_q, int64_t seq_k, Device device, DType dtype) -> Tensor {
-    // Compute bias: -slope * |i - j| for each head
+    // Compute bias on target device: -slope * |i - j| for each head
     // Shape: (1, num_heads, seq_q, seq_k)
-    auto bias = Tensor({1, num_heads_, seq_q, seq_k}, DType::Float32, Device::cpu());
-    float* data = bias.data<float>();
 
+    // Distance matrix via broadcasting: |pos_q - pos_k|
+    auto pos_q = arange(0.0, static_cast<double>(seq_q), 1.0, DType::Float32, device);
+    auto pos_k = arange(0.0, static_cast<double>(seq_k), 1.0, DType::Float32, device);
+    auto dist = abs(sub(reshape(pos_q, {seq_q, 1}), reshape(pos_k, {1, seq_k})));
+
+    // Slopes tensor: small (num_heads), create on CPU then transfer
+    auto slopes_tensor = Tensor({num_heads_}, DType::Float32, Device::cpu());
+    auto* slopes_data = slopes_tensor.data<float>();
     for (int64_t h = 0; h < num_heads_; ++h) {
-        float slope = slopes_[h];
-        for (int64_t i = 0; i < seq_q; ++i) {
-            for (int64_t j = 0; j < seq_k; ++j) {
-                int64_t offset = ((0 * num_heads_ + h) * seq_q + i) * seq_k + j;
-                data[offset] = -slope * static_cast<float>(std::abs(i - j));
-            }
-        }
+        slopes_data[h] = -slopes_[h];
+    }
+    if (device != Device::cpu()) {
+        slopes_tensor = slopes_tensor.to(device);
     }
 
-    // Move to target device and dtype
-    if (device != Device::cpu()) {
-        bias = bias.to(device);
-    }
+    // bias = slopes(1, num_heads, 1, 1) * dist(1, 1, seq_q, seq_k)
+    auto bias = mul(reshape(slopes_tensor, {1, num_heads_, 1, 1}),
+                    reshape(dist, {1, 1, seq_q, seq_k}));
+
     if (dtype != DType::Float32) {
         bias = bias.to(dtype);
     }

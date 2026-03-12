@@ -1,0 +1,56 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+// Bitonic sort (Int64 variant)
+// One compare-and-swap pass per dispatch
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Values { int64_t values[]; };
+layout(binding = 1) buffer Indices { int indices[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint padded_n;
+    uint stage;
+    uint substage;
+    uint descending;
+} params;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+
+    if (gid >= params.padded_n / 2) return;
+
+    uint block_size = 1u << (params.stage + 1);
+    uint half_block = 1u << params.substage;
+
+    uint block_id = gid / half_block;
+    uint offset = gid % half_block;
+
+    uint i = block_id * (half_block * 2) + offset;
+    uint j = i + half_block;
+
+    if (j >= params.padded_n) return;
+
+    uint sort_block = i / block_size;
+    bool ascending_block = ((sort_block % 2) == 0);
+    if (params.descending != 0) ascending_block = !ascending_block;
+
+    int64_t val_i = values[i];
+    int64_t val_j = values[j];
+
+    bool should_swap;
+    if (ascending_block) {
+        should_swap = (val_i > val_j);
+    } else {
+        should_swap = (val_i < val_j);
+    }
+
+    if (should_swap) {
+        values[i] = val_j;
+        values[j] = val_i;
+        int tmp = indices[i];
+        indices[i] = indices[j];
+        indices[j] = tmp;
+    }
+}
