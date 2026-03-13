@@ -1,0 +1,38 @@
+#version 450
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer InputA { float a_data[]; };  // interleaved real, imag
+layout(binding = 1) buffer InputB { float b_data[]; };
+layout(binding = 2) buffer Output { float out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;   // number of complex elements
+    uint op;  // 0=add, 1=sub, 2=mul, 3=div
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n) return;
+
+    uint base = idx * 2;
+    float ar = a_data[base], ai = a_data[base + 1];
+    float br = b_data[base], bi = b_data[base + 1];
+
+    float rr, ri;
+    switch (params.op) {
+        case 0: rr = ar + br; ri = ai + bi; break;
+        case 1: rr = ar - br; ri = ai - bi; break;
+        case 2: rr = ar * br - ai * bi; ri = ar * bi + ai * br; break;
+        case 3: {
+            float denom = br * br + bi * bi;
+            rr = (ar * br + ai * bi) / denom;
+            ri = (ai * br - ar * bi) / denom;
+            break;
+        }
+        default: rr = 0.0; ri = 0.0; break;
+    }
+
+    out_data[base] = rr;
+    out_data[base + 1] = ri;
+}

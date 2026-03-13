@@ -43,6 +43,44 @@ inline uint16_t f32_to_bf16(float f32) {
     return static_cast<uint16_t>(bits >> 16);
 }
 
+// Device-side upcast: F16/BF16 -> F32 (zero host transfers)
+inline void device_upcast_to_f32(const void* src_ptr, float* dst_ptr, int64_t numel,
+                                  DType src_dtype, sycl::queue& queue) {
+    if (src_dtype == DType::Float16) {
+        const sycl::half* src = static_cast<const sycl::half*>(src_ptr);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            dst_ptr[i] = static_cast<float>(src[i]);
+        }).wait();
+    } else {
+        // BFloat16 stored as uint16_t
+        const uint16_t* src = static_cast<const uint16_t*>(src_ptr);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            uint32_t bits = static_cast<uint32_t>(src[i]) << 16;
+            float val;
+            __builtin_memcpy(&val, &bits, sizeof(float));
+            dst_ptr[i] = val;
+        }).wait();
+    }
+}
+
+// Device-side downcast: F32 -> F16/BF16 (zero host transfers)
+inline void device_downcast_from_f32(const float* src_ptr, void* dst_ptr, int64_t numel,
+                                      DType dst_dtype, sycl::queue& queue) {
+    if (dst_dtype == DType::Float16) {
+        sycl::half* dst = static_cast<sycl::half*>(dst_ptr);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            dst[i] = sycl::half(src_ptr[i]);
+        }).wait();
+    } else {
+        uint16_t* dst = static_cast<uint16_t*>(dst_ptr);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            uint32_t bits;
+            __builtin_memcpy(&bits, &src_ptr[i], sizeof(uint32_t));
+            dst[i] = static_cast<uint16_t>(bits >> 16);
+        }).wait();
+    }
+}
+
 #ifdef TENZOR_HAS_ONEMKL
 
 namespace {
@@ -320,44 +358,51 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
     } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         // Upcast to Float32, compute FFT, downcast result
+        // All conversions done on device — zero host transfers for dtype conversion
         DType orig_dtype = input.dtype();
         int64_t numel = input.numel();
 
-        // Copy input to host and convert to float32
-        std::vector<float> host_f32(numel);
-        if (orig_dtype == DType::Float16) {
-            std::vector<sycl::half> host_in(numel);
-            queue.memcpy(host_in.data(), input.data_ptr(), numel * sizeof(sycl::half)).wait();
-            for (int64_t i = 0; i < numel; ++i) host_f32[i] = static_cast<float>(host_in[i]);
-        } else {
-            std::vector<uint16_t> host_in(numel);
-            queue.memcpy(host_in.data(), input.data_ptr(), numel * sizeof(uint16_t)).wait();
-            for (int64_t i = 0; i < numel; ++i) host_f32[i] = bf16_to_f32(host_in[i]);
-        }
-
-        // Create Float32 tensor, compute FFT
+        // Allocate device-side Float32 buffer and upcast on device
         Tensor f32_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                          DType::Float32, input.device());
-        queue.memcpy(const_cast<void*>(f32_input.data_ptr()), host_f32.data(), numel * sizeof(float)).wait();
+        float* f32_ptr = static_cast<float*>(const_cast<void*>(f32_input.data_ptr()));
+
+        if (orig_dtype == DType::Float16) {
+            const sycl::half* src = static_cast<const sycl::half*>(input.data_ptr());
+            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+                f32_ptr[i] = static_cast<float>(src[i]);
+            }).wait();
+        } else {
+            // BFloat16 stored as uint16_t
+            const uint16_t* src = static_cast<const uint16_t*>(input.data_ptr());
+            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+                uint32_t bits = static_cast<uint32_t>(src[i]) << 16;
+                float val;
+                __builtin_memcpy(&val, &bits, sizeof(float));
+                f32_ptr[i] = val;
+            }).wait();
+        }
 
         Tensor f32_result = fft_kernel(f32_input, dim, n, norm, queue);
 
-        // Downcast result
+        // Downcast result on device — zero host transfers
         int64_t out_numel = f32_result.numel();
         Tensor output(std::vector<int64_t>(f32_result.shape().begin(), f32_result.shape().end()),
                       orig_dtype, input.device());
-
-        std::vector<float> host_out(out_numel);
-        queue.memcpy(host_out.data(), f32_result.data_ptr(), out_numel * sizeof(float)).wait();
+        const float* f32_out = static_cast<const float*>(f32_result.data_ptr());
 
         if (orig_dtype == DType::Float16) {
-            std::vector<sycl::half> host_half(out_numel);
-            for (int64_t i = 0; i < out_numel; ++i) host_half[i] = sycl::half(host_out[i]);
-            queue.memcpy(const_cast<void*>(output.data_ptr()), host_half.data(), out_numel * sizeof(sycl::half)).wait();
+            sycl::half* dst = static_cast<sycl::half*>(const_cast<void*>(output.data_ptr()));
+            queue.parallel_for(sycl::range<1>(out_numel), [=](sycl::id<1> i) {
+                dst[i] = sycl::half(f32_out[i]);
+            }).wait();
         } else {
-            std::vector<uint16_t> host_bf16(out_numel);
-            for (int64_t i = 0; i < out_numel; ++i) host_bf16[i] = f32_to_bf16(host_out[i]);
-            queue.memcpy(const_cast<void*>(output.data_ptr()), host_bf16.data(), out_numel * sizeof(uint16_t)).wait();
+            uint16_t* dst = static_cast<uint16_t*>(const_cast<void*>(output.data_ptr()));
+            queue.parallel_for(sycl::range<1>(out_numel), [=](sycl::id<1> i) {
+                uint32_t bits;
+                __builtin_memcpy(&bits, &f32_out[i], sizeof(uint32_t));
+                dst[i] = static_cast<uint16_t>(bits >> 16);
+            }).wait();
         }
 
         return output;
@@ -532,39 +577,20 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
         DType orig_dtype = input.dtype();
         int64_t numel = input.numel();
 
-        std::vector<float> host_f32(numel);
-        if (orig_dtype == DType::Float16) {
-            std::vector<sycl::half> host_in(numel);
-            queue.memcpy(host_in.data(), input.data_ptr(), numel * sizeof(sycl::half)).wait();
-            for (int64_t i = 0; i < numel; ++i) host_f32[i] = static_cast<float>(host_in[i]);
-        } else {
-            std::vector<uint16_t> host_in(numel);
-            queue.memcpy(host_in.data(), input.data_ptr(), numel * sizeof(uint16_t)).wait();
-            for (int64_t i = 0; i < numel; ++i) host_f32[i] = bf16_to_f32(host_in[i]);
-        }
-
         Tensor f32_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                          DType::Float32, input.device());
-        queue.memcpy(const_cast<void*>(f32_input.data_ptr()), host_f32.data(), numel * sizeof(float)).wait();
+        device_upcast_to_f32(input.data_ptr(),
+                             static_cast<float*>(const_cast<void*>(f32_input.data_ptr())),
+                             numel, orig_dtype, queue);
 
         Tensor f32_result = ifft_kernel(f32_input, dim, n, norm, queue);
 
         int64_t out_numel = f32_result.numel();
         Tensor output(std::vector<int64_t>(f32_result.shape().begin(), f32_result.shape().end()),
                       orig_dtype, input.device());
-
-        std::vector<float> host_out(out_numel);
-        queue.memcpy(host_out.data(), f32_result.data_ptr(), out_numel * sizeof(float)).wait();
-
-        if (orig_dtype == DType::Float16) {
-            std::vector<sycl::half> host_half(out_numel);
-            for (int64_t i = 0; i < out_numel; ++i) host_half[i] = sycl::half(host_out[i]);
-            queue.memcpy(const_cast<void*>(output.data_ptr()), host_half.data(), out_numel * sizeof(sycl::half)).wait();
-        } else {
-            std::vector<uint16_t> host_bf16(out_numel);
-            for (int64_t i = 0; i < out_numel; ++i) host_bf16[i] = f32_to_bf16(host_out[i]);
-            queue.memcpy(const_cast<void*>(output.data_ptr()), host_bf16.data(), out_numel * sizeof(uint16_t)).wait();
-        }
+        device_downcast_from_f32(static_cast<const float*>(f32_result.data_ptr()),
+                                 const_cast<void*>(output.data_ptr()),
+                                 out_numel, orig_dtype, queue);
 
         return output;
 
@@ -763,39 +789,20 @@ auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
         DType orig_dtype = input.dtype();
         int64_t numel = input.numel();
 
-        std::vector<float> host_f32(numel);
-        if (orig_dtype == DType::Float16) {
-            std::vector<sycl::half> host_in(numel);
-            queue.memcpy(host_in.data(), input.data_ptr(), numel * sizeof(sycl::half)).wait();
-            for (int64_t i = 0; i < numel; ++i) host_f32[i] = static_cast<float>(host_in[i]);
-        } else {
-            std::vector<uint16_t> host_in(numel);
-            queue.memcpy(host_in.data(), input.data_ptr(), numel * sizeof(uint16_t)).wait();
-            for (int64_t i = 0; i < numel; ++i) host_f32[i] = bf16_to_f32(host_in[i]);
-        }
-
         Tensor f32_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                          DType::Float32, input.device());
-        queue.memcpy(const_cast<void*>(f32_input.data_ptr()), host_f32.data(), numel * sizeof(float)).wait();
+        device_upcast_to_f32(input.data_ptr(),
+                             static_cast<float*>(const_cast<void*>(f32_input.data_ptr())),
+                             numel, orig_dtype, queue);
 
         Tensor f32_result = rfft_kernel(f32_input, dim, n, norm, queue);
 
         int64_t out_numel = f32_result.numel();
         Tensor output(std::vector<int64_t>(f32_result.shape().begin(), f32_result.shape().end()),
                       orig_dtype, input.device());
-
-        std::vector<float> host_out(out_numel);
-        queue.memcpy(host_out.data(), f32_result.data_ptr(), out_numel * sizeof(float)).wait();
-
-        if (orig_dtype == DType::Float16) {
-            std::vector<sycl::half> host_half(out_numel);
-            for (int64_t i = 0; i < out_numel; ++i) host_half[i] = sycl::half(host_out[i]);
-            queue.memcpy(const_cast<void*>(output.data_ptr()), host_half.data(), out_numel * sizeof(sycl::half)).wait();
-        } else {
-            std::vector<uint16_t> host_bf16(out_numel);
-            for (int64_t i = 0; i < out_numel; ++i) host_bf16[i] = f32_to_bf16(host_out[i]);
-            queue.memcpy(const_cast<void*>(output.data_ptr()), host_bf16.data(), out_numel * sizeof(uint16_t)).wait();
-        }
+        device_downcast_from_f32(static_cast<const float*>(f32_result.data_ptr()),
+                                 const_cast<void*>(output.data_ptr()),
+                                 out_numel, orig_dtype, queue);
 
         return output;
 
@@ -999,39 +1006,20 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
         DType orig_dtype = input.dtype();
         int64_t numel = input.numel();
 
-        std::vector<float> host_f32(numel);
-        if (orig_dtype == DType::Float16) {
-            std::vector<sycl::half> host_in(numel);
-            queue.memcpy(host_in.data(), input.data_ptr(), numel * sizeof(sycl::half)).wait();
-            for (int64_t i = 0; i < numel; ++i) host_f32[i] = static_cast<float>(host_in[i]);
-        } else {
-            std::vector<uint16_t> host_in(numel);
-            queue.memcpy(host_in.data(), input.data_ptr(), numel * sizeof(uint16_t)).wait();
-            for (int64_t i = 0; i < numel; ++i) host_f32[i] = bf16_to_f32(host_in[i]);
-        }
-
         Tensor f32_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                          DType::Float32, input.device());
-        queue.memcpy(const_cast<void*>(f32_input.data_ptr()), host_f32.data(), numel * sizeof(float)).wait();
+        device_upcast_to_f32(input.data_ptr(),
+                             static_cast<float*>(const_cast<void*>(f32_input.data_ptr())),
+                             numel, orig_dtype, queue);
 
         Tensor f32_result = irfft_kernel(f32_input, dim, n, norm, queue);
 
         int64_t out_numel = f32_result.numel();
         Tensor output(std::vector<int64_t>(f32_result.shape().begin(), f32_result.shape().end()),
                       orig_dtype, input.device());
-
-        std::vector<float> host_out(out_numel);
-        queue.memcpy(host_out.data(), f32_result.data_ptr(), out_numel * sizeof(float)).wait();
-
-        if (orig_dtype == DType::Float16) {
-            std::vector<sycl::half> host_half(out_numel);
-            for (int64_t i = 0; i < out_numel; ++i) host_half[i] = sycl::half(host_out[i]);
-            queue.memcpy(const_cast<void*>(output.data_ptr()), host_half.data(), out_numel * sizeof(sycl::half)).wait();
-        } else {
-            std::vector<uint16_t> host_bf16(out_numel);
-            for (int64_t i = 0; i < out_numel; ++i) host_bf16[i] = f32_to_bf16(host_out[i]);
-            queue.memcpy(const_cast<void*>(output.data_ptr()), host_bf16.data(), out_numel * sizeof(uint16_t)).wait();
-        }
+        device_downcast_from_f32(static_cast<const float*>(f32_result.data_ptr()),
+                                 const_cast<void*>(output.data_ptr()),
+                                 out_numel, orig_dtype, queue);
 
         return output;
 
@@ -1420,37 +1408,19 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
         DType orig_dtype = input.dtype();
         int64_t in_numel = input.numel();
 
-        std::vector<float> host_f32(in_numel);
-        if (orig_dtype == DType::Float16) {
-            std::vector<sycl::half> host_in(in_numel);
-            queue.memcpy(host_in.data(), input.data_ptr(), in_numel * sizeof(sycl::half)).wait();
-            for (int64_t i = 0; i < in_numel; ++i) host_f32[i] = static_cast<float>(host_in[i]);
-        } else {
-            std::vector<uint16_t> host_in(in_numel);
-            queue.memcpy(host_in.data(), input.data_ptr(), in_numel * sizeof(uint16_t)).wait();
-            for (int64_t i = 0; i < in_numel; ++i) host_f32[i] = bf16_to_f32(host_in[i]);
-        }
-
         Tensor f32_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                          DType::Float32, input.device());
-        queue.memcpy(const_cast<void*>(f32_input.data_ptr()), host_f32.data(), in_numel * sizeof(float)).wait();
+        device_upcast_to_f32(input.data_ptr(),
+                             static_cast<float*>(const_cast<void*>(f32_input.data_ptr())),
+                             in_numel, orig_dtype, queue);
         Tensor f32_result = fft_kernel(f32_input, dim, n, norm, queue);
 
         int64_t out_numel = f32_result.numel();
         Tensor output(std::vector<int64_t>(f32_result.shape().begin(), f32_result.shape().end()),
                       orig_dtype, input.device());
-        std::vector<float> host_out(out_numel);
-        queue.memcpy(host_out.data(), f32_result.data_ptr(), out_numel * sizeof(float)).wait();
-
-        if (orig_dtype == DType::Float16) {
-            std::vector<sycl::half> host_half(out_numel);
-            for (int64_t i = 0; i < out_numel; ++i) host_half[i] = sycl::half(host_out[i]);
-            queue.memcpy(const_cast<void*>(output.data_ptr()), host_half.data(), out_numel * sizeof(sycl::half)).wait();
-        } else {
-            std::vector<uint16_t> host_bf16(out_numel);
-            for (int64_t i = 0; i < out_numel; ++i) host_bf16[i] = f32_to_bf16(host_out[i]);
-            queue.memcpy(const_cast<void*>(output.data_ptr()), host_bf16.data(), out_numel * sizeof(uint16_t)).wait();
-        }
+        device_downcast_from_f32(static_cast<const float*>(f32_result.data_ptr()),
+                                 const_cast<void*>(output.data_ptr()),
+                                 out_numel, orig_dtype, queue);
         return output;
     } else {
         throw std::runtime_error("fft_kernel: unsupported dtype (expected Float32 or Float64)");
@@ -1559,37 +1529,19 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
         DType orig_dtype = input.dtype();
         int64_t in_numel = input.numel();
 
-        std::vector<float> host_f32(in_numel);
-        if (orig_dtype == DType::Float16) {
-            std::vector<sycl::half> host_in(in_numel);
-            queue.memcpy(host_in.data(), input.data_ptr(), in_numel * sizeof(sycl::half)).wait();
-            for (int64_t i = 0; i < in_numel; ++i) host_f32[i] = static_cast<float>(host_in[i]);
-        } else {
-            std::vector<uint16_t> host_in(in_numel);
-            queue.memcpy(host_in.data(), input.data_ptr(), in_numel * sizeof(uint16_t)).wait();
-            for (int64_t i = 0; i < in_numel; ++i) host_f32[i] = bf16_to_f32(host_in[i]);
-        }
-
         Tensor f32_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                          DType::Float32, input.device());
-        queue.memcpy(const_cast<void*>(f32_input.data_ptr()), host_f32.data(), in_numel * sizeof(float)).wait();
+        device_upcast_to_f32(input.data_ptr(),
+                             static_cast<float*>(const_cast<void*>(f32_input.data_ptr())),
+                             in_numel, orig_dtype, queue);
         Tensor f32_result = ifft_kernel(f32_input, dim, n, norm, queue);
 
         int64_t out_numel = f32_result.numel();
         Tensor output(std::vector<int64_t>(f32_result.shape().begin(), f32_result.shape().end()),
                       orig_dtype, input.device());
-        std::vector<float> host_out(out_numel);
-        queue.memcpy(host_out.data(), f32_result.data_ptr(), out_numel * sizeof(float)).wait();
-
-        if (orig_dtype == DType::Float16) {
-            std::vector<sycl::half> host_half(out_numel);
-            for (int64_t i = 0; i < out_numel; ++i) host_half[i] = sycl::half(host_out[i]);
-            queue.memcpy(const_cast<void*>(output.data_ptr()), host_half.data(), out_numel * sizeof(sycl::half)).wait();
-        } else {
-            std::vector<uint16_t> host_bf16(out_numel);
-            for (int64_t i = 0; i < out_numel; ++i) host_bf16[i] = f32_to_bf16(host_out[i]);
-            queue.memcpy(const_cast<void*>(output.data_ptr()), host_bf16.data(), out_numel * sizeof(uint16_t)).wait();
-        }
+        device_downcast_from_f32(static_cast<const float*>(f32_result.data_ptr()),
+                                 const_cast<void*>(output.data_ptr()),
+                                 out_numel, orig_dtype, queue);
         return output;
     } else {
         throw std::runtime_error("ifft_kernel: unsupported dtype (expected Float32 or Float64)");
@@ -1702,37 +1654,19 @@ auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
         DType orig_dtype = input.dtype();
         int64_t in_numel = input.numel();
 
-        std::vector<float> host_f32(in_numel);
-        if (orig_dtype == DType::Float16) {
-            std::vector<sycl::half> host_in(in_numel);
-            queue.memcpy(host_in.data(), input.data_ptr(), in_numel * sizeof(sycl::half)).wait();
-            for (int64_t i = 0; i < in_numel; ++i) host_f32[i] = static_cast<float>(host_in[i]);
-        } else {
-            std::vector<uint16_t> host_in(in_numel);
-            queue.memcpy(host_in.data(), input.data_ptr(), in_numel * sizeof(uint16_t)).wait();
-            for (int64_t i = 0; i < in_numel; ++i) host_f32[i] = bf16_to_f32(host_in[i]);
-        }
-
         Tensor f32_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                          DType::Float32, input.device());
-        queue.memcpy(const_cast<void*>(f32_input.data_ptr()), host_f32.data(), in_numel * sizeof(float)).wait();
+        device_upcast_to_f32(input.data_ptr(),
+                             static_cast<float*>(const_cast<void*>(f32_input.data_ptr())),
+                             in_numel, orig_dtype, queue);
         Tensor f32_result = rfft_kernel(f32_input, dim, n, norm, queue);
 
         int64_t out_numel = f32_result.numel();
         Tensor output(std::vector<int64_t>(f32_result.shape().begin(), f32_result.shape().end()),
                       orig_dtype, input.device());
-        std::vector<float> host_out(out_numel);
-        queue.memcpy(host_out.data(), f32_result.data_ptr(), out_numel * sizeof(float)).wait();
-
-        if (orig_dtype == DType::Float16) {
-            std::vector<sycl::half> host_half(out_numel);
-            for (int64_t i = 0; i < out_numel; ++i) host_half[i] = sycl::half(host_out[i]);
-            queue.memcpy(const_cast<void*>(output.data_ptr()), host_half.data(), out_numel * sizeof(sycl::half)).wait();
-        } else {
-            std::vector<uint16_t> host_bf16(out_numel);
-            for (int64_t i = 0; i < out_numel; ++i) host_bf16[i] = f32_to_bf16(host_out[i]);
-            queue.memcpy(const_cast<void*>(output.data_ptr()), host_bf16.data(), out_numel * sizeof(uint16_t)).wait();
-        }
+        device_downcast_from_f32(static_cast<const float*>(f32_result.data_ptr()),
+                                 const_cast<void*>(output.data_ptr()),
+                                 out_numel, orig_dtype, queue);
         return output;
     } else {
         throw std::runtime_error("rfft_kernel: unsupported dtype (expected Float32 or Float64)");
@@ -1852,39 +1786,22 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
         queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), out_numel * sizeof(double)).wait();
         return output;
     } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        // Upcast to Float32, compute, downcast
         DType orig_dtype = input.dtype();
         int64_t numel = input.numel();
-        std::vector<float> host_f32(numel);
-        if (orig_dtype == DType::Float16) {
-            std::vector<sycl::half> host_in(numel);
-            queue.memcpy(host_in.data(), input.data_ptr(), numel * sizeof(sycl::half)).wait();
-            for (int64_t i = 0; i < numel; ++i) host_f32[i] = static_cast<float>(host_in[i]);
-        } else {
-            std::vector<uint16_t> host_in(numel);
-            queue.memcpy(host_in.data(), input.data_ptr(), numel * sizeof(uint16_t)).wait();
-            for (int64_t i = 0; i < numel; ++i) host_f32[i] = bf16_to_f32(host_in[i]);
-        }
+
         Tensor f32_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                          DType::Float32, input.device());
-        queue.memcpy(const_cast<void*>(f32_input.data_ptr()), host_f32.data(), numel * sizeof(float)).wait();
+        device_upcast_to_f32(input.data_ptr(),
+                             static_cast<float*>(const_cast<void*>(f32_input.data_ptr())),
+                             numel, orig_dtype, queue);
         Tensor f32_result = irfft_kernel(f32_input, dim, n, norm, queue);
 
-        // Downcast result to original dtype
         int64_t out_numel = f32_result.numel();
-        std::vector<float> host_out(out_numel);
-        queue.memcpy(host_out.data(), f32_result.data_ptr(), out_numel * sizeof(float)).wait();
         Tensor output(std::vector<int64_t>(f32_result.shape().begin(), f32_result.shape().end()),
                       orig_dtype, input.device());
-        if (orig_dtype == DType::Float16) {
-            std::vector<sycl::half> host_half(out_numel);
-            for (int64_t i = 0; i < out_numel; ++i) host_half[i] = sycl::half(host_out[i]);
-            queue.memcpy(const_cast<void*>(output.data_ptr()), host_half.data(), out_numel * sizeof(sycl::half)).wait();
-        } else {
-            std::vector<uint16_t> host_bf16(out_numel);
-            for (int64_t i = 0; i < out_numel; ++i) host_bf16[i] = f32_to_bf16(host_out[i]);
-            queue.memcpy(const_cast<void*>(output.data_ptr()), host_bf16.data(), out_numel * sizeof(uint16_t)).wait();
-        }
+        device_downcast_from_f32(static_cast<const float*>(f32_result.data_ptr()),
+                                 const_cast<void*>(output.data_ptr()),
+                                 out_numel, orig_dtype, queue);
         return output;
     } else {
         throw std::runtime_error("irfft_kernel: unsupported dtype (expected Float32 or Float64)");

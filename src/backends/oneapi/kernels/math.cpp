@@ -268,6 +268,14 @@ struct AddKernelBFloat16 {};
 struct SubKernelBFloat16 {};
 struct MulKernelBFloat16 {};
 struct DivKernelBFloat16 {};
+struct AddKernelComplex64 {};
+struct AddKernelComplex128 {};
+struct SubKernelComplex64 {};
+struct SubKernelComplex128 {};
+struct MulKernelComplex64 {};
+struct MulKernelComplex128 {};
+struct DivKernelComplex64 {};
+struct DivKernelComplex128 {};
 struct MatMulKernelBFloat16 {};
 struct BmmKernelBFloat16 {};
 struct SqrtKernelBFloat16 {};
@@ -347,6 +355,14 @@ struct BroadcastDivFloat16 {};
 struct BroadcastDivBFloat16 {};
 struct BroadcastDivInt8 {};
 struct BroadcastDivUInt8 {};
+struct BroadcastAddComplex64 {};
+struct BroadcastAddComplex128 {};
+struct BroadcastSubComplex64 {};
+struct BroadcastSubComplex128 {};
+struct BroadcastMulComplex64 {};
+struct BroadcastMulComplex128 {};
+struct BroadcastDivComplex64 {};
+struct BroadcastDivComplex128 {};
 
 constexpr int MAX_BROADCAST_DIMS = 8;
 
@@ -430,6 +446,42 @@ static void sycl_broadcast_binary(
     });
 }
 
+// Generic SYCL broadcast binary operation for complex types
+// Strides/indices are in complex element units; data is interleaved real/imag pairs
+template<typename T, typename KernelName, typename Op>
+static void sycl_broadcast_complex_binary(
+    const Tensor& a, const Tensor& b, Tensor& output,
+    const BroadcastInfo& info, sycl::queue& queue, Op op) {
+
+    const T* a_ptr = get_data_ptr<const T>(a);
+    const T* b_ptr = get_data_ptr<const T>(b);
+    T* out_ptr = get_data_ptr<T>(output);
+
+    int ndim = info.ndim;
+    int64_t out_numel = info.out_numel;
+
+    int64_t os[MAX_BROADCAST_DIMS], as_[MAX_BROADCAST_DIMS], bs_[MAX_BROADCAST_DIMS];
+    for (int i = 0; i < ndim; ++i) {
+        os[i] = info.out_strides[i];
+        as_[i] = info.a_strides[i];
+        bs_[i] = info.b_strides[i];
+    }
+
+    queue.parallel_for<KernelName>(sycl::range<1>(out_numel), [=](sycl::id<1> gid) {
+        int64_t flat = gid[0];
+        int64_t a_idx = 0, b_idx = 0;
+        int64_t remaining = flat;
+        for (int d = 0; d < ndim; ++d) {
+            int64_t coord = remaining / os[d];
+            remaining %= os[d];
+            a_idx += coord * as_[d];
+            b_idx += coord * bs_[d];
+        }
+        // Indices are in complex element units, multiply by 2 for real/imag pair access
+        op(a_ptr, b_ptr, out_ptr, a_idx * 2, b_idx * 2, flat * 2);
+    });
+}
+
 // Element-wise addition kernel
 // IMPORTANT: Must ensure contiguous inputs for direct memory access
 auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
@@ -484,6 +536,20 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             sycl_broadcast_binary<uint8_t, BroadcastAddUInt8>(
                 a_cont, b_cont, output, info, queue,
                 [](uint8_t x, uint8_t y) { return static_cast<uint8_t>(x + y); });
+        } else if (a_cont.dtype() == DType::Complex64) {
+            sycl_broadcast_complex_binary<float, BroadcastAddComplex64>(
+                a_cont, b_cont, output, info, queue,
+                [](const float* a, const float* b, float* c, int64_t ai, int64_t bi, int64_t ci) {
+                    c[ci]     = a[ai]     + b[bi];
+                    c[ci + 1] = a[ai + 1] + b[bi + 1];
+                });
+        } else if (a_cont.dtype() == DType::Complex128) {
+            sycl_broadcast_complex_binary<double, BroadcastAddComplex128>(
+                a_cont, b_cont, output, info, queue,
+                [](const double* a, const double* b, double* c, int64_t ai, int64_t bi, int64_t ci) {
+                    c[ci]     = a[ai]     + b[bi];
+                    c[ci + 1] = a[ai + 1] + b[bi + 1];
+                });
         } else {
             throw std::runtime_error("add broadcast: unsupported dtype");
         }
@@ -580,6 +646,28 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             out_ptr[idx] = a_ptr[idx] || b_ptr[idx];
         });
     }
+    else if (a_cont.dtype() == DType::Complex64) {
+        const float* a_ptr = get_data_ptr<const float>(a_cont);
+        const float* b_ptr = get_data_ptr<const float>(b_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+
+        queue.parallel_for<AddKernelComplex64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            int64_t base = idx[0] * 2;
+            out_ptr[base]     = a_ptr[base]     + b_ptr[base];
+            out_ptr[base + 1] = a_ptr[base + 1] + b_ptr[base + 1];
+        });
+    }
+    else if (a_cont.dtype() == DType::Complex128) {
+        const double* a_ptr = get_data_ptr<const double>(a_cont);
+        const double* b_ptr = get_data_ptr<const double>(b_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+
+        queue.parallel_for<AddKernelComplex128>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            int64_t base = idx[0] * 2;
+            out_ptr[base]     = a_ptr[base]     + b_ptr[base];
+            out_ptr[base + 1] = a_ptr[base + 1] + b_ptr[base + 1];
+        });
+    }
     else {
         throw std::runtime_error("Unsupported dtype for addition");
     }
@@ -636,6 +724,20 @@ auto sub_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             sycl_broadcast_binary<uint8_t, BroadcastSubUInt8>(
                 a_cont, b_cont, output, info, queue,
                 [](uint8_t x, uint8_t y) { return static_cast<uint8_t>(x - y); });
+        } else if (a_cont.dtype() == DType::Complex64) {
+            sycl_broadcast_complex_binary<float, BroadcastSubComplex64>(
+                a_cont, b_cont, output, info, queue,
+                [](const float* a, const float* b, float* c, int64_t ai, int64_t bi, int64_t ci) {
+                    c[ci]     = a[ai]     - b[bi];
+                    c[ci + 1] = a[ai + 1] - b[bi + 1];
+                });
+        } else if (a_cont.dtype() == DType::Complex128) {
+            sycl_broadcast_complex_binary<double, BroadcastSubComplex128>(
+                a_cont, b_cont, output, info, queue,
+                [](const double* a, const double* b, double* c, int64_t ai, int64_t bi, int64_t ci) {
+                    c[ci]     = a[ai]     - b[bi];
+                    c[ci + 1] = a[ai + 1] - b[bi + 1];
+                });
         } else {
             throw std::runtime_error("sub broadcast: unsupported dtype");
         }
@@ -719,6 +821,28 @@ auto sub_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             out_ptr[idx] = a_ptr[idx] - b_ptr[idx];
         });
     }
+    else if (a_cont.dtype() == DType::Complex64) {
+        const float* a_ptr = get_data_ptr<const float>(a_cont);
+        const float* b_ptr = get_data_ptr<const float>(b_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+
+        queue.parallel_for<SubKernelComplex64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            int64_t base = idx[0] * 2;
+            out_ptr[base]     = a_ptr[base]     - b_ptr[base];
+            out_ptr[base + 1] = a_ptr[base + 1] - b_ptr[base + 1];
+        });
+    }
+    else if (a_cont.dtype() == DType::Complex128) {
+        const double* a_ptr = get_data_ptr<const double>(a_cont);
+        const double* b_ptr = get_data_ptr<const double>(b_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+
+        queue.parallel_for<SubKernelComplex128>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            int64_t base = idx[0] * 2;
+            out_ptr[base]     = a_ptr[base]     - b_ptr[base];
+            out_ptr[base + 1] = a_ptr[base + 1] - b_ptr[base + 1];
+        });
+    }
     else {
         throw std::runtime_error("Unsupported dtype for subtraction");
     }
@@ -775,6 +899,22 @@ auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             sycl_broadcast_binary<uint8_t, BroadcastMulUInt8>(
                 a_cont, b_cont, output, info, queue,
                 [](uint8_t x, uint8_t y) { return static_cast<uint8_t>(x * y); });
+        } else if (a_cont.dtype() == DType::Complex64) {
+            sycl_broadcast_complex_binary<float, BroadcastMulComplex64>(
+                a_cont, b_cont, output, info, queue,
+                [](const float* a, const float* b, float* c, int64_t ai, int64_t bi, int64_t ci) {
+                    float ar = a[ai], ai_ = a[ai + 1], br = b[bi], bi_ = b[bi + 1];
+                    c[ci]     = ar * br - ai_ * bi_;
+                    c[ci + 1] = ar * bi_ + ai_ * br;
+                });
+        } else if (a_cont.dtype() == DType::Complex128) {
+            sycl_broadcast_complex_binary<double, BroadcastMulComplex128>(
+                a_cont, b_cont, output, info, queue,
+                [](const double* a, const double* b, double* c, int64_t ai, int64_t bi, int64_t ci) {
+                    double ar = a[ai], ai_ = a[ai + 1], br = b[bi], bi_ = b[bi + 1];
+                    c[ci]     = ar * br - ai_ * bi_;
+                    c[ci + 1] = ar * bi_ + ai_ * br;
+                });
         } else {
             throw std::runtime_error("mul broadcast: unsupported dtype");
         }
@@ -839,6 +979,32 @@ auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<MulKernelBool>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] && b_ptr[idx];
+        });
+    }
+    else if (a_cont.dtype() == DType::Complex64) {
+        const float* a_ptr = get_data_ptr<const float>(a_cont);
+        const float* b_ptr = get_data_ptr<const float>(b_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+
+        queue.parallel_for<MulKernelComplex64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            int64_t base = idx[0] * 2;
+            float ar = a_ptr[base], ai = a_ptr[base + 1];
+            float br = b_ptr[base], bi = b_ptr[base + 1];
+            out_ptr[base]     = ar * br - ai * bi;
+            out_ptr[base + 1] = ar * bi + ai * br;
+        });
+    }
+    else if (a_cont.dtype() == DType::Complex128) {
+        const double* a_ptr = get_data_ptr<const double>(a_cont);
+        const double* b_ptr = get_data_ptr<const double>(b_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+
+        queue.parallel_for<MulKernelComplex128>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            int64_t base = idx[0] * 2;
+            double ar = a_ptr[base], ai = a_ptr[base + 1];
+            double br = b_ptr[base], bi = b_ptr[base + 1];
+            out_ptr[base]     = ar * br - ai * bi;
+            out_ptr[base + 1] = ar * bi + ai * br;
         });
     }
     else {
@@ -920,6 +1086,24 @@ auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             sycl_broadcast_binary<uint8_t, BroadcastDivUInt8>(
                 a_cont, b_cont, output, info, queue,
                 [](uint8_t x, uint8_t y) { return y != 0 ? static_cast<uint8_t>(x / y) : uint8_t(0); });
+        } else if (a_cont.dtype() == DType::Complex64) {
+            sycl_broadcast_complex_binary<float, BroadcastDivComplex64>(
+                a_cont, b_cont, output, info, queue,
+                [](const float* a, const float* b, float* c, int64_t ai, int64_t bi, int64_t ci) {
+                    float ar = a[ai], ai_ = a[ai + 1], br = b[bi], bi_ = b[bi + 1];
+                    float denom = br * br + bi_ * bi_;
+                    c[ci]     = (ar * br + ai_ * bi_) / denom;
+                    c[ci + 1] = (ai_ * br - ar * bi_) / denom;
+                });
+        } else if (a_cont.dtype() == DType::Complex128) {
+            sycl_broadcast_complex_binary<double, BroadcastDivComplex128>(
+                a_cont, b_cont, output, info, queue,
+                [](const double* a, const double* b, double* c, int64_t ai, int64_t bi, int64_t ci) {
+                    double ar = a[ai], ai_ = a[ai + 1], br = b[bi], bi_ = b[bi + 1];
+                    double denom = br * br + bi_ * bi_;
+                    c[ci]     = (ar * br + ai_ * bi_) / denom;
+                    c[ci + 1] = (ai_ * br - ar * bi_) / denom;
+                });
         } else {
             throw std::runtime_error("div broadcast: unsupported dtype");
         }
@@ -977,6 +1161,34 @@ auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<DivKernelInt32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] / b_ptr[idx];
+        });
+    }
+    else if (a_cont.dtype() == DType::Complex64) {
+        const float* a_ptr = get_data_ptr<const float>(a_cont);
+        const float* b_ptr = get_data_ptr<const float>(b_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+
+        queue.parallel_for<DivKernelComplex64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            int64_t base = idx[0] * 2;
+            float ar = a_ptr[base], ai = a_ptr[base + 1];
+            float br = b_ptr[base], bi = b_ptr[base + 1];
+            float denom = br * br + bi * bi;
+            out_ptr[base]     = (ar * br + ai * bi) / denom;
+            out_ptr[base + 1] = (ai * br - ar * bi) / denom;
+        });
+    }
+    else if (a_cont.dtype() == DType::Complex128) {
+        const double* a_ptr = get_data_ptr<const double>(a_cont);
+        const double* b_ptr = get_data_ptr<const double>(b_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+
+        queue.parallel_for<DivKernelComplex128>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            int64_t base = idx[0] * 2;
+            double ar = a_ptr[base], ai = a_ptr[base + 1];
+            double br = b_ptr[base], bi = b_ptr[base + 1];
+            double denom = br * br + bi * bi;
+            out_ptr[base]     = (ar * br + ai * bi) / denom;
+            out_ptr[base + 1] = (ai * br - ar * bi) / denom;
         });
     }
     else {

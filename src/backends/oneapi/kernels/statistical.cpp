@@ -16,6 +16,16 @@ class VarKernelFloat32;
 class VarKernelFloat64;
 class ProdKernelFloat32;
 class ProdKernelFloat64;
+class ProdReducePhase1Float32;
+class ProdReducePhase2Float32;
+class ProdReducePhase1Float64;
+class ProdReducePhase2Float64;
+class ProdDimKernelFloat32;
+class ProdDimKernelFloat64;
+class NormReducePhase1Float32;
+class NormReducePhase2Float32;
+class NormReducePhase1Float64;
+class NormReducePhase2Float64;
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -372,165 +382,225 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
         output_size *= s;
     }
 
+    // Device-side product reduction using two-phase SYCL work-group reduction
+    // Phase 1: nd_range kernel with work-groups of 256, grid-stride accumulation,
+    //          work-group reduce to partial buffer (identity = 1, not 0)
+    // Phase 2: Single work-group reduces partial results
+
     if (input.dtype() == DType::Float32) {
         const float* in_ptr = get_data_ptr<const float>(input);
-
-        // Copy to host and compute product
-        std::vector<float> host_data(total_size);
-        queue.memcpy(host_data.data(), in_ptr, total_size * sizeof(float)).wait();
-
-        std::vector<float> result(output_size);
+        Tensor output(out_shape, input.dtype(), input.device());
+        float* out_ptr = get_data_ptr<float>(output);
 
         if (dim == -1) {
-            // Full reduction
-            float prod_value = 1.0f;
-            for (int64_t i = 0; i < total_size; ++i) {
-                prod_value *= host_data[i];
-            }
-            result[0] = prod_value;
+            // Full reduction on device
+            constexpr int64_t WG_SIZE = 256;
+            int64_t num_wgs = (total_size + WG_SIZE - 1) / WG_SIZE;
+            auto partial_buf = sycl::malloc_device<float>(num_wgs, queue);
+
+            // Phase 1: each work-group computes partial product
+            queue.parallel_for<ProdReducePhase1Float32>(
+                sycl::nd_range<1>(num_wgs * WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    int64_t gid = item.get_global_id(0);
+                    float val = (gid < total_size) ? in_ptr[gid] : 1.0f;
+                    float prod = sycl::reduce_over_group(
+                        item.get_group(), val, 1.0f, std::multiplies<float>());
+                    if (item.get_local_id(0) == 0) {
+                        partial_buf[item.get_group(0)] = prod;
+                    }
+                }
+            );
+
+            // Phase 2: single work-group reduces partial products
+            queue.parallel_for<ProdReducePhase2Float32>(
+                sycl::nd_range<1>(WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    int64_t lid = item.get_local_id(0);
+                    float val = (lid < num_wgs) ? partial_buf[lid] : 1.0f;
+                    float prod = sycl::reduce_over_group(
+                        item.get_group(), val, 1.0f, std::multiplies<float>());
+                    if (lid == 0) out_ptr[0] = prod;
+                }
+            );
+            queue.wait();
+            sycl::free(partial_buf, queue);
         } else {
-            // Dimensional reduction
+            // Dimensional reduction on device
             const int64_t ndim = shape.size();
             const int64_t dim_size = shape[dim];
 
-            for (int64_t out_idx = 0; out_idx < output_size; ++out_idx) {
-                std::vector<int64_t> indices(ndim, 0);
-                int64_t tmp = out_idx;
+            // Precompute strides on device
+            auto d_strides = sycl::malloc_device<int64_t>(ndim, queue);
+            auto d_shape = sycl::malloc_device<int64_t>(ndim, queue);
+            queue.memcpy(d_strides, strides.data(), ndim * sizeof(int64_t));
+            queue.memcpy(d_shape, shape.data(), ndim * sizeof(int64_t));
+            queue.wait();
 
-                // Convert flat output index to multi-dimensional indices
-                for (int64_t d = ndim - 1; d >= 0; --d) {
-                    if (d == dim) continue;
-                    int64_t size = shape[d];
-                    indices[d] = tmp % size;
-                    tmp /= size;
-                }
+            queue.parallel_for<ProdDimKernelFloat32>(
+                sycl::range<1>(output_size), [=](sycl::id<1> gid) {
+                    int64_t out_idx = gid[0];
+                    int64_t tmp = out_idx;
 
-                // Compute product along the reduction dimension
-                float prod_value = 1.0f;
-                for (int64_t i = 0; i < dim_size; ++i) {
-                    indices[dim] = i;
-                    int64_t in_idx = 0;
-                    for (int64_t d = 0; d < ndim; ++d) {
-                        in_idx += indices[d] * strides[d];
+                    // Compute base input index (with dim-th index = 0)
+                    int64_t base_in_idx = 0;
+                    for (int64_t d = ndim - 1; d >= 0; --d) {
+                        if (d == dim) continue;
+                        int64_t s = d_shape[d];
+                        int64_t coord = tmp % s;
+                        tmp /= s;
+                        base_in_idx += coord * d_strides[d];
                     }
-                    prod_value *= host_data[in_idx];
-                }
-                result[out_idx] = prod_value;
-            }
-        }
 
-        // Create output tensor and copy result back
-        Tensor output(out_shape, input.dtype(), input.device());
-        float* out_ptr = get_data_ptr<float>(output);
-        queue.memcpy(out_ptr, result.data(), output_size * sizeof(float)).wait();
+                    // Accumulate product along reduction dimension
+                    float prod_value = 1.0f;
+                    for (int64_t i = 0; i < dim_size; ++i) {
+                        prod_value *= in_ptr[base_in_idx + i * d_strides[dim]];
+                    }
+                    out_ptr[out_idx] = prod_value;
+                }
+            );
+            queue.wait();
+            sycl::free(d_strides, queue);
+            sycl::free(d_shape, queue);
+        }
 
         return output;
     }
     else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
-
-        // Copy to host and compute product
-        std::vector<double> host_data(total_size);
-        queue.memcpy(host_data.data(), in_ptr, total_size * sizeof(double)).wait();
-
-        std::vector<double> result(output_size);
+        Tensor output(out_shape, input.dtype(), input.device());
+        double* out_ptr = get_data_ptr<double>(output);
 
         if (dim == -1) {
-            // Full reduction
-            double prod_value = 1.0;
-            for (int64_t i = 0; i < total_size; ++i) {
-                prod_value *= host_data[i];
-            }
-            result[0] = prod_value;
+            // Full reduction on device
+            constexpr int64_t WG_SIZE = 256;
+            int64_t num_wgs = (total_size + WG_SIZE - 1) / WG_SIZE;
+            auto partial_buf = sycl::malloc_device<double>(num_wgs, queue);
+
+            // Phase 1: each work-group computes partial product
+            queue.parallel_for<ProdReducePhase1Float64>(
+                sycl::nd_range<1>(num_wgs * WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    int64_t gid = item.get_global_id(0);
+                    double val = (gid < total_size) ? in_ptr[gid] : 1.0;
+                    double prod = sycl::reduce_over_group(
+                        item.get_group(), val, 1.0, std::multiplies<double>());
+                    if (item.get_local_id(0) == 0) {
+                        partial_buf[item.get_group(0)] = prod;
+                    }
+                }
+            );
+
+            // Phase 2: single work-group reduces partial products
+            queue.parallel_for<ProdReducePhase2Float64>(
+                sycl::nd_range<1>(WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    int64_t lid = item.get_local_id(0);
+                    double val = (lid < num_wgs) ? partial_buf[lid] : 1.0;
+                    double prod = sycl::reduce_over_group(
+                        item.get_group(), val, 1.0, std::multiplies<double>());
+                    if (lid == 0) out_ptr[0] = prod;
+                }
+            );
+            queue.wait();
+            sycl::free(partial_buf, queue);
         } else {
-            // Dimensional reduction
+            // Dimensional reduction on device
             const int64_t ndim = shape.size();
             const int64_t dim_size = shape[dim];
 
-            for (int64_t out_idx = 0; out_idx < output_size; ++out_idx) {
-                std::vector<int64_t> indices(ndim, 0);
-                int64_t tmp = out_idx;
+            auto d_strides = sycl::malloc_device<int64_t>(ndim, queue);
+            auto d_shape = sycl::malloc_device<int64_t>(ndim, queue);
+            queue.memcpy(d_strides, strides.data(), ndim * sizeof(int64_t));
+            queue.memcpy(d_shape, shape.data(), ndim * sizeof(int64_t));
+            queue.wait();
 
-                // Convert flat output index to multi-dimensional indices
-                for (int64_t d = ndim - 1; d >= 0; --d) {
-                    if (d == dim) continue;
-                    int64_t size = shape[d];
-                    indices[d] = tmp % size;
-                    tmp /= size;
-                }
+            queue.parallel_for<ProdDimKernelFloat64>(
+                sycl::range<1>(output_size), [=](sycl::id<1> gid) {
+                    int64_t out_idx = gid[0];
+                    int64_t tmp = out_idx;
 
-                // Compute product along the reduction dimension
-                double prod_value = 1.0;
-                for (int64_t i = 0; i < dim_size; ++i) {
-                    indices[dim] = i;
-                    int64_t in_idx = 0;
-                    for (int64_t d = 0; d < ndim; ++d) {
-                        in_idx += indices[d] * strides[d];
+                    int64_t base_in_idx = 0;
+                    for (int64_t d = ndim - 1; d >= 0; --d) {
+                        if (d == dim) continue;
+                        int64_t s = d_shape[d];
+                        int64_t coord = tmp % s;
+                        tmp /= s;
+                        base_in_idx += coord * d_strides[d];
                     }
-                    prod_value *= host_data[in_idx];
-                }
-                result[out_idx] = prod_value;
-            }
-        }
 
-        // Create output tensor and copy result back
-        Tensor output(out_shape, input.dtype(), input.device());
-        double* out_ptr = get_data_ptr<double>(output);
-        queue.memcpy(out_ptr, result.data(), output_size * sizeof(double)).wait();
+                    double prod_value = 1.0;
+                    for (int64_t i = 0; i < dim_size; ++i) {
+                        prod_value *= in_ptr[base_in_idx + i * d_strides[dim]];
+                    }
+                    out_ptr[out_idx] = prod_value;
+                }
+            );
+            queue.wait();
+            sycl::free(d_strides, queue);
+            sycl::free(d_shape, queue);
+        }
 
         return output;
     }
     else if (input.dtype() == DType::Int32) {
         const int32_t* in_ptr = get_data_ptr<const int32_t>(input);
-
-        // Copy to host and compute product
-        std::vector<int32_t> host_data(total_size);
-        queue.memcpy(host_data.data(), in_ptr, total_size * sizeof(int32_t)).wait();
-
-        std::vector<int32_t> result(output_size);
+        Tensor output(out_shape, input.dtype(), input.device());
+        int32_t* out_ptr = get_data_ptr<int32_t>(output);
 
         if (dim == -1) {
-            // Full reduction - use int64_t accumulator to avoid overflow
-            int64_t prod_value = 1;
-            for (int64_t i = 0; i < total_size; ++i) {
-                prod_value *= static_cast<int64_t>(host_data[i]);
-            }
-            result[0] = static_cast<int32_t>(prod_value);
+            // Full reduction — use shared memory for int64 accumulator
+            auto prod_buf = sycl::malloc_shared<int64_t>(1, queue);
+            prod_buf[0] = 1;
+
+            queue.parallel_for(sycl::range<1>(total_size),
+                sycl::reduction(prod_buf, int64_t(1), std::multiplies<int64_t>()),
+                [=](sycl::id<1> idx, auto& prod) {
+                    prod.combine(static_cast<int64_t>(in_ptr[idx]));
+                }
+            );
+            queue.wait();
+            out_ptr[0] = static_cast<int32_t>(prod_buf[0]);
+            queue.wait();
+            sycl::free(prod_buf, queue);
         } else {
-            // Dimensional reduction
+            // Dimensional reduction on device
             const int64_t ndim = shape.size();
             const int64_t dim_size = shape[dim];
 
-            for (int64_t out_idx = 0; out_idx < output_size; ++out_idx) {
-                std::vector<int64_t> indices(ndim, 0);
-                int64_t tmp = out_idx;
+            auto d_strides = sycl::malloc_device<int64_t>(ndim, queue);
+            auto d_shape = sycl::malloc_device<int64_t>(ndim, queue);
+            queue.memcpy(d_strides, strides.data(), ndim * sizeof(int64_t));
+            queue.memcpy(d_shape, shape.data(), ndim * sizeof(int64_t));
+            queue.wait();
 
-                // Convert flat output index to multi-dimensional indices
-                for (int64_t d = ndim - 1; d >= 0; --d) {
-                    if (d == dim) continue;
-                    int64_t size = shape[d];
-                    indices[d] = tmp % size;
-                    tmp /= size;
-                }
+            queue.parallel_for(
+                sycl::range<1>(output_size), [=](sycl::id<1> gid) {
+                    int64_t out_idx = gid[0];
+                    int64_t tmp = out_idx;
 
-                // Compute product along the reduction dimension
-                int64_t prod_value = 1;
-                for (int64_t i = 0; i < dim_size; ++i) {
-                    indices[dim] = i;
-                    int64_t in_idx = 0;
-                    for (int64_t d = 0; d < ndim; ++d) {
-                        in_idx += indices[d] * strides[d];
+                    int64_t base_in_idx = 0;
+                    for (int64_t d = ndim - 1; d >= 0; --d) {
+                        if (d == dim) continue;
+                        int64_t s = d_shape[d];
+                        int64_t coord = tmp % s;
+                        tmp /= s;
+                        base_in_idx += coord * d_strides[d];
                     }
-                    prod_value *= static_cast<int64_t>(host_data[in_idx]);
-                }
-                result[out_idx] = static_cast<int32_t>(prod_value);
-            }
-        }
 
-        // Create output tensor and copy result back
-        Tensor output(out_shape, input.dtype(), input.device());
-        int32_t* out_ptr = get_data_ptr<int32_t>(output);
-        queue.memcpy(out_ptr, result.data(), output_size * sizeof(int32_t)).wait();
+                    int64_t prod_value = 1;
+                    for (int64_t i = 0; i < dim_size; ++i) {
+                        prod_value *= static_cast<int64_t>(
+                            in_ptr[base_in_idx + i * d_strides[dim]]);
+                    }
+                    out_ptr[out_idx] = static_cast<int32_t>(prod_value);
+                }
+            );
+            queue.wait();
+            sycl::free(d_strides, queue);
+            sycl::free(d_shape, queue);
+        }
 
         return output;
     }
@@ -565,73 +635,123 @@ auto norm_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
         throw std::runtime_error("norm: input tensor is empty");
     }
 
+    // Device-side norm reduction using two-phase SYCL work-group reduction
+    // Phase 1: nd_range kernel, work-groups of 256, apply norm transform, reduce to partials
+    // Phase 2: Single work-group reduces partial results, apply final root
+
     if (input.dtype() == DType::Float32) {
         const float* in_ptr = get_data_ptr<const float>(input);
-
-        // Copy to host and compute norm
-        std::vector<float> host_data(n);
-        queue.memcpy(host_data.data(), in_ptr, n * sizeof(float)).wait();
-
-        float norm_value = 0.0f;
-
-        if (p == 1.0f) {
-            // L1 norm
-            for (int64_t i = 0; i < n; ++i) {
-                norm_value += std::abs(host_data[i]);
-            }
-        } else if (p == 2.0f) {
-            // L2 norm
-            for (int64_t i = 0; i < n; ++i) {
-                norm_value += host_data[i] * host_data[i];
-            }
-            norm_value = std::sqrt(norm_value);
-        } else {
-            // General Lp norm
-            for (int64_t i = 0; i < n; ++i) {
-                norm_value += std::pow(std::abs(host_data[i]), p);
-            }
-            norm_value = std::pow(norm_value, 1.0f / p);
-        }
-
-        // Create output and copy result
         Tensor output(out_shape, input.dtype(), input.device());
         float* out_ptr = get_data_ptr<float>(output);
-        queue.fill(out_ptr, norm_value, 1).wait();
+
+        constexpr int64_t WG_SIZE = 256;
+        int64_t num_wgs = (n + WG_SIZE - 1) / WG_SIZE;
+        auto partial_buf = sycl::malloc_device<float>(num_wgs, queue);
+        float p_val = p;
+
+        // Phase 1: each work-group transforms and sums
+        queue.parallel_for<NormReducePhase1Float32>(
+            sycl::nd_range<1>(num_wgs * WG_SIZE, WG_SIZE),
+            [=](sycl::nd_item<1> item) {
+                int64_t gid = item.get_global_id(0);
+                float val = 0.0f;
+                if (gid < n) {
+                    float x = in_ptr[gid];
+                    if (p_val == 1.0f) {
+                        val = sycl::fabs(x);
+                    } else if (p_val == 2.0f) {
+                        val = x * x;
+                    } else {
+                        val = sycl::pow(sycl::fabs(x), p_val);
+                    }
+                }
+                float sum = sycl::reduce_over_group(
+                    item.get_group(), val, sycl::plus<float>());
+                if (item.get_local_id(0) == 0) {
+                    partial_buf[item.get_group(0)] = sum;
+                }
+            }
+        );
+
+        // Phase 2: single work-group reduces partial sums, apply root
+        queue.parallel_for<NormReducePhase2Float32>(
+            sycl::nd_range<1>(WG_SIZE, WG_SIZE),
+            [=](sycl::nd_item<1> item) {
+                int64_t lid = item.get_local_id(0);
+                float val = (lid < num_wgs) ? partial_buf[lid] : 0.0f;
+                float sum = sycl::reduce_over_group(
+                    item.get_group(), val, sycl::plus<float>());
+                if (lid == 0) {
+                    if (p_val == 2.0f) {
+                        out_ptr[0] = sycl::sqrt(sum);
+                    } else if (p_val == 1.0f) {
+                        out_ptr[0] = sum;
+                    } else {
+                        out_ptr[0] = sycl::pow(sum, 1.0f / p_val);
+                    }
+                }
+            }
+        );
+        queue.wait();
+        sycl::free(partial_buf, queue);
 
         return output;
     }
     else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
-
-        // Copy to host and compute norm
-        std::vector<double> host_data(n);
-        queue.memcpy(host_data.data(), in_ptr, n * sizeof(double)).wait();
-
-        double norm_value = 0.0;
-
-        if (p == 1.0) {
-            // L1 norm
-            for (int64_t i = 0; i < n; ++i) {
-                norm_value += std::abs(host_data[i]);
-            }
-        } else if (p == 2.0) {
-            // L2 norm
-            for (int64_t i = 0; i < n; ++i) {
-                norm_value += host_data[i] * host_data[i];
-            }
-            norm_value = std::sqrt(norm_value);
-        } else {
-            // General Lp norm
-            for (int64_t i = 0; i < n; ++i) {
-                norm_value += std::pow(std::abs(host_data[i]), p);
-            }
-            norm_value = std::pow(norm_value, 1.0 / p);
-        }
-
-        // Create output and copy result
         Tensor output(out_shape, input.dtype(), input.device());
         double* out_ptr = get_data_ptr<double>(output);
-        queue.fill(out_ptr, norm_value, 1).wait();
+
+        constexpr int64_t WG_SIZE = 256;
+        int64_t num_wgs = (n + WG_SIZE - 1) / WG_SIZE;
+        auto partial_buf = sycl::malloc_device<double>(num_wgs, queue);
+        double p_val = static_cast<double>(p);
+
+        // Phase 1: each work-group transforms and sums
+        queue.parallel_for<NormReducePhase1Float64>(
+            sycl::nd_range<1>(num_wgs * WG_SIZE, WG_SIZE),
+            [=](sycl::nd_item<1> item) {
+                int64_t gid = item.get_global_id(0);
+                double val = 0.0;
+                if (gid < n) {
+                    double x = in_ptr[gid];
+                    if (p_val == 1.0) {
+                        val = sycl::fabs(x);
+                    } else if (p_val == 2.0) {
+                        val = x * x;
+                    } else {
+                        val = sycl::pow(sycl::fabs(x), p_val);
+                    }
+                }
+                double sum = sycl::reduce_over_group(
+                    item.get_group(), val, sycl::plus<double>());
+                if (item.get_local_id(0) == 0) {
+                    partial_buf[item.get_group(0)] = sum;
+                }
+            }
+        );
+
+        // Phase 2: single work-group reduces partial sums, apply root
+        queue.parallel_for<NormReducePhase2Float64>(
+            sycl::nd_range<1>(WG_SIZE, WG_SIZE),
+            [=](sycl::nd_item<1> item) {
+                int64_t lid = item.get_local_id(0);
+                double val = (lid < num_wgs) ? partial_buf[lid] : 0.0;
+                double sum = sycl::reduce_over_group(
+                    item.get_group(), val, sycl::plus<double>());
+                if (lid == 0) {
+                    if (p_val == 2.0) {
+                        out_ptr[0] = sycl::sqrt(sum);
+                    } else if (p_val == 1.0) {
+                        out_ptr[0] = sum;
+                    } else {
+                        out_ptr[0] = sycl::pow(sum, 1.0 / p_val);
+                    }
+                }
+            }
+        );
+        queue.wait();
+        sycl::free(partial_buf, queue);
 
         return output;
     }

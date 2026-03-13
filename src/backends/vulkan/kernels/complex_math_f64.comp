@@ -1,0 +1,39 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer InputA { float64_t a_data[]; };  // interleaved real, imag
+layout(binding = 1) buffer InputB { float64_t b_data[]; };
+layout(binding = 2) buffer Output { float64_t out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;   // number of complex elements
+    uint op;  // 0=add, 1=sub, 2=mul, 3=div
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n) return;
+
+    uint base = idx * 2;
+    float64_t ar = a_data[base], ai = a_data[base + 1];
+    float64_t br = b_data[base], bi = b_data[base + 1];
+
+    float64_t rr, ri;
+    switch (params.op) {
+        case 0: rr = ar + br; ri = ai + bi; break;
+        case 1: rr = ar - br; ri = ai - bi; break;
+        case 2: rr = ar * br - ai * bi; ri = ar * bi + ai * br; break;
+        case 3: {
+            float64_t denom = br * br + bi * bi;
+            rr = (ar * br + ai * bi) / denom;
+            ri = (ai * br - ar * bi) / denom;
+            break;
+        }
+        default: rr = 0.0lf; ri = 0.0lf; break;
+    }
+
+    out_data[base] = rr;
+    out_data[base + 1] = ri;
+}

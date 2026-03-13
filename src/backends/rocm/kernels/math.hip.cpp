@@ -369,6 +369,137 @@ __global__ void broadcast_div_kernel_f16(
 }
 
 // ============================================================================
+// Complex Elementwise Arithmetic Kernels
+// ============================================================================
+
+// Complex add: (ar+ai*i) + (br+bi*i) = (ar+br) + (ai+bi)*i
+template<typename T>
+__global__ void complex_add_kernel(const T* a, const T* b, T* c, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        int64_t base = idx * 2;
+        c[base]     = a[base]     + b[base];
+        c[base + 1] = a[base + 1] + b[base + 1];
+    }
+}
+
+// Complex sub: (ar+ai*i) - (br+bi*i) = (ar-br) + (ai-bi)*i
+template<typename T>
+__global__ void complex_sub_kernel(const T* a, const T* b, T* c, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        int64_t base = idx * 2;
+        c[base]     = a[base]     - b[base];
+        c[base + 1] = a[base + 1] - b[base + 1];
+    }
+}
+
+// Complex mul: (ar+ai*i)*(br+bi*i) = (ar*br - ai*bi) + (ar*bi + ai*br)*i
+template<typename T>
+__global__ void complex_mul_kernel(const T* a, const T* b, T* c, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        int64_t base = idx * 2;
+        T ar = a[base], ai = a[base + 1];
+        T br = b[base], bi = b[base + 1];
+        c[base]     = ar * br - ai * bi;
+        c[base + 1] = ar * bi + ai * br;
+    }
+}
+
+// Complex div: (ar+ai*i)/(br+bi*i) = ((ar*br+ai*bi) + (ai*br-ar*bi)*i) / (br*br+bi*bi)
+template<typename T>
+__global__ void complex_div_kernel(const T* a, const T* b, T* c, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        int64_t base = idx * 2;
+        T ar = a[base], ai = a[base + 1];
+        T br = b[base], bi = b[base + 1];
+        T denom = br * br + bi * bi;
+        c[base]     = (ar * br + ai * bi) / denom;
+        c[base + 1] = (ai * br - ar * bi) / denom;
+    }
+}
+
+// Broadcast kernel for complex types - strides are in complex element units
+template<typename T>
+__global__ void broadcast_complex_add_kernel(
+    const T* a, const T* b, T* c,
+    const int64_t* strides_a, const int64_t* strides_b,
+    const int64_t* output_shape, int64_t ndim, int64_t n) {
+    HIP_KERNEL_LOOP(out_idx, n) {
+        int64_t idx_a = 0, idx_b = 0, tmp = out_idx;
+        for (int64_t i = ndim - 1; i >= 0; --i) {
+            int64_t coord = tmp % output_shape[i];
+            tmp /= output_shape[i];
+            idx_a += coord * strides_a[i];
+            idx_b += coord * strides_b[i];
+        }
+        int64_t a_base = idx_a * 2, b_base = idx_b * 2, c_base = out_idx * 2;
+        c[c_base]     = a[a_base]     + b[b_base];
+        c[c_base + 1] = a[a_base + 1] + b[b_base + 1];
+    }
+}
+
+template<typename T>
+__global__ void broadcast_complex_sub_kernel(
+    const T* a, const T* b, T* c,
+    const int64_t* strides_a, const int64_t* strides_b,
+    const int64_t* output_shape, int64_t ndim, int64_t n) {
+    HIP_KERNEL_LOOP(out_idx, n) {
+        int64_t idx_a = 0, idx_b = 0, tmp = out_idx;
+        for (int64_t i = ndim - 1; i >= 0; --i) {
+            int64_t coord = tmp % output_shape[i];
+            tmp /= output_shape[i];
+            idx_a += coord * strides_a[i];
+            idx_b += coord * strides_b[i];
+        }
+        int64_t a_base = idx_a * 2, b_base = idx_b * 2, c_base = out_idx * 2;
+        c[c_base]     = a[a_base]     - b[b_base];
+        c[c_base + 1] = a[a_base + 1] - b[b_base + 1];
+    }
+}
+
+template<typename T>
+__global__ void broadcast_complex_mul_kernel(
+    const T* a, const T* b, T* c,
+    const int64_t* strides_a, const int64_t* strides_b,
+    const int64_t* output_shape, int64_t ndim, int64_t n) {
+    HIP_KERNEL_LOOP(out_idx, n) {
+        int64_t idx_a = 0, idx_b = 0, tmp = out_idx;
+        for (int64_t i = ndim - 1; i >= 0; --i) {
+            int64_t coord = tmp % output_shape[i];
+            tmp /= output_shape[i];
+            idx_a += coord * strides_a[i];
+            idx_b += coord * strides_b[i];
+        }
+        int64_t a_base = idx_a * 2, b_base = idx_b * 2, c_base = out_idx * 2;
+        T ar = a[a_base], ai = a[a_base + 1];
+        T br = b[b_base], bi = b[b_base + 1];
+        c[c_base]     = ar * br - ai * bi;
+        c[c_base + 1] = ar * bi + ai * br;
+    }
+}
+
+template<typename T>
+__global__ void broadcast_complex_div_kernel(
+    const T* a, const T* b, T* c,
+    const int64_t* strides_a, const int64_t* strides_b,
+    const int64_t* output_shape, int64_t ndim, int64_t n) {
+    HIP_KERNEL_LOOP(out_idx, n) {
+        int64_t idx_a = 0, idx_b = 0, tmp = out_idx;
+        for (int64_t i = ndim - 1; i >= 0; --i) {
+            int64_t coord = tmp % output_shape[i];
+            tmp /= output_shape[i];
+            idx_a += coord * strides_a[i];
+            idx_b += coord * strides_b[i];
+        }
+        int64_t a_base = idx_a * 2, b_base = idx_b * 2, c_base = out_idx * 2;
+        T ar = a[a_base], ai = a[a_base + 1];
+        T br = b[b_base], bi = b[b_base + 1];
+        T denom = br * br + bi * bi;
+        c[c_base]     = (ar * br + ai * bi) / denom;
+        c[c_base + 1] = (ai * br - ar * bi) / denom;
+    }
+}
+
+// ============================================================================
 // Unary Operations
 // ============================================================================
 
@@ -793,6 +924,16 @@ auto add_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
             // For Bool, add acts as logical OR
             hipLaunchKernelGGL(add_kernel_device<bool>, grid, block, 0, stream,
                 a.data<bool>(), b.data<bool>(), result.data<bool>(), n);
+        } else if (a.dtype() == DType::Complex64) {
+            hipLaunchKernelGGL(complex_add_kernel<float>, grid, block, 0, stream,
+                reinterpret_cast<const float*>(a.data_ptr()),
+                reinterpret_cast<const float*>(b.data_ptr()),
+                reinterpret_cast<float*>(result.data_ptr()), n);
+        } else if (a.dtype() == DType::Complex128) {
+            hipLaunchKernelGGL(complex_add_kernel<double>, grid, block, 0, stream,
+                reinterpret_cast<const double*>(a.data_ptr()),
+                reinterpret_cast<const double*>(b.data_ptr()),
+                reinterpret_cast<double*>(result.data_ptr()), n);
         } else {
             throw std::runtime_error("Unsupported dtype for add operation");
         }
@@ -860,6 +1001,18 @@ auto add_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
         hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<bool, AddOp>), grid, block, 0, stream,
             a.data<bool>(), b.data<bool>(), result.data<bool>(),
             d_strides_a, d_strides_b, d_output_shape, ndim, n, AddOp());
+    } else if (a.dtype() == DType::Complex64) {
+        hipLaunchKernelGGL(broadcast_complex_add_kernel<float>, grid, block, 0, stream,
+            reinterpret_cast<const float*>(a.data_ptr()),
+            reinterpret_cast<const float*>(b.data_ptr()),
+            reinterpret_cast<float*>(result.data_ptr()),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n);
+    } else if (a.dtype() == DType::Complex128) {
+        hipLaunchKernelGGL(broadcast_complex_add_kernel<double>, grid, block, 0, stream,
+            reinterpret_cast<const double*>(a.data_ptr()),
+            reinterpret_cast<const double*>(b.data_ptr()),
+            reinterpret_cast<double*>(result.data_ptr()),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n);
     } else {
         throw std::runtime_error("Unsupported dtype for add operation");
     }
@@ -925,6 +1078,16 @@ auto sub_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
         } else if (a.dtype() == DType::UInt8) {
             hipLaunchKernelGGL(sub_kernel_device<uint8_t>, grid, block, 0, stream,
                 a.data<uint8_t>(), b.data<uint8_t>(), result.data<uint8_t>(), n);
+        } else if (a.dtype() == DType::Complex64) {
+            hipLaunchKernelGGL(complex_sub_kernel<float>, grid, block, 0, stream,
+                reinterpret_cast<const float*>(a.data_ptr()),
+                reinterpret_cast<const float*>(b.data_ptr()),
+                reinterpret_cast<float*>(result.data_ptr()), n);
+        } else if (a.dtype() == DType::Complex128) {
+            hipLaunchKernelGGL(complex_sub_kernel<double>, grid, block, 0, stream,
+                reinterpret_cast<const double*>(a.data_ptr()),
+                reinterpret_cast<const double*>(b.data_ptr()),
+                reinterpret_cast<double*>(result.data_ptr()), n);
         } else {
             throw std::runtime_error("Unsupported dtype for sub operation");
         }
@@ -985,6 +1148,18 @@ auto sub_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
         hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<uint8_t, SubOp>), grid, block, 0, stream,
             a.data<uint8_t>(), b.data<uint8_t>(), result.data<uint8_t>(),
             d_strides_a, d_strides_b, d_output_shape, ndim, n, SubOp());
+    } else if (a.dtype() == DType::Complex64) {
+        hipLaunchKernelGGL(broadcast_complex_sub_kernel<float>, grid, block, 0, stream,
+            reinterpret_cast<const float*>(a.data_ptr()),
+            reinterpret_cast<const float*>(b.data_ptr()),
+            reinterpret_cast<float*>(result.data_ptr()),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n);
+    } else if (a.dtype() == DType::Complex128) {
+        hipLaunchKernelGGL(broadcast_complex_sub_kernel<double>, grid, block, 0, stream,
+            reinterpret_cast<const double*>(a.data_ptr()),
+            reinterpret_cast<const double*>(b.data_ptr()),
+            reinterpret_cast<double*>(result.data_ptr()),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n);
     } else {
         throw std::runtime_error("Unsupported dtype for sub operation");
     }
@@ -1047,6 +1222,16 @@ auto mul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
             // For Bool, mul acts as logical AND
             hipLaunchKernelGGL(mul_kernel_device<bool>, grid, block, 0, stream,
                 a.data<bool>(), b.data<bool>(), result.data<bool>(), n);
+        } else if (a.dtype() == DType::Complex64) {
+            hipLaunchKernelGGL(complex_mul_kernel<float>, grid, block, 0, stream,
+                reinterpret_cast<const float*>(a.data_ptr()),
+                reinterpret_cast<const float*>(b.data_ptr()),
+                reinterpret_cast<float*>(result.data_ptr()), n);
+        } else if (a.dtype() == DType::Complex128) {
+            hipLaunchKernelGGL(complex_mul_kernel<double>, grid, block, 0, stream,
+                reinterpret_cast<const double*>(a.data_ptr()),
+                reinterpret_cast<const double*>(b.data_ptr()),
+                reinterpret_cast<double*>(result.data_ptr()), n);
         } else {
             throw std::runtime_error("Unsupported dtype for mul operation");
         }
@@ -1104,6 +1289,18 @@ auto mul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
         hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<bool, MulOp>), grid, block, 0, stream,
             a.data<bool>(), b.data<bool>(), result.data<bool>(),
             d_strides_a, d_strides_b, d_output_shape, ndim, n, MulOp());
+    } else if (a.dtype() == DType::Complex64) {
+        hipLaunchKernelGGL(broadcast_complex_mul_kernel<float>, grid, block, 0, stream,
+            reinterpret_cast<const float*>(a.data_ptr()),
+            reinterpret_cast<const float*>(b.data_ptr()),
+            reinterpret_cast<float*>(result.data_ptr()),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n);
+    } else if (a.dtype() == DType::Complex128) {
+        hipLaunchKernelGGL(broadcast_complex_mul_kernel<double>, grid, block, 0, stream,
+            reinterpret_cast<const double*>(a.data_ptr()),
+            reinterpret_cast<const double*>(b.data_ptr()),
+            reinterpret_cast<double*>(result.data_ptr()),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n);
     } else {
         throw std::runtime_error("Unsupported dtype for mul operation");
     }
@@ -1164,6 +1361,16 @@ auto div_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
         } else if (a.dtype() == DType::Int64) {
             hipLaunchKernelGGL(div_kernel_device<int64_t>, grid, block, 0, stream,
                 a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n);
+        } else if (a.dtype() == DType::Complex64) {
+            hipLaunchKernelGGL(complex_div_kernel<float>, grid, block, 0, stream,
+                reinterpret_cast<const float*>(a.data_ptr()),
+                reinterpret_cast<const float*>(b.data_ptr()),
+                reinterpret_cast<float*>(result.data_ptr()), n);
+        } else if (a.dtype() == DType::Complex128) {
+            hipLaunchKernelGGL(complex_div_kernel<double>, grid, block, 0, stream,
+                reinterpret_cast<const double*>(a.data_ptr()),
+                reinterpret_cast<const double*>(b.data_ptr()),
+                reinterpret_cast<double*>(result.data_ptr()), n);
         } else {
             throw std::runtime_error("Unsupported dtype for div operation");
         }
@@ -1215,6 +1422,18 @@ auto div_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
             reinterpret_cast<const __half*>(a.data<Float16>()),
             reinterpret_cast<const __half*>(b.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n);
+    } else if (a.dtype() == DType::Complex64) {
+        hipLaunchKernelGGL(broadcast_complex_div_kernel<float>, grid, block, 0, stream,
+            reinterpret_cast<const float*>(a.data_ptr()),
+            reinterpret_cast<const float*>(b.data_ptr()),
+            reinterpret_cast<float*>(result.data_ptr()),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n);
+    } else if (a.dtype() == DType::Complex128) {
+        hipLaunchKernelGGL(broadcast_complex_div_kernel<double>, grid, block, 0, stream,
+            reinterpret_cast<const double*>(a.data_ptr()),
+            reinterpret_cast<const double*>(b.data_ptr()),
+            reinterpret_cast<double*>(result.data_ptr()),
             d_strides_a, d_strides_b, d_output_shape, ndim, n);
     } else {
         throw std::runtime_error("Unsupported dtype for div operation");
@@ -2168,6 +2387,42 @@ void div_inplace_kernel(Tensor& a, const Tensor& b, hipStream_t stream) {
 // Dot Product Kernel Host Wrapper
 // ============================================================================
 
+/**
+ * @brief Final reduction kernel — reduces partial sums from dot product blocks
+ * @tparam T Data type
+ * @param partial Partial sums array (one per block from dot_kernel_device)
+ * @param output Single output scalar
+ * @param num_blocks Number of partial sums to reduce
+ *
+ * Launched with 1 block of 256 threads. Uses shared memory reduction
+ * following the same pattern as reduction.hip.cpp sum_reduce_kernel.
+ */
+template<typename T>
+__global__ void final_reduce_kernel(const T* partial, T* output, int num_blocks) {
+    __shared__ T sdata[256];
+    int tid = threadIdx.x;
+
+    // Grid-stride accumulation of partial sums
+    T sum = T(0);
+    for (int i = tid; i < num_blocks; i += blockDim.x) {
+        sum += partial[i];
+    }
+    sdata[tid] = sum;
+    __syncthreads();
+
+    // Block-level reduction in shared memory
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        output[0] = sdata[0];
+    }
+}
+
 auto dot_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
     if (a.numel() != b.numel()) {
         throw std::invalid_argument("Tensor sizes must match for dot product");
@@ -2203,16 +2458,10 @@ auto dot_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
             a.data<float>(), b.data<float>(), d_partial, n);
         HIP_CHECK(hipGetLastError());
 
-        // Reduce partial sums on CPU (for simplicity - can optimize with another kernel)
-        std::vector<float> h_partial(num_blocks);
-        HIP_CHECK(hipMemcpy(h_partial.data(), d_partial, num_blocks * sizeof(float), hipMemcpyDeviceToHost));
-
-        float sum = 0.0f;
-        for (int i = 0; i < num_blocks; ++i) {
-            sum += h_partial[i];
-        }
-
-        HIP_CHECK(hipMemcpy(result.data<float>(), &sum, sizeof(float), hipMemcpyHostToDevice));
+        // Final reduction on GPU — single block reduces partial sums
+        hipLaunchKernelGGL(final_reduce_kernel<float>, dim3(1), dim3(block_size), 0, stream,
+            d_partial, result.data<float>(), num_blocks);
+        HIP_CHECK(hipGetLastError());
         HIP_CHECK(hipFree(d_partial));
     } else if (a.dtype() == DType::Float64) {
         double* d_partial;
@@ -2222,15 +2471,10 @@ auto dot_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
             a.data<double>(), b.data<double>(), d_partial, n);
         HIP_CHECK(hipGetLastError());
 
-        std::vector<double> h_partial(num_blocks);
-        HIP_CHECK(hipMemcpy(h_partial.data(), d_partial, num_blocks * sizeof(double), hipMemcpyDeviceToHost));
-
-        double sum = 0.0;
-        for (int i = 0; i < num_blocks; ++i) {
-            sum += h_partial[i];
-        }
-
-        HIP_CHECK(hipMemcpy(result.data<double>(), &sum, sizeof(double), hipMemcpyHostToDevice));
+        // Final reduction on GPU — single block reduces partial sums
+        hipLaunchKernelGGL(final_reduce_kernel<double>, dim3(1), dim3(block_size), 0, stream,
+            d_partial, result.data<double>(), num_blocks);
+        HIP_CHECK(hipGetLastError());
         HIP_CHECK(hipFree(d_partial));
     } else if (a.dtype() == DType::Float16) {
         // Compute dot product in float for accuracy, then store as Float16
@@ -2243,16 +2487,20 @@ auto dot_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
             d_partial, n);
         HIP_CHECK(hipGetLastError());
 
-        std::vector<float> h_partial(num_blocks);
-        HIP_CHECK(hipMemcpy(h_partial.data(), d_partial, num_blocks * sizeof(float), hipMemcpyDeviceToHost));
+        // Final reduction on GPU in float, then convert to Float16
+        // Allocate a single float on device for the reduced result
+        float* d_sum;
+        HIP_CHECK(hipMalloc(&d_sum, sizeof(float)));
+        hipLaunchKernelGGL(final_reduce_kernel<float>, dim3(1), dim3(block_size), 0, stream,
+            d_partial, d_sum, num_blocks);
+        HIP_CHECK(hipGetLastError());
 
-        float sum = 0.0f;
-        for (int i = 0; i < num_blocks; ++i) {
-            sum += h_partial[i];
-        }
-
-        Float16 sum_f16 = Float16(sum);
+        // Copy reduced float sum to host, convert to Float16, write back
+        float h_sum;
+        HIP_CHECK(hipMemcpy(&h_sum, d_sum, sizeof(float), hipMemcpyDeviceToHost));
+        Float16 sum_f16 = Float16(h_sum);
         HIP_CHECK(hipMemcpy(result.data<Float16>(), &sum_f16, sizeof(Float16), hipMemcpyHostToDevice));
+        HIP_CHECK(hipFree(d_sum));
         HIP_CHECK(hipFree(d_partial));
     } else {
         throw std::runtime_error("dot operation only supports Float32, Float64, and Float16 dtypes");

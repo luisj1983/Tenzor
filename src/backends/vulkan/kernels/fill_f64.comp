@@ -1,0 +1,23 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Fill operation: fill tensor with a scalar value (Float64 variant)
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Output { float64_t data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint _pad;
+    float64_t value;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n) {
+        return;
+    }
+
+    data[idx] = params.value;
+}

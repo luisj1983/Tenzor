@@ -1,10 +1,17 @@
 #include "tenzor/core/tensor.hpp"
 #include <sycl/sycl.hpp>
 #include <cmath>
+#include <numeric>
 #include <stdexcept>
 #include <algorithm>
 #include <vector>
 #include <cstring>
+
+#ifdef TENZOR_HAS_ONEDPL
+#include <oneapi/dpl/algorithm>
+#include <oneapi/dpl/execution>
+#include <oneapi/dpl/iterator>
+#endif
 
 namespace tenzor {
 namespace oneapi {
@@ -129,10 +136,43 @@ auto nms_kernel(
 
     // Sort boxes by score (descending)
     std::vector<int64_t> order(num_boxes);
+
+#ifdef TENZOR_HAS_ONEDPL
+    {
+        // Device-side sort by score descending using oneDPL
+        auto policy = ::oneapi::dpl::execution::make_device_policy(queue);
+
+        // Allocate device buffers for scores and indices
+        float* d_scores = sycl::malloc_device<float>(num_boxes, queue);
+        int64_t* d_order = sycl::malloc_device<int64_t>(num_boxes, queue);
+        queue.memcpy(d_scores, host_scores.data(), num_boxes * sizeof(float));
+
+        // Initialize indices [0, 1, 2, ..., num_boxes-1] on device
+        queue.parallel_for(sycl::range<1>(num_boxes), [=](sycl::id<1> i) {
+            d_order[i] = static_cast<int64_t>(i[0]);
+        }).wait();
+
+        // Sort indices by score descending using sort_by_key
+        ::oneapi::dpl::sort(policy,
+            ::oneapi::dpl::make_zip_iterator(d_scores, d_order),
+            ::oneapi::dpl::make_zip_iterator(d_scores + num_boxes, d_order + num_boxes),
+            [](const auto& a, const auto& b) {
+                return std::get<0>(a) > std::get<0>(b);
+            });
+
+        // Copy sorted order back to host (needed for greedy suppression)
+        queue.memcpy(order.data(), d_order, num_boxes * sizeof(int64_t)).wait();
+
+        sycl::free(d_scores, queue);
+        sycl::free(d_order, queue);
+    }
+#else
+    // Host fallback: sort indices by score descending
     std::iota(order.begin(), order.end(), 0);
     std::sort(order.begin(), order.end(), [&](int64_t a, int64_t b) {
         return host_scores[a] > host_scores[b];
     });
+#endif
 
     // Compute NxN IoU matrix on device (embarrassingly parallel)
     float* d_boxes = sycl::malloc_device<float>(num_boxes * 4, queue);

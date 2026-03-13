@@ -843,6 +843,112 @@ __global__ void sign_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* outp
 }
 
 // ============================================================================
+// Complex Elementwise Arithmetic Kernels
+// ============================================================================
+
+// Complex add: (ar+ai*i) + (br+bi*i) = (ar+br) + (ai+bi)*i
+template<typename T>
+__global__ void complex_add_kernel(const T* a, const T* b, T* c, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        int64_t base = idx * 2;
+        c[base]     = a[base]     + b[base];
+        c[base + 1] = a[base + 1] + b[base + 1];
+    }
+}
+
+// Complex sub: (ar+ai*i) - (br+bi*i) = (ar-br) + (ai-bi)*i
+template<typename T>
+__global__ void complex_sub_kernel(const T* a, const T* b, T* c, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        int64_t base = idx * 2;
+        c[base]     = a[base]     - b[base];
+        c[base + 1] = a[base + 1] - b[base + 1];
+    }
+}
+
+// Complex mul: (ar+ai*i)*(br+bi*i) = (ar*br - ai*bi) + (ar*bi + ai*br)*i
+template<typename T>
+__global__ void complex_mul_kernel(const T* a, const T* b, T* c, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        int64_t base = idx * 2;
+        T ar = a[base], ai = a[base + 1];
+        T br = b[base], bi = b[base + 1];
+        c[base]     = ar * br - ai * bi;
+        c[base + 1] = ar * bi + ai * br;
+    }
+}
+
+// Complex div: (ar+ai*i)/(br+bi*i) = ((ar*br+ai*bi) + (ai*br-ar*bi)*i) / (br*br+bi*bi)
+template<typename T>
+__global__ void complex_div_kernel(const T* a, const T* b, T* c, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        int64_t base = idx * 2;
+        T ar = a[base], ai = a[base + 1];
+        T br = b[base], bi = b[base + 1];
+        T denom = br * br + bi * bi;
+        c[base]     = (ar * br + ai * bi) / denom;
+        c[base + 1] = (ai * br - ar * bi) / denom;
+    }
+}
+
+// Complex broadcast binary ops
+struct ComplexAddOp {
+    template<typename T>
+    __device__ void operator()(const T* a, const T* b, T* c, int64_t a_base, int64_t b_base, int64_t c_base) const {
+        c[c_base]     = a[a_base]     + b[b_base];
+        c[c_base + 1] = a[a_base + 1] + b[b_base + 1];
+    }
+};
+struct ComplexSubOp {
+    template<typename T>
+    __device__ void operator()(const T* a, const T* b, T* c, int64_t a_base, int64_t b_base, int64_t c_base) const {
+        c[c_base]     = a[a_base]     - b[b_base];
+        c[c_base + 1] = a[a_base + 1] - b[b_base + 1];
+    }
+};
+struct ComplexMulOp {
+    template<typename T>
+    __device__ void operator()(const T* a, const T* b, T* c, int64_t a_base, int64_t b_base, int64_t c_base) const {
+        T ar = a[a_base], ai = a[a_base + 1];
+        T br = b[b_base], bi = b[b_base + 1];
+        c[c_base]     = ar * br - ai * bi;
+        c[c_base + 1] = ar * bi + ai * br;
+    }
+};
+struct ComplexDivOp {
+    template<typename T>
+    __device__ void operator()(const T* a, const T* b, T* c, int64_t a_base, int64_t b_base, int64_t c_base) const {
+        T ar = a[a_base], ai = a[a_base + 1];
+        T br = b[b_base], bi = b[b_base + 1];
+        T denom = br * br + bi * bi;
+        c[c_base]     = (ar * br + ai * bi) / denom;
+        c[c_base + 1] = (ai * br - ar * bi) / denom;
+    }
+};
+
+// Broadcast kernel for complex types - operates on interleaved real/imag pairs
+// Strides are in units of complex elements; actual memory offsets are 2x for the float/double array
+template<typename T, typename Op>
+__global__ void broadcast_complex_kernel(
+    const T* __restrict__ a, const T* __restrict__ b, T* __restrict__ c,
+    BroadcastMeta meta, int64_t ndim, int64_t n, Op op) {
+
+    TENZOR_CUDA_KERNEL_LOOP(out_idx, n) {
+        int64_t idx_a = 0;
+        int64_t idx_b = 0;
+        int64_t tmp = out_idx;
+
+        for (int64_t i = ndim - 1; i >= 0; --i) {
+            int64_t coord = tmp % meta.output_shape[i];
+            tmp /= meta.output_shape[i];
+            idx_a += coord * meta.strides_a[i];
+            idx_b += coord * meta.strides_b[i];
+        }
+        op(a, b, c, idx_a * 2, idx_b * 2, out_idx * 2);
+    }
+}
+
+// ============================================================================
 // Optimized Kernels with Shared Memory (for reduction-like operations)
 // ============================================================================
 
@@ -944,6 +1050,18 @@ auto add_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
             add_kernel_device<<<grid, block, 0, stream>>>(
                 a.data<bool>(), b.data<bool>(), result.data<bool>(), n);
             CUDA_CHECK(cudaGetLastError());
+        } else if (a.dtype() == DType::Complex64) {
+            complex_add_kernel<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const float*>(a.data_ptr()),
+                reinterpret_cast<const float*>(b.data_ptr()),
+                reinterpret_cast<float*>(result.data_ptr()), n);
+            CUDA_CHECK(cudaGetLastError());
+        } else if (a.dtype() == DType::Complex128) {
+            complex_add_kernel<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const double*>(a.data_ptr()),
+                reinterpret_cast<const double*>(b.data_ptr()),
+                reinterpret_cast<double*>(result.data_ptr()), n);
+            CUDA_CHECK(cudaGetLastError());
         } else {
             throw std::runtime_error("Unsupported dtype for add operation");
         }
@@ -1026,6 +1144,20 @@ auto add_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
             a.data<bool>(), b.data<bool>(), result.data<bool>(),
             meta, ndim, n, AddOp());
         CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::Complex64) {
+        broadcast_complex_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const float*>(a.data_ptr()),
+            reinterpret_cast<const float*>(b.data_ptr()),
+            reinterpret_cast<float*>(result.data_ptr()),
+            meta, ndim, n, ComplexAddOp());
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::Complex128) {
+        broadcast_complex_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const double*>(a.data_ptr()),
+            reinterpret_cast<const double*>(b.data_ptr()),
+            reinterpret_cast<double*>(result.data_ptr()),
+            meta, ndim, n, ComplexAddOp());
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Unsupported dtype for add operation");
     }
@@ -1098,6 +1230,18 @@ auto sub_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
             CUDA_CHECK(cudaGetLastError());
         } else if (a.dtype() == DType::UInt64) {
             sub_kernel_device<<<grid, block, 0, stream>>>(a.data<uint64_t>(), b.data<uint64_t>(), result.data<uint64_t>(), n);
+            CUDA_CHECK(cudaGetLastError());
+        } else if (a.dtype() == DType::Complex64) {
+            complex_sub_kernel<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const float*>(a.data_ptr()),
+                reinterpret_cast<const float*>(b.data_ptr()),
+                reinterpret_cast<float*>(result.data_ptr()), n);
+            CUDA_CHECK(cudaGetLastError());
+        } else if (a.dtype() == DType::Complex128) {
+            complex_sub_kernel<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const double*>(a.data_ptr()),
+                reinterpret_cast<const double*>(b.data_ptr()),
+                reinterpret_cast<double*>(result.data_ptr()), n);
             CUDA_CHECK(cudaGetLastError());
         } else {
             throw std::runtime_error("Unsupported dtype for sub operation");
@@ -1190,6 +1334,20 @@ auto sub_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
             a.data<uint64_t>(), b.data<uint64_t>(), result.data<uint64_t>(),
             meta, ndim, n, SubOp());
         CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::Complex64) {
+        broadcast_complex_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const float*>(a.data_ptr()),
+            reinterpret_cast<const float*>(b.data_ptr()),
+            reinterpret_cast<float*>(result.data_ptr()),
+            meta, ndim, n, ComplexSubOp());
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::Complex128) {
+        broadcast_complex_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const double*>(a.data_ptr()),
+            reinterpret_cast<const double*>(b.data_ptr()),
+            reinterpret_cast<double*>(result.data_ptr()),
+            meta, ndim, n, ComplexSubOp());
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Unsupported dtype for sub operation");
     }
@@ -1247,6 +1405,18 @@ auto mul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
             CUDA_CHECK(cudaGetLastError());
         } else if (a.dtype() == DType::Bool) {
             mul_kernel_device<<<grid, block, 0, stream>>>(a.data<bool>(), b.data<bool>(), result.data<bool>(), n);
+            CUDA_CHECK(cudaGetLastError());
+        } else if (a.dtype() == DType::Complex64) {
+            complex_mul_kernel<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const float*>(a.data_ptr()),
+                reinterpret_cast<const float*>(b.data_ptr()),
+                reinterpret_cast<float*>(result.data_ptr()), n);
+            CUDA_CHECK(cudaGetLastError());
+        } else if (a.dtype() == DType::Complex128) {
+            complex_mul_kernel<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const double*>(a.data_ptr()),
+                reinterpret_cast<const double*>(b.data_ptr()),
+                reinterpret_cast<double*>(result.data_ptr()), n);
             CUDA_CHECK(cudaGetLastError());
         } else {
             throw std::runtime_error("Unsupported dtype for mul operation");
@@ -1314,6 +1484,20 @@ auto mul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
             a.data<bool>(), b.data<bool>(), result.data<bool>(),
             meta, ndim, n, MulOp());
         CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::Complex64) {
+        broadcast_complex_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const float*>(a.data_ptr()),
+            reinterpret_cast<const float*>(b.data_ptr()),
+            reinterpret_cast<float*>(result.data_ptr()),
+            meta, ndim, n, ComplexMulOp());
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::Complex128) {
+        broadcast_complex_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const double*>(a.data_ptr()),
+            reinterpret_cast<const double*>(b.data_ptr()),
+            reinterpret_cast<double*>(result.data_ptr()),
+            meta, ndim, n, ComplexMulOp());
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Unsupported dtype for mul operation");
     }
@@ -1370,6 +1554,18 @@ auto div_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
                 reinterpret_cast<const __nv_bfloat16*>(a.data<BFloat16>()),
                 reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
                 reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
+            CUDA_CHECK(cudaGetLastError());
+        } else if (a.dtype() == DType::Complex64) {
+            complex_div_kernel<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const float*>(a.data_ptr()),
+                reinterpret_cast<const float*>(b.data_ptr()),
+                reinterpret_cast<float*>(result.data_ptr()), n);
+            CUDA_CHECK(cudaGetLastError());
+        } else if (a.dtype() == DType::Complex128) {
+            complex_div_kernel<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const double*>(a.data_ptr()),
+                reinterpret_cast<const double*>(b.data_ptr()),
+                reinterpret_cast<double*>(result.data_ptr()), n);
             CUDA_CHECK(cudaGetLastError());
         } else {
             throw std::runtime_error("Unsupported dtype for div operation");
@@ -1433,6 +1629,20 @@ auto div_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
             reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()),
             meta, ndim, n, DivOp());
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::Complex64) {
+        broadcast_complex_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const float*>(a.data_ptr()),
+            reinterpret_cast<const float*>(b.data_ptr()),
+            reinterpret_cast<float*>(result.data_ptr()),
+            meta, ndim, n, ComplexDivOp());
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::Complex128) {
+        broadcast_complex_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const double*>(a.data_ptr()),
+            reinterpret_cast<const double*>(b.data_ptr()),
+            reinterpret_cast<double*>(result.data_ptr()),
+            meta, ndim, n, ComplexDivOp());
         CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Unsupported dtype for div operation");

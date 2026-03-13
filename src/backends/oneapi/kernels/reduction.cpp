@@ -1906,8 +1906,12 @@ auto unique_kernel(const Tensor& input, bool sorted, bool return_inverse, bool r
         return host_unique_impl(float{});
     } else if (input.dtype() == DType::Int64) {
         return host_unique_impl(int64_t{});
+    } else if (input.dtype() == DType::Float64) {
+        return host_unique_impl(double{});
+    } else if (input.dtype() == DType::Int32) {
+        return host_unique_impl(int32_t{});
     } else {
-        throw std::runtime_error("unique: unsupported dtype (only Float32 and Int64 supported)");
+        throw std::runtime_error("unique: unsupported dtype (supported: Float32, Float64, Int32, Int64)");
     }
 }
 

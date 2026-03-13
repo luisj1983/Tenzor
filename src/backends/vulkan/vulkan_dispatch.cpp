@@ -182,6 +182,137 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         }
     }
 
+    // =========================================================================
+    // Float64 handling: operations with native F64 shaders use them directly;
+    // operations without F64 support throw immediately to prevent silent
+    // corruption from dispatching F64 data to F32 shaders.
+    // =========================================================================
+    {
+        bool has_float64 = false;
+        for (const auto& t : inputs) {
+            if (t.dtype() == DType::Float64) {
+                has_float64 = true;
+                break;
+            }
+        }
+
+        if (has_float64) {
+            static const std::unordered_set<std::string> f64_native_ops = {
+                // Binary ops (math_f64 shader)
+                "add", "sub", "mul", "div",
+                "add_inplace", "sub_inplace", "mul_inplace", "div_inplace",
+                // Activation ops (activations_f64 shader)
+                "relu", "sigmoid", "tanh", "gelu", "leaky_relu", "swish",
+                "relu_inplace", "sigmoid_inplace", "tanh_inplace",
+                "gelu_inplace", "leaky_relu_inplace",
+                // Activation backward (activations_backward_f64 shader)
+                "relu_backward", "sigmoid_backward", "tanh_backward",
+                "gelu_backward", "leaky_relu_backward",
+                // Softmax (softmax_f64 shader)
+                "softmax", "softmax_backward",
+                // Layer norm (layer_norm_f64 shader)
+                "layer_norm", "layer_norm_backward",
+                // Group norm
+                "group_norm", "group_norm_backward",
+                // RMSNorm
+                "fused_rms_norm", "rms_norm_backward",
+                // Embedding
+                "embedding", "embedding_backward",
+                // Conv2d
+                "conv2d", "conv2d_forward",
+                // Adaptive pooling
+                "adaptive_avg_pool2d", "adaptive_max_pool2d",
+                "adaptive_avg_pool2d_backward", "adaptive_max_pool2d_backward",
+                // Pooling (pooling_f64, pooling_forward_with_indices_f64 shaders)
+                "pooling", "pooling_backward", "pooling_forward_with_indices",
+                "max_pool2d", "max_pool2d_forward", "max_pool2d_backward",
+                "avg_pool2d", "avg_pool2d_forward", "avg_pool2d_backward",
+                "max_pool2d_backward_with_indices", "max_pool2d_backward_recompute",
+                // Unary math (math_f64 shader)
+                "sqrt", "exp", "log", "neg", "abs", "sign", "pow",
+                "floor", "ceil", "round", "trunc", "reciprocal",
+                // Trigonometric (trigonometric_f64 shader)
+                "sin", "cos", "tan", "asin", "acos", "atan",
+                // Hyperbolic (hyperbolic_f64 shader)
+                "sinh", "cosh",
+                // Comparison (comparison_f64 shader)
+                "eq", "ne", "lt", "le", "gt", "ge",
+                // Matrix ops (matmul_f64 shader)
+                "matmul", "bmm", "dot",
+                // Fused operations
+                "fused_linear_relu", "fused_batchnorm_relu", "fused_add_relu",
+                "fused_conv2d_relu", "fused_gelu", "fused_layer_norm",
+                "fused_softmax_cross_entropy",
+                // BatchNorm
+                "batchnorm2d_forward", "batchnorm2d_forward_affine",
+                "batchnorm2d_backward",
+                "batchnorm2d_mean_var", "batchnorm2d_update_running_stats",
+                // Reduction (reduction_f64 shader)
+                "sum", "mean", "max", "min", "prod",
+                "argmax", "argmin", "argsort",
+                // Type-agnostic operations
+                "reshape", "view", "contiguous", "to", "to_dtype",
+                "zeros", "ones", "full", "empty",
+                // Creation ops
+                "arange", "linspace", "eye", "one_hot", "diag",
+                // Clamp
+                "clamp", "clamp_min", "clamp_max",
+                // Shape ops (type-agnostic / metadata-only)
+                "transpose", "permute", "cat", "squeeze", "unsqueeze",
+                // Indexing ops
+                "gather", "scatter", "masked_fill",
+                "masked_select", "where", "index_select",
+                // Reduction ops
+                "var", "std", "norm",
+                // Log softmax
+                "log_softmax", "log_softmax_backward",
+                // Interpolation
+                "interpolate",
+                // Memory ops
+                "clone", "fill", "unfold", "fold",
+                // Activation extras
+                "elu", "elu_backward", "selu", "selu_backward",
+                "mish", "mish_backward", "softplus", "softplus_backward",
+                "swish_backward",
+                // Sort/unique (bitonic_sort_f64, unique_mark_f64, unique_compact_f64)
+                "sort", "unique",
+                // Cast
+                "cast",
+                // Random
+                "uniform_random", "normal_random",
+                // FFT
+                "fft", "ifft",
+                // Linalg
+                "linalg_det", "linalg_inv", "linalg_solve", "linalg_eigh",
+                "linalg_svd", "linalg_cholesky", "linalg_qr",
+                // Complex
+                "conj", "real", "imag", "angle", "polar",
+                // Strided copy
+                "strided_copy",
+                // Expand/repeat
+                "expand", "repeat",
+                // Conv backward
+                "conv2d_backward_input", "conv2d_backward_weight", "conv2d_backward_bias",
+                // ConvTranspose2d
+                "conv_transpose2d_forward",
+                // Indexing ops
+                "put", "take", "tile", "stack", "searchsorted",
+                // Cross entropy
+                "cross_entropy_forward", "cross_entropy_backward",
+                // NLLLoss
+                "nll_loss_forward", "nll_loss_backward",
+                // Embedding
+                "embedding_bag",
+            };
+
+            if (!f64_native_ops.contains(op_name)) {
+                throw std::runtime_error(
+                    "Vulkan: operation '" + op_name + "' does not support Float64 dtype. "
+                    "No Float64 shader available — refusing to dispatch to prevent silent data corruption.");
+            }
+        }
+    }
+
     try {
     // Binary operations
     if (op_name == "add" || op_name == "sub" || op_name == "mul" || op_name == "div") {

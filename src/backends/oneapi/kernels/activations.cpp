@@ -1,4 +1,5 @@
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/ops/creation.hpp"
 #include <sycl/sycl.hpp>
 #include <cmath>
 #include <cstring>
@@ -6,6 +7,11 @@
 #include <stdexcept>
 #include <tuple>
 #include <vector>
+
+#ifdef TENZOR_HAS_ONEMKL
+#include <oneapi/mkl.hpp>
+#include <oneapi/mkl/rng.hpp>
+#endif
 
 // Forward declarations for kernels in other files
 namespace tenzor {
@@ -2497,6 +2503,7 @@ class DropoutBackwardKernelFloat32;
 class DropoutBackwardKernelFloat64;
 class DropoutBackwardKernelFloat16;
 class DropoutBackwardKernelBFloat16;
+class DropoutThresholdScaleKernel;
 
 auto dropout_kernel(const Tensor& input, float p, bool training, sycl::queue& queue)
     -> std::pair<Tensor, Tensor> {
@@ -2512,16 +2519,37 @@ auto dropout_kernel(const Tensor& input, float p, bool training, sycl::queue& qu
 
     const int64_t numel = in_cont.numel();
     float scale = 1.0f / (1.0f - p);
+    float* mask_ptr = get_data_ptr<float>(mask);
 
-    // Generate random mask on host, copy to device
+#ifdef TENZOR_HAS_ONEMKL
+    // Generate random values on device using oneMKL Philox RNG
+    auto seed = tenzor::get_global_seed();
+    // Allocate temporary buffer for uniform random values
+    float* rand_buf = sycl::malloc_device<float>(numel, queue);
+
+    ::oneapi::mkl::rng::philox4x32x10 engine(queue, seed);
+    ::oneapi::mkl::rng::uniform<float> dist(0.0f, 1.0f);
+    ::oneapi::mkl::rng::generate(dist, engine, numel, rand_buf);
+
+    // Fused threshold + scale kernel: rand < p -> 0, else -> scale
+    float p_thresh = p;
+    queue.parallel_for<DropoutThresholdScaleKernel>(
+        sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            mask_ptr[idx] = (rand_buf[idx] < p_thresh) ? 0.0f : scale;
+        }
+    ).wait();
+
+    sycl::free(rand_buf, queue);
+#else
+    // Host fallback: generate random mask on host, copy to device
     std::vector<float> host_mask(numel);
     std::mt19937 rng(std::random_device{}());
-    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+    std::uniform_real_distribution<float> host_dist(0.0f, 1.0f);
     for (int64_t i = 0; i < numel; ++i) {
-        host_mask[i] = (dist(rng) < p) ? 0.0f : scale;
+        host_mask[i] = (host_dist(rng) < p) ? 0.0f : scale;
     }
-    float* mask_ptr = get_data_ptr<float>(mask);
     queue.memcpy(mask_ptr, host_mask.data(), numel * sizeof(float)).wait();
+#endif
 
     if (in_cont.dtype() == DType::Float32) {
         const float* in_ptr = get_data_ptr<const float>(in_cont);
