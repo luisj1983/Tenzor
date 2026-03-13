@@ -739,24 +739,12 @@ auto median(const Tensor& input, int64_t dim, bool keepdim)
         throw std::invalid_argument("median: dim " + std::to_string(dim) + " out of range");
     }
 
-    // Sort along the dimension
-    auto [sorted_vals, sorted_idx] = sort(input, dim, false); // ascending
-
-    // Pick the middle element
-    int64_t dim_size = input.shape()[dim];
-    int64_t mid = (dim_size - 1) / 2; // lower median for even sizes
-
-    Tensor values = sorted_vals.select(dim, mid);
-    Tensor indices = sorted_idx.select(dim, mid);
-
-    if (keepdim) {
-        auto vshape = std::vector<int64_t>(values.shape().begin(), values.shape().end());
-        vshape.insert(vshape.begin() + dim, 1);
-        values = reshape(values, vshape);
-        indices = reshape(indices, vshape);
-    }
-
-    return {values, indices};
+    OpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    attrs.set(AttrKey::Keepdim, keepdim);
+    std::vector<Tensor> inputs = {input};
+    auto results = dispatch<OpId::Median>(inputs, attrs);
+    return {results[0], results[1]};
 }
 
 // ============================================================================
@@ -775,92 +763,12 @@ auto mode(const Tensor& input, int64_t dim, bool keepdim)
         throw std::invalid_argument("mode: dim " + std::to_string(dim) + " out of range");
     }
 
-    // Sort along the dimension, then find longest run of equal values
-    auto [sorted_vals, sorted_idx] = sort(input, dim, false);
-
-    // Move target dim to the end for easier iteration
-    std::vector<int64_t> perm_order;
-    for (int64_t d = 0; d < ndim; ++d) {
-        if (d != dim) perm_order.push_back(d);
-    }
-    perm_order.push_back(dim);
-    Tensor sv = permute(sorted_vals, perm_order).contiguous();
-    Tensor si = permute(sorted_idx, perm_order).contiguous();
-
-    int64_t dim_size = input.shape()[dim];
-    int64_t outer_size = sv.numel() / dim_size;
-
-    // Output shapes (same as input but with target dim removed)
-    std::vector<int64_t> out_shape;
-    for (int64_t d = 0; d < ndim; ++d) {
-        if (d != dim) out_shape.push_back(input.shape()[d]);
-    }
-    if (out_shape.empty()) out_shape.push_back(1);
-
-    Tensor values = zeros(out_shape, input.dtype(), input.device());
-    Tensor indices = zeros(out_shape, DType::Int64, input.device());
-
-    // CPU implementation: iterate over sorted slices to find mode
-    Tensor sv_cpu = sv.device().type != Device::Type::CPU ? sv.cpu() : sv;
-    Tensor si_cpu = si.device().type != Device::Type::CPU ? si.cpu() : si;
-    Tensor val_cpu = values.device().type != Device::Type::CPU ? values.cpu() : values;
-    Tensor idx_cpu = indices.device().type != Device::Type::CPU ? indices.cpu() : indices;
-
-    auto find_mode = [&]<typename T>(T*) {
-        const T* sv_data = sv_cpu.data<T>();
-        const int64_t* si_data = si_cpu.data<int64_t>();
-        T* val_data = val_cpu.data<T>();
-        int64_t* idx_data = idx_cpu.data<int64_t>();
-
-        for (int64_t o = 0; o < outer_size; ++o) {
-            const T* row = sv_data + o * dim_size;
-            const int64_t* irow = si_data + o * dim_size;
-            int64_t best_count = 0, cur_count = 1;
-            T best_val = row[0];
-            int64_t best_idx = irow[0];
-            for (int64_t i = 1; i < dim_size; ++i) {
-                if (row[i] == row[i - 1]) {
-                    cur_count++;
-                } else {
-                    cur_count = 1;
-                }
-                if (cur_count > best_count) {
-                    best_count = cur_count;
-                    best_val = row[i];
-                    best_idx = irow[i];
-                }
-            }
-            if (best_count == 0) { best_val = row[0]; best_idx = irow[0]; }
-            val_data[o] = best_val;
-            idx_data[o] = best_idx;
-        }
-    };
-
-    switch (input.dtype()) {
-        case DType::Float32: find_mode(static_cast<float*>(nullptr)); break;
-        case DType::Float64: find_mode(static_cast<double*>(nullptr)); break;
-        case DType::Int32:   find_mode(static_cast<int32_t*>(nullptr)); break;
-        case DType::Int64:   find_mode(static_cast<int64_t*>(nullptr)); break;
-        default: throw std::runtime_error("mode: unsupported dtype");
-    }
-
-    // Transfer back to original device
-    if (input.device().type != Device::Type::CPU) {
-        values = val_cpu.to(input.device());
-        indices = idx_cpu.to(input.device());
-    } else {
-        values = val_cpu;
-        indices = idx_cpu;
-    }
-
-    if (keepdim) {
-        auto vshape = std::vector<int64_t>(values.shape().begin(), values.shape().end());
-        vshape.insert(vshape.begin() + dim, 1);
-        values = reshape(values, vshape);
-        indices = reshape(indices, vshape);
-    }
-
-    return {values, indices};
+    OpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    attrs.set(AttrKey::Keepdim, keepdim);
+    std::vector<Tensor> inputs = {input};
+    auto results = dispatch<OpId::Mode>(inputs, attrs);
+    return {results[0], results[1]};
 }
 
 } // namespace tenzor

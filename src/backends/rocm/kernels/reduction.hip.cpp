@@ -3260,5 +3260,311 @@ auto logsumexp_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_
     return output;
 }
 
+// ============================================================================
+// Median kernel — sort-based, one block per slice
+// ============================================================================
+
+template <typename T>
+__global__ void median_per_slice_kernel(
+    const T* __restrict__ input,
+    T* __restrict__ out_values,
+    int64_t* __restrict__ out_indices,
+    const int64_t* __restrict__ shape,
+    const int64_t* __restrict__ strides,
+    int64_t ndim, int64_t dim, int64_t dim_size, int64_t outer_size)
+{
+    int64_t slice_idx = blockIdx.x;
+    if (slice_idx >= outer_size) return;
+
+    // Compute multi-dim index for this slice (skip the reduction dim)
+    int64_t tmp = slice_idx;
+    int64_t base_offset = 0;
+    for (int64_t d = ndim - 1; d >= 0; --d) {
+        if (d == dim) continue;
+        int64_t coord = tmp % shape[d];
+        tmp /= shape[d];
+        base_offset += coord * strides[d];
+    }
+
+    // Each thread in the block cooperates; for simplicity use thread 0
+    // (dim_size is typically small enough for a single-thread sort)
+    if (threadIdx.x == 0) {
+        // Allocate local arrays via dynamic shared memory would be complex;
+        // use register-based approach for small dims, else naive loop
+        // For GPU: simple insertion sort in registers (dim_size usually < 10K)
+        // We'll use a selection approach: partial sort to find median
+
+        int64_t mid = (dim_size - 1) / 2;
+
+        // Find the (mid+1)-th smallest element using repeated scans
+        // For better perf we do a simple selection algorithm
+        T pivot_val{};
+        int64_t pivot_orig_idx = 0;
+
+        // Count-based selection: for each element, count how many are smaller
+        // This is O(dim_size^2) but fully parallel-friendly
+        for (int64_t i = 0; i < dim_size; ++i) {
+            int64_t offset_i = base_offset + i * strides[dim];
+            T val_i = input[offset_i];
+            int64_t rank = 0;
+            for (int64_t j = 0; j < dim_size; ++j) {
+                T val_j = input[base_offset + j * strides[dim]];
+                if (val_j < val_i || (val_j == val_i && j < i)) {
+                    rank++;
+                }
+            }
+            if (rank == mid) {
+                pivot_val = val_i;
+                pivot_orig_idx = i;
+                break;
+            }
+        }
+
+        out_values[slice_idx] = pivot_val;
+        out_indices[slice_idx] = pivot_orig_idx;
+    }
+}
+
+auto median_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream)
+    -> std::vector<Tensor>
+{
+    const auto dtype = input.dtype();
+    const auto& device = input.device();
+    const auto& input_shape = input.shape();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    if (input.numel() == 0) {
+        throw std::runtime_error("median: cannot compute median of empty tensor");
+    }
+
+    // Normalize dim: INT64_MIN means full reduction
+    int64_t normalized_dim = dim;
+    if (normalized_dim == INT64_MIN) {
+        // Full reduction: flatten and reduce along dim 0
+        Tensor flat = input.contiguous().reshape({input.numel()});
+        auto result = median_kernel(flat, 0, false, stream);
+        if (keepdim) {
+            std::vector<int64_t> kshape(ndim, 1);
+            result[0] = result[0].reshape(kshape);
+            result[1] = result[1].reshape(kshape);
+        }
+        return result;
+    }
+
+    if (normalized_dim < 0) normalized_dim += ndim;
+
+    auto output_shape = compute_reduction_shape(
+        std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+        normalized_dim, keepdim);
+
+    int64_t dim_size = input_shape[normalized_dim];
+    int64_t outer_size = 1;
+    for (int64_t d = 0; d < ndim; ++d) {
+        if (d != normalized_dim) outer_size *= input_shape[d];
+    }
+
+    Tensor values(output_shape, dtype, device);
+    Tensor indices(output_shape, DType::Int64, device);
+
+    // Copy shape and strides to device
+    int64_t* d_shape;
+    int64_t* d_strides;
+    HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
+    HIP_CHECK(hipMalloc(&d_strides, ndim * sizeof(int64_t)));
+
+    std::vector<int64_t> shape_vec(input_shape.begin(), input_shape.end());
+    std::vector<int64_t> strides_vec(input.strides().begin(), input.strides().end());
+    HIP_CHECK(hipMemcpy(d_shape, shape_vec.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_strides, strides_vec.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+
+    int block_size = 1; // One thread per slice (selection algorithm)
+    int num_blocks = static_cast<int>(outer_size);
+
+    auto launch = [&]<typename T>(T*) {
+        hipLaunchKernelGGL((median_per_slice_kernel<T>),
+            dim3(num_blocks), dim3(block_size), 0, stream,
+            input.data<T>(), values.data<T>(), indices.data<int64_t>(),
+            d_shape, d_strides, ndim, normalized_dim, dim_size, outer_size);
+    };
+
+    switch (dtype) {
+        case DType::Float32: launch(static_cast<float*>(nullptr)); break;
+        case DType::Float64: launch(static_cast<double*>(nullptr)); break;
+        case DType::Int32:   launch(static_cast<int32_t*>(nullptr)); break;
+        case DType::Int64:   launch(static_cast<int64_t*>(nullptr)); break;
+        case DType::Float16:
+        case DType::BFloat16: {
+            auto input_f32 = input.to(DType::Float32);
+            auto result = median_kernel(input_f32, dim, keepdim, stream);
+            result[0] = result[0].to(dtype);
+            HIP_CHECK(hipStreamSynchronize(stream));
+            HIP_CHECK(hipFree(d_shape));
+            HIP_CHECK(hipFree(d_strides));
+            return result;
+        }
+        default: throw std::runtime_error("median_kernel: unsupported dtype");
+    }
+
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipFree(d_shape));
+    HIP_CHECK(hipFree(d_strides));
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        throw std::runtime_error(std::string("HIP error in median_kernel: ") + hipGetErrorString(err));
+    }
+
+    return {values, indices};
+}
+
+// ============================================================================
+// Mode kernel — sort-based, one block per slice
+// ============================================================================
+
+template <typename T>
+__global__ void mode_per_slice_kernel(
+    const T* __restrict__ input,
+    T* __restrict__ out_values,
+    int64_t* __restrict__ out_indices,
+    const int64_t* __restrict__ shape,
+    const int64_t* __restrict__ strides,
+    int64_t ndim, int64_t dim, int64_t dim_size, int64_t outer_size)
+{
+    int64_t slice_idx = blockIdx.x;
+    if (slice_idx >= outer_size) return;
+
+    int64_t tmp = slice_idx;
+    int64_t base_offset = 0;
+    for (int64_t d = ndim - 1; d >= 0; --d) {
+        if (d == dim) continue;
+        int64_t coord = tmp % shape[d];
+        tmp /= shape[d];
+        base_offset += coord * strides[d];
+    }
+
+    if (threadIdx.x == 0) {
+        // Collect (value, original_index) pairs, sort by value, find longest run
+        // Use simple bubble sort for correctness (dim_size typically manageable)
+        // For large dims, a more sophisticated approach would be needed
+
+        // First pass: find mode by counting equal neighbors after sorting indices by value
+        // We sort an index array by value using selection sort
+        // (avoids dynamic allocation on device)
+
+        T best_val = input[base_offset];
+        int64_t best_idx = 0;
+        int64_t best_count = 0;
+
+        // For each unique value, count occurrences
+        for (int64_t i = 0; i < dim_size; ++i) {
+            T val_i = input[base_offset + i * strides[dim]];
+            int64_t count = 0;
+            for (int64_t j = 0; j < dim_size; ++j) {
+                if (input[base_offset + j * strides[dim]] == val_i) {
+                    count++;
+                }
+            }
+            // Pick this value if count is higher, or same count but smaller index
+            if (count > best_count || (count == best_count && i < best_idx)) {
+                best_count = count;
+                best_val = val_i;
+                best_idx = i;
+            }
+        }
+
+        out_values[slice_idx] = best_val;
+        out_indices[slice_idx] = best_idx;
+    }
+}
+
+auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream)
+    -> std::vector<Tensor>
+{
+    const auto dtype = input.dtype();
+    const auto& device = input.device();
+    const auto& input_shape = input.shape();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    if (input.numel() == 0) {
+        throw std::runtime_error("mode: cannot compute mode of empty tensor");
+    }
+
+    int64_t normalized_dim = dim;
+    if (normalized_dim == INT64_MIN) {
+        Tensor flat = input.contiguous().reshape({input.numel()});
+        auto result = mode_kernel(flat, 0, false, stream);
+        if (keepdim) {
+            std::vector<int64_t> kshape(ndim, 1);
+            result[0] = result[0].reshape(kshape);
+            result[1] = result[1].reshape(kshape);
+        }
+        return result;
+    }
+
+    if (normalized_dim < 0) normalized_dim += ndim;
+
+    auto output_shape = compute_reduction_shape(
+        std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+        normalized_dim, keepdim);
+
+    int64_t dim_size = input_shape[normalized_dim];
+    int64_t outer_size = 1;
+    for (int64_t d = 0; d < ndim; ++d) {
+        if (d != normalized_dim) outer_size *= input_shape[d];
+    }
+
+    Tensor values(output_shape, dtype, device);
+    Tensor indices(output_shape, DType::Int64, device);
+
+    int64_t* d_shape;
+    int64_t* d_strides;
+    HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
+    HIP_CHECK(hipMalloc(&d_strides, ndim * sizeof(int64_t)));
+
+    std::vector<int64_t> shape_vec(input_shape.begin(), input_shape.end());
+    std::vector<int64_t> strides_vec(input.strides().begin(), input.strides().end());
+    HIP_CHECK(hipMemcpy(d_shape, shape_vec.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_strides, strides_vec.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+
+    int block_size = 1;
+    int num_blocks = static_cast<int>(outer_size);
+
+    auto launch = [&]<typename T>(T*) {
+        hipLaunchKernelGGL((mode_per_slice_kernel<T>),
+            dim3(num_blocks), dim3(block_size), 0, stream,
+            input.data<T>(), values.data<T>(), indices.data<int64_t>(),
+            d_shape, d_strides, ndim, normalized_dim, dim_size, outer_size);
+    };
+
+    switch (dtype) {
+        case DType::Float32: launch(static_cast<float*>(nullptr)); break;
+        case DType::Float64: launch(static_cast<double*>(nullptr)); break;
+        case DType::Int32:   launch(static_cast<int32_t*>(nullptr)); break;
+        case DType::Int64:   launch(static_cast<int64_t*>(nullptr)); break;
+        case DType::Float16:
+        case DType::BFloat16: {
+            auto input_f32 = input.to(DType::Float32);
+            auto result = mode_kernel(input_f32, dim, keepdim, stream);
+            result[0] = result[0].to(dtype);
+            HIP_CHECK(hipStreamSynchronize(stream));
+            HIP_CHECK(hipFree(d_shape));
+            HIP_CHECK(hipFree(d_strides));
+            return result;
+        }
+        default: throw std::runtime_error("mode_kernel: unsupported dtype");
+    }
+
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipFree(d_shape));
+    HIP_CHECK(hipFree(d_strides));
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        throw std::runtime_error(std::string("HIP error in mode_kernel: ") + hipGetErrorString(err));
+    }
+
+    return {values, indices};
+}
+
 } // namespace rocm
 } // namespace tenzor

@@ -92,6 +92,7 @@ private:
         std::unique_ptr<vulkan::DescriptorPool> descriptorPool;
         bool canPreserveDenormsF32 = false;  // Whether GPU supports denormal preservation for float32
         bool hasAtomicInt64 = false;          // Whether GPU supports VK_EXT_shader_atomic_int64
+        bool hasAtomicFloat = false;          // Whether GPU supports VK_EXT_shader_atomic_float
         bool hasSubgroupArithmetic = false;   // Whether GPU supports subgroup arithmetic ops
         uint32_t subgroupSize = 0;            // Subgroup (warp) size for this device
         uint32_t workgroupSize = 256;         // Optimal 1D workgroup size (power-of-2, from device limits)
@@ -483,6 +484,10 @@ public:
     auto dispatchTopK(const Tensor& input, int64_t k, int64_t dim, bool largest, bool sorted) -> std::pair<Tensor, Tensor>;
     auto dispatchUnique(const Tensor& input, bool sorted, bool return_inverse, bool return_counts) -> std::vector<Tensor>;
 
+    // Median and Mode operations
+    auto dispatchMedian(const Tensor& input, int64_t dim, bool keepdim) -> std::vector<Tensor>;
+    auto dispatchMode(const Tensor& input, int64_t dim, bool keepdim) -> std::vector<Tensor>;
+
     // Misc operations (Phase 11.5)
     auto dispatchStridedFill(Tensor& input, float value) -> void;
     auto dispatchToMemoryFormat(const Tensor& input, int format) -> Tensor;
@@ -532,6 +537,7 @@ public:
     auto dispatchNonzero(const Tensor& input) -> Tensor;
     auto dispatchOneHot(const Tensor& indices, int64_t num_classes) -> Tensor;
     auto dispatchBoxIoU(const Tensor& boxes1, const Tensor& boxes2, int64_t iou_type) -> Tensor;
+    auto dispatchNMS(const Tensor& boxes, const Tensor& scores, float iou_threshold) -> Tensor;
 
     // Forward activation operations
     auto dispatchActivation(const std::string& op_name,
@@ -660,6 +666,7 @@ public:
     auto dispatchSparseAdd(const Tensor& crow_indices, const Tensor& col_indices,
                             const Tensor& values, const Tensor& dense,
                             int64_t M, int64_t K) -> Tensor;
+    auto dispatchDenseToSparse(const Tensor& dense) -> std::vector<Tensor>;
 
     // Flash Attention — composed from existing matmul + softmax shaders (not a single fused kernel)
     auto dispatchFlashAttention(const Tensor& Q, const Tensor& K, const Tensor& V,

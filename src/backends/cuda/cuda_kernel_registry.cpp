@@ -289,6 +289,8 @@ namespace cuda {
     auto cumsum_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tensor;
     auto cumprod_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tensor;
     auto unique_kernel(const Tensor& input, bool sorted_output, bool return_inverse, bool return_counts, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
+    auto median_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> std::vector<Tensor>;
+    auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> std::vector<Tensor>;
 
     // ROI Align operations
     auto roi_align_forward(const Tensor& features, const Tensor& rois,
@@ -2566,6 +2568,16 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         bool descending = attrs.get_bool(AttrKey::Descending, false);
         auto [values, indices] = cuda::sort_kernel(inputs[0], dim, descending, get_cuda_stream(attrs));
         return std::vector<Tensor>{values, indices};
+    });
+    table.register_kernel(OpId::Median, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        return cuda::median_kernel(inputs[0], dim, keepdim, get_cuda_stream(attrs));
+    });
+    table.register_kernel(OpId::Mode, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        return cuda::mode_kernel(inputs[0], dim, keepdim, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::CumSum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t dim = attrs.get_int(AttrKey::Dim, 0);

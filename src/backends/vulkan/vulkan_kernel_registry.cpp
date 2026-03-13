@@ -978,6 +978,11 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             attrs.get_int(AttrKey::IouType, 0))};
     });
 
+    table.register_kernel(OpId::NMS, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float iou_threshold = static_cast<float>(attrs.get_float(AttrKey::IouThreshold, 0.5));
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchNMS(inputs[0], inputs[1], iou_threshold)};
+    });
+
     // ========================================================================
     // In-place Activation Operations
     // ========================================================================
@@ -1246,6 +1251,18 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         bool return_inverse = attrs.get_bool(AttrKey::ReturnInverse, false);
         bool return_counts = attrs.get_bool(AttrKey::ReturnCounts, false);
         return get_vulkan_backend()->dispatchUnique(inputs[0], sorted, return_inverse, return_counts);
+    });
+
+    table.register_kernel(OpId::Median, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        return get_vulkan_backend()->dispatchMedian(inputs[0], dim, keepdim);
+    });
+
+    table.register_kernel(OpId::Mode, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        return get_vulkan_backend()->dispatchMode(inputs[0], dim, keepdim);
     });
 
     // ========================================================================
@@ -2005,6 +2022,10 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         int64_t M = attrs.get_int(AttrKey::M, 0);
         int64_t K = attrs.get_int(AttrKey::K, 0);
         return {get_vulkan_backend()->dispatchSparseAdd(inputs[0], inputs[1], inputs[2], inputs[3], M, K)};
+    });
+
+    table.register_kernel(OpId::DenseToSparse, [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+        return get_vulkan_backend()->dispatchDenseToSparse(inputs[0]);
     });
 
     std::cout << "Vulkan dispatch table initialized with O(1) lookup" << std::endl;

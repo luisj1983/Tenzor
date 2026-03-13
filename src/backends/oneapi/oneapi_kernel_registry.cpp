@@ -178,6 +178,8 @@ namespace oneapi {
     auto any_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
     auto all_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
     auto logsumexp_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
+    auto median_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> std::vector<Tensor>;
+    auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> std::vector<Tensor>;
 
     // ---- Statistical operations (kernels/statistical.cpp) ----
     auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
@@ -1114,6 +1116,20 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
             bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             return {oneapi::logsumexp_kernel(inputs[0], dim, keepdim, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Median,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return oneapi::median_kernel(inputs[0], dim, keepdim, get_q(inputs));
+        });
+
+    table.register_kernel(OpId::Mode,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return oneapi::mode_kernel(inputs[0], dim, keepdim, get_q(inputs));
         });
 
     // Statistical operations: these OneAPI kernels take OpAttributes directly

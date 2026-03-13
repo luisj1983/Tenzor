@@ -2504,6 +2504,7 @@ class DropoutBackwardKernelFloat64;
 class DropoutBackwardKernelFloat16;
 class DropoutBackwardKernelBFloat16;
 class DropoutThresholdScaleKernel;
+class DropoutPhiloxMaskKernel;
 
 auto dropout_kernel(const Tensor& input, float p, bool training, sycl::queue& queue)
     -> std::pair<Tensor, Tensor> {
@@ -2541,14 +2542,44 @@ auto dropout_kernel(const Tensor& input, float p, bool training, sycl::queue& qu
 
     sycl::free(rand_buf, queue);
 #else
-    // Host fallback: generate random mask on host, copy to device
-    std::vector<float> host_mask(numel);
-    std::mt19937 rng(std::random_device{}());
-    std::uniform_real_distribution<float> host_dist(0.0f, 1.0f);
-    for (int64_t i = 0; i < numel; ++i) {
-        host_mask[i] = (host_dist(rng) < p) ? 0.0f : scale;
-    }
-    queue.memcpy(mask_ptr, host_mask.data(), numel * sizeof(float)).wait();
+    // Device-side Philox 4x32-10 RNG fallback (no oneMKL dependency)
+    auto seed_val = static_cast<uint32_t>(tenzor::get_global_seed());
+    float p_thresh = p;
+
+    queue.parallel_for<DropoutPhiloxMaskKernel>(
+        sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            uint32_t counter = static_cast<uint32_t>(idx[0]);
+            uint32_t key = seed_val;
+
+            // Philox 4x32-10 counter-based RNG
+            uint32_t c0 = counter;
+            uint32_t c1 = ~counter;
+            uint32_t k0 = key;
+            uint32_t k1 = ~key;
+
+            constexpr uint32_t M0 = 0xD2511F53u;
+            constexpr uint32_t M1 = 0xCD9E8D57u;
+            constexpr uint32_t BUMP = 0x9E3779B9u;
+            constexpr uint32_t BUMP1 = 0xBB67AE85u;
+
+            for (int round = 0; round < 10; ++round) {
+                uint32_t hi0 = static_cast<uint32_t>((static_cast<uint64_t>(c0) * M0) >> 32);
+                uint32_t hi1 = static_cast<uint32_t>((static_cast<uint64_t>(c1) * M1) >> 32);
+                uint32_t lo1 = c1 * M1;
+
+                c0 = hi1 ^ k0 ^ c0;
+                c1 = lo1;
+                c1 = hi0 ^ c1 ^ k1;
+                k0 += BUMP;
+                k1 += BUMP1;
+            }
+
+            // Convert to uniform [0,1)
+            constexpr float INV = 2.3283064365386963e-10f; // 1/2^32
+            float u = (static_cast<float>(c0) + 0.5f) * INV;
+            mask_ptr[idx] = (u < p_thresh) ? 0.0f : scale;
+        }
+    ).wait();
 #endif
 
     if (in_cont.dtype() == DType::Float32) {

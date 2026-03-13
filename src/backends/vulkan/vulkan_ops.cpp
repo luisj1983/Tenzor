@@ -2766,6 +2766,9 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
     // Select shader based on dtype
     std::string shader_name = "batchnorm2d_backward";
     if (input.dtype() == DType::Float64) {
+        if (!devices_[device_id].hasAtomicFloat) {
+            throw std::runtime_error("Vulkan: Float64 backward for BatchNorm2d requires VK_EXT_shader_atomic_float. Use Float32 or move tensor to CPU.");
+        }
         shader_name = "batchnorm2d_backward_f64";
     } else if (input.dtype() == DType::Float16) {
         shader_name = "batchnorm2d_backward_f16";
@@ -3478,6 +3481,9 @@ auto VulkanBackend::dispatchLayerNormBackward(const Tensor& grad_output, const T
 
     bool is_float64 = (input.dtype() == DType::Float64);
     bool is_bfloat16 = (input.dtype() == DType::BFloat16);
+    if (is_float64 && !devices_[device_id].hasAtomicFloat) {
+        throw std::runtime_error("Vulkan: Float64 backward for LayerNorm requires VK_EXT_shader_atomic_float. Use Float32 or move tensor to CPU.");
+    }
     std::string shader_name = is_float64 ? "layer_norm_backward_f64" : is_bfloat16 ? "layer_norm_backward_bf16" : "layer_norm_backward";
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -3598,6 +3604,9 @@ auto VulkanBackend::dispatchGroupNormBackward(const Tensor& grad_output, const T
 
     bool is_float64 = (input.dtype() == DType::Float64);
     bool is_bfloat16 = (input.dtype() == DType::BFloat16);
+    if (is_float64 && !devices_[device_id].hasAtomicFloat) {
+        throw std::runtime_error("Vulkan: Float64 backward for GroupNorm requires VK_EXT_shader_atomic_float. Use Float32 or move tensor to CPU.");
+    }
     std::string shader_name = is_float64 ? "group_norm_backward_f64" : is_bfloat16 ? "group_norm_backward_bf16" : "group_norm_backward";
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -4103,6 +4112,109 @@ auto VulkanBackend::dispatchBoxIoU(const Tensor& boxes1, const Tensor& boxes2, i
     }
 
     return result;
+}
+
+// NMS (Non-Maximum Suppression) - GPU implementation
+auto VulkanBackend::dispatchNMS(const Tensor& boxes, const Tensor& scores, float iou_threshold) -> Tensor {
+    int32_t device_id = boxes.device().index;
+    int64_t N = boxes.shape()[0];
+
+    if (N == 0) {
+        return Tensor({0}, DType::Int64, boxes.device());
+    }
+
+    // Sort scores descending to get order
+    auto [sorted_scores, sorted_indices] = dispatchSort(scores, 0, /*descending=*/true);
+
+    // Reorder boxes by sorted indices
+    Tensor sorted_boxes = dispatchIndexSelect(boxes, 0, sorted_indices);
+
+    // Ensure Float32 for the shader
+    Tensor boxes_f32 = sorted_boxes.contiguous();
+    if (boxes_f32.dtype() != DType::Float32) boxes_f32 = boxes_f32.to(DType::Float32);
+
+    // Create suppressed mask (uint32, zero-initialized)
+    Tensor suppressed_mask({N}, DType::Int32, boxes.device());
+    suppressed_mask = dispatchFill(suppressed_mask, 0.0f);
+
+    // Run NMS shader
+    auto* pipeline = getPipeline("nms", device_id);
+
+    const void* buf_boxes = boxes_f32.data_ptr();
+    const void* buf_suppressed = suppressed_mask.data_ptr();
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, buf_boxes},
+        {1, buf_suppressed},
+    };
+    std::vector<size_t> sizes = {
+        static_cast<size_t>(N * 4) * sizeof(float),
+        static_cast<size_t>(N) * sizeof(uint32_t),
+    };
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    struct PushConstants {
+        uint32_t N;
+        float iou_threshold;
+    } push_constants;
+
+    push_constants.N = static_cast<uint32_t>(N);
+    push_constants.iou_threshold = iou_threshold;
+
+    uint32_t workgroups = div_wg(static_cast<uint64_t>(N), devices_[device_id].workgroupSize);
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &push_constants);
+
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    insertComputeOnlyBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+    synchronize(device_id);
+
+    // Read back suppressed mask to CPU to compact results
+    Tensor mask_cpu = suppressed_mask.to(Device::cpu());
+    const int32_t* mask_data = mask_cpu.data<int32_t>();
+
+    // Count kept boxes
+    std::vector<int64_t> kept_indices;
+    kept_indices.reserve(static_cast<size_t>(N));
+    for (int64_t i = 0; i < N; ++i) {
+        if (mask_data[i] == 0) {
+            kept_indices.push_back(i);
+        }
+    }
+
+    if (kept_indices.empty()) {
+        return Tensor({0}, DType::Int64, boxes.device());
+    }
+
+    // Map kept indices back to original order via sorted_indices
+    Tensor sorted_idx_cpu = sorted_indices.to(Device::cpu());
+    const int64_t* sorted_idx_data = sorted_idx_cpu.data<int64_t>();
+
+    std::vector<int64_t> original_indices;
+    original_indices.reserve(kept_indices.size());
+    for (int64_t ki : kept_indices) {
+        original_indices.push_back(sorted_idx_data[ki]);
+    }
+
+    // Create result tensor on the target device
+    int64_t num_kept = static_cast<int64_t>(original_indices.size());
+    Tensor result({num_kept}, DType::Int64, Device::cpu());
+    auto* result_data = result.data<int64_t>();
+    for (int64_t i = 0; i < num_kept; ++i) {
+        result_data[i] = original_indices[static_cast<size_t>(i)];
+    }
+
+    return result.to(boxes.device());
 }
 
 // Phase 3: OneHot - GPU implementation
@@ -8647,6 +8759,9 @@ auto VulkanBackend::dispatchAvgPool2dBackward(const Tensor& grad_output, const T
     // Select shader based on dtype
     std::string shader_name = "avg_pool2d_backward";
     if (input.dtype() == DType::Float64) {
+        if (!devices_[device_id].hasAtomicFloat) {
+            throw std::runtime_error("Vulkan: Float64 backward for AvgPool2d requires VK_EXT_shader_atomic_float. Use Float32 or move tensor to CPU.");
+        }
         shader_name = "avg_pool2d_backward_f64";
     } else if (input.dtype() == DType::Float16) {
         shader_name = "avg_pool2d_backward_f16";
@@ -9161,8 +9276,12 @@ auto VulkanBackend::dispatchAvgPool1dBackward(const Tensor& grad_output, const T
     int32_t device_id = input.device().index;
 
     std::string shader_name = "avg_pool1d_backward";
-    if (input.dtype() == DType::Float64) shader_name = "avg_pool1d_backward_f64";
-    else if (input.dtype() == DType::Float16) shader_name = "avg_pool1d_backward_f16";
+    if (input.dtype() == DType::Float64) {
+        if (!devices_[device_id].hasAtomicFloat) {
+            throw std::runtime_error("Vulkan: Float64 backward for AvgPool1d requires VK_EXT_shader_atomic_float. Use Float32 or move tensor to CPU.");
+        }
+        shader_name = "avg_pool1d_backward_f64";
+    } else if (input.dtype() == DType::Float16) shader_name = "avg_pool1d_backward_f16";
     else if (input.dtype() == DType::BFloat16) shader_name = "avg_pool1d_backward_bf16";
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -9632,8 +9751,12 @@ auto VulkanBackend::dispatchAvgPool3dBackward(const Tensor& grad_output, const T
     int32_t device_id = input.device().index;
 
     std::string shader_name = "avg_pool3d_backward";
-    if (input.dtype() == DType::Float64) shader_name = "avg_pool3d_backward_f64";
-    else if (input.dtype() == DType::Float16) shader_name = "avg_pool3d_backward_f16";
+    if (input.dtype() == DType::Float64) {
+        if (!devices_[device_id].hasAtomicFloat) {
+            throw std::runtime_error("Vulkan: Float64 backward for AvgPool3d requires VK_EXT_shader_atomic_float. Use Float32 or move tensor to CPU.");
+        }
+        shader_name = "avg_pool3d_backward_f64";
+    } else if (input.dtype() == DType::Float16) shader_name = "avg_pool3d_backward_f16";
     else if (input.dtype() == DType::BFloat16) shader_name = "avg_pool3d_backward_bf16";
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -13372,6 +13495,244 @@ auto VulkanBackend::dispatchTopK(const Tensor& input, int64_t k, int64_t dim,
     Tensor topk_indices = dispatchSlice(sorted_indices, starts, ends, steps);
 
     return {dispatchContiguous(topk_values), dispatchContiguous(topk_indices)};
+}
+
+/**
+ * @brief Median — sort along dim, extract middle element.
+ *
+ * Returns {values, indices} where values[i] is the median of the i-th slice
+ * and indices[i] is its position in the original slice.
+ */
+auto VulkanBackend::dispatchMedian(const Tensor& input, int64_t dim, bool keepdim) -> std::vector<Tensor> {
+    auto input_shape = input.shape();
+    const int ndim = static_cast<int>(input_shape.size());
+
+    // Normalize dim
+    if (dim < 0) dim += ndim;
+
+    const int64_t dim_size = input_shape[dim];
+
+    // Edge case: empty tensor
+    if (input.numel() == 0 || dim_size == 0) {
+        std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
+        out_shape[dim] = 0;
+        if (!keepdim) {
+            out_shape.erase(out_shape.begin() + dim);
+        }
+        return {Tensor(out_shape, input.dtype(), input.device()),
+                Tensor(out_shape, DType::Int64, input.device())};
+    }
+
+    // Sort along dim (ascending)
+    auto [sorted_values, sorted_indices] = dispatchSort(input, dim, false);
+
+    // Median index: N/2 for even-length (lower median), (N-1)/2 same thing
+    int64_t median_idx = (dim_size - 1) / 2;
+
+    // Extract the median element using index_select along dim
+    Tensor idx_tensor({1}, DType::Int64, input.device());
+    {
+        int64_t idx_val = median_idx;
+        Tensor cpu_idx({1}, DType::Int64, Device::cpu());
+        *cpu_idx.data<int64_t>() = idx_val;
+        idx_tensor = cpu_idx.to(input.device());
+    }
+
+    Tensor median_values = dispatchIndexSelect(sorted_values, dim, idx_tensor);
+    Tensor median_indices = dispatchIndexSelect(sorted_indices, dim, idx_tensor);
+
+    // Squeeze the dim (index_select keeps dim with size 1)
+    if (!keepdim) {
+        // Remove the dimension
+        std::vector<int64_t> out_shape;
+        auto med_shape = median_values.shape();
+        for (int i = 0; i < ndim; ++i) {
+            if (i != dim) out_shape.push_back(med_shape[i]);
+        }
+        if (out_shape.empty()) out_shape.push_back(1);  // scalar
+        median_values = dispatchReshape(median_values, out_shape);
+        median_indices = dispatchReshape(median_indices, out_shape);
+    }
+
+    return {dispatchContiguous(median_values), dispatchContiguous(median_indices)};
+}
+
+/**
+ * @brief Mode — sort along dim, then find longest run of equal values.
+ *
+ * Uses dispatchSort to sort data, then launches mode.comp shader to find
+ * the most frequent element in each sorted slice.
+ * Returns {values, indices}.
+ */
+auto VulkanBackend::dispatchMode(const Tensor& input, int64_t dim, bool keepdim) -> std::vector<Tensor> {
+    auto input_shape = input.shape();
+    const int ndim = static_cast<int>(input_shape.size());
+
+    // Normalize dim
+    if (dim < 0) dim += ndim;
+
+    const int64_t dim_size = input_shape[dim];
+
+    // Edge case: empty tensor
+    if (input.numel() == 0 || dim_size == 0) {
+        std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
+        if (keepdim) {
+            out_shape[dim] = 1;
+        } else {
+            out_shape.erase(out_shape.begin() + dim);
+        }
+        if (out_shape.empty()) out_shape.push_back(1);
+        return {Tensor(out_shape, input.dtype(), input.device()),
+                Tensor(out_shape, DType::Int64, input.device())};
+    }
+
+    // Size-1 dim: mode is the element itself
+    if (dim_size == 1) {
+        if (keepdim) {
+            Tensor indices_out(std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               DType::Int64, input.device());
+            // Zero-fill indices
+            memset(indices_out.data_ptr(), 0,
+                   static_cast<size_t>(indices_out.numel()) * sizeof(int64_t),
+                   input.device().index);
+            return {input.contiguous(), indices_out};
+        } else {
+            std::vector<int64_t> out_shape;
+            for (int i = 0; i < ndim; ++i) {
+                if (i != dim) out_shape.push_back(input_shape[i]);
+            }
+            if (out_shape.empty()) out_shape.push_back(1);
+            Tensor vals = dispatchReshape(input, out_shape);
+            Tensor indices_out(out_shape, DType::Int64, input.device());
+            memset(indices_out.data_ptr(), 0,
+                   static_cast<size_t>(indices_out.numel()) * sizeof(int64_t),
+                   input.device().index);
+            return {dispatchContiguous(vals), indices_out};
+        }
+    }
+
+    // Sort along dim (ascending)
+    auto [sorted_values, sorted_indices] = dispatchSort(input, dim, false);
+
+    // Transpose so that dim is the last dimension, then make contiguous
+    Tensor sorted_contig, indices_contig;
+    std::vector<int64_t> inv_perm;
+    if (dim != ndim - 1) {
+        std::vector<int64_t> perm(ndim);
+        std::iota(perm.begin(), perm.end(), int64_t(0));
+        std::swap(perm[dim], perm[ndim - 1]);
+
+        inv_perm.resize(ndim);
+        for (int i = 0; i < ndim; ++i) inv_perm[perm[i]] = i;
+
+        sorted_contig = dispatchContiguous(dispatchPermute(sorted_values, perm));
+        indices_contig = dispatchContiguous(dispatchPermute(sorted_indices, perm));
+    } else {
+        sorted_contig = dispatchContiguous(sorted_values);
+        indices_contig = dispatchContiguous(sorted_indices);
+    }
+
+    // Compute number of slices = product of all dims except last
+    auto sc_shape = sorted_contig.shape();
+    int64_t num_slices = 1;
+    for (int i = 0; i < ndim - 1; ++i) num_slices *= sc_shape[i];
+    int64_t slice_size = sc_shape[ndim - 1];
+
+    // Determine shader based on dtype
+    std::string shader_name;
+    DType work_dtype = input.dtype();
+    bool needs_cast = false;
+    DType orig_dtype = input.dtype();
+
+    if (work_dtype == DType::Float32) {
+        shader_name = "mode";
+    } else if (work_dtype == DType::Float64) {
+        shader_name = "mode_f64";
+    } else {
+        // For other dtypes, cast to Float32
+        needs_cast = true;
+        work_dtype = DType::Float32;
+        shader_name = "mode";
+        sorted_contig = sorted_contig.to(DType::Float32);
+    }
+
+    int32_t device_id = input.device().index;
+
+    // Output tensors: one value and one index per slice
+    Tensor mode_values({num_slices}, work_dtype, input.device());
+    Tensor mode_indices_flat({num_slices}, DType::Int32, input.device());
+
+    // Launch mode shader
+    {
+        auto* pipeline = getPipeline(shader_name, device_id);
+        size_t sorted_bytes = static_cast<size_t>(num_slices * slice_size) * dtype_size(work_dtype);
+        size_t values_bytes = static_cast<size_t>(num_slices) * dtype_size(work_dtype);
+        size_t indices_bytes = static_cast<size_t>(num_slices) * sizeof(int32_t);
+
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, sorted_contig.data_ptr()},
+            {1, mode_values.data_ptr()},
+            {2, mode_indices_flat.data_ptr()}
+        };
+        std::vector<size_t> sizes = {sorted_bytes, values_bytes, indices_bytes};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+        struct { uint32_t slice_size; uint32_t num_slices; } pc;
+        pc.slice_size = static_cast<uint32_t>(slice_size);
+        pc.num_slices = static_cast<uint32_t>(num_slices);
+
+        uint32_t wg = static_cast<uint32_t>(div_wg(num_slices, devices_[device_id].workgroupSize));
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, wg, 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+    }
+
+    // The mode shader returns indices into the sorted slice. We need the original
+    // indices from the sort operation. Gather from indices_contig using mode_indices_flat.
+    // Read mode_indices back to host to do the gather (small: one int per slice)
+    Tensor h_mode_idx = mode_indices_flat.to(Device::cpu());
+    Tensor h_sort_indices = indices_contig.to(Device::cpu());
+    synchronize(device_id);
+
+    // Build original-index tensor on host
+    Tensor orig_indices_cpu({num_slices}, DType::Int64, Device::cpu());
+    {
+        const int32_t* midx = h_mode_idx.data<int32_t>();
+        const int64_t* sidx = h_sort_indices.data<int64_t>();
+        int64_t* out = orig_indices_cpu.data<int64_t>();
+        for (int64_t s = 0; s < num_slices; ++s) {
+            int32_t idx_in_sorted = midx[s];
+            out[s] = sidx[s * slice_size + idx_in_sorted];
+        }
+    }
+    Tensor orig_indices = orig_indices_cpu.to(input.device());
+
+    // Cast values back if needed
+    if (needs_cast) {
+        mode_values = mode_values.to(orig_dtype);
+    }
+
+    // Reshape to proper output shape
+    std::vector<int64_t> out_shape;
+    if (keepdim) {
+        out_shape = std::vector<int64_t>(input_shape.begin(), input_shape.end());
+        out_shape[dim] = 1;
+    } else {
+        for (int i = 0; i < ndim; ++i) {
+            if (i != dim) out_shape.push_back(input_shape[i]);
+        }
+        if (out_shape.empty()) out_shape.push_back(1);
+    }
+
+    mode_values = dispatchReshape(mode_values, out_shape);
+    orig_indices = dispatchReshape(orig_indices, out_shape);
+
+    return {dispatchContiguous(mode_values), dispatchContiguous(orig_indices)};
 }
 
 /**
@@ -19887,6 +20248,137 @@ auto VulkanBackend::dispatchSparseAdd(const Tensor& crow_indices, const Tensor& 
     endSingleTimeCommands(cmd, device_id);
 
     return output;
+}
+
+auto VulkanBackend::dispatchDenseToSparse(const Tensor& dense) -> std::vector<Tensor> {
+    if (dense.dim() != 2) {
+        throw std::runtime_error("Vulkan DenseToSparse requires a 2D tensor, got " +
+            std::to_string(dense.dim()) + "D");
+    }
+    DType dtype = dense.dtype();
+    if (dtype != DType::Float32 && dtype != DType::Float64) {
+        throw std::runtime_error("Vulkan DenseToSparse only supports Float32/Float64, got " +
+            std::string(dtype_name(dtype)));
+    }
+
+    int64_t M = dense.shape()[0];
+    int64_t K = dense.shape()[1];
+    int32_t device_id = dense.device().index;
+    bool is_f64 = (dtype == DType::Float64);
+    std::string shader_name = is_f64 ? "dense_to_sparse_f64" : "dense_to_sparse";
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    // Pass 1: count nonzeros per row using the GPU shader
+    Tensor row_counts = dispatchZeros({M}, DType::Int32, dense.device());
+
+    size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
+    size_t dense_size = dense.numel() * elem_size;
+    size_t row_counts_size = row_counts.numel() * sizeof(int32_t);
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, dense.data_ptr()}, {1, row_counts.data_ptr()},
+    };
+    std::vector<size_t> sizes = {dense_size, row_counts_size};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    struct { uint32_t n_rows; uint32_t n_cols; } pc;
+    pc.n_rows = static_cast<uint32_t>(M);
+    pc.n_cols = static_cast<uint32_t>(K);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(pc), &pc);
+    // One workgroup per row
+    vkCmdDispatch(cmd, static_cast<uint32_t>(M), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    // Pass 2: read back row_counts and dense data to CPU, build CSR components
+    Tensor row_counts_cpu = row_counts.to(Device::cpu());
+    Tensor dense_cpu = dense.to(Device::cpu());
+
+    auto* rc_ptr = row_counts_cpu.data<int32_t>();
+
+    // Build crow_indices via prefix sum
+    std::vector<int64_t> crow(static_cast<size_t>(M) + 1, 0);
+    for (int64_t i = 0; i < M; ++i) {
+        crow[static_cast<size_t>(i) + 1] = crow[static_cast<size_t>(i)] + rc_ptr[i];
+    }
+    int64_t nnz = crow[static_cast<size_t>(M)];
+
+    // Extract col_indices and values
+    std::vector<int64_t> col_indices_vec;
+    col_indices_vec.reserve(static_cast<size_t>(nnz));
+
+    if (is_f64) {
+        auto* dense_ptr = dense_cpu.data<double>();
+        std::vector<double> values_vec;
+        values_vec.reserve(static_cast<size_t>(nnz));
+        for (int64_t row = 0; row < M; ++row) {
+            for (int64_t col = 0; col < K; ++col) {
+                double val = dense_ptr[row * K + col];
+                if (val != 0.0) {
+                    col_indices_vec.push_back(col);
+                    values_vec.push_back(val);
+                }
+            }
+        }
+
+        // Create output tensors on CPU then move to Vulkan device
+        Tensor crow_tensor({static_cast<int64_t>(crow.size())}, DType::Int64, Device::cpu());
+        std::memcpy(crow_tensor.data_ptr(), crow.data(), crow.size() * sizeof(int64_t));
+
+        Tensor col_tensor({nnz}, DType::Int64, Device::cpu());
+        if (nnz > 0) {
+            std::memcpy(col_tensor.data_ptr(), col_indices_vec.data(),
+                       static_cast<size_t>(nnz) * sizeof(int64_t));
+        }
+
+        Tensor val_tensor({nnz}, DType::Float64, Device::cpu());
+        if (nnz > 0) {
+            std::memcpy(val_tensor.data_ptr(), values_vec.data(),
+                       static_cast<size_t>(nnz) * sizeof(double));
+        }
+
+        return {crow_tensor.to(dense.device()), col_tensor.to(dense.device()),
+                val_tensor.to(dense.device())};
+    } else {
+        auto* dense_ptr = dense_cpu.data<float>();
+        std::vector<float> values_vec;
+        values_vec.reserve(static_cast<size_t>(nnz));
+        for (int64_t row = 0; row < M; ++row) {
+            for (int64_t col = 0; col < K; ++col) {
+                float val = dense_ptr[row * K + col];
+                if (val != 0.0f) {
+                    col_indices_vec.push_back(col);
+                    values_vec.push_back(val);
+                }
+            }
+        }
+
+        // Create output tensors on CPU then move to Vulkan device
+        Tensor crow_tensor({static_cast<int64_t>(crow.size())}, DType::Int64, Device::cpu());
+        std::memcpy(crow_tensor.data_ptr(), crow.data(), crow.size() * sizeof(int64_t));
+
+        Tensor col_tensor({nnz}, DType::Int64, Device::cpu());
+        if (nnz > 0) {
+            std::memcpy(col_tensor.data_ptr(), col_indices_vec.data(),
+                       static_cast<size_t>(nnz) * sizeof(int64_t));
+        }
+
+        Tensor val_tensor({nnz}, DType::Float32, Device::cpu());
+        if (nnz > 0) {
+            std::memcpy(val_tensor.data_ptr(), values_vec.data(),
+                       static_cast<size_t>(nnz) * sizeof(float));
+        }
+
+        return {crow_tensor.to(dense.device()), col_tensor.to(dense.device()),
+                val_tensor.to(dense.device())};
+    }
 }
 
 } // namespace tenzor

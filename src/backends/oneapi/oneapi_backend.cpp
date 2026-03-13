@@ -379,6 +379,14 @@ public:
                     // Create queue for each device
                     try {
                         auto queue = std::make_shared<sycl::queue>(device,
+                            [](sycl::exception_list elist) {
+                                for (auto& e : elist) {
+                                    try { std::rethrow_exception(e); }
+                                    catch (const sycl::exception& se) {
+                                        fprintf(stderr, "SYCL async error: %s\n", se.what());
+                                    }
+                                }
+                            },
                             sycl::property_list{sycl::property::queue::in_order{}});
 
                         // Store device info
@@ -608,6 +616,14 @@ public:
         try {
             auto& device = devices_[device_id].device;
             auto* queue = new sycl::queue(device,
+                [](sycl::exception_list elist) {
+                    for (auto& e : elist) {
+                        try { std::rethrow_exception(e); }
+                        catch (const sycl::exception& se) {
+                            fprintf(stderr, "SYCL async error: %s\n", se.what());
+                        }
+                    }
+                },
                 sycl::property_list{sycl::property::queue::in_order{}});
             return static_cast<StreamHandle>(queue);
         } catch (const sycl::exception& e) {

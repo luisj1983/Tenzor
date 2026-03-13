@@ -1,0 +1,48 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer Boxes { float boxes[]; };
+layout(set = 0, binding = 1) buffer Suppressed { uint suppressed[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint N;
+    float iou_threshold;
+};
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= N || suppressed[i] != 0u) return;
+
+    float x1_i = boxes[i * 4 + 0];
+    float y1_i = boxes[i * 4 + 1];
+    float x2_i = boxes[i * 4 + 2];
+    float y2_i = boxes[i * 4 + 3];
+    float area_i = (x2_i - x1_i) * (y2_i - y1_i);
+
+    for (uint j = 0; j < i; ++j) {
+        if (suppressed[j] != 0u) continue;
+
+        float x1_j = boxes[j * 4 + 0];
+        float y1_j = boxes[j * 4 + 1];
+        float x2_j = boxes[j * 4 + 2];
+        float y2_j = boxes[j * 4 + 3];
+
+        float inter_x1 = max(x1_i, x1_j);
+        float inter_y1 = max(y1_i, y1_j);
+        float inter_x2 = min(x2_i, x2_j);
+        float inter_y2 = min(y2_i, y2_j);
+
+        float inter_w = max(inter_x2 - inter_x1, 0.0);
+        float inter_h = max(inter_y2 - inter_y1, 0.0);
+        float inter_area = inter_w * inter_h;
+
+        float area_j = (x2_j - x1_j) * (y2_j - y1_j);
+        float union_area = area_i + area_j - inter_area;
+
+        if (inter_area / union_area > iou_threshold) {
+            suppressed[i] = 1u;
+            return;
+        }
+    }
+}

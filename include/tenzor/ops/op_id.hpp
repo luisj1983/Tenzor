@@ -63,6 +63,8 @@ enum class OpId : uint16_t {
     ArgSort,
     Any,     // = 22, Boolean any reduction
     All,     // = 23, Boolean all reduction
+    Median,  // = 24
+    Mode,    // = 25
 
     // =========================================================================
     // Element-wise Math (30-49)
@@ -427,17 +429,17 @@ enum class OpId : uint16_t {
     LinalgCholesky,
 
     // =========================================================================
-    // Extended Operations (427-439)
+    // Extended Operations (428-439)
     // =========================================================================
-    StridedFill = 427,
-    QuantizedLinear,           // 428
-    QuantizedConv2d,           // 429
-    EmbeddingWithBoundsCheck,  // 430
-    WinogradConv2d,            // 431
-    LogSumExp,                 // 432
-    HasInfNan,                 // 433
-    EmbeddingBagForward,       // 434
-    EmbeddingBagBackward,      // 435
+    StridedFill = 428,
+    QuantizedLinear,           // 429
+    QuantizedConv2d,           // 430
+    EmbeddingWithBoundsCheck,  // 431
+    WinogradConv2d,            // 432
+    LogSumExp,                 // 433
+    HasInfNan,                 // 434
+    EmbeddingBagForward,       // 435
+    EmbeddingBagBackward,      // 436
 
     // =========================================================================
     // Complex Number Operations (440-449)

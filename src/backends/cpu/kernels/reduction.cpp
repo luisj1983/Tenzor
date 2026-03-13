@@ -3597,5 +3597,220 @@ auto logsumexp_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor 
     return output;
 }
 
+// ============================================================================
+// Median kernel — O(n) via nth_element
+// ============================================================================
+
+auto median_kernel(const Tensor& input, int64_t dim, bool keepdim) -> std::vector<Tensor> {
+    const auto dtype = input.dtype();
+    const auto& device = input.device();
+    const auto& input_shape = input.shape();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    dim = normalize_dim(dim, ndim);
+
+    // For full reduction, flatten to 1D then reduce along dim 0
+    if (dim == REDUCE_ALL) {
+        Tensor flat = input.contiguous().reshape({input.numel()});
+        auto result = median_kernel(flat, 0, false);
+        if (keepdim) {
+            std::vector<int64_t> kshape(ndim, 1);
+            result[0] = result[0].reshape(kshape);
+            result[1] = result[1].reshape(kshape);
+        }
+        return result;
+    }
+
+    auto output_shape = compute_reduction_shape(
+        std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+        dim, keepdim
+    );
+
+    // Shape without the reduced dim (for indexing)
+    std::vector<int64_t> reduced_shape;
+    for (int64_t d = 0; d < ndim; ++d) {
+        if (d != dim) reduced_shape.push_back(input_shape[d]);
+    }
+
+    int64_t dim_size = input_shape[dim];
+    int64_t mid = (dim_size - 1) / 2; // lower median for even sizes
+
+    int64_t outer_size = 1;
+    for (auto s : reduced_shape) outer_size *= s;
+
+    Tensor values(output_shape, dtype, device);
+    Tensor indices(output_shape, DType::Int64, device);
+
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+
+    auto process = [&]<typename T>(T*) {
+        const T* in_data = input_cont.data<T>();
+        T* val_data = values.data<T>();
+        int64_t* idx_data = indices.data<int64_t>();
+
+        // Compute strides for the input
+        std::vector<int64_t> in_strides(ndim);
+        int64_t stride = 1;
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            in_strides[d] = stride;
+            stride *= input_shape[d];
+        }
+
+        #pragma omp parallel for if(outer_size > REDUCTION_OMP_THRESHOLD)
+        for (int64_t o = 0; o < outer_size; ++o) {
+            // Compute multi-dimensional index for output position
+            std::vector<int64_t> out_idx(ndim, 0);
+            int64_t tmp = o;
+            for (int64_t d = ndim - 1; d >= 0; --d) {
+                if (d == dim) continue;
+                out_idx[d] = tmp % input_shape[d];
+                tmp /= input_shape[d];
+            }
+
+            // Build array of (value, original_index) pairs along dim
+            std::vector<std::pair<T, int64_t>> elems(dim_size);
+            for (int64_t i = 0; i < dim_size; ++i) {
+                out_idx[dim] = i;
+                int64_t flat_idx = 0;
+                for (int64_t d = 0; d < ndim; ++d) {
+                    flat_idx += out_idx[d] * in_strides[d];
+                }
+                elems[i] = {in_data[flat_idx], i};
+            }
+
+            // nth_element for O(n) median
+            std::nth_element(elems.begin(), elems.begin() + mid, elems.end(),
+                [](const auto& a, const auto& b) { return a.first < b.first; });
+
+            val_data[o] = elems[mid].first;
+            idx_data[o] = elems[mid].second;
+        }
+    };
+
+    switch (dtype) {
+        case DType::Float32: process(static_cast<float*>(nullptr)); break;
+        case DType::Float64: process(static_cast<double*>(nullptr)); break;
+        case DType::Int32:   process(static_cast<int32_t*>(nullptr)); break;
+        case DType::Int64:   process(static_cast<int64_t*>(nullptr)); break;
+        default: throw std::runtime_error("median_kernel: unsupported dtype");
+    }
+
+    return {values, indices};
+}
+
+// ============================================================================
+// Mode kernel — sort then find longest run
+// ============================================================================
+
+auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim) -> std::vector<Tensor> {
+    const auto dtype = input.dtype();
+    const auto& device = input.device();
+    const auto& input_shape = input.shape();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    dim = normalize_dim(dim, ndim);
+
+    // For full reduction, flatten to 1D then reduce along dim 0
+    if (dim == REDUCE_ALL) {
+        Tensor flat = input.contiguous().reshape({input.numel()});
+        auto result = mode_kernel(flat, 0, false);
+        if (keepdim) {
+            std::vector<int64_t> kshape(ndim, 1);
+            result[0] = result[0].reshape(kshape);
+            result[1] = result[1].reshape(kshape);
+        }
+        return result;
+    }
+
+    auto output_shape = compute_reduction_shape(
+        std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+        dim, keepdim
+    );
+
+    std::vector<int64_t> reduced_shape;
+    for (int64_t d = 0; d < ndim; ++d) {
+        if (d != dim) reduced_shape.push_back(input_shape[d]);
+    }
+
+    int64_t dim_size = input_shape[dim];
+    int64_t outer_size = 1;
+    for (auto s : reduced_shape) outer_size *= s;
+
+    Tensor values(output_shape, dtype, device);
+    Tensor indices(output_shape, DType::Int64, device);
+
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+
+    auto process = [&]<typename T>(T*) {
+        const T* in_data = input_cont.data<T>();
+        T* val_data = values.data<T>();
+        int64_t* idx_data = indices.data<int64_t>();
+
+        std::vector<int64_t> in_strides(ndim);
+        int64_t stride = 1;
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            in_strides[d] = stride;
+            stride *= input_shape[d];
+        }
+
+        #pragma omp parallel for if(outer_size > REDUCTION_OMP_THRESHOLD)
+        for (int64_t o = 0; o < outer_size; ++o) {
+            std::vector<int64_t> out_idx(ndim, 0);
+            int64_t tmp = o;
+            for (int64_t d = ndim - 1; d >= 0; --d) {
+                if (d == dim) continue;
+                out_idx[d] = tmp % input_shape[d];
+                tmp /= input_shape[d];
+            }
+
+            // Collect (value, original_index) pairs along dim
+            std::vector<std::pair<T, int64_t>> elems(dim_size);
+            for (int64_t i = 0; i < dim_size; ++i) {
+                out_idx[dim] = i;
+                int64_t flat_idx = 0;
+                for (int64_t d = 0; d < ndim; ++d) {
+                    flat_idx += out_idx[d] * in_strides[d];
+                }
+                elems[i] = {in_data[flat_idx], i};
+            }
+
+            // Sort by value, then find longest run of equal values
+            std::sort(elems.begin(), elems.end(),
+                [](const auto& a, const auto& b) { return a.first < b.first; });
+
+            T best_val = elems[0].first;
+            int64_t best_idx = elems[0].second;
+            int64_t best_count = 1;
+            int64_t cur_count = 1;
+
+            for (int64_t i = 1; i < dim_size; ++i) {
+                if (elems[i].first == elems[i - 1].first) {
+                    cur_count++;
+                } else {
+                    cur_count = 1;
+                }
+                if (cur_count > best_count) {
+                    best_count = cur_count;
+                    best_val = elems[i].first;
+                    best_idx = elems[i].second;
+                }
+            }
+
+            val_data[o] = best_val;
+            idx_data[o] = best_idx;
+        }
+    };
+
+    switch (dtype) {
+        case DType::Float32: process(static_cast<float*>(nullptr)); break;
+        case DType::Float64: process(static_cast<double*>(nullptr)); break;
+        case DType::Int32:   process(static_cast<int32_t*>(nullptr)); break;
+        case DType::Int64:   process(static_cast<int64_t*>(nullptr)); break;
+        default: throw std::runtime_error("mode_kernel: unsupported dtype");
+    }
+
+    return {values, indices};
+}
+
 } // namespace cpu
 } // namespace tenzor

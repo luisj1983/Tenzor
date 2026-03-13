@@ -39,7 +39,6 @@ auto BackendLoader::shutdown() -> void {
     const std::vector<std::string> destruction_order = {
         "oneapi",       // Independent SYCL runtime
         "vulkan",       // Independent GPU API
-        "metal",        // Independent GPU API
         "webgpu",       // Independent GPU API
         "rocm",         // AMD runtime
         "cuda",         // NVIDIA runtime

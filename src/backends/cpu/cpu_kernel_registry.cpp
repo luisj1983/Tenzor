@@ -108,6 +108,8 @@ namespace cpu {
     auto any_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto all_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto has_inf_nan_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
+    auto median_kernel(const Tensor& input, int64_t dim, bool keepdim) -> std::vector<Tensor>;
+    auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim) -> std::vector<Tensor>;
 
     // Comparison
     auto eq_kernel(const Tensor& a, const Tensor& b) -> Tensor;
@@ -548,6 +550,18 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     TENZOR_REGISTER_REDUCTION_KERNEL(table, All, cpu::all_kernel);
     TENZOR_REGISTER_REDUCTION_KERNEL(table, HasInfNan, cpu::has_inf_nan_kernel);
     TENZOR_REGISTER_REDUCTION_KERNEL(table, LogSumExp, cpu::logsumexp_kernel);
+
+    table.register_kernel(OpId::Median, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        return cpu::median_kernel(inputs[0], dim, keepdim);
+    });
+
+    table.register_kernel(OpId::Mode, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        return cpu::mode_kernel(inputs[0], dim, keepdim);
+    });
 
     // Use INT64_MIN as sentinel for "reduce all dimensions" (no dim specified)
     table.register_single_output_kernel(OpId::Var, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {

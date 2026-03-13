@@ -1,0 +1,56 @@
+#version 450
+
+// Mode operation: finds the most frequent element in each sorted slice.
+// Input must be pre-sorted along the reduction dimension (contiguous, last dim).
+// Each workgroup thread handles one slice.
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer SortedData { float sorted_data[]; };
+layout(set = 0, binding = 1) writeonly buffer ModeValues { float mode_values[]; };
+layout(set = 0, binding = 2) writeonly buffer ModeIndices { int mode_indices[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint slice_size;     // size of dimension being reduced
+    uint num_slices;     // total number of slices
+};
+
+void main() {
+    uint slice_id = gl_GlobalInvocationID.x;
+    if (slice_id >= num_slices) return;
+
+    uint base = slice_id * slice_size;
+
+    // Linear scan through sorted slice to find longest run
+    float best_val = sorted_data[base];
+    int best_count = 1;
+    int best_idx = 0;
+
+    float cur_val = sorted_data[base];
+    int cur_count = 1;
+    int cur_start = 0;
+
+    for (uint i = 1; i < slice_size; ++i) {
+        float v = sorted_data[base + i];
+        if (v == cur_val) {
+            cur_count++;
+        } else {
+            if (cur_count > best_count) {
+                best_count = cur_count;
+                best_val = cur_val;
+                best_idx = cur_start;
+            }
+            cur_val = v;
+            cur_count = 1;
+            cur_start = int(i);
+        }
+    }
+    // Check final run
+    if (cur_count > best_count) {
+        best_val = cur_val;
+        best_idx = cur_start;
+    }
+
+    mode_values[slice_id] = best_val;
+    mode_indices[slice_id] = best_idx;
+}

@@ -182,6 +182,8 @@ namespace rocm {
     auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, bool unbiased, hipStream_t stream) -> Tensor;
     auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, bool unbiased, hipStream_t stream) -> Tensor;
     auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor;
+    auto median_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> std::vector<Tensor>;
+    auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> std::vector<Tensor>;
 
     // Activation functions
     auto relu_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
@@ -900,6 +902,18 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
         bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return std::vector<Tensor>{rocm::logsumexp_kernel(inputs[0], dim, keepdim, get_hip_stream(attrs))};
+    });
+
+    table.register_kernel(OpId::Median, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        return rocm::median_kernel(inputs[0], dim, keepdim, get_hip_stream(attrs));
+    });
+
+    table.register_kernel(OpId::Mode, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        return rocm::mode_kernel(inputs[0], dim, keepdim, get_hip_stream(attrs));
     });
 
     table.register_kernel(OpId::Var, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {

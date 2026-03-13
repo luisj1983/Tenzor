@@ -790,6 +790,11 @@ static const std::unordered_map<std::string, VkDispatchHandler>& get_dispatch_ta
             int64_t iou_type = attrs.get_int(AttrKey::IouType, 0);
             return std::vector<Tensor>{b->dispatchBoxIoU(inputs[0], inputs[1], iou_type)};
         }},
+        {"nms", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() < 2) throw std::invalid_argument("nms requires 2 inputs (boxes, scores)");
+            float iou_threshold = static_cast<float>(attrs.get_float(AttrKey::IouThreshold, 0.5));
+            return std::vector<Tensor>{b->dispatchNMS(inputs[0], inputs[1], iou_threshold)};
+        }},
     };
     return table;
 }

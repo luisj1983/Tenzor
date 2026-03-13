@@ -857,5 +857,370 @@ auto unique_kernel(const Tensor& input, bool sorted_output, bool return_inverse,
     }
 }
 
+// ============================================================================
+// Median kernel — sort each slice, pick middle element
+// ============================================================================
+
+template<typename T>
+__global__ void extract_median_kernel(const T* __restrict__ sorted_vals,
+                                      const int64_t* __restrict__ sorted_idx,
+                                      T* __restrict__ out_vals,
+                                      int64_t* __restrict__ out_idx,
+                                      int64_t dim_size, int64_t inner_size,
+                                      int64_t mid, int64_t outer, int64_t inner)
+{
+    // Single-thread kernel — only element 0 does the work
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        int64_t out_offset = outer * inner_size + inner;
+        out_vals[out_offset] = sorted_vals[mid];
+        out_idx[out_offset] = sorted_idx[mid];
+    }
+}
+
+auto median_kernel(const Tensor& input, int64_t dim, bool keepdim,
+                   cudaStream_t stream) -> std::vector<Tensor>
+{
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    const auto& shape = input_cont.shape();
+    const int64_t ndim = static_cast<int64_t>(shape.size());
+    const auto dtype = input.dtype();
+    const auto device = input.device();
+
+    // Normalize dim
+    int64_t normalized_dim = dim;
+    if (dim == INT64_MIN) {
+        // Full reduction — flatten and reduce along dim 0
+        Tensor flat = input_cont.reshape({input.numel()});
+        auto result = median_kernel(flat, 0, false, stream);
+        if (keepdim) {
+            std::vector<int64_t> kshape(ndim, 1);
+            result[0] = result[0].reshape(kshape);
+            result[1] = result[1].reshape(kshape);
+        }
+        return result;
+    }
+    if (normalized_dim < 0) normalized_dim += ndim;
+
+    const int64_t dim_size = shape[normalized_dim];
+    const int64_t mid = (dim_size - 1) / 2;  // lower median for even sizes
+
+    // Compute output shape
+    std::vector<int64_t> output_shape(shape.begin(), shape.end());
+    if (keepdim) {
+        output_shape[normalized_dim] = 1;
+    } else {
+        output_shape.erase(output_shape.begin() + normalized_dim);
+    }
+
+    Tensor values(output_shape, dtype, device);
+    Tensor indices(output_shape, DType::Int64, device);
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < normalized_dim; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
+    for (int64_t i = normalized_dim + 1; i < ndim; ++i) inner_size *= shape[i];
+
+    auto launch = [&]<typename U>() {
+        backend::CachedMemoryGuard slice_guard(dim_size * sizeof(U));
+        U* d_slice = static_cast<U*>(slice_guard.get());
+        backend::CachedMemoryGuard idx_guard(dim_size * sizeof(int64_t));
+        int64_t* d_idx = static_cast<int64_t*>(idx_guard.get());
+
+        int block = 256;
+        int grid = std::min(int((dim_size + block - 1) / block), 1024);
+
+        for (int64_t outer = 0; outer < outer_size; ++outer) {
+            for (int64_t inner = 0; inner < inner_size; ++inner) {
+                // Extract slice along dim
+                extract_slice_kernel<U><<<grid, block, 0, stream>>>(
+                    input_cont.data<U>(), d_slice, dim_size, inner_size, outer, inner);
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+                // Sort the slice
+                sort_1d_thrust<U>(d_slice, d_slice, d_idx, dim_size, false, stream);
+
+                // Extract the median element
+                extract_median_kernel<U><<<1, 1, 0, stream>>>(
+                    d_slice, d_idx,
+                    values.data<U>(), indices.data<int64_t>(),
+                    dim_size, inner_size, mid, outer, inner);
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
+            }
+        }
+    };
+
+    // Half types: upcast to float, sort, then gather original values
+    auto launch_half = [&]<typename HalfT>() {
+        int64_t slice_numel = dim_size;
+        int cvt_block = 256;
+        int cvt_grid = (slice_numel + cvt_block - 1) / cvt_block;
+
+        backend::CachedMemoryGuard half_slice_guard(dim_size * sizeof(HalfT));
+        HalfT* d_half_slice = static_cast<HalfT*>(half_slice_guard.get());
+        backend::CachedMemoryGuard f32_slice_guard(dim_size * sizeof(float));
+        float* d_f32_slice = static_cast<float*>(f32_slice_guard.get());
+        backend::CachedMemoryGuard idx_guard(dim_size * sizeof(int64_t));
+        int64_t* d_idx = static_cast<int64_t*>(idx_guard.get());
+
+        int block = 256;
+        int grid = std::min(int((dim_size + block - 1) / block), 1024);
+
+        for (int64_t outer = 0; outer < outer_size; ++outer) {
+            for (int64_t inner = 0; inner < inner_size; ++inner) {
+                // Extract half slice
+                extract_slice_kernel<HalfT><<<grid, block, 0, stream>>>(
+                    reinterpret_cast<const HalfT*>(input_cont.data_ptr()),
+                    d_half_slice, dim_size, inner_size, outer, inner);
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+                // Convert to float
+                half_to_float_kernel<HalfT><<<cvt_grid, cvt_block, 0, stream>>>(
+                    d_half_slice, d_f32_slice, dim_size);
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+                // Sort float copy
+                sort_1d_thrust<float>(d_f32_slice, d_f32_slice, d_idx, dim_size, false, stream);
+
+                // Extract median index from sorted indices
+                // Copy the median index back to host to gather the original half value
+                int64_t out_offset = outer * inner_size + inner;
+                indices.data<int64_t>()[out_offset] = 0;  // placeholder
+
+                // Use a device kernel to write the result
+                // d_f32_slice[mid] has the sorted float value, d_idx[mid] has original index
+                // We need to write the original half value, so gather from half slice
+                // But half slice was extracted before sort — d_idx[mid] is the original position
+                // in the slice, so we need the original half values
+                // Actually d_half_slice was not sorted, but we overwrote d_f32_slice.
+                // Re-extract the half slice to get unsorted original values
+                extract_slice_kernel<HalfT><<<grid, block, 0, stream>>>(
+                    reinterpret_cast<const HalfT*>(input_cont.data_ptr()),
+                    d_half_slice, dim_size, inner_size, outer, inner);
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+                // Now use a simple kernel to write value and index
+                // We need d_idx[mid] and d_half_slice[d_idx[mid]]
+                // Use extract_median_kernel with the float sorted indices
+                extract_median_kernel<int64_t><<<1, 1, 0, stream>>>(
+                    d_idx, d_idx,  // dummy — we just need d_idx[mid]
+                    indices.data<int64_t>(), indices.data<int64_t>(),
+                    dim_size, inner_size, mid, outer, inner);
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+                // For the value, we need to gather from the original half data
+                // Use a gather kernel: out[offset] = half_slice[sorted_idx[mid]]
+                // Simpler: just write f32 median and convert back
+                float_to_half_kernel<HalfT><<<1, 1, 0, stream>>>(
+                    d_f32_slice + mid,
+                    reinterpret_cast<HalfT*>(values.data_ptr()) + out_offset,
+                    1);
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
+            }
+        }
+    };
+
+    switch (dtype) {
+        case DType::Float32:  launch.template operator()<float>(); break;
+        case DType::Float64:  launch.template operator()<double>(); break;
+        case DType::Int32:    launch.template operator()<int32_t>(); break;
+        case DType::Int64:    launch.template operator()<int64_t>(); break;
+        case DType::Float16:  launch_half.template operator()<__half>(); break;
+        case DType::BFloat16: launch_half.template operator()<__nv_bfloat16>(); break;
+        default: throw std::runtime_error("median CUDA: unsupported dtype");
+    }
+
+    return {values, indices};
+}
+
+// ============================================================================
+// Mode kernel — sort each slice, find longest run of consecutive equal values
+// ============================================================================
+
+template<typename T>
+__global__ void find_mode_kernel(const T* __restrict__ sorted_vals,
+                                 const int64_t* __restrict__ sorted_idx,
+                                 T* __restrict__ out_vals,
+                                 int64_t* __restrict__ out_idx,
+                                 int64_t dim_size, int64_t inner_size,
+                                 int64_t outer, int64_t inner)
+{
+    // Single-thread kernel for simplicity — one slice at a time
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        T best_val = sorted_vals[0];
+        int64_t best_idx = sorted_idx[0];
+        int64_t best_count = 1;
+        int64_t cur_count = 1;
+
+        for (int64_t i = 1; i < dim_size; ++i) {
+            if (sorted_vals[i] == sorted_vals[i - 1]) {
+                cur_count++;
+            } else {
+                cur_count = 1;
+            }
+            if (cur_count > best_count) {
+                best_count = cur_count;
+                best_val = sorted_vals[i];
+                best_idx = sorted_idx[i];
+            }
+        }
+
+        int64_t out_offset = outer * inner_size + inner;
+        out_vals[out_offset] = best_val;
+        out_idx[out_offset] = best_idx;
+    }
+}
+
+auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim,
+                 cudaStream_t stream) -> std::vector<Tensor>
+{
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    const auto& shape = input_cont.shape();
+    const int64_t ndim = static_cast<int64_t>(shape.size());
+    const auto dtype = input.dtype();
+    const auto device = input.device();
+
+    // Normalize dim
+    int64_t normalized_dim = dim;
+    if (dim == INT64_MIN) {
+        Tensor flat = input_cont.reshape({input.numel()});
+        auto result = mode_kernel(flat, 0, false, stream);
+        if (keepdim) {
+            std::vector<int64_t> kshape(ndim, 1);
+            result[0] = result[0].reshape(kshape);
+            result[1] = result[1].reshape(kshape);
+        }
+        return result;
+    }
+    if (normalized_dim < 0) normalized_dim += ndim;
+
+    const int64_t dim_size = shape[normalized_dim];
+
+    // Compute output shape
+    std::vector<int64_t> output_shape(shape.begin(), shape.end());
+    if (keepdim) {
+        output_shape[normalized_dim] = 1;
+    } else {
+        output_shape.erase(output_shape.begin() + normalized_dim);
+    }
+
+    Tensor values(output_shape, dtype, device);
+    Tensor indices(output_shape, DType::Int64, device);
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < normalized_dim; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
+    for (int64_t i = normalized_dim + 1; i < ndim; ++i) inner_size *= shape[i];
+
+    auto launch = [&]<typename U>() {
+        backend::CachedMemoryGuard slice_guard(dim_size * sizeof(U));
+        U* d_slice = static_cast<U*>(slice_guard.get());
+        backend::CachedMemoryGuard idx_guard(dim_size * sizeof(int64_t));
+        int64_t* d_idx = static_cast<int64_t*>(idx_guard.get());
+
+        int block = 256;
+        int grid = std::min(int((dim_size + block - 1) / block), 1024);
+
+        for (int64_t outer = 0; outer < outer_size; ++outer) {
+            for (int64_t inner = 0; inner < inner_size; ++inner) {
+                extract_slice_kernel<U><<<grid, block, 0, stream>>>(
+                    input_cont.data<U>(), d_slice, dim_size, inner_size, outer, inner);
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+                sort_1d_thrust<U>(d_slice, d_slice, d_idx, dim_size, false, stream);
+
+                find_mode_kernel<U><<<1, 1, 0, stream>>>(
+                    d_slice, d_idx,
+                    values.data<U>(), indices.data<int64_t>(),
+                    dim_size, inner_size, outer, inner);
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
+            }
+        }
+    };
+
+    auto launch_half = [&]<typename HalfT>() {
+        int cvt_block = 256;
+        int cvt_grid = (dim_size + cvt_block - 1) / cvt_block;
+
+        backend::CachedMemoryGuard half_slice_guard(dim_size * sizeof(HalfT));
+        HalfT* d_half_slice = static_cast<HalfT*>(half_slice_guard.get());
+        backend::CachedMemoryGuard f32_slice_guard(dim_size * sizeof(float));
+        float* d_f32_slice = static_cast<float*>(f32_slice_guard.get());
+        backend::CachedMemoryGuard idx_guard(dim_size * sizeof(int64_t));
+        int64_t* d_idx = static_cast<int64_t*>(idx_guard.get());
+
+        int block = 256;
+        int grid = std::min(int((dim_size + block - 1) / block), 1024);
+
+        for (int64_t outer = 0; outer < outer_size; ++outer) {
+            for (int64_t inner = 0; inner < inner_size; ++inner) {
+                // Extract half slice
+                extract_slice_kernel<HalfT><<<grid, block, 0, stream>>>(
+                    reinterpret_cast<const HalfT*>(input_cont.data_ptr()),
+                    d_half_slice, dim_size, inner_size, outer, inner);
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+                // Convert to float for sorting
+                half_to_float_kernel<HalfT><<<cvt_grid, cvt_block, 0, stream>>>(
+                    d_half_slice, d_f32_slice, dim_size);
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+                // Sort float copy (indices track original positions)
+                sort_1d_thrust<float>(d_f32_slice, d_f32_slice, d_idx, dim_size, false, stream);
+
+                // Find mode from sorted float values
+                // We need to write the original half value, not the float approximation
+                // find_mode_kernel gives us the index into the original slice
+                // So we use float for comparison but write original half value via index
+
+                // First find mode index using float sorted data
+                // We'll store the mode index, then gather from original half slice
+                // Use a temporary single-element buffer for the mode's original index
+                backend::CachedMemoryGuard mode_val_guard(sizeof(float));
+                float* d_mode_val = static_cast<float*>(mode_val_guard.get());
+                backend::CachedMemoryGuard mode_idx_guard(sizeof(int64_t));
+                int64_t* d_mode_idx = static_cast<int64_t*>(mode_idx_guard.get());
+
+                // find_mode writes to out_vals/out_idx at [outer*inner_size+inner]
+                // We can write directly to the output tensors
+                // But output tensors are half type and find_mode_kernel uses T=float...
+                // Instead, use a float temp and convert
+
+                // Use find_mode on float slice, writing to temp buffers
+                find_mode_kernel<float><<<1, 1, 0, stream>>>(
+                    d_f32_slice, d_idx, d_mode_val, d_mode_idx,
+                    dim_size, 1, 0, 0);
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+                // Write mode index to output indices
+                int64_t out_offset = outer * inner_size + inner;
+                cudaMemcpyAsync(
+                    indices.data<int64_t>() + out_offset,
+                    d_mode_idx, sizeof(int64_t),
+                    cudaMemcpyDeviceToDevice, stream);
+
+                // Gather the original half value using the mode index
+                // d_half_slice[d_mode_idx[0]] -> out_vals[out_offset]
+                gather_by_indices_kernel<HalfT><<<1, 1, 0, stream>>>(
+                    d_half_slice, d_mode_idx,
+                    reinterpret_cast<HalfT*>(values.data_ptr()) + out_offset,
+                    1);
+                TENZOR_CUDA_POST_LAUNCH_CHECK();
+            }
+        }
+    };
+
+    switch (dtype) {
+        case DType::Float32:  launch.template operator()<float>(); break;
+        case DType::Float64:  launch.template operator()<double>(); break;
+        case DType::Int32:    launch.template operator()<int32_t>(); break;
+        case DType::Int64:    launch.template operator()<int64_t>(); break;
+        case DType::Float16:  launch_half.template operator()<__half>(); break;
+        case DType::BFloat16: launch_half.template operator()<__nv_bfloat16>(); break;
+        default: throw std::runtime_error("mode CUDA: unsupported dtype");
+    }
+
+    return {values, indices};
+}
+
 } // namespace cuda
 } // namespace tenzor

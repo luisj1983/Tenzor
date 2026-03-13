@@ -455,6 +455,7 @@ void VulkanBackend::createLogicalDevices() {
         // Store capability flags for later use
         ctx.canPreserveDenormsF32 = canPreserveDenormsF32;
         ctx.hasAtomicInt64 = hasAtomicInt64;
+        ctx.hasAtomicFloat = hasAtomicFloat;
 
         // Query subgroup properties for subgroup arithmetic support
         {

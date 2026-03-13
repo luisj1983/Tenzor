@@ -105,6 +105,10 @@ struct alignas(64) BackendDispatchTable {
     /// Inplace kernel array for operations that modify tensors in-place
     std::array<InplaceKernelFn, OP_COUNT> inplace_kernels{};
 
+    static_assert(std::tuple_size_v<decltype(kernels)> == std::tuple_size_v<decltype(single_output_kernels)> &&
+                  std::tuple_size_v<decltype(kernels)> == std::tuple_size_v<decltype(inplace_kernels)>,
+                  "kernel arrays must be same size");
+
     /// Device type this table serves
     Device::Type device_type{Device::Type::CPU};
 

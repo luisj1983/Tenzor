@@ -2477,5 +2477,254 @@ auto logsumexp_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queu
     return output;
 }
 
+// ============================================================================
+// Median kernel — sort-based per-slice reduction
+// ============================================================================
+
+auto median_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue)
+    -> std::vector<Tensor>
+{
+    const auto dtype = input.dtype();
+    const auto& device = input.device();
+    const auto& input_shape = input.shape();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    if (input.numel() == 0) {
+        throw std::runtime_error("median: cannot compute median of empty tensor");
+    }
+
+    // Handle full reduction
+    int64_t normalized_dim = dim;
+    if (normalized_dim == INT64_MIN) {
+        Tensor flat = input.contiguous().reshape({input.numel()});
+        auto result = median_kernel(flat, 0, false, queue);
+        if (keepdim) {
+            std::vector<int64_t> kshape(ndim, 1);
+            result[0] = result[0].reshape(kshape);
+            result[1] = result[1].reshape(kshape);
+        }
+        return result;
+    }
+
+    if (normalized_dim < 0) normalized_dim += ndim;
+
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+
+    std::vector<int64_t> shape_vec(input_shape.begin(), input_shape.end());
+    auto output_shape = compute_reduction_shape(shape_vec, normalized_dim, keepdim);
+
+    int64_t dim_size = input_shape[normalized_dim];
+    int64_t mid = (dim_size - 1) / 2;
+
+    int64_t outer_size = 1;
+    for (int64_t d = 0; d < ndim; ++d) {
+        if (d != normalized_dim) outer_size *= input_shape[d];
+    }
+
+    // Compute strides
+    std::vector<int64_t> in_strides(ndim);
+    {
+        int64_t stride = 1;
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            in_strides[d] = stride;
+            stride *= input_shape[d];
+        }
+    }
+
+    Tensor values(output_shape, dtype, device);
+    Tensor indices(output_shape, DType::Int64, device);
+
+    // Handle FP16/BF16 by converting to FP32
+    if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result = median_kernel(input_f32, dim, keepdim, queue);
+        result[0] = result[0].to(dtype);
+        return result;
+    }
+
+    auto process = [&](auto* type_ptr) {
+        using T = std::remove_pointer_t<decltype(type_ptr)>;
+        const T* in_ptr = in_cont.data<T>();
+        T* val_ptr = values.data<T>();
+        int64_t* idx_ptr = indices.data<int64_t>();
+
+        // Copy strides and shape to device
+        auto* d_strides = sycl::malloc_device<int64_t>(ndim, queue);
+        auto* d_shape = sycl::malloc_device<int64_t>(ndim, queue);
+        queue.memcpy(d_strides, in_strides.data(), ndim * sizeof(int64_t));
+        queue.memcpy(d_shape, shape_vec.data(), ndim * sizeof(int64_t));
+        queue.wait();
+
+        queue.parallel_for(sycl::range<1>(outer_size), [=](sycl::id<1> id) {
+            int64_t o = id[0];
+
+            // Compute base offset for this slice
+            int64_t tmp = o;
+            int64_t base_offset = 0;
+            for (int64_t d = ndim - 1; d >= 0; --d) {
+                if (d == normalized_dim) continue;
+                int64_t coord = tmp % d_shape[d];
+                tmp /= d_shape[d];
+                base_offset += coord * d_strides[d];
+            }
+
+            // Selection-based median: count rank of each element
+            for (int64_t i = 0; i < dim_size; ++i) {
+                T val_i = in_ptr[base_offset + i * d_strides[normalized_dim]];
+                int64_t rank = 0;
+                for (int64_t j = 0; j < dim_size; ++j) {
+                    T val_j = in_ptr[base_offset + j * d_strides[normalized_dim]];
+                    if (val_j < val_i || (val_j == val_i && j < i)) {
+                        rank++;
+                    }
+                }
+                if (rank == mid) {
+                    val_ptr[o] = val_i;
+                    idx_ptr[o] = i;
+                    break;
+                }
+            }
+        });
+        queue.wait();
+
+        sycl::free(d_strides, queue);
+        sycl::free(d_shape, queue);
+    };
+
+    switch (dtype) {
+        case DType::Float32: process(static_cast<float*>(nullptr)); break;
+        case DType::Float64: process(static_cast<double*>(nullptr)); break;
+        case DType::Int32:   process(static_cast<int32_t*>(nullptr)); break;
+        case DType::Int64:   process(static_cast<int64_t*>(nullptr)); break;
+        default: throw std::runtime_error("median_kernel: unsupported dtype");
+    }
+
+    return {values, indices};
+}
+
+// ============================================================================
+// Mode kernel — count-based per-slice reduction
+// ============================================================================
+
+auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue)
+    -> std::vector<Tensor>
+{
+    const auto dtype = input.dtype();
+    const auto& device = input.device();
+    const auto& input_shape = input.shape();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    if (input.numel() == 0) {
+        throw std::runtime_error("mode: cannot compute mode of empty tensor");
+    }
+
+    int64_t normalized_dim = dim;
+    if (normalized_dim == INT64_MIN) {
+        Tensor flat = input.contiguous().reshape({input.numel()});
+        auto result = mode_kernel(flat, 0, false, queue);
+        if (keepdim) {
+            std::vector<int64_t> kshape(ndim, 1);
+            result[0] = result[0].reshape(kshape);
+            result[1] = result[1].reshape(kshape);
+        }
+        return result;
+    }
+
+    if (normalized_dim < 0) normalized_dim += ndim;
+
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+
+    std::vector<int64_t> shape_vec(input_shape.begin(), input_shape.end());
+    auto output_shape = compute_reduction_shape(shape_vec, normalized_dim, keepdim);
+
+    int64_t dim_size = input_shape[normalized_dim];
+    int64_t outer_size = 1;
+    for (int64_t d = 0; d < ndim; ++d) {
+        if (d != normalized_dim) outer_size *= input_shape[d];
+    }
+
+    std::vector<int64_t> in_strides(ndim);
+    {
+        int64_t stride = 1;
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            in_strides[d] = stride;
+            stride *= input_shape[d];
+        }
+    }
+
+    Tensor values(output_shape, dtype, device);
+    Tensor indices(output_shape, DType::Int64, device);
+
+    if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result = mode_kernel(input_f32, dim, keepdim, queue);
+        result[0] = result[0].to(dtype);
+        return result;
+    }
+
+    auto process = [&](auto* type_ptr) {
+        using T = std::remove_pointer_t<decltype(type_ptr)>;
+        const T* in_ptr = in_cont.data<T>();
+        T* val_ptr = values.data<T>();
+        int64_t* idx_ptr = indices.data<int64_t>();
+
+        auto* d_strides = sycl::malloc_device<int64_t>(ndim, queue);
+        auto* d_shape = sycl::malloc_device<int64_t>(ndim, queue);
+        queue.memcpy(d_strides, in_strides.data(), ndim * sizeof(int64_t));
+        queue.memcpy(d_shape, shape_vec.data(), ndim * sizeof(int64_t));
+        queue.wait();
+
+        queue.parallel_for(sycl::range<1>(outer_size), [=](sycl::id<1> id) {
+            int64_t o = id[0];
+
+            int64_t tmp = o;
+            int64_t base_offset = 0;
+            for (int64_t d = ndim - 1; d >= 0; --d) {
+                if (d == normalized_dim) continue;
+                int64_t coord = tmp % d_shape[d];
+                tmp /= d_shape[d];
+                base_offset += coord * d_strides[d];
+            }
+
+            // For each element, count how many times its value appears
+            T best_val = in_ptr[base_offset];
+            int64_t best_idx = 0;
+            int64_t best_count = 0;
+
+            for (int64_t i = 0; i < dim_size; ++i) {
+                T val_i = in_ptr[base_offset + i * d_strides[normalized_dim]];
+                int64_t count = 0;
+                for (int64_t j = 0; j < dim_size; ++j) {
+                    if (in_ptr[base_offset + j * d_strides[normalized_dim]] == val_i) {
+                        count++;
+                    }
+                }
+                if (count > best_count || (count == best_count && i < best_idx)) {
+                    best_count = count;
+                    best_val = val_i;
+                    best_idx = i;
+                }
+            }
+
+            val_ptr[o] = best_val;
+            idx_ptr[o] = best_idx;
+        });
+        queue.wait();
+
+        sycl::free(d_strides, queue);
+        sycl::free(d_shape, queue);
+    };
+
+    switch (dtype) {
+        case DType::Float32: process(static_cast<float*>(nullptr)); break;
+        case DType::Float64: process(static_cast<double*>(nullptr)); break;
+        case DType::Int32:   process(static_cast<int32_t*>(nullptr)); break;
+        case DType::Int64:   process(static_cast<int64_t*>(nullptr)); break;
+        default: throw std::runtime_error("mode_kernel: unsupported dtype");
+    }
+
+    return {values, indices};
+}
+
 } // namespace oneapi
 } // namespace tenzor
