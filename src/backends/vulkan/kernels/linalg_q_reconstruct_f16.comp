@@ -1,0 +1,108 @@
+#version 450
+
+// Reconstruct Q from Householder reflectors stored in QR factorization result — Float16 variant
+// Float16 elements packed 2 per 32-bit word, all computation in float32.
+// QR data: lower triangle holds Householder vectors, upper triangle holds R.
+// Tau: Householder coefficients (one per reflector).
+// Output: orthogonal Q matrix (m x m).
+// Single invocation per batch element (sequential Householder application).
+
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0) buffer QRBuf  { uint qr_data[]; };
+layout(set = 0, binding = 1) buffer TauBuf { uint tau_buf[];  };
+layout(set = 0, binding = 2) buffer QBuf   { uint q_data[];   };
+
+layout(push_constant) uniform PushConstants {
+    uint m;           // rows of original matrix
+    uint n;           // cols of original matrix
+    uint k;           // min(m, n) = number of reflectors
+    uint ldq;         // leading dimension of Q (= m)
+    uint batch_size;  // number of matrices in batch
+};
+
+// Read Float16 from QR buffer
+float readF16QR(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = qr_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+// Read Float16 from tau buffer
+float readF16Tau(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = tau_buf[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+// Read Float16 from Q buffer
+float readF16Q(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = q_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+// Write Float16 to Q buffer
+void writeF16Q(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = q_data[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0; iter < 1024; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(q_data[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    q_data[word_idx] = new_val;
+}
+
+void main() {
+    uint batch_idx = gl_GlobalInvocationID.x;
+    if (batch_idx >= batch_size) return;
+
+    uint qr_off = batch_idx * m * n;
+    uint tau_off = batch_idx * n;
+    uint q_off = batch_idx * m * ldq;
+
+    // Initialize Q = I(m x m)
+    for (uint i = 0; i < m; i++) {
+        for (uint j = 0; j < m; j++) {
+            writeF16Q(q_off + i * ldq + j, (i == j) ? 1.0 : 0.0);
+        }
+    }
+
+    // Apply reflectors in reverse: Q = H_0 * H_1 * ... * H_{k-1}
+    // where H_i = I - tau[i] * v_i * v_i^T
+    for (int ki = int(k) - 1; ki >= 0; ki--) {
+        uint kk = uint(ki);
+        float t = readF16Tau(tau_off + kk);
+        if (t == 0.0) continue;
+
+        // Householder vector v: v[0..kk-1] = 0, v[kk] = 1, v[kk+1..m-1] = qr[kk+1..m-1, kk]
+        // Apply: Q = (I - t * v * v^T) * Q
+        for (uint j = 0; j < m; j++) {
+            float dot = readF16Q(q_off + kk * ldq + j);  // v[kk] = 1
+            for (uint i = kk + 1; i < m; i++) {
+                dot += readF16QR(qr_off + i * n + kk) * readF16Q(q_off + i * ldq + j);
+            }
+            dot *= t;
+            writeF16Q(q_off + kk * ldq + j, readF16Q(q_off + kk * ldq + j) - dot);  // v[kk] = 1
+            for (uint i = kk + 1; i < m; i++) {
+                float qr_val = readF16QR(qr_off + i * n + kk);
+                float q_val = readF16Q(q_off + i * ldq + j);
+                writeF16Q(q_off + i * ldq + j, q_val - dot * qr_val);
+            }
+        }
+    }
+}

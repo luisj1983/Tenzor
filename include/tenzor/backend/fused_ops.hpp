@@ -2,6 +2,7 @@
 
 #include "tenzor/core/tensor.hpp"
 #include <tuple>
+#include <utility>
 #include <vector>
 
 // Forward declare CUDA stream type to avoid including CUDA headers
@@ -112,14 +113,41 @@ auto fused_rms_norm_backward_cuda(
  * @param K Key tensor (batch_heads, seq_len_k, head_dim)
  * @param V Value tensor (batch_heads, seq_len_k, head_dim)
  * @param scale Scaling factor (typically 1/sqrt(head_dim))
- * @return Output tensor (batch_heads, seq_len_q, head_dim)
+ * @return {output, logsumexp} — output (batch_heads, seq_len_q, head_dim), logsumexp (batch_heads, seq_len_q)
  */
 auto fused_attention_cuda(
     const Tensor& Q,
     const Tensor& K,
     const Tensor& V,
     float scale
-) -> Tensor;
+) -> std::pair<Tensor, Tensor>;
+
+/**
+ * @brief Fused Flash Attention backward pass (tiled, memory-efficient)
+ *
+ * Recomputes attention in tiles using saved logsumexp, avoiding O(N^2) memory.
+ * Falls back to composed-ops for unsupported head dimensions.
+ *
+ * @param dO Gradient of output (batch_heads, seq_len, head_dim)
+ * @param Q Query tensor (batch_heads, seq_len, head_dim)
+ * @param K Key tensor (batch_heads, seq_len, head_dim)
+ * @param V Value tensor (batch_heads, seq_len, head_dim)
+ * @param O Forward output (batch_heads, seq_len, head_dim)
+ * @param L Row-wise logsumexp from forward (batch_heads, seq_len)
+ * @param scale Scaling factor (typically 1/sqrt(head_dim))
+ * @param causal Whether to apply causal masking
+ * @return {dQ, dK, dV}
+ */
+auto flash_attention_backward_cuda(
+    const Tensor& dO,
+    const Tensor& Q,
+    const Tensor& K,
+    const Tensor& V,
+    const Tensor& O,
+    const Tensor& L,
+    float scale,
+    bool causal
+) -> std::vector<Tensor>;
 
 /**
  * @brief cuDNN SDPA (Scaled Dot-Product Attention) with Flash Attention

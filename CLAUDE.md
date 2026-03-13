@@ -85,9 +85,11 @@ TENZOR_REGISTER_BINARY_KERNEL(table, MatMul, cpu::matmul_kernel);
 ### Sparse Dispatch
 
 Sparse tensor operations (OpIds 460-464: SparseSpMM, SparseSpMV, SparseToDense, DenseToSparse,
-SparseAdd) use a **separate dispatch path** through `SparseTensor` in `src/sparse/sparse_ops.cpp`.
-They call MKL SpMV/SpMM on CPU and cuSPARSE/rocSPARSE on GPU directly, bypassing the `OpId`
-dispatch table. The OpIds are reserved for potential future unification of sparse and dense dispatch.
+SparseAdd) are registered in all backend dispatch tables (CPU, CUDA, ROCm, OneAPI). The wrapper
+kernels reconstruct a `SparseTensor` from CSR components (crow_indices, col_indices, values) passed
+as plain Tensors, then delegate to `sparse::spmm()` / `sparse::spmv()` / `sparse::add()` in
+`src/sparse/sparse_ops.cpp`. Those functions internally select MKL, cuSPARSE, rocSPARSE, or oneMKL
+based on device type. Vulkan sparse ops use native Vulkan dispatch (registered separately).
 
 ### Autograd Pattern
 

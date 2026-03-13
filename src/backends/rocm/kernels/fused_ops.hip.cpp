@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <cmath>
 #include <tuple>
+#include <vector>
 
 namespace tenzor {
 namespace rocm {
@@ -918,19 +919,426 @@ __global__ void fused_attention_kernel(
     }
 }
 
+/**
+ * @brief Compute row-wise logsumexp of attention scores for backward pass
+ *
+ * LSE_i = log(sum_j exp(Q_i @ K_j^T * scale - max_j)) + max_j
+ * Grid: (batch_size, seq_len), Block: (BLOCK_SIZE)
+ */
+template<typename T, int BLOCK_SIZE>
+__global__ void compute_attention_lse_kernel(
+    const T* __restrict__ Q,
+    const T* __restrict__ K,
+    T* __restrict__ lse_out,
+    int64_t batch_size,
+    int64_t seq_len,
+    int64_t d_k,
+    T scale
+) {
+    int64_t batch = blockIdx.x;
+    int64_t row = blockIdx.y;
+    if (batch >= batch_size || row >= seq_len) return;
+
+    extern __shared__ char shared_bytes[];
+    T* shared_reduce = reinterpret_cast<T*>(shared_bytes);
+
+    const T* q_row = Q + (batch * seq_len + row) * d_k;
+    const T* k_base = K + batch * seq_len * d_k;
+
+    // Find max score
+    T thread_max = -INFINITY;
+    for (int64_t col = threadIdx.x; col < seq_len; col += blockDim.x) {
+        const T* k_row = k_base + col * d_k;
+        T score = 0;
+        for (int64_t i = 0; i < d_k; ++i) {
+            score += q_row[i] * k_row[i];
+        }
+        score *= scale;
+        thread_max = fmaxf(thread_max, score);
+    }
+
+    shared_reduce[threadIdx.x] = thread_max;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) {
+            shared_reduce[threadIdx.x] = fmaxf(shared_reduce[threadIdx.x],
+                                                 shared_reduce[threadIdx.x + s]);
+        }
+        __syncthreads();
+    }
+    T max_val = shared_reduce[0];
+
+    // Compute sum of exp(score - max)
+    T thread_sum = 0;
+    for (int64_t col = threadIdx.x; col < seq_len; col += blockDim.x) {
+        const T* k_row = k_base + col * d_k;
+        T score = 0;
+        for (int64_t i = 0; i < d_k; ++i) {
+            score += q_row[i] * k_row[i];
+        }
+        score *= scale;
+        thread_sum += expf(score - max_val);
+    }
+
+    shared_reduce[threadIdx.x] = thread_sum;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) {
+            shared_reduce[threadIdx.x] += shared_reduce[threadIdx.x + s];
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+        lse_out[batch * seq_len + row] = max_val + logf(fmaxf(shared_reduce[0], 1e-10f));
+    }
+}
+
+// ==============================================================================
+// Flash Attention Backward HIP Kernel (Tiled, Memory-Efficient)
+// ==============================================================================
+
+/**
+ * @brief Tiled Flash Attention backward kernel (ported from CUDA)
+ *
+ * Recomputes attention scores in tiles using saved logsumexp from the forward pass,
+ * avoiding materialization of the full NxN attention matrix.
+ *
+ * Each thread block processes one KV tile (column block of size Bc) across all Q tiles.
+ * dK and dV are accumulated directly in registers (one block per KV tile, no race).
+ * dQ is accumulated via atomicAdd since multiple KV tiles contribute to each Q row.
+ *
+ * Grid: (num_kv_tiles, batch_heads)
+ * Block: (BLOCK_SIZE) threads
+ *
+ * Shared memory layout (fits in 48KB for HEAD_DIM <= 128):
+ *   K_tile[Bc][HEAD_DIM], V_tile[Bc][HEAD_DIM],
+ *   Q_tile[Br][HEAD_DIM], dO_tile[Br][HEAD_DIM],
+ *   S_tile[Br][Bc], l_tile[Br], D_tile[Br]
+ */
+template<int HEAD_DIM, int Br, int Bc, int BLOCK_SIZE>
+__global__ void flash_attention_backward_kernel_hip(
+    const float* __restrict__ Q,     // [batch_heads, seq_len, HEAD_DIM]
+    const float* __restrict__ K,     // [batch_heads, seq_len, HEAD_DIM]
+    const float* __restrict__ V,     // [batch_heads, seq_len, HEAD_DIM]
+    const float* __restrict__ O,     // [batch_heads, seq_len, HEAD_DIM]
+    const float* __restrict__ dO,    // [batch_heads, seq_len, HEAD_DIM]
+    const float* __restrict__ L,     // [batch_heads, seq_len] logsumexp
+    float* __restrict__ dQ,          // [batch_heads, seq_len, HEAD_DIM] (atomicAdd)
+    float* __restrict__ dK,          // [batch_heads, seq_len, HEAD_DIM] (one block per KV tile)
+    float* __restrict__ dV,          // [batch_heads, seq_len, HEAD_DIM] (one block per KV tile)
+    const int seq_len,
+    const float scale,
+    const bool causal
+) {
+    const int kv_tile_idx = blockIdx.x;  // which KV tile (column block)
+    const int batch_head = blockIdx.y;
+    const int tid = threadIdx.x;
+
+    const int kv_start = kv_tile_idx * Bc;
+    if (kv_start >= seq_len) return;
+    const int actual_Bc = min(Bc, seq_len - kv_start);
+
+    // Base pointers for this batch-head
+    const float* Q_base  = Q  + batch_head * seq_len * HEAD_DIM;
+    const float* K_base  = K  + batch_head * seq_len * HEAD_DIM;
+    const float* V_base  = V  + batch_head * seq_len * HEAD_DIM;
+    const float* O_base  = O  + batch_head * seq_len * HEAD_DIM;
+    const float* dO_base = dO + batch_head * seq_len * HEAD_DIM;
+    const float* L_base  = L  + batch_head * seq_len;
+    float* dQ_base = dQ + batch_head * seq_len * HEAD_DIM;
+    float* dK_base = dK + batch_head * seq_len * HEAD_DIM;
+    float* dV_base = dV + batch_head * seq_len * HEAD_DIM;
+
+    // Shared memory layout (no dK/dV tiles - those go directly to global)
+    extern __shared__ float smem[];
+    float* K_tile  = smem;                                          // [Bc][HEAD_DIM]
+    float* V_tile  = K_tile  + Bc * HEAD_DIM;                      // [Bc][HEAD_DIM]
+    float* Q_tile  = V_tile  + Bc * HEAD_DIM;                      // [Br][HEAD_DIM]
+    float* dO_tile = Q_tile  + Br * HEAD_DIM;                      // [Br][HEAD_DIM]
+    float* S_tile  = dO_tile + Br * HEAD_DIM;                      // [Br][Bc]
+    float* l_tile  = S_tile  + Br * Bc;                             // [Br]
+    float* D_tile  = l_tile  + Br;                                  // [Br]
+
+    // Load K_j and V_j tiles into shared memory
+    for (int i = tid; i < actual_Bc * HEAD_DIM; i += BLOCK_SIZE) {
+        int row = i / HEAD_DIM;
+        int col = i % HEAD_DIM;
+        K_tile[row * HEAD_DIM + col] = K_base[(kv_start + row) * HEAD_DIM + col];
+        V_tile[row * HEAD_DIM + col] = V_base[(kv_start + row) * HEAD_DIM + col];
+    }
+    // Zero-pad if actual_Bc < Bc
+    for (int i = tid + actual_Bc * HEAD_DIM; i < Bc * HEAD_DIM; i += BLOCK_SIZE) {
+        K_tile[i] = 0.0f;
+        V_tile[i] = 0.0f;
+    }
+    __syncthreads();
+
+    // Per-thread accumulators for dK and dV
+    // Max elements per thread: ceil(Bc * HEAD_DIM / BLOCK_SIZE)
+    constexpr int MAX_ELEMS_PER_THREAD = (Bc * HEAD_DIM + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    float dk_acc[MAX_ELEMS_PER_THREAD];
+    float dv_acc[MAX_ELEMS_PER_THREAD];
+    #pragma unroll
+    for (int e = 0; e < MAX_ELEMS_PER_THREAD; ++e) {
+        dk_acc[e] = 0.0f;
+        dv_acc[e] = 0.0f;
+    }
+
+    // Iterate over Q tiles (row blocks)
+    const int num_q_tiles = (seq_len + Br - 1) / Br;
+
+    for (int q_tile_idx = 0; q_tile_idx < num_q_tiles; ++q_tile_idx) {
+        const int q_start = q_tile_idx * Br;
+        if (q_start >= seq_len) break;
+        const int actual_Br = min(Br, seq_len - q_start);
+
+        // For causal masking: skip if all Q rows come before all K cols
+        if (causal && (q_start + actual_Br - 1) < kv_start) {
+            continue;
+        }
+
+        // Load Q_i and dO_i tiles into shared memory
+        for (int i = tid; i < actual_Br * HEAD_DIM; i += BLOCK_SIZE) {
+            int row = i / HEAD_DIM;
+            int col = i % HEAD_DIM;
+            Q_tile[row * HEAD_DIM + col]  = Q_base[(q_start + row) * HEAD_DIM + col];
+            dO_tile[row * HEAD_DIM + col] = dO_base[(q_start + row) * HEAD_DIM + col];
+        }
+        // Zero-pad
+        for (int i = tid + actual_Br * HEAD_DIM; i < Br * HEAD_DIM; i += BLOCK_SIZE) {
+            Q_tile[i] = 0.0f;
+            dO_tile[i] = 0.0f;
+        }
+
+        // Load l_i (logsumexp) and compute D_i = rowsum(dO_i * O_i)
+        for (int row = tid; row < actual_Br; row += BLOCK_SIZE) {
+            l_tile[row] = L_base[q_start + row];
+
+            float d_sum = 0.0f;
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                d_sum += dO_base[(q_start + row) * HEAD_DIM + d]
+                       * O_base[(q_start + row) * HEAD_DIM + d];
+            }
+            D_tile[row] = d_sum;
+        }
+        for (int row = tid + actual_Br; row < Br; row += BLOCK_SIZE) {
+            l_tile[row] = -INFINITY;
+            D_tile[row] = 0.0f;
+        }
+        __syncthreads();
+
+        // Compute S_ij = Q_i @ K_j^T * scale  [Br x Bc]
+        for (int idx = tid; idx < actual_Br * actual_Bc; idx += BLOCK_SIZE) {
+            int i = idx / actual_Bc;
+            int j = idx % actual_Bc;
+            float dot = 0.0f;
+            #pragma unroll 8
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                dot += Q_tile[i * HEAD_DIM + d] * K_tile[j * HEAD_DIM + d];
+            }
+            S_tile[i * Bc + j] = dot * scale;
+        }
+        // Set out-of-bounds entries to -inf
+        for (int idx = tid; idx < Br * Bc; idx += BLOCK_SIZE) {
+            int i = idx / Bc;
+            int j = idx % Bc;
+            if (i >= actual_Br || j >= actual_Bc) {
+                S_tile[idx] = -INFINITY;
+            }
+        }
+        __syncthreads();
+
+        // Compute P_ij = exp(S_ij - l_i)  [Br x Bc]
+        // Apply causal mask: P_ij = 0 where query_pos < key_pos
+        for (int idx = tid; idx < Br * Bc; idx += BLOCK_SIZE) {
+            int i = idx / Bc;
+            int j = idx % Bc;
+            float p = 0.0f;
+            if (i < actual_Br && j < actual_Bc) {
+                if (causal && (q_start + i) < (kv_start + j)) {
+                    p = 0.0f;
+                } else {
+                    p = expf(S_tile[i * Bc + j] - l_tile[i]);
+                }
+            }
+            S_tile[i * Bc + j] = p;  // Reuse S_tile for P_ij
+        }
+        __syncthreads();
+
+        // Accumulate dV_j += P_ij^T @ dO_i  [Bc x HEAD_DIM]
+        {
+            int e = 0;
+            for (int idx = tid; idx < Bc * HEAD_DIM; idx += BLOCK_SIZE, ++e) {
+                int j = idx / HEAD_DIM;
+                int d = idx % HEAD_DIM;
+                if (j < actual_Bc) {
+                    float sum = 0.0f;
+                    for (int i = 0; i < actual_Br; ++i) {
+                        sum += S_tile[i * Bc + j] * dO_tile[i * HEAD_DIM + d];
+                    }
+                    dv_acc[e] += sum;
+                }
+            }
+        }
+        __syncthreads();
+
+        // Compute dS_ij = P_ij * (dP_ij - D_i)  where dP_ij = dO_i . V_j
+        // Overwrites S_tile (P_ij) with dS_ij
+        for (int idx = tid; idx < actual_Br * actual_Bc; idx += BLOCK_SIZE) {
+            int i = idx / actual_Bc;
+            int j = idx % actual_Bc;
+            float dp = 0.0f;
+            #pragma unroll 8
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                dp += dO_tile[i * HEAD_DIM + d] * V_tile[j * HEAD_DIM + d];
+            }
+            float p_ij = S_tile[i * Bc + j];
+            S_tile[i * Bc + j] = p_ij * (dp - D_tile[i]);
+        }
+        __syncthreads();
+
+        // Accumulate dK_j += dS_ij^T @ Q_i * scale  [Bc x HEAD_DIM]
+        {
+            int e = 0;
+            for (int idx = tid; idx < Bc * HEAD_DIM; idx += BLOCK_SIZE, ++e) {
+                int j = idx / HEAD_DIM;
+                int d = idx % HEAD_DIM;
+                if (j < actual_Bc) {
+                    float sum = 0.0f;
+                    for (int i = 0; i < actual_Br; ++i) {
+                        sum += S_tile[i * Bc + j] * Q_tile[i * HEAD_DIM + d];
+                    }
+                    dk_acc[e] += sum * scale;
+                }
+            }
+        }
+
+        // dQ_i += dS_ij @ K_j * scale  [Br x HEAD_DIM]
+        // Accumulate via atomicAdd since multiple KV tiles contribute
+        for (int idx = tid; idx < actual_Br * HEAD_DIM; idx += BLOCK_SIZE) {
+            int i = idx / HEAD_DIM;
+            int d = idx % HEAD_DIM;
+            float sum = 0.0f;
+            for (int j = 0; j < actual_Bc; ++j) {
+                sum += S_tile[i * Bc + j] * K_tile[j * HEAD_DIM + d];
+            }
+            atomicAdd(&dQ_base[(q_start + i) * HEAD_DIM + d], sum * scale);
+        }
+        __syncthreads();
+    }
+
+    // Write accumulated dK and dV from registers to global memory
+    {
+        int e = 0;
+        for (int idx = tid; idx < Bc * HEAD_DIM; idx += BLOCK_SIZE, ++e) {
+            int row = idx / HEAD_DIM;
+            int col = idx % HEAD_DIM;
+            if (row < actual_Bc) {
+                dK_base[(kv_start + row) * HEAD_DIM + col] = dk_acc[e];
+                dV_base[(kv_start + row) * HEAD_DIM + col] = dv_acc[e];
+            }
+        }
+    }
+}
+
+// Host wrapper for fused flash attention backward
+auto flash_attention_backward_hip(
+    const Tensor& dO,    // [batch_heads, seq_len, head_dim]
+    const Tensor& Q,     // [batch_heads, seq_len, head_dim]
+    const Tensor& K,     // [batch_heads, seq_len, head_dim]
+    const Tensor& V,     // [batch_heads, seq_len, head_dim]
+    const Tensor& O,     // [batch_heads, seq_len, head_dim]
+    const Tensor& L,     // [batch_heads, seq_len] logsumexp
+    float scale,
+    bool causal
+) -> std::vector<Tensor> {
+    int64_t batch_heads = Q.shape()[0];
+    int64_t seq_len = Q.shape()[1];
+    int64_t head_dim = Q.shape()[2];
+
+    if (Q.dtype() != DType::Float32) {
+        throw std::runtime_error("flash_attention_backward_hip: Only Float32 supported");
+    }
+
+    Tensor dQ = zeros({batch_heads, seq_len, head_dim}, Q.dtype(), Q.device());
+    Tensor dK = zeros({batch_heads, seq_len, head_dim}, K.dtype(), K.device());
+    Tensor dV = zeros({batch_heads, seq_len, head_dim}, V.dtype(), V.device());
+
+    constexpr int Br = 32;
+    constexpr int Bc = 32;
+    constexpr int BLOCK_SIZE = 256;
+
+    int num_kv_tiles = (seq_len + Bc - 1) / Bc;
+    dim3 grid(num_kv_tiles, batch_heads);
+    dim3 threads(BLOCK_SIZE);
+
+    // Shared memory: K_tile[Bc*HD] + V_tile[Bc*HD] + Q_tile[Br*HD] + dO_tile[Br*HD]
+    //              + S_tile[Br*Bc] + l_tile[Br] + D_tile[Br]
+    auto compute_bwd_smem = [&](int hd) -> size_t {
+        return (2 * Bc * hd + 2 * Br * hd + Br * Bc + Br + Br) * sizeof(float);
+    };
+
+    const float* q_ptr  = Q.data<float>();
+    const float* k_ptr  = K.data<float>();
+    const float* v_ptr  = V.data<float>();
+    const float* o_ptr  = O.data<float>();
+    const float* do_ptr = dO.data<float>();
+    const float* l_ptr  = L.data<float>();
+    float* dq_ptr = dQ.data<float>();
+    float* dk_ptr = dK.data<float>();
+    float* dv_ptr = dV.data<float>();
+    int seq_len_int = static_cast<int>(seq_len);
+
+    // Dispatch based on head_dim for optimal unrolling
+    if (head_dim == 32) {
+        size_t smem = compute_bwd_smem(32);
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(flash_attention_backward_kernel_hip<32, Br, Bc, BLOCK_SIZE>),
+            grid, threads, smem, 0,
+            q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
+            seq_len_int, scale, causal);
+        HIP_CHECK(hipGetLastError());
+    } else if (head_dim == 64) {
+        size_t smem = compute_bwd_smem(64);
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(flash_attention_backward_kernel_hip<64, Br, Bc, BLOCK_SIZE>),
+            grid, threads, smem, 0,
+            q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
+            seq_len_int, scale, causal);
+        HIP_CHECK(hipGetLastError());
+    } else if (head_dim == 128) {
+        size_t smem = compute_bwd_smem(128);
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(flash_attention_backward_kernel_hip<128, Br, Bc, BLOCK_SIZE>),
+            grid, threads, smem, 0,
+            q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
+            seq_len_int, scale, causal);
+        HIP_CHECK(hipGetLastError());
+    } else {
+        throw std::runtime_error(
+            "flash_attention_backward_hip: Unsupported head_dim " + std::to_string(head_dim) +
+            ". Fused backward supports 32, 64, 128.");
+    }
+
+    HIP_CHECK(hipGetLastError());
+
+    return {dQ, dK, dV};
+}
+
 auto fused_attention_hip(
     const Tensor& Q,
     const Tensor& K,
     const Tensor& V,
     float scale
-) -> Tensor {
+) -> std::pair<Tensor, Tensor> {
     // BFloat16: upcast to Float32, compute, convert back
     if (Q.dtype() == DType::BFloat16) {
         auto q_f32 = Q.to(DType::Float32);
         auto k_f32 = K.to(DType::Float32);
         auto v_f32 = V.to(DType::Float32);
-        auto result = fused_attention_hip(q_f32, k_f32, v_f32, scale);
-        return result.to(DType::BFloat16);
+        auto [result, lse] = fused_attention_hip(q_f32, k_f32, v_f32, scale);
+        return {result.to(DType::BFloat16), lse};
     }
 
     int64_t batch_size = Q.shape()[0];
@@ -939,6 +1347,7 @@ auto fused_attention_hip(
     int64_t d_v = V.shape()[2];
 
     Tensor output = zeros({batch_size, seq_len, d_v}, Q.dtype(), Q.device());
+    Tensor lse = zeros({batch_size, seq_len}, Q.dtype(), Q.device());
 
     constexpr int BLOCK_SIZE = 256;
     dim3 threads(BLOCK_SIZE);
@@ -958,13 +1367,30 @@ auto fused_attention_hip(
             d_v,
             scale
         );
+
+        // Compute logsumexp separately for backward pass compatibility
+        // The naive attention kernel doesn't produce it inline, so we compute
+        // LSE = log(sum(exp(scores - max))) + max per query row
+        // For now, use a simple kernel to compute it from Q and K
+        // (this is acceptable overhead since the naive kernel is already O(N^2))
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(compute_attention_lse_kernel<float, BLOCK_SIZE>),
+            dim3(batch_size, seq_len), dim3(BLOCK_SIZE), BLOCK_SIZE * sizeof(float), 0,
+            Q.data<float>(),
+            K.data<float>(),
+            lse.data<float>(),
+            batch_size,
+            seq_len,
+            d_k,
+            scale
+        );
     } else {
         throw std::runtime_error("fused_attention_hip: Only Float32 supported");
     }
 
     HIP_CHECK(hipGetLastError());
 
-    return output;
+    return {output, lse};
 }
 
 // ==============================================================================

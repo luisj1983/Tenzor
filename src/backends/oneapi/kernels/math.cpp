@@ -1351,60 +1351,169 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
     Tensor output(out_shape, a_cont.dtype(), a_cont.device());
 
 #ifdef TENZOR_HAS_ONEMKL
-    // NOTE: oneMKL GEMM has issues with sycl::malloc_shared memory on some devices/configurations.
-    // Produces incorrect results (8x multiplier bug when k>16) with shared memory.
-    // Using naive SYCL kernel instead for correctness.
-    // TODO: Investigate using malloc_device with explicit transfers for oneMKL GEMM performance
+    // oneMKL GEMM has issues with sycl::malloc_shared memory on some devices/configurations
+    // (8x multiplier bug when k>16). Use sycl::malloc_device with explicit transfers instead.
     if (a_cont.dtype() == DType::Float32) {
         const float* a_ptr = get_data_ptr<const float>(a_cont);
         const float* b_ptr = get_data_ptr<const float>(b_cont);
         float* out_ptr = get_data_ptr<float>(output);
 
-        // C[i,j] = sum_p(A[i,p] * B[p,j])
-        queue.parallel_for<MatMulKernelFloat32>(sycl::range<2>(m, n), [=](sycl::id<2> idx) {
-            const int64_t i = idx[0];
-            const int64_t j = idx[1];
+        auto deleter = [&queue](float* p) { sycl::free(p, queue); };
+        std::unique_ptr<float, decltype(deleter)> d_a(
+            static_cast<float*>(sycl::malloc_device(m * k * sizeof(float), queue)), deleter);
+        std::unique_ptr<float, decltype(deleter)> d_b(
+            static_cast<float*>(sycl::malloc_device(k * n * sizeof(float), queue)), deleter);
+        std::unique_ptr<float, decltype(deleter)> d_c(
+            static_cast<float*>(sycl::malloc_device(m * n * sizeof(float), queue)), deleter);
 
-            float sum = 0.0f;
-            for (int64_t p = 0; p < k; ++p) {
-                sum += a_ptr[i * k + p] * b_ptr[p * n + j];
-            }
-            out_ptr[i * n + j] = sum;
-        });
+        queue.memcpy(d_a.get(), a_ptr, m * k * sizeof(float));
+        queue.memcpy(d_b.get(), b_ptr, k * n * sizeof(float));
+        queue.wait();
+
+        const float alpha = 1.0f;
+        const float beta = 0.0f;
+
+        try {
+            // Row-major C(m,n) = A(m,k) * B(k,n)
+            // In column-major: C^T(n,m) = B^T(n,k) * A^T(k,m)
+            ::oneapi::mkl::blas::column_major::gemm(
+                queue,
+                ::oneapi::mkl::transpose::nontrans,
+                ::oneapi::mkl::transpose::nontrans,
+                n, m, k,
+                alpha,
+                d_b.get(), n,
+                d_a.get(), k,
+                beta,
+                d_c.get(), n
+            );
+            queue.wait_and_throw();
+        } catch (const ::oneapi::mkl::exception& e) {
+            throw std::runtime_error(std::string("oneMKL GEMM (F32) failed: ") + e.what());
+        } catch (const sycl::exception& e) {
+            throw std::runtime_error(std::string("SYCL error in GEMM (F32): ") + e.what());
+        }
+
+        queue.memcpy(out_ptr, d_c.get(), m * n * sizeof(float));
+        queue.wait();
     }
     else if (a_cont.dtype() == DType::Float64) {
         const double* a_ptr = get_data_ptr<const double>(a_cont);
         const double* b_ptr = get_data_ptr<const double>(b_cont);
         double* out_ptr = get_data_ptr<double>(output);
 
-        // C[i,j] = sum_p(A[i,p] * B[p,j])
-        queue.parallel_for<MatMulKernelFloat64>(sycl::range<2>(m, n), [=](sycl::id<2> idx) {
-            const int64_t i = idx[0];
-            const int64_t j = idx[1];
+        auto deleter = [&queue](double* p) { sycl::free(p, queue); };
+        std::unique_ptr<double, decltype(deleter)> d_a(
+            static_cast<double*>(sycl::malloc_device(m * k * sizeof(double), queue)), deleter);
+        std::unique_ptr<double, decltype(deleter)> d_b(
+            static_cast<double*>(sycl::malloc_device(k * n * sizeof(double), queue)), deleter);
+        std::unique_ptr<double, decltype(deleter)> d_c(
+            static_cast<double*>(sycl::malloc_device(m * n * sizeof(double), queue)), deleter);
 
-            double sum = 0.0;
-            for (int64_t p = 0; p < k; ++p) {
-                sum += a_ptr[i * k + p] * b_ptr[p * n + j];
-            }
-            out_ptr[i * n + j] = sum;
-        });
+        queue.memcpy(d_a.get(), a_ptr, m * k * sizeof(double));
+        queue.memcpy(d_b.get(), b_ptr, k * n * sizeof(double));
+        queue.wait();
+
+        const double alpha = 1.0;
+        const double beta = 0.0;
+
+        try {
+            ::oneapi::mkl::blas::column_major::gemm(
+                queue,
+                ::oneapi::mkl::transpose::nontrans,
+                ::oneapi::mkl::transpose::nontrans,
+                n, m, k,
+                alpha,
+                d_b.get(), n,
+                d_a.get(), k,
+                beta,
+                d_c.get(), n
+            );
+            queue.wait_and_throw();
+        } catch (const ::oneapi::mkl::exception& e) {
+            throw std::runtime_error(std::string("oneMKL GEMM (F64) failed: ") + e.what());
+        } catch (const sycl::exception& e) {
+            throw std::runtime_error(std::string("SYCL error in GEMM (F64): ") + e.what());
+        }
+
+        queue.memcpy(out_ptr, d_c.get(), m * n * sizeof(double));
+        queue.wait();
     }
     else if (a_cont.dtype() == DType::Float16) {
         const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a_cont);
         const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b_cont);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
 
-        // Use float accumulation for precision
-        queue.parallel_for<MatMulKernelFloat16>(sycl::range<2>(m, n), [=](sycl::id<2> idx) {
-            const int64_t i = idx[0];
-            const int64_t j = idx[1];
+        // Use Float32 device buffers for accumulation precision
+        auto half_deleter = [&queue](sycl::half* p) { sycl::free(p, queue); };
+        auto float_deleter = [&queue](float* p) { sycl::free(p, queue); };
+        std::unique_ptr<float, decltype(float_deleter)> d_a(
+            static_cast<float*>(sycl::malloc_device(m * k * sizeof(float), queue)), float_deleter);
+        std::unique_ptr<float, decltype(float_deleter)> d_b(
+            static_cast<float*>(sycl::malloc_device(k * n * sizeof(float), queue)), float_deleter);
+        std::unique_ptr<float, decltype(float_deleter)> d_c(
+            static_cast<float*>(sycl::malloc_device(m * n * sizeof(float), queue)), float_deleter);
 
-            float sum = 0.0f;
-            for (int64_t p = 0; p < k; ++p) {
-                sum += static_cast<float>(a_ptr[i * k + p]) * static_cast<float>(b_ptr[p * n + j]);
-            }
-            out_ptr[i * n + j] = sycl::half(sum);
+        // Convert FP16 inputs to FP32 on device
+        std::unique_ptr<sycl::half, decltype(half_deleter)> d_a_h(
+            static_cast<sycl::half*>(sycl::malloc_device(m * k * sizeof(sycl::half), queue)), half_deleter);
+        std::unique_ptr<sycl::half, decltype(half_deleter)> d_b_h(
+            static_cast<sycl::half*>(sycl::malloc_device(k * n * sizeof(sycl::half), queue)), half_deleter);
+        std::unique_ptr<sycl::half, decltype(half_deleter)> d_c_h(
+            static_cast<sycl::half*>(sycl::malloc_device(m * n * sizeof(sycl::half), queue)), half_deleter);
+
+        queue.memcpy(d_a_h.get(), a_ptr, m * k * sizeof(sycl::half));
+        queue.memcpy(d_b_h.get(), b_ptr, k * n * sizeof(sycl::half));
+        queue.wait();
+
+        // Upcast FP16 → FP32 on device
+        const int64_t a_count = m * k;
+        const int64_t b_count = k * n;
+        auto* d_a_h_raw = d_a_h.get();
+        auto* d_a_raw = d_a.get();
+        queue.parallel_for(sycl::range<1>(a_count), [=](sycl::id<1> i) {
+            d_a_raw[i] = static_cast<float>(d_a_h_raw[i]);
         });
+        auto* d_b_h_raw = d_b_h.get();
+        auto* d_b_raw = d_b.get();
+        queue.parallel_for(sycl::range<1>(b_count), [=](sycl::id<1> i) {
+            d_b_raw[i] = static_cast<float>(d_b_h_raw[i]);
+        });
+        queue.wait();
+
+        const float alpha = 1.0f;
+        const float beta = 0.0f;
+
+        try {
+            ::oneapi::mkl::blas::column_major::gemm(
+                queue,
+                ::oneapi::mkl::transpose::nontrans,
+                ::oneapi::mkl::transpose::nontrans,
+                n, m, k,
+                alpha,
+                d_b.get(), n,
+                d_a.get(), k,
+                beta,
+                d_c.get(), n
+            );
+            queue.wait_and_throw();
+        } catch (const ::oneapi::mkl::exception& e) {
+            throw std::runtime_error(std::string("oneMKL GEMM (F16) failed: ") + e.what());
+        } catch (const sycl::exception& e) {
+            throw std::runtime_error(std::string("SYCL error in GEMM (F16): ") + e.what());
+        }
+
+        // Downcast FP32 → FP16 on device, then copy back
+        const int64_t c_count = m * n;
+        auto* d_c_raw = d_c.get();
+        auto* d_c_h_raw = d_c_h.get();
+        queue.parallel_for(sycl::range<1>(c_count), [=](sycl::id<1> i) {
+            d_c_h_raw[i] = sycl::half(d_c_raw[i]);
+        });
+        queue.wait();
+
+        queue.memcpy(out_ptr, d_c_h.get(), m * n * sizeof(sycl::half));
+        queue.wait();
     }
     else if (a_cont.dtype() == DType::Int32) {
         const int32_t* a_ptr = get_data_ptr<const int32_t>(a_cont);

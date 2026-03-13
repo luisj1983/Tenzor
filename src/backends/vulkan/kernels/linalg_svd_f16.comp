@@ -1,0 +1,191 @@
+#version 450
+
+// SVD via one-sided Jacobi method for small matrices (<= 32x32) — Float16 variant
+// Float16 elements packed 2 per 32-bit word, all computation in float32.
+// Output: U (binding 1), S (binding 2), Vt (binding 3) — all packed uint32
+
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) buffer InputBuf { uint data_in[]; };
+layout(set = 0, binding = 1) buffer UBuf     { uint data_u[];  };
+layout(set = 0, binding = 2) buffer SBuf     { uint data_s[];  };
+layout(set = 0, binding = 3) buffer VtBuf    { uint data_vt[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint m;       // rows
+    uint n_cols;  // columns
+    uint batch;
+    uint full_matrices; // 0=reduced, 1=full
+};
+
+shared float U[32][32];
+shared float V[32][32];
+shared float converged;
+
+// Read Float16 from input buffer
+float readF16In(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = data_in[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+// Write Float16 to U buffer
+void writeF16U(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = data_u[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0; iter < 1024; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(data_u[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    data_u[word_idx] = new_val;
+}
+
+// Write Float16 to S buffer
+void writeF16S(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = data_s[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0; iter < 1024; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(data_s[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    data_s[word_idx] = new_val;
+}
+
+// Write Float16 to Vt buffer
+void writeF16Vt(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = data_vt[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0; iter < 1024; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(data_vt[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    data_vt[word_idx] = new_val;
+}
+
+void main() {
+    uint batch_idx = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (batch_idx >= batch) return;
+
+    uint mat_offset_mn = batch_idx * m * n_cols;
+    uint k = min(m, n_cols);
+
+    // Load U = A (from packed F16 into shared float32)
+    for (uint row = 0; row < m; row++) {
+        if (tid < n_cols) {
+            U[row][tid] = readF16In(mat_offset_mn + row * n_cols + tid);
+        }
+    }
+
+    // V = I
+    for (uint row = 0; row < n_cols; row++) {
+        if (tid < n_cols) {
+            V[row][tid] = (row == tid) ? 1.0 : 0.0;
+        }
+    }
+    barrier();
+
+    // Jacobi sweeps
+    for (uint sweep = 0; sweep < 30; sweep++) {
+        if (tid == 0) converged = 1.0;
+        barrier();
+
+        // For each column pair (p, q)
+        for (uint p = 0; p < n_cols; p++) {
+            for (uint q = p + 1; q < n_cols; q++) {
+                // Thread 0: compute Jacobi rotation
+                if (tid == 0) {
+                    float a = 0.0, b = 0.0, d = 0.0;
+                    for (uint i = 0; i < m; i++) {
+                        a += U[i][p] * U[i][p];
+                        b += U[i][q] * U[i][q];
+                        d += U[i][p] * U[i][q];
+                    }
+
+                    if (abs(d) > 1e-10 * sqrt(a * b)) {
+                        converged = 0.0;
+                        float zeta = (b - a) / (2.0 * d);
+                        float t = sign(zeta) / (abs(zeta) + sqrt(1.0 + zeta * zeta));
+                        float c = 1.0 / sqrt(1.0 + t * t);
+                        float s = t * c;
+
+                        // Rotate columns of U
+                        for (uint i = 0; i < m; i++) {
+                            float up = U[i][p], uq = U[i][q];
+                            U[i][p] = c * up - s * uq;
+                            U[i][q] = s * up + c * uq;
+                        }
+                        // Rotate columns of V
+                        for (uint i = 0; i < n_cols; i++) {
+                            float vp = V[i][p], vq = V[i][q];
+                            V[i][p] = c * vp - s * vq;
+                            V[i][q] = s * vp + c * vq;
+                        }
+                    }
+                }
+                barrier();
+            }
+        }
+
+        if (converged > 0.5) break;
+        barrier();
+    }
+
+    // Extract singular values (column norms of U) and normalize U
+    if (tid < k) {
+        float norm = 0.0;
+        for (uint i = 0; i < m; i++) {
+            norm += U[i][tid] * U[i][tid];
+        }
+        norm = sqrt(norm);
+        writeF16S(batch_idx * k + tid, norm);
+
+        if (norm > 1e-30) {
+            for (uint i = 0; i < m; i++) {
+                U[i][tid] /= norm;
+            }
+        }
+    }
+    barrier();
+
+    // Write U as packed Float16
+    for (uint row = 0; row < m; row++) {
+        if (tid < k) {
+            writeF16U(mat_offset_mn + row * k + tid, U[row][tid]);
+        }
+    }
+
+    // Write Vt (transpose of V) as packed Float16
+    uint vt_offset = batch_idx * n_cols * n_cols;
+    for (uint row = 0; row < n_cols; row++) {
+        if (tid < n_cols) {
+            writeF16Vt(vt_offset + tid * n_cols + row, V[row][tid]);
+        }
+    }
+}

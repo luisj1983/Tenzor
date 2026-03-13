@@ -18,6 +18,8 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/sparse/sparse_tensor.hpp"
+#include "tenzor/sparse/sparse_ops.hpp"
 #include <hip/hip_runtime.h>
 #include <iostream>
 #include <cstdlib>
@@ -485,7 +487,10 @@ namespace rocm {
                                        const Tensor& running_var, const Tensor& weight,
                                        const Tensor& bias, float eps) -> Tensor;
     auto fused_attention_hip(const Tensor& Q, const Tensor& K, const Tensor& V,
-                             float scale) -> Tensor;
+                             float scale) -> std::pair<Tensor, Tensor>;
+    auto flash_attention_backward_hip(
+        const Tensor& dO, const Tensor& Q, const Tensor& K, const Tensor& V,
+        const Tensor& O, const Tensor& L, float scale, bool causal) -> std::vector<Tensor>;
 
     // Fused RMSNorm
     auto fused_rms_norm_hip(const Tensor& input, const Tensor& weight,
@@ -625,6 +630,9 @@ namespace rocm {
 
     // BoxIoU (vision.hip.cpp)
     auto box_iou_hip(const Tensor& boxes1, const Tensor& boxes2, int iou_type) -> Tensor;
+
+    // NMS (nms.hip.cpp)
+    auto nms_forward(const Tensor& boxes, const Tensor& scores, float iou_threshold) -> Tensor;
 
     // EmbeddingBagForward/Backward (indexing.hip.cpp)
     auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offsets,
@@ -1830,7 +1838,8 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // ========================================================================
     table.register_kernel(OpId::FusedAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
-        return std::vector<Tensor>{rocm::fused_attention_hip(inputs[0], inputs[1], inputs[2], scale)};
+        auto [output, lse] = rocm::fused_attention_hip(inputs[0], inputs[1], inputs[2], scale);
+        return std::vector<Tensor>{output};
     });
 
     // ========================================================================
@@ -1838,34 +1847,45 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // ========================================================================
     table.register_kernel(OpId::FlashAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
-        return std::vector<Tensor>{rocm::fused_attention_hip(inputs[0], inputs[1], inputs[2], scale)};
+        auto [output, lse] = rocm::fused_attention_hip(inputs[0], inputs[1], inputs[2], scale);
+        return std::vector<Tensor>{output, lse};
     });
 
     // ========================================================================
-    // Flash Attention Backward (composed-ops fallback using high-level ops)
+    // Flash Attention Backward (fused tiled kernel, composed-ops fallback)
     // ========================================================================
     table.register_kernel(OpId::FlashAttentionBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            // inputs: [dO, Q, K, V, O] — dO = grad_output, O = forward output
+            // inputs: [dO, Q, K, V, O, L] — L = logsumexp from forward
+            // Falls back to [dO, Q, K, V, O] (no L) for composed-ops path
             float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
             bool causal = attrs.get_bool(AttrKey::Causal, false);
 
-            const Tensor& dO = inputs[0];  // [B, H, S, D]
+            const Tensor& dO = inputs[0];
             const Tensor& Q = inputs[1];
             const Tensor& K = inputs[2];
             const Tensor& V = inputs[3];
+            const Tensor& O = inputs[4];
 
-            // Recompute attention weights: attn = softmax(Q @ K^T * scale)
+            // Check if we have logsumexp (L) and supported head_dim for fused kernel
+            int64_t head_dim = Q.shape().back();
+            bool has_lse = inputs.size() >= 6;
+            bool fused_supported = (head_dim == 32 || head_dim == 64 || head_dim == 128);
+
+            if (has_lse && fused_supported && Q.dtype() == DType::Float32) {
+                const Tensor& L = inputs[5];
+                return rocm::flash_attention_backward_hip(dO, Q, K, V, O, L, scale, causal);
+            }
+
+            // Composed-ops fallback for unsupported head_dim or missing L
             Tensor Kt = tenzor::transpose(K, -1, -2);
-            Tensor scores = tenzor::bmm(Q, Kt);  // [B, H, S, S]
+            Tensor scores = tenzor::bmm(Q, Kt);
 
-            // Scale
             auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
             Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
                                            scores.dtype(), scores.device());
             scores = tenzor::mul(scores, scale_t);
 
-            // Apply causal mask if needed
             if (causal) {
                 int64_t seq_len = scores_shape[scores_shape.size() - 1];
                 Tensor rows = tenzor::arange(0, seq_len, 1, DType::Int64, scores.device());
@@ -1878,21 +1898,17 @@ void register_rocm_kernels(BackendDispatchTable& table) {
                 scores = tenzor::add(scores, tenzor::mul(causal_mask.to(scores.dtype()), neg_inf));
             }
 
-            // Softmax along last dim
             NewOpAttributes sm_attrs;
             sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
             std::vector<Tensor> sm_inputs = {scores};
             Tensor attn_weights = tenzor::dispatch(OpId::Softmax, sm_inputs, sm_attrs)[0];
 
-            // dV = attn^T @ dO
             Tensor attn_t = tenzor::transpose(attn_weights, -1, -2);
             Tensor dV = tenzor::bmm(attn_t, dO);
 
-            // dAttn = dO @ V^T
             Tensor Vt = tenzor::transpose(V, -1, -2);
             Tensor dAttn = tenzor::bmm(dO, Vt);
 
-            // softmax backward: ds = attn * (dAttn - sum(attn * dAttn, dim=-1, keepdim=true))
             Tensor attn_dAttn = tenzor::mul(attn_weights, dAttn);
             NewOpAttributes sum_attrs;
             sum_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
@@ -1901,13 +1917,11 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             Tensor sum_ad = tenzor::dispatch(OpId::Sum, sum_inputs, sum_attrs)[0];
             Tensor dScores = tenzor::mul(attn_weights, tenzor::sub(dAttn, sum_ad));
 
-            // Apply scale
             Tensor scale_t2 = tenzor::full(
                 std::vector<int64_t>(dScores.shape().begin(), dScores.shape().end()),
                 static_cast<double>(scale), dScores.dtype(), dScores.device());
             dScores = tenzor::mul(dScores, scale_t2);
 
-            // dQ = dScores @ K, dK = dScores^T @ Q
             Tensor dQ = tenzor::bmm(dScores, K);
             Tensor dScores_t = tenzor::transpose(dScores, -1, -2);
             Tensor dK = tenzor::bmm(dScores_t, Q);
@@ -2472,6 +2486,16 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     // ========================================================================
+    // NMS Operation
+    // ========================================================================
+    table.register_kernel(OpId::NMS, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        // inputs: [boxes (N,4), scores (N)]
+        // attrs: IouThreshold
+        float iou_threshold = static_cast<float>(attrs.get_float(AttrKey::IouThreshold, 0.5));
+        return {rocm::nms_forward(inputs[0], inputs[1], iou_threshold)};
+    });
+
+    // ========================================================================
     // EmbeddingBagForward Operation
     // ========================================================================
     table.register_kernel(OpId::EmbeddingBagForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -2843,6 +2867,59 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             y_hard = dispatch<OpId::Scatter>(scatter_inputs, scatter_attrs)[0];
 
             return add(sub(y_hard, y_soft.detach()), y_soft);
+        });
+
+    // =========================================================================
+    // Sparse Tensor Operations (OpIds 460-464)
+    //
+    // Wrapper lambdas that reconstruct SparseTensor from CSR components passed
+    // as plain Tensors, then delegate to the existing sparse:: functions which
+    // internally dispatch to rocSPARSE when inputs are on ROCm.
+    // =========================================================================
+
+#ifdef TENZOR_HAS_ROCSPARSE
+    // SparseSpMM: sparse(M,K) @ dense(K,N) -> dense(M,N)
+    table.register_single_output_kernel(OpId::SparseSpMM,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            return sparse::spmm(sp, inputs[3]);
+        });
+
+    // SparseSpMV: sparse(M,K) @ vec(K) -> vec(M)
+    table.register_single_output_kernel(OpId::SparseSpMV,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            return sparse::spmv(sp, inputs[3]);
+        });
+#endif // TENZOR_HAS_ROCSPARSE
+
+    // SparseToDense: CSR components -> dense tensor
+    table.register_single_output_kernel(OpId::SparseToDense,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            return sp.to_dense();
+        });
+
+    // DenseToSparse: dense tensor -> CSR components [crow_indices, col_indices, values]
+    table.register_kernel(OpId::DenseToSparse,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            auto sp = SparseTensor::from_dense(inputs[0], SparseLayout::CSR);
+            return {sp.crow_indices(), sp.col_indices(), sp.values()};
+        });
+
+    // SparseAdd: sparse(M,K) + dense(M,K) -> dense(M,K)
+    table.register_single_output_kernel(OpId::SparseAdd,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            return sparse::add(sp, inputs[3]);
         });
 
     std::cout << "ROCm dispatch table initialized with O(1) lookup" << std::endl;

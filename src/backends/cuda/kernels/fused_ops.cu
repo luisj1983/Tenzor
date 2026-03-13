@@ -1727,6 +1727,7 @@ __global__ void flash_attention_v2_kernel(
     const float* __restrict__ K,     // [batch_heads, seq_len_k, head_dim]
     const float* __restrict__ V,     // [batch_heads, seq_len_k, head_dim]
     float* __restrict__ O,           // [batch_heads, seq_len_q, head_dim]
+    float* __restrict__ L,           // [batch_heads, seq_len_q] logsumexp (may be nullptr)
     const int seq_len_q,
     const int seq_len_k,
     const float scale
@@ -1895,6 +1896,12 @@ __global__ void flash_attention_v2_kernel(
             O_row[d] = o_local[i] * l_inv;
         }
     }
+
+    // Save logsumexp for backward pass: LSE = m + log(l)
+    if (L != nullptr && tid == 0) {
+        float lse = m_prev + logf(fmaxf(l_prev, 1e-10f));
+        L[batch_head * seq_len_q + query_idx] = lse;
+    }
 }
 
 /**
@@ -1906,6 +1913,7 @@ __global__ void flash_attention_forward_kernel(
     const float* __restrict__ K,
     const float* __restrict__ V,
     float* __restrict__ O,
+    float* __restrict__ L,    // [batch_heads, seq_len_q] logsumexp (may be nullptr)
     int64_t batch_heads,
     int64_t seq_len_q,
     int64_t seq_len_k,
@@ -2024,6 +2032,14 @@ __global__ void flash_attention_forward_kernel(
         int col = i % HEAD_DIM;
         float l_inv = 1.0f / l_i[row];
         O_base[(q_start + row) * head_dim + col] = O_acc[row * HEAD_DIM + col] * l_inv;
+    }
+
+    // Save logsumexp for backward pass: LSE = m + log(l)
+    if (L != nullptr) {
+        for (int row = tid; row < actual_Br; row += BLOCK_SIZE) {
+            float lse = m_i[row] + logf(fmaxf(l_i[row], 1e-10f));
+            L[batch_head * seq_len_q + (q_start + row)] = lse;
+        }
     }
 }
 
@@ -2177,7 +2193,7 @@ auto fused_attention_cuda(
     const Tensor& K,     // (batch_heads, seq_len_k, head_dim)
     const Tensor& V,     // (batch_heads, seq_len_k, head_dim)
     float scale
-) -> Tensor {
+) -> std::pair<Tensor, Tensor> {
     int64_t batch_heads = Q.shape()[0];
     int64_t seq_len_q = Q.shape()[1];
     int64_t head_dim = Q.shape()[2];
@@ -2188,6 +2204,7 @@ auto fused_attention_cuda(
     }
 
     Tensor output = create_cuda_zeros({batch_heads, seq_len_q, head_dim}, Q.dtype(), Q.device());
+    Tensor lse = create_cuda_zeros({batch_heads, seq_len_q}, Q.dtype(), Q.device());
 
     // Optimized Flash Attention V2 - supports multiple head dimensions
     constexpr int BLOCK_SIZE = 256;
@@ -2204,59 +2221,405 @@ auto fused_attention_cuda(
         return (2 * Bc * k_stride + hd + Bc + 8) * sizeof(float);
     };
 
+    float* lse_ptr = lse.data<float>();
+
     // Dispatch based on head_dim for optimal unrolling
     if (head_dim == 64) {
         size_t smem_size = compute_smem_size(64);
         flash_attention_v2_kernel<64, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
-            Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(),
+            Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(), lse_ptr,
             static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (head_dim == 128) {
         size_t smem_size = compute_smem_size(128);
         flash_attention_v2_kernel<128, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
-            Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(),
+            Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(), lse_ptr,
             static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (head_dim == 32) {
         size_t smem_size = compute_smem_size(32);
         flash_attention_v2_kernel<32, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
-            Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(),
+            Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(), lse_ptr,
             static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (head_dim == 80) {
         size_t smem_size = compute_smem_size(80);
         flash_attention_v2_kernel<80, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
-            Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(),
+            Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(), lse_ptr,
             static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (head_dim == 96) {
         size_t smem_size = compute_smem_size(96);
         flash_attention_v2_kernel<96, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
-            Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(),
+            Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(), lse_ptr,
             static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
-        // Fallback to naive kernel for non-standard head_dim
-        constexpr int NAIVE_BLOCK_SIZE = 256;
-        size_t shared_mem_size = (seq_len_k + 2 * NAIVE_BLOCK_SIZE) * sizeof(float);
+        // Fallback to legacy tiled kernel for non-standard head_dim
+        // Legacy kernel uses block-per-tile (not block-per-row), different grid
+        constexpr int LBr = 32;
+        constexpr int LBc = 32;
+        constexpr int LEGACY_BLOCK = 256;
+        dim3 legacy_blocks(batch_heads, (seq_len_q + LBr - 1) / LBr);
+        dim3 legacy_threads(LEGACY_BLOCK);
+        // Shared: Q_tile[Br*HD] + K_tile[Bc*HD] + V_tile[Bc*HD] + S_tile[Br*Bc] + O_acc[Br*HD] + m_i[Br] + l_i[Br]
+        size_t legacy_smem = (LBr * head_dim + 2 * LBc * head_dim + LBr * LBc + LBr * head_dim + 2 * LBr) * sizeof(float);
 
-        fused_attention_kernel_naive<float, NAIVE_BLOCK_SIZE><<<blocks, threads, shared_mem_size>>>(
-            Q.data<float>(),
-            K.data<float>(),
-            V.data<float>(),
-            output.data<float>(),
-            batch_heads,
-            seq_len_q,
-            seq_len_k,
-            head_dim,
-            scale
-        );
+        // Use 32 as HEAD_DIM template param for legacy kernel (it also takes runtime head_dim)
+        flash_attention_forward_kernel<LBr, LBc, 32, LEGACY_BLOCK><<<legacy_blocks, legacy_threads, legacy_smem>>>(
+            Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(), lse_ptr,
+            batch_heads, seq_len_q, seq_len_k, head_dim, scale);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
 
-    return output;
+    return {output, lse};
+}
+
+// ==============================================================================
+// Fused Flash Attention Backward CUDA Kernel (Tiled, Memory-Efficient)
+// ==============================================================================
+
+/**
+ * @brief Tiled Flash Attention backward kernel
+ *
+ * Recomputes attention scores in tiles using saved logsumexp from the forward pass,
+ * avoiding materialization of the full NxN attention matrix.
+ *
+ * Each thread block processes one KV tile (column block of size Bc) across all Q tiles.
+ * dK and dV are accumulated directly in global memory (one block per KV tile, no race).
+ * dQ is accumulated via atomicAdd since multiple KV tiles contribute to each Q row.
+ *
+ * Grid: (num_kv_tiles, batch_heads)
+ * Block: (BLOCK_SIZE) threads
+ *
+ * Shared memory layout (fits in 48KB for HEAD_DIM <= 64; uses extended smem for 128):
+ *   K_tile[Bc][HEAD_DIM], V_tile[Bc][HEAD_DIM],
+ *   Q_tile[Br][HEAD_DIM], dO_tile[Br][HEAD_DIM],
+ *   S_tile[Br][Bc], l_tile[Br], D_tile[Br]
+ * dK/dV accumulated in per-thread register arrays, written to global at end.
+ */
+template<int HEAD_DIM, int Br, int Bc, int BLOCK_SIZE>
+__global__ void flash_attention_backward_kernel(
+    const float* __restrict__ Q,     // [batch_heads, seq_len, HEAD_DIM]
+    const float* __restrict__ K,     // [batch_heads, seq_len, HEAD_DIM]
+    const float* __restrict__ V,     // [batch_heads, seq_len, HEAD_DIM]
+    const float* __restrict__ O,     // [batch_heads, seq_len, HEAD_DIM]
+    const float* __restrict__ dO,    // [batch_heads, seq_len, HEAD_DIM]
+    const float* __restrict__ L,     // [batch_heads, seq_len] logsumexp
+    float* __restrict__ dQ,          // [batch_heads, seq_len, HEAD_DIM] (atomicAdd)
+    float* __restrict__ dK,          // [batch_heads, seq_len, HEAD_DIM] (one block per KV tile)
+    float* __restrict__ dV,          // [batch_heads, seq_len, HEAD_DIM] (one block per KV tile)
+    const int seq_len,
+    const float scale,
+    const bool causal
+) {
+    const int kv_tile_idx = blockIdx.x;  // which KV tile (column block)
+    const int batch_head = blockIdx.y;
+    const int tid = threadIdx.x;
+
+    const int kv_start = kv_tile_idx * Bc;
+    if (kv_start >= seq_len) return;
+    const int actual_Bc = min(Bc, seq_len - kv_start);
+
+    // Base pointers for this batch-head
+    const float* Q_base  = Q  + batch_head * seq_len * HEAD_DIM;
+    const float* K_base  = K  + batch_head * seq_len * HEAD_DIM;
+    const float* V_base  = V  + batch_head * seq_len * HEAD_DIM;
+    const float* O_base  = O  + batch_head * seq_len * HEAD_DIM;
+    const float* dO_base = dO + batch_head * seq_len * HEAD_DIM;
+    const float* L_base  = L  + batch_head * seq_len;
+    float* dQ_base = dQ + batch_head * seq_len * HEAD_DIM;
+    float* dK_base = dK + batch_head * seq_len * HEAD_DIM;
+    float* dV_base = dV + batch_head * seq_len * HEAD_DIM;
+
+    // Shared memory layout (no dK/dV tiles — those go directly to global)
+    extern __shared__ float smem[];
+    float* K_tile  = smem;                                          // [Bc][HEAD_DIM]
+    float* V_tile  = K_tile  + Bc * HEAD_DIM;                      // [Bc][HEAD_DIM]
+    float* Q_tile  = V_tile  + Bc * HEAD_DIM;                      // [Br][HEAD_DIM]
+    float* dO_tile = Q_tile  + Br * HEAD_DIM;                      // [Br][HEAD_DIM]
+    float* S_tile  = dO_tile + Br * HEAD_DIM;                      // [Br][Bc]
+    float* l_tile  = S_tile  + Br * Bc;                             // [Br]
+    float* D_tile  = l_tile  + Br;                                  // [Br]
+
+    // Load K_j and V_j tiles into shared memory
+    for (int i = tid; i < actual_Bc * HEAD_DIM; i += BLOCK_SIZE) {
+        int row = i / HEAD_DIM;
+        int col = i % HEAD_DIM;
+        K_tile[row * HEAD_DIM + col] = K_base[(kv_start + row) * HEAD_DIM + col];
+        V_tile[row * HEAD_DIM + col] = V_base[(kv_start + row) * HEAD_DIM + col];
+    }
+    // Zero-pad if actual_Bc < Bc
+    for (int i = tid + actual_Bc * HEAD_DIM; i < Bc * HEAD_DIM; i += BLOCK_SIZE) {
+        K_tile[i] = 0.0f;
+        V_tile[i] = 0.0f;
+    }
+    __syncthreads();
+
+    // Per-thread accumulators for dK and dV for the elements this thread is responsible for.
+    // Each thread handles ceil(actual_Bc * HEAD_DIM / BLOCK_SIZE) elements.
+    // We use register arrays for accumulation then write once at the end.
+    // Max elements per thread: ceil(Bc * HEAD_DIM / BLOCK_SIZE)
+    // For Bc=32, HEAD_DIM=128, BLOCK_SIZE=256: 32*128/256 = 16 elements per thread
+    constexpr int MAX_ELEMS_PER_THREAD = (Bc * HEAD_DIM + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    float dk_acc[MAX_ELEMS_PER_THREAD];
+    float dv_acc[MAX_ELEMS_PER_THREAD];
+    #pragma unroll
+    for (int e = 0; e < MAX_ELEMS_PER_THREAD; ++e) {
+        dk_acc[e] = 0.0f;
+        dv_acc[e] = 0.0f;
+    }
+
+    // Iterate over Q tiles (row blocks)
+    const int num_q_tiles = (seq_len + Br - 1) / Br;
+
+    for (int q_tile_idx = 0; q_tile_idx < num_q_tiles; ++q_tile_idx) {
+        const int q_start = q_tile_idx * Br;
+        if (q_start >= seq_len) break;
+        const int actual_Br = min(Br, seq_len - q_start);
+
+        // For causal masking: skip if all Q rows come before all K cols
+        if (causal && (q_start + actual_Br - 1) < kv_start) {
+            continue;
+        }
+
+        // Load Q_i and dO_i tiles into shared memory
+        for (int i = tid; i < actual_Br * HEAD_DIM; i += BLOCK_SIZE) {
+            int row = i / HEAD_DIM;
+            int col = i % HEAD_DIM;
+            Q_tile[row * HEAD_DIM + col]  = Q_base[(q_start + row) * HEAD_DIM + col];
+            dO_tile[row * HEAD_DIM + col] = dO_base[(q_start + row) * HEAD_DIM + col];
+        }
+        // Zero-pad
+        for (int i = tid + actual_Br * HEAD_DIM; i < Br * HEAD_DIM; i += BLOCK_SIZE) {
+            Q_tile[i] = 0.0f;
+            dO_tile[i] = 0.0f;
+        }
+
+        // Load l_i (logsumexp) and compute D_i = rowsum(dO_i * O_i)
+        for (int row = tid; row < actual_Br; row += BLOCK_SIZE) {
+            l_tile[row] = L_base[q_start + row];
+
+            float d_sum = 0.0f;
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                d_sum += dO_base[(q_start + row) * HEAD_DIM + d]
+                       * O_base[(q_start + row) * HEAD_DIM + d];
+            }
+            D_tile[row] = d_sum;
+        }
+        for (int row = tid + actual_Br; row < Br; row += BLOCK_SIZE) {
+            l_tile[row] = -INFINITY;
+            D_tile[row] = 0.0f;
+        }
+        __syncthreads();
+
+        // Compute S_ij = Q_i @ K_j^T * scale  [Br x Bc]
+        for (int idx = tid; idx < actual_Br * actual_Bc; idx += BLOCK_SIZE) {
+            int i = idx / actual_Bc;
+            int j = idx % actual_Bc;
+            float dot = 0.0f;
+            #pragma unroll 8
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                dot += Q_tile[i * HEAD_DIM + d] * K_tile[j * HEAD_DIM + d];
+            }
+            S_tile[i * Bc + j] = dot * scale;
+        }
+        // Set out-of-bounds entries to -inf
+        for (int idx = tid; idx < Br * Bc; idx += BLOCK_SIZE) {
+            int i = idx / Bc;
+            int j = idx % Bc;
+            if (i >= actual_Br || j >= actual_Bc) {
+                S_tile[idx] = -INFINITY;
+            }
+        }
+        __syncthreads();
+
+        // Compute P_ij = exp(S_ij - l_i)  [Br x Bc]
+        // Apply causal mask: P_ij = 0 where query_pos < key_pos
+        for (int idx = tid; idx < Br * Bc; idx += BLOCK_SIZE) {
+            int i = idx / Bc;
+            int j = idx % Bc;
+            float p = 0.0f;
+            if (i < actual_Br && j < actual_Bc) {
+                if (causal && (q_start + i) < (kv_start + j)) {
+                    p = 0.0f;
+                } else {
+                    p = expf(S_tile[i * Bc + j] - l_tile[i]);
+                }
+            }
+            S_tile[i * Bc + j] = p;  // Reuse S_tile for P_ij
+        }
+        __syncthreads();
+
+        // Accumulate dV_j += P_ij^T @ dO_i  [Bc x HEAD_DIM]
+        // Each thread accumulates for its assigned (j, d) elements
+        {
+            int e = 0;
+            for (int idx = tid; idx < Bc * HEAD_DIM; idx += BLOCK_SIZE, ++e) {
+                int j = idx / HEAD_DIM;
+                int d = idx % HEAD_DIM;
+                if (j < actual_Bc) {
+                    float sum = 0.0f;
+                    for (int i = 0; i < actual_Br; ++i) {
+                        sum += S_tile[i * Bc + j] * dO_tile[i * HEAD_DIM + d];
+                    }
+                    dv_acc[e] += sum;
+                }
+            }
+        }
+        __syncthreads();
+
+        // Compute dS_ij = P_ij * (dP_ij - D_i)  where dP_ij = dO_i . V_j
+        // Overwrites S_tile (P_ij) with dS_ij
+        for (int idx = tid; idx < actual_Br * actual_Bc; idx += BLOCK_SIZE) {
+            int i = idx / actual_Bc;
+            int j = idx % actual_Bc;
+            float dp = 0.0f;
+            #pragma unroll 8
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                dp += dO_tile[i * HEAD_DIM + d] * V_tile[j * HEAD_DIM + d];
+            }
+            float p_ij = S_tile[i * Bc + j];
+            S_tile[i * Bc + j] = p_ij * (dp - D_tile[i]);
+        }
+        __syncthreads();
+
+        // Accumulate dK_j += dS_ij^T @ Q_i * scale  [Bc x HEAD_DIM]
+        // dK = scale * sum_i dS^T @ Q  (since S = Q @ K^T * scale)
+        {
+            int e = 0;
+            for (int idx = tid; idx < Bc * HEAD_DIM; idx += BLOCK_SIZE, ++e) {
+                int j = idx / HEAD_DIM;
+                int d = idx % HEAD_DIM;
+                if (j < actual_Bc) {
+                    float sum = 0.0f;
+                    for (int i = 0; i < actual_Br; ++i) {
+                        sum += S_tile[i * Bc + j] * Q_tile[i * HEAD_DIM + d];
+                    }
+                    dk_acc[e] += sum * scale;
+                }
+            }
+        }
+
+        // dQ_i += dS_ij @ K_j * scale  [Br x HEAD_DIM]
+        // Accumulate via atomicAdd since multiple KV tiles contribute
+        for (int idx = tid; idx < actual_Br * HEAD_DIM; idx += BLOCK_SIZE) {
+            int i = idx / HEAD_DIM;
+            int d = idx % HEAD_DIM;
+            float sum = 0.0f;
+            for (int j = 0; j < actual_Bc; ++j) {
+                sum += S_tile[i * Bc + j] * K_tile[j * HEAD_DIM + d];
+            }
+            atomicAdd(&dQ_base[(q_start + i) * HEAD_DIM + d], sum * scale);
+        }
+        __syncthreads();
+    }
+
+    // Write accumulated dK and dV from registers to global memory
+    {
+        int e = 0;
+        for (int idx = tid; idx < Bc * HEAD_DIM; idx += BLOCK_SIZE, ++e) {
+            int row = idx / HEAD_DIM;
+            int col = idx % HEAD_DIM;
+            if (row < actual_Bc) {
+                dK_base[(kv_start + row) * HEAD_DIM + col] = dk_acc[e];
+                dV_base[(kv_start + row) * HEAD_DIM + col] = dv_acc[e];
+            }
+        }
+    }
+}
+
+// Host wrapper for fused flash attention backward
+auto flash_attention_backward_cuda(
+    const Tensor& dO,    // [batch_heads, seq_len, head_dim]
+    const Tensor& Q,     // [batch_heads, seq_len, head_dim]
+    const Tensor& K,     // [batch_heads, seq_len, head_dim]
+    const Tensor& V,     // [batch_heads, seq_len, head_dim]
+    const Tensor& O,     // [batch_heads, seq_len, head_dim]
+    const Tensor& L,     // [batch_heads, seq_len] logsumexp
+    float scale,
+    bool causal
+) -> std::vector<Tensor> {
+    int64_t batch_heads = Q.shape()[0];
+    int64_t seq_len = Q.shape()[1];
+    int64_t head_dim = Q.shape()[2];
+
+    if (Q.dtype() != DType::Float32) {
+        throw std::runtime_error("flash_attention_backward_cuda: Only Float32 supported");
+    }
+
+    Tensor dQ = create_cuda_zeros({batch_heads, seq_len, head_dim}, Q.dtype(), Q.device());
+    Tensor dK = create_cuda_zeros({batch_heads, seq_len, head_dim}, K.dtype(), K.device());
+    Tensor dV = create_cuda_zeros({batch_heads, seq_len, head_dim}, V.dtype(), V.device());
+
+    constexpr int Br = 32;
+    constexpr int Bc = 32;
+    constexpr int BLOCK_SIZE = 256;
+
+    int num_kv_tiles = (seq_len + Bc - 1) / Bc;
+    dim3 grid(num_kv_tiles, batch_heads);
+    dim3 threads(BLOCK_SIZE);
+
+    // Shared memory: K_tile[Bc*HD] + V_tile[Bc*HD] + Q_tile[Br*HD] + dO_tile[Br*HD]
+    //              + S_tile[Br*Bc] + l_tile[Br] + D_tile[Br]
+    // dK/dV accumulated in registers, not shared memory
+    auto compute_bwd_smem = [&](int hd) -> size_t {
+        return (2 * Bc * hd + 2 * Br * hd + Br * Bc + Br + Br) * sizeof(float);
+    };
+
+    const float* q_ptr  = Q.data<float>();
+    const float* k_ptr  = K.data<float>();
+    const float* v_ptr  = V.data<float>();
+    const float* o_ptr  = O.data<float>();
+    const float* do_ptr = dO.data<float>();
+    const float* l_ptr  = L.data<float>();
+    float* dq_ptr = dQ.data<float>();
+    float* dk_ptr = dK.data<float>();
+    float* dv_ptr = dV.data<float>();
+    int seq_len_int = static_cast<int>(seq_len);
+
+    // Helper to optionally request extended shared memory for large tile sizes
+    auto maybe_set_max_smem = [](const void* func, size_t smem_bytes) {
+        if (smem_bytes > 48 * 1024) {
+            cudaFuncSetAttribute(func, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 static_cast<int>(smem_bytes));
+        }
+    };
+
+    // Dispatch based on head_dim for optimal unrolling
+    if (head_dim == 32) {
+        size_t smem = compute_bwd_smem(32);
+        flash_attention_backward_kernel<32, Br, Bc, BLOCK_SIZE><<<grid, threads, smem>>>(
+            q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
+            seq_len_int, scale, causal);
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+    } else if (head_dim == 64) {
+        size_t smem = compute_bwd_smem(64);
+        flash_attention_backward_kernel<64, Br, Bc, BLOCK_SIZE><<<grid, threads, smem>>>(
+            q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
+            seq_len_int, scale, causal);
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+    } else if (head_dim == 128) {
+        size_t smem = compute_bwd_smem(128);
+        auto kernel_fn = flash_attention_backward_kernel<128, Br, Bc, BLOCK_SIZE>;
+        maybe_set_max_smem(reinterpret_cast<const void*>(kernel_fn), smem);
+        kernel_fn<<<grid, threads, smem>>>(
+            q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
+            seq_len_int, scale, causal);
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+    } else {
+        // Fallback: unsupported head_dim for fused kernel — should not reach here
+        // (caller should use composed-ops fallback)
+        throw std::runtime_error(
+            "flash_attention_backward_cuda: Unsupported head_dim " + std::to_string(head_dim) +
+            ". Fused backward supports 32, 64, 128.");
+    }
+
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+    return {dQ, dK, dV};
 }
 
 // ==============================================================================

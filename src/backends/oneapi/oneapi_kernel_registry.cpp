@@ -19,6 +19,8 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/sparse/sparse_tensor.hpp"
+#include "tenzor/sparse/sparse_ops.hpp"
 #include <climits>
 #include <cmath>
 #include <cstdint>
@@ -3043,6 +3045,17 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         });
 
     // =========================================================================
+    // NMS Operation
+    // =========================================================================
+    table.register_kernel(OpId::NMS,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // inputs: [boxes (N,4), scores (N)]
+            // attrs: IouThreshold
+            float iou_threshold = static_cast<float>(attrs.get_float(AttrKey::IouThreshold, 0.5));
+            return {oneapi::nms_kernel(inputs[0], inputs[1], iou_threshold, get_q(inputs))};
+        });
+
+    // =========================================================================
     // Quantized Operations (Phase 3.1)
     // =========================================================================
 
@@ -3119,6 +3132,59 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             y_hard = dispatch<OpId::Scatter>(scatter_inputs, scatter_attrs)[0];
 
             return add(sub(y_hard, y_soft.detach()), y_soft);
+        });
+
+    // =========================================================================
+    // Sparse Tensor Operations (OpIds 460-464)
+    //
+    // Wrapper lambdas that reconstruct SparseTensor from CSR components passed
+    // as plain Tensors, then delegate to the existing sparse:: functions which
+    // internally dispatch to oneMKL sparse when inputs are on OneAPI/SYCL.
+    // =========================================================================
+
+#ifdef TENZOR_HAS_ONEMKL
+    // SparseSpMM: sparse(M,K) @ dense(K,N) -> dense(M,N)
+    table.register_single_output_kernel(OpId::SparseSpMM,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            return sparse::spmm(sp, inputs[3]);
+        });
+
+    // SparseSpMV: sparse(M,K) @ vec(K) -> vec(M)
+    table.register_single_output_kernel(OpId::SparseSpMV,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            return sparse::spmv(sp, inputs[3]);
+        });
+#endif // TENZOR_HAS_ONEMKL
+
+    // SparseToDense: CSR components -> dense tensor
+    table.register_single_output_kernel(OpId::SparseToDense,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            return sp.to_dense();
+        });
+
+    // DenseToSparse: dense tensor -> CSR components [crow_indices, col_indices, values]
+    table.register_kernel(OpId::DenseToSparse,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            auto sp = SparseTensor::from_dense(inputs[0], SparseLayout::CSR);
+            return {sp.crow_indices(), sp.col_indices(), sp.values()};
+        });
+
+    // SparseAdd: sparse(M,K) + dense(M,K) -> dense(M,K)
+    table.register_single_output_kernel(OpId::SparseAdd,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            return sparse::add(sp, inputs[3]);
         });
 
 } // register_oneapi_kernels

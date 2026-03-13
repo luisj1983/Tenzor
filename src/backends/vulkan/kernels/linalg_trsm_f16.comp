@@ -1,0 +1,120 @@
+#version 450
+
+// Triangular solve from LU factors for Float16: solves L*U*X = P*B.
+// Float16 elements packed 2 per 32-bit word, all computation in float32.
+// Single invocation per batch element (sequential column solve).
+// Input: LU matrix (packed F16), pivot indices (int), B matrix (packed F16).
+// Output: solution X matrix (packed F16).
+
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0) buffer LUBuf    { uint lu_data[]; };
+layout(set = 0, binding = 1) buffer PivotBuf { int pivots[];    };
+layout(set = 0, binding = 2) buffer BBuf     { uint b_data[];  };
+layout(set = 0, binding = 3) buffer OutBuf   { uint x_data[];  };
+
+layout(push_constant) uniform PushConstants {
+    uint n;           // matrix dimension
+    uint nrhs;        // number of right-hand sides
+    uint lda;         // LU leading dimension
+    uint ldb;         // B/X leading dimension
+    uint batch_size;  // number of matrices in batch
+};
+
+// Read Float16 from LU buffer
+float readF16LU(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = lu_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+// Read Float16 from B buffer
+float readF16B(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = b_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+// Read Float16 from X buffer
+float readF16X(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = x_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+// Write Float16 to X buffer
+void writeF16X(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = x_data[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0; iter < 1024; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(x_data[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    x_data[word_idx] = new_val;
+}
+
+void main() {
+    uint batch_idx = gl_GlobalInvocationID.x;
+    if (batch_idx >= batch_size) return;
+
+    uint lu_off = batch_idx * n * lda;
+    uint bx_off = batch_idx * n * ldb;
+
+    // Copy B to X (work in x_data)
+    for (uint i = 0; i < n; i++) {
+        for (uint j = 0; j < nrhs; j++) {
+            writeF16X(bx_off + i * ldb + j, readF16B(bx_off + i * ldb + j));
+        }
+    }
+
+    // Apply pivots (row permutation)
+    for (uint i = 0; i < n; i++) {
+        uint pi = uint(pivots[batch_idx * n + i]);
+        if (pi != i) {
+            for (uint j = 0; j < nrhs; j++) {
+                float tmp = readF16X(bx_off + i * ldb + j);
+                writeF16X(bx_off + i * ldb + j, readF16X(bx_off + pi * ldb + j));
+                writeF16X(bx_off + pi * ldb + j, tmp);
+            }
+        }
+    }
+
+    // Forward substitution: L * y = Pb (L has unit diagonal)
+    for (uint i = 1; i < n; i++) {
+        for (uint j = 0; j < nrhs; j++) {
+            float sum = 0.0;
+            for (uint k = 0; k < i; k++) {
+                sum += readF16LU(lu_off + i * lda + k) * readF16X(bx_off + k * ldb + j);
+            }
+            float cur = readF16X(bx_off + i * ldb + j);
+            writeF16X(bx_off + i * ldb + j, cur - sum);
+        }
+    }
+
+    // Backward substitution: U * x = y (U has non-unit diagonal)
+    for (int i = int(n) - 1; i >= 0; i--) {
+        for (uint j = 0; j < nrhs; j++) {
+            float sum = 0.0;
+            for (uint k = uint(i) + 1; k < n; k++) {
+                sum += readF16LU(lu_off + uint(i) * lda + k) * readF16X(bx_off + k * ldb + j);
+            }
+            float cur = readF16X(bx_off + uint(i) * ldb + j);
+            float diag = readF16LU(lu_off + uint(i) * lda + uint(i));
+            writeF16X(bx_off + uint(i) * ldb + j, (cur - sum) / diag);
+        }
+    }
+}

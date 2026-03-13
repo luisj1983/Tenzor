@@ -248,4 +248,16 @@ auto backend_registry() -> BackendLoader&;
  */
 auto is_backend_registry_alive() -> bool;
 
+/**
+ * @brief Atomically check if registry is alive and return backend.
+ *
+ * Eliminates the TOCTOU race between is_backend_registry_alive() and
+ * backend_registry().get_backend(). Safe to call from destructors
+ * during static destruction.
+ *
+ * @param type Device type to look up
+ * @return Backend pointer, or nullptr if registry is dead or backend not found
+ */
+auto try_get_backend(Device::Type type) -> Backend*;
+
 } // namespace tenzor

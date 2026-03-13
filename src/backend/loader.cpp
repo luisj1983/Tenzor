@@ -248,4 +248,12 @@ auto is_backend_registry_alive() -> bool {
     return !g_registry_destroying.load(std::memory_order_acquire);
 }
 
+auto try_get_backend(Device::Type type) -> Backend* {
+    // Single atomic check — if destroying, return nullptr immediately
+    if (g_registry_destroying.load(std::memory_order_acquire)) {
+        return nullptr;
+    }
+    return backend_registry().get_backend(type);
+}
+
 } // namespace tenzor

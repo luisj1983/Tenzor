@@ -1,0 +1,53 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Fused SGD optimizer step (Float64)
+// Per-element: applies weight decay, momentum, dampening, nesterov, then updates param.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Grad { float64_t grad_data[]; };
+layout(binding = 1) buffer Param { float64_t param_data[]; };
+layout(binding = 2) buffer MomentumBuf { float64_t momentum_buf[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint numel;
+    float lr;
+    float momentum;
+    float weight_decay;
+    float dampening;
+    uint nesterov;        // 0=off, 1=on
+    uint has_momentum;    // 0=no momentum buffer, 1=has momentum
+    uint padding;
+} params;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= params.numel) return;
+
+    float64_t g = grad_data[gid];
+
+    float64_t lr_d = float64_t(params.lr);
+    float64_t momentum_d = float64_t(params.momentum);
+    float64_t wd_d = float64_t(params.weight_decay);
+    float64_t dampening_d = float64_t(params.dampening);
+
+    // Weight decay (L2 regularization)
+    if (params.weight_decay > 0.0) {
+        g += wd_d * param_data[gid];
+    }
+
+    if (params.has_momentum != 0 && params.momentum > 0.0) {
+        // buf = momentum * buf + (1 - dampening) * g
+        float64_t buf = momentum_d * momentum_buf[gid] + (1.0LF - dampening_d) * g;
+        momentum_buf[gid] = buf;
+
+        if (params.nesterov != 0) {
+            // Nesterov: effective update = g + momentum * buf
+            g = g + momentum_d * buf;
+        } else {
+            g = buf;
+        }
+    }
+
+    param_data[gid] -= lr_d * g;
+}

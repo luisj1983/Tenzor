@@ -900,7 +900,8 @@ static const std::unordered_map<std::string, VkDispatchHandler>& get_dispatch_ta
         }},
         {"conv_transpose2d_forward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
             if (inputs.size() < 2) throw std::invalid_argument("conv_transpose2d_forward requires at least 2 inputs (input, weight)");
-            if (inputs[0].dtype() != DType::Float32 && inputs[0].dtype() != DType::Float64 && inputs[0].dtype() != DType::Float16) {
+            if (inputs[0].dtype() != DType::Float32 && inputs[0].dtype() != DType::Float64 &&
+                inputs[0].dtype() != DType::Float16 && inputs[0].dtype() != DType::BFloat16) {
                 TENZOR_LOG_WARNING(std::format("Vulkan: No shader for conv_transpose2d_forward with dtype {}; falling back to CPU",
                                                dtype_name(inputs[0].dtype())));
                 Device original_device = inputs[0].device();
@@ -1228,6 +1229,9 @@ auto VulkanBackend::dispatch(const std::string& op_name,
                 "gru_cell", "gru_cell_backward",
                 // Indexing ops (put_f16, take_f16, tile_f16, stack_f16, searchsorted_f16 shaders)
                 "put", "take", "tile", "stack", "searchsorted",
+                // Linalg (native F16 shaders)
+                "linalg_det", "linalg_inv", "linalg_solve", "linalg_eigh",
+                "linalg_svd", "linalg_cholesky", "linalg_qr",
             };
 
             if (!f16_native_ops.contains(op_name)) {
@@ -1377,6 +1381,9 @@ auto VulkanBackend::dispatch(const std::string& op_name,
                 "nll_loss_forward", "nll_loss_backward",
                 // Embedding
                 "embedding_bag",
+                // Optimizer steps
+                "fused_sgd_step", "fused_adagrad_step",
+                "fused_adadelta_step", "fused_rmsprop_step",
             };
 
             if (!f64_native_ops.contains(op_name)) {
@@ -1501,7 +1508,9 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         bool centered = attrs.get_bool(AttrKey::Centered, false);
 
         int32_t device_id = inputs[0].device().index;
-        auto* pipeline = getPipeline("fused_rmsprop_step", device_id);
+        bool is_float64 = (inputs[0].dtype() == DType::Float64);
+        std::string rmsprop_shader = is_float64 ? "fused_rmsprop_step_f64" : "fused_rmsprop_step";
+        auto* pipeline = getPipeline(rmsprop_shader, device_id);
 
         bool has_momentum = (inputs.size() > 3 && momentum > 0.0f);
         bool has_grad_avg = (inputs.size() > 4 && centered);
@@ -1580,7 +1589,9 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
 
         int32_t device_id = inputs[0].device().index;
-        auto* pipeline = getPipeline("fused_adadelta_step", device_id);
+        bool is_float64 = (inputs[0].dtype() == DType::Float64);
+        std::string adadelta_shader = is_float64 ? "fused_adadelta_step_f64" : "fused_adadelta_step";
+        auto* pipeline = getPipeline(adadelta_shader, device_id);
 
         size_t buf_size = numel * inputs[0].dtype_size();
         std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -1639,7 +1650,9 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
 
         int32_t device_id = inputs[0].device().index;
-        auto* pipeline = getPipeline("fused_adagrad_step", device_id);
+        bool is_float64 = (inputs[0].dtype() == DType::Float64);
+        std::string adagrad_shader = is_float64 ? "fused_adagrad_step_f64" : "fused_adagrad_step";
+        auto* pipeline = getPipeline(adagrad_shader, device_id);
 
         size_t buf_size = numel * inputs[0].dtype_size();
         std::vector<std::pair<uint32_t, const void*>> bindings = {

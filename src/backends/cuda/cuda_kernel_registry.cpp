@@ -16,6 +16,8 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/sparse/sparse_tensor.hpp"
+#include "tenzor/sparse/sparse_ops.hpp"
 #include "tenzor/backend/fused_ops.hpp"
 #ifdef TENZOR_HAS_CUDNN
 #include "tenzor/backend/cudnn_wrapper.hpp"
@@ -277,6 +279,7 @@ namespace cuda {
     auto unfold_cuda(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation) -> Tensor;
     auto fold_cuda(const Tensor& input, const std::vector<int64_t>& output_size, int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation) -> Tensor;
     auto box_iou_cuda(const Tensor& boxes1, const Tensor& boxes2, int iou_type) -> Tensor;
+    auto nms_cuda_wrapper(const Tensor& boxes, const Tensor& scores, float iou_threshold) -> Tensor;
     auto gather_relative_position_bias(const Tensor& table, const Tensor& indices,
                                        int64_t num_positions, int64_t num_heads) -> Tensor;
 
@@ -321,13 +324,25 @@ namespace cuda {
         float eps
     ) -> std::tuple<Tensor, Tensor>;
 
-    // Fused Attention operation
+    // Fused Attention operation (returns {output, logsumexp})
     auto fused_attention_cuda(
         const Tensor& Q,
         const Tensor& K,
         const Tensor& V,
         float scale
-    ) -> Tensor;
+    ) -> std::pair<Tensor, Tensor>;
+
+    // Fused Flash Attention backward (tiled, memory-efficient)
+    auto flash_attention_backward_cuda(
+        const Tensor& dO,
+        const Tensor& Q,
+        const Tensor& K,
+        const Tensor& V,
+        const Tensor& O,
+        const Tensor& L,
+        float scale,
+        bool causal
+    ) -> std::vector<Tensor>;
 
     // Fused optimizer operations
     auto fused_sgd_step_cuda(
@@ -1311,7 +1326,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 #endif
 
         // 3D input or cuDNN not available: use custom flash attention kernel
-        auto output = cuda::fused_attention_cuda(inputs[0], inputs[1], inputs[2], scale);
+        auto [output, lse] = cuda::fused_attention_cuda(inputs[0], inputs[1], inputs[2], scale);
         return std::vector<Tensor>{output};
     });
 
@@ -1320,37 +1335,48 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // =========================================================================
     table.register_kernel(OpId::FlashAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // Uses same implementation as FusedAttention — both are memory-efficient
+        // Returns {O, L} where L is the row-wise logsumexp (for backward pass)
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
         bool causal = attrs.get_bool(AttrKey::Causal, false);
-        auto output = cuda::fused_attention_cuda(inputs[0], inputs[1], inputs[2], scale);
-        return std::vector<Tensor>{output};
+        auto [output, lse] = cuda::fused_attention_cuda(inputs[0], inputs[1], inputs[2], scale);
+        return std::vector<Tensor>{output, lse};
     });
 
     // =========================================================================
-    // Flash Attention Backward (composed-ops fallback using high-level ops)
+    // Flash Attention Backward (fused tiled kernel, composed-ops fallback)
     // =========================================================================
     table.register_kernel(OpId::FlashAttentionBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            // inputs: [dO, Q, K, V, O] — dO = grad_output, O = forward output
+            // inputs: [dO, Q, K, V, O, L] — L = logsumexp from forward
+            // Falls back to [dO, Q, K, V, O] (no L) for composed-ops path
             float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
             bool causal = attrs.get_bool(AttrKey::Causal, false);
 
-            const Tensor& dO = inputs[0];  // [B, H, S, D]
+            const Tensor& dO = inputs[0];
             const Tensor& Q = inputs[1];
             const Tensor& K = inputs[2];
             const Tensor& V = inputs[3];
+            const Tensor& O = inputs[4];
 
-            // Recompute attention weights: attn = softmax(Q @ K^T * scale)
+            // Check if we have logsumexp (L) and supported head_dim for fused kernel
+            int64_t head_dim = Q.shape().back();
+            bool has_lse = inputs.size() >= 6;
+            bool fused_supported = (head_dim == 32 || head_dim == 64 || head_dim == 128);
+
+            if (has_lse && fused_supported && Q.dtype() == DType::Float32) {
+                const Tensor& L = inputs[5];
+                return cuda::flash_attention_backward_cuda(dO, Q, K, V, O, L, scale, causal);
+            }
+
+            // Composed-ops fallback for unsupported head_dim or missing L
             Tensor Kt = tenzor::transpose(K, -1, -2);
-            Tensor scores = tenzor::bmm(Q, Kt);  // [B, H, S, S]
+            Tensor scores = tenzor::bmm(Q, Kt);
 
-            // Scale
             auto scores_shape = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
             Tensor scale_t = tenzor::full(scores_shape, static_cast<double>(scale),
                                            scores.dtype(), scores.device());
             scores = tenzor::mul(scores, scale_t);
 
-            // Apply causal mask if needed
             if (causal) {
                 int64_t seq_len = scores_shape[scores_shape.size() - 1];
                 Tensor rows = tenzor::arange(0, seq_len, 1, DType::Int64, scores.device());
@@ -1363,21 +1389,17 @@ void register_cuda_kernels(BackendDispatchTable& table) {
                 scores = tenzor::add(scores, tenzor::mul(causal_mask.to(scores.dtype()), neg_inf));
             }
 
-            // Softmax along last dim
             NewOpAttributes sm_attrs;
             sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
             std::vector<Tensor> sm_inputs = {scores};
             Tensor attn_weights = tenzor::dispatch(OpId::Softmax, sm_inputs, sm_attrs)[0];
 
-            // dV = attn^T @ dO
             Tensor attn_t = tenzor::transpose(attn_weights, -1, -2);
             Tensor dV = tenzor::bmm(attn_t, dO);
 
-            // dAttn = dO @ V^T
             Tensor Vt = tenzor::transpose(V, -1, -2);
             Tensor dAttn = tenzor::bmm(dO, Vt);
 
-            // softmax backward: ds = attn * (dAttn - sum(attn * dAttn, dim=-1, keepdim=true))
             Tensor attn_dAttn = tenzor::mul(attn_weights, dAttn);
             NewOpAttributes sum_attrs;
             sum_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
@@ -1386,13 +1408,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             Tensor sum_ad = tenzor::dispatch(OpId::Sum, sum_inputs, sum_attrs)[0];
             Tensor dScores = tenzor::mul(attn_weights, tenzor::sub(dAttn, sum_ad));
 
-            // Apply scale
             Tensor scale_t2 = tenzor::full(
                 std::vector<int64_t>(dScores.shape().begin(), dScores.shape().end()),
                 static_cast<double>(scale), dScores.dtype(), dScores.device());
             dScores = tenzor::mul(dScores, scale_t2);
 
-            // dQ = dScores @ K, dK = dScores^T @ Q
             Tensor dQ = tenzor::bmm(dScores, K);
             Tensor dScores_t = tenzor::transpose(dScores, -1, -2);
             Tensor dK = tenzor::bmm(dScores_t, Q);
@@ -2513,6 +2533,16 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return cuda::box_iou_cuda(inputs[0], inputs[1], iou_type);
     });
 
+    // =========================================================================
+    // NMS Operation
+    // =========================================================================
+    table.register_kernel(OpId::NMS, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        // inputs: [boxes (N,4), scores (N)]
+        // attrs: IouThreshold
+        float iou_threshold = static_cast<float>(attrs.get_float(AttrKey::IouThreshold, 0.5));
+        return {cuda::nms_cuda_wrapper(inputs[0], inputs[1], iou_threshold)};
+    });
+
     table.register_kernel(OpId::GatherRelativePositionBias,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             int64_t num_positions = attrs.get_int(AttrKey::NumPositions, 0);
@@ -2828,6 +2858,59 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             y_hard = dispatch<OpId::Scatter>(scatter_inputs, scatter_attrs)[0];
 
             return add(sub(y_hard, y_soft.detach()), y_soft);
+        });
+
+    // =========================================================================
+    // Sparse Tensor Operations (OpIds 460-464)
+    //
+    // Wrapper lambdas that reconstruct SparseTensor from CSR components passed
+    // as plain Tensors, then delegate to the existing sparse:: functions which
+    // internally dispatch to cuSPARSE when inputs are on CUDA.
+    // =========================================================================
+
+#ifdef TENZOR_HAS_CUSPARSE
+    // SparseSpMM: sparse(M,K) @ dense(K,N) -> dense(M,N)
+    table.register_single_output_kernel(OpId::SparseSpMM,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            return sparse::spmm(sp, inputs[3]);
+        });
+
+    // SparseSpMV: sparse(M,K) @ vec(K) -> vec(M)
+    table.register_single_output_kernel(OpId::SparseSpMV,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            return sparse::spmv(sp, inputs[3]);
+        });
+#endif // TENZOR_HAS_CUSPARSE
+
+    // SparseToDense: CSR components -> dense tensor (works on any device)
+    table.register_single_output_kernel(OpId::SparseToDense,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            return sp.to_dense();
+        });
+
+    // DenseToSparse: dense tensor -> CSR components [crow_indices, col_indices, values]
+    table.register_kernel(OpId::DenseToSparse,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            auto sp = SparseTensor::from_dense(inputs[0], SparseLayout::CSR);
+            return {sp.crow_indices(), sp.col_indices(), sp.values()};
+        });
+
+    // SparseAdd: sparse(M,K) + dense(M,K) -> dense(M,K)
+    table.register_single_output_kernel(OpId::SparseAdd,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            return sparse::add(sp, inputs[3]);
         });
 }
 

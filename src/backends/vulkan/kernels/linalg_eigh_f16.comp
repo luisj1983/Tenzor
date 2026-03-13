@@ -1,0 +1,145 @@
+#version 450
+
+// Symmetric eigenvalue decomposition (Jacobi method) for small matrices (<= 32x32) - Float16 variant
+// Input/output use packed uint32 buffers (2 float16 values per word)
+// All computation done in float32.
+
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) buffer InputBuf { uint data_in[];  };
+layout(set = 0, binding = 1) buffer WBuf     { uint data_w[];   };  // eigenvalues
+layout(set = 0, binding = 2) buffer VBuf     { uint data_v[];   };  // eigenvectors
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint batch;
+};
+
+shared float D[32][32];
+shared float V[32][32];
+shared float converged;
+
+float readF16(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = data_in[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+void writeF16W(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = data_w[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0; iter < 1024; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(data_w[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    data_w[word_idx] = new_val;
+}
+
+void writeF16V(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = data_v[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0; iter < 1024; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(data_v[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    data_v[word_idx] = new_val;
+}
+
+void main() {
+    uint batch_idx = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (batch_idx >= batch) return;
+
+    uint mat_offset = batch_idx * n * n;
+
+    // Load D = A (symmetric)
+    for (uint row = 0; row < n; row++) {
+        if (tid < n) {
+            D[row][tid] = readF16(mat_offset + row * n + tid);
+        }
+        if (tid < n) {
+            V[row][tid] = (row == tid) ? 1.0 : 0.0;
+        }
+    }
+    barrier();
+
+    // Jacobi sweeps
+    for (uint sweep = 0; sweep < 30; sweep++) {
+        if (tid == 0) converged = 1.0;
+        barrier();
+
+        for (uint p = 0; p < n; p++) {
+            for (uint q = p + 1; q < n; q++) {
+                if (tid == 0) {
+                    float app = D[p][p], aqq = D[q][q], apq = D[p][q];
+
+                    if (abs(apq) > 1e-10 * sqrt(abs(app * aqq))) {
+                        converged = 0.0;
+
+                        float tau_val = (aqq - app) / (2.0 * apq);
+                        float t = sign(tau_val) / (abs(tau_val) + sqrt(1.0 + tau_val * tau_val));
+                        float c = 1.0 / sqrt(1.0 + t * t);
+                        float s = t * c;
+
+                        for (uint i = 0; i < n; i++) {
+                            if (i != p && i != q) {
+                                float dip = D[i][p], diq = D[i][q];
+                                D[i][p] = c * dip - s * diq;
+                                D[p][i] = D[i][p];
+                                D[i][q] = s * dip + c * diq;
+                                D[q][i] = D[i][q];
+                            }
+                        }
+
+                        float new_pp = c*c*app - 2.0*s*c*apq + s*s*aqq;
+                        float new_qq = s*s*app + 2.0*s*c*apq + c*c*aqq;
+                        D[p][p] = new_pp;
+                        D[q][q] = new_qq;
+                        D[p][q] = 0.0;
+                        D[q][p] = 0.0;
+
+                        for (uint i = 0; i < n; i++) {
+                            float vip = V[i][p], viq = V[i][q];
+                            V[i][p] = c * vip - s * viq;
+                            V[i][q] = s * vip + c * viq;
+                        }
+                    }
+                }
+                barrier();
+            }
+        }
+
+        if (converged > 0.5) break;
+        barrier();
+    }
+
+    // Write eigenvalues (diagonal of D)
+    if (tid < n) {
+        writeF16W(batch_idx * n + tid, D[tid][tid]);
+    }
+
+    // Write eigenvectors (columns of V)
+    for (uint row = 0; row < n; row++) {
+        if (tid < n) {
+            writeF16V(mat_offset + row * n + tid, V[row][tid]);
+        }
+    }
+}

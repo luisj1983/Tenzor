@@ -41,7 +41,8 @@ struct Device {
         OneAPI,      ///< Intel OneAPI backend
         Vulkan,      ///< Vulkan cross-platform backend
         // Metal: planned for future release
-        WebGPU       ///< WebGPU browser/WASM backend
+        WebGPU,      ///< WebGPU browser/WASM backend
+        COUNT        ///< Sentinel — must be last
     };
 
     Type type;         ///< Device backend type
@@ -152,6 +153,7 @@ struct Device {
             case Type::OneAPI: return "oneapi:" + std::to_string(index);
             case Type::Vulkan: return "vulkan:" + std::to_string(index);
             case Type::WebGPU: return "webgpu:" + std::to_string(index);
+            case Type::COUNT: break;
         }
         return "unknown";
     }

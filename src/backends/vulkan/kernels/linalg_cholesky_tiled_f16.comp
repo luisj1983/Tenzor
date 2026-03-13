@@ -1,0 +1,89 @@
+#version 450
+
+// Blocked Cholesky - panel factorization - Float16 variant
+// Matrix buffer uses packed uint32 (2 float16 values per word)
+// All computation done in float32.
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer Matrix { uint A[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint col_start;
+    uint panel_cols;  // min(32, n - col_start)
+    uint batch_idx;
+};
+
+shared float panel[256][32];
+
+float readF16(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = A[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+void writeF16(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = A[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0; iter < 1024; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(A[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    A[word_idx] = new_val;
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint base = batch_idx * n * n;
+    uint panel_rows = n - col_start;
+
+    // Load panel into shared memory
+    for (uint r = tid; r < panel_rows; r += 256) {
+        for (uint c = 0; c < panel_cols; c++) {
+            panel[r][c] = readF16(base + (col_start + r) * n + (col_start + c));
+        }
+    }
+    barrier();
+
+    // Column-by-column Cholesky on the panel
+    for (uint k = 0; k < panel_cols; k++) {
+        if (tid == 0) {
+            float sum = panel[k][k];
+            for (uint j = 0; j < k; j++) {
+                sum -= panel[k][j] * panel[k][j];
+            }
+            panel[k][k] = sqrt(max(sum, 1e-30));
+        }
+        barrier();
+
+        float diag = panel[k][k];
+        float inv_diag = 1.0 / diag;
+
+        for (uint r = k + 1 + tid; r < panel_rows; r += 256) {
+            float sum = panel[r][k];
+            for (uint j = 0; j < k; j++) {
+                sum -= panel[r][j] * panel[k][j];
+            }
+            panel[r][k] = sum * inv_diag;
+        }
+        barrier();
+    }
+
+    // Write panel back
+    for (uint r = tid; r < panel_rows; r += 256) {
+        for (uint c = 0; c < panel_cols; c++) {
+            writeF16(base + (col_start + r) * n + (col_start + c), panel[r][c]);
+        }
+    }
+}

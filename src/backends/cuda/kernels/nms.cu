@@ -5,6 +5,7 @@
 
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
+#include "tenzor/core/tensor.hpp"
 #include "tenzor/backend/caching_allocator.hpp"
 #include "../cuda_stream_pool.hpp"
 #include "cuda_common.cuh"
@@ -14,6 +15,11 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+
+namespace tenzor {
+// Forward-declare zeros (creation.hpp uses std::expected which nvcc doesn't support)
+auto zeros(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor;
+} // namespace tenzor
 
 namespace tenzor {
 namespace cuda {
@@ -258,6 +264,35 @@ extern "C" void nms_cuda(const float* boxes, const float* scores,
 
     // Stream automatically returned to pool by StreamGuard destructor
     // Memory automatically freed by CachedMemoryGuard destructors
+}
+
+// Tensor-level NMS wrapper for dispatch table integration
+auto nms_cuda_wrapper(const Tensor& boxes, const Tensor& scores, float iou_threshold) -> Tensor {
+    auto boxes_f32 = boxes.to(DType::Float32).contiguous();
+    auto scores_f32 = scores.to(DType::Float32).contiguous();
+    int64_t N = boxes_f32.shape()[0];
+
+    if (N == 0) {
+        return Tensor({0}, DType::Int64, boxes.device());
+    }
+
+    // Allocate output tensor on device for keep indices
+    auto keep_device = tenzor::zeros({N}, DType::Int64, boxes.device());
+
+    int64_t num_keep = 0;
+    nms_cuda(
+        static_cast<const float*>(boxes_f32.data_ptr()),
+        static_cast<const float*>(scores_f32.data_ptr()),
+        N,
+        iou_threshold,
+        static_cast<int64_t*>(keep_device.data_ptr()),
+        &num_keep
+    );
+
+    if (num_keep < N) {
+        keep_device = keep_device.slice(0, 0, num_keep);
+    }
+    return keep_device;
 }
 
 } // namespace cuda

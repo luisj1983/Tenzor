@@ -17,6 +17,7 @@ layout(push_constant) uniform PushConstants {
 } params;
 
 shared float shared_data[WORKGROUP_SIZE];
+shared float shared_comp[WORKGROUP_SIZE]; // Kahan compensation for tree reduction
 
 void main() {
     uint tid = gl_LocalInvocationID.x;
@@ -29,6 +30,7 @@ void main() {
 
     // Initialize accumulator based on operation
     float accum;
+    float compensation = 0.0; // Kahan compensation for per-thread accumulation
     if (params.op == 2) { // max
         accum = -1.0 / 0.0; // -infinity
     } else if (params.op == 3) { // min
@@ -59,8 +61,14 @@ void main() {
             switch (params.op) {
                 case 0: // sum
                 case 1: // mean
-                    accum += val;
+                {
+                    // Kahan compensated summation for better floating-point accuracy
+                    float y = val - compensation;
+                    float t = accum + y;
+                    compensation = (t - accum) - y;
+                    accum = t;
                     break;
+                }
                 case 2: // max
                     accum = max(accum, val);
                     break;
@@ -72,6 +80,7 @@ void main() {
     }
 
     shared_data[tid] = accum;
+    shared_comp[tid] = compensation;
     barrier();
 
     // Parallel reduction in shared memory
@@ -80,8 +89,16 @@ void main() {
             switch (params.op) {
                 case 0: // sum
                 case 1: // mean
-                    shared_data[tid] += shared_data[tid + s];
+                {
+                    // Kahan compensated addition for tree reduction
+                    // Combine compensations first, then add the partial sum
+                    float comp = shared_comp[tid] + shared_comp[tid + s];
+                    float y = shared_data[tid + s] - comp;
+                    float t = shared_data[tid] + y;
+                    shared_comp[tid] = (t - shared_data[tid]) - y;
+                    shared_data[tid] = t;
                     break;
+                }
                 case 2: // max
                     shared_data[tid] = max(shared_data[tid], shared_data[tid + s]);
                     break;

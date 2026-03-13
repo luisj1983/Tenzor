@@ -1,0 +1,41 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Fused Adagrad optimizer step (Float64)
+// Per-element: updates sum_sq and param in one kernel
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Grad { float64_t grad_data[]; };
+layout(binding = 1) buffer Param { float64_t param_data[]; };
+layout(binding = 2) buffer SumSq { float64_t sum_sq[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint numel;
+    float lr;
+    float eps;
+    float weight_decay;
+} params;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= params.numel) return;
+
+    float64_t g = grad_data[gid];
+
+    float64_t lr_d = float64_t(params.lr);
+    float64_t eps_d = float64_t(params.eps);
+    float64_t wd_d = float64_t(params.weight_decay);
+
+    // Weight decay
+    if (params.weight_decay > 0.0) {
+        g += wd_d * param_data[gid];
+    }
+
+    // Accumulate squared gradient
+    sum_sq[gid] += g * g;
+
+    // Update parameter
+    // GLSL sqrt only works on float — cast down for sqrt
+    float64_t denom = float64_t(sqrt(float(sum_sq[gid]))) + eps_d;
+    param_data[gid] -= lr_d * g / denom;
+}

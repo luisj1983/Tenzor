@@ -17,6 +17,8 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "tenzor/sparse/sparse_tensor.hpp"
+#include "tenzor/sparse/sparse_ops.hpp"
 #include <cstdlib>
 #include <climits>
 #include <cstdint>
@@ -2243,6 +2245,67 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         auto [Re, Im, V] = linalg::eig(inputs[0]);
         return {Re, Im, V};
     });
+
+    // =========================================================================
+    // Sparse Tensor Operations (OpIds 460-464)
+    //
+    // Wrapper lambdas that reconstruct SparseTensor from CSR components passed
+    // as plain Tensors, then delegate to the existing sparse:: functions.
+    //
+    // Convention for inputs:
+    //   [0] = crow_indices (Int64, shape {M+1})
+    //   [1] = col_indices  (Int64, shape {NNZ})
+    //   [2] = values       (Float32/Float64, shape {NNZ})
+    //   [3] = dense matrix B (for SpMM/SpMV/SparseAdd)
+    // Attrs: M, K, N (dimensions), NNZ
+    // =========================================================================
+
+    // SparseSpMM: sparse(M,K) @ dense(K,N) -> dense(M,N)
+    table.register_single_output_kernel(OpId::SparseSpMM,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            return sparse::spmm(sp, inputs[3]);
+        });
+
+    // SparseSpMV: sparse(M,K) @ vec(K) -> vec(M)
+    table.register_single_output_kernel(OpId::SparseSpMV,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            return sparse::spmv(sp, inputs[3]);
+        });
+
+    // SparseToDense: CSR components -> dense tensor
+    // inputs: [0]=crow_indices, [1]=col_indices, [2]=values
+    // attrs: M, K (shape of the sparse matrix)
+    table.register_single_output_kernel(OpId::SparseToDense,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            return sp.to_dense();
+        });
+
+    // DenseToSparse: dense tensor -> CSR components [crow_indices, col_indices, values]
+    // inputs: [0]=dense tensor
+    table.register_kernel(OpId::DenseToSparse,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            auto sp = SparseTensor::from_dense(inputs[0], SparseLayout::CSR);
+            return {sp.crow_indices(), sp.col_indices(), sp.values()};
+        });
+
+    // SparseAdd: sparse(M,K) + dense(M,K) -> dense(M,K)
+    // inputs: [0]=crow_indices, [1]=col_indices, [2]=values, [3]=dense
+    table.register_single_output_kernel(OpId::SparseAdd,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            return sparse::add(sp, inputs[3]);
+        });
 }
 
 } // namespace tenzor

@@ -110,6 +110,11 @@ jobs:
             -E "cuda|vulkan|oneapi" \
             --timeout 120
 
+      - name: Op coverage check
+        run: |
+          cd build
+          ./bin/op_coverage_report --check ../tools/op_coverage_baseline.json
+
   # Tier 1.5: Sanitizer build (ASAN + UBSAN, ~15 min)
   sanitizer:
     name: ASAN + UBSAN

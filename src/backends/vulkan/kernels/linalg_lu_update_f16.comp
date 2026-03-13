@@ -1,0 +1,121 @@
+#version 450
+
+// Blocked LU — trailing matrix update for Float16
+// Float16 elements packed 2 per 32-bit word, all computation in float32.
+// After panel factorization of columns [col_start, col_start+block_size),
+// this kernel updates the trailing submatrix:
+//   1. Solve L * U_right = A_right (triangular solve for U rows)
+//   2. A_trailing -= L_below * U_right (GEMM update)
+// Each workgroup handles one 32x32 tile of the trailing matrix.
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) buffer Matrix { uint A[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // matrix dimension
+    uint col_start;  // starting column of factored panel
+    uint block_size; // panel width (usually 32)
+    uint batch_idx;  // batch element
+};
+
+shared float L_tile[32][32];
+shared float U_tile[32][32];
+
+// Helper: read one Float16 element from packed uint32 buffer
+float readF16(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = A[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+// Helper: write one Float16 element to packed uint32 buffer (atomic CAS)
+void writeF16(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = A[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0; iter < 1024; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(A[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    A[word_idx] = new_val;
+}
+
+void main() {
+    uint tx = gl_LocalInvocationID.x;  // 0..15
+    uint ty = gl_LocalInvocationID.y;  // 0..15
+
+    // This workgroup updates tile at (tile_row, tile_col) in the trailing matrix
+    uint tile_row = gl_WorkGroupID.x;
+    uint tile_col = gl_WorkGroupID.y;
+
+    uint trail_start = col_start + block_size;
+    uint row_start = trail_start + tile_row * 32;
+    uint col_start_tile = trail_start + tile_col * 32;
+
+    if (row_start >= n || col_start_tile >= n) return;
+
+    uint elem_base = batch_idx * n * n;
+    uint row_end = min(row_start + 32, n);
+    uint col_end = min(col_start_tile + 32, n);
+    uint actual_rows = row_end - row_start;
+    uint actual_cols = col_end - col_start_tile;
+
+    // Accumulate update
+    float acc[4] = {0.0, 0.0, 0.0, 0.0};  // 2x2 per thread
+
+    for (uint kb = 0; kb < block_size; kb += 32) {
+        uint k_len = min(32u, block_size - kb);
+
+        // Load L tile
+        for (uint r = ty; r < actual_rows; r += 16) {
+            for (uint c = tx; c < k_len; c += 16) {
+                L_tile[r][c] = readF16(elem_base + (row_start + r) * n + (col_start + kb + c));
+            }
+        }
+        // Load U tile
+        for (uint r = ty; r < k_len; r += 16) {
+            for (uint c = tx; c < actual_cols; c += 16) {
+                U_tile[r][c] = readF16(elem_base + (col_start + kb + r) * n + (col_start_tile + c));
+            }
+        }
+        barrier();
+
+        // Compute partial GEMM
+        for (uint dy = 0; dy < 2; dy++) {
+            uint r = ty * 2 + dy;
+            if (r >= actual_rows) continue;
+            for (uint dx = 0; dx < 2; dx++) {
+                uint c = tx * 2 + dx;
+                if (c >= actual_cols) continue;
+                float sum = 0.0;
+                for (uint k = 0; k < k_len; k++) {
+                    sum += L_tile[r][k] * U_tile[k][c];
+                }
+                acc[dy * 2 + dx] += sum;
+            }
+        }
+        barrier();
+    }
+
+    // Subtract update from trailing matrix: read current value, subtract, write back
+    for (uint dy = 0; dy < 2; dy++) {
+        uint r = ty * 2 + dy;
+        if (r >= actual_rows) continue;
+        for (uint dx = 0; dx < 2; dx++) {
+            uint c = tx * 2 + dx;
+            if (c >= actual_cols) continue;
+            uint idx = elem_base + (row_start + r) * n + (col_start_tile + c);
+            float cur = readF16(idx);
+            writeF16(idx, cur - acc[dy * 2 + dx]);
+        }
+    }
+}

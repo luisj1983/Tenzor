@@ -601,7 +601,7 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
             SyclDeviceGuard shape_guard(d_shape, queue);
             queue.memcpy(d_strides, strides.data(), ndim * sizeof(int64_t));
             queue.memcpy(d_shape, shape.data(), ndim * sizeof(int64_t));
-            queue.wait();
+            // In-order queue guarantees ordering — no wait needed
 
             queue.parallel_for<ProdDimKernelFloat32>(
                 sycl::range<1>(output_size), [=](sycl::id<1> gid) {
@@ -680,7 +680,7 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
             SyclDeviceGuard shape_guard(d_shape, queue);
             queue.memcpy(d_strides, strides.data(), ndim * sizeof(int64_t));
             queue.memcpy(d_shape, shape.data(), ndim * sizeof(int64_t));
-            queue.wait();
+            // In-order queue guarantees ordering — no wait needed
 
             queue.parallel_for<ProdDimKernelFloat64>(
                 sycl::range<1>(output_size), [=](sycl::id<1> gid) {
@@ -739,7 +739,7 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
             SyclDeviceGuard shape_guard(d_shape, queue);
             queue.memcpy(d_strides, strides.data(), ndim * sizeof(int64_t));
             queue.memcpy(d_shape, shape.data(), ndim * sizeof(int64_t));
-            queue.wait();
+            // In-order queue guarantees ordering — no wait needed
 
             queue.parallel_for(
                 sycl::range<1>(output_size), [=](sycl::id<1> gid) {

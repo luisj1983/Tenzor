@@ -64,7 +64,7 @@ auto Variable::mutable_grad() -> std::optional<Tensor>& {
 auto Variable::has_grad() const -> bool {
     if (!impl_) return false;
     if (impl_->thread_safe_.load(std::memory_order_acquire)) {
-        std::lock_guard lock(impl_->grad_mutex_);
+        std::lock_guard lock(*impl_->grad_mutex_);
         return impl_->grad_.has_value();
     }
     return impl_->grad_.has_value();
@@ -75,7 +75,7 @@ auto Variable::set_grad(Tensor gradient) -> void {
         throw std::runtime_error("Cannot set grad of uninitialized Variable");
     }
     if (impl_->thread_safe_.load(std::memory_order_acquire)) {
-        std::lock_guard lock(impl_->grad_mutex_);
+        std::lock_guard lock(*impl_->grad_mutex_);
         impl_->grad_ = std::move(gradient);
     } else {
         impl_->grad_ = std::move(gradient);
@@ -139,7 +139,7 @@ auto Variable::retains_grad() const -> bool {
 auto Variable::zero_grad() -> void {
     if (impl_) {
         if (impl_->thread_safe_.load(std::memory_order_acquire)) {
-            std::lock_guard lock(impl_->grad_mutex_);
+            std::lock_guard lock(*impl_->grad_mutex_);
             impl_->grad_.reset();
         } else {
             impl_->grad_.reset();

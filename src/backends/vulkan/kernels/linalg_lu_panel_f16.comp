@@ -1,0 +1,140 @@
+#version 450
+
+// Blocked LU Panel Factorization for Float16 — factorizes a single 32-column panel
+// Float16 elements packed 2 per 32-bit word, all computation in float32.
+// Input: A[n x n] stored row-major in packed uint32. This kernel factorizes
+// columns [col_start, col_start+32) using partial pivoting within the panel,
+// then applies row swaps to the full matrix.
+// One workgroup with 256 threads.
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer Matrix { uint A[]; };
+layout(set = 0, binding = 1) buffer PivotBuf { int pivots[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // matrix dimension
+    uint col_start;  // starting column of this panel
+    uint panel_cols; // number of columns in this panel (min(32, n - col_start))
+    uint batch_idx;  // batch element index
+};
+
+shared float panel[256][32];
+shared float max_val;
+shared uint max_row;
+shared int pivot_idx;
+
+// Helper: read one Float16 element from packed uint32 buffer
+float readF16(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = A[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+// Helper: write one Float16 element to packed uint32 buffer (atomic CAS)
+void writeF16(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = A[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0; iter < 1024; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(A[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    A[word_idx] = new_val;
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    // Element base offset for this batch (n*n elements per batch matrix)
+    uint elem_base = batch_idx * n * n;
+
+    // Load panel columns into shared memory
+    uint panel_rows = n - col_start;
+    for (uint r = tid; r < panel_rows; r += 256) {
+        for (uint c = 0; c < panel_cols; c++) {
+            panel[r][c] = readF16(elem_base + (col_start + r) * n + (col_start + c));
+        }
+    }
+    barrier();
+
+    // Factor each column with partial pivoting
+    for (uint k = 0; k < panel_cols; k++) {
+        // Find pivot (max abs in column k, rows k..panel_rows)
+        if (tid == 0) {
+            max_val = 0.0;
+            max_row = k;
+            for (uint r = k; r < panel_rows; r++) {
+                float v = abs(panel[r][k]);
+                if (v > max_val) {
+                    max_val = v;
+                    max_row = r;
+                }
+            }
+            pivot_idx = int(col_start + max_row);
+        }
+        barrier();
+
+        // Store pivot
+        if (tid == 0) {
+            pivots[col_start + k] = pivot_idx;
+        }
+
+        // Swap rows k and max_row in the panel
+        if (max_row != k) {
+            for (uint c = tid; c < panel_cols; c += 256) {
+                float tmp = panel[k][c];
+                panel[k][c] = panel[max_row][c];
+                panel[max_row][c] = tmp;
+            }
+            // Also swap in the full matrix (left of panel)
+            for (uint c = tid; c < col_start; c += 256) {
+                uint ek = elem_base + (col_start + k) * n + c;
+                uint em = elem_base + (col_start + max_row) * n + c;
+                float tmp = readF16(ek);
+                writeF16(ek, readF16(em));
+                writeF16(em, tmp);
+            }
+            // Swap in the full matrix (right of panel)
+            for (uint c = col_start + panel_cols + tid; c < n; c += 256) {
+                uint ek = elem_base + (col_start + k) * n + c;
+                uint em = elem_base + (col_start + max_row) * n + c;
+                float tmp = readF16(ek);
+                writeF16(ek, readF16(em));
+                writeF16(em, tmp);
+            }
+        }
+        barrier();
+
+        // Compute multipliers and eliminate
+        float diag = panel[k][k];
+        if (abs(diag) < 1e-30) {
+            barrier();
+            continue;
+        }
+        float inv_diag = 1.0 / diag;
+
+        for (uint r = k + 1 + tid; r < panel_rows; r += 256) {
+            float mult = panel[r][k] * inv_diag;
+            panel[r][k] = mult;  // Store L factor in-place
+            for (uint c = k + 1; c < panel_cols; c++) {
+                panel[r][c] -= mult * panel[k][c];
+            }
+        }
+        barrier();
+    }
+
+    // Write panel back to global memory
+    for (uint r = tid; r < panel_rows; r += 256) {
+        for (uint c = 0; c < panel_cols; c++) {
+            writeF16(elem_base + (col_start + r) * n + (col_start + c), panel[r][c]);
+        }
+    }
+}

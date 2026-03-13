@@ -63,6 +63,7 @@ endif()
 # Collect source files
 set(WEBGPU_BACKEND_SOURCES
     webgpu_backend.cpp
+    webgpu_kernel_registry.cpp
 )
 
 set(WEBGPU_BACKEND_HEADERS
@@ -107,7 +108,7 @@ target_link_libraries(tenzor_webgpu_backend
 # Compiler features
 target_compile_features(tenzor_webgpu_backend
     PUBLIC
-        cxx_std_17
+        cxx_std_23
 )
 
 # Compiler options

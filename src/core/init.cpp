@@ -374,6 +374,57 @@ auto initialize() -> void {
         std::cout << "Vulkan backend not found at: " << vulkan_backend_path << std::endl;
     }
 
+    // Try to load WebGPU backend if available
+    std::filesystem::path webgpu_backend_path = bin_path / "tenzor_backend_webgpu.so";
+
+    if (std::filesystem::exists(webgpu_backend_path)) {
+        std::cout << "Loading WebGPU backend from: " << webgpu_backend_path << std::endl;
+
+        auto webgpu_result = loader.load_backend(webgpu_backend_path);
+        if (webgpu_result) {
+            auto webgpu_backend_unique = std::move(webgpu_result.value());
+            auto* webgpu_backend_ptr = webgpu_backend_unique.get();
+
+            // Check if WebGPU is actually available
+            if (webgpu_backend_ptr->is_available()) {
+                loader.register_backend(webgpu_backend_ptr->name(), std::move(webgpu_backend_unique));
+                std::cout << "WebGPU backend registered: " << webgpu_backend_ptr->name() << std::endl;
+                std::cout << "Found " << webgpu_backend_ptr->device_count() << " WebGPU device(s)" << std::endl;
+
+                auto* webgpu_backend = webgpu_backend_ptr;
+
+                // =========================================================================
+                // O(1) DISPATCH TABLE REGISTRATION FOR WEBGPU
+                // =========================================================================
+                DispatchTableRegistry::register_backend(Device::Type::WebGPU, webgpu_backend);
+                auto& webgpu_table = DispatchTableRegistry::get_table(Device::Type::WebGPU);
+
+                // Use existing library handle (no second dlopen needed)
+                void* webgpu_handle = loader.last_library_handle();
+                if (webgpu_handle) {
+                    using RegisterFn = void(*)(BackendDispatchTable*);
+                    auto register_fn = reinterpret_cast<RegisterFn>(dlsym(webgpu_handle, "register_kernels"));
+                    if (register_fn) {
+                        register_fn(&webgpu_table);
+                        DispatchTableRegistry::mark_ready(Device::Type::WebGPU);
+                        std::cout << "WebGPU dispatch table initialized with O(1) lookup" << std::endl;
+                    } else {
+                        std::cerr << "Warning: Could not find register_kernels in WebGPU backend" << std::endl;
+                    }
+                } else {
+                    std::cerr << "Warning: No library handle for WebGPU backend kernel registration" << std::endl;
+                }
+
+            } else {
+                std::cout << "WebGPU backend loaded but no WebGPU devices available" << std::endl;
+            }
+        } else {
+            std::cout << "Warning: Failed to load WebGPU backend: " << webgpu_result.error() << std::endl;
+        }
+    } else {
+        std::cout << "WebGPU backend not found at: " << webgpu_backend_path << std::endl;
+    }
+
     std::cout << "Tenzor initialization complete - 51 CPU operations registered" << std::endl;
 
     g_initialized.store(true, std::memory_order_release);

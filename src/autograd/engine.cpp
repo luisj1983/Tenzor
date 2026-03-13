@@ -333,7 +333,7 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                     if (var.impl_) {
                         // Always acquire mutex to prevent TOCTOU race:
                         // thread_safe_ could be set between check and lock acquisition
-                        std::lock_guard lock(var.impl_->grad_mutex_);
+                        std::lock_guard lock(*var.impl_->grad_mutex_);
                         accumulate();
                     } else {
                         accumulate();
@@ -620,7 +620,7 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                     if (var.impl_) {
                         // Always acquire mutex to prevent TOCTOU race:
                         // thread_safe_ could be set between check and lock acquisition
-                        std::lock_guard lock(var.impl_->grad_mutex_);
+                        std::lock_guard lock(*var.impl_->grad_mutex_);
                         accumulate();
                     } else {
                         accumulate();

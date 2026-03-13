@@ -1,0 +1,60 @@
+#version 450
+
+// Compute determinant from LU factorization diagonal + pivot sign - Float16 variant
+// LU data uses packed uint32 buffers (2 float16 values per word)
+// Pivots remain int. Output uses packed uint32 buffers.
+// All computation done in float32.
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer LUBuf    { uint lu_data[];  };
+layout(set = 0, binding = 1) buffer PivotBuf { int pivots[];    };
+layout(set = 0, binding = 2) buffer OutBuf   { uint det_out[];  };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint batch_size;
+    uint lda;
+};
+
+float readF16(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = lu_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+void writeF16Out(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = det_out[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0; iter < 1024; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(det_out[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    det_out[word_idx] = new_val;
+}
+
+void main() {
+    uint batch_idx = gl_GlobalInvocationID.x;
+    if (batch_idx >= batch_size) return;
+
+    uint offset = batch_idx * n * lda;
+    float det = 1.0;
+    int sign = 1;
+
+    for (uint i = 0; i < n; i++) {
+        det *= readF16(offset + i * lda + i);  // diagonal element
+        if (pivots[batch_idx * n + i] != int(i)) sign = -sign;
+    }
+
+    writeF16Out(batch_idx, det * float(sign));
+}

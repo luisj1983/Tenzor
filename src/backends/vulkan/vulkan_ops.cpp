@@ -5906,14 +5906,17 @@ auto VulkanBackend::dispatchGather(const Tensor& input, int64_t dim, const Tenso
         device_id, pipeline, bindings, sizes);
 
     // Calculate gather parameters
-    uint32_t dim_size = static_cast<uint32_t>(input_shape[dim]);
+    // dim_size = indices_shape[dim] for output index decomposition
+    // input_dim_size = input_shape[dim] for bounds check and input indexing
+    uint32_t dim_size = static_cast<uint32_t>(indices_shape[dim]);
+    uint32_t input_dim_size = static_cast<uint32_t>(input_shape[dim]);
     uint32_t inner_size = 1;
     for (int64_t d = dim + 1; d < ndim; ++d) {
-        inner_size *= static_cast<uint32_t>(input_shape[d]);
+        inner_size *= static_cast<uint32_t>(indices_shape[d]);
     }
     uint32_t outer_size = 1;
     for (int64_t d = 0; d < dim; ++d) {
-        outer_size *= static_cast<uint32_t>(input_shape[d]);
+        outer_size *= static_cast<uint32_t>(indices_shape[d]);
     }
 
     // Push constants matching shader layout
@@ -5924,6 +5927,7 @@ auto VulkanBackend::dispatchGather(const Tensor& input, int64_t dim, const Tenso
         uint32_t dim_size;
         uint32_t inner_size;
         uint32_t outer_size;
+        uint32_t input_dim_size;
     } push_constants;
 
     push_constants.input_size = static_cast<uint32_t>(input.numel());
@@ -5932,6 +5936,7 @@ auto VulkanBackend::dispatchGather(const Tensor& input, int64_t dim, const Tenso
     push_constants.dim_size = dim_size;
     push_constants.inner_size = inner_size;
     push_constants.outer_size = outer_size;
+    push_constants.input_dim_size = input_dim_size;
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
@@ -7812,8 +7817,17 @@ auto VulkanBackend::dispatchClamp(const Tensor& input, float min_value, float ma
 
     const void* buffer_in = input.data_ptr();
     const void* buffer_out = output.data_ptr();
-    size_t buffer_size_in = input.numel() * input.dtype_size();
-    size_t buffer_size_out = output.numel() * output.dtype_size();
+    size_t buffer_size_in, buffer_size_out;
+    if (is_float16) {
+        // Float16 packed as 2 elements per uint32 — round up to 4-byte boundary
+        size_t num_pairs_in = (input.numel() + 1) / 2;
+        size_t num_pairs_out = (output.numel() + 1) / 2;
+        buffer_size_in = num_pairs_in * 4;
+        buffer_size_out = num_pairs_out * 4;
+    } else {
+        buffer_size_in = input.numel() * input.dtype_size();
+        buffer_size_out = output.numel() * output.dtype_size();
+    }
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_in},
@@ -12421,26 +12435,23 @@ auto VulkanBackend::dispatchBatchNorm2dUpdateRunningStats(
 
 auto VulkanBackend::dispatchFusedRMSPropStep(
     std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-    if (!inputs.empty() && inputs[0].dtype() == DType::Float64) {
-        throw std::runtime_error("Vulkan fused RMSProp step does not support Float64. Use CPU backend or cast to Float32.");
-    }
-    return dispatch("fused_rmsprop_step", inputs, attrs);
+    bool is_f64 = (!inputs.empty() && inputs[0].dtype() == DType::Float64);
+    std::string shader = is_f64 ? "fused_rmsprop_step_f64" : "fused_rmsprop_step";
+    return dispatch(shader, inputs, attrs);
 }
 
 auto VulkanBackend::dispatchFusedAdadeltaStep(
     std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-    if (!inputs.empty() && inputs[0].dtype() == DType::Float64) {
-        throw std::runtime_error("Vulkan fused Adadelta step does not support Float64. Use CPU backend or cast to Float32.");
-    }
-    return dispatch("fused_adadelta_step", inputs, attrs);
+    bool is_f64 = (!inputs.empty() && inputs[0].dtype() == DType::Float64);
+    std::string shader = is_f64 ? "fused_adadelta_step_f64" : "fused_adadelta_step";
+    return dispatch(shader, inputs, attrs);
 }
 
 auto VulkanBackend::dispatchFusedAdagradStep(
     std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-    if (!inputs.empty() && inputs[0].dtype() == DType::Float64) {
-        throw std::runtime_error("Vulkan fused Adagrad step does not support Float64. Use CPU backend or cast to Float32.");
-    }
-    return dispatch("fused_adagrad_step", inputs, attrs);
+    bool is_f64 = (!inputs.empty() && inputs[0].dtype() == DType::Float64);
+    std::string shader = is_f64 ? "fused_adagrad_step_f64" : "fused_adagrad_step";
+    return dispatch(shader, inputs, attrs);
 }
 
 // ============================================================================
@@ -15592,15 +15603,15 @@ auto VulkanBackend::dispatchFusedSGDStep(std::span<const Tensor> inputs,
     float dampening = static_cast<float>(attrs.get_float(AttrKey::Dampening, 0.0));
     bool nesterov = attrs.get_bool(AttrKey::Nesterov, false);
 
-    if (inputs[0].dtype() == DType::Float64) {
-        throw std::runtime_error("Vulkan fused SGD step does not support Float64. Use CPU backend or cast to Float32.");
-    }
-
     int64_t numel = inputs[0].numel();
     int32_t device_id = inputs[0].device().index;
     bool is_float16 = (inputs[0].dtype() == DType::Float16);
+    bool is_float64 = (inputs[0].dtype() == DType::Float64);
     bool is_bfloat16 = (inputs[0].dtype() == DType::BFloat16);
-    std::string sgd_shader = is_float16 ? "fused_sgd_step_f16" : is_bfloat16 ? "fused_sgd_step_bf16" : "fused_sgd_step";
+    std::string sgd_shader = is_float16 ? "fused_sgd_step_f16"
+                            : is_float64 ? "fused_sgd_step_f64"
+                            : is_bfloat16 ? "fused_sgd_step_bf16"
+                            : "fused_sgd_step";
     auto* pipeline = getPipeline(sgd_shader, device_id);
 
     bool has_momentum = (inputs.size() > 2 && momentum > 0.0f);
@@ -18112,9 +18123,11 @@ auto VulkanBackend::dispatchIFFTN(const Tensor& input, const std::vector<int64_t
 // pivots is [batch_size, n] Int32 tensor storing row pivot indices.
 // ---------------------------------------------------------------------------
 void VulkanBackend::runBlockedLU(Tensor& A, Tensor& pivots, int64_t n,
-                                  int64_t batch_size, int32_t device_id, bool is_f64) {
-    size_t elem_size = is_f64 ? 8 : 4;
-    size_t mat_size = static_cast<size_t>(batch_size) * n * n * elem_size;
+                                  int64_t batch_size, int32_t device_id, bool is_f64, bool is_f16) {
+    size_t elem_size = is_f64 ? 8 : is_f16 ? 2 : 4;
+    auto f16_buf = [&](size_t numel) -> size_t { return ((numel + 1) / 2) * 4; };
+    size_t mat_numel = static_cast<size_t>(batch_size) * n * n;
+    size_t mat_size = is_f16 ? f16_buf(mat_numel) : mat_numel * elem_size;
     size_t piv_size = static_cast<size_t>(batch_size) * n * sizeof(int32_t);
 
     for (int64_t col_start = 0; col_start < n; col_start += TILED_BLOCK_SIZE) {
@@ -18122,7 +18135,7 @@ void VulkanBackend::runBlockedLU(Tensor& A, Tensor& pivots, int64_t n,
 
         // --- Panel factorization (one workgroup per batch element) ---
         for (int64_t b = 0; b < batch_size; ++b) {
-            std::string shader = is_f64 ? "linalg_lu_panel_f64" : "linalg_lu_panel";
+            std::string shader = is_f64 ? "linalg_lu_panel_f64" : is_f16 ? "linalg_lu_panel_f16" : "linalg_lu_panel";
             auto* pipeline = getPipeline(shader, device_id);
 
             struct PushConstants {
@@ -18160,7 +18173,7 @@ void VulkanBackend::runBlockedLU(Tensor& A, Tensor& pivots, int64_t n,
             uint32_t tile_count = static_cast<uint32_t>((trail_size + 31) / 32);
 
             for (int64_t b = 0; b < batch_size; ++b) {
-                std::string shader = is_f64 ? "linalg_lu_update_f64" : "linalg_lu_update";
+                std::string shader = is_f64 ? "linalg_lu_update_f64" : is_f16 ? "linalg_lu_update_f16" : "linalg_lu_update";
                 auto* pipeline = getPipeline(shader, device_id);
 
                 struct PushConstants {
@@ -18199,16 +18212,18 @@ void VulkanBackend::runBlockedLU(Tensor& A, Tensor& pivots, int64_t n,
 // Modifies A in-place to contain L (lower triangle).
 // ---------------------------------------------------------------------------
 void VulkanBackend::runBlockedCholesky(Tensor& A, int64_t n,
-                                        int64_t batch_size, int32_t device_id, bool is_f64) {
-    size_t elem_size = is_f64 ? 8 : 4;
-    size_t mat_size = static_cast<size_t>(batch_size) * n * n * elem_size;
+                                        int64_t batch_size, int32_t device_id, bool is_f64, bool is_f16) {
+    size_t elem_size = is_f64 ? 8 : is_f16 ? 2 : 4;
+    auto f16_buf = [&](size_t numel) -> size_t { return ((numel + 1) / 2) * 4; };
+    size_t mat_numel = static_cast<size_t>(batch_size) * n * n;
+    size_t mat_size = is_f16 ? f16_buf(mat_numel) : mat_numel * elem_size;
 
     for (int64_t col_start = 0; col_start < n; col_start += TILED_BLOCK_SIZE) {
         int64_t panel_cols = std::min(TILED_BLOCK_SIZE, n - col_start);
 
         // --- Panel factorization ---
         for (int64_t b = 0; b < batch_size; ++b) {
-            std::string shader = is_f64 ? "linalg_cholesky_tiled_f64" : "linalg_cholesky_tiled";
+            std::string shader = is_f64 ? "linalg_cholesky_tiled_f64" : is_f16 ? "linalg_cholesky_tiled_f16" : "linalg_cholesky_tiled";
             auto* pipeline = getPipeline(shader, device_id);
 
             struct PushConstants {
@@ -18246,7 +18261,7 @@ void VulkanBackend::runBlockedCholesky(Tensor& A, int64_t n,
             uint32_t tile_count = static_cast<uint32_t>((trail_size + 31) / 32);
 
             for (int64_t b = 0; b < batch_size; ++b) {
-                std::string shader = is_f64 ? "linalg_cholesky_update_f64" : "linalg_cholesky_update";
+                std::string shader = is_f64 ? "linalg_cholesky_update_f64" : is_f16 ? "linalg_cholesky_update_f16" : "linalg_cholesky_update";
                 auto* pipeline = getPipeline(shader, device_id);
 
                 struct PushConstants {
@@ -18287,10 +18302,13 @@ void VulkanBackend::runBlockedCholesky(Tensor& A, int64_t n,
 // tau is [batch_size, n] storing Householder scalars.
 // ---------------------------------------------------------------------------
 void VulkanBackend::runBlockedQR(Tensor& A, Tensor& tau, int64_t m, int64_t n,
-                                  int64_t batch_size, int32_t device_id, bool is_f64) {
-    size_t elem_size = is_f64 ? 8 : 4;
-    size_t mat_size = static_cast<size_t>(batch_size) * m * n * elem_size;
-    size_t tau_size = static_cast<size_t>(batch_size) * n * elem_size;
+                                  int64_t batch_size, int32_t device_id, bool is_f64, bool is_f16) {
+    size_t elem_size = is_f64 ? 8 : is_f16 ? 2 : 4;
+    auto f16_buf = [&](size_t numel) -> size_t { return ((numel + 1) / 2) * 4; };
+    size_t mat_numel = static_cast<size_t>(batch_size) * m * n;
+    size_t tau_numel = static_cast<size_t>(batch_size) * n;
+    size_t mat_size = is_f16 ? f16_buf(mat_numel) : mat_numel * elem_size;
+    size_t tau_size = is_f16 ? f16_buf(tau_numel) : tau_numel * elem_size;
     int64_t k = std::min(m, n);
 
     for (int64_t col_start = 0; col_start < k; col_start += TILED_BLOCK_SIZE) {
@@ -18298,7 +18316,7 @@ void VulkanBackend::runBlockedQR(Tensor& A, Tensor& tau, int64_t m, int64_t n,
 
         // --- Panel factorization ---
         for (int64_t b = 0; b < batch_size; ++b) {
-            std::string shader = is_f64 ? "linalg_qr_panel_f64" : "linalg_qr_panel";
+            std::string shader = is_f64 ? "linalg_qr_panel_f64" : is_f16 ? "linalg_qr_panel_f16" : "linalg_qr_panel";
             auto* pipeline = getPipeline(shader, device_id);
 
             struct PushConstants {
@@ -18337,7 +18355,7 @@ void VulkanBackend::runBlockedQR(Tensor& A, Tensor& tau, int64_t m, int64_t n,
             int64_t trail_cols = n - trail_start;
 
             for (int64_t b = 0; b < batch_size; ++b) {
-                std::string shader = is_f64 ? "linalg_qr_update_f64" : "linalg_qr_update";
+                std::string shader = is_f64 ? "linalg_qr_update_f64" : is_f16 ? "linalg_qr_update_f16" : "linalg_qr_update";
                 auto* pipeline = getPipeline(shader, device_id);
 
                 struct PushConstants {
@@ -18407,6 +18425,7 @@ auto VulkanBackend::dispatchLinalgDet(const Tensor& input) -> Tensor {
 
     int32_t device_id = input.device().index;
     bool is_f64 = (input.dtype() == DType::Float64);
+    bool is_f16 = (input.dtype() == DType::Float16);
 
     // Compute batch size
     int64_t batch_size = 1;
@@ -18419,7 +18438,7 @@ auto VulkanBackend::dispatchLinalgDet(const Tensor& input) -> Tensor {
 
     if (n <= MAX_SMALL_LINALG_SIZE) {
         // Small matrix path: single-workgroup shader
-        std::string shader = is_f64 ? "linalg_det_f64" : "linalg_det";
+        std::string shader = is_f64 ? "linalg_det_f64" : is_f16 ? "linalg_det_f16" : "linalg_det";
         auto* pipeline = getPipeline(shader, device_id);
 
         struct PushConstants {
@@ -18430,9 +18449,12 @@ auto VulkanBackend::dispatchLinalgDet(const Tensor& input) -> Tensor {
         pc.batch = static_cast<uint32_t>(batch_size);
 
         auto cont = input.contiguous();
-        size_t elem_size = is_f64 ? 8 : 4;
-        size_t in_size = batch_size * n * n * elem_size;
-        size_t out_size = batch_size * elem_size;
+        size_t elem_size = is_f64 ? 8 : is_f16 ? 2 : 4;
+        auto f16_buf = [&](size_t numel) -> size_t { return ((numel + 1) / 2) * 4; };
+        size_t in_numel = batch_size * n * n;
+        size_t out_numel = batch_size;
+        size_t in_size = is_f16 ? f16_buf(in_numel) : in_numel * elem_size;
+        size_t out_size = is_f16 ? f16_buf(out_numel) : out_numel * elem_size;
 
         std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, cont.data_ptr()}, {1, output.data_ptr()}
@@ -18454,10 +18476,10 @@ auto VulkanBackend::dispatchLinalgDet(const Tensor& input) -> Tensor {
         Tensor A = dispatchClone(input.contiguous());
         Tensor pivots({batch_size, n}, DType::Int32, input.device());
 
-        runBlockedLU(A, pivots, n, batch_size, device_id, is_f64);
+        runBlockedLU(A, pivots, n, batch_size, device_id, is_f64, is_f16);
 
         // Compute determinant from LU diagonal + pivot sign entirely on GPU
-        std::string det_shader = is_f64 ? "linalg_det_from_lu_f64" : "linalg_det_from_lu";
+        std::string det_shader = is_f64 ? "linalg_det_from_lu_f64" : is_f16 ? "linalg_det_from_lu_f16" : "linalg_det_from_lu";
         auto* det_pipeline = getPipeline(det_shader, device_id);
 
         struct DetPC {
@@ -18469,10 +18491,13 @@ auto VulkanBackend::dispatchLinalgDet(const Tensor& input) -> Tensor {
         det_pc.batch_cnt = static_cast<uint32_t>(batch_size);
         det_pc.lda = static_cast<uint32_t>(n);
 
-        size_t elem_size = is_f64 ? 8 : 4;
-        size_t lu_buf_size = batch_size * n * n * elem_size;
+        size_t elem_size = is_f64 ? 8 : is_f16 ? 2 : 4;
+        auto f16_buf = [&](size_t numel) -> size_t { return ((numel + 1) / 2) * 4; };
+        size_t lu_numel = batch_size * n * n;
+        size_t det_numel = batch_size;
+        size_t lu_buf_size = is_f16 ? f16_buf(lu_numel) : lu_numel * elem_size;
         size_t piv_buf_size = batch_size * n * sizeof(int32_t);
-        size_t det_buf_size = batch_size * elem_size;
+        size_t det_buf_size = is_f16 ? f16_buf(det_numel) : det_numel * elem_size;
 
         std::vector<std::pair<uint32_t, const void*>> det_bindings = {
             {0, A.data_ptr()}, {1, pivots.data_ptr()}, {2, output.data_ptr()}
@@ -18531,15 +18556,18 @@ auto VulkanBackend::dispatchLinalgInv(const Tensor& input) -> Tensor {
 
     int32_t device_id = input.device().index;
     bool is_f64 = (input.dtype() == DType::Float64);
+    bool is_f16 = (input.dtype() == DType::Float16);
 
     int64_t batch_size = 1;
     for (int64_t i = 0; i < ndim - 2; ++i) batch_size *= shape[i];
+
+    auto f16_buf = [&](size_t numel) -> size_t { return ((numel + 1) / 2) * 4; };
 
     if (n <= MAX_SMALL_LINALG_SIZE) {
         // Small matrix path: single-workgroup shader
         Tensor output(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
 
-        std::string shader = is_f64 ? "linalg_inv_f64" : "linalg_inv";
+        std::string shader = is_f64 ? "linalg_inv_f64" : is_f16 ? "linalg_inv_f16" : "linalg_inv";
         auto* pipeline = getPipeline(shader, device_id);
 
         struct PushConstants {
@@ -18550,8 +18578,9 @@ auto VulkanBackend::dispatchLinalgInv(const Tensor& input) -> Tensor {
         pc.batch = static_cast<uint32_t>(batch_size);
 
         auto cont = input.contiguous();
-        size_t elem_size = is_f64 ? 8 : 4;
-        size_t mat_size = batch_size * n * n * elem_size;
+        size_t elem_size = is_f64 ? 8 : is_f16 ? 2 : 4;
+        size_t mat_numel = batch_size * n * n;
+        size_t mat_size = is_f16 ? f16_buf(mat_numel) : mat_numel * elem_size;
 
         std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, cont.data_ptr()}, {1, output.data_ptr()}
@@ -18576,7 +18605,7 @@ auto VulkanBackend::dispatchLinalgInv(const Tensor& input) -> Tensor {
     Tensor A = dispatchClone(input.contiguous());
     Tensor pivots({batch_size, n}, DType::Int32, input.device());
 
-    runBlockedLU(A, pivots, n, batch_size, device_id, is_f64);
+    runBlockedLU(A, pivots, n, batch_size, device_id, is_f64, is_f16);
 
     // Create identity matrix as RHS: solve LU * X = P * I => X = A^{-1}
     // dispatchEye creates a single n x n identity on GPU; expand for batches
@@ -18592,7 +18621,7 @@ auto VulkanBackend::dispatchLinalgInv(const Tensor& input) -> Tensor {
     Tensor output(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
 
     // Dispatch TRSM shader: solve LU * X = P * I
-    std::string trsm_shader = is_f64 ? "linalg_trsm_f64" : "linalg_trsm";
+    std::string trsm_shader = is_f64 ? "linalg_trsm_f64" : is_f16 ? "linalg_trsm_f16" : "linalg_trsm";
     auto* trsm_pipeline = getPipeline(trsm_shader, device_id);
 
     struct TrsmPC {
@@ -18608,10 +18637,11 @@ auto VulkanBackend::dispatchLinalgInv(const Tensor& input) -> Tensor {
     trsm_pc.ldb = static_cast<uint32_t>(n);
     trsm_pc.batch_cnt = static_cast<uint32_t>(batch_size);
 
-    size_t elem_size = is_f64 ? 8 : 4;
-    size_t lu_sz = batch_size * n * n * elem_size;
+    size_t elem_size = is_f64 ? 8 : is_f16 ? 2 : 4;
+    size_t lu_numel = batch_size * n * n;
+    size_t lu_sz = is_f16 ? f16_buf(lu_numel) : lu_numel * elem_size;
     size_t piv_sz = batch_size * n * sizeof(int32_t);
-    size_t mat_sz = batch_size * n * n * elem_size;
+    size_t mat_sz = is_f16 ? f16_buf(lu_numel) : lu_numel * elem_size;
 
     // Note: identity is read-only input, output receives solution
     auto identity_cont = identity.contiguous();
@@ -18669,15 +18699,18 @@ auto VulkanBackend::dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Ten
 
     int32_t device_id = a.device().index;
     bool is_f64 = (a.dtype() == DType::Float64);
+    bool is_f16 = (a.dtype() == DType::Float16);
 
     int64_t batch_size = 1;
     for (int64_t i = 0; i < a_ndim - 2; ++i) batch_size *= a_shape[i];
+
+    auto f16_buf = [&](size_t numel) -> size_t { return ((numel + 1) / 2) * 4; };
 
     if (n <= MAX_SMALL_LINALG_SIZE) {
         // Small matrix path: single-workgroup shader
         Tensor output(std::vector<int64_t>(b_shape.begin(), b_shape.end()), a.dtype(), a.device());
 
-        std::string shader = is_f64 ? "linalg_solve_f64" : "linalg_solve";
+        std::string shader = is_f64 ? "linalg_solve_f64" : is_f16 ? "linalg_solve_f16" : "linalg_solve";
         auto* pipeline = getPipeline(shader, device_id);
 
         struct PushConstants {
@@ -18691,9 +18724,11 @@ auto VulkanBackend::dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Ten
 
         auto a_cont = a.contiguous();
         auto b_cont = b.contiguous();
-        size_t elem_size = is_f64 ? 8 : 4;
-        size_t a_size = batch_size * n * n * elem_size;
-        size_t b_size = batch_size * n * elem_size;
+        size_t elem_size = is_f64 ? 8 : is_f16 ? 2 : 4;
+        size_t a_numel = batch_size * n * n;
+        size_t b_numel = batch_size * n;
+        size_t a_size = is_f16 ? f16_buf(a_numel) : a_numel * elem_size;
+        size_t b_size = is_f16 ? f16_buf(b_numel) : b_numel * elem_size;
 
         std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, a_cont.data_ptr()}, {1, b_cont.data_ptr()}, {2, output.data_ptr()}
@@ -18718,7 +18753,7 @@ auto VulkanBackend::dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Ten
     Tensor A = dispatchClone(a.contiguous());
     Tensor pivots({batch_size, n}, DType::Int32, a.device());
 
-    runBlockedLU(A, pivots, n, batch_size, device_id, is_f64);
+    runBlockedLU(A, pivots, n, batch_size, device_id, is_f64, is_f16);
 
     // Determine nrhs from b shape
     int64_t b_ndim = static_cast<int64_t>(b_shape.size());
@@ -18728,7 +18763,7 @@ auto VulkanBackend::dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Ten
     Tensor output(std::vector<int64_t>(b_shape.begin(), b_shape.end()), a.dtype(), a.device());
 
     // Dispatch TRSM shader: solve LU * X = P * B
-    std::string trsm_shader = is_f64 ? "linalg_trsm_f64" : "linalg_trsm";
+    std::string trsm_shader = is_f64 ? "linalg_trsm_f64" : is_f16 ? "linalg_trsm_f16" : "linalg_trsm";
     auto* trsm_pipeline = getPipeline(trsm_shader, device_id);
 
     struct TrsmPC {
@@ -18744,10 +18779,12 @@ auto VulkanBackend::dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Ten
     trsm_pc.ldb_val = static_cast<uint32_t>(ldb);
     trsm_pc.batch_cnt = static_cast<uint32_t>(batch_size);
 
-    size_t elem_size = is_f64 ? 8 : 4;
-    size_t lu_sz = batch_size * n * n * elem_size;
+    size_t elem_size = is_f64 ? 8 : is_f16 ? 2 : 4;
+    size_t lu_numel = batch_size * n * n;
+    size_t b_numel = batch_size * n * nrhs;
+    size_t lu_sz = is_f16 ? f16_buf(lu_numel) : lu_numel * elem_size;
     size_t piv_sz = batch_size * n * sizeof(int32_t);
-    size_t b_sz = batch_size * n * nrhs * elem_size;
+    size_t b_sz = is_f16 ? f16_buf(b_numel) : b_numel * elem_size;
 
     auto b_cont = b.contiguous();
     std::vector<std::pair<uint32_t, const void*>> trsm_bindings = {
@@ -18794,6 +18831,7 @@ auto VulkanBackend::dispatchLinalgCholesky(const Tensor& input, bool upper) -> T
 
     int32_t device_id = input.device().index;
     bool is_f64 = (input.dtype() == DType::Float64);
+    bool is_f16 = (input.dtype() == DType::Float16);
     int64_t batch_size = 1;
     for (int64_t i = 0; i < ndim - 2; ++i) batch_size *= shape[i];
 
@@ -18801,7 +18839,7 @@ auto VulkanBackend::dispatchLinalgCholesky(const Tensor& input, bool upper) -> T
         // Small matrix path: single-workgroup shader
         Tensor output(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
 
-        std::string shader = is_f64 ? "linalg_cholesky_f64" : "linalg_cholesky";
+        std::string shader = is_f64 ? "linalg_cholesky_f64" : is_f16 ? "linalg_cholesky_f16" : "linalg_cholesky";
         auto* pipeline = getPipeline(shader, device_id);
 
         struct PushConstants { uint32_t n; uint32_t batch; uint32_t upper; } pc;
@@ -18810,8 +18848,10 @@ auto VulkanBackend::dispatchLinalgCholesky(const Tensor& input, bool upper) -> T
         pc.upper = upper ? 1 : 0;
 
         auto cont = input.contiguous();
-        size_t elem_size = is_f64 ? 8 : 4;
-        size_t mat_size = batch_size * n * n * elem_size;
+        size_t elem_size = is_f64 ? 8 : is_f16 ? 2 : 4;
+        auto f16_buf = [&](size_t numel) -> size_t { return ((numel + 1) / 2) * 4; };
+        size_t mat_numel = batch_size * n * n;
+        size_t mat_size = is_f16 ? f16_buf(mat_numel) : mat_numel * elem_size;
 
         std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, cont.data_ptr()}, {1, output.data_ptr()}
@@ -18834,7 +18874,7 @@ auto VulkanBackend::dispatchLinalgCholesky(const Tensor& input, bool upper) -> T
     // Tiled path (32 < n <= 256): blocked Cholesky factorization
     Tensor A = dispatchClone(input.contiguous());
 
-    runBlockedCholesky(A, n, batch_size, device_id, is_f64);
+    runBlockedCholesky(A, n, batch_size, device_id, is_f64, is_f16);
 
     // Zero the upper triangle (Cholesky produces L in lower triangle)
     // Use dispatchTriuTril to extract lower triangle
@@ -18871,8 +18911,11 @@ auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor>
 
     int32_t device_id = input.device().index;
     bool is_f64 = (input.dtype() == DType::Float64);
+    bool is_f16 = (input.dtype() == DType::Float16);
     int64_t batch_size = 1;
     for (int64_t i = 0; i < ndim - 2; ++i) batch_size *= shape[i];
+
+    auto f16_buf = [&](size_t numel) -> size_t { return ((numel + 1) / 2) * 4; };
 
     if (m <= MAX_SMALL_LINALG_SIZE && n <= MAX_SMALL_LINALG_SIZE) {
         // Small matrix path: single-workgroup shader
@@ -18883,7 +18926,7 @@ auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor>
         Tensor Q(q_shape, input.dtype(), input.device());
         Tensor R(r_shape, input.dtype(), input.device());
 
-        std::string shader = is_f64 ? "linalg_qr_f64" : "linalg_qr";
+        std::string shader = is_f64 ? "linalg_qr_f64" : is_f16 ? "linalg_qr_f16" : "linalg_qr";
         auto* pipeline = getPipeline(shader, device_id);
 
         struct PushConstants { uint32_t m; uint32_t n_cols; uint32_t batch; } pc;
@@ -18892,9 +18935,11 @@ auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor>
         pc.batch = static_cast<uint32_t>(batch_size);
 
         auto cont = input.contiguous();
-        size_t elem_size = is_f64 ? 8 : 4;
-        size_t in_size = batch_size * m * n * elem_size;
-        size_t q_size = batch_size * m * m * elem_size;
+        size_t elem_size = is_f64 ? 8 : is_f16 ? 2 : 4;
+        size_t in_numel = batch_size * m * n;
+        size_t q_numel = batch_size * m * m;
+        size_t in_size = is_f16 ? f16_buf(in_numel) : in_numel * elem_size;
+        size_t q_size = is_f16 ? f16_buf(q_numel) : q_numel * elem_size;
         size_t r_size = in_size;
 
         std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -18927,7 +18972,7 @@ auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor>
     tau_shape.push_back(n);
     Tensor tau(tau_shape, input.dtype(), input.device());
 
-    runBlockedQR(A, tau, m, n, batch_size, device_id, is_f64);
+    runBlockedQR(A, tau, m, n, batch_size, device_id, is_f64, is_f16);
 
     // Extract R from the upper triangle of A (on GPU)
     std::vector<int64_t> r_shape(shape.begin(), shape.end());
@@ -18938,7 +18983,7 @@ auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor>
     q_shape.push_back(m); q_shape.push_back(m);
     Tensor Q(q_shape, input.dtype(), input.device());
 
-    std::string qr_recon_shader = is_f64 ? "linalg_q_reconstruct_f64" : "linalg_q_reconstruct";
+    std::string qr_recon_shader = is_f64 ? "linalg_q_reconstruct_f64" : is_f16 ? "linalg_q_reconstruct_f16" : "linalg_q_reconstruct";
     auto* qr_pipeline = getPipeline(qr_recon_shader, device_id);
 
     struct QReconPC {
@@ -18954,10 +18999,13 @@ auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor>
     qr_pc.ldq = static_cast<uint32_t>(m);
     qr_pc.batch_cnt = static_cast<uint32_t>(batch_size);
 
-    size_t elem_size = is_f64 ? 8 : 4;
-    size_t qr_buf_size = batch_size * m * n * elem_size;
-    size_t tau_buf_size = batch_size * n * elem_size;
-    size_t q_buf_size = batch_size * m * m * elem_size;
+    size_t elem_size = is_f64 ? 8 : is_f16 ? 2 : 4;
+    size_t qr_numel = batch_size * m * n;
+    size_t tau_numel = batch_size * n;
+    size_t q_numel = batch_size * m * m;
+    size_t qr_buf_size = is_f16 ? f16_buf(qr_numel) : qr_numel * elem_size;
+    size_t tau_buf_size = is_f16 ? f16_buf(tau_numel) : tau_numel * elem_size;
+    size_t q_buf_size = is_f16 ? f16_buf(q_numel) : q_numel * elem_size;
 
     std::vector<std::pair<uint32_t, const void*>> qr_bindings = {
         {0, A.data_ptr()}, {1, tau.data_ptr()}, {2, Q.data_ptr()}
@@ -19004,9 +19052,12 @@ auto VulkanBackend::dispatchLinalgSVD(const Tensor& input, bool full_matrices) -
 
     int32_t device_id = input.device().index;
     bool is_f64 = (input.dtype() == DType::Float64);
+    bool is_f16 = (input.dtype() == DType::Float16);
     int64_t batch_size = 1;
     for (int64_t i = 0; i < ndim - 2; ++i) batch_size *= shape[i];
     int64_t k = std::min(m, n);
+
+    auto f16_buf = [&](size_t numel) -> size_t { return ((numel + 1) / 2) * 4; };
 
     // Output: U (batch, m, k), S (batch, k), Vt (batch, n, n)
     std::vector<int64_t> u_shape(shape.begin(), shape.end() - 2);
@@ -19020,7 +19071,7 @@ auto VulkanBackend::dispatchLinalgSVD(const Tensor& input, bool full_matrices) -
     Tensor S(s_shape, input.dtype(), input.device());
     Tensor Vt(vt_shape, input.dtype(), input.device());
 
-    std::string shader = is_f64 ? "linalg_svd_f64" : "linalg_svd";
+    std::string shader = is_f64 ? "linalg_svd_f64" : is_f16 ? "linalg_svd_f16" : "linalg_svd";
     auto* pipeline = getPipeline(shader, device_id);
 
     struct PushConstants { uint32_t m; uint32_t n_cols; uint32_t batch; uint32_t full_matrices; } pc;
@@ -19030,11 +19081,15 @@ auto VulkanBackend::dispatchLinalgSVD(const Tensor& input, bool full_matrices) -
     pc.full_matrices = full_matrices ? 1 : 0;
 
     auto cont = input.contiguous();
-    size_t elem_size = is_f64 ? 8 : 4;
-    size_t in_size = batch_size * m * n * elem_size;
-    size_t u_size = batch_size * m * k * elem_size;
-    size_t s_size = batch_size * k * elem_size;
-    size_t vt_size = batch_size * n * n * elem_size;
+    size_t elem_size = is_f64 ? 8 : is_f16 ? 2 : 4;
+    size_t in_numel = batch_size * m * n;
+    size_t u_numel = batch_size * m * k;
+    size_t s_numel = batch_size * k;
+    size_t vt_numel = batch_size * n * n;
+    size_t in_size = is_f16 ? f16_buf(in_numel) : in_numel * elem_size;
+    size_t u_size = is_f16 ? f16_buf(u_numel) : u_numel * elem_size;
+    size_t s_size = is_f16 ? f16_buf(s_numel) : s_numel * elem_size;
+    size_t vt_size = is_f16 ? f16_buf(vt_numel) : vt_numel * elem_size;
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, cont.data_ptr()}, {1, U.data_ptr()}, {2, S.data_ptr()}, {3, Vt.data_ptr()}
@@ -19079,8 +19134,11 @@ auto VulkanBackend::dispatchLinalgEigh(const Tensor& input) -> std::vector<Tenso
 
     int32_t device_id = input.device().index;
     bool is_f64 = (input.dtype() == DType::Float64);
+    bool is_f16 = (input.dtype() == DType::Float16);
     int64_t batch_size = 1;
     for (int64_t i = 0; i < ndim - 2; ++i) batch_size *= shape[i];
+
+    auto f16_buf = [&](size_t numel) -> size_t { return ((numel + 1) / 2) * 4; };
 
     // Output: eigenvalues (batch, n), eigenvectors (batch, n, n)
     std::vector<int64_t> w_shape(shape.begin(), shape.end() - 2);
@@ -19089,7 +19147,7 @@ auto VulkanBackend::dispatchLinalgEigh(const Tensor& input) -> std::vector<Tenso
     Tensor W(w_shape, input.dtype(), input.device());
     Tensor V(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
 
-    std::string shader = is_f64 ? "linalg_eigh_f64" : "linalg_eigh";
+    std::string shader = is_f64 ? "linalg_eigh_f64" : is_f16 ? "linalg_eigh_f16" : "linalg_eigh";
     auto* pipeline = getPipeline(shader, device_id);
 
     struct PushConstants { uint32_t n; uint32_t batch; } pc;
@@ -19097,9 +19155,11 @@ auto VulkanBackend::dispatchLinalgEigh(const Tensor& input) -> std::vector<Tenso
     pc.batch = static_cast<uint32_t>(batch_size);
 
     auto cont = input.contiguous();
-    size_t elem_size = is_f64 ? 8 : 4;
-    size_t mat_size = batch_size * n * n * elem_size;
-    size_t w_size = batch_size * n * elem_size;
+    size_t elem_size = is_f64 ? 8 : is_f16 ? 2 : 4;
+    size_t mat_numel = batch_size * n * n;
+    size_t w_numel = batch_size * n;
+    size_t mat_size = is_f16 ? f16_buf(mat_numel) : mat_numel * elem_size;
+    size_t w_size = is_f16 ? f16_buf(w_numel) : w_numel * elem_size;
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, cont.data_ptr()}, {1, W.data_ptr()}, {2, V.data_ptr()}

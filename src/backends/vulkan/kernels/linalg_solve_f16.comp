@@ -1,0 +1,138 @@
+#version 450
+
+// Solve Ax = b via LU factorization for small matrices (<= 32x32) - Float16 variant
+// Input/output use packed uint32 buffers (2 float16 values per word)
+// All computation done in float32.
+
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) buffer MatrixA { uint a_data[]; };
+layout(set = 0, binding = 1) buffer VectorB { uint b_data[]; };
+layout(set = 0, binding = 2) buffer OutputX { uint x_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint batch;
+    uint nrhs;
+};
+
+shared float mat[32][32];
+shared float rhs[32];
+shared uint piv[32];
+
+float readF16A(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = a_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+float readF16B(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = b_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+void writeF16X(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = x_data[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0; iter < 1024; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(x_data[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    x_data[word_idx] = new_val;
+}
+
+void main() {
+    uint batch_idx = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+
+    if (batch_idx >= batch) return;
+
+    uint a_offset = batch_idx * n * n;
+    uint b_offset = batch_idx * n;
+
+    // Load matrix and RHS
+    for (uint row = 0; row < n; row++) {
+        if (tid < n) {
+            mat[row][tid] = readF16A(a_offset + row * n + tid);
+        }
+    }
+    if (tid < n) {
+        rhs[tid] = readF16B(b_offset + tid);
+        piv[tid] = tid;
+    }
+    barrier();
+
+    // LU factorization with partial pivoting
+    for (uint col = 0; col < n; col++) {
+        if (tid == 0) {
+            uint max_row = col;
+            float max_val = abs(mat[col][col]);
+            for (uint row = col + 1; row < n; row++) {
+                float val = abs(mat[row][col]);
+                if (val > max_val) {
+                    max_val = val;
+                    max_row = row;
+                }
+            }
+            piv[col] = max_row;
+            if (max_row != col) {
+                for (uint j = 0; j < n; j++) {
+                    float tmp = mat[col][j];
+                    mat[col][j] = mat[max_row][j];
+                    mat[max_row][j] = tmp;
+                }
+                float tmp = rhs[col];
+                rhs[col] = rhs[max_row];
+                rhs[max_row] = tmp;
+            }
+        }
+        barrier();
+
+        if (tid > col && tid < n) {
+            float pivot = mat[col][col];
+            if (abs(pivot) > 1e-30) {
+                float factor = mat[tid][col] / pivot;
+                mat[tid][col] = factor;
+                for (uint j = col + 1; j < n; j++) {
+                    mat[tid][j] -= factor * mat[col][j];
+                }
+                rhs[tid] -= factor * rhs[col];
+            }
+        }
+        barrier();
+    }
+
+    // Back substitution (thread 0)
+    if (tid == 0) {
+        for (int i = int(n) - 1; i >= 0; i--) {
+            float sum = rhs[i];
+            for (uint j = uint(i) + 1; j < n; j++) {
+                sum -= mat[i][j] * rhs[j];
+            }
+            if (abs(mat[i][i]) > 1e-30) {
+                rhs[i] = sum / mat[i][i];
+            } else {
+                rhs[i] = 0.0;
+            }
+        }
+    }
+    barrier();
+
+    // Write solution
+    if (tid < n) {
+        writeF16X(b_offset + tid, rhs[tid]);
+    }
+}

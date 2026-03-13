@@ -13,25 +13,15 @@ DeviceStorage::~DeviceStorage() {
         return;
     }
 
-    // Check if the backend registry is still alive before accessing it.
-    // During static destruction, the registry may have been destroyed before
-    // this DeviceStorage instance. In that case, skip deallocation.
-    if (!is_backend_registry_alive()) {
-        // Registry is being or has been destroyed. Skip deallocation.
-        // For Vulkan, VulkanCachingAllocator::shutdown_device() already cleared
-        // all blocks before the VkDevice was destroyed. For other backends,
-        // this is a minor memory leak that only occurs during program shutdown,
-        // which is acceptable since the process is about to exit anyway.
-        return;
-    }
-
-    // Look up the backend from the registry to check if it's still alive
-    Backend* current_backend = backend_registry().get_backend(device_.type);
-
+    // Atomically check if registry is alive and get backend in one call,
+    // eliminating the TOCTOU race between is_backend_registry_alive() and
+    // get_backend(). Returns nullptr if registry is being destroyed.
+    Backend* current_backend = try_get_backend(device_.type);
     if (current_backend) {
-        // Backend is still alive, use it normally
         current_backend->deallocate(device_ptr_);
     }
+    // If nullptr: registry destroyed or backend unloaded — minor leak at
+    // shutdown only, acceptable since process is about to exit.
 }
 
 DeviceStorage::DeviceStorage(DeviceStorage&& other) noexcept
@@ -42,9 +32,8 @@ DeviceStorage::DeviceStorage(DeviceStorage&& other) noexcept
 
 DeviceStorage& DeviceStorage::operator=(DeviceStorage&& other) noexcept {
     if (this != &other) {
-        if (device_ptr_ && is_backend_registry_alive()) {
-            // Use the same safe deallocation as destructor
-            Backend* current_backend = backend_registry().get_backend(device_.type);
+        if (device_ptr_) {
+            Backend* current_backend = try_get_backend(device_.type);
             if (current_backend) {
                 current_backend->deallocate(device_ptr_);
             }

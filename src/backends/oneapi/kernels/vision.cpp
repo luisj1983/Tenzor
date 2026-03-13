@@ -48,6 +48,7 @@ struct InterpolateBilinearKernelBFloat16 {};
 struct InterpolateBicubicKernelBFloat16 {};
 struct BoxIoUKernelFloat16 {};
 struct BoxIoUKernelBFloat16 {};
+struct NmsIoUBitmaskKernel {};
 
 // BFloat16 conversion helpers
 inline float bf16_to_f32(uint16_t bf16) {
@@ -82,8 +83,6 @@ inline auto get_data_ptr(const Tensor& t) -> T* {
  * @param iou_threshold IoU threshold for suppression
  * @return Indices of kept boxes
  */
-struct NmsIoUKernel {};
-
 auto nms_kernel(
     const Tensor& boxes,
     const Tensor& scores,
@@ -174,19 +173,38 @@ auto nms_kernel(
     });
 #endif
 
-    // Compute NxN IoU matrix on device (embarrassingly parallel)
+    // Compute IoU on device and produce a thresholded bitmask.
+    // Instead of copying an N*N float IoU matrix to host (4*N*N bytes),
+    // we threshold on-device and pack results into uint64 words,
+    // transferring only N * ceil(N/64) * 8 bytes — up to 256x smaller.
     float* d_boxes = sycl::malloc_device<float>(num_boxes * 4, queue);
-    float* d_iou_matrix = sycl::malloc_device<float>(num_boxes * num_boxes, queue);
     queue.memcpy(d_boxes, host_boxes.data(), num_boxes * 4 * sizeof(float)).wait();
 
-    int64_t total_pairs = num_boxes * num_boxes;
-    queue.parallel_for<NmsIoUKernel>(
-        sycl::range<1>(total_pairs), [=](sycl::id<1> gid) {
-            int64_t i = static_cast<int64_t>(gid[0]) / num_boxes;
-            int64_t j = static_cast<int64_t>(gid[0]) % num_boxes;
+    // Each row i has ceil(num_boxes/64) uint64 words; bit j is set if IoU(i,j) > threshold
+    int64_t cols_u64 = (num_boxes + 63) / 64;
+    int64_t bitmask_elems = num_boxes * cols_u64;
+    uint64_t* d_bitmask = sycl::malloc_device<uint64_t>(bitmask_elems, queue);
+    queue.memset(d_bitmask, 0, bitmask_elems * sizeof(uint64_t)).wait();
 
-            if (i >= j) {
-                // Only compute upper triangle; IoU is symmetric
+    // Launch one work-item per upper-triangle pair (i > j).
+    // Each sets the corresponding bit in both row i and row j (symmetric).
+    int64_t upper_pairs = num_boxes * (num_boxes - 1) / 2;
+    float iou_thresh_val = iou_threshold;
+
+    if (upper_pairs > 0) {
+        queue.parallel_for<NmsIoUBitmaskKernel>(
+            sycl::range<1>(upper_pairs), [=](sycl::id<1> gid) {
+                // Map linear index to upper-triangle (i, j) where i > j
+                // Using the inverse triangular formula:
+                //   gid = i*(i-1)/2 + j  =>  i = floor((1+sqrt(1+8*gid))/2)
+                int64_t g = static_cast<int64_t>(gid[0]);
+                int64_t i = static_cast<int64_t>(
+                    (1.0 + sycl::sqrt(1.0 + 8.0 * static_cast<double>(g))) * 0.5);
+                // Correct for floating-point imprecision
+                if (i * (i - 1) / 2 > g) --i;
+                if ((i + 1) * i / 2 <= g) ++i;
+                int64_t j = g - i * (i - 1) / 2;
+
                 float x1_i = d_boxes[i * 4 + 0], y1_i = d_boxes[i * 4 + 1];
                 float x2_i = d_boxes[i * 4 + 2], y2_i = d_boxes[i * 4 + 3];
                 float x1_j = d_boxes[j * 4 + 0], y1_j = d_boxes[j * 4 + 1];
@@ -205,19 +223,38 @@ auto nms_kernel(
                 float intersection = w * h;
                 float iou = intersection / (area_i + area_j - intersection + 1e-6f);
 
-                d_iou_matrix[i * num_boxes + j] = iou;
-                d_iou_matrix[j * num_boxes + i] = iou;
-            }
-        }).wait();
+                if (iou > iou_thresh_val) {
+                    // Set bit j in row i
+                    int64_t word_ij = j / 64;
+                    uint64_t bit_ij = uint64_t(1) << (j % 64);
+                    auto addr_ij = sycl::atomic_ref<uint64_t,
+                        sycl::memory_order::relaxed,
+                        sycl::memory_scope::device,
+                        sycl::access::address_space::global_space>(
+                            d_bitmask[i * cols_u64 + word_ij]);
+                    addr_ij.fetch_or(bit_ij);
 
-    // Copy thresholded IoU matrix to host for greedy suppression
-    std::vector<float> h_iou(num_boxes * num_boxes);
-    queue.memcpy(h_iou.data(), d_iou_matrix, num_boxes * num_boxes * sizeof(float)).wait();
+                    // Set bit i in row j (symmetric)
+                    int64_t word_ji = i / 64;
+                    uint64_t bit_ji = uint64_t(1) << (i % 64);
+                    auto addr_ji = sycl::atomic_ref<uint64_t,
+                        sycl::memory_order::relaxed,
+                        sycl::memory_scope::device,
+                        sycl::access::address_space::global_space>(
+                            d_bitmask[j * cols_u64 + word_ji]);
+                    addr_ji.fetch_or(bit_ji);
+                }
+            }).wait();
+    }
+
+    // Copy only the compact bitmask to host (N * ceil(N/64) * 8 bytes)
+    std::vector<uint64_t> h_bitmask(bitmask_elems);
+    queue.memcpy(h_bitmask.data(), d_bitmask, bitmask_elems * sizeof(uint64_t)).wait();
 
     sycl::free(d_boxes, queue);
-    sycl::free(d_iou_matrix, queue);
+    sycl::free(d_bitmask, queue);
 
-    // Greedy suppression (inherently sequential)
+    // Greedy suppression using bitmask (inherently sequential)
     std::vector<bool> suppressed(num_boxes, false);
     std::vector<int64_t> keep;
 
@@ -227,12 +264,18 @@ auto nms_kernel(
 
         keep.push_back(idx);
 
-        for (int64_t j = i + 1; j < num_boxes; ++j) {
-            int64_t jdx = order[j];
-            if (suppressed[jdx]) continue;
-
-            if (h_iou[idx * num_boxes + jdx] > iou_threshold) {
-                suppressed[jdx] = true;
+        // Suppress all boxes that overlap with idx above threshold
+        // by scanning the bitmask row for idx
+        const uint64_t* row = h_bitmask.data() + idx * cols_u64;
+        for (int64_t w = 0; w < cols_u64; ++w) {
+            uint64_t bits = row[w];
+            while (bits) {
+                int bit_pos = __builtin_ctzll(bits);
+                int64_t jdx = w * 64 + bit_pos;
+                if (jdx < num_boxes) {
+                    suppressed[jdx] = true;
+                }
+                bits &= bits - 1; // clear lowest set bit
             }
         }
     }

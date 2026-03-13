@@ -13,6 +13,7 @@
 #include <tenzor/ops/transform.hpp>
 #include <tenzor/backend/loader.hpp>
 #include <tenzor/backend/backend.hpp>
+#include <tenzor/backend/dispatch_table.hpp>
 #include <tenzor/nn/optim/scheduler.hpp>
 #include <tenzor/nn/layers/rnn.hpp>
 #include <tenzor/nn/layers/attention.hpp>
@@ -123,7 +124,13 @@ public:
         // First, try Python's 'forward' method (the natural way users define it)
         py::function forward_override = py::get_override(this, "forward");
         if (forward_override) {
-            return forward_override(input).cast<tenzor::Variable>();
+            py::object result = forward_override(input);
+            if (!py::isinstance<tenzor::Variable>(result)) {
+                throw std::runtime_error(
+                    std::string("forward() must return a tenzor.Variable, got ") +
+                    std::string(py::str(py::type::handle_of(result).attr("__name__"))));
+            }
+            return result.cast<tenzor::Variable>();
         }
 
         // Fall back to forward_impl if no forward override found
@@ -221,6 +228,16 @@ PYBIND11_MODULE(tenzor_core, m) {
     py::register_exception<tenzor::MemoryException>(
         m, "MemoryError", py_tenzor_error.ptr());
 
+    // Catch-all translator: any future TenzorException-derived types not
+    // explicitly registered above will still map to TenzorError in Python.
+    py::register_exception_translator([](std::exception_ptr p) {
+        try {
+            if (p) std::rethrow_exception(p);
+        } catch (const tenzor::TenzorException& e) {
+            PyErr_SetString(py_tenzor_error.ptr(), e.what());
+        }
+    });
+
     // Library initialization
     m.def("initialize", &tenzor::initialize,
           py::call_guard<py::gil_scoped_release>(),
@@ -299,6 +316,33 @@ PYBIND11_MODULE(tenzor_core, m) {
         auto* oneapi_backend = loader.get_backend("oneapi");
         return oneapi_backend ? oneapi_backend->device_count() : 0;
     }, "Get number of available OneAPI devices");
+
+    // Op coverage introspection API
+    m.def("get_supported_ops", [](const std::string& device_str) {
+        auto device = tenzor::Device::from_string(device_str);
+        auto ops = tenzor::get_supported_ops(device.type);
+        std::vector<std::string> names;
+        names.reserve(ops.size());
+        for (auto op : ops) {
+            names.push_back(std::string(tenzor::op_id_to_name(op)));
+        }
+        return names;
+    }, py::arg("device"), "Get list of supported operation names for a device");
+
+    m.def("supports_op", [](const std::string& device_str, const std::string& op_name) {
+        auto device = tenzor::Device::from_string(device_str);
+        auto& table = tenzor::DispatchTableRegistry::get_table_const(device.type);
+        auto ops = table.supported_ops();
+        for (auto op : ops) {
+            if (std::string(tenzor::op_id_to_name(op)) == op_name) return true;
+        }
+        return false;
+    }, py::arg("device"), py::arg("op_name"), "Check if a device supports a specific operation");
+
+    m.def("op_count", [](const std::string& device_str) {
+        auto device = tenzor::Device::from_string(device_str);
+        return tenzor::DispatchTableRegistry::get_table_const(device.type).op_count();
+    }, py::arg("device"), "Get count of registered operations for a device");
 
     // ROCm device availability
     m.def("rocm_is_available", []() {

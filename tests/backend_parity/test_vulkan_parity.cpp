@@ -98,8 +98,8 @@ TEST_F(VulkanFloat64Parity, Exp) {
     assert_parity(cpu_r, vk_r, 1e-12f, 1e-14f, "F64 Exp");
 }
 
-TEST_F(VulkanFloat64Parity, DISABLED_Log) {
-    // Known Vulkan Float64 precision issue with log shader
+TEST_F(VulkanFloat64Parity, Log) {
+    // Fixed: proper double-precision log implementation via IEEE 754 decomposition
     auto a = abs(randn({32, 32}, DType::Float64, cpu_)) + 0.001;
 
     auto cpu_r = log(a);
@@ -126,8 +126,8 @@ TEST_F(VulkanFloat64Parity, Sigmoid) {
     assert_parity(cpu_r, vk_r, 1e-12f, 1e-14f, "F64 Sigmoid");
 }
 
-TEST_F(VulkanFloat64Parity, DISABLED_Sum) {
-    // Known: Vulkan Float64 reduction uses different summation order, large error
+TEST_F(VulkanFloat64Parity, Sum) {
+    // Fixed: Kahan compensated summation in reduction shader
     auto a = randn({32, 64}, DType::Float64, cpu_);
 
     auto cpu_r = sum(a);
@@ -136,8 +136,8 @@ TEST_F(VulkanFloat64Parity, DISABLED_Sum) {
     assert_parity(cpu_r, vk_r, 1e-4f, 1e-6f, "F64 Sum");
 }
 
-TEST_F(VulkanFloat64Parity, DISABLED_Mean) {
-    // Known: Vulkan Float64 reduction uses different summation order, large error
+TEST_F(VulkanFloat64Parity, Mean) {
+    // Fixed: Kahan compensated summation in reduction shader
     auto a = randn({32, 64}, DType::Float64, cpu_);
 
     auto cpu_r = mean(a);
@@ -155,8 +155,8 @@ TEST_F(VulkanFloat64Parity, Clamp) {
     assert_parity(cpu_r, vk_r, 0.0f, 0.0f, "F64 Clamp");
 }
 
-TEST_F(VulkanFloat64Parity, DISABLED_Gather) {
-    // Known: Vulkan Float64 gather has data corruption (likely buffer offset issue)
+TEST_F(VulkanFloat64Parity, Gather) {
+    // Fixed: separate input_dim_size and index_dim_size push constants
     auto a = randn({8, 16}, DType::Float64, cpu_);
     auto idx = zeros({8, 4}, DType::Int64, cpu_);
     {
@@ -301,8 +301,8 @@ TEST_F(VulkanFloat16OddElements, MatMul_OddDim) {
     assert_parity(cpu_r, vk_r, 1e-2f, 1e-2f, "F16 MatMul 7x8 @ 8x5");
 }
 
-TEST_F(VulkanFloat16OddElements, DISABLED_Clamp_OddCount) {
-    // Known: Vulkan Float16 odd-element-count buffer rounding issue with clamp
+TEST_F(VulkanFloat16OddElements, Clamp_OddCount) {
+    // Fixed: buffer size rounding and preserve upper half-word for odd counts
     auto a = randn({3}, DType::Float32, cpu_).to(DType::Float16);
 
     auto cpu_r = clamp(a, -0.5f, 0.5f);
@@ -553,8 +553,8 @@ TEST_F(VulkanFloat32Parity, Clamp) {
     assert_parity(cpu_r, vk_r, 0.0f, 0.0f, "F32 Clamp");
 }
 
-TEST_F(VulkanFloat32Parity, DISABLED_Sum) {
-    // Known: Vulkan reduction produces incorrect results for sum
+TEST_F(VulkanFloat32Parity, Sum) {
+    // Fixed: Kahan compensated summation in reduction shader
     auto a = randn({32, 64}, DType::Float32, cpu_);
 
     auto cpu_r = sum(a);
@@ -563,8 +563,8 @@ TEST_F(VulkanFloat32Parity, DISABLED_Sum) {
     assert_parity(cpu_r, vk_r, 1e-1f, 1e-2f, "F32 Sum");
 }
 
-TEST_F(VulkanFloat32Parity, DISABLED_Mean) {
-    // Known: Vulkan reduction produces incorrect results for mean
+TEST_F(VulkanFloat32Parity, Mean) {
+    // Fixed: Kahan compensated summation in reduction shader
     auto a = randn({32, 64}, DType::Float32, cpu_);
 
     auto cpu_r = mean(a);
@@ -573,8 +573,8 @@ TEST_F(VulkanFloat32Parity, DISABLED_Mean) {
     assert_parity(cpu_r, vk_r, 1e-2f, 1e-3f, "F32 Mean");
 }
 
-TEST_F(VulkanFloat32Parity, DISABLED_Max) {
-    // Known: Vulkan reduction produces incorrect results for max
+TEST_F(VulkanFloat32Parity, Max) {
+    // Fixed: Kahan compensated summation in reduction shader
     auto a = randn({32, 64}, DType::Float32, cpu_);
 
     auto cpu_r = max(a);
@@ -583,8 +583,8 @@ TEST_F(VulkanFloat32Parity, DISABLED_Max) {
     assert_parity(cpu_r, vk_r, 1e-6f, 1e-7f, "F32 Max");
 }
 
-TEST_F(VulkanFloat32Parity, DISABLED_Min) {
-    // Known: Vulkan reduction produces incorrect results for min
+TEST_F(VulkanFloat32Parity, Min) {
+    // Fixed: Kahan compensated summation in reduction shader
     auto a = randn({32, 64}, DType::Float32, cpu_);
 
     auto cpu_r = min(a);
@@ -631,8 +631,8 @@ TEST_F(VulkanFloat32Parity, CatDim1) {
     assert_parity(cpu_r, vk_r, 0.0f, 0.0f, "F32 Cat dim=1");
 }
 
-TEST_F(VulkanFloat32Parity, DISABLED_Gather) {
-    // Known: Vulkan gather produces incorrect results (buffer offset issue)
+TEST_F(VulkanFloat32Parity, Gather) {
+    // Fixed: separate input_dim_size and index_dim_size push constants
     auto a = randn({16, 32}, DType::Float32, cpu_);
     auto idx = zeros({16, 8}, DType::Int64, cpu_);
     {

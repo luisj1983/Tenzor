@@ -630,11 +630,11 @@ public:
 
     // Tiled blocked linalg helpers for medium matrices (33-256)
     void runBlockedLU(Tensor& A, Tensor& pivots, int64_t n,
-                      int64_t batch_size, int32_t device_id, bool is_f64);
+                      int64_t batch_size, int32_t device_id, bool is_f64, bool is_f16);
     void runBlockedCholesky(Tensor& A, int64_t n,
-                            int64_t batch_size, int32_t device_id, bool is_f64);
+                            int64_t batch_size, int32_t device_id, bool is_f64, bool is_f16);
     void runBlockedQR(Tensor& A, Tensor& tau, int64_t m, int64_t n,
-                      int64_t batch_size, int32_t device_id, bool is_f64);
+                      int64_t batch_size, int32_t device_id, bool is_f64, bool is_f16);
 
     // SearchSorted (native GPU binary search shader)
     auto dispatchSearchSorted(const Tensor& sorted, const Tensor& values) -> Tensor;

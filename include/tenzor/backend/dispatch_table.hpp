@@ -74,9 +74,9 @@ using InplaceKernelFn = Tensor&(*)(Tensor&, std::span<const Tensor>, const OpAtt
 /**
  * @brief Number of device types in the dispatch system.
  *
- * Must match Device::Type enum count.
+ * Derived from Device::Type::COUNT sentinel — always in sync.
  */
-inline constexpr size_t DEVICE_TYPE_COUNT = 7;
+inline constexpr size_t DEVICE_TYPE_COUNT = static_cast<size_t>(Device::Type::COUNT);
 
 /**
  * @brief Cache-aligned dispatch table for a single backend.
@@ -361,6 +361,41 @@ struct alignas(64) BackendDispatchTable {
         return result;
     }
 
+    /**
+     * @brief Get list of all supported operation IDs.
+     *
+     * @return Vector of OpIds that have registered kernels
+     */
+    [[nodiscard]] std::vector<OpId> supported_ops() const noexcept {
+        std::vector<OpId> ops;
+        for (size_t i = 0; i < OP_COUNT; ++i) {
+            if (kernels[i] || single_output_kernels[i] || inplace_kernels[i]) {
+                ops.push_back(static_cast<OpId>(i));
+            }
+        }
+        return ops;
+    }
+
+    /**
+     * @brief Check if an operation is supported (alias for has_kernel).
+     */
+    [[nodiscard]] bool supports_op(OpId op) const noexcept {
+        return has_kernel(op);
+    }
+
+    /**
+     * @brief Get count of registered operations.
+     */
+    [[nodiscard]] size_t op_count() const noexcept {
+        size_t count = 0;
+        for (size_t i = 0; i < OP_COUNT; ++i) {
+            if (kernels[i] || single_output_kernels[i] || inplace_kernels[i]) {
+                ++count;
+            }
+        }
+        return count;
+    }
+
 private:
     [[noreturn]] void throw_unsupported(OpId op) const;
 };
@@ -488,6 +523,16 @@ private:
 };
 
 /**
+ * @brief Get list of supported ops for a device type.
+ *
+ * @param type Device type
+ * @return Vector of supported OpIds (empty if backend not registered)
+ */
+inline std::vector<OpId> get_supported_ops(Device::Type type) noexcept {
+    return DispatchTableRegistry::get_table_const(type).supported_ops();
+}
+
+/**
  * @brief Convert device type to string for error messages.
  *
  * @param type Device type
@@ -501,6 +546,7 @@ inline const char* device_type_to_string(Device::Type type) noexcept {
         case Device::Type::OneAPI: return "OneAPI";
         case Device::Type::Vulkan: return "Vulkan";
         case Device::Type::WebGPU: return "WebGPU";
+        case Device::Type::COUNT:  break;
     }
     return "Unknown";
 }

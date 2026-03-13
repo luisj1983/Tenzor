@@ -1,0 +1,98 @@
+#version 450
+
+// Cholesky decomposition for small matrices (<= 32x32) - Float16 variant
+// Input/output use packed uint32 buffers (2 float16 values per word)
+// All computation done in float32.
+
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { uint data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { uint data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint batch;
+    uint upper;  // 0=lower, 1=upper
+};
+
+shared float L[32][32];
+
+float readF16(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = data_in[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+void writeF16(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = data_out[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0; iter < 1024; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(data_out[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    data_out[word_idx] = new_val;
+}
+
+void main() {
+    uint batch_idx = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (batch_idx >= batch) return;
+
+    uint mat_offset = batch_idx * n * n;
+
+    // Load matrix into shared memory
+    for (uint row = 0; row < n; row++) {
+        if (tid < n) {
+            L[row][tid] = readF16(mat_offset + row * n + tid);
+        }
+    }
+    barrier();
+
+    // Column-by-column Cholesky-Crout
+    for (uint j = 0; j < n; j++) {
+        if (tid == 0) {
+            float sum = L[j][j];
+            for (uint k = 0; k < j; k++) {
+                sum -= L[j][k] * L[j][k];
+            }
+            L[j][j] = (sum > 0.0) ? sqrt(sum) : 0.0;
+        }
+        barrier();
+
+        if (tid > j && tid < n) {
+            float sum = L[tid][j];
+            for (uint k = 0; k < j; k++) {
+                sum -= L[tid][k] * L[j][k];
+            }
+            float diag = L[j][j];
+            L[tid][j] = (abs(diag) > 1e-30) ? sum / diag : 0.0;
+        }
+        barrier();
+
+        if (tid < j && tid < n) {
+            L[tid][j] = 0.0;
+        }
+        barrier();
+    }
+
+    // Write output
+    for (uint row = 0; row < n; row++) {
+        if (tid < n) {
+            if (upper != 0) {
+                writeF16(mat_offset + tid * n + row, L[row][tid]);
+            } else {
+                writeF16(mat_offset + row * n + tid, L[row][tid]);
+            }
+        }
+    }
+}

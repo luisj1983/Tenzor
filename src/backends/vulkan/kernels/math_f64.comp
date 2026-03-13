@@ -57,33 +57,85 @@ double exp_double(double x) {
     }
 }
 
-// Double-precision log approximation
-// log(x) = log(m * 2^e) = log(m) + e * log(2)
+// Double-precision log using IEEE 754 bit extraction and minimax polynomial
+// log(x) = log(2^exp * mantissa) = exp * ln(2) + log(mantissa)
 double log_double(double x) {
     // Handle NaN
     if (x != x) return x;
 
-    if (x <= 0.0) return -1.0 / 0.0;  // -inf for x <= 0
-    if (x == 1.0) return 0.0;
+    // x <= 0: return NaN for negative, -inf for zero
+    if (x < 0.0LF) return 0.0LF / 0.0LF;  // NaN
+    if (x == 0.0LF) return -1.0LF / 0.0LF; // -inf
 
-    // For values that fit in float range with good precision, use float log
-    if (x >= 1.0e-30 && x <= 1.0e30) {
-        return double(log(float(x)));
+    // +inf returns +inf
+    if (x > 1.7976931348623157e308LF) return x;
+
+    // x == 1 exact
+    if (x == 1.0LF) return 0.0LF;
+
+    // Extract IEEE 754 bits via unpackDouble2x32
+    // Double layout: [63] sign | [62:52] exponent (11 bits) | [51:0] mantissa (52 bits)
+    // unpackDouble2x32 returns uvec2(low32, high32)
+    uvec2 bits = unpackDouble2x32(x);
+    uint hi = bits.y;
+    uint lo = bits.x;
+
+    // Extract biased exponent (bits 62:52 of the 64-bit value = bits 30:20 of high word)
+    int biased_exp = int((hi >> 20u) & 0x7FFu);
+    int exp_val = biased_exp - 1023;
+
+    // Reconstruct normalized mantissa in [1, 2):
+    // Set exponent bits to 1023 (bias) so value = 1.mantissa
+    uint hi_normalized = (hi & 0x000FFFFFu) | 0x3FF00000u;
+    double m = packDouble2x32(uvec2(lo, hi_normalized));
+
+    // For better polynomial convergence, reduce to [sqrt(2)/2, sqrt(2))
+    // If m >= sqrt(2), divide by 2 and increment exponent
+    if (m > 1.4142135623730950488LF) {
+        m *= 0.5LF;
+        exp_val += 1;
     }
 
-    // For extreme values, use range reduction with bounded loop
-    double ln2 = 0.6931471805599453;
-    int e = 0;
-    double m = x;
+    // Compute log(m) where m is in [sqrt(2)/2, sqrt(2))
+    // Let f = m - 1, so f is in [-0.2929, 0.4142]
+    // Use the identity: log(1+f) = 2*atanh(s) where s = f/(2+f)
+    // atanh(s) = s + s^3/3 + s^5/5 + ...
+    // This converges faster because |s| < |f|/2
+    double f = m - 1.0LF;
+    double s = f / (2.0LF + f);
+    double s2 = s * s;
 
-    // Normalize to range [1, 2) with bounded iterations
-    for (int i = 0; i < 1100 && m >= 2.0; i++) { m *= 0.5; e++; }
-    for (int i = 0; i < 1100 && m < 1.0; i++) { m *= 2.0; e--; }
+    // Minimax polynomial for atanh(s)/s - 1 in terms of s^2
+    // log(1+f) = 2*s*(1 + s2*P(s2))
+    // Coefficients from Cephes / Sun fdlibm style, degree-9 approximation
+    // P(z) = c1 + c2*z + c3*z^2 + c4*z^3 + c5*z^4 + c6*z^5 + c7*z^6
+    // where z = s^2, approximating (atanh(s)/s - 1)/s^2
+    double c1 = 0.6666666666666735130LF;   // 2/3
+    double c2 = 0.3999999999940941908LF;   // 2/5
+    double c3 = 0.2857142874366239149LF;   // 2/7
+    double c4 = 0.2222219843214978396LF;   // ~2/9
+    double c5 = 0.1818357216161805012LF;   // ~2/11
+    double c6 = 0.1531383769920937332LF;   // ~2/13
+    double c7 = 0.1479819860511658591LF;   // ~2/15 adjusted
 
-    // Now m is in [1, 2), compute log(m) using float
-    double log_m = double(log(float(m)));
+    // Evaluate P(s2) using Horner's method
+    double s4 = s2 * s2;
+    // Group into even and odd powers for better ILP
+    double t1 = c1 + c2 * s2 + c3 * s4;
+    double s6 = s4 * s2;
+    double t2 = c4 + c5 * s2 + c6 * s4 + c7 * s6;
+    double R = t1 + t2 * s6;
 
-    return log_m + double(e) * ln2;
+    // log(m) = 2*s + 2*s*s2*R = 2*s*(1 + s2*R)
+    double log_m = 2.0LF * s + 2.0LF * s * s2 * R;
+
+    // ln(2) split into high and low parts for precision
+    double ln2_hi = 0.69314718055994530942LF;
+    double ln2_lo = 2.3190468138462995584e-17LF;
+
+    // log(x) = exp_val * ln(2) + log(m)
+    double exp_dbl = double(exp_val);
+    return exp_dbl * ln2_hi + (log_m + exp_dbl * ln2_lo);
 }
 
 // Double-precision pow approximation

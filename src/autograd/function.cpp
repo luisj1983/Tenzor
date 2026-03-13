@@ -1,4 +1,5 @@
 #include "tenzor/autograd/function.hpp"
+#include <cassert>
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/sparse/sparse_ops.hpp"
 #include "tenzor/ops/math.hpp"
@@ -96,7 +97,9 @@ auto Function::saved_tensors() const -> const std::vector<Tensor>& {
 }
 
 void Function::validate_saved_tensors() const {
-    for (size_t i = 0; i < saved_tensors_.size() && i < saved_versions_.size(); ++i) {
+    assert(saved_tensors_.size() == saved_versions_.size() &&
+           "saved_tensors_ and saved_versions_ size mismatch — save_for_backward() is broken");
+    for (size_t i = 0; i < saved_tensors_.size(); ++i) {
         if (saved_tensors_[i].version() != saved_versions_[i]) {
             throw std::runtime_error(
                 "one of the variables needed for gradient computation has been modified by an "

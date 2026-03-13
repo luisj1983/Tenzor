@@ -21,11 +21,6 @@
 #include <omp.h>
 #endif
 
-#ifdef TENZOR_CUDA_ENABLED
-extern "C" void nms_cuda(const float* boxes, const float* scores,
-                         int64_t num_boxes, float iou_threshold,
-                         int64_t* keep_indices, int64_t* num_keep);
-#endif
 
 // SIMD headers for optimized NMS
 #if defined(__x86_64__) || defined(_M_X64)
@@ -488,32 +483,16 @@ auto nms(const Tensor& boxes, const Tensor& scores, double iou_threshold) -> Ten
         return tenzor::empty({0}, DType::Int64, boxes.device());
     }
 
-#ifdef TENZOR_CUDA_ENABLED
-    // CUDA fast path: run NMS entirely on GPU using CUB sort + custom kernels
-    if (boxes.device().type == Device::Type::CUDA) {
+    // GPU fast path: dispatch NMS to registered backend kernel (CUDA, ROCm, OneAPI, Vulkan)
+    if (boxes.device().type != Device::Type::CPU) {
+        OpAttributes attrs;
+        attrs.set(AttrKey::IouThreshold, static_cast<float>(iou_threshold));
         auto boxes_f32 = boxes.to(DType::Float32).contiguous();
         auto scores_f32 = scores.to(DType::Float32).contiguous();
-
-        // Allocate output tensor on device for keep indices
-        auto keep_device = zeros({N}, DType::Int64, boxes.device());
-
-        int64_t num_keep = 0;
-        nms_cuda(
-            static_cast<const float*>(boxes_f32.data_ptr()),
-            static_cast<const float*>(scores_f32.data_ptr()),
-            N,
-            static_cast<float>(iou_threshold),
-            static_cast<int64_t*>(keep_device.data_ptr()),
-            &num_keep
-        );
-
-        // Slice to actual number of kept boxes
-        if (num_keep < N) {
-            keep_device = keep_device.slice(0, 0, num_keep);
-        }
-        return keep_device;
+        std::vector<Tensor> nms_inputs = {boxes_f32, scores_f32};
+        auto result = dispatch<OpId::NMS>(nms_inputs, attrs);
+        return result[0];
     }
-#endif
 
     // Move to CPU and convert to Float32 for processing
     auto boxes_cpu = boxes.to(Device::cpu()).to(DType::Float32);

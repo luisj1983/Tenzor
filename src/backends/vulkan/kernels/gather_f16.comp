@@ -13,9 +13,10 @@ layout(push_constant) uniform PushConstants {
     uint input_size;       // Total input size (in elements, not words)
     uint output_size;      // Total output size (in elements)
     uint dim;              // Dimension to gather along
-    uint dim_size;         // Size of the dimension being gathered
+    uint dim_size;         // Size of gather dim in indices/output (for decomposition)
     uint inner_size;       // Product of dimensions after dim
     uint outer_size;       // Product of dimensions before dim
+    uint input_dim_size;   // Size of gather dim in input (for bounds check + indexing)
 } params;
 
 // Read a single Float16 element from packed uint32 array
@@ -60,14 +61,14 @@ void main() {
     // Get the index to gather from
     int gather_idx = indices[out_idx];
 
-    // Bounds check
-    if (gather_idx < 0 || gather_idx >= int(params.dim_size)) {
+    // Bounds check against input dimension size
+    if (gather_idx < 0 || gather_idx >= int(params.input_dim_size)) {
         writeF16(out_idx, 0.0);
         return;
     }
 
-    // Compute input index
-    uint in_idx = outer_idx * (params.dim_size * params.inner_size) +
+    // Compute input index using input_dim_size for the gather dimension stride
+    uint in_idx = outer_idx * (params.input_dim_size * params.inner_size) +
                   uint(gather_idx) * params.inner_size +
                   inner_idx;
 

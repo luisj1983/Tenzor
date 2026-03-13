@@ -1,0 +1,109 @@
+#version 450
+
+// Determinant via LU factorization for small matrices (<= 32x32) - Float16 variant
+// Input/output use packed uint32 buffers (2 float16 values per word)
+// All computation done in float32 for numerical stability.
+
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { uint data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { uint data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;      // Matrix dimension (n x n)
+    uint batch;  // Batch size
+};
+
+shared float mat[32][32];
+shared int pivot_sign;
+
+float readF16(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = data_in[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+void writeF16(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = data_out[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0; iter < 1024; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(data_out[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    data_out[word_idx] = new_val;
+}
+
+void main() {
+    uint batch_idx = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+
+    if (batch_idx >= batch) return;
+
+    uint mat_offset = batch_idx * n * n;
+
+    if (tid == 0) pivot_sign = 1;
+    barrier();
+
+    // Load matrix into shared memory
+    for (uint row = 0; row < n; row++) {
+        if (tid < n) {
+            mat[row][tid] = readF16(mat_offset + row * n + tid);
+        }
+    }
+    barrier();
+
+    // LU factorization with partial pivoting
+    for (uint col = 0; col < n; col++) {
+        if (tid == 0) {
+            uint max_row = col;
+            float max_val = abs(mat[col][col]);
+            for (uint row = col + 1; row < n; row++) {
+                float val = abs(mat[row][col]);
+                if (val > max_val) {
+                    max_val = val;
+                    max_row = row;
+                }
+            }
+            if (max_row != col) {
+                pivot_sign = -pivot_sign;
+                for (uint j = 0; j < n; j++) {
+                    float tmp = mat[col][j];
+                    mat[col][j] = mat[max_row][j];
+                    mat[max_row][j] = tmp;
+                }
+            }
+        }
+        barrier();
+
+        if (tid > col && tid < n) {
+            float pivot = mat[col][col];
+            if (abs(pivot) > 1e-30) {
+                float factor = mat[tid][col] / pivot;
+                for (uint j = col + 1; j < n; j++) {
+                    mat[tid][j] -= factor * mat[col][j];
+                }
+                mat[tid][col] = factor;
+            }
+        }
+        barrier();
+    }
+
+    // Compute determinant = product of diagonal * pivot_sign
+    if (tid == 0) {
+        float det = float(pivot_sign);
+        for (uint i = 0; i < n; i++) {
+            det *= mat[i][i];
+        }
+        writeF16(batch_idx, det);
+    }
+}

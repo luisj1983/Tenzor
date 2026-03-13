@@ -42,9 +42,12 @@ void main() {
     val0 = max(params.min_value, min(params.max_value, val0));
     val1 = max(params.min_value, min(params.max_value, val1));
 
-    // Handle odd number of elements
+    // Handle odd number of elements: preserve existing upper half-word
     if (idx1 >= params.n_elements) {
-        val1 = 0.0;
+        uint clamped_bits = packHalf2x16(vec2(float(float16_t(val0)), 0.0)) & 0xFFFFu;
+        uint existing = output_data[pair_idx];
+        output_data[pair_idx] = clamped_bits | (existing & 0xFFFF0000u);
+        return;
     }
 
     output_data[pair_idx] = packF16Pair(float16_t(val0), float16_t(val1));

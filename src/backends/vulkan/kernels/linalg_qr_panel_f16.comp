@@ -1,0 +1,137 @@
+#version 450
+
+// Blocked QR — panel factorization using Householder reflections — Float16 variant
+// Float16 elements packed 2 per 32-bit word, all computation in float32.
+// Factorizes columns [col_start, col_start+panel_cols) of matrix A.
+// Stores Householder vectors below diagonal, R on/above diagonal.
+// One workgroup with 256 threads.
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer Matrix { uint A[]; };
+layout(set = 0, binding = 1) buffer TauBuf { uint tau_buf[]; };  // packed Float16 tau values
+
+layout(push_constant) uniform PushConstants {
+    uint m;          // number of rows
+    uint n;          // number of columns
+    uint col_start;  // starting column of this panel
+    uint panel_cols; // number of columns in panel
+    uint batch_idx;
+};
+
+shared float col_data[256];
+shared float norm_sq;
+shared float alpha;
+shared float tau_k;
+
+// Read Float16 from matrix A
+float readF16(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = A[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+// Write Float16 to matrix A
+void writeF16(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = A[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0; iter < 1024; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(A[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    A[word_idx] = new_val;
+}
+
+// Write Float16 to tau buffer
+void writeF16Tau(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = tau_buf[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0; iter < 1024; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(tau_buf[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    tau_buf[word_idx] = new_val;
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint elem_base = batch_idx * m * n;
+    uint panel_rows = m - col_start;
+
+    for (uint k = 0; k < panel_cols; k++) {
+        uint col = col_start + k;
+
+        // Thread 0: compute norm, alpha, tau
+        if (tid == 0) {
+            norm_sq = 0.0;
+            for (uint r = k; r < panel_rows; r++) {
+                float v = readF16(elem_base + (col_start + r) * n + col);
+                norm_sq += v * v;
+            }
+
+            float a_kk = readF16(elem_base + (col_start + k) * n + col);
+            alpha = -sign(a_kk) * sqrt(norm_sq);
+            float v_k = a_kk - alpha;
+
+            if (abs(v_k) < 1e-30) {
+                tau_k = 0.0;
+            } else {
+                float sub_norm = norm_sq - a_kk * a_kk;
+                tau_k = (sub_norm + v_k * v_k) / (v_k * v_k);
+                tau_k = 2.0 / tau_k;
+            }
+
+            // Set R diagonal and store tau
+            writeF16(elem_base + (col_start + k) * n + col, alpha);
+            writeF16Tau(batch_idx * n + col, tau_k);
+        }
+        barrier();
+
+        if (abs(tau_k) < 1e-30) continue;
+
+        // Apply reflection to remaining columns: A[:,j] -= tau * v * (v^T * A[:,j])
+        for (uint j = col + 1; j < min(col_start + panel_cols, n); j++) {
+            // Thread 0: compute dot product
+            if (tid == 0) {
+                float dot = readF16(elem_base + (col_start + k) * n + j);  // v[k] = 1
+                for (uint r = k + 1; r < panel_rows; r++) {
+                    float v_r = readF16(elem_base + (col_start + r) * n + col);
+                    dot += v_r * readF16(elem_base + (col_start + r) * n + j);
+                }
+                col_data[0] = dot;
+            }
+            barrier();
+
+            float dot = col_data[0];
+
+            // Update: A[r,j] -= tau * v[r] * dot
+            for (uint r = k + 1 + tid; r < panel_rows; r += 256) {
+                float v_r = readF16(elem_base + (col_start + r) * n + col);
+                float cur = readF16(elem_base + (col_start + r) * n + j);
+                writeF16(elem_base + (col_start + r) * n + j, cur - tau_k * v_r * dot);
+            }
+            if (tid == 0) {
+                float cur = readF16(elem_base + (col_start + k) * n + j);
+                writeF16(elem_base + (col_start + k) * n + j, cur - tau_k * dot);
+            }
+            barrier();
+        }
+    }
+}

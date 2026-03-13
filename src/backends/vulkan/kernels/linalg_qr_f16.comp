@@ -1,0 +1,153 @@
+#version 450
+
+// QR decomposition for small matrices (<= 32x32) — Float16 variant
+// Float16 elements packed 2 per 32-bit word, all computation in float32.
+// Householder reflections, column by column.
+// Output: Q (binding 1), R (binding 2) — both packed uint32
+
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { uint data_in[];  };
+layout(set = 0, binding = 1) buffer QBuf      { uint data_q[];   };
+layout(set = 0, binding = 2) buffer RBuf      { uint data_r[];   };
+
+layout(push_constant) uniform PushConstants {
+    uint m;      // rows
+    uint n_cols; // columns
+    uint batch;
+};
+
+shared float R[32][32];
+shared float Q[32][32];
+shared float v[32];
+shared float norm_val;
+shared float tau;
+
+float readF16In(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = data_in[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+void writeF16Q(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = data_q[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0; iter < 1024; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(data_q[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    data_q[word_idx] = new_val;
+}
+
+void writeF16R(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = data_r[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0; iter < 1024; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(data_r[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    data_r[word_idx] = new_val;
+}
+
+void main() {
+    uint batch_idx = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (batch_idx >= batch) return;
+
+    uint mat_offset = batch_idx * m * n_cols;
+
+    // Load R = A, Q = I (all in shared memory float32)
+    for (uint row = 0; row < m; row++) {
+        if (tid < n_cols) {
+            R[row][tid] = readF16In(mat_offset + row * n_cols + tid);
+        }
+        if (tid < m) {
+            Q[row][tid] = (row == tid) ? 1.0 : 0.0;
+        }
+    }
+    barrier();
+
+    uint min_mn = min(m, n_cols);
+
+    for (uint col = 0; col < min_mn; col++) {
+        // Thread 0: compute Householder vector from column below diagonal
+        if (tid == 0) {
+            float sigma = 0.0;
+            for (uint i = col; i < m; i++) {
+                v[i] = R[i][col];
+                sigma += v[i] * v[i];
+            }
+            float norm = sqrt(sigma);
+            float sign_val = (v[col] >= 0.0) ? 1.0 : -1.0;
+            v[col] += sign_val * norm;
+
+            // Recompute norm of v
+            float v_norm_sq = 0.0;
+            for (uint i = col; i < m; i++) {
+                v_norm_sq += v[i] * v[i];
+            }
+            norm_val = v_norm_sq;
+            tau = (v_norm_sq > 1e-30) ? 2.0 / v_norm_sq : 0.0;
+        }
+        barrier();
+
+        if (norm_val < 1e-30) {
+            barrier();
+            continue;
+        }
+
+        // Apply H = I - tau * v * v^T to R columns
+        if (tid < n_cols && tid >= col) {
+            float dot = 0.0;
+            for (uint i = col; i < m; i++) {
+                dot += v[i] * R[i][tid];
+            }
+            dot *= tau;
+            for (uint i = col; i < m; i++) {
+                R[i][tid] -= dot * v[i];
+            }
+        }
+        barrier();
+
+        // Apply H to Q columns: Q = Q * H
+        if (tid < m) {
+            float dot = 0.0;
+            for (uint i = col; i < m; i++) {
+                dot += Q[tid][i] * v[i];
+            }
+            dot *= tau;
+            for (uint i = col; i < m; i++) {
+                Q[tid][i] -= dot * v[i];
+            }
+        }
+        barrier();
+    }
+
+    // Write Q and R as packed Float16
+    for (uint row = 0; row < m; row++) {
+        if (tid < m) {
+            writeF16Q(batch_idx * m * m + row * m + tid, Q[row][tid]);
+        }
+        if (tid < n_cols) {
+            writeF16R(mat_offset + row * n_cols + tid, R[row][tid]);
+        }
+    }
+}

@@ -6,6 +6,14 @@
 #include <stdexcept>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+// OpenMP parallelization threshold (elements)
+static constexpr size_t OMP_THRESHOLD = 65536;
 
 // SIMD intrinsics
 #if defined(__AVX512F__)
@@ -30,73 +38,16 @@ auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& 
     Tensor result(shape, dtype, device);
     size_t n = static_cast<size_t>(result.numel());
 
+    // IEEE 754 float/double zero and integer zero are all-bits-zero,
+    // so memset is correct and fastest for all supported dtypes.
     if (dtype == DType::Float32) {
-        float* data = result.data<float>();
-
-#ifdef TENZOR_HAS_AVX512
-        // Process 16 floats at a time with AVX-512
-        size_t simd_end = (n / 16) * 16;
-        __m512 zero_vec = _mm512_setzero_ps();
-        for (size_t i = 0; i < simd_end; i += 16) {
-            _mm512_storeu_ps(&data[i], zero_vec);
-        }
-        // Handle remainder
-        for (size_t i = simd_end; i < n; ++i) {
-            data[i] = 0.0f;
-        }
-#elif defined(TENZOR_HAS_AVX2)
-        // Process 8 floats at a time with AVX2
-        size_t simd_end = (n / 8) * 8;
-        __m256 zero_vec = _mm256_setzero_ps();
-        for (size_t i = 0; i < simd_end; i += 8) {
-            _mm256_storeu_ps(&data[i], zero_vec);
-        }
-        // Handle remainder
-        for (size_t i = simd_end; i < n; ++i) {
-            data[i] = 0.0f;
-        }
-#else
-        // Scalar fallback - use std::fill for better optimization
-        std::fill_n(data, n, 0.0f);
-#endif
-
+        std::memset(result.data<float>(), 0, n * sizeof(float));
     } else if (dtype == DType::Float64) {
-        double* data = result.data<double>();
-
-#ifdef TENZOR_HAS_AVX512
-        // Process 8 doubles at a time with AVX-512
-        size_t simd_end = (n / 8) * 8;
-        __m512d zero_vec = _mm512_setzero_pd();
-        for (size_t i = 0; i < simd_end; i += 8) {
-            _mm512_storeu_pd(&data[i], zero_vec);
-        }
-        // Handle remainder
-        for (size_t i = simd_end; i < n; ++i) {
-            data[i] = 0.0;
-        }
-#elif defined(TENZOR_HAS_AVX2)
-        // Process 4 doubles at a time with AVX2
-        size_t simd_end = (n / 4) * 4;
-        __m256d zero_vec = _mm256_setzero_pd();
-        for (size_t i = 0; i < simd_end; i += 4) {
-            _mm256_storeu_pd(&data[i], zero_vec);
-        }
-        // Handle remainder
-        for (size_t i = simd_end; i < n; ++i) {
-            data[i] = 0.0;
-        }
-#else
-        std::fill_n(data, n, 0.0);
-#endif
-
+        std::memset(result.data<double>(), 0, n * sizeof(double));
     } else if (dtype == DType::Int32) {
-        int32_t* data = result.data<int32_t>();
-        std::fill_n(data, n, 0);
-
+        std::memset(result.data<int32_t>(), 0, n * sizeof(int32_t));
     } else if (dtype == DType::Int64) {
-        int64_t* data = result.data<int64_t>();
-        std::fill_n(data, n, 0);
-
+        std::memset(result.data<int64_t>(), 0, n * sizeof(int64_t));
     } else {
         throw std::runtime_error("zeros operation: unsupported dtype");
     }
@@ -110,74 +61,32 @@ auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& 
 
 auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor {
     Tensor result(shape, dtype, device);
-    size_t n = static_cast<size_t>(result.numel());
+    int64_t n = result.numel();
 
     if (dtype == DType::Float32) {
         float* data = result.data<float>();
-
-#ifdef TENZOR_HAS_AVX512
-        // Process 16 floats at a time with AVX-512
-        size_t simd_end = (n / 16) * 16;
-        __m512 one_vec = _mm512_set1_ps(1.0f);
-        for (size_t i = 0; i < simd_end; i += 16) {
-            _mm512_storeu_ps(&data[i], one_vec);
-        }
-        // Handle remainder
-        for (size_t i = simd_end; i < n; ++i) {
+        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
+        for (int64_t i = 0; i < n; ++i) {
             data[i] = 1.0f;
         }
-#elif defined(TENZOR_HAS_AVX2)
-        // Process 8 floats at a time with AVX2
-        size_t simd_end = (n / 8) * 8;
-        __m256 one_vec = _mm256_set1_ps(1.0f);
-        for (size_t i = 0; i < simd_end; i += 8) {
-            _mm256_storeu_ps(&data[i], one_vec);
-        }
-        // Handle remainder
-        for (size_t i = simd_end; i < n; ++i) {
-            data[i] = 1.0f;
-        }
-#else
-        std::fill_n(data, n, 1.0f);
-#endif
-
     } else if (dtype == DType::Float64) {
         double* data = result.data<double>();
-
-#ifdef TENZOR_HAS_AVX512
-        // Process 8 doubles at a time with AVX-512
-        size_t simd_end = (n / 8) * 8;
-        __m512d one_vec = _mm512_set1_pd(1.0);
-        for (size_t i = 0; i < simd_end; i += 8) {
-            _mm512_storeu_pd(&data[i], one_vec);
-        }
-        // Handle remainder
-        for (size_t i = simd_end; i < n; ++i) {
+        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
+        for (int64_t i = 0; i < n; ++i) {
             data[i] = 1.0;
         }
-#elif defined(TENZOR_HAS_AVX2)
-        // Process 4 doubles at a time with AVX2
-        size_t simd_end = (n / 4) * 4;
-        __m256d one_vec = _mm256_set1_pd(1.0);
-        for (size_t i = 0; i < simd_end; i += 4) {
-            _mm256_storeu_pd(&data[i], one_vec);
-        }
-        // Handle remainder
-        for (size_t i = simd_end; i < n; ++i) {
-            data[i] = 1.0;
-        }
-#else
-        std::fill_n(data, n, 1.0);
-#endif
-
     } else if (dtype == DType::Int32) {
         int32_t* data = result.data<int32_t>();
-        std::fill_n(data, n, 1);
-
+        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
+        for (int64_t i = 0; i < n; ++i) {
+            data[i] = 1;
+        }
     } else if (dtype == DType::Int64) {
         int64_t* data = result.data<int64_t>();
-        std::fill_n(data, n, 1);
-
+        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
+        for (int64_t i = 0; i < n; ++i) {
+            data[i] = 1;
+        }
     } else {
         throw std::runtime_error("ones operation: unsupported dtype");
     }
@@ -186,13 +95,14 @@ auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& d
 }
 
 // ============================================================================
-// Random Number Generator - Thread-local for thread safety
+// Random Number Generator helpers
 // ============================================================================
 
 namespace detail {
-    // Thread-local random number generator for thread safety
-    // Seeded from get_global_seed() so manual_seed() controls reproducibility
-    thread_local std::mt19937 rng(static_cast<unsigned int>(tenzor::get_global_seed()));
+    // Get a base seed from the global seed (for reproducibility via manual_seed())
+    static unsigned int get_base_seed() {
+        return static_cast<unsigned int>(tenzor::get_global_seed());
+    }
 }
 
 // ============================================================================
@@ -201,22 +111,60 @@ namespace detail {
 
 auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor {
     Tensor result(shape, dtype, device);
-    size_t n = static_cast<size_t>(result.numel());
+    int64_t n = result.numel();
 
     if (dtype == DType::Float32) {
         float* data = result.data<float>();
-        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
 
-        for (size_t i = 0; i < n; ++i) {
-            data[i] = dist(detail::rng);
+        if (n > static_cast<int64_t>(OMP_THRESHOLD)) {
+            unsigned int base_seed = detail::get_base_seed();
+            #pragma omp parallel
+            {
+#ifdef _OPENMP
+                int tid = omp_get_thread_num();
+#else
+                int tid = 0;
+#endif
+                std::mt19937 local_rng(base_seed + static_cast<unsigned int>(tid));
+                std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+                #pragma omp for schedule(static)
+                for (int64_t i = 0; i < n; ++i) {
+                    data[i] = dist(local_rng);
+                }
+            }
+        } else {
+            std::mt19937 rng(detail::get_base_seed());
+            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+            for (int64_t i = 0; i < n; ++i) {
+                data[i] = dist(rng);
+            }
         }
 
     } else if (dtype == DType::Float64) {
         double* data = result.data<double>();
-        std::uniform_real_distribution<double> dist(0.0, 1.0);
 
-        for (size_t i = 0; i < n; ++i) {
-            data[i] = dist(detail::rng);
+        if (n > static_cast<int64_t>(OMP_THRESHOLD)) {
+            unsigned int base_seed = detail::get_base_seed();
+            #pragma omp parallel
+            {
+#ifdef _OPENMP
+                int tid = omp_get_thread_num();
+#else
+                int tid = 0;
+#endif
+                std::mt19937 local_rng(base_seed + static_cast<unsigned int>(tid));
+                std::uniform_real_distribution<double> dist(0.0, 1.0);
+                #pragma omp for schedule(static)
+                for (int64_t i = 0; i < n; ++i) {
+                    data[i] = dist(local_rng);
+                }
+            }
+        } else {
+            std::mt19937 rng(detail::get_base_seed());
+            std::uniform_real_distribution<double> dist(0.0, 1.0);
+            for (int64_t i = 0; i < n; ++i) {
+                data[i] = dist(rng);
+            }
         }
 
     } else {
@@ -232,22 +180,60 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& d
 
 auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor {
     Tensor result(shape, dtype, device);
-    size_t n = static_cast<size_t>(result.numel());
+    int64_t n = result.numel();
 
     if (dtype == DType::Float32) {
         float* data = result.data<float>();
-        std::normal_distribution<float> dist(0.0f, 1.0f);
 
-        for (size_t i = 0; i < n; ++i) {
-            data[i] = dist(detail::rng);
+        if (n > static_cast<int64_t>(OMP_THRESHOLD)) {
+            unsigned int base_seed = detail::get_base_seed();
+            #pragma omp parallel
+            {
+#ifdef _OPENMP
+                int tid = omp_get_thread_num();
+#else
+                int tid = 0;
+#endif
+                std::mt19937 local_rng(base_seed + static_cast<unsigned int>(tid));
+                std::normal_distribution<float> dist(0.0f, 1.0f);
+                #pragma omp for schedule(static)
+                for (int64_t i = 0; i < n; ++i) {
+                    data[i] = dist(local_rng);
+                }
+            }
+        } else {
+            std::mt19937 rng(detail::get_base_seed());
+            std::normal_distribution<float> dist(0.0f, 1.0f);
+            for (int64_t i = 0; i < n; ++i) {
+                data[i] = dist(rng);
+            }
         }
 
     } else if (dtype == DType::Float64) {
         double* data = result.data<double>();
-        std::normal_distribution<double> dist(0.0, 1.0);
 
-        for (size_t i = 0; i < n; ++i) {
-            data[i] = dist(detail::rng);
+        if (n > static_cast<int64_t>(OMP_THRESHOLD)) {
+            unsigned int base_seed = detail::get_base_seed();
+            #pragma omp parallel
+            {
+#ifdef _OPENMP
+                int tid = omp_get_thread_num();
+#else
+                int tid = 0;
+#endif
+                std::mt19937 local_rng(base_seed + static_cast<unsigned int>(tid));
+                std::normal_distribution<double> dist(0.0, 1.0);
+                #pragma omp for schedule(static)
+                for (int64_t i = 0; i < n; ++i) {
+                    data[i] = dist(local_rng);
+                }
+            }
+        } else {
+            std::mt19937 rng(detail::get_base_seed());
+            std::normal_distribution<double> dist(0.0, 1.0);
+            for (int64_t i = 0; i < n; ++i) {
+                data[i] = dist(rng);
+            }
         }
 
     } else {
@@ -268,22 +254,61 @@ auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape
     }
 
     Tensor result(shape, dtype, device);
-    size_t n = static_cast<size_t>(result.numel());
+    int64_t n = result.numel();
 
     if (dtype == DType::Int32) {
         int32_t* data = result.data<int32_t>();
         std::uniform_int_distribution<int32_t> dist(
             static_cast<int32_t>(low), static_cast<int32_t>(high - 1));
 
-        for (size_t i = 0; i < n; ++i) {
-            data[i] = dist(detail::rng);
+        if (n > static_cast<int64_t>(OMP_THRESHOLD)) {
+            unsigned int base_seed = detail::get_base_seed();
+            #pragma omp parallel
+            {
+#ifdef _OPENMP
+                int tid = omp_get_thread_num();
+#else
+                int tid = 0;
+#endif
+                std::mt19937 local_rng(base_seed + static_cast<unsigned int>(tid));
+                std::uniform_int_distribution<int32_t> local_dist(
+                    static_cast<int32_t>(low), static_cast<int32_t>(high - 1));
+                #pragma omp for schedule(static)
+                for (int64_t i = 0; i < n; ++i) {
+                    data[i] = local_dist(local_rng);
+                }
+            }
+        } else {
+            std::mt19937 rng(detail::get_base_seed());
+            for (int64_t i = 0; i < n; ++i) {
+                data[i] = dist(rng);
+            }
         }
     } else {  // Int64
         int64_t* data = result.data<int64_t>();
         std::uniform_int_distribution<int64_t> dist(low, high - 1);
 
-        for (size_t i = 0; i < n; ++i) {
-            data[i] = dist(detail::rng);
+        if (n > static_cast<int64_t>(OMP_THRESHOLD)) {
+            unsigned int base_seed = detail::get_base_seed();
+            #pragma omp parallel
+            {
+#ifdef _OPENMP
+                int tid = omp_get_thread_num();
+#else
+                int tid = 0;
+#endif
+                std::mt19937 local_rng(base_seed + static_cast<unsigned int>(tid));
+                std::uniform_int_distribution<int64_t> local_dist(low, high - 1);
+                #pragma omp for schedule(static)
+                for (int64_t i = 0; i < n; ++i) {
+                    data[i] = local_dist(local_rng);
+                }
+            }
+        } else {
+            std::mt19937 rng(detail::get_base_seed());
+            for (int64_t i = 0; i < n; ++i) {
+                data[i] = dist(rng);
+            }
         }
     }
 
@@ -296,45 +321,35 @@ auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape
 
 auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, const Device& device) -> Tensor {
     Tensor result(shape, dtype, device);
-    size_t n = static_cast<size_t>(result.numel());
+    int64_t n = result.numel();
 
     if (dtype == DType::Float32) {
         float* data = result.data<float>();
-
-#ifdef TENZOR_HAS_AVX512
-        size_t simd_end = (n / 16) * 16;
-        __m512 val_vec = _mm512_set1_ps(value);
-        for (size_t i = 0; i < simd_end; i += 16) {
-            _mm512_storeu_ps(&data[i], val_vec);
-        }
-        for (size_t i = simd_end; i < n; ++i) {
+        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
+        for (int64_t i = 0; i < n; ++i) {
             data[i] = value;
         }
-#elif defined(TENZOR_HAS_AVX2)
-        size_t simd_end = (n / 8) * 8;
-        __m256 val_vec = _mm256_set1_ps(value);
-        for (size_t i = 0; i < simd_end; i += 8) {
-            _mm256_storeu_ps(&data[i], val_vec);
-        }
-        for (size_t i = simd_end; i < n; ++i) {
-            data[i] = value;
-        }
-#else
-        std::fill_n(data, n, value);
-#endif
-
     } else if (dtype == DType::Float64) {
         double* data = result.data<double>();
-        std::fill_n(data, n, static_cast<double>(value));
-
+        double dval = static_cast<double>(value);
+        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
+        for (int64_t i = 0; i < n; ++i) {
+            data[i] = dval;
+        }
     } else if (dtype == DType::Int32) {
         int32_t* data = result.data<int32_t>();
-        std::fill_n(data, n, static_cast<int32_t>(value));
-
+        int32_t ival = static_cast<int32_t>(value);
+        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
+        for (int64_t i = 0; i < n; ++i) {
+            data[i] = ival;
+        }
     } else if (dtype == DType::Int64) {
         int64_t* data = result.data<int64_t>();
-        std::fill_n(data, n, static_cast<int64_t>(value));
-
+        int64_t ival = static_cast<int64_t>(value);
+        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
+        for (int64_t i = 0; i < n; ++i) {
+            data[i] = ival;
+        }
     } else {
         throw std::runtime_error("full operation: unsupported dtype");
     }

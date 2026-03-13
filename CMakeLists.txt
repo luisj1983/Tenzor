@@ -284,6 +284,12 @@ if(TENZOR_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
 
+# Tools
+option(TENZOR_BUILD_TOOLS "Build developer tools" ON)
+if(TENZOR_BUILD_TOOLS)
+    add_subdirectory(tools)
+endif()
+
 # Documentation
 find_package(Doxygen)
 if(DOXYGEN_FOUND)

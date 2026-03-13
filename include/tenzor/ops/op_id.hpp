@@ -229,6 +229,7 @@ enum class OpId : uint16_t {
     ROIAlignBackward,
     BoxIoU,
     GatherRelativePositionBias,
+    NMS,                       // Non-Maximum Suppression
 
     // =========================================================================
     // Fused Operations (210-229)
@@ -465,12 +466,13 @@ enum class OpId : uint16_t {
     // =========================================================================
     // Sparse Tensor Operations (460-469)
     //
-    // NOTE: These OpIds are RESERVED but NOT registered via the dispatch table.
-    // Sparse operations use a separate dispatch path through SparseTensor
-    // (see src/sparse/sparse_ops.cpp) which calls MKL SpMV/SpMM on CPU and
-    // cuSPARSE/rocSPARSE on GPU directly, bypassing the Tensor-based OpId
-    // dispatch. These OpIds exist for potential future unification of sparse
-    // and dense dispatch but are currently unused.
+    // These OpIds ARE registered in the dispatch tables for CPU, CUDA, ROCm,
+    // and OneAPI backends. The wrapper kernels reconstruct a SparseTensor from
+    // CSR components (crow_indices, col_indices, values) passed as plain
+    // Tensors, then delegate to the existing sparse:: functions in
+    // src/sparse/sparse_ops.cpp. SpMM/SpMV on GPU are guarded by
+    // TENZOR_HAS_CUSPARSE / TENZOR_HAS_ROCSPARSE / TENZOR_HAS_ONEMKL.
+    // Vulkan uses its own native dispatch (registered separately).
     // =========================================================================
     SparseSpMM = 460,          // Sparse-Dense matrix multiplication
     SparseSpMV,                // Sparse-Dense matrix-vector multiplication
