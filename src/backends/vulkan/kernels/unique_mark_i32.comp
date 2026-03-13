@@ -1,0 +1,22 @@
+#version 450
+
+// Mark boundaries between distinct sorted elements (Int32)
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer SortedInput { int sorted_data[]; };
+layout(binding = 1) writeonly buffer Boundaries { uint boundary_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint numel;
+} params;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= params.numel) return;
+
+    if (gid == 0) {
+        boundary_data[gid] = 1;
+    } else {
+        boundary_data[gid] = (sorted_data[gid] != sorted_data[gid - 1]) ? 1 : 0;
+    }
+}

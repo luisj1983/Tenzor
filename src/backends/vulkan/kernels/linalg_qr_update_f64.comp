@@ -1,0 +1,52 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Blocked QR — apply Householder reflections to trailing columns (Float64)
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer Matrix { float64_t A[]; };
+layout(set = 0, binding = 1) readonly buffer TauBuf { float64_t tau[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint m;
+    uint n;
+    uint col_start;
+    uint panel_cols;
+    uint batch_idx;
+};
+
+shared float64_t dot_val;
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint base = batch_idx * m * n;
+    uint panel_rows = m - col_start;
+
+    uint j = col_start + panel_cols + gl_WorkGroupID.x;
+    if (j >= n) return;
+
+    for (uint k = 0; k < panel_cols; k++) {
+        uint col = col_start + k;
+        float64_t tau_k = tau[batch_idx * n + col];
+        if (abs(tau_k) < 1e-30lf) continue;
+
+        if (tid == 0) {
+            float64_t dot = A[base + (col_start + k) * n + j];
+            for (uint r = k + 1; r < panel_rows; r++) {
+                dot += A[base + (col_start + r) * n + col] * A[base + (col_start + r) * n + j];
+            }
+            dot_val = dot;
+        }
+        barrier();
+
+        float64_t dot = dot_val;
+
+        for (uint r = k + 1 + tid; r < panel_rows; r += 256) {
+            A[base + (col_start + r) * n + j] -= tau_k * A[base + (col_start + r) * n + col] * dot;
+        }
+        if (tid == 0) {
+            A[base + (col_start + k) * n + j] -= tau_k * dot;
+        }
+        barrier();
+    }
+}

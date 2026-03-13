@@ -1,0 +1,79 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Blocked QR — panel factorization using Householder reflections (Float64)
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer Matrix { float64_t A[]; };
+layout(set = 0, binding = 1) buffer TauBuf { float64_t tau[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint m;
+    uint n;
+    uint col_start;
+    uint panel_cols;
+    uint batch_idx;
+};
+
+shared float64_t col_data[256];
+shared float64_t norm_sq;
+shared float64_t alpha;
+shared float64_t tau_k;
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint base = batch_idx * m * n;
+    uint panel_rows = m - col_start;
+
+    for (uint k = 0; k < panel_cols; k++) {
+        uint col = col_start + k;
+
+        if (tid == 0) {
+            norm_sq = 0.0lf;
+            for (uint r = k; r < panel_rows; r++) {
+                float64_t v = A[base + (col_start + r) * n + col];
+                norm_sq += v * v;
+            }
+
+            alpha = -sign(A[base + (col_start + k) * n + col]) * sqrt(norm_sq);
+            float64_t v_k = A[base + (col_start + k) * n + col] - alpha;
+
+            if (abs(v_k) < 1e-30lf) {
+                tau_k = 0.0lf;
+            } else {
+                float64_t sub_norm = norm_sq - A[base + (col_start + k) * n + col] * A[base + (col_start + k) * n + col];
+                tau_k = (sub_norm + v_k * v_k) / (v_k * v_k);
+                tau_k = 2.0lf / tau_k;
+            }
+
+            A[base + (col_start + k) * n + col] = alpha;
+            tau[batch_idx * n + col] = tau_k;
+        }
+        barrier();
+
+        if (abs(tau_k) < 1e-30lf) continue;
+
+        for (uint j = col + 1; j < min(col_start + panel_cols, n); j++) {
+            if (tid == 0) {
+                float64_t dot = A[base + (col_start + k) * n + j];
+                for (uint r = k + 1; r < panel_rows; r++) {
+                    float64_t v_r = A[base + (col_start + r) * n + col];
+                    dot += v_r * A[base + (col_start + r) * n + j];
+                }
+                col_data[0] = dot;
+            }
+            barrier();
+
+            float64_t dot = col_data[0];
+
+            for (uint r = k + 1 + tid; r < panel_rows; r += 256) {
+                float64_t v_r = A[base + (col_start + r) * n + col];
+                A[base + (col_start + r) * n + j] -= tau_k * v_r * dot;
+            }
+            if (tid == 0) {
+                A[base + (col_start + k) * n + j] -= tau_k * dot;
+            }
+            barrier();
+        }
+    }
+}

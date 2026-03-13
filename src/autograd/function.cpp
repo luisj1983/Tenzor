@@ -159,7 +159,7 @@ auto Function::backward_with_variables(std::vector<Variable> grad_outputs) -> st
                 if (std::string(env) == "warn") return 1;
                 if (std::string(env) == "silent") return 2;
             }
-            return 1; // warn by default (allows higher-order grad to work with disconnected graph)
+            return 0; // error by default (safe: users must opt-in via TENZOR_HIGHER_ORDER_GRAD=warn)
         }();
 
         auto op_name = name();
@@ -193,7 +193,7 @@ auto Function::backward_with_variables(std::vector<Variable> grad_outputs) -> st
     std::vector<Variable> result_vars;
     result_vars.reserve(result_tensors.size());
     for (auto& t : result_tensors) {
-        result_vars.emplace_back(t, any_requires_grad && t.is_valid());
+        result_vars.emplace_back(t, false);
     }
     return result_vars;
 }
@@ -2756,6 +2756,20 @@ auto ExpandBackward::backward_with_variables(std::vector<Variable> grad_outputs)
     auto original_shape = std::vector<int64_t>(shape_ptr, shape_ptr + shape_tensor.numel());
 
     return {reduce_grad_var_for_broadcasting(grad_outputs[0], original_shape)};
+}
+
+// DeviceTransferBackward implementation
+// Transfers gradient back to the source device during backward
+auto DeviceTransferBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("DeviceTransferBackward::forward should not be called");
+}
+
+auto DeviceTransferBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    const auto& grad = grad_outputs[0];
+    if (grad.device() == source_device) {
+        return {grad};
+    }
+    return {grad.to(source_device)};
 }
 
 // FlattenBackward implementation

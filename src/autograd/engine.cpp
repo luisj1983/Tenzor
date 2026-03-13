@@ -204,6 +204,9 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
             // Validate saved tensors haven't been modified in-place since forward
             function->validate_saved_tensors();
 
+            // Check incoming gradients for NaN/Inf before calling backward
+            check_for_anomaly(grad_outputs, function.get());
+
             // Compute gradients for inputs
             std::vector<Tensor> input_grads;
 
@@ -548,6 +551,9 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                 total_grad = total_grad + (gi.dtype() == target_dtype ? gi : gi.to(target_dtype));
             }
             grad_outputs.push_back(total_grad);
+
+            // Check incoming gradients for NaN/Inf before calling backward
+            check_for_anomaly(grad_outputs, function.get());
 
             function->reload_saved_tensors();
             function->validate_saved_tensors();

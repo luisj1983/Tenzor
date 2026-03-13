@@ -597,6 +597,9 @@ auto unsqueeze(const Variable& input, int64_t dim) -> Variable;
 /// Expand tensor to larger shape. Grad: sum along expanded dims
 auto expand(const Variable& input, const std::vector<int64_t>& shape) -> Variable;
 
+/// Transfer tensor to target device. Grad: transfer back to source device
+auto to_device(const Variable& input, Device target) -> Variable;
+
 /// Flatten dimensions [start, end]. Grad: reshape to original
 auto flatten(const Variable& input, int64_t start_dim = 0, int64_t end_dim = -1) -> Variable;
 

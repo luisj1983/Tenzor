@@ -1,0 +1,99 @@
+#version 450
+
+// Blocked LU — trailing matrix update
+// After panel factorization of columns [col_start, col_start+block_size),
+// this kernel updates the trailing submatrix:
+//   1. Solve L * U_right = A_right (triangular solve for U rows)
+//   2. A_trailing -= L_below * U_right (GEMM update)
+// Each workgroup handles one 32x32 tile of the trailing matrix.
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) buffer Matrix { float A[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // matrix dimension
+    uint col_start;  // starting column of factored panel
+    uint block_size; // panel width (usually 32)
+    uint batch_idx;  // batch element
+};
+
+shared float L_tile[32][32];  // L below diagonal
+shared float U_tile[32][32];  // U right of diagonal
+
+void main() {
+    uint tx = gl_LocalInvocationID.x;  // 0..15
+    uint ty = gl_LocalInvocationID.y;  // 0..15
+
+    // This workgroup updates tile at (tile_row, tile_col) in the trailing matrix
+    uint tile_row = gl_WorkGroupID.x;  // row tile index
+    uint tile_col = gl_WorkGroupID.y;  // col tile index
+
+    uint trail_start = col_start + block_size;
+    uint trail_rows = n - trail_start;
+    uint trail_cols = n - trail_start;
+
+    uint row_start = trail_start + tile_row * 32;
+    uint col_start_tile = trail_start + tile_col * 32;
+
+    if (row_start >= n || col_start_tile >= n) return;
+
+    uint base = batch_idx * n * n;
+    uint row_end = min(row_start + 32, n);
+    uint col_end = min(col_start_tile + 32, n);
+    uint actual_rows = row_end - row_start;
+    uint actual_cols = col_end - col_start_tile;
+
+    // First: solve for U rows (triangular solve)
+    // Only tile_row == 0 workgroups need to do this, but we skip that complexity
+    // and just do the GEMM update: A[i,j] -= sum_k L[i,k] * U[k,j]
+    // where L[i,k] = A[row, col_start..col_start+block_size] (below diagonal)
+    // and U[k,j] = A[col_start..col_start+block_size, col_j] (right of diagonal)
+
+    // Accumulate update
+    float acc[4] = {0.0, 0.0, 0.0, 0.0};  // 2x2 per thread
+
+    for (uint kb = 0; kb < block_size; kb += 32) {
+        uint k_len = min(32u, block_size - kb);
+
+        // Load L tile
+        for (uint r = ty; r < actual_rows; r += 16) {
+            for (uint c = tx; c < k_len; c += 16) {
+                L_tile[r][c] = A[base + (row_start + r) * n + (col_start + kb + c)];
+            }
+        }
+        // Load U tile
+        for (uint r = ty; r < k_len; r += 16) {
+            for (uint c = tx; c < actual_cols; c += 16) {
+                U_tile[r][c] = A[base + (col_start + kb + r) * n + (col_start_tile + c)];
+            }
+        }
+        barrier();
+
+        // Compute partial GEMM
+        for (uint dy = 0; dy < 2; dy++) {
+            uint r = ty * 2 + dy;
+            if (r >= actual_rows) continue;
+            for (uint dx = 0; dx < 2; dx++) {
+                uint c = tx * 2 + dx;
+                if (c >= actual_cols) continue;
+                float sum = 0.0;
+                for (uint k = 0; k < k_len; k++) {
+                    sum += L_tile[r][k] * U_tile[k][c];
+                }
+                acc[dy * 2 + dx] += sum;
+            }
+        }
+        barrier();
+    }
+
+    // Subtract update from trailing matrix
+    for (uint dy = 0; dy < 2; dy++) {
+        uint r = ty * 2 + dy;
+        if (r >= actual_rows) continue;
+        for (uint dx = 0; dx < 2; dx++) {
+            uint c = tx * 2 + dx;
+            if (c >= actual_cols) continue;
+            A[base + (row_start + r) * n + (col_start_tile + c)] -= acc[dy * 2 + dx];
+        }
+    }
+}

@@ -1,5 +1,7 @@
 #include "tenzor/sparse/sparse_ops.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/type_promotion.hpp"
+#include "tenzor/backend/dispatch_table.hpp"
 #include <cstring>
 #include <stdexcept>
 #include <vector>
@@ -117,6 +119,17 @@ DType compute_dtype_for(DType dtype) {
     (void)vec;
     return false;
 #endif
+}
+
+/// Return true if sparse/dense are on Vulkan.
+[[maybe_unused]] bool should_use_vulkan(const SparseTensor& sparse, const Tensor& dense) {
+    return (dense.device().type == Device::Type::Vulkan ||
+            sparse.device().type == Device::Type::Vulkan);
+}
+
+[[maybe_unused]] bool should_use_vulkan_vec(const SparseTensor& sparse, const Tensor& vec) {
+    return (vec.device().type == Device::Type::Vulkan ||
+            sparse.device().type == Device::Type::Vulkan);
 }
 
 /// Return true if sparse/dense are on OneAPI/SYCL and oneMKL sparse is available.
@@ -597,6 +610,20 @@ auto spmm(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
     }
 #endif
 
+    // Vulkan path: dispatch via OpId table (backend loaded dynamically)
+    if (should_use_vulkan(sparse_compute, dense_compute)) {
+        auto csr = sparse_compute.to_csr();
+        std::vector<Tensor> inputs = {csr.crow_indices(), csr.col_indices(), csr.values(), dense_compute};
+        OpAttributes attrs;
+        attrs.set(AttrKey::M, M);
+        attrs.set(AttrKey::K, K);
+        attrs.set(AttrKey::N, N);
+        auto& table = DispatchTableRegistry::get_table(Device::Type::Vulkan);
+        auto results = table.dispatch(OpId::SparseSpMM, inputs, attrs);
+        auto result = results[0];
+        return (orig_dtype != comp_dtype) ? result.to(orig_dtype) : result;
+    }
+
     // CPU path: MKL-accelerated with scalar fallback
     auto result = cpu_spmm(sparse_compute, dense_compute, M, K, N);
 
@@ -656,6 +683,19 @@ auto spmv(const SparseTensor& sparse, const Tensor& vec) -> Tensor {
     }
 #endif
 
+    // Vulkan path: dispatch via OpId table
+    if (should_use_vulkan_vec(sparse_compute, vec_compute)) {
+        auto csr = sparse_compute.to_csr();
+        std::vector<Tensor> inputs = {csr.crow_indices(), csr.col_indices(), csr.values(), vec_compute};
+        OpAttributes attrs;
+        attrs.set(AttrKey::M, M);
+        attrs.set(AttrKey::K, K);
+        auto& table = DispatchTableRegistry::get_table(Device::Type::Vulkan);
+        auto results = table.dispatch(OpId::SparseSpMV, inputs, attrs);
+        auto result = results[0];
+        return (orig_dtype != comp_dtype) ? result.to(orig_dtype) : result;
+    }
+
     // CPU path: MKL-accelerated with scalar fallback
     auto result = cpu_spmv(sparse_compute, vec_compute, M, K);
 
@@ -667,6 +707,30 @@ auto spmv(const SparseTensor& sparse, const Tensor& vec) -> Tensor {
 // ============================================================================
 
 auto add(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
+    // Promote dtypes if they don't match
+    DType common_dtype = promote_types(sparse.dtype(), dense.dtype());
+    if (sparse.dtype() != common_dtype || dense.dtype() != common_dtype) {
+        auto sparse_promoted = (sparse.dtype() != common_dtype)
+            ? SparseTensor::sparse_coo(sparse.indices(), sparse.values().to(common_dtype),
+                std::vector<int64_t>(sparse.shape().begin(), sparse.shape().end()))
+            : sparse;
+        auto dense_promoted = (dense.dtype() != common_dtype) ? dense.to(common_dtype) : dense;
+        return add(sparse_promoted, dense_promoted);
+    }
+
+    // Vulkan path: dispatch via OpId table
+    if (should_use_vulkan(sparse, dense)) {
+        auto csr = sparse.to_csr();
+        auto sp_shape = sparse.shape();
+        std::vector<Tensor> inputs = {csr.crow_indices(), csr.col_indices(), csr.values(), dense};
+        OpAttributes attrs;
+        attrs.set(AttrKey::M, sp_shape[0]);
+        attrs.set(AttrKey::K, sp_shape.size() > 1 ? sp_shape[1] : int64_t(1));
+        auto& table = DispatchTableRegistry::get_table(Device::Type::Vulkan);
+        auto results = table.dispatch(OpId::SparseAdd, inputs, attrs);
+        return results[0];
+    }
+
     auto result = sparse.to_dense();
     auto dense_c = dense.contiguous();
     auto result_c = result.contiguous();
@@ -690,6 +754,23 @@ auto add(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
         for (int64_t i = 0; i < n; ++i) {
             r[i] += d[i];
         }
+    } else if (result_c.dtype() == DType::Int32) {
+        auto* r = result_c.data<int32_t>();
+        auto* d = dense_c.data<int32_t>();
+        #pragma omp parallel for schedule(static) if(n > 65536)
+        for (int64_t i = 0; i < n; ++i) {
+            r[i] += d[i];
+        }
+    } else if (result_c.dtype() == DType::Int64) {
+        auto* r = result_c.data<int64_t>();
+        auto* d = dense_c.data<int64_t>();
+        #pragma omp parallel for schedule(static) if(n > 65536)
+        for (int64_t i = 0; i < n; ++i) {
+            r[i] += d[i];
+        }
+    } else {
+        throw std::runtime_error("sparse::add: unsupported dtype " +
+            std::string(dtype_name(result_c.dtype())));
     }
 
     return result_c;
@@ -776,55 +857,50 @@ auto add(const SparseTensor& a, const SparseTensor& b) -> SparseTensor {
 // ============================================================================
 
 auto mul(const SparseTensor& sparse, double scalar) -> SparseTensor {
-    if (sparse.layout() == SparseLayout::COO) {
-        auto vals = sparse.values().contiguous();
-        int64_t nnz = sparse.nnz();
+    auto vals = sparse.values().contiguous();
+    int64_t nnz = sparse.nnz();
 
-        auto new_values = Tensor({nnz}, vals.dtype(), vals.device());
-        if (vals.dtype() == DType::Float32) {
-            auto* src = vals.data<float>();
-            auto* dst = new_values.data<float>();
-            float s = static_cast<float>(scalar);
-            #pragma omp parallel for schedule(static) if(nnz > 65536)
-            for (int64_t i = 0; i < nnz; ++i) {
-                dst[i] = src[i] * s;
-            }
-        } else if (vals.dtype() == DType::Float64) {
-            auto* src = vals.data<double>();
-            auto* dst = new_values.data<double>();
-            #pragma omp parallel for schedule(static) if(nnz > 65536)
-            for (int64_t i = 0; i < nnz; ++i) {
-                dst[i] = src[i] * scalar;
-            }
+    auto new_values = Tensor({nnz}, vals.dtype(), vals.device());
+    if (vals.dtype() == DType::Float32) {
+        auto* src = vals.data<float>();
+        auto* dst = new_values.data<float>();
+        float s = static_cast<float>(scalar);
+        #pragma omp parallel for schedule(static) if(nnz > 65536)
+        for (int64_t i = 0; i < nnz; ++i) {
+            dst[i] = src[i] * s;
         }
-
-        auto shape_vec = std::vector<int64_t>(sparse.shape().begin(), sparse.shape().end());
-        auto result = SparseTensor::sparse_coo(sparse.indices(), new_values, shape_vec);
-        return result;
+    } else if (vals.dtype() == DType::Float64) {
+        auto* src = vals.data<double>();
+        auto* dst = new_values.data<double>();
+        #pragma omp parallel for schedule(static) if(nnz > 65536)
+        for (int64_t i = 0; i < nnz; ++i) {
+            dst[i] = src[i] * scalar;
+        }
+    } else if (vals.dtype() == DType::Int32) {
+        auto* src = vals.data<int32_t>();
+        auto* dst = new_values.data<int32_t>();
+        int32_t s = static_cast<int32_t>(scalar);
+        #pragma omp parallel for schedule(static) if(nnz > 65536)
+        for (int64_t i = 0; i < nnz; ++i) {
+            dst[i] = src[i] * s;
+        }
+    } else if (vals.dtype() == DType::Int64) {
+        auto* src = vals.data<int64_t>();
+        auto* dst = new_values.data<int64_t>();
+        int64_t s = static_cast<int64_t>(scalar);
+        #pragma omp parallel for schedule(static) if(nnz > 65536)
+        for (int64_t i = 0; i < nnz; ++i) {
+            dst[i] = src[i] * s;
+        }
     } else {
-        // CSR
-        auto vals = sparse.values().contiguous();
-        int64_t nnz = sparse.nnz();
+        throw std::runtime_error("sparse::mul: unsupported dtype " +
+            std::string(dtype_name(vals.dtype())));
+    }
 
-        auto new_values = Tensor({nnz}, vals.dtype(), vals.device());
-        if (vals.dtype() == DType::Float32) {
-            auto* src = vals.data<float>();
-            auto* dst = new_values.data<float>();
-            float s = static_cast<float>(scalar);
-            #pragma omp parallel for schedule(static) if(nnz > 65536)
-            for (int64_t i = 0; i < nnz; ++i) {
-                dst[i] = src[i] * s;
-            }
-        } else if (vals.dtype() == DType::Float64) {
-            auto* src = vals.data<double>();
-            auto* dst = new_values.data<double>();
-            #pragma omp parallel for schedule(static) if(nnz > 65536)
-            for (int64_t i = 0; i < nnz; ++i) {
-                dst[i] = src[i] * scalar;
-            }
-        }
-
-        auto shape_vec = std::vector<int64_t>(sparse.shape().begin(), sparse.shape().end());
+    auto shape_vec = std::vector<int64_t>(sparse.shape().begin(), sparse.shape().end());
+    if (sparse.layout() == SparseLayout::COO) {
+        return SparseTensor::sparse_coo(sparse.indices(), new_values, shape_vec);
+    } else {
         return SparseTensor::sparse_csr(sparse.crow_indices(), sparse.col_indices(), new_values, shape_vec);
     }
 }

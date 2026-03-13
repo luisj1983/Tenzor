@@ -1,0 +1,98 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Blocked LU Panel Factorization (Float64)
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer Matrix { float64_t A[]; };
+layout(set = 0, binding = 1) buffer PivotBuf { int pivots[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint col_start;
+    uint panel_cols;
+    uint batch_idx;
+};
+
+shared float64_t panel[256][32];
+shared float64_t max_val;
+shared uint max_row;
+shared int pivot_idx;
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint base = batch_idx * n * n;
+
+    uint panel_rows = n - col_start;
+    for (uint r = tid; r < panel_rows; r += 256) {
+        for (uint c = 0; c < panel_cols; c++) {
+            panel[r][c] = A[base + (col_start + r) * n + (col_start + c)];
+        }
+    }
+    barrier();
+
+    for (uint k = 0; k < panel_cols; k++) {
+        if (tid == 0) {
+            max_val = 0.0lf;
+            max_row = k;
+            for (uint r = k; r < panel_rows; r++) {
+                float64_t v = abs(panel[r][k]);
+                if (v > max_val) {
+                    max_val = v;
+                    max_row = r;
+                }
+            }
+            pivot_idx = int(col_start + max_row);
+        }
+        barrier();
+
+        if (tid == 0) {
+            pivots[col_start + k] = pivot_idx;
+        }
+
+        if (max_row != k) {
+            for (uint c = tid; c < panel_cols; c += 256) {
+                float64_t tmp = panel[k][c];
+                panel[k][c] = panel[max_row][c];
+                panel[max_row][c] = tmp;
+            }
+            for (uint c = tid; c < col_start; c += 256) {
+                uint row_k = base + (col_start + k) * n + c;
+                uint row_m = base + (col_start + max_row) * n + c;
+                float64_t tmp = A[row_k];
+                A[row_k] = A[row_m];
+                A[row_m] = tmp;
+            }
+            for (uint c = col_start + panel_cols + tid; c < n; c += 256) {
+                uint row_k = base + (col_start + k) * n + c;
+                uint row_m = base + (col_start + max_row) * n + c;
+                float64_t tmp = A[row_k];
+                A[row_k] = A[row_m];
+                A[row_m] = tmp;
+            }
+        }
+        barrier();
+
+        float64_t diag = panel[k][k];
+        if (abs(diag) < 1e-30lf) {
+            barrier();
+            continue;
+        }
+        float64_t inv_diag = 1.0lf / diag;
+
+        for (uint r = k + 1 + tid; r < panel_rows; r += 256) {
+            float64_t mult = panel[r][k] * inv_diag;
+            panel[r][k] = mult;
+            for (uint c = k + 1; c < panel_cols; c++) {
+                panel[r][c] -= mult * panel[k][c];
+            }
+        }
+        barrier();
+    }
+
+    for (uint r = tid; r < panel_rows; r += 256) {
+        for (uint c = 0; c < panel_cols; c++) {
+            A[base + (col_start + r) * n + (col_start + c)] = panel[r][c];
+        }
+    }
+}

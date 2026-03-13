@@ -386,9 +386,13 @@ auto Conv2d::forward_impl(const Variable& input) -> Variable {
     forward_attrs.set(AttrKey::DilationH, dilation_h_);
     forward_attrs.set(AttrKey::DilationW, dilation_w_);
     forward_attrs.set(AttrKey::Groups, groups_);
+    DType original_dtype = input.dtype();
     auto output_result = dispatch_to_device(OpId::Conv2dForward, input.tensor().device().type,
         inputs_vec, forward_attrs);
     output = output_result[0];
+    if (output.dtype() != original_dtype) {
+        output = output.to(original_dtype);
+    }
 
     auto result = Variable(output, input.requires_grad() || weight.requires_grad());
 
@@ -632,6 +636,7 @@ auto Conv1d::forward_impl(const Variable& input) -> Variable {
     forward_attrs.set(AttrKey::Dilation, dilation_);
     forward_attrs.set(AttrKey::Groups, groups_);
 
+    DType original_dtype = input.dtype();
     auto output_result = dispatch(OpId::Conv2dForward,
         std::span<const Tensor>(inputs_vec),
         forward_attrs);
@@ -639,6 +644,9 @@ auto Conv1d::forward_impl(const Variable& input) -> Variable {
 
     // Remove height dimension: [N, C_out, 1, L_out] -> [N, C_out, L_out]
     Tensor output = output_4d.squeeze(2);
+    if (output.dtype() != original_dtype) {
+        output = output.to(original_dtype);
+    }
 
     auto result = Variable(output, input.requires_grad() || weight.requires_grad());
 
@@ -884,10 +892,14 @@ auto ConvTranspose2d::forward_impl(const Variable& input) -> Variable {
     forward_attrs.set(AttrKey::OutputPadding, output_padding_);
     forward_attrs.set(AttrKey::Dilation, static_cast<int64_t>(1));  // ConvTranspose2d uses dilation=1
     forward_attrs.set(AttrKey::Groups, groups_);
+    DType original_dtype = input.dtype();
     auto output_result = dispatch(OpId::ConvTranspose2dForward,
         std::span<const Tensor>(inputs_vec),
         forward_attrs);
     output = output_result[0];
+    if (output.dtype() != original_dtype) {
+        output = output.to(original_dtype);
+    }
 
     auto result = Variable(output, input.requires_grad() || weight.requires_grad());
 
@@ -1129,8 +1141,12 @@ auto Conv3d::forward_impl(const Variable& input) -> Variable {
     forward_attrs.set(AttrKey::Padding, padding_);
     forward_attrs.set(AttrKey::Dilation, dilation_);
     forward_attrs.set(AttrKey::Groups, groups_);
+    DType original_dtype = input.dtype();
     auto output_result = dispatch<OpId::Conv3dForward>(inputs_vec, forward_attrs);
     auto output = output_result[0];
+    if (output.dtype() != original_dtype) {
+        output = output.to(original_dtype);
+    }
 
     auto result = Variable(output, input.requires_grad() || weight.requires_grad());
 
@@ -1350,8 +1366,12 @@ auto ConvTranspose3d::forward_impl(const Variable& input) -> Variable {
     forward_attrs.set(AttrKey::Dilation, dilation_);
     forward_attrs.set(AttrKey::Groups, groups_);
 
+    DType original_dtype = input.dtype();
     auto output_result = dispatch<OpId::ConvTranspose3dForward>(inputs_vec, forward_attrs);
     auto output = output_result[0];
+    if (output.dtype() != original_dtype) {
+        output = output.to(original_dtype);
+    }
 
     auto result = Variable(output, input.requires_grad() || weight.requires_grad());
 
@@ -1601,6 +1621,7 @@ auto ConvTranspose1d::forward_impl(const Variable& input) -> Variable {
     forward_attrs.set(AttrKey::OutputPadding, output_padding_);
     forward_attrs.set(AttrKey::Dilation, static_cast<int64_t>(1));
     forward_attrs.set(AttrKey::Groups, groups_);
+    DType original_dtype = input.dtype();
     auto output_result = dispatch(OpId::ConvTranspose2dForward,
         std::span<const Tensor>(inputs_vec),
         forward_attrs);
@@ -1608,6 +1629,9 @@ auto ConvTranspose1d::forward_impl(const Variable& input) -> Variable {
 
     // Squeeze back: [N, C_out, 1, L_out] -> [N, C_out, L_out]
     Tensor output = output_4d.squeeze(2);
+    if (output.dtype() != original_dtype) {
+        output = output.to(original_dtype);
+    }
 
     auto result = Variable(output, input.requires_grad() || weight.requires_grad());
 

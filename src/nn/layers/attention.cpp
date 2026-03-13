@@ -530,8 +530,8 @@ auto MultiheadAttention::forward(const Variable& query,
     // add_bias_kv: concatenate bias_k/bias_v to key/value sequences
     if (add_bias_kv_) {
         // bias_k_ is [1, 1, embed_dim], expand to [batch_size, 1, embed_dim]
-        auto bk = Variable(tenzor::expand(bias_k_.tensor(), {batch_size, 1, embed_dim_}), false);
-        auto bv = Variable(tenzor::expand(bias_v_.tensor(), {batch_size, 1, embed_dim_}), false);
+        auto bk = tenzor::expand(bias_k_, {batch_size, 1, embed_dim_});
+        auto bv = tenzor::expand(bias_v_, {batch_size, 1, embed_dim_});
         K = tenzor::cat({K, bk}, 1);  // [batch, seq_k+1, embed]
         V = tenzor::cat({V, bv}, 1);  // [batch, seq_k+1, embed]
         seq_len_k += 1;

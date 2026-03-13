@@ -144,12 +144,10 @@ auto Linear::forward_impl(const Variable& input) -> Variable {
     if (is_2d) {
         DType compute_dtype = input.dtype();
 
-        // Handle device mismatch - transfer input to weight's device
+        // Handle device mismatch - transfer input to weight's device via autograd
         Variable input_device = input;
         if (input.tensor().device() != weight.tensor().device()) {
-            auto input_transferred = input.tensor().to(weight.tensor().device());
-            input_device = Variable(input_transferred, input.requires_grad());
-            input_device.set_grad_fn(input.grad_fn());
+            input_device = tenzor::to_device(input, weight.tensor().device());
         }
 
         // Handle dtype mismatch - convert weight/bias to input's dtype using gradient-aware cast
@@ -195,12 +193,10 @@ auto Linear::forward_impl(const Variable& input) -> Variable {
     std::vector<int64_t> flat_shape = {batch_total, in_features_};
     auto input_2d = autograd::reshape(input, flat_shape);
 
-    // Handle device mismatch - transfer input to weight's device
+    // Handle device mismatch - transfer input to weight's device via autograd
     Variable input_2d_device = input_2d;
     if (input_2d.tensor().device() != weight.tensor().device()) {
-        auto input_transferred = input_2d.tensor().to(weight.tensor().device());
-        input_2d_device = Variable(input_transferred, input_2d.requires_grad());
-        input_2d_device.set_grad_fn(input_2d.grad_fn());
+        input_2d_device = tenzor::to_device(input_2d, weight.tensor().device());
     }
 
     // Handle dtype mismatch - convert weight/bias to input's dtype using gradient-aware cast

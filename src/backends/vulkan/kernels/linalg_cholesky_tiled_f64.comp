@@ -1,0 +1,58 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Blocked Cholesky — panel factorization (Float64)
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer Matrix { float64_t A[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint col_start;
+    uint panel_cols;
+    uint batch_idx;
+};
+
+shared float64_t panel[256][32];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint base = batch_idx * n * n;
+    uint panel_rows = n - col_start;
+
+    for (uint r = tid; r < panel_rows; r += 256) {
+        for (uint c = 0; c < panel_cols; c++) {
+            panel[r][c] = A[base + (col_start + r) * n + (col_start + c)];
+        }
+    }
+    barrier();
+
+    for (uint k = 0; k < panel_cols; k++) {
+        if (tid == 0) {
+            float64_t sum = panel[k][k];
+            for (uint j = 0; j < k; j++) {
+                sum -= panel[k][j] * panel[k][j];
+            }
+            panel[k][k] = sqrt(max(sum, 1e-30lf));
+        }
+        barrier();
+
+        float64_t diag = panel[k][k];
+        float64_t inv_diag = 1.0lf / diag;
+
+        for (uint r = k + 1 + tid; r < panel_rows; r += 256) {
+            float64_t sum = panel[r][k];
+            for (uint j = 0; j < k; j++) {
+                sum -= panel[r][j] * panel[k][j];
+            }
+            panel[r][k] = sum * inv_diag;
+        }
+        barrier();
+    }
+
+    for (uint r = tid; r < panel_rows; r += 256) {
+        for (uint c = 0; c < panel_cols; c++) {
+            A[base + (col_start + r) * n + (col_start + c)] = panel[r][c];
+        }
+    }
+}

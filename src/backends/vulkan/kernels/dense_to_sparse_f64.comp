@@ -1,0 +1,35 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Dense to CSR: Pass 1 — count nonzeros per row (Float64)
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer Dense     { float64_t dense[]; };
+layout(set = 0, binding = 1) buffer RowCounts          { uint row_counts[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_rows;
+    uint n_cols;
+};
+
+shared uint local_count;
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (row >= n_rows) return;
+
+    if (tid == 0) local_count = 0;
+    barrier();
+
+    for (uint col = tid; col < n_cols; col += 256) {
+        if (dense[row * n_cols + col] != 0.0lf) {
+            atomicAdd(local_count, 1);
+        }
+    }
+    barrier();
+
+    if (tid == 0) {
+        row_counts[row] = local_count;
+    }
+}

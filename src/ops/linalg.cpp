@@ -17,6 +17,7 @@
 #include <limits>
 #include <vector>
 #include <algorithm>
+#include <iostream>
 
 namespace tenzor::linalg {
 
@@ -34,7 +35,14 @@ bool try_gpu_dispatch(OpId op, std::span<const Tensor> inputs,
     try {
         result = dispatch_single(op, inputs, attrs);
         return true;
+    } catch (const std::exception& e) {
+        std::cerr << "[tenzor::linalg] GPU dispatch failed for "
+                  << op_id_to_name(op) << ", falling back to CPU LAPACK: "
+                  << e.what() << "\n";
+        return false;
     } catch (...) {
+        std::cerr << "[tenzor::linalg] GPU dispatch failed for "
+                  << op_id_to_name(op) << ", falling back to CPU LAPACK\n";
         return false;
     }
 }
@@ -46,7 +54,14 @@ bool try_gpu_dispatch_multi(OpId op, std::span<const Tensor> inputs,
     try {
         results = dispatch(op, inputs, attrs);
         return true;
+    } catch (const std::exception& e) {
+        std::cerr << "[tenzor::linalg] GPU dispatch failed for "
+                  << op_id_to_name(op) << ", falling back to CPU LAPACK: "
+                  << e.what() << "\n";
+        return false;
     } catch (...) {
+        std::cerr << "[tenzor::linalg] GPU dispatch failed for "
+                  << op_id_to_name(op) << ", falling back to CPU LAPACK\n";
         return false;
     }
 }

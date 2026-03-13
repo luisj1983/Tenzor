@@ -1134,6 +1134,13 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
 };
 
+class DeviceTransferBackward : public Function {
+public:
+    Device source_device;  // Device to transfer gradients back to
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+};
+
 class FlattenBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;

@@ -1664,18 +1664,6 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         });
     table.register_kernel(OpId::LSTMCellForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs)
         -> std::vector<Tensor> {
-        // BFloat16: Vulkan BFloat16 support is limited, fall back to CPU
-        if (inputs[0].dtype() == DType::BFloat16) {
-            auto device = inputs[0].device();
-            std::vector<Tensor> cpu_inputs;
-            cpu_inputs.reserve(inputs.size());
-            for (size_t i = 0; i < inputs.size(); ++i)
-                cpu_inputs.push_back(inputs[i].to(Device::cpu()));
-            auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
-            auto results = cpu_table.dispatch(OpId::LSTMCellForward, cpu_inputs, attrs);
-            for (auto& r : results) r = r.to(device);
-            return results;
-        }
         // inputs: [input, hx, cx, weight_ih, weight_hh, bias_ih, bias_hh]
         return get_vulkan_backend()->dispatchLSTMCellForward(
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5], inputs[6]);
@@ -1690,18 +1678,6 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
     table.register_kernel(OpId::GRUCellForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs)
         -> std::vector<Tensor> {
-        // BFloat16: Vulkan BFloat16 support is limited, fall back to CPU
-        if (inputs[0].dtype() == DType::BFloat16) {
-            auto device = inputs[0].device();
-            std::vector<Tensor> cpu_inputs;
-            cpu_inputs.reserve(inputs.size());
-            for (size_t i = 0; i < inputs.size(); ++i)
-                cpu_inputs.push_back(inputs[i].to(Device::cpu()));
-            auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
-            auto results = cpu_table.dispatch(OpId::GRUCellForward, cpu_inputs, attrs);
-            for (auto& r : results) r = r.to(device);
-            return results;
-        }
         // inputs: [input, hx, weight_ih, weight_hh, bias_ih, bias_hh]
         return std::vector<Tensor>{get_vulkan_backend()->dispatchGRUCellForward(
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5])};
@@ -2002,6 +1978,33 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         }
         std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
         return get_vulkan_backend()->dispatchIFFTN(inputs[0], dims, norm);
+    });
+
+    // Sparse tensor operations (OpIds 460-464)
+    table.register_kernel(OpId::SparseSpMM, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        int64_t M = attrs.get_int(AttrKey::M, 0);
+        int64_t K = attrs.get_int(AttrKey::K, 0);
+        int64_t N = attrs.get_int(AttrKey::N, 0);
+        return {get_vulkan_backend()->dispatchSparseSpMM(inputs[0], inputs[1], inputs[2], inputs[3], M, K, N)};
+    });
+
+    table.register_kernel(OpId::SparseSpMV, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        int64_t M = attrs.get_int(AttrKey::M, 0);
+        int64_t K = attrs.get_int(AttrKey::K, 0);
+        return {get_vulkan_backend()->dispatchSparseSpMV(inputs[0], inputs[1], inputs[2], inputs[3], M, K)};
+    });
+
+    table.register_kernel(OpId::SparseToDense, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        int64_t M = attrs.get_int(AttrKey::M, 0);
+        int64_t K = attrs.get_int(AttrKey::K, 0);
+        DType dtype = inputs[2].dtype();  // values tensor dtype
+        return {get_vulkan_backend()->dispatchSparseToDense(inputs[0], inputs[1], inputs[2], M, K, dtype)};
+    });
+
+    table.register_kernel(OpId::SparseAdd, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        int64_t M = attrs.get_int(AttrKey::M, 0);
+        int64_t K = attrs.get_int(AttrKey::K, 0);
+        return {get_vulkan_backend()->dispatchSparseAdd(inputs[0], inputs[1], inputs[2], inputs[3], M, K)};
     });
 
     std::cout << "Vulkan dispatch table initialized with O(1) lookup" << std::endl;

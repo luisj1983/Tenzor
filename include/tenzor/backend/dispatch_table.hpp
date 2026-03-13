@@ -16,6 +16,7 @@
 
 #include <array>
 #include <atomic>
+#include <cassert>
 #include <span>
 #include <vector>
 #include <cstdio>
@@ -120,6 +121,8 @@ struct alignas(64) BackendDispatchTable {
      * @param fn Kernel function pointer
      */
     void register_kernel(OpId op, KernelFn fn) noexcept {
+        assert(!ready.load(std::memory_order_relaxed) &&
+               "register_kernel called after table marked ready");
 #ifndef NDEBUG
         auto idx = static_cast<size_t>(op);
         if (kernels[idx] != nullptr) {
@@ -142,6 +145,8 @@ struct alignas(64) BackendDispatchTable {
      * @param fn Single-output kernel function pointer
      */
     void register_single_output_kernel(OpId op, SingleOutputKernelFn fn) noexcept {
+        assert(!ready.load(std::memory_order_relaxed) &&
+               "register_single_output_kernel called after table marked ready");
 #ifndef NDEBUG
         auto idx = static_cast<size_t>(op);
         if (single_output_kernels[idx] != nullptr) {
@@ -164,6 +169,8 @@ struct alignas(64) BackendDispatchTable {
      * @param fn Inplace kernel function pointer
      */
     void register_inplace_kernel(OpId op, InplaceKernelFn fn) noexcept {
+        assert(!ready.load(std::memory_order_relaxed) &&
+               "register_inplace_kernel called after table marked ready");
 #ifndef NDEBUG
         auto idx = static_cast<size_t>(op);
         if (inplace_kernels[idx] != nullptr) {
@@ -345,9 +352,12 @@ struct alignas(64) BackendDispatchTable {
         if (!fn) [[unlikely]] {
             throw_unsupported(op);
         }
+        auto pre_version = target.version();
         auto& result = fn(target, others, attrs);
-        // Auto-bump version counter so kernel authors don't need to remember
-        result.bump_version();
+        // Auto-bump version counter only if kernel didn't already bump
+        if (result.version() == pre_version) {
+            result.bump_version();
+        }
         return result;
     }
 

@@ -11,6 +11,7 @@
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/device.hpp"
+#include "tenzor/sparse/sparse_tensor.hpp"
 #include "vulkan_utils.hpp"
 #include <vulkan/vulkan.h>
 #include <array>
@@ -627,6 +628,14 @@ public:
     auto dispatchLinalgSVD(const Tensor& input, bool full_matrices) -> std::vector<Tensor>;
     auto dispatchLinalgEigh(const Tensor& input) -> std::vector<Tensor>;
 
+    // Tiled blocked linalg helpers for medium matrices (33-256)
+    void runBlockedLU(Tensor& A, Tensor& pivots, int64_t n,
+                      int64_t batch_size, int32_t device_id, bool is_f64);
+    void runBlockedCholesky(Tensor& A, int64_t n,
+                            int64_t batch_size, int32_t device_id, bool is_f64);
+    void runBlockedQR(Tensor& A, Tensor& tau, int64_t m, int64_t n,
+                      int64_t batch_size, int32_t device_id, bool is_f64);
+
     // SearchSorted (native GPU binary search shader)
     auto dispatchSearchSorted(const Tensor& sorted, const Tensor& values) -> Tensor;
 
@@ -638,6 +647,19 @@ public:
                                   int64_t stride, int64_t padding,
                                   float input_scale, float weight_scale,
                                   int32_t input_zp, int32_t weight_zp) -> Tensor;
+
+    // Sparse tensor operations (raw CSR components from kernel registry dispatch)
+    auto dispatchSparseSpMM(const Tensor& crow_indices, const Tensor& col_indices,
+                             const Tensor& values, const Tensor& dense,
+                             int64_t M, int64_t K, int64_t N) -> Tensor;
+    auto dispatchSparseSpMV(const Tensor& crow_indices, const Tensor& col_indices,
+                             const Tensor& values, const Tensor& vec,
+                             int64_t M, int64_t K) -> Tensor;
+    auto dispatchSparseToDense(const Tensor& crow_indices, const Tensor& col_indices,
+                                const Tensor& values, int64_t M, int64_t K, DType dtype) -> Tensor;
+    auto dispatchSparseAdd(const Tensor& crow_indices, const Tensor& col_indices,
+                            const Tensor& values, const Tensor& dense,
+                            int64_t M, int64_t K) -> Tensor;
 
     // Flash Attention — composed from existing matmul + softmax shaders (not a single fused kernel)
     auto dispatchFlashAttention(const Tensor& Q, const Tensor& K, const Tensor& V,

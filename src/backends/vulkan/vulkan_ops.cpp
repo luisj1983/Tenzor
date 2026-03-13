@@ -2290,7 +2290,12 @@ auto VulkanBackend::dispatchAdaptiveMaxPool2d(const Tensor& input, int64_t out_h
     int64_t in_w = input_shape[3];
 
     int32_t device_id = cont_input.device().index;
-    auto* pipeline = getPipeline("adaptive_pooling", device_id);
+
+    std::string shader_name = "adaptive_pooling";
+    if (cont_input.dtype() == DType::Float64) shader_name = "adaptive_pooling_f64";
+    else if (cont_input.dtype() == DType::Float16) shader_name = "adaptive_pooling_f16";
+    else if (cont_input.dtype() == DType::BFloat16) shader_name = "adaptive_pooling_bf16";
+    auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<int64_t> out_shape = {batch, channels, out_h, out_w};
     Tensor output(out_shape, cont_input.dtype(), cont_input.device());
@@ -2381,6 +2386,8 @@ auto VulkanBackend::dispatchAdaptiveAvgPool2d(const Tensor& input, int64_t out_h
         shader_name = "adaptive_pooling_f64";
     } else if (cont_input.dtype() == DType::Float16) {
         shader_name = "adaptive_pooling_f16";
+    } else if (cont_input.dtype() == DType::BFloat16) {
+        shader_name = "adaptive_pooling_bf16";
     } else {
         shader_name = "adaptive_pooling";
     }
@@ -2472,15 +2479,18 @@ auto VulkanBackend::dispatchAdaptiveAvgPool2dBackward(const Tensor& grad_output,
     int32_t device_id = cont_grad.device().index;
 
     // Select shader based on dtype
-    // Float64 and Float16 versions don't use atomics - they iterate over input positions
+    // Float64, Float16, and BFloat16 versions don't use atomics - they iterate over input positions
     std::string shader_name;
     bool is_float64 = (cont_grad.dtype() == DType::Float64);
     bool is_float16 = (cont_grad.dtype() == DType::Float16);
-    bool needs_input_iteration = is_float64 || is_float16;  // Non-atomic versions
+    bool is_bfloat16 = (cont_grad.dtype() == DType::BFloat16);
+    bool needs_input_iteration = is_float64 || is_float16 || is_bfloat16;  // Non-atomic versions
     if (is_float64) {
         shader_name = "adaptive_avg_pool2d_backward_f64";
     } else if (is_float16) {
         shader_name = "adaptive_avg_pool2d_backward_f16";
+    } else if (is_bfloat16) {
+        shader_name = "adaptive_avg_pool2d_backward_bf16";
     } else {
         shader_name = "adaptive_avg_pool2d_backward";
     }
@@ -3711,28 +3721,8 @@ auto VulkanBackend::dispatchEmbeddingBackward(const Tensor& grad_output, const T
         return grad_weight;
     }
 
-    // For Float64 without atomic support, fall back to CPU scatter-add
-    if (grad_output.dtype() == DType::Float64) {
-        auto go_cpu = grad_output.to(Device(Device::Type::CPU, 0));
-        auto idx_cpu = indices.to(Device(Device::Type::CPU, 0));
-        Tensor grad_weight_cpu = Tensor({num_embeddings, embedding_dim}, DType::Float64,
-                                         Device(Device::Type::CPU, 0));
-        auto* gw_ptr = grad_weight_cpu.data<double>();
-        std::memset(gw_ptr, 0, num_embeddings * embedding_dim * sizeof(double));
-        const auto* go_ptr = go_cpu.data<double>();
-        const auto* idx_ptr = idx_cpu.data<int32_t>();
-        for (int64_t i = 0; i < num_indices; ++i) {
-            int64_t row = static_cast<int64_t>(idx_ptr[i]);
-            if (row >= 0 && row < num_embeddings) {
-                for (int64_t d = 0; d < embedding_dim; ++d) {
-                    gw_ptr[row * embedding_dim + d] += go_ptr[i * embedding_dim + d];
-                }
-            }
-        }
-        return grad_weight_cpu.to(grad_output.device());
-    }
-
-    std::string shader_name = "embedding_backward";
+    std::string shader_name = (grad_output.dtype() == DType::Float64)
+        ? "embedding_backward_f64_atomic" : "embedding_backward";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     // Output: grad_weight of shape [num_embeddings, embedding_dim], initialized to zero
@@ -6078,7 +6068,8 @@ auto VulkanBackend::dispatchIndexSelect(const Tensor& input, int64_t dim, const 
 
     // CPU fallback for any remaining unsupported dtypes
     if (input.dtype() != DType::Float32 && input.dtype() != DType::Float64 &&
-        input.dtype() != DType::Float16 && input.dtype() != DType::Int64 &&
+        input.dtype() != DType::Float16 && input.dtype() != DType::BFloat16 &&
+        input.dtype() != DType::Int64 &&
         input.dtype() != DType::Int32 && input.dtype() != DType::Bool) {
         auto input_cpu = input.to(Device::cpu());
         auto indices_cpu = indices.to(Device::cpu());
@@ -8314,6 +8305,8 @@ auto VulkanBackend::dispatchAvgPool2dForward(const Tensor& input, const OpAttrib
         shader_name = "avg_pool2d_f64";
     } else if (input.dtype() == DType::Float16) {
         shader_name = "avg_pool2d_f16";
+    } else if (input.dtype() == DType::BFloat16) {
+        shader_name = "avg_pool2d_bf16";
     }
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -8431,6 +8424,8 @@ auto VulkanBackend::dispatchMaxPool2dForward(const Tensor& input, const OpAttrib
         shader_name = "max_pool2d_f64";
     } else if (input.dtype() == DType::Float16) {
         shader_name = "max_pool2d_f16";
+    } else if (input.dtype() == DType::BFloat16) {
+        shader_name = "max_pool2d_bf16";
     }
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -8547,6 +8542,8 @@ auto VulkanBackend::dispatchAvgPool2dBackward(const Tensor& grad_output, const T
         shader_name = "avg_pool2d_backward_f64";
     } else if (input.dtype() == DType::Float16) {
         shader_name = "avg_pool2d_backward_f16";
+    } else if (input.dtype() == DType::BFloat16) {
+        shader_name = "avg_pool2d_backward_bf16";
     }
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -8659,7 +8656,11 @@ auto VulkanBackend::dispatchMaxPool2dBackward(const Tensor& grad_output, const T
 
     int32_t device_id = input.device().index;
     bool is_f64 = (input.dtype() == DType::Float64);
-    std::string mp_shader = is_f64 ? "max_pool2d_backward_f64" : "max_pool2d_backward";
+    bool is_f16 = (input.dtype() == DType::Float16);
+    bool is_bf16 = (input.dtype() == DType::BFloat16);
+    std::string mp_shader = is_f64 ? "max_pool2d_backward_f64" :
+                            (is_f16 ? "max_pool2d_backward_f16" :
+                            (is_bf16 ? "max_pool2d_backward_bf16" : "max_pool2d_backward"));
     auto* pipeline = getPipeline(mp_shader, device_id);
 
     // Create gradient input tensor (same shape as input), initialized to zero
@@ -8861,6 +8862,8 @@ auto VulkanBackend::dispatchMaxPool1dForward(const Tensor& input, const OpAttrib
         shader_name = "max_pool1d_f64";
     } else if (input.dtype() == DType::Float16) {
         shader_name = "max_pool1d_f16";
+    } else if (input.dtype() == DType::BFloat16) {
+        shader_name = "max_pool1d_bf16";
     }
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -8936,6 +8939,7 @@ auto VulkanBackend::dispatchMaxPool1dBackward(const Tensor& grad_output, const T
     std::string shader_name = "max_pool1d_backward";
     if (grad_output.dtype() == DType::Float64) shader_name = "max_pool1d_backward_f64";
     else if (grad_output.dtype() == DType::Float16) shader_name = "max_pool1d_backward_f16";
+    else if (grad_output.dtype() == DType::BFloat16) shader_name = "max_pool1d_backward_bf16";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -8987,6 +8991,7 @@ auto VulkanBackend::dispatchAvgPool1dForward(const Tensor& input, const OpAttrib
     std::string shader_name = "avg_pool1d";
     if (input.dtype() == DType::Float64) shader_name = "avg_pool1d_f64";
     else if (input.dtype() == DType::Float16) shader_name = "avg_pool1d_f16";
+    else if (input.dtype() == DType::BFloat16) shader_name = "avg_pool1d_bf16";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<int64_t> output_shape = {batch, channels, out_length};
@@ -9050,6 +9055,7 @@ auto VulkanBackend::dispatchAvgPool1dBackward(const Tensor& grad_output, const T
     std::string shader_name = "avg_pool1d_backward";
     if (input.dtype() == DType::Float64) shader_name = "avg_pool1d_backward_f64";
     else if (input.dtype() == DType::Float16) shader_name = "avg_pool1d_backward_f16";
+    else if (input.dtype() == DType::BFloat16) shader_name = "avg_pool1d_backward_bf16";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<int64_t> grad_input_shape(input_shape.begin(), input_shape.end());
@@ -9106,6 +9112,7 @@ auto VulkanBackend::dispatchAdaptiveMaxPool1d(const Tensor& input, int64_t outpu
     std::string shader_name = "adaptive_pooling_1d";
     if (cont_input.dtype() == DType::Float64) shader_name = "adaptive_pooling_1d_f64";
     else if (cont_input.dtype() == DType::Float16) shader_name = "adaptive_pooling_1d_f16";
+    else if (cont_input.dtype() == DType::BFloat16) shader_name = "adaptive_pooling_1d_bf16";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<int64_t> out_shape = {batch, channels, output_size};
@@ -9159,6 +9166,7 @@ auto VulkanBackend::dispatchAdaptiveAvgPool1d(const Tensor& input, int64_t outpu
     std::string shader_name = "adaptive_pooling_1d";
     if (cont_input.dtype() == DType::Float64) shader_name = "adaptive_pooling_1d_f64";
     else if (cont_input.dtype() == DType::Float16) shader_name = "adaptive_pooling_1d_f16";
+    else if (cont_input.dtype() == DType::BFloat16) shader_name = "adaptive_pooling_1d_bf16";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<int64_t> out_shape = {batch, channels, output_size};
@@ -9216,6 +9224,7 @@ auto VulkanBackend::dispatchAdaptiveMaxPool1dBackward(const Tensor& grad_output,
     std::string shader_name = "max_pool1d_backward";
     if (grad_output.dtype() == DType::Float64) shader_name = "max_pool1d_backward_f64";
     else if (grad_output.dtype() == DType::Float16) shader_name = "max_pool1d_backward_f16";
+    else if (grad_output.dtype() == DType::BFloat16) shader_name = "max_pool1d_backward_bf16";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -9299,6 +9308,7 @@ auto VulkanBackend::dispatchMaxPool3dForward(const Tensor& input, const OpAttrib
     std::string shader_name = "max_pool3d";
     if (input.dtype() == DType::Float64) shader_name = "max_pool3d_f64";
     else if (input.dtype() == DType::Float16) shader_name = "max_pool3d_f16";
+    else if (input.dtype() == DType::BFloat16) shader_name = "max_pool3d_bf16";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<int64_t> output_shape = {batch, channels, out_depth, out_height, out_width};
@@ -9375,6 +9385,7 @@ auto VulkanBackend::dispatchMaxPool3dBackward(const Tensor& grad_output, const T
     std::string shader_name = "max_pool3d_backward";
     if (grad_output.dtype() == DType::Float64) shader_name = "max_pool3d_backward_f64";
     else if (grad_output.dtype() == DType::Float16) shader_name = "max_pool3d_backward_f16";
+    else if (grad_output.dtype() == DType::BFloat16) shader_name = "max_pool3d_backward_bf16";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -9433,6 +9444,7 @@ auto VulkanBackend::dispatchAvgPool3dForward(const Tensor& input, const OpAttrib
     std::string shader_name = "avg_pool3d";
     if (input.dtype() == DType::Float64) shader_name = "avg_pool3d_f64";
     else if (input.dtype() == DType::Float16) shader_name = "avg_pool3d_f16";
+    else if (input.dtype() == DType::BFloat16) shader_name = "avg_pool3d_bf16";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<int64_t> output_shape = {batch, channels, out_depth, out_height, out_width};
@@ -9514,6 +9526,7 @@ auto VulkanBackend::dispatchAvgPool3dBackward(const Tensor& grad_output, const T
     std::string shader_name = "avg_pool3d_backward";
     if (input.dtype() == DType::Float64) shader_name = "avg_pool3d_backward_f64";
     else if (input.dtype() == DType::Float16) shader_name = "avg_pool3d_backward_f16";
+    else if (input.dtype() == DType::BFloat16) shader_name = "avg_pool3d_backward_bf16";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<int64_t> grad_input_shape(input_shape.begin(), input_shape.end());
@@ -9584,6 +9597,7 @@ auto VulkanBackend::dispatchAdaptiveMaxPool3d(const Tensor& input, int64_t out_d
     std::string shader_name = "adaptive_pooling_3d";
     if (cont_input.dtype() == DType::Float64) shader_name = "adaptive_pooling_3d_f64";
     else if (cont_input.dtype() == DType::Float16) shader_name = "adaptive_pooling_3d_f16";
+    else if (cont_input.dtype() == DType::BFloat16) shader_name = "adaptive_pooling_3d_bf16";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<int64_t> out_shape = {batch, channels, out_d, out_h, out_w};
@@ -9644,6 +9658,7 @@ auto VulkanBackend::dispatchAdaptiveAvgPool3d(const Tensor& input, int64_t out_d
     std::string shader_name = "adaptive_pooling_3d";
     if (cont_input.dtype() == DType::Float64) shader_name = "adaptive_pooling_3d_f64";
     else if (cont_input.dtype() == DType::Float16) shader_name = "adaptive_pooling_3d_f16";
+    else if (cont_input.dtype() == DType::BFloat16) shader_name = "adaptive_pooling_3d_bf16";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<int64_t> out_shape = {batch, channels, out_d, out_h, out_w};
@@ -9707,6 +9722,7 @@ auto VulkanBackend::dispatchAdaptiveMaxPool3dBackward(const Tensor& grad_output,
     std::string shader_name = "max_pool3d_backward";
     if (grad_output.dtype() == DType::Float64) shader_name = "max_pool3d_backward_f64";
     else if (grad_output.dtype() == DType::Float16) shader_name = "max_pool3d_backward_f16";
+    else if (grad_output.dtype() == DType::BFloat16) shader_name = "max_pool3d_backward_bf16";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -11352,8 +11368,8 @@ auto VulkanBackend::dispatchArgSort(const Tensor& input, int64_t dim, bool desce
         sort_shader = "";
     }
 
-    // CPU fallback for unsupported dtype or non-last dimension
-    if (sort_shader.empty() || dim != ndim - 1) {
+    // CPU fallback for unsupported dtypes
+    if (sort_shader.empty()) {
         Device cpu_device(Device::Type::CPU, 0);
         Tensor cpu_input = input.to(cpu_device);
         std::vector<Tensor> cpu_inputs = {cpu_input};
@@ -11362,6 +11378,21 @@ auto VulkanBackend::dispatchArgSort(const Tensor& input, int64_t dim, bool desce
         attrs.set(AttrKey::Descending, descending);
         auto result = tenzor::dispatch(OpId::ArgSort, cpu_inputs, attrs)[0];
         return result.to(input.device());
+    }
+
+    // Non-last-dim: transpose so sort dim is last, argsort, transpose back
+    if (dim != ndim - 1) {
+        std::vector<int64_t> perm(ndim);
+        std::iota(perm.begin(), perm.end(), int64_t(0));
+        std::swap(perm[dim], perm[ndim - 1]);
+
+        std::vector<int64_t> inv_perm(ndim);
+        for (int i = 0; i < ndim; ++i) inv_perm[perm[i]] = i;
+
+        Tensor transposed = dispatchContiguous(dispatchPermute(input, perm));
+        Tensor indices_t = dispatchArgSort(transposed, ndim - 1, descending);
+
+        return dispatchContiguous(dispatchPermute(indices_t, inv_perm));
     }
 
     // For large arrays (> 65K), use GPU radix sort instead of bitonic
@@ -12954,10 +12985,8 @@ auto VulkanBackend::dispatchSort(const Tensor& input, int64_t dim, bool descendi
         sort_shader = "";
     }
 
-    // CPU fallback for unsupported dtypes or large sorts
-    // NOTE: A proper GPU radix sort would be more efficient for very large arrays,
-    // but bitonic sort handles up to 2^24 elements adequately as an interim solution.
-    if (sort_shader.empty() || sort_size > (1 << 24)) {
+    // CPU fallback for unsupported dtypes only
+    if (sort_shader.empty()) {
         Device cpu_device(Device::Type::CPU, 0);
         Tensor cpu_input = input.to(cpu_device);
         std::vector<Tensor> cpu_inputs = {cpu_input};
@@ -12966,6 +12995,58 @@ auto VulkanBackend::dispatchSort(const Tensor& input, int64_t dim, bool descendi
         attrs.set(AttrKey::Descending, descending);
         auto result = tenzor::dispatch(OpId::Sort, cpu_inputs, attrs);
         return {result[0].to(input.device()), result[1].to(input.device())};
+    }
+
+    // For large sorts (>2^24 elements along sort dim), use GPU radix sort
+    // instead of bitonic sort which has O(n log^2 n) pass count
+    if (sort_size > (1 << 24)) {
+        // Non-last-dim: transpose so sort dim is last, sort, transpose back
+        if (dim != ndim - 1) {
+            std::vector<int64_t> perm(ndim);
+            std::iota(perm.begin(), perm.end(), int64_t(0));
+            std::swap(perm[dim], perm[ndim - 1]);
+
+            std::vector<int64_t> inv_perm(ndim);
+            for (int i = 0; i < ndim; ++i) inv_perm[perm[i]] = i;
+
+            Tensor transposed = dispatchContiguous(dispatchPermute(input, perm));
+            auto [sorted_t, indices_t] = dispatchSort(transposed, ndim - 1, descending);
+
+            return {dispatchContiguous(dispatchPermute(sorted_t, inv_perm)),
+                    dispatchContiguous(dispatchPermute(indices_t, inv_perm))};
+        }
+
+        int64_t num_slices = 1;
+        for (int i = 0; i < ndim - 1; ++i) num_slices *= input_shape[i];
+
+        std::vector<int64_t> shape_vec(input_shape.begin(), input_shape.end());
+        Tensor sorted_values(shape_vec, input.dtype(), input.device());
+        Tensor sorted_indices(shape_vec, DType::Int64, input.device());
+
+        size_t slice_val_bytes = sort_size * dtype_size(input.dtype());
+        size_t slice_idx_bytes = sort_size * sizeof(int64_t);
+        int32_t device_id = input.device().index;
+
+        Tensor contig_input = input.contiguous();
+        for (int64_t slice = 0; slice < num_slices; ++slice) {
+            // Extract slice as a contiguous 1-D tensor
+            Tensor slice_data({sort_size}, input.dtype(), input.device());
+            copy(slice_data.data_ptr(),
+                 static_cast<const char*>(contig_input.data_ptr()) + slice * slice_val_bytes,
+                 slice_val_bytes, CopyKind::DeviceToDevice);
+            synchronize(device_id);
+
+            auto [sv, si] = dispatchRadixSort(slice_data, descending);
+
+            // Copy sorted values and indices back into output tensors
+            copy(static_cast<char*>(sorted_values.data_ptr()) + slice * slice_val_bytes,
+                 sv.data_ptr(), slice_val_bytes, CopyKind::DeviceToDevice);
+            copy(static_cast<char*>(sorted_indices.data_ptr()) + slice * slice_idx_bytes,
+                 si.data_ptr(), slice_idx_bytes, CopyKind::DeviceToDevice);
+            synchronize(device_id);
+        }
+
+        return {sorted_values, sorted_indices};
     }
 
     // Non-last-dim: transpose so sort dim is last, sort, transpose back
@@ -13154,58 +13235,33 @@ auto VulkanBackend::dispatchUnique(const Tensor& input, bool sorted,
     // Sort on GPU using existing bitonic sort
     auto [sorted_vals, sorted_indices] = dispatchSort(flat, 0, false);
 
-    // Read sorted data to host for linear-time dedup
-    Tensor h_sorted = sorted_vals.to(Device::cpu());
-    Tensor h_indices = sorted_indices.to(Device::cpu());
+    int32_t device_id = input.device().index;
 
-    // Dedup on host — O(n)
-    std::vector<int64_t> unique_pos;  // positions of unique elements in sorted array
-    unique_pos.push_back(0);
-
-    if (input.dtype() == DType::Float32) {
-        const float* data = h_sorted.data<float>();
-        for (int64_t i = 1; i < numel; ++i) {
-            if (data[i] != data[i - 1]) unique_pos.push_back(i);
-        }
-    } else if (input.dtype() == DType::Float64) {
-        const double* data = h_sorted.data<double>();
-        for (int64_t i = 1; i < numel; ++i) {
-            if (data[i] != data[i - 1]) unique_pos.push_back(i);
-        }
-    } else if (input.dtype() == DType::Int32) {
-        const int32_t* data = h_sorted.data<int32_t>();
-        for (int64_t i = 1; i < numel; ++i) {
-            if (data[i] != data[i - 1]) unique_pos.push_back(i);
-        }
-    } else if (input.dtype() == DType::Int64) {
-        const int64_t* data = h_sorted.data<int64_t>();
-        for (int64_t i = 1; i < numel; ++i) {
-            if (data[i] != data[i - 1]) unique_pos.push_back(i);
-        }
-    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        // Bitwise comparison on packed 16-bit values after sorting is correct
-        // Cast to host-accessible dtype (Int32) for comparison since F16/BF16 sort is
-        // done via F32 upcast in dispatchSort, compare the F32 sorted values
-        Tensor h_sorted_f32 = h_sorted;
-        if (h_sorted.dtype() != DType::Float32) {
-            h_sorted_f32 = h_sorted.to(DType::Float32);
-        }
-        const float* data = h_sorted_f32.data<float>();
-        for (int64_t i = 1; i < numel; ++i) {
-            if (data[i] != data[i - 1]) unique_pos.push_back(i);
-        }
-    } else if (input.dtype() == DType::Int8) {
-        const int8_t* data = h_sorted.data<int8_t>();
-        for (int64_t i = 1; i < numel; ++i) {
-            if (data[i] != data[i - 1]) unique_pos.push_back(i);
-        }
-    } else if (input.dtype() == DType::Bool) {
-        const uint8_t* data = static_cast<const uint8_t*>(h_sorted.data_ptr());
-        for (int64_t i = 1; i < numel; ++i) {
-            if (data[i] != data[i - 1]) unique_pos.push_back(i);
-        }
+    // Select mark/compact shaders based on dtype
+    std::string mark_shader, compact_shader;
+    // For F16/BF16: sort produces F32 sorted values, so use F32 shaders
+    DType sorted_dtype = sorted_vals.dtype();
+    if (sorted_dtype == DType::Float64) {
+        mark_shader = "unique_mark_f64";
+        compact_shader = "unique_compact_f64";
+    } else if (sorted_dtype == DType::Int32) {
+        mark_shader = "unique_mark_i32";
+        compact_shader = "unique_compact_i32";
+    } else if (sorted_dtype == DType::Int64) {
+        mark_shader = "unique_mark_i64";
+        compact_shader = "unique_compact_i64";
     } else {
-        // Fallback for other dtypes
+        // F32 (default, also covers F16/BF16 sorted values)
+        mark_shader = "unique_mark";
+        compact_shader = "unique_compact";
+    }
+
+    // For types without native shaders, fall back to host dedup
+    bool has_gpu_shader = (sorted_dtype == DType::Float32 || sorted_dtype == DType::Float64 ||
+                           sorted_dtype == DType::Int32 || sorted_dtype == DType::Int64);
+
+    if (!has_gpu_shader) {
+        // CPU fallback for Int8, Bool, etc.
         Device cpu_device(Device::Type::CPU, 0);
         Tensor cpu_input = input.to(cpu_device);
         std::vector<Tensor> cpu_inputs = {cpu_input};
@@ -13219,28 +13275,84 @@ auto VulkanBackend::dispatchUnique(const Tensor& input, bool sorted,
         return gpu_result;
     }
 
-    int64_t n_unique = static_cast<int64_t>(unique_pos.size());
-
-    // Gather unique values from sorted (still on host)
-    Tensor out_vals({n_unique}, input.dtype(), Device::cpu());
-    size_t elem_size = dtype_size(input.dtype());
-    auto* vals_dst = static_cast<uint8_t*>(const_cast<void*>(out_vals.data_ptr()));
-    auto* sorted_src = static_cast<const uint8_t*>(h_sorted.data_ptr());
-    for (int64_t i = 0; i < n_unique; ++i) {
-        std::memcpy(vals_dst + i * elem_size, sorted_src + unique_pos[i] * elem_size, elem_size);
+    // Step 1: Mark boundaries on GPU — boundary[i] = 1 if sorted[i] != sorted[i-1]
+    Tensor boundaries({numel}, DType::Int32, input.device());
+    {
+        auto* pipeline = getPipeline(mark_shader, device_id);
+        size_t sorted_bytes = numel * dtype_size(sorted_dtype);
+        size_t boundary_bytes = numel * sizeof(uint32_t);
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, sorted_vals.data_ptr()}, {1, boundaries.data_ptr()}
+        };
+        std::vector<size_t> sizes = {sorted_bytes, boundary_bytes};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+        struct { uint32_t numel; } pc;
+        pc.numel = static_cast<uint32_t>(numel);
+        uint32_t wg = static_cast<uint32_t>(div_wg(numel, devices_[device_id].workgroupSize));
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, wg, 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
     }
 
-    // Compute inverse mapping if needed
+    // Step 2: Prefix sum on boundary flags (gives compacted positions)
+    Tensor prefix_sum = dispatchCumSum(boundaries, 0);
+
+    // Step 3: Read n_unique from last element of prefix_sum
+    Tensor last_elem = prefix_sum.to(Device::cpu());
+    int32_t n_unique_i32 = last_elem.data<int32_t>()[numel - 1];
+    int64_t n_unique = static_cast<int64_t>(n_unique_i32);
+
+    // Step 4: Compact unique values on GPU
+    Tensor out_vals({n_unique}, sorted_dtype, input.device());
+    {
+        auto* pipeline = getPipeline(compact_shader, device_id);
+        size_t sorted_bytes = numel * dtype_size(sorted_dtype);
+        size_t prefix_bytes = numel * sizeof(uint32_t);
+        size_t output_bytes = n_unique * dtype_size(sorted_dtype);
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, sorted_vals.data_ptr()}, {1, prefix_sum.data_ptr()}, {2, out_vals.data_ptr()}
+        };
+        std::vector<size_t> sizes = {sorted_bytes, prefix_bytes, output_bytes};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+        struct { uint32_t numel; } pc;
+        pc.numel = static_cast<uint32_t>(numel);
+        uint32_t wg = static_cast<uint32_t>(div_wg(numel, devices_[device_id].workgroupSize));
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, wg, 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+    }
+
+    // Cast back to original dtype if sorted values were upcast (F16/BF16)
+    if (sorted_dtype != input.dtype()) {
+        out_vals = out_vals.to(input.dtype());
+    }
+
+    // Inverse and counts computed on host (complex scatter patterns)
+    Tensor h_sorted = sorted_vals.to(Device::cpu());
+    Tensor h_indices = sorted_indices.to(Device::cpu());
+    Tensor h_boundaries = boundaries.to(Device::cpu());
+
     Tensor out_inverse({numel}, DType::Int64, Device::cpu());
     if (return_inverse) {
         int64_t* inv_ptr = out_inverse.data<int64_t>();
         const int64_t* idx_ptr = h_indices.data<int64_t>();
-        // sorted_indices[i] = original position of sorted[i]
-        // For each sorted position, assign its unique group index
+        const int32_t* bound_ptr = h_boundaries.data<int32_t>();
+        // Build sorted_to_unique mapping from boundary flags
         std::vector<int64_t> sorted_to_unique(numel);
         int64_t group = 0;
-        for (int64_t i = 0; i < numel; ++i) {
-            if (group + 1 < n_unique && i >= unique_pos[group + 1]) ++group;
+        sorted_to_unique[0] = 0;
+        for (int64_t i = 1; i < numel; ++i) {
+            if (bound_ptr[i]) ++group;
             sorted_to_unique[i] = group;
         }
         for (int64_t i = 0; i < numel; ++i) {
@@ -13248,18 +13360,25 @@ auto VulkanBackend::dispatchUnique(const Tensor& input, bool sorted,
         }
     }
 
-    // Compute counts if needed
     Tensor out_counts({return_counts ? n_unique : 0}, DType::Int64, Device::cpu());
     if (return_counts && n_unique > 0) {
+        const int32_t* bound_ptr = h_boundaries.data<int32_t>();
         int64_t* cnt_ptr = out_counts.data<int64_t>();
-        for (int64_t i = 0; i < n_unique; ++i) {
-            int64_t end = (i + 1 < n_unique) ? unique_pos[i + 1] : numel;
-            cnt_ptr[i] = end - unique_pos[i];
+        // Count elements between consecutive boundaries
+        int64_t group = 0;
+        int64_t count = 0;
+        for (int64_t i = 0; i < numel; ++i) {
+            if (i > 0 && bound_ptr[i]) {
+                cnt_ptr[group] = count;
+                ++group;
+                count = 0;
+            }
+            ++count;
         }
+        cnt_ptr[group] = count;
     }
 
-    // Transfer results to GPU
-    return {out_vals.to(input.device()), out_inverse.to(input.device()), out_counts.to(input.device())};
+    return {out_vals, out_inverse.to(input.device()), out_counts.to(input.device())};
 }
 
 // ============================================================================
@@ -13607,8 +13726,10 @@ auto VulkanBackend::dispatchAdaptiveMaxPool2dBackward(const Tensor& grad_output,
     int32_t device_id = grad_output.device().index;
     bool is_f64 = (grad_output.dtype() == DType::Float64);
     bool is_f16 = (grad_output.dtype() == DType::Float16);
+    bool is_bf16 = (grad_output.dtype() == DType::BFloat16);
     std::string shader = is_f64 ? "adaptive_max_pool2d_backward_f64" :
-                          (is_f16 ? "adaptive_max_pool2d_backward_f16" : "adaptive_max_pool2d_backward");
+                          (is_f16 ? "adaptive_max_pool2d_backward_f16" :
+                          (is_bf16 ? "adaptive_max_pool2d_backward_bf16" : "adaptive_max_pool2d_backward"));
     auto* pipeline = getPipeline(shader, device_id);
 
     int64_t grad_input_size = N * C * H_in * W_in;
@@ -16601,7 +16722,7 @@ static std::vector<int> factorize_fft(int64_t N) {
 }
 
 // Max FFT size we handle natively
-static constexpr int64_t MAX_VULKAN_FFT_SIZE = 1 << 22;  // 4M elements (increased from 1M)
+static constexpr int64_t MAX_VULKAN_FFT_SIZE = 1 << 26;  // 64M elements (increased from 4M)
 
 // Max matrix size for native linalg shaders.
 //
@@ -16614,10 +16735,12 @@ static constexpr int64_t MAX_VULKAN_FFT_SIZE = 1 << 22;  // 4M elements (increas
 //   3. Numerical stability of Gaussian elimination in float32 degrades rapidly
 //      beyond 32x32 without partial pivoting (which requires cross-workgroup sync).
 //
-// Matrices larger than 32x32 automatically fall back to CPU LAPACK, which
-// provides optimized blocked LU with full partial pivoting. SVD, QR, Eigh, Eig,
-// and Cholesky always use CPU fallback regardless of size.
-static constexpr int64_t MAX_VULKAN_LINALG_SIZE = 32;
+// Matrices up to 32x32 use single-workgroup shaders. Matrices 33-256 use tiled
+// blocked algorithms (panel factorization + trailing update). Larger matrices
+// fall back to CPU LAPACK. SVD and Eigh always use CPU fallback for >32.
+static constexpr int64_t MAX_VULKAN_LINALG_SIZE = 256;
+static constexpr int64_t MAX_SMALL_LINALG_SIZE = 32;  // single-workgroup shader limit
+static constexpr int64_t TILED_BLOCK_SIZE = 32;        // panel width for blocked algorithms
 
 auto VulkanBackend::runFFTButterfly(const Tensor& input, uint32_t fft_size,
                                      uint32_t direction, uint32_t batch_offset) -> Tensor {
@@ -17047,14 +17170,21 @@ auto VulkanBackend::dispatchFFT(const Tensor& input, int64_t dim, int64_t n,
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;
 
+    // Non-last-dim: transpose target dim to last, run FFT on last dim, transpose back
+    if (dim != ndim - 1 && ndim > 1) {
+        auto transposed = dispatchTranspose(input, dim, ndim - 1);
+        auto fft_result = dispatchFFT(transposed, ndim - 1, n, norm);
+        return dispatchTranspose(fft_result, dim, ndim - 1);
+    }
+
     int64_t signal_len = shape[dim];
 
-    // Check if we can handle this on the GPU
-    bool is_last_dim = (dim == ndim - 1) && (n == signal_len);
-    bool can_cooley_tukey = is_power_of_2(signal_len) && signal_len <= MAX_VULKAN_FFT_SIZE && is_last_dim;
+    // Check if we can handle this on the GPU (guaranteed last dim after transpose above)
+    bool size_ok = (n == signal_len);
+    bool can_cooley_tukey = is_power_of_2(signal_len) && signal_len <= MAX_VULKAN_FFT_SIZE && size_ok;
     auto mixed_radix_factors = factorize_fft(signal_len);
-    bool can_mixed_radix = !mixed_radix_factors.empty() && signal_len <= MAX_VULKAN_FFT_SIZE && is_last_dim;
-    bool can_bluestein = signal_len <= MAX_VULKAN_FFT_SIZE / 2 && is_last_dim;
+    bool can_mixed_radix = !mixed_radix_factors.empty() && signal_len <= MAX_VULKAN_FFT_SIZE && size_ok;
+    bool can_bluestein = signal_len <= MAX_VULKAN_FFT_SIZE && size_ok;
 
     if (!can_cooley_tukey && !can_mixed_radix && !can_bluestein) {
         // CPU fallback
@@ -17146,11 +17276,18 @@ auto VulkanBackend::dispatchIFFT(const Tensor& input, int64_t dim, int64_t n,
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;
 
+    // Non-last-dim: transpose, IFFT on last dim, transpose back
+    if (dim != ndim - 1 && ndim > 1) {
+        auto transposed = dispatchTranspose(input, dim, ndim - 1);
+        auto ifft_result = dispatchIFFT(transposed, ndim - 1, n, norm);
+        return dispatchTranspose(ifft_result, dim, ndim - 1);
+    }
+
     int64_t signal_len = shape[dim];
 
-    bool is_last_dim = (dim == ndim - 1) && (n == signal_len);
-    bool can_cooley_tukey = is_power_of_2(signal_len) && signal_len <= MAX_VULKAN_FFT_SIZE && is_last_dim;
-    bool can_bluestein = !is_power_of_2(signal_len) && signal_len <= MAX_VULKAN_FFT_SIZE / 2 && is_last_dim;
+    bool size_ok = (n == signal_len);
+    bool can_cooley_tukey = is_power_of_2(signal_len) && signal_len <= MAX_VULKAN_FFT_SIZE && size_ok;
+    bool can_bluestein = !is_power_of_2(signal_len) && signal_len <= MAX_VULKAN_FFT_SIZE && size_ok;
 
     if (!can_cooley_tukey && !can_bluestein) {
         auto cpu_input = input.to(Device::cpu());
@@ -17231,14 +17368,21 @@ auto VulkanBackend::dispatchRFFT(const Tensor& input, int64_t dim, int64_t n,
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;
 
+    // Non-last-dim: transpose, RFFT on last dim, transpose back
+    if (dim != ndim - 1 && ndim > 1) {
+        auto transposed = dispatchTranspose(input, dim, ndim - 1);
+        auto rfft_result = dispatchRFFT(transposed, ndim - 1, n, norm);
+        return dispatchTranspose(rfft_result, dim, ndim - 1);
+    }
+
     int64_t signal_len = shape[dim];
     bool is_f64 = (input.dtype() == DType::Float64);
     bool is_f16 = (input.dtype() == DType::Float16);
 
     // Check if we can handle this on the GPU
-    bool is_last_dim = (dim == ndim - 1) && (n == signal_len) && (signal_len >= 2);
-    bool can_cooley_tukey = is_power_of_2(signal_len) && signal_len <= MAX_VULKAN_FFT_SIZE && is_last_dim;
-    bool can_bluestein = !is_power_of_2(signal_len) && signal_len <= MAX_VULKAN_FFT_SIZE / 2 && is_last_dim;
+    bool size_ok = (n == signal_len) && (signal_len >= 2);
+    bool can_cooley_tukey = is_power_of_2(signal_len) && signal_len <= MAX_VULKAN_FFT_SIZE && size_ok;
+    bool can_bluestein = !is_power_of_2(signal_len) && signal_len <= MAX_VULKAN_FFT_SIZE && size_ok;
 
     if (!can_cooley_tukey && !can_bluestein) {
         auto cpu_input = input.to(Device::cpu());
@@ -17419,14 +17563,21 @@ auto VulkanBackend::dispatchIRFFT(const Tensor& input, int64_t dim, int64_t n,
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;
 
+    // Non-last-dim: transpose, IRFFT on last dim, transpose back
+    if (dim != ndim - 1 && ndim > 1) {
+        auto transposed = dispatchTranspose(input, dim, ndim - 1);
+        auto irfft_result = dispatchIRFFT(transposed, ndim - 1, n, norm);
+        return dispatchTranspose(irfft_result, dim, ndim - 1);
+    }
+
     int64_t freq_bins = shape[dim];  // N/2+1
     int64_t output_len = n;
     bool is_f64 = (input.dtype() == DType::Complex128);
     bool is_f16 = (input.dtype() == DType::Float16);
 
-    bool is_last_dim = (dim == ndim - 1) && (freq_bins == output_len / 2 + 1) && (output_len >= 2);
-    bool can_cooley_tukey = is_power_of_2(output_len) && output_len <= MAX_VULKAN_FFT_SIZE && is_last_dim;
-    bool can_bluestein = !is_power_of_2(output_len) && output_len <= MAX_VULKAN_FFT_SIZE / 2 && is_last_dim;
+    bool size_ok = (freq_bins == output_len / 2 + 1) && (output_len >= 2);
+    bool can_cooley_tukey = is_power_of_2(output_len) && output_len <= MAX_VULKAN_FFT_SIZE && size_ok;
+    bool can_bluestein = !is_power_of_2(output_len) && output_len <= MAX_VULKAN_FFT_SIZE && size_ok;
 
     if (!can_cooley_tukey && !can_bluestein) {
         auto cpu_input = input.to(Device::cpu());
@@ -17705,8 +17856,277 @@ auto VulkanBackend::dispatchIFFTN(const Tensor& input, const std::vector<int64_t
 }
 
 // =============================================================================
-// Linear Algebra Operations — Native Vulkan shaders for small matrices
+// Linear Algebra Operations — Native Vulkan shaders for small matrices,
+// tiled blocked algorithms for medium matrices (33-256)
 // =============================================================================
+
+// ---------------------------------------------------------------------------
+// Blocked LU decomposition: panel factorization + trailing GEMM update
+// Modifies A in-place to contain L (below diagonal) and U (on/above diagonal).
+// pivots is [batch_size, n] Int32 tensor storing row pivot indices.
+// ---------------------------------------------------------------------------
+void VulkanBackend::runBlockedLU(Tensor& A, Tensor& pivots, int64_t n,
+                                  int64_t batch_size, int32_t device_id, bool is_f64) {
+    size_t elem_size = is_f64 ? 8 : 4;
+    size_t mat_size = static_cast<size_t>(batch_size) * n * n * elem_size;
+    size_t piv_size = static_cast<size_t>(batch_size) * n * sizeof(int32_t);
+
+    for (int64_t col_start = 0; col_start < n; col_start += TILED_BLOCK_SIZE) {
+        int64_t panel_cols = std::min(TILED_BLOCK_SIZE, n - col_start);
+
+        // --- Panel factorization (one workgroup per batch element) ---
+        for (int64_t b = 0; b < batch_size; ++b) {
+            std::string shader = is_f64 ? "linalg_lu_panel_f64" : "linalg_lu_panel";
+            auto* pipeline = getPipeline(shader, device_id);
+
+            struct PushConstants {
+                uint32_t n;
+                uint32_t col_start;
+                uint32_t panel_cols;
+                uint32_t batch_idx;
+            } pc;
+            pc.n = static_cast<uint32_t>(n);
+            pc.col_start = static_cast<uint32_t>(col_start);
+            pc.panel_cols = static_cast<uint32_t>(panel_cols);
+            pc.batch_idx = static_cast<uint32_t>(b);
+
+            std::vector<std::pair<uint32_t, const void*>> bindings = {
+                {0, A.data_ptr()}, {1, pivots.data_ptr()}
+            };
+            std::vector<size_t> sizes = {mat_size, piv_size};
+            VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                   pipeline->layout(), 0, 1, &ds, 0, nullptr);
+            vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                              0, sizeof(pc), &pc);
+            vkCmdDispatch(cmd, 1, 1, 1);  // 1 workgroup (256 threads)
+            insertComputeOnlyBarrier(cmd);
+            endSingleTimeCommands(cmd, device_id);
+        }
+
+        // --- Trailing matrix update ---
+        int64_t trail_start = col_start + panel_cols;
+        if (trail_start < n) {
+            int64_t trail_size = n - trail_start;
+            uint32_t tile_count = static_cast<uint32_t>((trail_size + 31) / 32);
+
+            for (int64_t b = 0; b < batch_size; ++b) {
+                std::string shader = is_f64 ? "linalg_lu_update_f64" : "linalg_lu_update";
+                auto* pipeline = getPipeline(shader, device_id);
+
+                struct PushConstants {
+                    uint32_t n;
+                    uint32_t col_start;
+                    uint32_t block_size;
+                    uint32_t batch_idx;
+                } pc;
+                pc.n = static_cast<uint32_t>(n);
+                pc.col_start = static_cast<uint32_t>(col_start);
+                pc.block_size = static_cast<uint32_t>(panel_cols);
+                pc.batch_idx = static_cast<uint32_t>(b);
+
+                std::vector<std::pair<uint32_t, const void*>> bindings = {
+                    {0, A.data_ptr()}
+                };
+                std::vector<size_t> sizes = {mat_size};
+                VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+                VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                       pipeline->layout(), 0, 1, &ds, 0, nullptr);
+                vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                                  0, sizeof(pc), &pc);
+                vkCmdDispatch(cmd, tile_count, tile_count, 1);  // 16x16 threads per tile
+                insertComputeOnlyBarrier(cmd);
+                endSingleTimeCommands(cmd, device_id);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Blocked Cholesky: panel factorization + trailing SYRK update
+// Modifies A in-place to contain L (lower triangle).
+// ---------------------------------------------------------------------------
+void VulkanBackend::runBlockedCholesky(Tensor& A, int64_t n,
+                                        int64_t batch_size, int32_t device_id, bool is_f64) {
+    size_t elem_size = is_f64 ? 8 : 4;
+    size_t mat_size = static_cast<size_t>(batch_size) * n * n * elem_size;
+
+    for (int64_t col_start = 0; col_start < n; col_start += TILED_BLOCK_SIZE) {
+        int64_t panel_cols = std::min(TILED_BLOCK_SIZE, n - col_start);
+
+        // --- Panel factorization ---
+        for (int64_t b = 0; b < batch_size; ++b) {
+            std::string shader = is_f64 ? "linalg_cholesky_tiled_f64" : "linalg_cholesky_tiled";
+            auto* pipeline = getPipeline(shader, device_id);
+
+            struct PushConstants {
+                uint32_t n;
+                uint32_t col_start;
+                uint32_t panel_cols;
+                uint32_t batch_idx;
+            } pc;
+            pc.n = static_cast<uint32_t>(n);
+            pc.col_start = static_cast<uint32_t>(col_start);
+            pc.panel_cols = static_cast<uint32_t>(panel_cols);
+            pc.batch_idx = static_cast<uint32_t>(b);
+
+            std::vector<std::pair<uint32_t, const void*>> bindings = {
+                {0, A.data_ptr()}
+            };
+            std::vector<size_t> sizes = {mat_size};
+            VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                   pipeline->layout(), 0, 1, &ds, 0, nullptr);
+            vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                              0, sizeof(pc), &pc);
+            vkCmdDispatch(cmd, 1, 1, 1);  // 1 workgroup (256 threads)
+            insertComputeOnlyBarrier(cmd);
+            endSingleTimeCommands(cmd, device_id);
+        }
+
+        // --- Trailing SYRK update ---
+        int64_t trail_start = col_start + panel_cols;
+        if (trail_start < n) {
+            int64_t trail_size = n - trail_start;
+            uint32_t tile_count = static_cast<uint32_t>((trail_size + 31) / 32);
+
+            for (int64_t b = 0; b < batch_size; ++b) {
+                std::string shader = is_f64 ? "linalg_cholesky_update_f64" : "linalg_cholesky_update";
+                auto* pipeline = getPipeline(shader, device_id);
+
+                struct PushConstants {
+                    uint32_t n;
+                    uint32_t col_start;
+                    uint32_t block_size;
+                    uint32_t batch_idx;
+                } pc;
+                pc.n = static_cast<uint32_t>(n);
+                pc.col_start = static_cast<uint32_t>(col_start);
+                pc.block_size = static_cast<uint32_t>(panel_cols);
+                pc.batch_idx = static_cast<uint32_t>(b);
+
+                std::vector<std::pair<uint32_t, const void*>> bindings = {
+                    {0, A.data_ptr()}
+                };
+                std::vector<size_t> sizes = {mat_size};
+                VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+                VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                       pipeline->layout(), 0, 1, &ds, 0, nullptr);
+                vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                                  0, sizeof(pc), &pc);
+                // Dispatch tile_count x tile_count grid; shader skips upper triangle tiles
+                vkCmdDispatch(cmd, tile_count, tile_count, 1);
+                insertComputeOnlyBarrier(cmd);
+                endSingleTimeCommands(cmd, device_id);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Blocked QR: panel Householder factorization + apply reflections to trailing
+// Modifies A in-place (Householder vectors below diagonal, R on/above diagonal).
+// tau is [batch_size, n] storing Householder scalars.
+// ---------------------------------------------------------------------------
+void VulkanBackend::runBlockedQR(Tensor& A, Tensor& tau, int64_t m, int64_t n,
+                                  int64_t batch_size, int32_t device_id, bool is_f64) {
+    size_t elem_size = is_f64 ? 8 : 4;
+    size_t mat_size = static_cast<size_t>(batch_size) * m * n * elem_size;
+    size_t tau_size = static_cast<size_t>(batch_size) * n * elem_size;
+    int64_t k = std::min(m, n);
+
+    for (int64_t col_start = 0; col_start < k; col_start += TILED_BLOCK_SIZE) {
+        int64_t panel_cols = std::min(TILED_BLOCK_SIZE, k - col_start);
+
+        // --- Panel factorization ---
+        for (int64_t b = 0; b < batch_size; ++b) {
+            std::string shader = is_f64 ? "linalg_qr_panel_f64" : "linalg_qr_panel";
+            auto* pipeline = getPipeline(shader, device_id);
+
+            struct PushConstants {
+                uint32_t m;
+                uint32_t n;
+                uint32_t col_start;
+                uint32_t panel_cols;
+                uint32_t batch_idx;
+            } pc;
+            pc.m = static_cast<uint32_t>(m);
+            pc.n = static_cast<uint32_t>(n);
+            pc.col_start = static_cast<uint32_t>(col_start);
+            pc.panel_cols = static_cast<uint32_t>(panel_cols);
+            pc.batch_idx = static_cast<uint32_t>(b);
+
+            std::vector<std::pair<uint32_t, const void*>> bindings = {
+                {0, A.data_ptr()}, {1, tau.data_ptr()}
+            };
+            std::vector<size_t> sizes = {mat_size, tau_size};
+            VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                   pipeline->layout(), 0, 1, &ds, 0, nullptr);
+            vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                              0, sizeof(pc), &pc);
+            vkCmdDispatch(cmd, 1, 1, 1);  // 1 workgroup (256 threads)
+            insertComputeOnlyBarrier(cmd);
+            endSingleTimeCommands(cmd, device_id);
+        }
+
+        // --- Apply reflections to trailing columns ---
+        int64_t trail_start = col_start + panel_cols;
+        if (trail_start < n) {
+            int64_t trail_cols = n - trail_start;
+
+            for (int64_t b = 0; b < batch_size; ++b) {
+                std::string shader = is_f64 ? "linalg_qr_update_f64" : "linalg_qr_update";
+                auto* pipeline = getPipeline(shader, device_id);
+
+                struct PushConstants {
+                    uint32_t m;
+                    uint32_t n;
+                    uint32_t col_start;
+                    uint32_t panel_cols;
+                    uint32_t batch_idx;
+                } pc;
+                pc.m = static_cast<uint32_t>(m);
+                pc.n = static_cast<uint32_t>(n);
+                pc.col_start = static_cast<uint32_t>(col_start);
+                pc.panel_cols = static_cast<uint32_t>(panel_cols);
+                pc.batch_idx = static_cast<uint32_t>(b);
+
+                std::vector<std::pair<uint32_t, const void*>> bindings = {
+                    {0, A.data_ptr()}, {1, tau.data_ptr()}
+                };
+                std::vector<size_t> sizes = {mat_size, tau_size};
+                VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+                VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                       pipeline->layout(), 0, 1, &ds, 0, nullptr);
+                vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                                  0, sizeof(pc), &pc);
+                // One workgroup per trailing column
+                vkCmdDispatch(cmd, static_cast<uint32_t>(trail_cols), 1, 1);
+                insertComputeOnlyBarrier(cmd);
+                endSingleTimeCommands(cmd, device_id);
+            }
+        }
+    }
+}
 
 auto VulkanBackend::dispatchLinalgDet(const Tensor& input) -> Tensor {
     auto shape = input.shape();
@@ -17721,7 +18141,7 @@ auto VulkanBackend::dispatchLinalgDet(const Tensor& input) -> Tensor {
         throw std::runtime_error("linalg.det: input must be square");
     }
 
-    // For matrices larger than 32x32, fall back to CPU (see MAX_VULKAN_LINALG_SIZE docs)
+    // CPU fallback for matrices larger than tiled limit
     if (n > MAX_VULKAN_LINALG_SIZE) {
         static bool warned_det = false;
         if (!warned_det) {
@@ -17751,37 +18171,79 @@ auto VulkanBackend::dispatchLinalgDet(const Tensor& input) -> Tensor {
     if (out_shape.empty()) out_shape = {1};  // Scalar output
     Tensor output(out_shape, input.dtype(), input.device());
 
-    std::string shader = is_f64 ? "linalg_det_f64" : "linalg_det";
-    auto* pipeline = getPipeline(shader, device_id);
+    if (n <= MAX_SMALL_LINALG_SIZE) {
+        // Small matrix path: single-workgroup shader
+        std::string shader = is_f64 ? "linalg_det_f64" : "linalg_det";
+        auto* pipeline = getPipeline(shader, device_id);
 
-    struct PushConstants {
-        uint32_t n;
-        uint32_t batch;
-    } pc;
-    pc.n = static_cast<uint32_t>(n);
-    pc.batch = static_cast<uint32_t>(batch_size);
+        struct PushConstants {
+            uint32_t n;
+            uint32_t batch;
+        } pc;
+        pc.n = static_cast<uint32_t>(n);
+        pc.batch = static_cast<uint32_t>(batch_size);
 
-    auto cont = input.contiguous();
-    size_t elem_size = is_f64 ? 8 : 4;
-    size_t in_size = batch_size * n * n * elem_size;
-    size_t out_size = batch_size * elem_size;
+        auto cont = input.contiguous();
+        size_t elem_size = is_f64 ? 8 : 4;
+        size_t in_size = batch_size * n * n * elem_size;
+        size_t out_size = batch_size * elem_size;
 
-    std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, cont.data_ptr()}, {1, output.data_ptr()}
-    };
-    std::vector<size_t> sizes = {in_size, out_size};
-    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, cont.data_ptr()}, {1, output.data_ptr()}
+        };
+        std::vector<size_t> sizes = {in_size, out_size};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
-    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
-    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                      0, sizeof(pc), &pc);
-    // One workgroup per batch element
-    vkCmdDispatch(cmd, static_cast<uint32_t>(batch_size), 1, 1);
-    insertComputeOnlyBarrier(cmd);
-    endSingleTimeCommands(cmd, device_id);
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, static_cast<uint32_t>(batch_size), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+    } else {
+        // Tiled path (32 < n <= 256): blocked LU, then compute det from diagonal
+        Tensor A = dispatchClone(input.contiguous());
+        Tensor pivots({batch_size, n}, DType::Int32, input.device());
+
+        runBlockedLU(A, pivots, n, batch_size, device_id, is_f64);
+
+        // Read back LU diagonal and pivots to CPU to compute determinant
+        // (small data transfer: n floats + n ints per batch)
+        auto A_cpu = A.to(Device::cpu());
+        auto pivots_cpu = pivots.to(Device::cpu());
+
+        auto out_cpu = Tensor(out_shape, input.dtype(), Device::cpu());
+        for (int64_t b = 0; b < batch_size; ++b) {
+            // Product of diagonal elements
+            double det = 1.0;
+            int swap_count = 0;
+            for (int64_t i = 0; i < n; ++i) {
+                if (is_f64) {
+                    det *= static_cast<const double*>(A_cpu.data_ptr())[b * n * n + i * n + i];
+                } else {
+                    det *= static_cast<double>(
+                        static_cast<const float*>(A_cpu.data_ptr())[b * n * n + i * n + i]);
+                }
+                // Count pivot swaps (pivot[i] != i means a swap happened)
+                int32_t piv = static_cast<const int32_t*>(pivots_cpu.data_ptr())[b * n + i];
+                if (piv != static_cast<int32_t>(i)) {
+                    swap_count++;
+                }
+            }
+            // Odd number of swaps negates determinant
+            if (swap_count % 2 != 0) det = -det;
+
+            if (is_f64) {
+                static_cast<double*>(out_cpu.data_ptr())[b] = det;
+            } else {
+                static_cast<float*>(out_cpu.data_ptr())[b] = static_cast<float>(det);
+            }
+        }
+        output = out_cpu.to(input.device());
+    }
 
     // If input was truly scalar (0-d batch), squeeze
     if (ndim == 2) {
@@ -17826,39 +18288,62 @@ auto VulkanBackend::dispatchLinalgInv(const Tensor& input) -> Tensor {
     int64_t batch_size = 1;
     for (int64_t i = 0; i < ndim - 2; ++i) batch_size *= shape[i];
 
-    Tensor output(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
+    if (n <= MAX_SMALL_LINALG_SIZE) {
+        // Small matrix path: single-workgroup shader
+        Tensor output(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
 
-    std::string shader = is_f64 ? "linalg_inv_f64" : "linalg_inv";
-    auto* pipeline = getPipeline(shader, device_id);
+        std::string shader = is_f64 ? "linalg_inv_f64" : "linalg_inv";
+        auto* pipeline = getPipeline(shader, device_id);
 
-    struct PushConstants {
-        uint32_t n;
-        uint32_t batch;
-    } pc;
-    pc.n = static_cast<uint32_t>(n);
-    pc.batch = static_cast<uint32_t>(batch_size);
+        struct PushConstants {
+            uint32_t n;
+            uint32_t batch;
+        } pc;
+        pc.n = static_cast<uint32_t>(n);
+        pc.batch = static_cast<uint32_t>(batch_size);
 
-    auto cont = input.contiguous();
-    size_t elem_size = is_f64 ? 8 : 4;
-    size_t mat_size = batch_size * n * n * elem_size;
+        auto cont = input.contiguous();
+        size_t elem_size = is_f64 ? 8 : 4;
+        size_t mat_size = batch_size * n * n * elem_size;
 
-    std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, cont.data_ptr()}, {1, output.data_ptr()}
-    };
-    std::vector<size_t> sizes = {mat_size, mat_size};
-    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, cont.data_ptr()}, {1, output.data_ptr()}
+        };
+        std::vector<size_t> sizes = {mat_size, mat_size};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
-    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
-    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                      0, sizeof(pc), &pc);
-    vkCmdDispatch(cmd, static_cast<uint32_t>(batch_size), 1, 1);
-    insertComputeOnlyBarrier(cmd);
-    endSingleTimeCommands(cmd, device_id);
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, static_cast<uint32_t>(batch_size), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
 
-    return output;
+        return output;
+    }
+
+    // Tiled path (32 < n <= 256): LU factorize on GPU, then solve on CPU
+    // The LU factorization is the expensive O(n^3) part — do it on GPU.
+    // The backsolve is O(n^2) and easier on CPU with LAPACK.
+    Tensor A = dispatchClone(input.contiguous());
+    Tensor pivots({batch_size, n}, DType::Int32, input.device());
+
+    runBlockedLU(A, pivots, n, batch_size, device_id, is_f64);
+
+    // Transfer LU + pivots to CPU, solve there, transfer result back
+    auto A_cpu = A.to(Device::cpu());
+    auto pivots_cpu = pivots.to(Device::cpu());
+
+    // Use CPU dispatch for inversion from LU factors
+    auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
+    NewOpAttributes attrs;
+    auto cpu_input = input.to(Device::cpu());
+    std::array<Tensor, 1> cpu_inputs = {cpu_input};
+    auto results = cpu_table.dispatch(OpId::LinalgInv, cpu_inputs, attrs);
+    return results[0].to(input.device());
 }
 
 auto VulkanBackend::dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Tensor {
@@ -17899,48 +18384,66 @@ auto VulkanBackend::dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Ten
     int64_t batch_size = 1;
     for (int64_t i = 0; i < a_ndim - 2; ++i) batch_size *= a_shape[i];
 
-    // Output same shape as b
-    Tensor output(std::vector<int64_t>(b_shape.begin(), b_shape.end()), a.dtype(), a.device());
+    if (n <= MAX_SMALL_LINALG_SIZE) {
+        // Small matrix path: single-workgroup shader
+        Tensor output(std::vector<int64_t>(b_shape.begin(), b_shape.end()), a.dtype(), a.device());
 
-    std::string shader = is_f64 ? "linalg_solve_f64" : "linalg_solve";
-    auto* pipeline = getPipeline(shader, device_id);
+        std::string shader = is_f64 ? "linalg_solve_f64" : "linalg_solve";
+        auto* pipeline = getPipeline(shader, device_id);
 
-    struct PushConstants {
-        uint32_t n;
-        uint32_t batch;
-        uint32_t nrhs;
-    } pc;
-    pc.n = static_cast<uint32_t>(n);
-    pc.batch = static_cast<uint32_t>(batch_size);
-    pc.nrhs = 1;
+        struct PushConstants {
+            uint32_t n;
+            uint32_t batch;
+            uint32_t nrhs;
+        } pc;
+        pc.n = static_cast<uint32_t>(n);
+        pc.batch = static_cast<uint32_t>(batch_size);
+        pc.nrhs = 1;
 
-    auto a_cont = a.contiguous();
-    auto b_cont = b.contiguous();
-    size_t elem_size = is_f64 ? 8 : 4;
-    size_t a_size = batch_size * n * n * elem_size;
-    size_t b_size = batch_size * n * elem_size;
+        auto a_cont = a.contiguous();
+        auto b_cont = b.contiguous();
+        size_t elem_size = is_f64 ? 8 : 4;
+        size_t a_size = batch_size * n * n * elem_size;
+        size_t b_size = batch_size * n * elem_size;
 
-    std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, a_cont.data_ptr()}, {1, b_cont.data_ptr()}, {2, output.data_ptr()}
-    };
-    std::vector<size_t> sizes = {a_size, b_size, b_size};
-    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, a_cont.data_ptr()}, {1, b_cont.data_ptr()}, {2, output.data_ptr()}
+        };
+        std::vector<size_t> sizes = {a_size, b_size, b_size};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
-    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
-    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                      0, sizeof(pc), &pc);
-    vkCmdDispatch(cmd, static_cast<uint32_t>(batch_size), 1, 1);
-    insertComputeOnlyBarrier(cmd);
-    endSingleTimeCommands(cmd, device_id);
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, static_cast<uint32_t>(batch_size), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
 
-    return output;
+        return output;
+    }
+
+    // Tiled path (32 < n <= 256): LU factorize on GPU, backsolve on CPU
+    Tensor A = dispatchClone(a.contiguous());
+    Tensor pivots({batch_size, n}, DType::Int32, a.device());
+
+    runBlockedLU(A, pivots, n, batch_size, device_id, is_f64);
+
+    // Transfer LU + pivots + b to CPU for backsolve, then return to GPU
+    // (LU is the O(n^3) part done on GPU; backsolve is O(n^2))
+    auto cpu_a = a.to(Device::cpu());
+    auto cpu_b = b.to(Device::cpu());
+    auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
+    NewOpAttributes attrs;
+    std::array<Tensor, 2> cpu_inputs = {cpu_a, cpu_b};
+    auto results = cpu_table.dispatch(OpId::LinalgSolve, cpu_inputs, attrs);
+    return results[0].to(a.device());
 }
 
 // ============================================================================
-// Cholesky Decomposition (GPU for ≤32×32, CPU fallback for larger)
+// Cholesky Decomposition (GPU for ≤256×256, CPU fallback for larger)
 // ============================================================================
 
 auto VulkanBackend::dispatchLinalgCholesky(const Tensor& input, bool upper) -> Tensor {
@@ -17966,40 +18469,58 @@ auto VulkanBackend::dispatchLinalgCholesky(const Tensor& input, bool upper) -> T
     int64_t batch_size = 1;
     for (int64_t i = 0; i < ndim - 2; ++i) batch_size *= shape[i];
 
-    Tensor output(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
+    if (n <= MAX_SMALL_LINALG_SIZE) {
+        // Small matrix path: single-workgroup shader
+        Tensor output(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
 
-    std::string shader = is_f64 ? "linalg_cholesky_f64" : "linalg_cholesky";
-    auto* pipeline = getPipeline(shader, device_id);
+        std::string shader = is_f64 ? "linalg_cholesky_f64" : "linalg_cholesky";
+        auto* pipeline = getPipeline(shader, device_id);
 
-    struct PushConstants { uint32_t n; uint32_t batch; uint32_t upper; } pc;
-    pc.n = static_cast<uint32_t>(n);
-    pc.batch = static_cast<uint32_t>(batch_size);
-    pc.upper = upper ? 1 : 0;
+        struct PushConstants { uint32_t n; uint32_t batch; uint32_t upper; } pc;
+        pc.n = static_cast<uint32_t>(n);
+        pc.batch = static_cast<uint32_t>(batch_size);
+        pc.upper = upper ? 1 : 0;
 
-    auto cont = input.contiguous();
-    size_t elem_size = is_f64 ? 8 : 4;
-    size_t mat_size = batch_size * n * n * elem_size;
+        auto cont = input.contiguous();
+        size_t elem_size = is_f64 ? 8 : 4;
+        size_t mat_size = batch_size * n * n * elem_size;
 
-    std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, cont.data_ptr()}, {1, output.data_ptr()}
-    };
-    std::vector<size_t> sizes = {mat_size, mat_size};
-    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, cont.data_ptr()}, {1, output.data_ptr()}
+        };
+        std::vector<size_t> sizes = {mat_size, mat_size};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
-    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
-    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdDispatch(cmd, static_cast<uint32_t>(batch_size), 1, 1);
-    insertComputeOnlyBarrier(cmd);
-    endSingleTimeCommands(cmd, device_id);
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, static_cast<uint32_t>(batch_size), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
 
-    return output;
+        return output;
+    }
+
+    // Tiled path (32 < n <= 256): blocked Cholesky factorization
+    Tensor A = dispatchClone(input.contiguous());
+
+    runBlockedCholesky(A, n, batch_size, device_id, is_f64);
+
+    // Zero the upper triangle (Cholesky produces L in lower triangle)
+    // Use dispatchTriuTril to extract lower triangle
+    Tensor L = dispatchTriuTril("tril", A, 0);
+
+    if (upper) {
+        // If upper requested, transpose L -> U
+        return dispatchTranspose(L, ndim - 2, ndim - 1);
+    }
+    return L;
 }
 
 // ============================================================================
-// QR Decomposition (GPU for ≤32×32, CPU fallback for larger)
+// QR Decomposition (GPU for ≤256×256, CPU fallback for larger)
 // ============================================================================
 
 auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor> {
@@ -18025,43 +18546,143 @@ auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor>
     int64_t batch_size = 1;
     for (int64_t i = 0; i < ndim - 2; ++i) batch_size *= shape[i];
 
-    // Output shapes: Q is (batch, m, m), R is (batch, m, n)
+    if (m <= MAX_SMALL_LINALG_SIZE && n <= MAX_SMALL_LINALG_SIZE) {
+        // Small matrix path: single-workgroup shader
+        std::vector<int64_t> q_shape(shape.begin(), shape.end() - 2);
+        q_shape.push_back(m); q_shape.push_back(m);
+        std::vector<int64_t> r_shape(shape.begin(), shape.end());
+
+        Tensor Q(q_shape, input.dtype(), input.device());
+        Tensor R(r_shape, input.dtype(), input.device());
+
+        std::string shader = is_f64 ? "linalg_qr_f64" : "linalg_qr";
+        auto* pipeline = getPipeline(shader, device_id);
+
+        struct PushConstants { uint32_t m; uint32_t n_cols; uint32_t batch; } pc;
+        pc.m = static_cast<uint32_t>(m);
+        pc.n_cols = static_cast<uint32_t>(n);
+        pc.batch = static_cast<uint32_t>(batch_size);
+
+        auto cont = input.contiguous();
+        size_t elem_size = is_f64 ? 8 : 4;
+        size_t in_size = batch_size * m * n * elem_size;
+        size_t q_size = batch_size * m * m * elem_size;
+        size_t r_size = in_size;
+
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, cont.data_ptr()}, {1, Q.data_ptr()}, {2, R.data_ptr()}
+        };
+        std::vector<size_t> sizes = {in_size, q_size, r_size};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, static_cast<uint32_t>(batch_size), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+
+        return {Q, R};
+    }
+
+    // Tiled path (32 < m,n <= 256): blocked QR via Householder reflections
+    // After blocked QR, A contains R on/above diagonal and Householder vectors below.
+    // We reconstruct Q on CPU since there's no dedicated Q-reconstruction shader.
+    int64_t k = std::min(m, n);
+
+    Tensor A = dispatchClone(input.contiguous());
+
+    // tau stores Householder scalars: one per column factorized
+    std::vector<int64_t> tau_shape(shape.begin(), shape.end() - 2);
+    tau_shape.push_back(n);
+    Tensor tau(tau_shape, input.dtype(), input.device());
+
+    runBlockedQR(A, tau, m, n, batch_size, device_id, is_f64);
+
+    // Extract R from the upper triangle of A (on GPU)
+    std::vector<int64_t> r_shape(shape.begin(), shape.end());
+    Tensor R = dispatchTriuTril("triu", A, 0);
+
+    // Reconstruct Q from Householder vectors and tau on CPU
+    // Q = product of (I - tau_k * v_k * v_k^T) for k = 0..min(m,n)-1
+    auto A_cpu = A.to(Device::cpu());
+    auto tau_cpu = tau.to(Device::cpu());
+
     std::vector<int64_t> q_shape(shape.begin(), shape.end() - 2);
     q_shape.push_back(m); q_shape.push_back(m);
-    std::vector<int64_t> r_shape(shape.begin(), shape.end());
+    Tensor Q_cpu(q_shape, input.dtype(), Device::cpu());
 
-    Tensor Q(q_shape, input.dtype(), input.device());
-    Tensor R(r_shape, input.dtype(), input.device());
+    for (int64_t b = 0; b < batch_size; ++b) {
+        // Initialize Q = I
+        for (int64_t i = 0; i < m; ++i) {
+            for (int64_t j = 0; j < m; ++j) {
+                if (is_f64) {
+                    static_cast<double*>(Q_cpu.data_ptr())[b * m * m + i * m + j] = (i == j) ? 1.0 : 0.0;
+                } else {
+                    static_cast<float*>(Q_cpu.data_ptr())[b * m * m + i * m + j] = (i == j) ? 1.0f : 0.0f;
+                }
+            }
+        }
 
-    std::string shader = is_f64 ? "linalg_qr_f64" : "linalg_qr";
-    auto* pipeline = getPipeline(shader, device_id);
+        // Apply Householder reflections in reverse: Q = H_0 * H_1 * ... * H_{k-1}
+        // where H_k = I - tau_k * v_k * v_k^T
+        for (int64_t kk = k - 1; kk >= 0; --kk) {
+            // Build Householder vector v: v[kk] = 1, v[kk+1:m] from A[kk+1:m, kk]
+            std::vector<double> v(m, 0.0);
+            v[kk] = 1.0;
+            for (int64_t i = kk + 1; i < m; ++i) {
+                if (is_f64) {
+                    v[i] = static_cast<const double*>(A_cpu.data_ptr())[b * m * n + i * n + kk];
+                } else {
+                    v[i] = static_cast<double>(
+                        static_cast<const float*>(A_cpu.data_ptr())[b * m * n + i * n + kk]);
+                }
+            }
 
-    struct PushConstants { uint32_t m; uint32_t n_cols; uint32_t batch; } pc;
-    pc.m = static_cast<uint32_t>(m);
-    pc.n_cols = static_cast<uint32_t>(n);
-    pc.batch = static_cast<uint32_t>(batch_size);
+            double tau_val;
+            if (is_f64) {
+                tau_val = static_cast<const double*>(tau_cpu.data_ptr())[b * n + kk];
+            } else {
+                tau_val = static_cast<double>(
+                    static_cast<const float*>(tau_cpu.data_ptr())[b * n + kk]);
+            }
 
-    auto cont = input.contiguous();
-    size_t elem_size = is_f64 ? 8 : 4;
-    size_t in_size = batch_size * m * n * elem_size;
-    size_t q_size = batch_size * m * m * elem_size;
-    size_t r_size = in_size;
+            if (std::abs(tau_val) < 1e-30) continue;
 
-    std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, cont.data_ptr()}, {1, Q.data_ptr()}, {2, R.data_ptr()}
-    };
-    std::vector<size_t> sizes = {in_size, q_size, r_size};
-    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+            // Apply H_k to Q: Q = (I - tau * v * v^T) * Q = Q - tau * v * (v^T * Q)
+            // First compute w = v^T * Q (1 x m vector)
+            std::vector<double> w(m, 0.0);
+            for (int64_t j = 0; j < m; ++j) {
+                double sum = 0.0;
+                for (int64_t i = kk; i < m; ++i) {
+                    if (is_f64) {
+                        sum += v[i] * static_cast<const double*>(Q_cpu.data_ptr())[b * m * m + i * m + j];
+                    } else {
+                        sum += v[i] * static_cast<double>(
+                            static_cast<const float*>(Q_cpu.data_ptr())[b * m * m + i * m + j]);
+                    }
+                }
+                w[j] = sum;
+            }
 
-    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
-    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdDispatch(cmd, static_cast<uint32_t>(batch_size), 1, 1);
-    insertComputeOnlyBarrier(cmd);
-    endSingleTimeCommands(cmd, device_id);
+            // Q[i,j] -= tau * v[i] * w[j]
+            for (int64_t i = kk; i < m; ++i) {
+                for (int64_t j = 0; j < m; ++j) {
+                    double update = tau_val * v[i] * w[j];
+                    if (is_f64) {
+                        static_cast<double*>(Q_cpu.data_ptr())[b * m * m + i * m + j] -= update;
+                    } else {
+                        static_cast<float*>(Q_cpu.data_ptr())[b * m * m + i * m + j] -=
+                            static_cast<float>(update);
+                    }
+                }
+            }
+        }
+    }
 
+    Tensor Q = Q_cpu.to(input.device());
     return {Q, R};
 }
 
@@ -18077,7 +18698,8 @@ auto VulkanBackend::dispatchLinalgSVD(const Tensor& input, bool full_matrices) -
     int64_t m = shape[ndim - 2];
     int64_t n = shape[ndim - 1];
 
-    if (m > MAX_VULKAN_LINALG_SIZE || n > MAX_VULKAN_LINALG_SIZE) {
+    // SVD only has single-workgroup shaders — no tiled path yet
+    if (m > MAX_SMALL_LINALG_SIZE || n > MAX_SMALL_LINALG_SIZE) {
         auto cpu_input = input.to(Device::cpu());
         auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
         NewOpAttributes attrs;
@@ -18152,7 +18774,8 @@ auto VulkanBackend::dispatchLinalgEigh(const Tensor& input) -> std::vector<Tenso
     int64_t n = shape[ndim - 1];
     if (shape[ndim - 2] != n) throw std::runtime_error("linalg.eigh: input must be square");
 
-    if (n > MAX_VULKAN_LINALG_SIZE) {
+    // Eigh only has single-workgroup shaders — no tiled path yet
+    if (n > MAX_SMALL_LINALG_SIZE) {
         auto cpu_input = input.to(Device::cpu());
         auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
         NewOpAttributes attrs;
@@ -18702,6 +19325,214 @@ auto VulkanBackend::dispatchFlashAttention(
     if (has_head_dim) {
         output = output.reshape({q_shape[0], q_shape[1], seq_len_q, V.shape()[3]});
     }
+
+    return output;
+}
+
+// ---------------------------------------------------------------------------
+// Sparse tensor dispatch functions (CSR format via Vulkan compute shaders)
+// ---------------------------------------------------------------------------
+
+auto VulkanBackend::dispatchSparseSpMM(const Tensor& crow_indices, const Tensor& col_indices,
+                                        const Tensor& values, const Tensor& dense,
+                                        int64_t M, int64_t K, int64_t N) -> Tensor {
+    if (values.dtype() != DType::Float32 && values.dtype() != DType::Float64) {
+        throw std::runtime_error("Vulkan SpMM only supports Float32/Float64, got " +
+            std::string(dtype_name(values.dtype())));
+    }
+    int32_t device_id = values.device().index;
+    bool is_f64 = (values.dtype() == DType::Float64);
+    std::string shader_name = is_f64 ? "sparse_spmm_f64" : "sparse_spmm";
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    // Convert Int64 indices to Int32 for shader compatibility
+    auto crow_i32 = (crow_indices.dtype() == DType::Int32) ? crow_indices : crow_indices.to(DType::Int32);
+    auto col_i32 = (col_indices.dtype() == DType::Int32) ? col_indices : col_indices.to(DType::Int32);
+
+    // Output: C of shape [M, N]
+    Tensor output = dispatchZeros({M, N}, values.dtype(), values.device());
+
+    size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
+    size_t crow_size = crow_i32.numel() * sizeof(int32_t);
+    size_t col_size = col_i32.numel() * sizeof(int32_t);
+    size_t values_size = values.numel() * elem_size;
+    size_t dense_size = dense.numel() * elem_size;
+    size_t output_size = output.numel() * elem_size;
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, crow_i32.data_ptr()}, {1, col_i32.data_ptr()}, {2, values.data_ptr()},
+        {3, dense.data_ptr()}, {4, output.data_ptr()},
+    };
+    std::vector<size_t> sizes = {crow_size, col_size, values_size, dense_size, output_size};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    struct { uint32_t m; uint32_t k; uint32_t n_cols; } pc;
+    pc.m = static_cast<uint32_t>(M);
+    pc.k = static_cast<uint32_t>(K);
+    pc.n_cols = static_cast<uint32_t>(N);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(pc), &pc);
+    // One workgroup per row
+    vkCmdDispatch(cmd, static_cast<uint32_t>(M), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchSparseSpMV(const Tensor& crow_indices, const Tensor& col_indices,
+                                        const Tensor& values, const Tensor& vec,
+                                        int64_t M, int64_t K) -> Tensor {
+    if (values.dtype() != DType::Float32 && values.dtype() != DType::Float64) {
+        throw std::runtime_error("Vulkan SpMV only supports Float32/Float64, got " +
+            std::string(dtype_name(values.dtype())));
+    }
+    int32_t device_id = values.device().index;
+    bool is_f64 = (values.dtype() == DType::Float64);
+    std::string shader_name = is_f64 ? "sparse_spmv_f64" : "sparse_spmv";
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    auto crow_i32 = (crow_indices.dtype() == DType::Int32) ? crow_indices : crow_indices.to(DType::Int32);
+    auto col_i32 = (col_indices.dtype() == DType::Int32) ? col_indices : col_indices.to(DType::Int32);
+
+    // Output: y of shape [M]
+    Tensor output = dispatchZeros({M}, values.dtype(), values.device());
+
+    size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
+    size_t crow_size = crow_i32.numel() * sizeof(int32_t);
+    size_t col_size = col_i32.numel() * sizeof(int32_t);
+    size_t values_size = values.numel() * elem_size;
+    size_t vec_size = vec.numel() * elem_size;
+    size_t output_size = output.numel() * elem_size;
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, crow_i32.data_ptr()}, {1, col_i32.data_ptr()}, {2, values.data_ptr()},
+        {3, vec.data_ptr()}, {4, output.data_ptr()},
+    };
+    std::vector<size_t> sizes = {crow_size, col_size, values_size, vec_size, output_size};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    struct { uint32_t n_rows; uint32_t n_cols; } pc;
+    pc.n_rows = static_cast<uint32_t>(M);
+    pc.n_cols = static_cast<uint32_t>(K);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(pc), &pc);
+    // One workgroup per row
+    vkCmdDispatch(cmd, static_cast<uint32_t>(M), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchSparseToDense(const Tensor& crow_indices, const Tensor& col_indices,
+                                           const Tensor& values, int64_t M, int64_t K,
+                                           DType dtype) -> Tensor {
+    if (dtype != DType::Float32 && dtype != DType::Float64) {
+        throw std::runtime_error("Vulkan SparseToDense only supports Float32/Float64, got " +
+            std::string(dtype_name(dtype)));
+    }
+    int32_t device_id = values.device().index;
+    bool is_f64 = (dtype == DType::Float64);
+    std::string shader_name = is_f64 ? "sparse_to_dense_f64" : "sparse_to_dense";
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    auto crow_i32 = (crow_indices.dtype() == DType::Int32) ? crow_indices : crow_indices.to(DType::Int32);
+    auto col_i32 = (col_indices.dtype() == DType::Int32) ? col_indices : col_indices.to(DType::Int32);
+
+    // Output: dense matrix of shape [M, K], zero-initialized
+    Tensor output = dispatchZeros({M, K}, dtype, values.device());
+
+    size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
+    size_t crow_size = crow_i32.numel() * sizeof(int32_t);
+    size_t col_size = col_i32.numel() * sizeof(int32_t);
+    size_t values_size = values.numel() * elem_size;
+    size_t output_size = output.numel() * elem_size;
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, crow_i32.data_ptr()}, {1, col_i32.data_ptr()}, {2, values.data_ptr()},
+        {3, output.data_ptr()},
+    };
+    std::vector<size_t> sizes = {crow_size, col_size, values_size, output_size};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    struct { uint32_t n_rows; uint32_t n_cols; } pc;
+    pc.n_rows = static_cast<uint32_t>(M);
+    pc.n_cols = static_cast<uint32_t>(K);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(pc), &pc);
+    // One workgroup per row
+    vkCmdDispatch(cmd, static_cast<uint32_t>(M), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchSparseAdd(const Tensor& crow_indices, const Tensor& col_indices,
+                                       const Tensor& values, const Tensor& dense,
+                                       int64_t M, int64_t K) -> Tensor {
+    if (values.dtype() != DType::Float32 && values.dtype() != DType::Float64) {
+        throw std::runtime_error("Vulkan SparseAdd only supports Float32/Float64, got " +
+            std::string(dtype_name(values.dtype())));
+    }
+    int32_t device_id = values.device().index;
+    bool is_f64 = (values.dtype() == DType::Float64);
+    std::string shader_name = is_f64 ? "sparse_add_f64" : "sparse_add";
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    auto crow_i32 = (crow_indices.dtype() == DType::Int32) ? crow_indices : crow_indices.to(DType::Int32);
+    auto col_i32 = (col_indices.dtype() == DType::Int32) ? col_indices : col_indices.to(DType::Int32);
+
+    // Output must be pre-filled with dense values; clone dense into output
+    Tensor output = dispatchClone(dense);
+
+    size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
+    size_t crow_size = crow_i32.numel() * sizeof(int32_t);
+    size_t col_size = col_i32.numel() * sizeof(int32_t);
+    size_t values_size = values.numel() * elem_size;
+    size_t output_size = output.numel() * elem_size;
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, crow_i32.data_ptr()}, {1, col_i32.data_ptr()}, {2, values.data_ptr()},
+        {3, output.data_ptr()},
+    };
+    std::vector<size_t> sizes = {crow_size, col_size, values_size, output_size};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    struct { uint32_t n_rows; uint32_t n_cols; } pc;
+    pc.n_rows = static_cast<uint32_t>(M);
+    pc.n_cols = static_cast<uint32_t>(K);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(pc), &pc);
+    // One workgroup per row
+    vkCmdDispatch(cmd, static_cast<uint32_t>(M), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
 
     return output;
 }

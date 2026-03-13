@@ -1,0 +1,81 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Blocked LU — trailing matrix update (Float64)
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) buffer Matrix { float64_t A[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint col_start;
+    uint block_size;
+    uint batch_idx;
+};
+
+shared float64_t L_tile[32][32];
+shared float64_t U_tile[32][32];
+
+void main() {
+    uint tx = gl_LocalInvocationID.x;
+    uint ty = gl_LocalInvocationID.y;
+
+    uint tile_row = gl_WorkGroupID.x;
+    uint tile_col = gl_WorkGroupID.y;
+
+    uint trail_start = col_start + block_size;
+
+    uint row_start = trail_start + tile_row * 32;
+    uint col_start_tile = trail_start + tile_col * 32;
+
+    if (row_start >= n || col_start_tile >= n) return;
+
+    uint base = batch_idx * n * n;
+    uint row_end = min(row_start + 32, n);
+    uint col_end = min(col_start_tile + 32, n);
+    uint actual_rows = row_end - row_start;
+    uint actual_cols = col_end - col_start_tile;
+
+    float64_t acc[4] = {0.0lf, 0.0lf, 0.0lf, 0.0lf};
+
+    for (uint kb = 0; kb < block_size; kb += 32) {
+        uint k_len = min(32u, block_size - kb);
+
+        for (uint r = ty; r < actual_rows; r += 16) {
+            for (uint c = tx; c < k_len; c += 16) {
+                L_tile[r][c] = A[base + (row_start + r) * n + (col_start + kb + c)];
+            }
+        }
+        for (uint r = ty; r < k_len; r += 16) {
+            for (uint c = tx; c < actual_cols; c += 16) {
+                U_tile[r][c] = A[base + (col_start + kb + r) * n + (col_start_tile + c)];
+            }
+        }
+        barrier();
+
+        for (uint dy = 0; dy < 2; dy++) {
+            uint r = ty * 2 + dy;
+            if (r >= actual_rows) continue;
+            for (uint dx = 0; dx < 2; dx++) {
+                uint c = tx * 2 + dx;
+                if (c >= actual_cols) continue;
+                float64_t sum = 0.0lf;
+                for (uint k = 0; k < k_len; k++) {
+                    sum += L_tile[r][k] * U_tile[k][c];
+                }
+                acc[dy * 2 + dx] += sum;
+            }
+        }
+        barrier();
+    }
+
+    for (uint dy = 0; dy < 2; dy++) {
+        uint r = ty * 2 + dy;
+        if (r >= actual_rows) continue;
+        for (uint dx = 0; dx < 2; dx++) {
+            uint c = tx * 2 + dx;
+            if (c >= actual_cols) continue;
+            A[base + (row_start + r) * n + (col_start_tile + c)] -= acc[dy * 2 + dx];
+        }
+    }
+}

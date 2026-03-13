@@ -1,0 +1,65 @@
+#version 450
+
+// Blocked Cholesky — panel factorization
+// Factorizes a single 32-column panel of the lower-triangular factor L
+// Input: A[n x n] symmetric positive definite, stored row-major
+// One workgroup with 256 threads.
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer Matrix { float A[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint col_start;
+    uint panel_cols;  // min(32, n - col_start)
+    uint batch_idx;
+};
+
+shared float panel[256][32];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint base = batch_idx * n * n;
+    uint panel_rows = n - col_start;
+
+    // Load panel into shared memory
+    for (uint r = tid; r < panel_rows; r += 256) {
+        for (uint c = 0; c < panel_cols; c++) {
+            panel[r][c] = A[base + (col_start + r) * n + (col_start + c)];
+        }
+    }
+    barrier();
+
+    // Column-by-column Cholesky on the panel
+    for (uint k = 0; k < panel_cols; k++) {
+        // Compute diagonal element
+        if (tid == 0) {
+            float sum = panel[k][k];
+            for (uint j = 0; j < k; j++) {
+                sum -= panel[k][j] * panel[k][j];
+            }
+            panel[k][k] = sqrt(max(sum, 1e-30));
+        }
+        barrier();
+
+        float diag = panel[k][k];
+        float inv_diag = 1.0 / diag;
+
+        // Compute sub-diagonal elements in column k
+        for (uint r = k + 1 + tid; r < panel_rows; r += 256) {
+            float sum = panel[r][k];
+            for (uint j = 0; j < k; j++) {
+                sum -= panel[r][j] * panel[k][j];
+            }
+            panel[r][k] = sum * inv_diag;
+        }
+        barrier();
+    }
+
+    // Write panel back
+    for (uint r = tid; r < panel_rows; r += 256) {
+        for (uint c = 0; c < panel_cols; c++) {
+            A[base + (col_start + r) * n + (col_start + c)] = panel[r][c];
+        }
+    }
+}

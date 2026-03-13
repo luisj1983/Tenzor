@@ -11,6 +11,7 @@
 namespace tenzor {
 namespace oneapi {
     auto contiguous_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto cast_kernel(const Tensor& input, DType target_dtype, sycl::queue& queue) -> Tensor;
     auto fused_layer_norm_kernel(const Tensor& input, const Tensor& weight, const Tensor& bias,
                                  const std::vector<int64_t>& normalized_shape, float epsilon,
                                  sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor>;
@@ -2723,8 +2724,16 @@ auto instance_norm_kernel(const Tensor& input, const Tensor& weight,
         });
     }
     else {
-        // Float16/BFloat16: compute in float32 via conversion
-        throw std::runtime_error("instance_norm on OneAPI only supports Float32/Float64; convert input first");
+        // Float16/BFloat16: upcast to Float32, compute, downcast
+        DType orig_dtype = in_cont.dtype();
+        Tensor in_f32 = cast_kernel(in_cont, DType::Float32, queue);
+        Tensor w_f32 = (has_weight && weight.dtype() != DType::Float32)
+            ? cast_kernel(weight, DType::Float32, queue) : weight;
+        Tensor b_f32 = (has_bias && bias.dtype() != DType::Float32)
+            ? cast_kernel(bias, DType::Float32, queue) : bias;
+        auto results = instance_norm_kernel(in_f32, w_f32, b_f32, eps, queue);
+        results[0] = cast_kernel(results[0], orig_dtype, queue);
+        return results;
     }
 
     return {output, mean_t, inv_std_t};
@@ -2872,7 +2881,15 @@ auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& inpu
         });
     }
     else {
-        throw std::runtime_error("instance_norm_backward on OneAPI only supports Float32/Float64");
+        // Float16/BFloat16: upcast to Float32, compute, downcast
+        DType orig_dtype = input.dtype();
+        Tensor in_f32 = cast_kernel(input, DType::Float32, queue);
+        Tensor go_f32 = cast_kernel(grad_output, DType::Float32, queue);
+        Tensor w_f32 = (has_weight && weight.dtype() != DType::Float32)
+            ? cast_kernel(weight, DType::Float32, queue) : weight;
+        auto results = instance_norm_backward_kernel(go_f32, in_f32, mean, rstd, w_f32, queue);
+        results[0] = cast_kernel(results[0], orig_dtype, queue);
+        return results;
     }
 
     return {grad_input, grad_weight, grad_bias};

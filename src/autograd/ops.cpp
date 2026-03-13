@@ -1107,6 +1107,23 @@ auto expand(const Variable& input, const std::vector<int64_t>& shape) -> Variabl
     return output;
 }
 
+auto to_device(const Variable& input, Device target) -> Variable {
+    if (input.tensor().device() == target) {
+        return input;
+    }
+    auto result = input.tensor().to(target);
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+    auto grad_fn = std::make_shared<DeviceTransferBackward>();
+    grad_fn->source_device = input.tensor().device();
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
 auto flatten(const Variable& input, int64_t start_dim, int64_t end_dim) -> Variable {
     if (!input.requires_grad() || !is_grad_enabled()) {
         return Variable(tenzor::flatten(input.tensor(), start_dim, end_dim), false);
