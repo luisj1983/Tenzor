@@ -1,0 +1,33 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Compute determinant from LU factorization diagonal + pivot sign — Float64.
+// Each workgroup handles one batch element.
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer LUBuf    { double lu_data[]; };
+layout(set = 0, binding = 1) buffer PivotBuf { int pivots[];     };
+layout(set = 0, binding = 2) buffer OutBuf   { double det_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;           // matrix dimension
+    uint batch_size;  // number of matrices in batch
+    uint lda;         // leading dimension
+};
+
+void main() {
+    uint batch_idx = gl_GlobalInvocationID.x;
+    if (batch_idx >= batch_size) return;
+
+    uint offset = batch_idx * n * lda;
+    double det = 1.0LF;
+    int sign = 1;
+
+    for (uint i = 0; i < n; i++) {
+        det *= lu_data[offset + i * lda + i];
+        if (pivots[batch_idx * n + i] != int(i)) sign = -sign;
+    }
+
+    det_out[batch_idx] = det * double(sign);
+}

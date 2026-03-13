@@ -2,11 +2,11 @@
 #include <hip/hip_fp16.h>
 #include <rocblas/rocblas.h>
 #include <cmath>
-#include <cfloat>
 #include <cstdio>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include <stdexcept>
+#include <string>
 
 namespace tenzor {
 namespace rocm {
@@ -19,9 +19,8 @@ namespace rocm {
     do { \
         hipError_t err = call; \
         if (err != hipSuccess) { \
-            fprintf(stderr, "HIP error at %s:%d: %s\n", __FILE__, __LINE__, \
-                    hipGetErrorString(err)); \
-            exit(EXIT_FAILURE); \
+            throw std::runtime_error(std::string("HIP error at ") + __FILE__ + ":" + \
+                std::to_string(__LINE__) + ": " + hipGetErrorString(err)); \
         } \
     } while(0)
 
@@ -805,9 +804,9 @@ auto gru_forward_kernel(
     Tensor h_t({batch, hidden}, input.dtype(), input.device());
 
     // Copy h0 to h_t
-    hipMemcpyAsync(h_t.data<void>(), h0.data<void>(),
+    HIP_CHECK(hipMemcpyAsync(h_t.data<void>(), h0.data<void>(),
                    batch * hidden * dtype_size(input.dtype()),
-                   hipMemcpyDeviceToDevice, stream);
+                   hipMemcpyDeviceToDevice, stream));
 
     if (input.dtype() == DType::Float32) {
         RocBLASHandleGuard handle_guard;
@@ -883,15 +882,15 @@ auto gru_forward_kernel(
                               batch, hidden);
 
             // Copy h_t to output[t]
-            hipMemcpyAsync(output_ptr + t * batch * hidden, h_t_ptr,
+            HIP_CHECK(hipMemcpyAsync(output_ptr + t * batch * hidden, h_t_ptr,
                           batch * hidden * sizeof(float),
-                          hipMemcpyDeviceToDevice, stream);
+                          hipMemcpyDeviceToDevice, stream));
         }
 
         // Copy final state
-        hipMemcpyAsync(h_n.data<float>(), h_t_ptr,
+        HIP_CHECK(hipMemcpyAsync(h_n.data<float>(), h_t_ptr,
                       batch * hidden * sizeof(float),
-                      hipMemcpyDeviceToDevice, stream);
+                      hipMemcpyDeviceToDevice, stream));
     } else if (input.dtype() == DType::Float64) {
         RocBLASHandleGuard handle_guard2;
         rocblas_handle handle = handle_guard2.get();
@@ -960,15 +959,15 @@ auto gru_forward_kernel(
                               batch, hidden);
 
             // Copy h_t to output[t]
-            hipMemcpyAsync(output_ptr + t * batch * hidden, h_t_ptr,
+            HIP_CHECK(hipMemcpyAsync(output_ptr + t * batch * hidden, h_t_ptr,
                           batch * hidden * sizeof(double),
-                          hipMemcpyDeviceToDevice, stream);
+                          hipMemcpyDeviceToDevice, stream));
         }
 
         // Copy final state
-        hipMemcpyAsync(h_n.data<double>(), h_t_ptr,
+        HIP_CHECK(hipMemcpyAsync(h_n.data<double>(), h_t_ptr,
                       batch * hidden * sizeof(double),
-                      hipMemcpyDeviceToDevice, stream);
+                      hipMemcpyDeviceToDevice, stream));
     } else if (input.dtype() == DType::Float16) {
         RocBLASHandleGuard handle_guard3;
         rocblas_handle handle = handle_guard3.get();
@@ -1036,15 +1035,15 @@ auto gru_forward_kernel(
                               batch, hidden);
 
             // Copy h_t to output[t]
-            hipMemcpyAsync(output_ptr + t * batch * hidden, h_t_ptr,
+            HIP_CHECK(hipMemcpyAsync(output_ptr + t * batch * hidden, h_t_ptr,
                           batch * hidden * sizeof(__half),
-                          hipMemcpyDeviceToDevice, stream);
+                          hipMemcpyDeviceToDevice, stream));
         }
 
         // Copy final state
-        hipMemcpyAsync(reinterpret_cast<__half*>(h_n.data<Float16>()), h_t_ptr,
+        HIP_CHECK(hipMemcpyAsync(reinterpret_cast<__half*>(h_n.data<Float16>()), h_t_ptr,
                       batch * hidden * sizeof(__half),
-                      hipMemcpyDeviceToDevice, stream);
+                      hipMemcpyDeviceToDevice, stream));
     } else {
         throw std::runtime_error("GRU forward only supports Float32, Float64, Float16, and BFloat16");
     }
@@ -1079,9 +1078,9 @@ auto gru_multi_layer_forward_kernel(
     for (int64_t l = 0; l < num_layers; ++l) {
         // Extract h0 for this layer
         Tensor h_l({batch, hidden}, input.dtype(), input.device());
-        hipMemcpyAsync(h_l.data<void>(),
+        HIP_CHECK(hipMemcpyAsync(h_l.data<void>(),
                        static_cast<const char*>(h0.data<void>()) + l * layer_bytes,
-                       layer_bytes, hipMemcpyDeviceToDevice, stream);
+                       layer_bytes, hipMemcpyDeviceToDevice, stream));
 
         auto result = gru_forward_kernel(
             layer_input, W_ih_list[l], W_hh_list[l],
@@ -1089,10 +1088,10 @@ auto gru_multi_layer_forward_kernel(
 
         layer_input = result[0];
 
-        hipMemcpyAsync(
+        HIP_CHECK(hipMemcpyAsync(
             static_cast<char*>(h_n.data<void>()) + l * layer_bytes,
             result[1].data<void>(), layer_bytes,
-            hipMemcpyDeviceToDevice, stream);
+            hipMemcpyDeviceToDevice, stream));
     }
 
     HIP_CHECK(hipGetLastError());

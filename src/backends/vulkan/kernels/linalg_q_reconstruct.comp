@@ -1,0 +1,62 @@
+#version 450
+
+// Reconstruct Q from Householder reflectors stored in QR factorization result.
+// QR data: lower triangle holds Householder vectors, upper triangle holds R.
+// Tau: Householder coefficients (one per reflector).
+// Output: orthogonal Q matrix (m x m).
+// Single invocation per batch element (sequential Householder application).
+
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0) buffer QRBuf  { float qr_data[]; };
+layout(set = 0, binding = 1) buffer TauBuf { float tau[];      };
+layout(set = 0, binding = 2) buffer QBuf   { float q_data[];   };
+
+layout(push_constant) uniform PushConstants {
+    uint m;           // rows of original matrix
+    uint n;           // cols of original matrix
+    uint k;           // min(m, n) = number of reflectors
+    uint ldq;         // leading dimension of Q (= m)
+    uint batch_size;  // number of matrices in batch
+};
+
+void main() {
+    uint batch_idx = gl_GlobalInvocationID.x;
+    if (batch_idx >= batch_size) return;
+
+    uint qr_off = batch_idx * m * n;
+    uint tau_off = batch_idx * n;
+    uint q_off = batch_idx * m * ldq;
+
+    // Initialize Q = I(m x m)
+    for (uint i = 0; i < m; i++) {
+        for (uint j = 0; j < m; j++) {
+            q_data[q_off + i * ldq + j] = (i == j) ? 1.0 : 0.0;
+        }
+    }
+
+    // Apply reflectors in reverse: Q = H_0 * H_1 * ... * H_{k-1}
+    // where H_i = I - tau[i] * v_i * v_i^T
+    for (int ki = int(k) - 1; ki >= 0; ki--) {
+        uint kk = uint(ki);
+        float t = tau[tau_off + kk];
+        if (t == 0.0) continue;
+
+        // Householder vector v: v[0..kk-1] = 0, v[kk] = 1, v[kk+1..m-1] = qr[kk+1..m-1, kk]
+        // Apply: Q = (I - t * v * v^T) * Q
+        // For each column j of Q:
+        //   dot = sum_i v[i] * Q[i][j]
+        //   Q[i][j] -= t * dot * v[i]
+        for (uint j = 0; j < m; j++) {
+            float dot = q_data[q_off + kk * ldq + j];  // v[kk] = 1
+            for (uint i = kk + 1; i < m; i++) {
+                dot += qr_data[qr_off + i * n + kk] * q_data[q_off + i * ldq + j];
+            }
+            dot *= t;
+            q_data[q_off + kk * ldq + j] -= dot;  // v[kk] = 1
+            for (uint i = kk + 1; i < m; i++) {
+                q_data[q_off + i * ldq + j] -= dot * qr_data[qr_off + i * n + kk];
+            }
+        }
+    }
+}

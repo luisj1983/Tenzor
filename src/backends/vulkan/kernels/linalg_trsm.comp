@@ -1,0 +1,72 @@
+#version 450
+
+// Triangular solve from LU factors: solves L*U*X = P*B.
+// Single invocation per batch element (sequential column solve).
+// Input: LU matrix, pivot indices, B matrix.
+// Output: solution X matrix.
+// B is NOT modified; result written to x_data.
+
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0) buffer LUBuf    { float lu_data[]; };
+layout(set = 0, binding = 1) buffer PivotBuf { int pivots[];    };
+layout(set = 0, binding = 2) buffer BBuf     { float b_data[];  };
+layout(set = 0, binding = 3) buffer OutBuf   { float x_data[];  };
+
+layout(push_constant) uniform PushConstants {
+    uint n;           // matrix dimension
+    uint nrhs;        // number of right-hand sides
+    uint lda;         // LU leading dimension
+    uint ldb;         // B/X leading dimension
+    uint batch_size;  // number of matrices in batch
+};
+
+void main() {
+    uint batch_idx = gl_GlobalInvocationID.x;
+    if (batch_idx >= batch_size) return;
+
+    uint lu_off = batch_idx * n * lda;
+    uint bx_off = batch_idx * n * ldb;
+
+    // Copy B to X (work in x_data)
+    for (uint i = 0; i < n; i++) {
+        for (uint j = 0; j < nrhs; j++) {
+            x_data[bx_off + i * ldb + j] = b_data[bx_off + i * ldb + j];
+        }
+    }
+
+    // Apply pivots (row permutation)
+    for (uint i = 0; i < n; i++) {
+        uint pi = uint(pivots[batch_idx * n + i]);
+        if (pi != i) {
+            for (uint j = 0; j < nrhs; j++) {
+                float tmp = x_data[bx_off + i * ldb + j];
+                x_data[bx_off + i * ldb + j] = x_data[bx_off + pi * ldb + j];
+                x_data[bx_off + pi * ldb + j] = tmp;
+            }
+        }
+    }
+
+    // Forward substitution: L * y = Pb (L has unit diagonal)
+    for (uint i = 1; i < n; i++) {
+        for (uint j = 0; j < nrhs; j++) {
+            float sum = 0.0;
+            for (uint k = 0; k < i; k++) {
+                sum += lu_data[lu_off + i * lda + k] * x_data[bx_off + k * ldb + j];
+            }
+            x_data[bx_off + i * ldb + j] -= sum;
+        }
+    }
+
+    // Backward substitution: U * x = y (U has non-unit diagonal)
+    for (int i = int(n) - 1; i >= 0; i--) {
+        for (uint j = 0; j < nrhs; j++) {
+            float sum = 0.0;
+            for (uint k = uint(i) + 1; k < n; k++) {
+                sum += lu_data[lu_off + uint(i) * lda + k] * x_data[bx_off + k * ldb + j];
+            }
+            x_data[bx_off + uint(i) * ldb + j] =
+                (x_data[bx_off + uint(i) * ldb + j] - sum) / lu_data[lu_off + uint(i) * lda + uint(i)];
+        }
+    }
+}

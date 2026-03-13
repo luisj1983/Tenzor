@@ -1,0 +1,28 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : enable
+
+// Reconstruct full N-point Float64 complex spectrum from N/2+1 Hermitian-symmetric bins.
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { float64_t data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { float64_t data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint half_plus_one;  // N/2+1
+    uint full_size;      // N
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= full_size) return;
+
+    if (idx < half_plus_one) {
+        data_out[idx * 2]     = data_in[idx * 2];
+        data_out[idx * 2 + 1] = data_in[idx * 2 + 1];
+    } else {
+        uint mirror = full_size - idx;
+        data_out[idx * 2]     =  data_in[mirror * 2];
+        data_out[idx * 2 + 1] = -data_in[mirror * 2 + 1];
+    }
+}

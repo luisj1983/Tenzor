@@ -1,0 +1,33 @@
+#version 450
+
+// Reconstruct full N-point complex spectrum from N/2+1 Hermitian-symmetric bins.
+// Input:  N/2+1 complex pairs (interleaved re/im)
+// Output: N complex pairs
+// For k < half_plus_one: direct copy
+// For k >= half_plus_one: X[k] = conj(X[N-k])
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { float data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { float data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint half_plus_one;  // N/2+1
+    uint full_size;      // N
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= full_size) return;
+
+    if (idx < half_plus_one) {
+        // Direct copy for first half (including DC and Nyquist)
+        data_out[idx * 2]     = data_in[idx * 2];
+        data_out[idx * 2 + 1] = data_in[idx * 2 + 1];
+    } else {
+        // Conjugate mirror: X[k] = conj(X[N-k])
+        uint mirror = full_size - idx;
+        data_out[idx * 2]     =  data_in[mirror * 2];
+        data_out[idx * 2 + 1] = -data_in[mirror * 2 + 1];
+    }
+}

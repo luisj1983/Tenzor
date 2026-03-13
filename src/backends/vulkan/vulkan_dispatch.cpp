@@ -8,6 +8,7 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/utils/logging.hpp"
 
+#include <functional>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -17,6 +18,1079 @@
 #include <vector>
 
 namespace tenzor {
+
+// Handler signature: (backend, op_name, inputs, attrs) -> vector<Tensor>
+// op_name is passed for error messages and for ops that forward it (e.g. dispatchBinaryOp).
+using VkDispatchHandler = std::function<std::vector<Tensor>(
+    VulkanBackend*, const std::string&, std::span<const Tensor>, const OpAttributes&)>;
+
+static const std::unordered_map<std::string, VkDispatchHandler>& get_dispatch_table() {
+    static const std::unordered_map<std::string, VkDispatchHandler> table = {
+        // ==================================================================
+        // Binary operations
+        // ==================================================================
+        {"add", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 2) throw std::invalid_argument(op + " requires 2 inputs");
+            return std::vector<Tensor>{b->dispatchBinaryOp(op, inputs[0], inputs[1])};
+        }},
+        {"sub", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 2) throw std::invalid_argument(op + " requires 2 inputs");
+            return std::vector<Tensor>{b->dispatchBinaryOp(op, inputs[0], inputs[1])};
+        }},
+        {"mul", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 2) throw std::invalid_argument(op + " requires 2 inputs");
+            return std::vector<Tensor>{b->dispatchBinaryOp(op, inputs[0], inputs[1])};
+        }},
+        {"div", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 2) throw std::invalid_argument(op + " requires 2 inputs");
+            return std::vector<Tensor>{b->dispatchBinaryOp(op, inputs[0], inputs[1])};
+        }},
+
+        // ==================================================================
+        // In-place binary operations
+        // ==================================================================
+        {"add_inplace", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 2) throw std::invalid_argument(op + " requires 2 inputs");
+            std::string base_op = op.substr(0, op.find("_inplace"));
+            Tensor result = b->dispatchBinaryOp(base_op, inputs[0], inputs[1]);
+            size_t bytes = result.numel() * result.dtype_size();
+            if (bytes > 0) {
+                void* dst = const_cast<void*>(inputs[0].data_ptr());
+                b->copy(dst, result.data_ptr(), bytes, CopyKind::DeviceToDevice);
+            }
+            return std::vector<Tensor>{inputs[0]};
+        }},
+        {"sub_inplace", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 2) throw std::invalid_argument(op + " requires 2 inputs");
+            std::string base_op = op.substr(0, op.find("_inplace"));
+            Tensor result = b->dispatchBinaryOp(base_op, inputs[0], inputs[1]);
+            size_t bytes = result.numel() * result.dtype_size();
+            if (bytes > 0) {
+                void* dst = const_cast<void*>(inputs[0].data_ptr());
+                b->copy(dst, result.data_ptr(), bytes, CopyKind::DeviceToDevice);
+            }
+            return std::vector<Tensor>{inputs[0]};
+        }},
+        {"mul_inplace", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 2) throw std::invalid_argument(op + " requires 2 inputs");
+            std::string base_op = op.substr(0, op.find("_inplace"));
+            Tensor result = b->dispatchBinaryOp(base_op, inputs[0], inputs[1]);
+            size_t bytes = result.numel() * result.dtype_size();
+            if (bytes > 0) {
+                void* dst = const_cast<void*>(inputs[0].data_ptr());
+                b->copy(dst, result.data_ptr(), bytes, CopyKind::DeviceToDevice);
+            }
+            return std::vector<Tensor>{inputs[0]};
+        }},
+        {"div_inplace", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 2) throw std::invalid_argument(op + " requires 2 inputs");
+            std::string base_op = op.substr(0, op.find("_inplace"));
+            Tensor result = b->dispatchBinaryOp(base_op, inputs[0], inputs[1]);
+            size_t bytes = result.numel() * result.dtype_size();
+            if (bytes > 0) {
+                void* dst = const_cast<void*>(inputs[0].data_ptr());
+                b->copy(dst, result.data_ptr(), bytes, CopyKind::DeviceToDevice);
+            }
+            return std::vector<Tensor>{inputs[0]};
+        }},
+
+        // ==================================================================
+        // In-place activation operations
+        // ==================================================================
+        {"relu_inplace", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() < 1) throw std::invalid_argument(op + " requires 1 input");
+            Tensor result = b->dispatchActivation("relu", inputs[0], 0, 0.0f);
+            size_t bytes = result.numel() * result.dtype_size();
+            if (bytes > 0) { void* dst = const_cast<void*>(inputs[0].data_ptr()); b->copy(dst, result.data_ptr(), bytes, CopyKind::DeviceToDevice); }
+            return std::vector<Tensor>{inputs[0]};
+        }},
+        {"sigmoid_inplace", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() < 1) throw std::invalid_argument(op + " requires 1 input");
+            Tensor result = b->dispatchActivation("sigmoid", inputs[0], 1, 0.0f);
+            size_t bytes = result.numel() * result.dtype_size();
+            if (bytes > 0) { void* dst = const_cast<void*>(inputs[0].data_ptr()); b->copy(dst, result.data_ptr(), bytes, CopyKind::DeviceToDevice); }
+            return std::vector<Tensor>{inputs[0]};
+        }},
+        {"tanh_inplace", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() < 1) throw std::invalid_argument(op + " requires 1 input");
+            Tensor result = b->dispatchActivation("tanh", inputs[0], 2, 0.0f);
+            size_t bytes = result.numel() * result.dtype_size();
+            if (bytes > 0) { void* dst = const_cast<void*>(inputs[0].data_ptr()); b->copy(dst, result.data_ptr(), bytes, CopyKind::DeviceToDevice); }
+            return std::vector<Tensor>{inputs[0]};
+        }},
+        {"gelu_inplace", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() < 1) throw std::invalid_argument(op + " requires 1 input");
+            Tensor result = b->dispatchActivation("gelu", inputs[0], 3, 0.0f);
+            size_t bytes = result.numel() * result.dtype_size();
+            if (bytes > 0) { void* dst = const_cast<void*>(inputs[0].data_ptr()); b->copy(dst, result.data_ptr(), bytes, CopyKind::DeviceToDevice); }
+            return std::vector<Tensor>{inputs[0]};
+        }},
+        {"leaky_relu_inplace", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() < 1) throw std::invalid_argument(op + " requires 1 input");
+            float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
+            Tensor result = b->dispatchActivation("leaky_relu", inputs[0], 4, alpha);
+            size_t bytes = result.numel() * result.dtype_size();
+            if (bytes > 0) { void* dst = const_cast<void*>(inputs[0].data_ptr()); b->copy(dst, result.data_ptr(), bytes, CopyKind::DeviceToDevice); }
+            return std::vector<Tensor>{inputs[0]};
+        }},
+
+        // ==================================================================
+        // Comparison operations
+        // ==================================================================
+        {"eq", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 2) throw std::invalid_argument(op + " requires 2 inputs");
+            return std::vector<Tensor>{b->dispatchComparisonOp(op, inputs[0], inputs[1])};
+        }},
+        {"ne", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 2) throw std::invalid_argument(op + " requires 2 inputs");
+            return std::vector<Tensor>{b->dispatchComparisonOp(op, inputs[0], inputs[1])};
+        }},
+        {"lt", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 2) throw std::invalid_argument(op + " requires 2 inputs");
+            return std::vector<Tensor>{b->dispatchComparisonOp(op, inputs[0], inputs[1])};
+        }},
+        {"le", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 2) throw std::invalid_argument(op + " requires 2 inputs");
+            return std::vector<Tensor>{b->dispatchComparisonOp(op, inputs[0], inputs[1])};
+        }},
+        {"gt", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 2) throw std::invalid_argument(op + " requires 2 inputs");
+            return std::vector<Tensor>{b->dispatchComparisonOp(op, inputs[0], inputs[1])};
+        }},
+        {"ge", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 2) throw std::invalid_argument(op + " requires 2 inputs");
+            return std::vector<Tensor>{b->dispatchComparisonOp(op, inputs[0], inputs[1])};
+        }},
+
+        // ==================================================================
+        // Activation functions
+        // ==================================================================
+        {"relu", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument(op + " requires 1 input");
+            return std::vector<Tensor>{b->dispatchActivation("relu", inputs[0], 0, 0.0f)};
+        }},
+        {"sigmoid", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument(op + " requires 1 input");
+            return std::vector<Tensor>{b->dispatchActivation("sigmoid", inputs[0], 1, 0.0f)};
+        }},
+        {"tanh", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument(op + " requires 1 input");
+            return std::vector<Tensor>{b->dispatchActivation("tanh", inputs[0], 2, 0.0f)};
+        }},
+        {"gelu", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument("gelu requires 1 input");
+            return std::vector<Tensor>{b->dispatchActivation("gelu", inputs[0], 3, 0.0f)};
+        }},
+        {"leaky_relu", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument("leaky_relu requires 1 input");
+            float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
+            return std::vector<Tensor>{b->dispatchActivation("leaky_relu", inputs[0], 4, alpha)};
+        }},
+        {"swish", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument("swish requires 1 input");
+            return std::vector<Tensor>{b->dispatchActivation("swish", inputs[0], 5, 0.0f)};
+        }},
+        {"elu", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument("elu requires 1 input");
+            float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 1.0));
+            return std::vector<Tensor>{b->dispatchActivation("elu", inputs[0], 6, alpha)};
+        }},
+        {"selu", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument("selu requires 1 input");
+            return std::vector<Tensor>{b->dispatchActivation("selu", inputs[0], 7, 0.0f)};
+        }},
+        {"mish", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument("mish requires 1 input");
+            return std::vector<Tensor>{b->dispatchActivation("mish", inputs[0], 8, 0.0f)};
+        }},
+        {"softplus", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument("softplus requires 1 input");
+            float beta = static_cast<float>(attrs.get_float(AttrKey::Beta, 1.0));
+            return std::vector<Tensor>{b->dispatchActivation("softplus", inputs[0], 9, beta)};
+        }},
+
+        // ==================================================================
+        // Unary math operations
+        // ==================================================================
+        {"sqrt", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument(op + " requires 1 input");
+            return std::vector<Tensor>{b->dispatchUnaryOp(op, inputs[0])};
+        }},
+        {"exp", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument(op + " requires 1 input");
+            return std::vector<Tensor>{b->dispatchUnaryOp(op, inputs[0])};
+        }},
+        {"log", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument(op + " requires 1 input");
+            return std::vector<Tensor>{b->dispatchUnaryOp(op, inputs[0])};
+        }},
+        {"neg", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument(op + " requires 1 input");
+            return std::vector<Tensor>{b->dispatchUnaryOp(op, inputs[0])};
+        }},
+        {"abs", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument(op + " requires 1 input");
+            return std::vector<Tensor>{b->dispatchUnaryOp(op, inputs[0])};
+        }},
+        {"sign", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument(op + " requires 1 input");
+            return std::vector<Tensor>{b->dispatchUnaryOp(op, inputs[0])};
+        }},
+        {"floor", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument(op + " requires 1 input");
+            return std::vector<Tensor>{b->dispatchUnaryOp(op, inputs[0])};
+        }},
+        {"ceil", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument(op + " requires 1 input");
+            return std::vector<Tensor>{b->dispatchUnaryOp(op, inputs[0])};
+        }},
+        {"round", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument(op + " requires 1 input");
+            return std::vector<Tensor>{b->dispatchUnaryOp(op, inputs[0])};
+        }},
+        {"trunc", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument(op + " requires 1 input");
+            return std::vector<Tensor>{b->dispatchUnaryOp(op, inputs[0])};
+        }},
+        {"reciprocal", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument(op + " requires 1 input");
+            return std::vector<Tensor>{b->dispatchUnaryOp(op, inputs[0])};
+        }},
+
+        // ==================================================================
+        // Trigonometric operations
+        // ==================================================================
+        {"sin", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument(op + " requires 1 input");
+            return std::vector<Tensor>{b->dispatchTrigonometricOp(op, inputs[0])};
+        }},
+        {"cos", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument(op + " requires 1 input");
+            return std::vector<Tensor>{b->dispatchTrigonometricOp(op, inputs[0])};
+        }},
+        {"tan", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument(op + " requires 1 input");
+            return std::vector<Tensor>{b->dispatchTrigonometricOp(op, inputs[0])};
+        }},
+        {"asin", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument(op + " requires 1 input");
+            return std::vector<Tensor>{b->dispatchTrigonometricOp(op, inputs[0])};
+        }},
+        {"acos", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument(op + " requires 1 input");
+            return std::vector<Tensor>{b->dispatchTrigonometricOp(op, inputs[0])};
+        }},
+        {"atan", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument(op + " requires 1 input");
+            return std::vector<Tensor>{b->dispatchTrigonometricOp(op, inputs[0])};
+        }},
+
+        // ==================================================================
+        // Hyperbolic operations
+        // ==================================================================
+        {"sinh", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument(op + " requires 1 input");
+            return std::vector<Tensor>{b->dispatchHyperbolicOp(op, inputs[0])};
+        }},
+        {"cosh", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument(op + " requires 1 input");
+            return std::vector<Tensor>{b->dispatchHyperbolicOp(op, inputs[0])};
+        }},
+
+        // ==================================================================
+        // Pow (unary with parameter)
+        // ==================================================================
+        {"pow", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument("pow requires 1 input");
+            float exponent = static_cast<float>(attrs.get_float(AttrKey::Exponent, 2.0));
+            return std::vector<Tensor>{b->dispatchUnaryOpWithParam(op, inputs[0], exponent)};
+        }},
+
+        // ==================================================================
+        // Backward activation operations
+        // ==================================================================
+        {"relu_backward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 2) throw std::invalid_argument("relu_backward requires 2 inputs");
+            return std::vector<Tensor>{b->dispatchActivationBackward("relu_backward", inputs[0], inputs[1], 0, 0.0f)};
+        }},
+        {"sigmoid_backward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 2) throw std::invalid_argument("sigmoid_backward requires 2 inputs");
+            return std::vector<Tensor>{b->dispatchActivationBackward("sigmoid_backward", inputs[0], inputs[1], 1, 0.0f)};
+        }},
+        {"tanh_backward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 2) throw std::invalid_argument("tanh_backward requires 2 inputs");
+            return std::vector<Tensor>{b->dispatchActivationBackward("tanh_backward", inputs[0], inputs[1], 2, 0.0f)};
+        }},
+        {"leaky_relu_backward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 2) throw std::invalid_argument("leaky_relu_backward requires 2 inputs");
+            float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
+            return std::vector<Tensor>{b->dispatchActivationBackward("leaky_relu_backward", inputs[0], inputs[1], 3, alpha)};
+        }},
+        {"gelu_backward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 2) throw std::invalid_argument("gelu_backward requires 2 inputs");
+            return std::vector<Tensor>{b->dispatchActivationBackward("gelu_backward", inputs[0], inputs[1], 4, 0.0f)};
+        }},
+        {"elu_backward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 2) throw std::invalid_argument("elu_backward requires 2 inputs");
+            float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 1.0));
+            return std::vector<Tensor>{b->dispatchActivationBackward("elu_backward", inputs[0], inputs[1], 5, alpha)};
+        }},
+        {"selu_backward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 2) throw std::invalid_argument("selu_backward requires 2 inputs");
+            return std::vector<Tensor>{b->dispatchActivationBackward("selu_backward", inputs[0], inputs[1], 6, 0.0f)};
+        }},
+        {"mish_backward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 2) throw std::invalid_argument("mish_backward requires 2 inputs");
+            return std::vector<Tensor>{b->dispatchActivationBackward("mish_backward", inputs[0], inputs[1], 7, 0.0f)};
+        }},
+        {"softplus_backward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 2) throw std::invalid_argument("softplus_backward requires 2 inputs");
+            float beta = static_cast<float>(attrs.get_float(AttrKey::Beta, 1.0));
+            return std::vector<Tensor>{b->dispatchActivationBackward("softplus_backward", inputs[0], inputs[1], 8, beta)};
+        }},
+        {"swish_backward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 2) throw std::invalid_argument("swish_backward requires 2 inputs");
+            return std::vector<Tensor>{b->dispatchSwishBackward(inputs[0], inputs[1])};
+        }},
+        {"softmax_backward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 2) throw std::invalid_argument("softmax_backward requires 2 inputs");
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            return std::vector<Tensor>{b->dispatchSoftmaxBackward(inputs[0], inputs[1], dim)};
+        }},
+        {"log_softmax_backward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 2) throw std::invalid_argument("log_softmax_backward requires 2 inputs");
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            return std::vector<Tensor>{b->dispatchLogSoftmaxBackward(inputs[0], inputs[1], dim)};
+        }},
+
+        // ==================================================================
+        // Conv2d backward operations
+        // ==================================================================
+        {"conv2d_backward_input", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 2) throw std::invalid_argument("conv2d_backward_input requires 2 inputs (grad_output, weight)");
+            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            std::vector<int64_t> input_shape = attrs.get_int_list(AttrKey::InputShape);
+            return std::vector<Tensor>{b->dispatchConv2dBackwardInput(inputs[0], inputs[1], stride, padding, dilation, input_shape)};
+        }},
+        {"conv2d_backward_weight", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 2) throw std::invalid_argument("conv2d_backward_weight requires 2 inputs (grad_output, input)");
+            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            std::vector<int64_t> weight_shape = attrs.get_int_list(AttrKey::WeightShape);
+            return std::vector<Tensor>{b->dispatchConv2dBackwardWeight(inputs[0], inputs[1], stride, padding, dilation, weight_shape)};
+        }},
+        {"conv2d_backward_bias", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument("conv2d_backward_bias requires 1 input (grad_output)");
+            return std::vector<Tensor>{b->dispatchConv2dBackwardBias(inputs[0])};
+        }},
+        {"conv2d_backward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 3) throw std::invalid_argument("conv2d_backward operation requires exactly 3 inputs (grad_output, input, weight)");
+            const Tensor& grad_output = inputs[0];
+            const Tensor& input = inputs[1];
+            const Tensor& weight = inputs[2];
+            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+            bool compute_grad_input = attrs.get_bool(AttrKey::ComputeGradInput, true);
+            bool compute_grad_weight = attrs.get_bool(AttrKey::ComputeGradWeight, true);
+            bool compute_grad_bias = attrs.get_bool(AttrKey::ComputeGradBias, false);
+            std::vector<int64_t> input_shape(input.shape().begin(), input.shape().end());
+            std::vector<int64_t> weight_shape(weight.shape().begin(), weight.shape().end());
+            std::vector<Tensor> results;
+            if (compute_grad_input) results.push_back(b->dispatchConv2dBackwardInput(grad_output, weight, stride, padding, dilation, input_shape, groups));
+            if (compute_grad_weight) results.push_back(b->dispatchConv2dBackwardWeight(grad_output, input, stride, padding, dilation, weight_shape, groups));
+            if (compute_grad_bias) results.push_back(b->dispatchConv2dBackwardBias(grad_output));
+            return results;
+        }},
+
+        // ==================================================================
+        // Reduction operations
+        // ==================================================================
+        {"sum", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument(op + " requires 1 input");
+            int64_t dim = attrs.has(AttrKey::Dim) ? attrs.get_int(AttrKey::Dim) : INT64_MIN;
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return std::vector<Tensor>{b->dispatchReduction(op, inputs[0], dim, keepdim)};
+        }},
+        {"mean", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument(op + " requires 1 input");
+            int64_t dim = attrs.has(AttrKey::Dim) ? attrs.get_int(AttrKey::Dim) : INT64_MIN;
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return std::vector<Tensor>{b->dispatchReduction(op, inputs[0], dim, keepdim)};
+        }},
+        {"max", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument(op + " requires 1 input");
+            int64_t dim = attrs.has(AttrKey::Dim) ? attrs.get_int(AttrKey::Dim) : INT64_MIN;
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return std::vector<Tensor>{b->dispatchReduction(op, inputs[0], dim, keepdim)};
+        }},
+        {"min", [](VulkanBackend* b, const std::string& op, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument(op + " requires 1 input");
+            int64_t dim = attrs.has(AttrKey::Dim) ? attrs.get_int(AttrKey::Dim) : INT64_MIN;
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return std::vector<Tensor>{b->dispatchReduction(op, inputs[0], dim, keepdim)};
+        }},
+
+        // ==================================================================
+        // Matrix operations
+        // ==================================================================
+        {"matmul", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 2) throw std::invalid_argument("matmul requires 2 inputs");
+            return std::vector<Tensor>{b->dispatchMatmul(inputs[0], inputs[1])};
+        }},
+        {"bmm", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 2) throw std::invalid_argument("bmm requires 2 inputs");
+            return std::vector<Tensor>{b->dispatchBmm(inputs[0], inputs[1])};
+        }},
+        {"dot", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 2) throw std::invalid_argument("dot requires 2 inputs");
+            return std::vector<Tensor>{b->dispatchDot(inputs[0], inputs[1])};
+        }},
+    };
+    return table;
+}
+
+// Helper for pooling attr parsing
+static void parse_pool_attrs(const OpAttributes& attrs,
+    int64_t& kernel_h, int64_t& kernel_w,
+    int64_t& stride_h, int64_t& stride_w,
+    int64_t& padding_h, int64_t& padding_w) {
+    kernel_h = 2; kernel_w = 2;
+    if (attrs.has(AttrKey::KernelSizeH)) {
+        kernel_h = attrs.get_int(AttrKey::KernelSizeH);
+        kernel_w = attrs.has(AttrKey::KernelSizeW) ? attrs.get_int(AttrKey::KernelSizeW) : kernel_h;
+    } else if (attrs.has(AttrKey::KernelSize)) {
+        kernel_h = kernel_w = attrs.get_int(AttrKey::KernelSize);
+    }
+    stride_h = kernel_h; stride_w = kernel_w;
+    if (attrs.has(AttrKey::StrideH)) {
+        stride_h = attrs.get_int(AttrKey::StrideH);
+        stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : stride_h;
+    } else if (attrs.has(AttrKey::Stride)) {
+        stride_h = stride_w = attrs.get_int(AttrKey::Stride);
+    }
+    padding_h = 0; padding_w = 0;
+    if (attrs.has(AttrKey::PaddingH)) {
+        padding_h = attrs.get_int(AttrKey::PaddingH);
+        padding_w = attrs.has(AttrKey::PaddingW) ? attrs.get_int(AttrKey::PaddingW) : padding_h;
+    } else if (attrs.has(AttrKey::Padding)) {
+        padding_h = padding_w = attrs.get_int(AttrKey::Padding);
+    }
+}
+
+// Helper to parse dtype from string attribute
+static DType parse_dtype_attr(const OpAttributes& attrs, DType default_val = DType::Float32) {
+    if (!attrs.has(AttrKey::Dtype)) return default_val;
+    auto s = attrs.get_string(AttrKey::Dtype);
+    if (s == "float32" || s == "Float32") return DType::Float32;
+    if (s == "float64" || s == "Float64") return DType::Float64;
+    if (s == "float16" || s == "Float16") return DType::Float16;
+    if (s == "bfloat16" || s == "BFloat16") return DType::BFloat16;
+    if (s == "int32" || s == "Int32") return DType::Int32;
+    if (s == "int64" || s == "Int64") return DType::Int64;
+    if (s == "int8" || s == "Int8") return DType::Int8;
+    if (s == "int16" || s == "Int16") return DType::Int16;
+    if (s == "uint8" || s == "UInt8") return DType::UInt8;
+    if (s == "uint16" || s == "Uint16") return DType::UInt16;
+    if (s == "uint32" || s == "UInt32") return DType::UInt32;
+    if (s == "uint64" || s == "UInt64") return DType::UInt64;
+    if (s == "bool" || s == "Bool") return DType::Bool;
+    if (s == "complex64" || s == "Complex64") return DType::Complex64;
+    if (s == "complex128" || s == "Complex128") return DType::Complex128;
+    return default_val;
+}
+
+// Second dispatch table for remaining operations
+static const std::unordered_map<std::string, VkDispatchHandler>& get_dispatch_table_2() {
+    static const std::unordered_map<std::string, VkDispatchHandler> table = {
+        // ==================================================================
+        // Pooling operations
+        // ==================================================================
+        {"max_pool2d", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            int64_t kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w;
+            parse_pool_attrs(attrs, kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w);
+            // Float16/Float64: use typed shader via dispatchMaxPool2dForward
+            if (inputs[0].dtype() == DType::Float16 || inputs[0].dtype() == DType::Float64) {
+                OpAttributes pool_attrs;
+                pool_attrs.set(AttrKey::KernelSizeH, kernel_h);
+                pool_attrs.set(AttrKey::KernelSizeW, kernel_w);
+                pool_attrs.set(AttrKey::StrideH, stride_h);
+                pool_attrs.set(AttrKey::StrideW, stride_w);
+                pool_attrs.set(AttrKey::PaddingH, padding_h);
+                pool_attrs.set(AttrKey::PaddingW, padding_w);
+                Tensor output = b->dispatchMaxPool2dForward(inputs[0], pool_attrs);
+                std::vector<int64_t> out_shape_vec(output.shape().begin(), output.shape().end());
+                Tensor pool_indices(out_shape_vec, DType::Int32, inputs[0].device());
+                pool_indices = b->dispatchFill(pool_indices, 0.0f);
+                return std::vector<Tensor>{output, pool_indices};
+            }
+            auto [output, indices] = b->dispatchMaxPool2d(inputs[0], kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w);
+            return std::vector<Tensor>{output, indices};
+        }},
+        {"avg_pool2d", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            int64_t kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w;
+            parse_pool_attrs(attrs, kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w);
+            return std::vector<Tensor>{b->dispatchAvgPool2d(inputs[0], kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w)};
+        }},
+        {"adaptive_max_pool2d", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            int64_t out_h = attrs.has(AttrKey::OutputHeight) ? attrs.get_int(AttrKey::OutputHeight) : attrs.get_int(AttrKey::OutputSizeH);
+            int64_t out_w = attrs.has(AttrKey::OutputWidth) ? attrs.get_int(AttrKey::OutputWidth) : attrs.get_int(AttrKey::OutputSizeW);
+            auto [output, indices] = b->dispatchAdaptiveMaxPool2d(inputs[0], out_h, out_w);
+            return std::vector<Tensor>{output, indices};
+        }},
+        {"adaptive_avg_pool2d", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            int64_t out_h = attrs.has(AttrKey::OutputHeight) ? attrs.get_int(AttrKey::OutputHeight) : attrs.get_int(AttrKey::OutputSizeH);
+            int64_t out_w = attrs.has(AttrKey::OutputWidth) ? attrs.get_int(AttrKey::OutputWidth) : attrs.get_int(AttrKey::OutputSizeW);
+            return std::vector<Tensor>{b->dispatchAdaptiveAvgPool2d(inputs[0], out_h, out_w)};
+        }},
+        {"adaptive_avg_pool2d_backward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument("adaptive_avg_pool2d_backward requires exactly 1 input (grad_output)");
+            int64_t H_in = attrs.get_int(AttrKey::InputH, 0);
+            int64_t W_in = attrs.get_int(AttrKey::InputW, 0);
+            return std::vector<Tensor>{b->dispatchAdaptiveAvgPool2dBackward(inputs[0], H_in, W_in)};
+        }},
+
+        // ==================================================================
+        // Normalization
+        // ==================================================================
+        {"softmax", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            return std::vector<Tensor>{b->dispatchSoftmax(inputs[0], dim)};
+        }},
+        {"log_softmax", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            return std::vector<Tensor>{b->dispatchLogSoftmax(inputs[0], dim)};
+        }},
+
+        // ==================================================================
+        // Advanced reductions
+        // ==================================================================
+        {"argmax", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return std::vector<Tensor>{b->dispatchArgmax(inputs[0], dim, keepdim)};
+        }},
+        {"argmin", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return std::vector<Tensor>{b->dispatchArgmin(inputs[0], dim, keepdim)};
+        }},
+        {"argsort", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool descending = attrs.get_bool(AttrKey::Descending, false);
+            return std::vector<Tensor>{b->dispatchArgSort(inputs[0], dim, descending)};
+        }},
+        {"var", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool unbiased = attrs.get_bool(AttrKey::Unbiased, true);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return std::vector<Tensor>{b->dispatchVariance(inputs[0], dim, unbiased, keepdim)};
+        }},
+        {"variance", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool unbiased = attrs.get_bool(AttrKey::Unbiased, true);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return std::vector<Tensor>{b->dispatchVariance(inputs[0], dim, unbiased, keepdim)};
+        }},
+        {"std", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool unbiased = attrs.get_bool(AttrKey::Unbiased, true);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return std::vector<Tensor>{b->dispatchStd(inputs[0], dim, unbiased, keepdim)};
+        }},
+        {"prod", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return std::vector<Tensor>{b->dispatchProd(inputs[0], dim, keepdim)};
+        }},
+        {"norm", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            float p = static_cast<float>(attrs.get_float(AttrKey::P, 2.0));
+            int64_t dim = attrs.has(AttrKey::Dim) ? attrs.get_int(AttrKey::Dim) : INT64_MIN;
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return std::vector<Tensor>{b->dispatchNorm(inputs[0], p, dim, keepdim)};
+        }},
+
+        // ==================================================================
+        // Indexing operations
+        // ==================================================================
+        {"embedding", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            int64_t padding_idx = attrs.get_int(AttrKey::PaddingIdx, -1);
+            return std::vector<Tensor>{b->dispatchEmbedding(inputs[0], inputs[1], padding_idx)};
+        }},
+        {"gather", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            int64_t dim = attrs.get_int(AttrKey::Dim);
+            return std::vector<Tensor>{b->dispatchGather(inputs[0], dim, inputs[1])};
+        }},
+        {"scatter", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            int64_t dim = attrs.get_int(AttrKey::Dim);
+            int64_t reduction = attrs.get_int(AttrKey::Reduction, 0);
+            return std::vector<Tensor>{b->dispatchScatter(inputs[0], dim, inputs[1], inputs[2], reduction)};
+        }},
+        {"index_select", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            int64_t dim = attrs.get_int(AttrKey::Dim);
+            return std::vector<Tensor>{b->dispatchIndexSelect(inputs[0], dim, inputs[1])};
+        }},
+        {"gather_relative_position_bias", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 2) throw std::invalid_argument("gather_relative_position_bias operation requires exactly 2 inputs");
+            int64_t num_positions = attrs.get_int(AttrKey::NumPositions, 0);
+            int64_t num_heads = attrs.get_int(AttrKey::NumHeads, 0);
+            return std::vector<Tensor>{b->dispatchGatherRelativePositionBias(inputs[0], inputs[1], num_positions, num_heads)};
+        }},
+
+        // ==================================================================
+        // Shape operations
+        // ==================================================================
+        {"reshape", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument("reshape requires 1 input");
+            if (!attrs.has(AttrKey::Shape)) throw std::invalid_argument("reshape requires 'shape' attribute");
+            std::vector<int64_t> new_shape = attrs.get_int_list(AttrKey::Shape);
+            return std::vector<Tensor>{b->dispatchReshape(inputs[0], new_shape)};
+        }},
+        {"transpose", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument("transpose requires 1 input");
+            int64_t dim0 = attrs.get_int(AttrKey::Dim0);
+            int64_t dim1 = attrs.get_int(AttrKey::Dim1);
+            return std::vector<Tensor>{b->dispatchTranspose(inputs[0], dim0, dim1)};
+        }},
+        {"permute", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument("permute requires 1 input");
+            std::vector<int64_t> dims = attrs.get_int_list(AttrKey::Dims);
+            return std::vector<Tensor>{b->dispatchPermute(inputs[0], dims)};
+        }},
+        {"squeeze", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument("squeeze requires 1 input");
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            return std::vector<Tensor>{b->dispatchSqueeze(inputs[0], dim)};
+        }},
+        {"unsqueeze", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument("unsqueeze requires 1 input");
+            int64_t dim = attrs.get_int(AttrKey::Dim);
+            return std::vector<Tensor>{b->dispatchUnsqueeze(inputs[0], dim)};
+        }},
+        {"contiguous", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument("contiguous requires 1 input");
+            return std::vector<Tensor>{b->dispatchContiguous(inputs[0])};
+        }},
+
+        // ==================================================================
+        // Memory / creation operations
+        // ==================================================================
+        {"zeros", [](VulkanBackend* b, const std::string&, std::span<const Tensor>, const OpAttributes& attrs) {
+            std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
+            DType dtype = parse_dtype_attr(attrs);
+            int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
+            Device device = Device::vulkan(device_id);
+            return std::vector<Tensor>{b->dispatchZeros(shape, dtype, device)};
+        }},
+        {"fill", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument("fill requires 1 input");
+            float value = static_cast<float>(attrs.get_float(AttrKey::Value));
+            return std::vector<Tensor>{b->dispatchFill(inputs[0], value)};
+        }},
+        {"clone", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument("clone requires 1 input");
+            return std::vector<Tensor>{b->dispatchClone(inputs[0])};
+        }},
+        {"im2col", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument("im2col requires 1 input");
+            return std::vector<Tensor>{b->dispatchIm2Col(inputs[0], attrs)};
+        }},
+        {"unfold", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument("im2col requires 1 input");
+            return std::vector<Tensor>{b->dispatchIm2Col(inputs[0], attrs)};
+        }},
+        {"col2im", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument("col2im requires 1 input");
+            return std::vector<Tensor>{b->dispatchCol2Im(inputs[0], attrs)};
+        }},
+        {"fold", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument("col2im requires 1 input");
+            return std::vector<Tensor>{b->dispatchCol2Im(inputs[0], attrs)};
+        }},
+        {"expand", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument("expand requires 1 input");
+            std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
+            return std::vector<Tensor>{b->dispatchExpand(inputs[0], shape)};
+        }},
+        {"cat", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() < 2) throw std::invalid_argument("cat requires at least 2 inputs");
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            std::vector<Tensor> input_tensors(inputs.begin(), inputs.end());
+            return std::vector<Tensor>{b->dispatchCat(input_tensors, dim)};
+        }},
+        {"concatenate", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() < 2) throw std::invalid_argument("cat requires at least 2 inputs");
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            std::vector<Tensor> input_tensors(inputs.begin(), inputs.end());
+            return std::vector<Tensor>{b->dispatchCat(input_tensors, dim)};
+        }},
+        {"clamp", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument("clamp requires 1 input");
+            float min_value = static_cast<float>(attrs.get_float(AttrKey::Min, -std::numeric_limits<double>::infinity()));
+            float max_value = static_cast<float>(attrs.get_float(AttrKey::Max, std::numeric_limits<double>::infinity()));
+            return std::vector<Tensor>{b->dispatchClamp(inputs[0], min_value, max_value)};
+        }},
+        {"clamp_min", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument("clamp_min requires 1 input");
+            float min_value = static_cast<float>(attrs.get_float(AttrKey::Min, -std::numeric_limits<double>::infinity()));
+            return std::vector<Tensor>{b->dispatchClamp(inputs[0], min_value, std::numeric_limits<float>::infinity())};
+        }},
+        {"clamp_max", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument("clamp_max requires 1 input");
+            float max_value = static_cast<float>(attrs.get_float(AttrKey::Max, std::numeric_limits<double>::infinity()));
+            return std::vector<Tensor>{b->dispatchClamp(inputs[0], -std::numeric_limits<float>::infinity(), max_value)};
+        }},
+        {"masked_select", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 2) throw std::invalid_argument("masked_select operation requires exactly 2 inputs");
+            return std::vector<Tensor>{b->dispatchMaskedSelect(inputs[0], inputs[1])};
+        }},
+        {"masked_fill", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 2) throw std::invalid_argument("masked_fill operation requires exactly 2 inputs");
+            if (!attrs.has(AttrKey::Value)) throw std::invalid_argument("masked_fill operation requires 'value' attribute");
+            float value = static_cast<float>(attrs.get_float(AttrKey::Value));
+            return std::vector<Tensor>{b->dispatchMaskedFill(inputs[0], inputs[1], value)};
+        }},
+        {"where", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 3) throw std::invalid_argument("where operation requires exactly 3 inputs");
+            return std::vector<Tensor>{b->dispatchWhere(inputs[0], inputs[1], inputs[2])};
+        }},
+        {"repeat", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument("repeat operation requires exactly 1 input");
+            if (!attrs.has(AttrKey::Repeats)) throw std::invalid_argument("repeat operation requires 'repeats' attribute");
+            std::vector<int64_t> repeats = attrs.get_int_list(AttrKey::Repeats);
+            return std::vector<Tensor>{b->dispatchRepeat(inputs[0], repeats)};
+        }},
+        {"interpolate", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument("interpolate requires 1 input");
+            return std::vector<Tensor>{b->dispatchInterpolate(inputs[0], attrs)};
+        }},
+        {"roi_align_forward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() < 2) throw std::invalid_argument("roi_align_forward requires 2 inputs (features, rois)");
+            return std::vector<Tensor>{b->dispatchROIAlignForward(inputs[0], inputs[1], attrs)};
+        }},
+        {"roi_align_backward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() < 2) throw std::invalid_argument("roi_align_backward requires 2 inputs (grad_output, rois)");
+            return std::vector<Tensor>{b->dispatchROIAlignBackward(inputs[0], inputs[1], attrs)};
+        }},
+        {"nonzero", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() < 1) throw std::invalid_argument("nonzero requires 1 input");
+            return std::vector<Tensor>{b->dispatchNonzero(inputs[0])};
+        }},
+        {"one_hot", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() < 1) throw std::invalid_argument("one_hot requires 1 input (indices)");
+            int64_t num_classes = attrs.get_int(AttrKey::NumClasses, 10);
+            return std::vector<Tensor>{b->dispatchOneHot(inputs[0], num_classes)};
+        }},
+        {"box_iou", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() < 2) throw std::invalid_argument("box_iou requires 2 inputs (boxes1, boxes2)");
+            int64_t iou_type = attrs.get_int(AttrKey::IouType, 0);
+            return std::vector<Tensor>{b->dispatchBoxIoU(inputs[0], inputs[1], iou_type)};
+        }},
+    };
+    return table;
+}
+
+// Third dispatch table for BatchNorm, LayerNorm, GroupNorm, Embedding backward,
+// RMSNorm, Conv2d forward, creation ops, fused ops, and fused optimizers
+static const std::unordered_map<std::string, VkDispatchHandler>& get_dispatch_table_3() {
+    static const std::unordered_map<std::string, VkDispatchHandler> table = {
+        // ==================================================================
+        // BatchNorm2d operations
+        // ==================================================================
+        {"batchnorm2d_forward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() < 3) throw std::invalid_argument("batchnorm2d_forward requires at least 3 inputs (input, mean, var)");
+            const Tensor* gamma = (inputs.size() > 3) ? &inputs[3] : nullptr;
+            const Tensor* beta = (inputs.size() > 4) ? &inputs[4] : nullptr;
+            float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+            return std::vector<Tensor>{b->dispatchBatchNorm2dForward(inputs[0], inputs[1], inputs[2], gamma, beta, epsilon)};
+        }},
+        {"batchnorm2d_forward_affine", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() < 5) throw std::invalid_argument("batchnorm2d_forward_affine requires 5 inputs (input, mean, var, weight, bias)");
+            float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+            return std::vector<Tensor>{b->dispatchBatchNorm2dForward(inputs[0], inputs[1], inputs[2], &inputs[3], &inputs[4], epsilon)};
+        }},
+        {"batchnorm2d_backward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() < 5) throw std::invalid_argument("batchnorm2d_backward requires 5 inputs (grad_output, input, weight, mean, invstd)");
+            const Tensor* gamma = &inputs[2];
+            float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+            auto [grad_input, grad_gamma, grad_beta] = b->dispatchBatchNorm2dBackward(inputs[0], inputs[1], inputs[3], inputs[4], gamma, epsilon);
+            return std::vector<Tensor>{grad_input, grad_gamma, grad_beta};
+        }},
+        {"batchnorm2d_mean_var", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument("batchnorm2d_mean_var requires 1 input");
+            auto [mean, variance] = b->dispatchBatchNorm2dMeanVar(inputs[0]);
+            return std::vector<Tensor>{mean, variance};
+        }},
+
+        // ==================================================================
+        // Pooling operations (new OpAttributes versions)
+        // ==================================================================
+        {"avg_pool2d_forward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument("avg_pool2d_forward requires 1 input");
+            return std::vector<Tensor>{b->dispatchAvgPool2dForward(inputs[0], attrs)};
+        }},
+        {"max_pool2d_forward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 1) throw std::invalid_argument("max_pool2d_forward requires 1 input");
+            return std::vector<Tensor>{b->dispatchMaxPool2dForward(inputs[0], attrs)};
+        }},
+        {"avg_pool2d_backward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() >= 2) {
+                return std::vector<Tensor>{b->dispatchAvgPool2dBackward(inputs[0], inputs[1], attrs)};
+            }
+            if (inputs.size() == 1) {
+                OpAttributes bwd_attrs;
+                int64_t in_n = 0, in_c = 0, in_h = 0, in_w = 0;
+                if (attrs.has(AttrKey::InputShape)) {
+                    auto dims = attrs.get_int_list(AttrKey::InputShape);
+                    if (dims.size() >= 4) { in_n = dims[0]; in_c = dims[1]; in_h = dims[2]; in_w = dims[3]; }
+                }
+                int64_t kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w;
+                if (attrs.has(AttrKey::KernelSizeH)) {
+                    kernel_h = attrs.get_int(AttrKey::KernelSizeH);
+                    kernel_w = attrs.has(AttrKey::KernelSizeW) ? attrs.get_int(AttrKey::KernelSizeW) : kernel_h;
+                } else {
+                    kernel_h = kernel_w = attrs.get_int(AttrKey::KernelSize);
+                }
+                if (attrs.has(AttrKey::StrideH)) {
+                    stride_h = attrs.get_int(AttrKey::StrideH);
+                    stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : stride_h;
+                } else if (attrs.has(AttrKey::Stride)) {
+                    stride_h = stride_w = attrs.get_int(AttrKey::Stride);
+                } else {
+                    stride_h = kernel_h; stride_w = kernel_w;
+                }
+                if (attrs.has(AttrKey::PaddingH)) {
+                    padding_h = attrs.get_int(AttrKey::PaddingH);
+                    padding_w = attrs.has(AttrKey::PaddingW) ? attrs.get_int(AttrKey::PaddingW) : padding_h;
+                } else if (attrs.has(AttrKey::Padding)) {
+                    padding_h = padding_w = attrs.get_int(AttrKey::Padding);
+                } else {
+                    padding_h = padding_w = 0;
+                }
+                bwd_attrs.set(AttrKey::KernelSizeH, kernel_h);
+                bwd_attrs.set(AttrKey::KernelSizeW, kernel_w);
+                bwd_attrs.set(AttrKey::StrideH, stride_h);
+                bwd_attrs.set(AttrKey::StrideW, stride_w);
+                bwd_attrs.set(AttrKey::PaddingH, padding_h);
+                bwd_attrs.set(AttrKey::PaddingW, padding_w);
+                bwd_attrs.set(AttrKey::CountIncludePad, true);
+                Tensor dummy_input({in_n, in_c, in_h, in_w}, inputs[0].dtype(), inputs[0].device());
+                return std::vector<Tensor>{b->dispatchAvgPool2dBackward(inputs[0], dummy_input, bwd_attrs)};
+            }
+            throw std::invalid_argument("avg_pool2d_backward requires at least 1 input");
+        }},
+        {"max_pool2d_backward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() != 2) throw std::invalid_argument("max_pool2d_backward requires 2 inputs (grad_output, indices)");
+            int64_t H_in = attrs.get_int(AttrKey::InputH);
+            int64_t W_in = attrs.get_int(AttrKey::InputW);
+            return std::vector<Tensor>{b->dispatchMaxPool2dBackwardWithIndices(inputs[0], inputs[1], H_in, W_in)};
+        }},
+
+        // ==================================================================
+        // Conv2d forward / ConvTranspose2d forward
+        // ==================================================================
+        {"conv2d_forward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() < 2) throw std::invalid_argument("conv2d_forward requires at least 2 inputs (input, weight)");
+            const Tensor* bias_ptr = inputs.size() >= 3 ? &inputs[2] : nullptr;
+            return std::vector<Tensor>{b->dispatchConv2dForward(inputs[0], inputs[1], bias_ptr, attrs)};
+        }},
+        {"conv_transpose2d_forward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() < 2) throw std::invalid_argument("conv_transpose2d_forward requires at least 2 inputs (input, weight)");
+            if (inputs[0].dtype() != DType::Float32 && inputs[0].dtype() != DType::Float64 && inputs[0].dtype() != DType::Float16) {
+                TENZOR_LOG_WARNING(std::format("Vulkan: No shader for conv_transpose2d_forward with dtype {}; falling back to CPU",
+                                               dtype_name(inputs[0].dtype())));
+                Device original_device = inputs[0].device();
+                std::vector<Tensor> cpu_inputs;
+                cpu_inputs.reserve(inputs.size());
+                for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
+                auto cpu_results = tenzor::dispatch(OpId::ConvTranspose2dForward, cpu_inputs, attrs);
+                return std::vector<Tensor>{cpu_results[0].to(original_device)};
+            }
+            const Tensor* bias_ptr = (inputs.size() >= 3) ? &inputs[2] : nullptr;
+            return std::vector<Tensor>{b->dispatchConvTranspose2dForward(inputs[0], inputs[1], bias_ptr, attrs)};
+        }},
+
+        // ==================================================================
+        // Creation operations
+        // ==================================================================
+        {"full", [](VulkanBackend* b, const std::string&, std::span<const Tensor>, const OpAttributes& attrs) {
+            std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
+            float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
+            DType dtype = parse_dtype_attr(attrs);
+            return std::vector<Tensor>{b->dispatchFull(shape, value, dtype)};
+        }},
+        {"ones", [](VulkanBackend* b, const std::string&, std::span<const Tensor>, const OpAttributes& attrs) {
+            std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
+            DType dtype = parse_dtype_attr(attrs);
+            return std::vector<Tensor>{b->dispatchOnes(shape, dtype)};
+        }},
+        {"rand", [](VulkanBackend* b, const std::string&, std::span<const Tensor>, const OpAttributes& attrs) {
+            std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
+            DType dtype = parse_dtype_attr(attrs);
+            return std::vector<Tensor>{b->dispatchRand(shape, dtype)};
+        }},
+        {"randn", [](VulkanBackend* b, const std::string&, std::span<const Tensor>, const OpAttributes& attrs) {
+            std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
+            DType dtype = parse_dtype_attr(attrs);
+            return std::vector<Tensor>{b->dispatchRandn(shape, dtype)};
+        }},
+        {"arange", [](VulkanBackend* b, const std::string&, std::span<const Tensor>, const OpAttributes& attrs) {
+            float start = static_cast<float>(attrs.get_float(AttrKey::Start, 0.0));
+            float end_val = static_cast<float>(attrs.get_float(AttrKey::End, 0.0));
+            float step = static_cast<float>(attrs.get_float(AttrKey::Step, 1.0));
+            DType dtype = parse_dtype_attr(attrs);
+            int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
+            Device device = Device::vulkan(device_id);
+            return std::vector<Tensor>{b->dispatchArange(start, end_val, step, dtype, device)};
+        }},
+        {"linspace", [](VulkanBackend* b, const std::string&, std::span<const Tensor>, const OpAttributes& attrs) {
+            float start = static_cast<float>(attrs.get_float(AttrKey::Start, 0.0));
+            float end_val = static_cast<float>(attrs.get_float(AttrKey::End, 1.0));
+            int64_t steps = attrs.get_int(AttrKey::Steps, 100);
+            DType dtype = parse_dtype_attr(attrs);
+            int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
+            Device device = Device::vulkan(device_id);
+            return std::vector<Tensor>{b->dispatchLinspace(start, end_val, steps, dtype, device)};
+        }},
+        {"eye", [](VulkanBackend* b, const std::string&, std::span<const Tensor>, const OpAttributes& attrs) {
+            int64_t n = attrs.get_int(AttrKey::N, 0);
+            int64_t m = attrs.get_int(AttrKey::M, -1);
+            DType dtype = parse_dtype_attr(attrs);
+            int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
+            Device device = Device::vulkan(device_id);
+            return std::vector<Tensor>{b->dispatchEye(n, m, dtype, device)};
+        }},
+
+        // ==================================================================
+        // LayerNorm / GroupNorm / RMSNorm / Embedding backward
+        // ==================================================================
+        {"layer_norm", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() < 1) throw std::invalid_argument("layer_norm requires at least 1 input");
+            int64_t normalized_size = 1;
+            if (attrs.has(AttrKey::NormalizedShape)) {
+                auto ns_str = attrs.get_string(AttrKey::NormalizedShape);
+                std::string ns_s{ns_str};
+                std::stringstream ss(ns_s);
+                std::string token;
+                while (std::getline(ss, token, ',')) normalized_size *= std::stoll(token);
+            } else {
+                normalized_size = inputs[0].shape().back();
+            }
+            float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+            const Tensor* gamma = (inputs.size() > 1) ? &inputs[1] : nullptr;
+            const Tensor* beta = (inputs.size() > 2) ? &inputs[2] : nullptr;
+            return std::vector<Tensor>{b->dispatchLayerNorm(inputs[0], normalized_size, gamma, beta, eps)};
+        }},
+        {"layer_norm_backward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() < 5) throw std::invalid_argument("layer_norm_backward requires 5 inputs (grad_output, input, mean, rstd, weight)");
+            int64_t normalized_shape = inputs[0].shape().back();
+            if (attrs.has(AttrKey::NormalizedShape)) normalized_shape = attrs.get_int(AttrKey::NormalizedShape);
+            auto [grad_input, grad_weight, grad_bias] = b->dispatchLayerNormBackward(inputs[0], inputs[1], inputs[2], inputs[3], &inputs[4], normalized_shape);
+            return std::vector<Tensor>{grad_input, grad_weight, grad_bias};
+        }},
+        {"group_norm", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() < 1) throw std::invalid_argument("group_norm requires at least 1 input");
+            int64_t num_groups = attrs.get_int(AttrKey::NumGroups, 1);
+            float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+            const Tensor* gamma = (inputs.size() > 1) ? &inputs[1] : nullptr;
+            const Tensor* beta = (inputs.size() > 2) ? &inputs[2] : nullptr;
+            return b->dispatchGroupNorm(inputs[0], num_groups, gamma, beta, eps);
+        }},
+        {"group_norm_backward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() < 5) throw std::invalid_argument("group_norm_backward requires 5 inputs (grad_output, input, mean, rstd, weight)");
+            int64_t num_groups = attrs.get_int(AttrKey::NumGroups, 1);
+            auto [grad_input, grad_weight, grad_bias] = b->dispatchGroupNormBackward(inputs[0], inputs[1], inputs[2], inputs[3], &inputs[4], num_groups);
+            return std::vector<Tensor>{grad_input, grad_weight, grad_bias};
+        }},
+        {"embedding_backward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() < 2) throw std::invalid_argument("embedding_backward requires 2 inputs (grad_output, indices)");
+            int64_t num_embeddings = attrs.get_int(AttrKey::NumEmbeddings, 0);
+            int64_t embedding_dim = inputs[0].shape().back();
+            return std::vector<Tensor>{b->dispatchEmbeddingBackward(inputs[0], inputs[1], num_embeddings, embedding_dim)};
+        }},
+        {"fused_rms_norm", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() < 2) throw std::invalid_argument("fused_rms_norm requires 2 inputs (input, weight)");
+            float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+            int64_t normalized_shape = inputs[0].shape().back();
+            auto [output, rrms] = b->dispatchRMSNorm(inputs[0], inputs[1], normalized_shape, eps);
+            return std::vector<Tensor>{output, rrms};
+        }},
+        {"rms_norm_backward", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() < 4) throw std::invalid_argument("rms_norm_backward requires 4 inputs (grad_output, input, rrms, weight)");
+            int64_t normalized_shape = inputs[0].shape().back();
+            if (attrs.has(AttrKey::NormalizedShape)) normalized_shape = attrs.get_int(AttrKey::NormalizedShape);
+            auto [grad_input, grad_weight] = b->dispatchRMSNormBackward(inputs[0], inputs[1], inputs[2], inputs[3], normalized_shape);
+            return std::vector<Tensor>{grad_input, grad_weight};
+        }},
+
+        // ==================================================================
+        // Fused operations
+        // ==================================================================
+        {"fused_linear_relu", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() < 2) throw std::invalid_argument("fused_linear_relu requires at least 2 inputs (input, weight)");
+            bool has_bias = attrs.get_bool(AttrKey::HasBias, false);
+            auto input_shape = inputs[0].shape();
+            int64_t in_features = input_shape[input_shape.size() - 1];
+            int64_t out_features = inputs[1].shape()[0];
+            int64_t batch_size = 1;
+            for (size_t i = 0; i < input_shape.size() - 1; ++i) batch_size *= input_shape[i];
+            Tensor input_2d = inputs[0].reshape({batch_size, in_features});
+            Tensor weight_t = inputs[1].transpose(0, 1);
+            Tensor mm_result = b->dispatchMatmul(input_2d, weight_t);
+            if (has_bias && inputs.size() > 2) mm_result = b->dispatchBinaryOp("add", mm_result, inputs[2]);
+            Tensor result = b->dispatchActivation("relu", mm_result, 0, 0.0f);
+            std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end() - 1);
+            out_shape.push_back(out_features);
+            result = result.reshape(out_shape);
+            return std::vector<Tensor>{result};
+        }},
+        {"fused_batchnorm_relu", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() < 5) throw std::invalid_argument("fused_batchnorm_relu requires 5 inputs (input, mean, var, weight, bias)");
+            float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+            auto orig_shape = inputs[0].shape();
+            Tensor input_4d = inputs[0];
+            bool needs_reshape = (orig_shape.size() != 4);
+            if (needs_reshape) {
+                int64_t N = orig_shape[0]; int64_t C = orig_shape[1]; int64_t spatial = 1;
+                for (size_t i = 2; i < orig_shape.size(); ++i) spatial *= orig_shape[i];
+                input_4d = inputs[0].reshape({N, C, spatial, 1});
+            }
+            Tensor bn_result = b->dispatchBatchNorm2dForward(input_4d, inputs[1], inputs[2], &inputs[3], &inputs[4], eps);
+            if (needs_reshape) {
+                std::vector<int64_t> shape_vec(orig_shape.begin(), orig_shape.end());
+                bn_result = bn_result.reshape(shape_vec);
+            }
+            Tensor result = b->dispatchActivation("relu", bn_result, 0, 0.0f);
+            return std::vector<Tensor>{result};
+        }},
+        {"fused_add_relu", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 2) throw std::invalid_argument("fused_add_relu requires 2 inputs");
+            Tensor add_result = b->dispatchBinaryOp("add", inputs[0], inputs[1]);
+            return std::vector<Tensor>{b->dispatchActivation("relu", add_result, 0, 0.0f)};
+        }},
+        {"fused_gelu", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes&) {
+            if (inputs.size() != 1) throw std::invalid_argument("fused_gelu requires 1 input");
+            return std::vector<Tensor>{b->dispatchActivation("gelu", inputs[0], 3, 0.0f)};
+        }},
+        {"fused_layer_norm", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            if (inputs.size() < 3) throw std::invalid_argument("fused_layer_norm requires 3 inputs (input, weight, bias)");
+            auto ns_str = attrs.get_string(AttrKey::NormalizedShape);
+            int64_t normalized_size = 1;
+            std::string ns_s{ns_str};
+            std::stringstream ss(ns_s);
+            std::string token;
+            while (std::getline(ss, token, ',')) normalized_size *= std::stoll(token);
+            float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+            Tensor result = b->dispatchLayerNorm(inputs[0], normalized_size, &inputs[1], &inputs[2], eps);
+            return std::vector<Tensor>{result};
+        }},
+    };
+    return table;
+}
 
 auto VulkanBackend::dispatch(const std::string& op_name,
                             std::span<const Tensor> inputs,
@@ -314,751 +1388,33 @@ auto VulkanBackend::dispatch(const std::string& op_name,
     }
 
     try {
-    // Binary operations
-    if (op_name == "add" || op_name == "sub" || op_name == "mul" || op_name == "div") {
-        if (inputs.size() != 2) {
-            throw std::invalid_argument(op_name + " requires 2 inputs");
-        }
-        return {dispatchBinaryOp(op_name, inputs[0], inputs[1])};
-    }
-
-    // In-place operations (modify first tensor in-place)
-    if (op_name == "add_inplace" || op_name == "sub_inplace" ||
-        op_name == "mul_inplace" || op_name == "div_inplace") {
-        if (inputs.size() != 2) {
-            throw std::invalid_argument(op_name + " requires 2 inputs");
-        }
-        // Extract the base operation name (remove "_inplace" suffix)
-        std::string base_op = op_name.substr(0, op_name.find("_inplace"));
-
-        // Perform the operation and copy result back to first tensor's buffer
-        Tensor result = dispatchBinaryOp(base_op, inputs[0], inputs[1]);
-
-        // Copy result data back to input tensor's buffer (in-place modification)
-        // Note: const_cast is safe here as we're explicitly modifying the tensor in-place
-        size_t bytes = result.numel() * result.dtype_size();
-        if (bytes > 0) {
-            void* dst = const_cast<void*>(inputs[0].data_ptr());
-            copy(dst, result.data_ptr(), bytes, CopyKind::DeviceToDevice);
-        }
-
-        return {inputs[0]};
-    }
-
-    // In-place activation operations
-    if (op_name == "relu_inplace" || op_name == "sigmoid_inplace" || op_name == "tanh_inplace" ||
-        op_name == "leaky_relu_inplace" || op_name == "gelu_inplace") {
-        if (inputs.size() < 1) {
-            throw std::invalid_argument(op_name + " requires 1 input");
-        }
-        // Determine the base activation and its opcode/param
-        std::string base_op = op_name.substr(0, op_name.find("_inplace"));
-        uint32_t opcode = 0;
-        float param = 0.0f;
-        if (base_op == "relu") opcode = 0;
-        else if (base_op == "sigmoid") opcode = 1;
-        else if (base_op == "tanh") opcode = 2;
-        else if (base_op == "gelu") opcode = 3;
-        else if (base_op == "leaky_relu") {
-            opcode = 4;
-            param = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
-        }
-
-        // Dispatch out-of-place activation, then copy result back
-        Tensor result = dispatchActivation(base_op, inputs[0], opcode, param);
-        size_t bytes = result.numel() * result.dtype_size();
-        if (bytes > 0) {
-            void* dst = const_cast<void*>(inputs[0].data_ptr());
-            copy(dst, result.data_ptr(), bytes, CopyKind::DeviceToDevice);
-        }
-        return {inputs[0]};
-    }
-
-    // Comparison operations
-    if (op_name == "eq" || op_name == "ne" || op_name == "lt" ||
-        op_name == "le" || op_name == "gt" || op_name == "ge") {
-        if (inputs.size() != 2) {
-            throw std::invalid_argument(op_name + " requires 2 inputs");
-        }
-        return {dispatchComparisonOp(op_name, inputs[0], inputs[1])};
-    }
-
-    // Activation functions (use activations shader)
-    if (op_name == "relu" || op_name == "sigmoid" || op_name == "tanh") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument(op_name + " requires 1 input");
-        }
-        uint32_t opcode = 0;
-        if (op_name == "relu") opcode = 0;
-        else if (op_name == "sigmoid") opcode = 1;
-        else if (op_name == "tanh") opcode = 2;
-        return {dispatchActivation(op_name, inputs[0], opcode, 0.0f)};
-    }
-
-    // GELU activation
-    if (op_name == "gelu") {
-        if (inputs.size() != 1) throw std::invalid_argument("gelu requires 1 input");
-        return {dispatchActivation("gelu", inputs[0], 3, 0.0f)};
-    }
-
-    // LeakyReLU activation
-    if (op_name == "leaky_relu") {
-        if (inputs.size() != 1) throw std::invalid_argument("leaky_relu requires 1 input");
-        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
-        return {dispatchActivation("leaky_relu", inputs[0], 4, alpha)};
-    }
-
-    // Swish activation
-    if (op_name == "swish") {
-        if (inputs.size() != 1) throw std::invalid_argument("swish requires 1 input");
-        return {dispatchActivation("swish", inputs[0], 5, 0.0f)};
-    }
-
-    // ELU activation
-    if (op_name == "elu") {
-        if (inputs.size() != 1) throw std::invalid_argument("elu requires 1 input");
-        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 1.0));
-        return {dispatchActivation("elu", inputs[0], 6, alpha)};
-    }
-
-    // SELU activation
-    if (op_name == "selu") {
-        if (inputs.size() != 1) throw std::invalid_argument("selu requires 1 input");
-        return {dispatchActivation("selu", inputs[0], 7, 0.0f)};
-    }
-
-    // Mish activation
-    if (op_name == "mish") {
-        if (inputs.size() != 1) throw std::invalid_argument("mish requires 1 input");
-        return {dispatchActivation("mish", inputs[0], 8, 0.0f)};
-    }
-
-    // Softplus activation
-    if (op_name == "softplus") {
-        if (inputs.size() != 1) throw std::invalid_argument("softplus requires 1 input");
-        float beta = static_cast<float>(attrs.get_float(AttrKey::Beta, 1.0));
-        return {dispatchActivation("softplus", inputs[0], 9, beta)};
-    }
-
-    // Unary math operations (use math shader)
-    if (op_name == "sqrt" || op_name == "exp" || op_name == "log" ||
-        op_name == "neg" || op_name == "abs" || op_name == "sign" ||
-        op_name == "floor" || op_name == "ceil" || op_name == "round" ||
-        op_name == "trunc" || op_name == "reciprocal") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument(op_name + " requires 1 input");
-        }
-        return {dispatchUnaryOp(op_name, inputs[0])};
-    }
-
-    // Trigonometric operations
-    if (op_name == "sin" || op_name == "cos" || op_name == "tan" ||
-        op_name == "asin" || op_name == "acos" || op_name == "atan") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument(op_name + " requires 1 input");
-        }
-        return {dispatchTrigonometricOp(op_name, inputs[0])};
-    }
-
-    // Hyperbolic operations
-    if (op_name == "sinh" || op_name == "cosh" || op_name == "tanh") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument(op_name + " requires 1 input");
-        }
-        return {dispatchHyperbolicOp(op_name, inputs[0])};
-    }
-
-    // Pow operation (unary with parameter)
-    if (op_name == "pow") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument("pow requires 1 input");
-        }
-        float exponent = static_cast<float>(attrs.get_float(AttrKey::Exponent, 2.0));
-        return {dispatchUnaryOpWithParam(op_name, inputs[0], exponent)};
-    }
-
-    // Backward activation operations
-    if (op_name == "relu_backward") {
-        if (inputs.size() != 2) throw std::invalid_argument("relu_backward requires 2 inputs");
-        return {dispatchActivationBackward("relu_backward", inputs[0], inputs[1], 0, 0.0f)};
-    }
-
-    if (op_name == "sigmoid_backward") {
-        if (inputs.size() != 2) throw std::invalid_argument("sigmoid_backward requires 2 inputs");
-        return {dispatchActivationBackward("sigmoid_backward", inputs[0], inputs[1], 1, 0.0f)};
-    }
-
-    if (op_name == "tanh_backward") {
-        if (inputs.size() != 2) throw std::invalid_argument("tanh_backward requires 2 inputs");
-        return {dispatchActivationBackward("tanh_backward", inputs[0], inputs[1], 2, 0.0f)};
-    }
-
-    if (op_name == "leaky_relu_backward") {
-        if (inputs.size() != 2) throw std::invalid_argument("leaky_relu_backward requires 2 inputs");
-        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
-        return {dispatchActivationBackward("leaky_relu_backward", inputs[0], inputs[1], 3, alpha)};
-    }
-
-    if (op_name == "gelu_backward") {
-        if (inputs.size() != 2) throw std::invalid_argument("gelu_backward requires 2 inputs");
-        return {dispatchActivationBackward("gelu_backward", inputs[0], inputs[1], 4, 0.0f)};
-    }
-
-    if (op_name == "elu_backward") {
-        if (inputs.size() != 2) throw std::invalid_argument("elu_backward requires 2 inputs");
-        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 1.0));
-        return {dispatchActivationBackward("elu_backward", inputs[0], inputs[1], 5, alpha)};
-    }
-
-    if (op_name == "selu_backward") {
-        if (inputs.size() != 2) throw std::invalid_argument("selu_backward requires 2 inputs");
-        return {dispatchActivationBackward("selu_backward", inputs[0], inputs[1], 6, 0.0f)};
-    }
-
-    if (op_name == "mish_backward") {
-        if (inputs.size() != 2) throw std::invalid_argument("mish_backward requires 2 inputs");
-        return {dispatchActivationBackward("mish_backward", inputs[0], inputs[1], 7, 0.0f)};
-    }
-
-    if (op_name == "softplus_backward") {
-        if (inputs.size() != 2) throw std::invalid_argument("softplus_backward requires 2 inputs");
-        float beta = static_cast<float>(attrs.get_float(AttrKey::Beta, 1.0));
-        return {dispatchActivationBackward("softplus_backward", inputs[0], inputs[1], 8, beta)};
-    }
-
-    if (op_name == "swish_backward") {
-        if (inputs.size() != 2) throw std::invalid_argument("swish_backward requires 2 inputs");
-        return {dispatchSwishBackward(inputs[0], inputs[1])};
-    }
-
-    if (op_name == "softmax_backward") {
-        if (inputs.size() != 2) throw std::invalid_argument("softmax_backward requires 2 inputs");
-        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
-        return {dispatchSoftmaxBackward(inputs[0], inputs[1], dim)};
-    }
-
-    if (op_name == "log_softmax_backward") {
-        if (inputs.size() != 2) throw std::invalid_argument("log_softmax_backward requires 2 inputs");
-        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
-        return {dispatchLogSoftmaxBackward(inputs[0], inputs[1], dim)};
-    }
-
-    // Conv2d backward operations
-    if (op_name == "conv2d_backward_input") {
-        if (inputs.size() != 2) throw std::invalid_argument("conv2d_backward_input requires 2 inputs (grad_output, weight)");
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-
-        // Parse input shape from comma-separated string
-        std::vector<int64_t> input_shape = attrs.get_int_list(AttrKey::InputShape);
-
-        return {dispatchConv2dBackwardInput(inputs[0], inputs[1], stride, padding, dilation, input_shape)};
-    }
-
-    if (op_name == "conv2d_backward_weight") {
-        if (inputs.size() != 2) throw std::invalid_argument("conv2d_backward_weight requires 2 inputs (grad_output, input)");
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-
-        // Parse weight shape from comma-separated string
-        std::vector<int64_t> weight_shape = attrs.get_int_list(AttrKey::WeightShape);
-
-        return {dispatchConv2dBackwardWeight(inputs[0], inputs[1], stride, padding, dilation, weight_shape)};
-    }
-
-    if (op_name == "conv2d_backward_bias") {
-        if (inputs.size() != 1) throw std::invalid_argument("conv2d_backward_bias requires 1 input (grad_output)");
-        return {dispatchConv2dBackwardBias(inputs[0])};
-    }
-
-    // Unified conv2d backward: computes grad_input, grad_weight, and optionally grad_bias
-    // inputs: [grad_output, input, weight]
-    if (op_name == "conv2d_backward") {
-        if (inputs.size() != 3) {
-            throw std::invalid_argument("conv2d_backward operation requires exactly 3 inputs (grad_output, input, weight)");
-        }
-        const Tensor& grad_output = inputs[0];
-        const Tensor& input = inputs[1];
-        const Tensor& weight = inputs[2];
-
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-        bool compute_grad_input = attrs.get_bool(AttrKey::ComputeGradInput, true);
-        bool compute_grad_weight = attrs.get_bool(AttrKey::ComputeGradWeight, true);
-        bool compute_grad_bias = attrs.get_bool(AttrKey::ComputeGradBias, false);
-
-        std::vector<int64_t> input_shape(input.shape().begin(), input.shape().end());
-        std::vector<int64_t> weight_shape(weight.shape().begin(), weight.shape().end());
-
-        std::vector<Tensor> results;
-
-        // Compute grad_input
-        if (compute_grad_input) {
-            results.push_back(dispatchConv2dBackwardInput(grad_output, weight, stride, padding, dilation, input_shape, groups));
-        }
-
-        // Compute grad_weight
-        if (compute_grad_weight) {
-            results.push_back(dispatchConv2dBackwardWeight(grad_output, input, stride, padding, dilation, weight_shape, groups));
-        }
-
-        // Compute grad_bias
-        if (compute_grad_bias) {
-            results.push_back(dispatchConv2dBackwardBias(grad_output));
-        }
-
-        return results;
-    }
-
-    // Reduction operations
-    if (op_name == "sum" || op_name == "mean" || op_name == "max" || op_name == "min") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument(op_name + " requires 1 input");
-        }
-        // Use INT64_MIN as sentinel for "reduce all elements" (full reduction)
-        // dim=-1, -2, etc. mean negative indexing from the end
-        int64_t dim = attrs.has(AttrKey::Dim) ? attrs.get_int(AttrKey::Dim) : INT64_MIN;
-        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
-        return {dispatchReduction(op_name, inputs[0], dim, keepdim)};
-    }
-
-    // Matrix multiplication
-    if (op_name == "matmul") {
-        if (inputs.size() != 2) {
-            throw std::invalid_argument("matmul requires 2 inputs");
-        }
-        return {dispatchMatmul(inputs[0], inputs[1])};
-    }
-
-    // Batched matrix multiplication
-    if (op_name == "bmm") {
-        if (inputs.size() != 2) {
-            throw std::invalid_argument("bmm requires 2 inputs");
-        }
-        return {dispatchBmm(inputs[0], inputs[1])};
-    }
-
-    // Pooling operations
-    if (op_name == "max_pool2d") {
-        // Support both kernel_h/kernel_w and kernel_size attributes
-        int64_t kernel_h = 2, kernel_w = 2;
-        if (attrs.has(AttrKey::KernelSizeH)) {
-            kernel_h = attrs.get_int(AttrKey::KernelSizeH);
-            kernel_w = attrs.has(AttrKey::KernelSizeW) ? attrs.get_int(AttrKey::KernelSizeW) : kernel_h;
-        } else if (attrs.has(AttrKey::KernelSize)) {
-            kernel_h = kernel_w = attrs.get_int(AttrKey::KernelSize);
-        }
-
-        // Support both stride_h/stride_w and stride attributes
-        int64_t stride_h = kernel_h, stride_w = kernel_w;
-        if (attrs.has(AttrKey::StrideH)) {
-            stride_h = attrs.get_int(AttrKey::StrideH);
-            stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : stride_h;
-        } else if (attrs.has(AttrKey::Stride)) {
-            stride_h = stride_w = attrs.get_int(AttrKey::Stride);
-        }
-
-        // Support both padding_h/padding_w and padding attributes
-        int64_t padding_h = 0, padding_w = 0;
-        if (attrs.has(AttrKey::PaddingH)) {
-            padding_h = attrs.get_int(AttrKey::PaddingH);
-            padding_w = attrs.has(AttrKey::PaddingW) ? attrs.get_int(AttrKey::PaddingW) : padding_h;
-        } else if (attrs.has(AttrKey::Padding)) {
-            padding_h = padding_w = attrs.get_int(AttrKey::Padding);
-        }
-
-        // Float16: use max_pool2d_f16 shader via dispatch path (same as Float64)
-        if (inputs[0].dtype() == DType::Float16) {
-            OpAttributes pool_attrs;
-            pool_attrs.set(AttrKey::KernelSizeH, kernel_h);
-            pool_attrs.set(AttrKey::KernelSizeW, kernel_w);
-            pool_attrs.set(AttrKey::StrideH, stride_h);
-            pool_attrs.set(AttrKey::StrideW, stride_w);
-            pool_attrs.set(AttrKey::PaddingH, padding_h);
-            pool_attrs.set(AttrKey::PaddingW, padding_w);
-            Tensor output = dispatchMaxPool2dForward(inputs[0], pool_attrs);
-            std::vector<int64_t> out_shape_vec(output.shape().begin(), output.shape().end());
-            Tensor pool_indices(out_shape_vec, DType::Int32, inputs[0].device());
-            pool_indices = dispatchFill(pool_indices, 0.0f);
-            return {output, pool_indices};
-        }
-
-        // Float64: use max_pool2d_f64 shader via new dispatch path
-        if (inputs[0].dtype() == DType::Float64) {
-            OpAttributes pool_attrs;
-            pool_attrs.set(AttrKey::KernelSizeH, kernel_h);
-            pool_attrs.set(AttrKey::KernelSizeW, kernel_w);
-            pool_attrs.set(AttrKey::StrideH, stride_h);
-            pool_attrs.set(AttrKey::StrideW, stride_w);
-            pool_attrs.set(AttrKey::PaddingH, padding_h);
-            pool_attrs.set(AttrKey::PaddingW, padding_w);
-            Tensor output = dispatchMaxPool2dForward(inputs[0], pool_attrs);
-            // Create indices tensor (Float64 max_pool2d doesn't produce indices)
-            std::vector<int64_t> out_shape_vec(output.shape().begin(), output.shape().end());
-            Tensor pool_indices(out_shape_vec, DType::Int32, inputs[0].device());
-            pool_indices = dispatchFill(pool_indices, 0.0f);
-            return {output, pool_indices};
-        }
-
-        auto [output, indices] = dispatchMaxPool2d(inputs[0], kernel_h, kernel_w,
-                                                    stride_h, stride_w, padding_h, padding_w);
-        return {output, indices};
-    }
-
-    if (op_name == "avg_pool2d") {
-        // Support both kernel_h/kernel_w and kernel_size attributes
-        int64_t kernel_h = 2, kernel_w = 2;
-        if (attrs.has(AttrKey::KernelSizeH)) {
-            kernel_h = attrs.get_int(AttrKey::KernelSizeH);
-            kernel_w = attrs.has(AttrKey::KernelSizeW) ? attrs.get_int(AttrKey::KernelSizeW) : kernel_h;
-        } else if (attrs.has(AttrKey::KernelSize)) {
-            kernel_h = kernel_w = attrs.get_int(AttrKey::KernelSize);
-        }
-
-        // Support both stride_h/stride_w and stride attributes
-        int64_t stride_h = kernel_h, stride_w = kernel_w;
-        if (attrs.has(AttrKey::StrideH)) {
-            stride_h = attrs.get_int(AttrKey::StrideH);
-            stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : stride_h;
-        } else if (attrs.has(AttrKey::Stride)) {
-            stride_h = stride_w = attrs.get_int(AttrKey::Stride);
-        }
-        int64_t padding_h = attrs.get_int(AttrKey::PaddingH, 0);
-        int64_t padding_w = attrs.get_int(AttrKey::PaddingW, 0);
-
-        // Float16: use avg_pool2d_f16 shader on GPU
-        // (Falls through to dispatchAvgPool2d which will select the correct shader)
-
-        return {dispatchAvgPool2d(inputs[0], kernel_h, kernel_w,
-                                  stride_h, stride_w, padding_h, padding_w)};
-    }
-
-    if (op_name == "adaptive_max_pool2d") {
-        // Support both naming conventions: output_height/output_width and output_h/output_w
-        int64_t out_h = attrs.has(AttrKey::OutputHeight) ? attrs.get_int(AttrKey::OutputHeight)
-                      : attrs.get_int(AttrKey::OutputSizeH);
-        int64_t out_w = attrs.has(AttrKey::OutputWidth) ? attrs.get_int(AttrKey::OutputWidth)
-                      : attrs.get_int(AttrKey::OutputSizeW);
-        auto [output, indices] = dispatchAdaptiveMaxPool2d(inputs[0], out_h, out_w);
-        return {output, indices};
-    }
-
-    if (op_name == "adaptive_avg_pool2d") {
-        // Support both naming conventions: output_height/output_width and output_h/output_w
-        int64_t out_h = attrs.has(AttrKey::OutputHeight) ? attrs.get_int(AttrKey::OutputHeight)
-                      : attrs.get_int(AttrKey::OutputSizeH);
-        int64_t out_w = attrs.has(AttrKey::OutputWidth) ? attrs.get_int(AttrKey::OutputWidth)
-                      : attrs.get_int(AttrKey::OutputSizeW);
-        return {dispatchAdaptiveAvgPool2d(inputs[0], out_h, out_w)};
-    }
-
-    if (op_name == "adaptive_avg_pool2d_backward") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument("adaptive_avg_pool2d_backward requires exactly 1 input (grad_output)");
-        }
-        int64_t H_in = attrs.get_int(AttrKey::InputH, 0);
-        int64_t W_in = attrs.get_int(AttrKey::InputW, 0);
-        return {dispatchAdaptiveAvgPool2dBackward(inputs[0], H_in, W_in)};
-    }
-
-    // Normalization
-    if (op_name == "softmax") {
-        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
-        return {dispatchSoftmax(inputs[0], dim)};
-    }
-
-    if (op_name == "log_softmax") {
-        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
-        return {dispatchLogSoftmax(inputs[0], dim)};
-    }
-
-    // Advanced reductions
-    if (op_name == "argmax") {
-        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
-        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
-        return {dispatchArgmax(inputs[0], dim, keepdim)};
-    }
-
-    if (op_name == "argmin") {
-        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
-        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
-        return {dispatchArgmin(inputs[0], dim, keepdim)};
-    }
-
-    if (op_name == "argsort") {
-        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
-        bool descending = attrs.get_bool(AttrKey::Descending, false);
-        return {dispatchArgSort(inputs[0], dim, descending)};
-    }
-
-    if (op_name == "var" || op_name == "variance") {
-        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
-        bool unbiased = attrs.get_bool(AttrKey::Unbiased, true);
-        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
-        return {dispatchVariance(inputs[0], dim, unbiased, keepdim)};
-    }
-
-    if (op_name == "std") {
-        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
-        bool unbiased = attrs.get_bool(AttrKey::Unbiased, true);
-        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
-        return {dispatchStd(inputs[0], dim, unbiased, keepdim)};
-    }
-
-    if (op_name == "prod") {
-        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
-        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
-        return {dispatchProd(inputs[0], dim, keepdim)};
-    }
-
-    if (op_name == "norm") {
-        float p = static_cast<float>(attrs.get_float(AttrKey::P, 2.0));
-        // Use INT64_MIN to signal full reduction when dim is not specified
-        int64_t dim = attrs.has(AttrKey::Dim) ? attrs.get_int(AttrKey::Dim) : INT64_MIN;
-        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
-        return {dispatchNorm(inputs[0], p, dim, keepdim)};
-    }
-
-    // Indexing operations
-    if (op_name == "embedding") {
-        int64_t padding_idx = attrs.get_int(AttrKey::PaddingIdx, -1);
-        return {dispatchEmbedding(inputs[0], inputs[1], padding_idx)};
-    }
-
-    if (op_name == "gather") {
-        int64_t dim = attrs.get_int(AttrKey::Dim);
-        return {dispatchGather(inputs[0], dim, inputs[1])};
-    }
-
-    if (op_name == "scatter") {
-        int64_t dim = attrs.get_int(AttrKey::Dim);
-        int64_t reduction = attrs.get_int(AttrKey::Reduction, 0);
-        return {dispatchScatter(inputs[0], dim, inputs[1], inputs[2], reduction)};
-    }
-
-    if (op_name == "index_select") {
-        int64_t dim = attrs.get_int(AttrKey::Dim);
-        return {dispatchIndexSelect(inputs[0], dim, inputs[1])};
-    }
-
-    // Vision operations
-    if (op_name == "gather_relative_position_bias") {
-        if (inputs.size() != 2) {
-            throw std::invalid_argument("gather_relative_position_bias operation requires exactly 2 inputs");
-        }
-        int64_t num_positions = attrs.get_int(AttrKey::NumPositions, 0);
-        int64_t num_heads = attrs.get_int(AttrKey::NumHeads, 0);
-        return {dispatchGatherRelativePositionBias(inputs[0], inputs[1], num_positions, num_heads)};
-    }
-
-    // Shape operations
-    if (op_name == "reshape") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument("reshape requires 1 input");
-        }
-        if (!attrs.has(AttrKey::Shape)) {
-            throw std::invalid_argument("reshape requires 'shape' attribute");
-        }
-        std::vector<int64_t> new_shape = attrs.get_int_list(AttrKey::Shape);
-        return {dispatchReshape(inputs[0], new_shape)};
-    }
-
-    if (op_name == "transpose") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument("transpose requires 1 input");
-        }
-        int64_t dim0 = attrs.get_int(AttrKey::Dim0);
-        int64_t dim1 = attrs.get_int(AttrKey::Dim1);
-        return {dispatchTranspose(inputs[0], dim0, dim1)};
-    }
-
-    if (op_name == "permute") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument("permute requires 1 input");
-        }
-        std::vector<int64_t> dims = attrs.get_int_list(AttrKey::Dims);
-        return {dispatchPermute(inputs[0], dims)};
-    }
-
-    if (op_name == "squeeze") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument("squeeze requires 1 input");
-        }
-        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
-        return {dispatchSqueeze(inputs[0], dim)};
-    }
-
-    if (op_name == "unsqueeze") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument("unsqueeze requires 1 input");
-        }
-        int64_t dim = attrs.get_int(AttrKey::Dim);
-        return {dispatchUnsqueeze(inputs[0], dim)};
-    }
-
-    if (op_name == "contiguous") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument("contiguous requires 1 input");
-        }
-        return {dispatchContiguous(inputs[0])};
-    }
-
-    // Memory operations
-    if (op_name == "zeros") {
-        std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
-        // Get dtype and device from attributes or use defaults
-        DType dtype = DType::Float32;
-        if (attrs.has(AttrKey::Dtype)) {
-            auto dtype_str = attrs.get_string(AttrKey::Dtype);
-            if (dtype_str == "float32") dtype = DType::Float32;
-            else if (dtype_str == "float64") dtype = DType::Float64;
-            else if (dtype_str == "float16") dtype = DType::Float16;
-            else if (dtype_str == "bfloat16") dtype = DType::BFloat16;
-            else if (dtype_str == "int8") dtype = DType::Int8;
-            else if (dtype_str == "int16") dtype = DType::Int16;
-            else if (dtype_str == "int32") dtype = DType::Int32;
-            else if (dtype_str == "int64") dtype = DType::Int64;
-            else if (dtype_str == "uint8") dtype = DType::UInt8;
-            else if (dtype_str == "uint16") dtype = DType::UInt16;
-            else if (dtype_str == "uint32") dtype = DType::UInt32;
-            else if (dtype_str == "uint64") dtype = DType::UInt64;
-            else if (dtype_str == "bool") dtype = DType::Bool;
-            else if (dtype_str == "complex64") dtype = DType::Complex64;
-            else if (dtype_str == "complex128") dtype = DType::Complex128;
-        }
-        int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
-        Device device = Device::vulkan(device_id);
-        return {dispatchZeros(shape, dtype, device)};
-    }
-
-    if (op_name == "fill") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument("fill requires 1 input");
-        }
-        float value = static_cast<float>(attrs.get_float(AttrKey::Value));
-        return {dispatchFill(inputs[0], value)};
-    }
-
-    if (op_name == "clone") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument("clone requires 1 input");
-        }
-        return {dispatchClone(inputs[0])};
-    }
-
-    // Vision operations
-    if (op_name == "im2col" || op_name == "unfold") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument("im2col requires 1 input");
-        }
-        return {dispatchIm2Col(inputs[0], attrs)};
-    }
-
-    if (op_name == "col2im" || op_name == "fold") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument("col2im requires 1 input");
-        }
-        return {dispatchCol2Im(inputs[0], attrs)};
-    }
-
-    // Tensor manipulation operations
-    if (op_name == "expand") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument("expand requires 1 input");
-        }
-        std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
-        return {dispatchExpand(inputs[0], shape)};
-    }
-
-    if (op_name == "cat" || op_name == "concatenate") {
-        if (inputs.size() < 2) {
-            throw std::invalid_argument("cat requires at least 2 inputs");
-        }
-        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
-        std::vector<Tensor> input_tensors(inputs.begin(), inputs.end());
-        return {dispatchCat(input_tensors, dim)};
-    }
-
-    if (op_name == "clamp") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument("clamp requires 1 input");
-        }
-        float min_value = static_cast<float>(attrs.get_float(AttrKey::Min, -std::numeric_limits<double>::infinity()));
-        float max_value = static_cast<float>(attrs.get_float(AttrKey::Max, std::numeric_limits<double>::infinity()));
-        return {dispatchClamp(inputs[0], min_value, max_value)};
-    }
-
-    if (op_name == "clamp_min") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument("clamp_min requires 1 input");
-        }
-        float min_value = static_cast<float>(attrs.get_float(AttrKey::Min, -std::numeric_limits<double>::infinity()));
-        return {dispatchClamp(inputs[0], min_value, std::numeric_limits<float>::infinity())};
-    }
-
-    if (op_name == "clamp_max") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument("clamp_max requires 1 input");
-        }
-        float max_value = static_cast<float>(attrs.get_float(AttrKey::Max, std::numeric_limits<double>::infinity()));
-        return {dispatchClamp(inputs[0], -std::numeric_limits<float>::infinity(), max_value)};
-    }
-
-    if (op_name == "dot") {
-        if (inputs.size() != 2) {
-            throw std::invalid_argument("dot requires 2 inputs");
-        }
-        return {dispatchDot(inputs[0], inputs[1])};
-    }
-
-    // BatchNorm2d operations
-    if (op_name == "batchnorm2d_forward") {
-        if (inputs.size() < 3) {
-            throw std::invalid_argument("batchnorm2d_forward requires at least 3 inputs (input, mean, var)");
-        }
-        const Tensor* gamma = (inputs.size() > 3) ? &inputs[3] : nullptr;
-        const Tensor* beta = (inputs.size() > 4) ? &inputs[4] : nullptr;
-        float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
-        return {dispatchBatchNorm2dForward(inputs[0], inputs[1], inputs[2], gamma, beta, epsilon)};
-    }
-
-    if (op_name == "batchnorm2d_forward_affine") {
-        // batchnorm2d_forward_affine is the same as batchnorm2d_forward with weight and bias
-        // Inputs: input, mean, var, weight, bias
-        if (inputs.size() < 5) {
-            throw std::invalid_argument("batchnorm2d_forward_affine requires 5 inputs (input, mean, var, weight, bias)");
-        }
-        float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
-        return {dispatchBatchNorm2dForward(inputs[0], inputs[1], inputs[2], &inputs[3], &inputs[4], epsilon)};
-    }
-
-    if (op_name == "batchnorm2d_backward") {
-        // Autograd passes: [grad_output, input, weight(gamma), mean, invstd]
-        if (inputs.size() < 5) {
-            throw std::invalid_argument("batchnorm2d_backward requires 5 inputs (grad_output, input, weight, mean, invstd)");
-        }
-        const Tensor* gamma = &inputs[2];  // weight = gamma
-        float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
-        // Pass mean=inputs[3], invstd=inputs[4] (shader uses invstd directly)
-        auto [grad_input, grad_gamma, grad_beta] = dispatchBatchNorm2dBackward(
-            inputs[0], inputs[1], inputs[3], inputs[4], gamma, epsilon);
-        return {grad_input, grad_gamma, grad_beta};
-    }
-
-    if (op_name == "batchnorm2d_mean_var") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument("batchnorm2d_mean_var requires 1 input");
-        }
-        auto [mean, variance] = dispatchBatchNorm2dMeanVar(inputs[0]);
-        return {mean, variance};
-    }
+    // O(1) dispatch via hash table lookup (replaces ~117 if-else string comparisons)
+    // Three tables are used to keep static initialization manageable.
+    const auto& t1 = get_dispatch_table();
+    auto it = t1.find(op_name);
+    if (it != t1.end()) {
+        return it->second(this, op_name, inputs, attrs);
+    }
+
+    const auto& t2 = get_dispatch_table_2();
+    it = t2.find(op_name);
+    if (it != t2.end()) {
+        return it->second(this, op_name, inputs, attrs);
+    }
+
+    const auto& t3 = get_dispatch_table_3();
+    it = t3.find(op_name);
+    if (it != t3.end()) {
+        return it->second(this, op_name, inputs, attrs);
+    }
+
+    // ========================================================================
+    // Operations with inline Vulkan API calls (batchnorm update stats,
+    // fused optimizer steps) — kept out of the static map because they
+    // reference VulkanBackend member state (devices_, pipelines, etc.)
+    // ========================================================================
 
     if (op_name == "batchnorm2d_update_running_stats") {
-        // Use GPU kernel for updating running statistics with exponential moving average
         if (inputs.size() != 4) {
             throw std::invalid_argument("batchnorm2d_update_running_stats requires 4 inputs (running_mean, running_var, batch_mean, batch_var)");
         }
@@ -1077,7 +1433,6 @@ auto VulkanBackend::dispatch(const std::string& op_name,
 
         int32_t device_id = running_mean.device().index;
 
-        // Select shader based on dtype
         std::string shader_name = "batchnorm_update_stats";
         if (running_mean.dtype() == DType::Float64) {
             shader_name = "batchnorm_update_stats_f64";
@@ -1126,591 +1481,14 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         uint32_t workgroups = div_wg(n_channels, devices_[device_id].workgroupSize);
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-        // Add memory barrier
         insertComputeBarrier(cmdBuffer);
 
         endSingleTimeCommands(cmdBuffer, device_id);
 
-        // Return the updated tensors (modified in-place)
         return {running_mean, running_var};
     }
 
-    // Pooling operations (new OpAttributes versions)
-    if (op_name == "avg_pool2d_forward") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument("avg_pool2d_forward requires 1 input");
-        }
-        return {dispatchAvgPool2dForward(inputs[0], attrs)};
-    }
-
-    if (op_name == "max_pool2d_forward") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument("max_pool2d_forward requires 1 input");
-        }
-        return {dispatchMaxPool2dForward(inputs[0], attrs)};
-    }
-
-    if (op_name == "avg_pool2d_backward") {
-        if (inputs.size() >= 2) {
-            return {dispatchAvgPool2dBackward(inputs[0], inputs[1], attrs)};
-        }
-        if (inputs.size() == 1) {
-            // Autograd path: 1 input (grad_output) + shape/pooling params in attrs
-            // Build compatible attrs for dispatchAvgPool2dBackward
-            OpAttributes bwd_attrs;
-
-            // Parse input shape from "input_shape" attribute (comma-separated "N,C,H,W")
-            int64_t in_n = 0, in_c = 0, in_h = 0, in_w = 0;
-            if (attrs.has(AttrKey::InputShape)) {
-                auto dims = attrs.get_int_list(AttrKey::InputShape);
-                if (dims.size() >= 4) {
-                    in_n = dims[0]; in_c = dims[1]; in_h = dims[2]; in_w = dims[3];
-                }
-            }
-
-            // Parse pooling parameters (support both single-value and h/w variants)
-            int64_t kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w;
-            if (attrs.has(AttrKey::KernelSizeH)) {
-                kernel_h = attrs.get_int(AttrKey::KernelSizeH);
-                kernel_w = attrs.has(AttrKey::KernelSizeW) ? attrs.get_int(AttrKey::KernelSizeW) : kernel_h;
-            } else {
-                kernel_h = kernel_w = attrs.get_int(AttrKey::KernelSize);
-            }
-            if (attrs.has(AttrKey::StrideH)) {
-                stride_h = attrs.get_int(AttrKey::StrideH);
-                stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : stride_h;
-            } else if (attrs.has(AttrKey::Stride)) {
-                stride_h = stride_w = attrs.get_int(AttrKey::Stride);
-            } else {
-                stride_h = kernel_h; stride_w = kernel_w;
-            }
-            if (attrs.has(AttrKey::PaddingH)) {
-                padding_h = attrs.get_int(AttrKey::PaddingH);
-                padding_w = attrs.has(AttrKey::PaddingW) ? attrs.get_int(AttrKey::PaddingW) : padding_h;
-            } else if (attrs.has(AttrKey::Padding)) {
-                padding_h = padding_w = attrs.get_int(AttrKey::Padding);
-            } else {
-                padding_h = padding_w = 0;
-            }
-
-            bwd_attrs.set(AttrKey::KernelSizeH, kernel_h);
-            bwd_attrs.set(AttrKey::KernelSizeW, kernel_w);
-            bwd_attrs.set(AttrKey::StrideH, stride_h);
-            bwd_attrs.set(AttrKey::StrideW, stride_w);
-            bwd_attrs.set(AttrKey::PaddingH, padding_h);
-            bwd_attrs.set(AttrKey::PaddingW, padding_w);
-            bwd_attrs.set(AttrKey::CountIncludePad, true);
-
-            // Create a dummy input tensor with the right shape for dispatchAvgPool2dBackward
-            Tensor dummy_input({in_n, in_c, in_h, in_w}, inputs[0].dtype(), inputs[0].device());
-
-            return {dispatchAvgPool2dBackward(inputs[0], dummy_input, bwd_attrs)};
-        }
-        throw std::invalid_argument("avg_pool2d_backward requires at least 1 input");
-    }
-
-    if (op_name == "max_pool2d_backward") {
-        if (inputs.size() != 2) {
-            throw std::invalid_argument("max_pool2d_backward requires 2 inputs (grad_output, indices)");
-        }
-        // Extract H_in and W_in from attributes (required for output shape)
-        int64_t H_in = attrs.get_int(AttrKey::InputH);
-        int64_t W_in = attrs.get_int(AttrKey::InputW);
-        return {dispatchMaxPool2dBackwardWithIndices(inputs[0], inputs[1], H_in, W_in)};
-    }
-
-    // Conv2d forward operation
-    if (op_name == "conv2d_forward") {
-        if (inputs.size() < 2) {
-            throw std::invalid_argument("conv2d_forward requires at least 2 inputs (input, weight)");
-        }
-        const Tensor* bias_ptr = inputs.size() >= 3 ? &inputs[2] : nullptr;
-        return {dispatchConv2dForward(inputs[0], inputs[1], bias_ptr, attrs)};
-    }
-
-    // ConvTranspose2d forward operation
-    if (op_name == "conv_transpose2d_forward") {
-        if (inputs.size() < 2) {
-            throw std::invalid_argument("conv_transpose2d_forward requires at least 2 inputs (input, weight)");
-        }
-        // CPU fallback for unsupported dtypes (Int32, etc.)
-        if (inputs[0].dtype() != DType::Float32 && inputs[0].dtype() != DType::Float64 && inputs[0].dtype() != DType::Float16) {
-            TENZOR_LOG_WARNING(std::format("Vulkan: No shader for conv_transpose2d_forward with dtype {}; falling back to CPU",
-                                           dtype_name(inputs[0].dtype())));
-            Device original_device = inputs[0].device();
-            std::vector<Tensor> cpu_inputs;
-            cpu_inputs.reserve(inputs.size());
-            for (const auto& t : inputs) {
-                cpu_inputs.push_back(t.to(Device::cpu()));
-            }
-            auto cpu_results = tenzor::dispatch(OpId::ConvTranspose2dForward, cpu_inputs, attrs);
-            return {cpu_results[0].to(original_device)};
-        }
-        const Tensor* bias_ptr = (inputs.size() >= 3) ? &inputs[2] : nullptr;
-        return {dispatchConvTranspose2dForward(inputs[0], inputs[1], bias_ptr, attrs)};
-    }
-
-    // Full operation - create tensor filled with specific value
-    if (op_name == "full") {
-        // Extract shape and value from attributes
-        std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
-        float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
-        DType dtype = DType::Float32;  // Default dtype
-        if (attrs.has(AttrKey::Dtype)) {
-            auto dtype_str = attrs.get_string(AttrKey::Dtype);
-            if (dtype_str == "int32" || dtype_str == "Int32") {
-                dtype = DType::Int32;
-            } else if (dtype_str == "float32" || dtype_str == "Float32") {
-                dtype = DType::Float32;
-            } else if (dtype_str == "float16" || dtype_str == "Float16") {
-                dtype = DType::Float16;
-            } else if (dtype_str == "bfloat16" || dtype_str == "BFloat16") {
-                dtype = DType::BFloat16;
-            } else if (dtype_str == "float64" || dtype_str == "Float64") {
-                dtype = DType::Float64;
-            } else if (dtype_str == "int64" || dtype_str == "Int64") {
-                dtype = DType::Int64;
-            } else if (dtype_str == "int8" || dtype_str == "Int8") {
-                dtype = DType::Int8;
-            } else if (dtype_str == "uint8" || dtype_str == "UInt8") {
-                dtype = DType::UInt8;
-            } else if (dtype_str == "bool" || dtype_str == "Bool") {
-                dtype = DType::Bool;
-            }
-        }
-        return {dispatchFull(shape, value, dtype)};
-    }
-
-    // Ones operation - create tensor filled with 1.0
-    if (op_name == "ones") {
-        std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
-        DType dtype = DType::Float32;
-        if (attrs.has(AttrKey::Dtype)) {
-            auto dtype_str = attrs.get_string(AttrKey::Dtype);
-            if (dtype_str == "float32" || dtype_str == "Float32") dtype = DType::Float32;
-            else if (dtype_str == "float16" || dtype_str == "Float16") dtype = DType::Float16;
-            else if (dtype_str == "bfloat16" || dtype_str == "BFloat16") dtype = DType::BFloat16;
-            else if (dtype_str == "int32" || dtype_str == "Int32") dtype = DType::Int32;
-            else if (dtype_str == "int64" || dtype_str == "Int64") dtype = DType::Int64;
-            else if (dtype_str == "float64" || dtype_str == "Float64") dtype = DType::Float64;
-            else if (dtype_str == "int8" || dtype_str == "Int8") dtype = DType::Int8;
-            else if (dtype_str == "uint8" || dtype_str == "UInt8") dtype = DType::UInt8;
-            else if (dtype_str == "bool" || dtype_str == "Bool") dtype = DType::Bool;
-        }
-        return {dispatchOnes(shape, dtype)};
-    }
-
-    // Rand operation - create tensor filled with uniform random values [0, 1)
-    if (op_name == "rand") {
-        std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
-        DType dtype = DType::Float32;
-        if (attrs.has(AttrKey::Dtype)) {
-            auto dtype_str = attrs.get_string(AttrKey::Dtype);
-            if (dtype_str == "float32" || dtype_str == "Float32") dtype = DType::Float32;
-            else if (dtype_str == "float64" || dtype_str == "Float64") dtype = DType::Float64;
-            else if (dtype_str == "float16" || dtype_str == "Float16") dtype = DType::Float16;
-            else if (dtype_str == "bfloat16" || dtype_str == "BFloat16") dtype = DType::BFloat16;
-        }
-        return {dispatchRand(shape, dtype)};
-    }
-
-    // Randn operation - create tensor filled with normal random values
-    if (op_name == "randn") {
-        std::vector<int64_t> shape = attrs.get_int_list(AttrKey::Shape);
-        DType dtype = DType::Float32;
-        if (attrs.has(AttrKey::Dtype)) {
-            auto dtype_str = attrs.get_string(AttrKey::Dtype);
-            if (dtype_str == "float32" || dtype_str == "Float32") dtype = DType::Float32;
-            else if (dtype_str == "float64" || dtype_str == "Float64") dtype = DType::Float64;
-            else if (dtype_str == "float16" || dtype_str == "Float16") dtype = DType::Float16;
-            else if (dtype_str == "bfloat16" || dtype_str == "BFloat16") dtype = DType::BFloat16;
-        }
-        return {dispatchRandn(shape, dtype)};
-    }
-
-    // Arange operation
-    if (op_name == "arange") {
-        float start = static_cast<float>(attrs.get_float(AttrKey::Start, 0.0));
-        float end_val = static_cast<float>(attrs.get_float(AttrKey::End, 0.0));
-        float step = static_cast<float>(attrs.get_float(AttrKey::Step, 1.0));
-        DType dtype = DType::Float32;
-        if (attrs.has(AttrKey::Dtype)) {
-            auto dtype_str = attrs.get_string(AttrKey::Dtype);
-            if (dtype_str == "float64" || dtype_str == "Float64") dtype = DType::Float64;
-            else if (dtype_str == "float16" || dtype_str == "Float16") dtype = DType::Float16;
-            else if (dtype_str == "bfloat16" || dtype_str == "BFloat16") dtype = DType::BFloat16;
-            else if (dtype_str == "int32" || dtype_str == "Int32") dtype = DType::Int32;
-            else if (dtype_str == "int64" || dtype_str == "Int64") dtype = DType::Int64;
-            else if (dtype_str == "int8" || dtype_str == "Int8") dtype = DType::Int8;
-            else if (dtype_str == "uint8" || dtype_str == "UInt8") dtype = DType::UInt8;
-            else if (dtype_str == "bool" || dtype_str == "Bool") dtype = DType::Bool;
-        }
-        int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
-        Device device = Device::vulkan(device_id);
-        return {dispatchArange(start, end_val, step, dtype, device)};
-    }
-
-    // Linspace operation
-    if (op_name == "linspace") {
-        float start = static_cast<float>(attrs.get_float(AttrKey::Start, 0.0));
-        float end_val = static_cast<float>(attrs.get_float(AttrKey::End, 1.0));
-        int64_t steps = attrs.get_int(AttrKey::Steps, 100);
-        DType dtype = DType::Float32;
-        if (attrs.has(AttrKey::Dtype)) {
-            auto dtype_str = attrs.get_string(AttrKey::Dtype);
-            if (dtype_str == "float64" || dtype_str == "Float64") dtype = DType::Float64;
-            else if (dtype_str == "float16" || dtype_str == "Float16") dtype = DType::Float16;
-            else if (dtype_str == "bfloat16" || dtype_str == "BFloat16") dtype = DType::BFloat16;
-            else if (dtype_str == "int32" || dtype_str == "Int32") dtype = DType::Int32;
-            else if (dtype_str == "int64" || dtype_str == "Int64") dtype = DType::Int64;
-            else if (dtype_str == "int8" || dtype_str == "Int8") dtype = DType::Int8;
-            else if (dtype_str == "uint8" || dtype_str == "UInt8") dtype = DType::UInt8;
-            else if (dtype_str == "bool" || dtype_str == "Bool") dtype = DType::Bool;
-        }
-        int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
-        Device device = Device::vulkan(device_id);
-        return {dispatchLinspace(start, end_val, steps, dtype, device)};
-    }
-
-    // Eye operation
-    if (op_name == "eye") {
-        int64_t n = attrs.get_int(AttrKey::N, 0);
-        int64_t m = attrs.get_int(AttrKey::M, -1);
-        DType dtype = DType::Float32;
-        if (attrs.has(AttrKey::Dtype)) {
-            auto dtype_str = attrs.get_string(AttrKey::Dtype);
-            if (dtype_str == "float64" || dtype_str == "Float64") dtype = DType::Float64;
-            else if (dtype_str == "float16" || dtype_str == "Float16") dtype = DType::Float16;
-            else if (dtype_str == "bfloat16" || dtype_str == "BFloat16") dtype = DType::BFloat16;
-            else if (dtype_str == "int32" || dtype_str == "Int32") dtype = DType::Int32;
-            else if (dtype_str == "int64" || dtype_str == "Int64") dtype = DType::Int64;
-            else if (dtype_str == "int8" || dtype_str == "Int8") dtype = DType::Int8;
-            else if (dtype_str == "uint8" || dtype_str == "UInt8") dtype = DType::UInt8;
-            else if (dtype_str == "bool" || dtype_str == "Bool") dtype = DType::Bool;
-        }
-        int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
-        Device device = Device::vulkan(device_id);
-        return {dispatchEye(n, m, dtype, device)};
-    }
-
-    // Repeat operation
-    if (op_name == "repeat") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument("repeat operation requires exactly 1 input");
-        }
-        if (!attrs.has(AttrKey::Repeats)) {
-            throw std::invalid_argument("repeat operation requires 'repeats' attribute");
-        }
-        std::vector<int64_t> repeats = attrs.get_int_list(AttrKey::Repeats);
-        return {dispatchRepeat(inputs[0], repeats)};
-    }
-
-    // Masked select operation
-    if (op_name == "masked_select") {
-        if (inputs.size() != 2) {
-            throw std::invalid_argument("masked_select operation requires exactly 2 inputs");
-        }
-        return {dispatchMaskedSelect(inputs[0], inputs[1])};
-    }
-
-    // Masked fill operation
-    if (op_name == "masked_fill") {
-        if (inputs.size() != 2) {
-            throw std::invalid_argument("masked_fill operation requires exactly 2 inputs");
-        }
-        if (!attrs.has(AttrKey::Value)) {
-            throw std::invalid_argument("masked_fill operation requires 'value' attribute");
-        }
-        float value = static_cast<float>(attrs.get_float(AttrKey::Value));
-        return {dispatchMaskedFill(inputs[0], inputs[1], value)};
-    }
-
-    // Where operation
-    if (op_name == "where") {
-        if (inputs.size() != 3) {
-            throw std::invalid_argument("where operation requires exactly 3 inputs");
-        }
-        return {dispatchWhere(inputs[0], inputs[1], inputs[2])};
-    }
-
-    // ========================================================================
-    // Fused Operations (composed from existing operations)
-    // ========================================================================
-
-    // Fused Linear + ReLU: matmul(input, weight^T) + bias + relu
-    if (op_name == "fused_linear_relu") {
-        if (inputs.size() < 2) {
-            throw std::invalid_argument("fused_linear_relu requires at least 2 inputs (input, weight)");
-        }
-        bool has_bias = attrs.get_bool(AttrKey::HasBias, false);
-
-        auto input_shape = inputs[0].shape();
-        int64_t in_features = input_shape[input_shape.size() - 1];
-        int64_t out_features = inputs[1].shape()[0];
-
-        // Flatten input to 2D: (..., in_features) -> (batch_size, in_features)
-        int64_t batch_size = 1;
-        for (size_t i = 0; i < input_shape.size() - 1; ++i) {
-            batch_size *= input_shape[i];
-        }
-        Tensor input_2d = inputs[0].reshape({batch_size, in_features});
-
-        // Transpose weight as a view (swap shape/strides, same data)
-        // dispatchMatmul will call dispatchContiguous if needed
-        Tensor weight_t = inputs[1].transpose(0, 1);
-
-        // MatMul: input_2d @ weight^T -> (batch_size, out_features)
-        Tensor mm_result = dispatchMatmul(input_2d, weight_t);
-
-        // Add bias if present
-        if (has_bias && inputs.size() > 2) {
-            mm_result = dispatchBinaryOp("add", mm_result, inputs[2]);
-        }
-
-        // ReLU activation
-        Tensor result = dispatchActivation("relu", mm_result, 0, 0.0f);
-
-        // Reshape back to original batch dimensions
-        std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end() - 1);
-        out_shape.push_back(out_features);
-        result = result.reshape(out_shape);
-
-        return {result};
-    }
-
-    // Fused BatchNorm + ReLU
-    if (op_name == "fused_batchnorm_relu") {
-        if (inputs.size() < 5) {
-            throw std::invalid_argument("fused_batchnorm_relu requires 5 inputs (input, mean, var, weight, bias)");
-        }
-
-        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
-        auto orig_shape = inputs[0].shape();
-
-        // Reshape to 4D if needed: (N, C, ...) -> (N, C, H, W) where H*W = spatial_size
-        Tensor input_4d = inputs[0];
-        bool needs_reshape = (orig_shape.size() != 4);
-        if (needs_reshape) {
-            int64_t N = orig_shape[0];
-            int64_t C = orig_shape[1];
-            int64_t spatial = 1;
-            for (size_t i = 2; i < orig_shape.size(); ++i) {
-                spatial *= orig_shape[i];
-            }
-            input_4d = inputs[0].reshape({N, C, spatial, 1});
-        }
-
-        // BatchNorm forward
-        Tensor bn_result = dispatchBatchNorm2dForward(input_4d, inputs[1], inputs[2],
-                                                       &inputs[3], &inputs[4], eps);
-
-        // Reshape back if needed
-        if (needs_reshape) {
-            std::vector<int64_t> shape_vec(orig_shape.begin(), orig_shape.end());
-            bn_result = bn_result.reshape(shape_vec);
-        }
-
-        // ReLU activation
-        Tensor result = dispatchActivation("relu", bn_result, 0, 0.0f);
-        return {result};
-    }
-
-    // Fused Add + ReLU
-    if (op_name == "fused_add_relu") {
-        if (inputs.size() != 2) {
-            throw std::invalid_argument("fused_add_relu requires 2 inputs");
-        }
-        Tensor add_result = dispatchBinaryOp("add", inputs[0], inputs[1]);
-        return {dispatchActivation("relu", add_result, 0, 0.0f)};
-    }
-
-    // Fused GELU
-    if (op_name == "fused_gelu") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument("fused_gelu requires 1 input");
-        }
-        return {dispatchActivation("gelu", inputs[0], 3, 0.0f)};
-    }
-
-    // Fused Layer Norm
-    if (op_name == "fused_layer_norm") {
-        if (inputs.size() < 3) {
-            throw std::invalid_argument("fused_layer_norm requires 3 inputs (input, weight, bias)");
-        }
-        // Parse normalized_shape from comma-separated string to compute total size
-        auto ns_str = attrs.get_string(AttrKey::NormalizedShape);
-        int64_t normalized_size = 1;
-        std::string ns_s{ns_str};
-        std::stringstream ss(ns_s);
-        std::string token;
-        while (std::getline(ss, token, ',')) {
-            normalized_size *= std::stoll(token);
-        }
-        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
-        Tensor result = dispatchLayerNorm(inputs[0], normalized_size,
-                                           &inputs[1], &inputs[2], eps);
-        return {result};
-    }
-
-    // ========================================================================
-    // Interpolation Operation
-    // ========================================================================
-    if (op_name == "interpolate") {
-        if (inputs.size() != 1) {
-            throw std::invalid_argument("interpolate requires 1 input");
-        }
-        return {dispatchInterpolate(inputs[0], attrs)};
-    }
-
-    // ========================================================================
-    // ROI Align Operations
-    // ========================================================================
-    if (op_name == "roi_align_forward") {
-        if (inputs.size() < 2) {
-            throw std::invalid_argument("roi_align_forward requires 2 inputs (features, rois)");
-        }
-        return {dispatchROIAlignForward(inputs[0], inputs[1], attrs)};
-    }
-
-    if (op_name == "roi_align_backward") {
-        if (inputs.size() < 2) {
-            throw std::invalid_argument("roi_align_backward requires 2 inputs (grad_output, rois)");
-        }
-        return {dispatchROIAlignBackward(inputs[0], inputs[1], attrs)};
-    }
-
-    // ========================================================================
-    // LayerNorm / GroupNorm string dispatch
-    // ========================================================================
-    if (op_name == "layer_norm") {
-        if (inputs.size() < 1) {
-            throw std::invalid_argument("layer_norm requires at least 1 input");
-        }
-        int64_t normalized_size = 1;
-        if (attrs.has(AttrKey::NormalizedShape)) {
-            auto ns_str = attrs.get_string(AttrKey::NormalizedShape);
-            std::string ns_s{ns_str};
-            std::stringstream ss(ns_s);
-            std::string token;
-            while (std::getline(ss, token, ',')) {
-                normalized_size *= std::stoll(token);
-            }
-        } else {
-            normalized_size = inputs[0].shape().back();
-        }
-        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
-        const Tensor* gamma = (inputs.size() > 1) ? &inputs[1] : nullptr;
-        const Tensor* beta = (inputs.size() > 2) ? &inputs[2] : nullptr;
-        return {dispatchLayerNorm(inputs[0], normalized_size, gamma, beta, eps)};
-    }
-
-    if (op_name == "layer_norm_backward") {
-        // inputs: [grad_output, input, mean, rstd, weight]
-        if (inputs.size() < 5) {
-            throw std::invalid_argument("layer_norm_backward requires 5 inputs (grad_output, input, mean, rstd, weight)");
-        }
-        int64_t normalized_shape = inputs[0].shape().back();
-        if (attrs.has(AttrKey::NormalizedShape)) {
-            normalized_shape = attrs.get_int(AttrKey::NormalizedShape);
-        }
-        auto [grad_input, grad_weight, grad_bias] = dispatchLayerNormBackward(
-            inputs[0], inputs[1], inputs[2], inputs[3], &inputs[4], normalized_shape);
-        return {grad_input, grad_weight, grad_bias};
-    }
-
-    if (op_name == "group_norm") {
-        if (inputs.size() < 1) {
-            throw std::invalid_argument("group_norm requires at least 1 input");
-        }
-        int64_t num_groups = attrs.get_int(AttrKey::NumGroups, 1);
-        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
-        const Tensor* gamma = (inputs.size() > 1) ? &inputs[1] : nullptr;
-        const Tensor* beta = (inputs.size() > 2) ? &inputs[2] : nullptr;
-        return dispatchGroupNorm(inputs[0], num_groups, gamma, beta, eps);
-    }
-
-    if (op_name == "group_norm_backward") {
-        // inputs: [grad_output, input, mean, rstd, weight]
-        if (inputs.size() < 5) {
-            throw std::invalid_argument("group_norm_backward requires 5 inputs (grad_output, input, mean, rstd, weight)");
-        }
-        int64_t num_groups = attrs.get_int(AttrKey::NumGroups, 1);
-        auto [grad_input, grad_weight, grad_bias] = dispatchGroupNormBackward(
-            inputs[0], inputs[1], inputs[2], inputs[3], &inputs[4], num_groups);
-        return {grad_input, grad_weight, grad_bias};
-    }
-
-    // ========================================================================
-    // Embedding Backward
-    // ========================================================================
-    if (op_name == "embedding_backward") {
-        // inputs: [grad_output, indices]
-        if (inputs.size() < 2) {
-            throw std::invalid_argument("embedding_backward requires 2 inputs (grad_output, indices)");
-        }
-        int64_t num_embeddings = attrs.get_int(AttrKey::NumEmbeddings, 0);
-        int64_t embedding_dim = inputs[0].shape().back();
-        return {dispatchEmbeddingBackward(inputs[0], inputs[1], num_embeddings, embedding_dim)};
-    }
-
-    // ========================================================================
-    // RMSNorm Forward and Backward
-    // ========================================================================
-    if (op_name == "fused_rms_norm") {
-        if (inputs.size() < 2) {
-            throw std::invalid_argument("fused_rms_norm requires 2 inputs (input, weight)");
-        }
-        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
-        int64_t normalized_shape = inputs[0].shape().back();
-        auto [output, rrms] = dispatchRMSNorm(inputs[0], inputs[1], normalized_shape, eps);
-        return {output, rrms};
-    }
-
-    if (op_name == "rms_norm_backward") {
-        // inputs: [grad_output, input, rrms, weight]
-        if (inputs.size() < 4) {
-            throw std::invalid_argument("rms_norm_backward requires 4 inputs (grad_output, input, rrms, weight)");
-        }
-        int64_t normalized_shape = inputs[0].shape().back();
-        if (attrs.has(AttrKey::NormalizedShape)) {
-            normalized_shape = attrs.get_int(AttrKey::NormalizedShape);
-        }
-        auto [grad_input, grad_weight] = dispatchRMSNormBackward(
-            inputs[0], inputs[1], inputs[2], inputs[3], normalized_shape);
-        return {grad_input, grad_weight};
-    }
-
-    // ========================================================================
-    // Phase 3: Nonzero, OneHot, BoxIoU
-    // ========================================================================
-    if (op_name == "nonzero") {
-        if (inputs.size() < 1) {
-            throw std::invalid_argument("nonzero requires 1 input");
-        }
-        return {dispatchNonzero(inputs[0])};
-    }
-
-    if (op_name == "one_hot") {
-        if (inputs.size() < 1) {
-            throw std::invalid_argument("one_hot requires 1 input (indices)");
-        }
-        int64_t num_classes = attrs.get_int(AttrKey::NumClasses, 10);
-        return {dispatchOneHot(inputs[0], num_classes)};
-    }
-
-    if (op_name == "box_iou") {
-        if (inputs.size() < 2) {
-            throw std::invalid_argument("box_iou requires 2 inputs (boxes1, boxes2)");
-        }
-        int64_t iou_type = attrs.get_int(AttrKey::IouType, 0);
-        return {dispatchBoxIoU(inputs[0], inputs[1], iou_type)};
-    }
-
-    // ========================================================================
-    // Phase 4: Fused Optimizer Steps
-    // ========================================================================
     if (op_name == "fused_rmsprop_step") {
-        // inputs: [grad, param, square_avg, momentum_buf, grad_avg]
         if (inputs.size() < 3) {
             throw std::invalid_argument("fused_rmsprop_step requires at least 3 inputs");
         }
@@ -1792,7 +1570,6 @@ auto VulkanBackend::dispatch(const std::string& op_name,
     }
 
     if (op_name == "fused_adadelta_step") {
-        // inputs: [grad, param, square_avg, acc_delta]
         if (inputs.size() < 4) {
             throw std::invalid_argument("fused_adadelta_step requires 4 inputs");
         }
@@ -1853,7 +1630,6 @@ auto VulkanBackend::dispatch(const std::string& op_name,
     }
 
     if (op_name == "fused_adagrad_step") {
-        // inputs: [grad, param, sum_sq]
         if (inputs.size() < 3) {
             throw std::invalid_argument("fused_adagrad_step requires 3 inputs");
         }

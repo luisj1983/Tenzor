@@ -1,0 +1,21 @@
+#version 450
+
+// Convert real-valued buffer to interleaved complex (imag = 0)
+// Input:  [r0, r1, r2, ...]
+// Output: [r0, 0, r1, 0, r2, 0, ...]
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { float data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { float data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= num_elements) return;
+    data_out[idx * 2]     = data_in[idx];  // real part
+    data_out[idx * 2 + 1] = 0.0;           // imag part = 0
+}

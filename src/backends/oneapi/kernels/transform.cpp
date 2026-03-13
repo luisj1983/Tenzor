@@ -11,6 +11,8 @@
 namespace tenzor {
 namespace oneapi {
     auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, sycl::queue& queue) -> Tensor;
+    // Forward declaration for contiguous_kernel (defined later in this file)
+    auto contiguous_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
 }
 }
 
@@ -88,13 +90,14 @@ auto reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape, 
         throw std::invalid_argument("Reshape: total number of elements must remain constant");
     }
 
-    // For contiguous tensors, reshape is just a view change
-    // For non-contiguous, we need to copy
-    Tensor output(new_shape, input.dtype(), input.device());
+    // Ensure input is contiguous before memcpy (non-contiguous layout would corrupt data)
+    Tensor src = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+
+    Tensor output(new_shape, src.dtype(), src.device());
 
     // Simple memory copy since data layout is preserved - works for all dtypes
-    const size_t bytes = input_numel * input.dtype_size();
-    const void* in_ptr = input.data_ptr();
+    const size_t bytes = input_numel * src.dtype_size();
+    const void* in_ptr = src.data_ptr();
     void* out_ptr = const_cast<void*>(output.data_ptr());
     queue.memcpy(out_ptr, in_ptr, bytes);
 

@@ -1,0 +1,70 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Triangular solve from LU factors: solves L*U*X = P*B — Float64.
+// Single invocation per batch element (sequential column solve).
+
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0) buffer LUBuf    { double lu_data[]; };
+layout(set = 0, binding = 1) buffer PivotBuf { int pivots[];     };
+layout(set = 0, binding = 2) buffer BBuf     { double b_data[];  };
+layout(set = 0, binding = 3) buffer OutBuf   { double x_data[];  };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint nrhs;
+    uint lda;
+    uint ldb;
+    uint batch_size;
+};
+
+void main() {
+    uint batch_idx = gl_GlobalInvocationID.x;
+    if (batch_idx >= batch_size) return;
+
+    uint lu_off = batch_idx * n * lda;
+    uint bx_off = batch_idx * n * ldb;
+
+    // Copy B to X
+    for (uint i = 0; i < n; i++) {
+        for (uint j = 0; j < nrhs; j++) {
+            x_data[bx_off + i * ldb + j] = b_data[bx_off + i * ldb + j];
+        }
+    }
+
+    // Apply pivots
+    for (uint i = 0; i < n; i++) {
+        uint pi = uint(pivots[batch_idx * n + i]);
+        if (pi != i) {
+            for (uint j = 0; j < nrhs; j++) {
+                double tmp = x_data[bx_off + i * ldb + j];
+                x_data[bx_off + i * ldb + j] = x_data[bx_off + pi * ldb + j];
+                x_data[bx_off + pi * ldb + j] = tmp;
+            }
+        }
+    }
+
+    // Forward substitution (L has unit diagonal)
+    for (uint i = 1; i < n; i++) {
+        for (uint j = 0; j < nrhs; j++) {
+            double sum = 0.0LF;
+            for (uint k = 0; k < i; k++) {
+                sum += lu_data[lu_off + i * lda + k] * x_data[bx_off + k * ldb + j];
+            }
+            x_data[bx_off + i * ldb + j] -= sum;
+        }
+    }
+
+    // Backward substitution (U has non-unit diagonal)
+    for (int i = int(n) - 1; i >= 0; i--) {
+        for (uint j = 0; j < nrhs; j++) {
+            double sum = 0.0LF;
+            for (uint k = uint(i) + 1; k < n; k++) {
+                sum += lu_data[lu_off + uint(i) * lda + k] * x_data[bx_off + k * ldb + j];
+            }
+            x_data[bx_off + uint(i) * ldb + j] =
+                (x_data[bx_off + uint(i) * ldb + j] - sum) / lu_data[lu_off + uint(i) * lda + uint(i)];
+        }
+    }
+}

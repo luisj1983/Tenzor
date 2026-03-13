@@ -4,14 +4,10 @@
  */
 
 #include <hip/hip_runtime.h>
-#include <thrust/sort.h>
-#include <thrust/device_ptr.h>
-#include <thrust/execution_policy.h>
-#include <thrust/sequence.h>
-#include <algorithm>
-#include <numeric>
 #include <vector>
 #include <cstdint>
+#include <algorithm>
+#include <numeric>
 #include "tenzor/core/tensor.hpp"
 
 namespace tenzor {
@@ -128,25 +124,25 @@ extern "C" void nms_hip(const float* boxes, const float* scores,
         return;
     }
 
-    // Sort indices by score on device using rocThrust (avoids D2H + H2D round-trip)
-    HipDevicePtr d_scores_guard;
-    NMS_HIP_CHECK(hipMalloc(&d_scores_guard.ptr, num_boxes * sizeof(float)));
-    auto* d_scores_copy = static_cast<float*>(d_scores_guard.ptr);
-    NMS_HIP_CHECK(hipMemcpy(d_scores_copy, scores, num_boxes * sizeof(float),
-                             hipMemcpyDeviceToDevice));
+    // Sort indices by score on host (avoids HIP compiler ICE in rocprim
+    // radix_sort_single_helper triggered by thrust::sort_by_key on gfx1150).
+    // NMS box counts are typically small, so host sort is fast.
+    std::vector<float> h_scores(num_boxes);
+    NMS_HIP_CHECK(hipMemcpy(h_scores.data(), scores, num_boxes * sizeof(float),
+                             hipMemcpyDeviceToHost));
 
+    std::vector<int64_t> h_sorted(num_boxes);
+    std::iota(h_sorted.begin(), h_sorted.end(), int64_t(0));
+    std::sort(h_sorted.begin(), h_sorted.end(), [&](int64_t a, int64_t b) {
+        return h_scores[a] > h_scores[b];
+    });
+
+    // Upload sorted indices to device
     HipDevicePtr d_sorted_guard;
     NMS_HIP_CHECK(hipMalloc(&d_sorted_guard.ptr, num_boxes * sizeof(int64_t)));
     auto* d_sorted_indices = static_cast<int64_t*>(d_sorted_guard.ptr);
-
-    // Initialize indices to [0, 1, 2, ..., num_boxes-1]
-    thrust::device_ptr<int64_t> d_idx_ptr(d_sorted_indices);
-    thrust::sequence(thrust::device, d_idx_ptr, d_idx_ptr + num_boxes, int64_t(0));
-
-    // Sort indices by descending score
-    thrust::device_ptr<float> d_scores_ptr(d_scores_copy);
-    thrust::sort_by_key(thrust::device, d_scores_ptr, d_scores_ptr + num_boxes,
-                        d_idx_ptr, thrust::greater<float>());
+    NMS_HIP_CHECK(hipMemcpy(d_sorted_indices, h_sorted.data(),
+                             num_boxes * sizeof(int64_t), hipMemcpyHostToDevice));
 
     // Allocate suppression mask with RAII guard
     const int64_t num_chunks = (num_boxes + 63) / 64;
@@ -166,11 +162,6 @@ extern "C" void nms_hip(const float* boxes, const float* scores,
     NMS_HIP_CHECK(hipMemcpy(suppression_mask.data(), d_suppression_mask,
                              num_boxes * num_chunks * sizeof(uint64_t),
                              hipMemcpyDeviceToHost));
-
-    // Copy sorted indices to host for sequential suppression processing
-    std::vector<int64_t> h_sorted(num_boxes);
-    NMS_HIP_CHECK(hipMemcpy(h_sorted.data(), d_sorted_indices,
-                             num_boxes * sizeof(int64_t), hipMemcpyDeviceToHost));
 
     // Process suppression mask to get keep indices
     std::vector<bool> suppressed(num_boxes, false);

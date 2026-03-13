@@ -6,6 +6,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace tenzor {
@@ -20,9 +21,8 @@ namespace rocm {
     do { \
         hipError_t err = call; \
         if (err != hipSuccess) { \
-            fprintf(stderr, "HIP error at %s:%d: %s\n", __FILE__, __LINE__, \
-                    hipGetErrorString(err)); \
-            exit(EXIT_FAILURE); \
+            throw std::runtime_error(std::string("HIP error at ") + __FILE__ + ":" + \
+                std::to_string(__LINE__) + ": " + hipGetErrorString(err)); \
         } \
     } while(0)
 

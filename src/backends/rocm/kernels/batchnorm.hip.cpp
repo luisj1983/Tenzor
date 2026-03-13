@@ -6,6 +6,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace tenzor {
@@ -20,9 +21,8 @@ namespace rocm {
     do { \
         hipError_t err = call; \
         if (err != hipSuccess) { \
-            fprintf(stderr, "HIP error at %s:%d: %s\n", __FILE__, __LINE__, \
-                    hipGetErrorString(err)); \
-            exit(EXIT_FAILURE); \
+            throw std::runtime_error(std::string("HIP error at ") + __FILE__ + ":" + \
+                std::to_string(__LINE__) + ": " + hipGetErrorString(err)); \
         } \
     } while(0)
 
@@ -1528,8 +1528,8 @@ auto layernorm_backward(const Tensor& grad_output,
     int64_t outer_size = total_size / normalized_size;
 
     // Zero initialize grad_gamma and grad_beta
-    hipMemsetAsync(grad_gamma.data_ptr(), 0, normalized_size * dtype_size(input.dtype()), stream);
-    hipMemsetAsync(grad_beta.data_ptr(), 0, normalized_size * dtype_size(input.dtype()), stream);
+    HIP_CHECK(hipMemsetAsync(grad_gamma.data_ptr(), 0, normalized_size * dtype_size(input.dtype()), stream));
+    HIP_CHECK(hipMemsetAsync(grad_beta.data_ptr(), 0, normalized_size * dtype_size(input.dtype()), stream));
 
     if (input.dtype() == DType::Float32) {
         int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(float);
@@ -1551,8 +1551,8 @@ auto layernorm_backward(const Tensor& grad_output,
         // Allocate float accumulators for gradients
         Tensor grad_gamma_f32({normalized_size}, DType::Float32, input.device());
         Tensor grad_beta_f32({normalized_size}, DType::Float32, input.device());
-        hipMemsetAsync(grad_gamma_f32.data<float>(), 0, normalized_size * sizeof(float), stream);
-        hipMemsetAsync(grad_beta_f32.data<float>(), 0, normalized_size * sizeof(float), stream);
+        HIP_CHECK(hipMemsetAsync(grad_gamma_f32.data<float>(), 0, normalized_size * sizeof(float), stream));
+        HIP_CHECK(hipMemsetAsync(grad_beta_f32.data<float>(), 0, normalized_size * sizeof(float), stream));
 
         int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(float);
         hipLaunchKernelGGL(layernorm_backward_kernel_fp16, dim3(outer_size), dim3(BATCHNORM_BLOCK_SIZE),
@@ -1661,8 +1661,8 @@ auto instancenorm_backward(const Tensor& grad_output,
     Tensor grad_beta({C}, input.dtype(), input.device());
 
     // Zero initialize grad_gamma and grad_beta
-    hipMemsetAsync(grad_gamma.data_ptr(), 0, C * dtype_size(input.dtype()), stream);
-    hipMemsetAsync(grad_beta.data_ptr(), 0, C * dtype_size(input.dtype()), stream);
+    HIP_CHECK(hipMemsetAsync(grad_gamma.data_ptr(), 0, C * dtype_size(input.dtype()), stream));
+    HIP_CHECK(hipMemsetAsync(grad_beta.data_ptr(), 0, C * dtype_size(input.dtype()), stream));
 
     if (input.dtype() == DType::Float32) {
         int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(float);
@@ -1684,8 +1684,8 @@ auto instancenorm_backward(const Tensor& grad_output,
         // Allocate float accumulators for gradients
         Tensor grad_gamma_f32({C}, DType::Float32, input.device());
         Tensor grad_beta_f32({C}, DType::Float32, input.device());
-        hipMemsetAsync(grad_gamma_f32.data<float>(), 0, C * sizeof(float), stream);
-        hipMemsetAsync(grad_beta_f32.data<float>(), 0, C * sizeof(float), stream);
+        HIP_CHECK(hipMemsetAsync(grad_gamma_f32.data<float>(), 0, C * sizeof(float), stream));
+        HIP_CHECK(hipMemsetAsync(grad_beta_f32.data<float>(), 0, C * sizeof(float), stream));
 
         int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(float);
         hipLaunchKernelGGL(instancenorm_backward_kernel_fp16, dim3(N * C), dim3(BATCHNORM_BLOCK_SIZE),
@@ -1800,8 +1800,8 @@ auto groupnorm_backward(const Tensor& grad_output,
     Tensor grad_beta({C}, input.dtype(), input.device());
 
     // Zero initialize grad_gamma and grad_beta
-    hipMemsetAsync(grad_gamma.data_ptr(), 0, C * dtype_size(input.dtype()), stream);
-    hipMemsetAsync(grad_beta.data_ptr(), 0, C * dtype_size(input.dtype()), stream);
+    HIP_CHECK(hipMemsetAsync(grad_gamma.data_ptr(), 0, C * dtype_size(input.dtype()), stream));
+    HIP_CHECK(hipMemsetAsync(grad_beta.data_ptr(), 0, C * dtype_size(input.dtype()), stream));
 
     if (input.dtype() == DType::Float32) {
         int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(float);
@@ -1823,8 +1823,8 @@ auto groupnorm_backward(const Tensor& grad_output,
         // Allocate float accumulators for gradients
         Tensor grad_gamma_f32({C}, DType::Float32, input.device());
         Tensor grad_beta_f32({C}, DType::Float32, input.device());
-        hipMemsetAsync(grad_gamma_f32.data<float>(), 0, C * sizeof(float), stream);
-        hipMemsetAsync(grad_beta_f32.data<float>(), 0, C * sizeof(float), stream);
+        HIP_CHECK(hipMemsetAsync(grad_gamma_f32.data<float>(), 0, C * sizeof(float), stream));
+        HIP_CHECK(hipMemsetAsync(grad_beta_f32.data<float>(), 0, C * sizeof(float), stream));
 
         int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(float);
         hipLaunchKernelGGL(groupnorm_backward_kernel_fp16, dim3(N * groups), dim3(BATCHNORM_BLOCK_SIZE),

@@ -1,0 +1,20 @@
+#version 450
+
+// Extract real parts from interleaved complex buffer.
+// Input:  [re0, im0, re1, im1, ...]  (complex pairs)
+// Output: [re0, re1, ...]            (real only)
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { float data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { float data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= num_elements) return;
+    data_out[idx] = data_in[idx * 2];  // extract real part
+}

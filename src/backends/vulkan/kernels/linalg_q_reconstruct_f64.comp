@@ -1,0 +1,53 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Reconstruct Q from Householder reflectors — Float64.
+
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0) buffer QRBuf  { double qr_data[]; };
+layout(set = 0, binding = 1) buffer TauBuf { double tau[];      };
+layout(set = 0, binding = 2) buffer QBuf   { double q_data[];   };
+
+layout(push_constant) uniform PushConstants {
+    uint m;
+    uint n;
+    uint k;
+    uint ldq;
+    uint batch_size;
+};
+
+void main() {
+    uint batch_idx = gl_GlobalInvocationID.x;
+    if (batch_idx >= batch_size) return;
+
+    uint qr_off = batch_idx * m * n;
+    uint tau_off = batch_idx * n;
+    uint q_off = batch_idx * m * ldq;
+
+    // Initialize Q = I(m x m)
+    for (uint i = 0; i < m; i++) {
+        for (uint j = 0; j < m; j++) {
+            q_data[q_off + i * ldq + j] = (i == j) ? 1.0LF : 0.0LF;
+        }
+    }
+
+    // Apply reflectors in reverse
+    for (int ki = int(k) - 1; ki >= 0; ki--) {
+        uint kk = uint(ki);
+        double t = tau[tau_off + kk];
+        if (t == 0.0LF) continue;
+
+        for (uint j = 0; j < m; j++) {
+            double dot = q_data[q_off + kk * ldq + j];
+            for (uint i = kk + 1; i < m; i++) {
+                dot += qr_data[qr_off + i * n + kk] * q_data[q_off + i * ldq + j];
+            }
+            dot *= t;
+            q_data[q_off + kk * ldq + j] -= dot;
+            for (uint i = kk + 1; i < m; i++) {
+                q_data[q_off + i * ldq + j] -= dot * qr_data[qr_off + i * n + kk];
+            }
+        }
+    }
+}

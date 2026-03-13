@@ -11458,11 +11458,15 @@ auto VulkanBackend::dispatchArgSort(const Tensor& input, int64_t dim, bool desce
         sort_shader = "bitonic_sort_f16";
         work_dtype = DType::Float16;
         elem_size = sizeof(uint16_t);
+    } else if (input.dtype() == DType::Int8 || input.dtype() == DType::UInt8 || input.dtype() == DType::Bool) {
+        // Cast to Int32, sort using i32 shader, indices are dtype-independent
+        Tensor int32_input = input.to(DType::Int32);
+        return dispatchArgSort(int32_input, dim, descending);
     } else {
         sort_shader = "";
     }
 
-    // CPU fallback for unsupported dtypes
+    // CPU fallback for any remaining unsupported dtypes
     if (sort_shader.empty()) {
         Device cpu_device(Device::Type::CPU, 0);
         Tensor cpu_input = input.to(cpu_device);
@@ -13098,11 +13102,17 @@ auto VulkanBackend::dispatchSort(const Tensor& input, int64_t dim, bool descendi
         sort_shader = "bitonic_sort_f16";
         work_dtype = DType::Float16;
         elem_size = sizeof(uint16_t);
+    } else if (input.dtype() == DType::Int8 || input.dtype() == DType::UInt8 || input.dtype() == DType::Bool) {
+        // Cast to Int32, sort, then cast sorted values back to original dtype
+        DType orig_dtype = input.dtype();
+        Tensor int32_input = input.to(DType::Int32);
+        auto [sorted_i32, indices] = dispatchSort(int32_input, dim, descending);
+        return {sorted_i32.to(orig_dtype), indices};
     } else {
         sort_shader = "";
     }
 
-    // CPU fallback for unsupported dtypes only
+    // CPU fallback for any remaining unsupported dtypes
     if (sort_shader.empty()) {
         Device cpu_device(Device::Type::CPU, 0);
         Tensor cpu_input = input.to(cpu_device);
@@ -13370,6 +13380,16 @@ auto VulkanBackend::dispatchUnique(const Tensor& input, bool sorted,
         return {empty_vals, empty_inv, empty_cnt};
     }
 
+    // For Int8/UInt8/Bool: cast to Int32, run unique on GPU, cast results back
+    if (input.dtype() == DType::Int8 || input.dtype() == DType::UInt8 || input.dtype() == DType::Bool) {
+        DType orig_dtype = input.dtype();
+        Tensor int32_input = input.to(DType::Int32);
+        auto results = dispatchUnique(int32_input, sorted, return_inverse, return_counts);
+        // Cast unique values back to original dtype; inverse/counts stay as Int64
+        results[0] = results[0].to(orig_dtype);
+        return results;
+    }
+
     // Flatten input
     Tensor flat = dispatchContiguous(dispatchReshape(input, {numel}));
 
@@ -13380,8 +13400,12 @@ auto VulkanBackend::dispatchUnique(const Tensor& input, bool sorted,
 
     // Select mark/compact shaders based on dtype
     std::string mark_shader, compact_shader;
-    // For F16/BF16: sort produces F32 sorted values, so use F32 shaders
     DType sorted_dtype = sorted_vals.dtype();
+    // For F16/BF16: cast sorted values to F32 so F32 mark/compact shaders work correctly
+    if (sorted_dtype == DType::Float16 || sorted_dtype == DType::BFloat16) {
+        sorted_vals = sorted_vals.to(DType::Float32);
+        sorted_dtype = DType::Float32;
+    }
     if (sorted_dtype == DType::Float64) {
         mark_shader = "unique_mark_f64";
         compact_shader = "unique_compact_f64";
@@ -13392,7 +13416,7 @@ auto VulkanBackend::dispatchUnique(const Tensor& input, bool sorted,
         mark_shader = "unique_mark_i64";
         compact_shader = "unique_compact_i64";
     } else {
-        // F32 (default, also covers F16/BF16 sorted values)
+        // F32 (default; F16/BF16 are already cast to F32 above)
         mark_shader = "unique_mark";
         compact_shader = "unique_compact";
     }
@@ -13402,7 +13426,7 @@ auto VulkanBackend::dispatchUnique(const Tensor& input, bool sorted,
                            sorted_dtype == DType::Int32 || sorted_dtype == DType::Int64);
 
     if (!has_gpu_shader) {
-        // CPU fallback for Int8, Bool, etc.
+        // CPU fallback for any remaining unsupported dtypes
         Device cpu_device(Device::Type::CPU, 0);
         Tensor cpu_input = input.to(cpu_device);
         std::vector<Tensor> cpu_inputs = {cpu_input};
@@ -16328,7 +16352,6 @@ auto VulkanBackend::dispatchStack(std::span<const Tensor> inputs, int64_t dim) -
 
         // Copy all input tensors into a single contiguous buffer
         size_t elem_bytes = inputs[0].dtype_size();
-        size_t total_input_bytes = static_cast<size_t>(output_numel_f16) * elem_bytes;
         Tensor concat_input({output_numel_f16}, dtype, inputs[0].device());
 
         auto [dst_vk_buffer, dst_base_offset] = getVulkanBufferAndOffset(concat_input.data_ptr());
@@ -17425,9 +17448,11 @@ auto VulkanBackend::dispatchIFFT(const Tensor& input, int64_t dim, int64_t n,
 
     bool size_ok = (n == signal_len);
     bool can_cooley_tukey = is_power_of_2(signal_len) && signal_len <= MAX_VULKAN_FFT_SIZE && size_ok;
-    bool can_bluestein = !is_power_of_2(signal_len) && signal_len <= MAX_VULKAN_FFT_SIZE && size_ok;
+    auto mixed_radix_factors = factorize_fft(signal_len);
+    bool can_mixed_radix = !mixed_radix_factors.empty() && signal_len <= MAX_VULKAN_FFT_SIZE && size_ok;
+    bool can_bluestein = signal_len <= MAX_VULKAN_FFT_SIZE && size_ok;
 
-    if (!can_cooley_tukey && !can_bluestein) {
+    if (!can_cooley_tukey && !can_mixed_radix && !can_bluestein) {
         auto cpu_input = input.to(Device::cpu());
         auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
         NewOpAttributes attrs;
@@ -17449,8 +17474,14 @@ auto VulkanBackend::dispatchIFFT(const Tensor& input, int64_t dim, int64_t n,
             result = runFFTButterfly(result, static_cast<uint32_t>(signal_len), 1,
                                       static_cast<uint32_t>(b * signal_len));
         }
+    } else if (can_mixed_radix && !is_power_of_2(signal_len)) {
+        // Factorable into {2,3,5,7}: use mixed-radix Stockham with direction=1 (inverse)
+        for (int64_t b = 0; b < batch_size; ++b) {
+            result = runMixedRadixFFT(result, signal_len, 1,
+                                       static_cast<uint32_t>(b * signal_len));
+        }
     } else {
-        // Non-power-of-2: use Bluestein's algorithm per batch element
+        // Non-factorable: use Bluestein's algorithm per batch element
         size_t elem_size = (input.dtype() == DType::Complex128) ? 16 : 8;
         int32_t device_id = input.device().index;
 
@@ -17520,9 +17551,11 @@ auto VulkanBackend::dispatchRFFT(const Tensor& input, int64_t dim, int64_t n,
     // Check if we can handle this on the GPU
     bool size_ok = (n == signal_len) && (signal_len >= 2);
     bool can_cooley_tukey = is_power_of_2(signal_len) && signal_len <= MAX_VULKAN_FFT_SIZE && size_ok;
-    bool can_bluestein = !is_power_of_2(signal_len) && signal_len <= MAX_VULKAN_FFT_SIZE && size_ok;
+    auto mixed_radix_factors_rfft = factorize_fft(signal_len);
+    bool can_mixed_radix = !mixed_radix_factors_rfft.empty() && signal_len <= MAX_VULKAN_FFT_SIZE && size_ok;
+    bool can_bluestein = signal_len <= MAX_VULKAN_FFT_SIZE && size_ok;
 
-    if (!can_cooley_tukey && !can_bluestein) {
+    if (!can_cooley_tukey && !can_mixed_radix && !can_bluestein) {
         auto cpu_input = input.to(Device::cpu());
         auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
         NewOpAttributes attrs;
@@ -17547,54 +17580,87 @@ auto VulkanBackend::dispatchRFFT(const Tensor& input, int64_t dim, int64_t n,
     out_shape[ndim - 1] = half_n + 1;
     Tensor output(out_shape, complex_dtype, input.device());
 
-    // For non-power-of-2: convert real to complex, run full FFT via Bluestein,
-    // then extract first N/2+1 bins
-    if (can_bluestein) {
+    // Helper lambda: real-to-complex conversion on GPU via shader
+    auto run_real_to_complex = [&](const Tensor& cont_input, int64_t b_idx) -> Tensor {
+        Tensor complex_input({signal_len}, complex_dtype, input.device());
+        std::string shader = is_f64 ? "real_to_complex_f64" : "real_to_complex";
+        auto* pipeline = getPipeline(shader, device_id);
+
+        struct PushConstants {
+            uint32_t num_elements;
+        } pc;
+        pc.num_elements = static_cast<uint32_t>(signal_len);
+
+        size_t real_elem_sz = is_f64 ? 8 : 4;
+        const void* in_ptr = static_cast<const char*>(cont_input.data_ptr())
+                             + b_idx * signal_len * real_elem_sz;
+        size_t in_size = signal_len * real_elem_sz;
+        size_t out_size = signal_len * complex_elem_size;
+
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, in_ptr}, {1, complex_input.data_ptr()}
+        };
+        std::vector<size_t> sizes = {in_size, out_size};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, div_wg(signal_len, devices_[device_id].workgroupSize), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+        return complex_input;
+    };
+
+    // Helper lambda: copy first N/2+1 complex bins from full FFT to output batch slice
+    auto copy_half_bins_to_output = [&](const Tensor& full_fft, int64_t b_idx) {
+        auto [src_buf, src_off] = getVulkanBufferAndOffset(full_fft.data_ptr());
+        auto [dst_buf, dst_off] = getVulkanBufferAndOffset(output.data_ptr());
+
+        VkBufferCopy region{};
+        region.srcOffset = static_cast<VkDeviceSize>(src_off);
+        region.dstOffset = static_cast<VkDeviceSize>(dst_off)
+                         + b_idx * (half_n + 1) * complex_elem_size;
+        region.size = (half_n + 1) * complex_elem_size;
+
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdCopyBuffer(cmd, src_buf, dst_buf, 1, &region);
+        insertTransferToComputeBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+    };
+
+    // Mixed-radix path for non-power-of-2 sizes factorable into {2,3,5,7}
+    if (can_mixed_radix && !is_power_of_2(signal_len)) {
         auto cont = input.contiguous();
 
         for (int64_t b = 0; b < batch_size; ++b) {
-            // Create complex tensor from real input: set imaginary parts to 0
-            // Zero-init handles imag=0, now copy real values into even positions
-            Tensor complex_cpu({signal_len}, complex_dtype, Device::cpu());
-            // Access real input on CPU
-            Tensor cont_cpu = cont.to(Device::cpu());
-            if (is_f64) {
-                const auto* real_ptr = static_cast<const double*>(cont_cpu.data_ptr())
-                                       + b * signal_len;
-                auto* cplx_ptr = static_cast<double*>(complex_cpu.data_ptr());
-                for (int64_t k = 0; k < signal_len; ++k) {
-                    cplx_ptr[k * 2]     = real_ptr[k];
-                    cplx_ptr[k * 2 + 1] = 0.0;
-                }
-            } else {
-                const auto* real_ptr = static_cast<const float*>(cont_cpu.data_ptr())
-                                       + b * signal_len;
-                auto* cplx_ptr = static_cast<float*>(complex_cpu.data_ptr());
-                for (int64_t k = 0; k < signal_len; ++k) {
-                    cplx_ptr[k * 2]     = real_ptr[k];
-                    cplx_ptr[k * 2 + 1] = 0.0f;
-                }
-            }
-            Tensor complex_input = complex_cpu.to(input.device());
+            Tensor complex_input = run_real_to_complex(cont, b);
+            Tensor full_fft = runMixedRadixFFT(complex_input, signal_len, 0, 0);
+            copy_half_bins_to_output(full_fft, b);
+        }
+
+        double scale = fft_norm_factor(signal_len, norm, /*is_forward=*/true);
+        if (std::abs(scale - 1.0) > 1e-15) {
+            uint32_t total_elems = static_cast<uint32_t>(output.numel());
+            runFFTScale(output, total_elems, scale);
+        }
+
+        return output;
+    }
+
+    // Non-factorable non-power-of-2: convert real to complex on GPU, run full FFT via Bluestein,
+    // then extract first N/2+1 bins
+    if (!can_cooley_tukey) {
+        auto cont = input.contiguous();
+
+        for (int64_t b = 0; b < batch_size; ++b) {
+            Tensor complex_input = run_real_to_complex(cont, b);
 
             Tensor full_fft = dispatchFFTBluestein(complex_input, signal_len, 0);
-
-            // Copy first N/2+1 complex elements to output batch slice
-            {
-                auto [src_buf, src_off] = getVulkanBufferAndOffset(full_fft.data_ptr());
-                auto [dst_buf, dst_off] = getVulkanBufferAndOffset(output.data_ptr());
-
-                VkBufferCopy region{};
-                region.srcOffset = static_cast<VkDeviceSize>(src_off);
-                region.dstOffset = static_cast<VkDeviceSize>(dst_off)
-                                 + b * (half_n + 1) * complex_elem_size;
-                region.size = (half_n + 1) * complex_elem_size;
-
-                VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-                vkCmdCopyBuffer(cmd, src_buf, dst_buf, 1, &region);
-                insertTransferToComputeBarrier(cmd);
-                endSingleTimeCommands(cmd, device_id);
-            }
+            copy_half_bins_to_output(full_fft, b);
         }
 
         // Apply normalization
@@ -17715,9 +17781,11 @@ auto VulkanBackend::dispatchIRFFT(const Tensor& input, int64_t dim, int64_t n,
 
     bool size_ok = (freq_bins == output_len / 2 + 1) && (output_len >= 2);
     bool can_cooley_tukey = is_power_of_2(output_len) && output_len <= MAX_VULKAN_FFT_SIZE && size_ok;
-    bool can_bluestein = !is_power_of_2(output_len) && output_len <= MAX_VULKAN_FFT_SIZE && size_ok;
+    auto mixed_radix_factors_irfft = factorize_fft(output_len);
+    bool can_mixed_radix = !mixed_radix_factors_irfft.empty() && output_len <= MAX_VULKAN_FFT_SIZE && size_ok;
+    bool can_bluestein = output_len <= MAX_VULKAN_FFT_SIZE && size_ok;
 
-    if (!can_cooley_tukey && !can_bluestein) {
+    if (!can_cooley_tukey && !can_mixed_radix && !can_bluestein) {
         auto cpu_input = input.to(Device::cpu());
         auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
         NewOpAttributes attrs;
@@ -17744,45 +17812,117 @@ auto VulkanBackend::dispatchIRFFT(const Tensor& input, int64_t dim, int64_t n,
     out_shape[ndim - 1] = output_len;
     Tensor output(out_shape, real_dtype, input.device());
 
-    // For non-power-of-2: reconstruct full N-point Hermitian spectrum from N/2+1 bins,
-    // run full IFFT via Bluestein, then extract real parts
-    if (can_bluestein) {
+    // Helper lambda: Hermitian mirror on GPU — reconstruct full N-point spectrum from N/2+1 bins
+    auto run_hermitian_mirror = [&](const Tensor& cont_input, int64_t b_idx) -> Tensor {
+        Tensor full_spectrum({output_len}, complex_dtype, input.device());
+        std::string shader = is_f64 ? "hermitian_mirror_f64" : "hermitian_mirror";
+        auto* pipeline = getPipeline(shader, device_id);
+
+        struct PushConstants {
+            uint32_t half_plus_one;
+            uint32_t full_size;
+        } pc;
+        pc.half_plus_one = static_cast<uint32_t>(freq_bins);
+        pc.full_size = static_cast<uint32_t>(output_len);
+
+        const void* in_ptr = static_cast<const char*>(cont_input.data_ptr())
+                             + b_idx * freq_bins * complex_elem_size;
+        size_t in_size = freq_bins * complex_elem_size;
+        size_t out_size = output_len * complex_elem_size;
+
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, in_ptr}, {1, full_spectrum.data_ptr()}
+        };
+        std::vector<size_t> sizes = {in_size, out_size};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, div_wg(output_len, devices_[device_id].workgroupSize), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+        return full_spectrum;
+    };
+
+    // Helper lambda: extract real parts from complex IFFT result on GPU
+    auto run_complex_to_real = [&](const Tensor& ifft_result, int64_t b_idx) {
+        std::string shader = is_f64 ? "complex_to_real_f64" : "complex_to_real";
+        auto* pipeline = getPipeline(shader, device_id);
+
+        struct PushConstants {
+            uint32_t num_elements;
+        } pc;
+        pc.num_elements = static_cast<uint32_t>(output_len);
+
+        size_t in_size = output_len * complex_elem_size;
+        void* out_ptr = static_cast<char*>(const_cast<void*>(output.data_ptr()))
+                        + b_idx * output_len * real_elem_size;
+        size_t out_size = output_len * real_elem_size;
+
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, ifft_result.data_ptr()}, {1, out_ptr}
+        };
+        std::vector<size_t> sizes = {in_size, out_size};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, div_wg(output_len, devices_[device_id].workgroupSize), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+    };
+
+    // Mixed-radix path for non-power-of-2 sizes factorable into {2,3,5,7}
+    if (can_mixed_radix && !is_power_of_2(output_len)) {
         auto cont = input.contiguous();
 
         for (int64_t b = 0; b < batch_size; ++b) {
-            // Reconstruct full N-point complex spectrum from Hermitian symmetry:
-            // X[0..N/2] given, X[k] = conj(X[N-k]) for k = N/2+1..N-1
-            Tensor cont_cpu = cont.to(Device::cpu());
-            Tensor full_spectrum_cpu({output_len}, complex_dtype, Device::cpu());
-            // Complex64/128 data is interleaved floats/doubles, access via data_ptr()
-            if (is_f64) {
-                const auto* in_ptr = static_cast<const double*>(cont_cpu.data_ptr())
-                                     + b * freq_bins * 2;
-                auto* out_ptr = static_cast<double*>(full_spectrum_cpu.data_ptr());
-                // Copy first N/2+1 bins
-                for (int64_t k = 0; k < freq_bins; ++k) {
-                    out_ptr[k * 2]     = in_ptr[k * 2];
-                    out_ptr[k * 2 + 1] = in_ptr[k * 2 + 1];
-                }
-                // Fill conjugate mirror: X[N-k] = conj(X[k])
-                for (int64_t k = 1; k < freq_bins - 1 && (output_len - k) >= freq_bins; ++k) {
-                    out_ptr[(output_len - k) * 2]     =  in_ptr[k * 2];
-                    out_ptr[(output_len - k) * 2 + 1] = -in_ptr[k * 2 + 1];
-                }
-            } else {
-                const auto* in_ptr = static_cast<const float*>(cont_cpu.data_ptr())
-                                     + b * freq_bins * 2;
-                auto* out_ptr = static_cast<float*>(full_spectrum_cpu.data_ptr());
-                for (int64_t k = 0; k < freq_bins; ++k) {
-                    out_ptr[k * 2]     = in_ptr[k * 2];
-                    out_ptr[k * 2 + 1] = in_ptr[k * 2 + 1];
-                }
-                for (int64_t k = 1; k < freq_bins - 1 && (output_len - k) >= freq_bins; ++k) {
-                    out_ptr[(output_len - k) * 2]     =  in_ptr[k * 2];
-                    out_ptr[(output_len - k) * 2 + 1] = -in_ptr[k * 2 + 1];
-                }
-            }
-            Tensor full_spectrum = full_spectrum_cpu.to(input.device());
+            // Reconstruct full Hermitian spectrum on GPU
+            Tensor full_spectrum = run_hermitian_mirror(cont, b);
+
+            // Run inverse mixed-radix FFT
+            Tensor ifft_result = runMixedRadixFFT(full_spectrum, output_len, 1, 0);
+
+            // Scale by 1/N for the IFFT (mixed-radix does not apply normalization)
+            runFFTScale(ifft_result, static_cast<uint32_t>(output_len),
+                        1.0 / static_cast<double>(output_len));
+
+            // Extract real parts on GPU
+            run_complex_to_real(ifft_result, b);
+        }
+
+        // Apply normalization correction
+        double applied_scale = 1.0 / static_cast<double>(output_len);
+        double target_scale = fft_norm_factor(output_len, norm, /*is_forward=*/false);
+        if (std::abs(target_scale - 1.0) < 1e-15) {
+            target_scale = 1.0;
+        }
+        double correction = target_scale / applied_scale;
+        if (std::abs(correction - 1.0) > 1e-15) {
+            auto scale_tensor = dispatchFull({1}, static_cast<float>(correction), real_dtype);
+            output = dispatchBinaryOp("mul", output,
+                dispatchExpand(scale_tensor, std::vector<int64_t>(out_shape.begin(), out_shape.end())));
+        }
+
+        return output;
+    }
+
+    // Non-factorable non-power-of-2: reconstruct Hermitian spectrum on GPU,
+    // run full IFFT via Bluestein, extract real parts on GPU
+    if (!can_cooley_tukey) {
+        auto cont = input.contiguous();
+
+        for (int64_t b = 0; b < batch_size; ++b) {
+            // Reconstruct full Hermitian spectrum on GPU
+            Tensor full_spectrum = run_hermitian_mirror(cont, b);
 
             // Run inverse FFT via Bluestein
             Tensor ifft_result = dispatchFFTBluestein(full_spectrum, output_len, 1);
@@ -17791,40 +17931,8 @@ auto VulkanBackend::dispatchIRFFT(const Tensor& input, int64_t dim, int64_t n,
             runFFTScale(ifft_result, static_cast<uint32_t>(output_len),
                         1.0 / static_cast<double>(output_len));
 
-            // Extract real parts from complex IFFT result via CPU roundtrip
-            Tensor real_batch_cpu({output_len}, real_dtype, Device::cpu());
-            Tensor ifft_on_cpu = ifft_result.to(Device::cpu());
-            if (is_f64) {
-                const auto* cplx = static_cast<const double*>(ifft_on_cpu.data_ptr());
-                auto* real_out = real_batch_cpu.data<double>();
-                for (int64_t k = 0; k < output_len; ++k) {
-                    real_out[k] = cplx[k * 2];  // real part only
-                }
-            } else {
-                const auto* cplx = static_cast<const float*>(ifft_on_cpu.data_ptr());
-                auto* real_out = real_batch_cpu.data<float>();
-                for (int64_t k = 0; k < output_len; ++k) {
-                    real_out[k] = cplx[k * 2];
-                }
-            }
-            Tensor real_batch_gpu = real_batch_cpu.to(input.device());
-
-            // Copy to output batch slice
-            {
-                auto [src_buf, src_off] = getVulkanBufferAndOffset(real_batch_gpu.data_ptr());
-                auto [dst_buf, dst_off] = getVulkanBufferAndOffset(output.data_ptr());
-
-                VkBufferCopy region{};
-                region.srcOffset = static_cast<VkDeviceSize>(src_off);
-                region.dstOffset = static_cast<VkDeviceSize>(dst_off)
-                                 + b * output_len * real_elem_size;
-                region.size = output_len * real_elem_size;
-
-                VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-                vkCmdCopyBuffer(cmd, src_buf, dst_buf, 1, &region);
-                insertTransferToComputeBarrier(cmd);
-                endSingleTimeCommands(cmd, device_id);
-            }
+            // Extract real parts on GPU
+            run_complex_to_real(ifft_result, b);
         }
 
         // Apply normalization correction: Bluestein IFFT + 1/N already applied.
@@ -18348,39 +18456,40 @@ auto VulkanBackend::dispatchLinalgDet(const Tensor& input) -> Tensor {
 
         runBlockedLU(A, pivots, n, batch_size, device_id, is_f64);
 
-        // Read back LU diagonal and pivots to CPU to compute determinant
-        // (small data transfer: n floats + n ints per batch)
-        auto A_cpu = A.to(Device::cpu());
-        auto pivots_cpu = pivots.to(Device::cpu());
+        // Compute determinant from LU diagonal + pivot sign entirely on GPU
+        std::string det_shader = is_f64 ? "linalg_det_from_lu_f64" : "linalg_det_from_lu";
+        auto* det_pipeline = getPipeline(det_shader, device_id);
 
-        auto out_cpu = Tensor(out_shape, input.dtype(), Device::cpu());
-        for (int64_t b = 0; b < batch_size; ++b) {
-            // Product of diagonal elements
-            double det = 1.0;
-            int swap_count = 0;
-            for (int64_t i = 0; i < n; ++i) {
-                if (is_f64) {
-                    det *= static_cast<const double*>(A_cpu.data_ptr())[b * n * n + i * n + i];
-                } else {
-                    det *= static_cast<double>(
-                        static_cast<const float*>(A_cpu.data_ptr())[b * n * n + i * n + i]);
-                }
-                // Count pivot swaps (pivot[i] != i means a swap happened)
-                int32_t piv = static_cast<const int32_t*>(pivots_cpu.data_ptr())[b * n + i];
-                if (piv != static_cast<int32_t>(i)) {
-                    swap_count++;
-                }
-            }
-            // Odd number of swaps negates determinant
-            if (swap_count % 2 != 0) det = -det;
+        struct DetPC {
+            uint32_t n_dim;
+            uint32_t batch_cnt;
+            uint32_t lda;
+        } det_pc;
+        det_pc.n_dim = static_cast<uint32_t>(n);
+        det_pc.batch_cnt = static_cast<uint32_t>(batch_size);
+        det_pc.lda = static_cast<uint32_t>(n);
 
-            if (is_f64) {
-                static_cast<double*>(out_cpu.data_ptr())[b] = det;
-            } else {
-                static_cast<float*>(out_cpu.data_ptr())[b] = static_cast<float>(det);
-            }
-        }
-        output = out_cpu.to(input.device());
+        size_t elem_size = is_f64 ? 8 : 4;
+        size_t lu_buf_size = batch_size * n * n * elem_size;
+        size_t piv_buf_size = batch_size * n * sizeof(int32_t);
+        size_t det_buf_size = batch_size * elem_size;
+
+        std::vector<std::pair<uint32_t, const void*>> det_bindings = {
+            {0, A.data_ptr()}, {1, pivots.data_ptr()}, {2, output.data_ptr()}
+        };
+        std::vector<size_t> det_sizes = {lu_buf_size, piv_buf_size, det_buf_size};
+        VkDescriptorSet det_ds = allocateAndWriteDescriptorSet(device_id, det_pipeline, det_bindings, det_sizes);
+
+        VkCommandBuffer det_cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(det_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, det_pipeline->pipeline());
+        vkCmdBindDescriptorSets(det_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               det_pipeline->layout(), 0, 1, &det_ds, 0, nullptr);
+        vkCmdPushConstants(det_cmd, det_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(det_pc), &det_pc);
+        uint32_t det_groups = (static_cast<uint32_t>(batch_size) + 255) / 256;
+        vkCmdDispatch(det_cmd, det_groups, 1, 1);
+        insertComputeOnlyBarrier(det_cmd);
+        endSingleTimeCommands(det_cmd, device_id);
     }
 
     // If input was truly scalar (0-d batch), squeeze
@@ -18463,25 +18572,67 @@ auto VulkanBackend::dispatchLinalgInv(const Tensor& input) -> Tensor {
         return output;
     }
 
-    // Tiled path (32 < n <= 256): LU factorize on GPU, then solve on CPU
-    // The LU factorization is the expensive O(n^3) part — do it on GPU.
-    // The backsolve is O(n^2) and easier on CPU with LAPACK.
+    // Tiled path (32 < n <= 512): LU factorize on GPU, then backsolve on GPU via TRSM shader
     Tensor A = dispatchClone(input.contiguous());
     Tensor pivots({batch_size, n}, DType::Int32, input.device());
 
     runBlockedLU(A, pivots, n, batch_size, device_id, is_f64);
 
-    // Transfer LU + pivots to CPU, solve there, transfer result back
-    auto A_cpu = A.to(Device::cpu());
-    auto pivots_cpu = pivots.to(Device::cpu());
+    // Create identity matrix as RHS: solve LU * X = P * I => X = A^{-1}
+    // dispatchEye creates a single n x n identity on GPU; expand for batches
+    Tensor identity = dispatchEye(n, n, input.dtype(), input.device());
+    if (batch_size > 1) {
+        // Repeat identity for each batch element
+        std::vector<Tensor> eyes(batch_size, identity);
+        identity = dispatchStack(eyes, 0);
+    } else {
+        identity = identity.unsqueeze(0);
+    }
 
-    // Use CPU dispatch for inversion from LU factors
-    auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
-    NewOpAttributes attrs;
-    auto cpu_input = input.to(Device::cpu());
-    std::array<Tensor, 1> cpu_inputs = {cpu_input};
-    auto results = cpu_table.dispatch(OpId::LinalgInv, cpu_inputs, attrs);
-    return results[0].to(input.device());
+    Tensor output(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
+
+    // Dispatch TRSM shader: solve LU * X = P * I
+    std::string trsm_shader = is_f64 ? "linalg_trsm_f64" : "linalg_trsm";
+    auto* trsm_pipeline = getPipeline(trsm_shader, device_id);
+
+    struct TrsmPC {
+        uint32_t n_dim;
+        uint32_t nrhs;
+        uint32_t lda;
+        uint32_t ldb;
+        uint32_t batch_cnt;
+    } trsm_pc;
+    trsm_pc.n_dim = static_cast<uint32_t>(n);
+    trsm_pc.nrhs = static_cast<uint32_t>(n);
+    trsm_pc.lda = static_cast<uint32_t>(n);
+    trsm_pc.ldb = static_cast<uint32_t>(n);
+    trsm_pc.batch_cnt = static_cast<uint32_t>(batch_size);
+
+    size_t elem_size = is_f64 ? 8 : 4;
+    size_t lu_sz = batch_size * n * n * elem_size;
+    size_t piv_sz = batch_size * n * sizeof(int32_t);
+    size_t mat_sz = batch_size * n * n * elem_size;
+
+    // Note: identity is read-only input, output receives solution
+    auto identity_cont = identity.contiguous();
+    std::vector<std::pair<uint32_t, const void*>> trsm_bindings = {
+        {0, A.data_ptr()}, {1, pivots.data_ptr()},
+        {2, identity_cont.data_ptr()}, {3, output.data_ptr()}
+    };
+    std::vector<size_t> trsm_sizes = {lu_sz, piv_sz, mat_sz, mat_sz};
+    VkDescriptorSet trsm_ds = allocateAndWriteDescriptorSet(device_id, trsm_pipeline, trsm_bindings, trsm_sizes);
+
+    VkCommandBuffer trsm_cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(trsm_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, trsm_pipeline->pipeline());
+    vkCmdBindDescriptorSets(trsm_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           trsm_pipeline->layout(), 0, 1, &trsm_ds, 0, nullptr);
+    vkCmdPushConstants(trsm_cmd, trsm_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(trsm_pc), &trsm_pc);
+    vkCmdDispatch(trsm_cmd, static_cast<uint32_t>(batch_size), 1, 1);
+    insertComputeOnlyBarrier(trsm_cmd);
+    endSingleTimeCommands(trsm_cmd, device_id);
+
+    return output;
 }
 
 auto VulkanBackend::dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Tensor {
@@ -18563,21 +18714,60 @@ auto VulkanBackend::dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Ten
         return output;
     }
 
-    // Tiled path (32 < n <= 256): LU factorize on GPU, backsolve on CPU
+    // Tiled path (32 < n <= 512): LU factorize on GPU, backsolve on GPU via TRSM shader
     Tensor A = dispatchClone(a.contiguous());
     Tensor pivots({batch_size, n}, DType::Int32, a.device());
 
     runBlockedLU(A, pivots, n, batch_size, device_id, is_f64);
 
-    // Transfer LU + pivots + b to CPU for backsolve, then return to GPU
-    // (LU is the O(n^3) part done on GPU; backsolve is O(n^2))
-    auto cpu_a = a.to(Device::cpu());
-    auto cpu_b = b.to(Device::cpu());
-    auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
-    NewOpAttributes attrs;
-    std::array<Tensor, 2> cpu_inputs = {cpu_a, cpu_b};
-    auto results = cpu_table.dispatch(OpId::LinalgSolve, cpu_inputs, attrs);
-    return results[0].to(a.device());
+    // Determine nrhs from b shape
+    int64_t b_ndim = static_cast<int64_t>(b_shape.size());
+    int64_t nrhs = (b_ndim >= 2) ? b_shape[b_ndim - 1] : 1;
+    int64_t ldb = nrhs;
+
+    Tensor output(std::vector<int64_t>(b_shape.begin(), b_shape.end()), a.dtype(), a.device());
+
+    // Dispatch TRSM shader: solve LU * X = P * B
+    std::string trsm_shader = is_f64 ? "linalg_trsm_f64" : "linalg_trsm";
+    auto* trsm_pipeline = getPipeline(trsm_shader, device_id);
+
+    struct TrsmPC {
+        uint32_t n_dim;
+        uint32_t nrhs_cnt;
+        uint32_t lda;
+        uint32_t ldb_val;
+        uint32_t batch_cnt;
+    } trsm_pc;
+    trsm_pc.n_dim = static_cast<uint32_t>(n);
+    trsm_pc.nrhs_cnt = static_cast<uint32_t>(nrhs);
+    trsm_pc.lda = static_cast<uint32_t>(n);
+    trsm_pc.ldb_val = static_cast<uint32_t>(ldb);
+    trsm_pc.batch_cnt = static_cast<uint32_t>(batch_size);
+
+    size_t elem_size = is_f64 ? 8 : 4;
+    size_t lu_sz = batch_size * n * n * elem_size;
+    size_t piv_sz = batch_size * n * sizeof(int32_t);
+    size_t b_sz = batch_size * n * nrhs * elem_size;
+
+    auto b_cont = b.contiguous();
+    std::vector<std::pair<uint32_t, const void*>> trsm_bindings = {
+        {0, A.data_ptr()}, {1, pivots.data_ptr()},
+        {2, b_cont.data_ptr()}, {3, output.data_ptr()}
+    };
+    std::vector<size_t> trsm_sizes = {lu_sz, piv_sz, b_sz, b_sz};
+    VkDescriptorSet trsm_ds = allocateAndWriteDescriptorSet(device_id, trsm_pipeline, trsm_bindings, trsm_sizes);
+
+    VkCommandBuffer trsm_cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(trsm_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, trsm_pipeline->pipeline());
+    vkCmdBindDescriptorSets(trsm_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           trsm_pipeline->layout(), 0, 1, &trsm_ds, 0, nullptr);
+    vkCmdPushConstants(trsm_cmd, trsm_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(trsm_pc), &trsm_pc);
+    vkCmdDispatch(trsm_cmd, static_cast<uint32_t>(batch_size), 1, 1);
+    insertComputeOnlyBarrier(trsm_cmd);
+    endSingleTimeCommands(trsm_cmd, device_id);
+
+    return output;
 }
 
 // ============================================================================
@@ -18727,7 +18917,7 @@ auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor>
 
     // Tiled path (32 < m,n <= 256): blocked QR via Householder reflections
     // After blocked QR, A contains R on/above diagonal and Householder vectors below.
-    // We reconstruct Q on CPU since there's no dedicated Q-reconstruction shader.
+    // Reconstruct Q on GPU via dedicated Q-reconstruction shader.
     int64_t k = std::min(m, n);
 
     Tensor A = dispatchClone(input.contiguous());
@@ -18743,84 +18933,48 @@ auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor>
     std::vector<int64_t> r_shape(shape.begin(), shape.end());
     Tensor R = dispatchTriuTril("triu", A, 0);
 
-    // Reconstruct Q from Householder vectors and tau on CPU
-    // Q = product of (I - tau_k * v_k * v_k^T) for k = 0..min(m,n)-1
-    auto A_cpu = A.to(Device::cpu());
-    auto tau_cpu = tau.to(Device::cpu());
-
+    // Reconstruct Q from Householder vectors and tau entirely on GPU
     std::vector<int64_t> q_shape(shape.begin(), shape.end() - 2);
     q_shape.push_back(m); q_shape.push_back(m);
-    Tensor Q_cpu(q_shape, input.dtype(), Device::cpu());
+    Tensor Q(q_shape, input.dtype(), input.device());
 
-    for (int64_t b = 0; b < batch_size; ++b) {
-        // Initialize Q = I
-        for (int64_t i = 0; i < m; ++i) {
-            for (int64_t j = 0; j < m; ++j) {
-                if (is_f64) {
-                    static_cast<double*>(Q_cpu.data_ptr())[b * m * m + i * m + j] = (i == j) ? 1.0 : 0.0;
-                } else {
-                    static_cast<float*>(Q_cpu.data_ptr())[b * m * m + i * m + j] = (i == j) ? 1.0f : 0.0f;
-                }
-            }
-        }
+    std::string qr_recon_shader = is_f64 ? "linalg_q_reconstruct_f64" : "linalg_q_reconstruct";
+    auto* qr_pipeline = getPipeline(qr_recon_shader, device_id);
 
-        // Apply Householder reflections in reverse: Q = H_0 * H_1 * ... * H_{k-1}
-        // where H_k = I - tau_k * v_k * v_k^T
-        for (int64_t kk = k - 1; kk >= 0; --kk) {
-            // Build Householder vector v: v[kk] = 1, v[kk+1:m] from A[kk+1:m, kk]
-            std::vector<double> v(m, 0.0);
-            v[kk] = 1.0;
-            for (int64_t i = kk + 1; i < m; ++i) {
-                if (is_f64) {
-                    v[i] = static_cast<const double*>(A_cpu.data_ptr())[b * m * n + i * n + kk];
-                } else {
-                    v[i] = static_cast<double>(
-                        static_cast<const float*>(A_cpu.data_ptr())[b * m * n + i * n + kk]);
-                }
-            }
+    struct QReconPC {
+        uint32_t m_rows;
+        uint32_t n_cols;
+        uint32_t k_refl;
+        uint32_t ldq;
+        uint32_t batch_cnt;
+    } qr_pc;
+    qr_pc.m_rows = static_cast<uint32_t>(m);
+    qr_pc.n_cols = static_cast<uint32_t>(n);
+    qr_pc.k_refl = static_cast<uint32_t>(k);
+    qr_pc.ldq = static_cast<uint32_t>(m);
+    qr_pc.batch_cnt = static_cast<uint32_t>(batch_size);
 
-            double tau_val;
-            if (is_f64) {
-                tau_val = static_cast<const double*>(tau_cpu.data_ptr())[b * n + kk];
-            } else {
-                tau_val = static_cast<double>(
-                    static_cast<const float*>(tau_cpu.data_ptr())[b * n + kk]);
-            }
+    size_t elem_size = is_f64 ? 8 : 4;
+    size_t qr_buf_size = batch_size * m * n * elem_size;
+    size_t tau_buf_size = batch_size * n * elem_size;
+    size_t q_buf_size = batch_size * m * m * elem_size;
 
-            if (std::abs(tau_val) < 1e-30) continue;
+    std::vector<std::pair<uint32_t, const void*>> qr_bindings = {
+        {0, A.data_ptr()}, {1, tau.data_ptr()}, {2, Q.data_ptr()}
+    };
+    std::vector<size_t> qr_sizes = {qr_buf_size, tau_buf_size, q_buf_size};
+    VkDescriptorSet qr_ds = allocateAndWriteDescriptorSet(device_id, qr_pipeline, qr_bindings, qr_sizes);
 
-            // Apply H_k to Q: Q = (I - tau * v * v^T) * Q = Q - tau * v * (v^T * Q)
-            // First compute w = v^T * Q (1 x m vector)
-            std::vector<double> w(m, 0.0);
-            for (int64_t j = 0; j < m; ++j) {
-                double sum = 0.0;
-                for (int64_t i = kk; i < m; ++i) {
-                    if (is_f64) {
-                        sum += v[i] * static_cast<const double*>(Q_cpu.data_ptr())[b * m * m + i * m + j];
-                    } else {
-                        sum += v[i] * static_cast<double>(
-                            static_cast<const float*>(Q_cpu.data_ptr())[b * m * m + i * m + j]);
-                    }
-                }
-                w[j] = sum;
-            }
+    VkCommandBuffer qr_cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(qr_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, qr_pipeline->pipeline());
+    vkCmdBindDescriptorSets(qr_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           qr_pipeline->layout(), 0, 1, &qr_ds, 0, nullptr);
+    vkCmdPushConstants(qr_cmd, qr_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(qr_pc), &qr_pc);
+    vkCmdDispatch(qr_cmd, static_cast<uint32_t>(batch_size), 1, 1);
+    insertComputeOnlyBarrier(qr_cmd);
+    endSingleTimeCommands(qr_cmd, device_id);
 
-            // Q[i,j] -= tau * v[i] * w[j]
-            for (int64_t i = kk; i < m; ++i) {
-                for (int64_t j = 0; j < m; ++j) {
-                    double update = tau_val * v[i] * w[j];
-                    if (is_f64) {
-                        static_cast<double*>(Q_cpu.data_ptr())[b * m * m + i * m + j] -= update;
-                    } else {
-                        static_cast<float*>(Q_cpu.data_ptr())[b * m * m + i * m + j] -=
-                            static_cast<float>(update);
-                    }
-                }
-            }
-        }
-    }
-
-    Tensor Q = Q_cpu.to(input.device());
     return {Q, R};
 }
 
@@ -18837,7 +18991,7 @@ auto VulkanBackend::dispatchLinalgSVD(const Tensor& input, bool full_matrices) -
     int64_t n = shape[ndim - 1];
 
     // SVD only has single-workgroup shaders — no tiled path yet
-    if (m > MAX_SMALL_LINALG_SIZE || n > MAX_SMALL_LINALG_SIZE) {
+    if (m > 256 || n > 256) {
         auto cpu_input = input.to(Device::cpu());
         auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
         NewOpAttributes attrs;
@@ -18913,7 +19067,7 @@ auto VulkanBackend::dispatchLinalgEigh(const Tensor& input) -> std::vector<Tenso
     if (shape[ndim - 2] != n) throw std::runtime_error("linalg.eigh: input must be square");
 
     // Eigh only has single-workgroup shaders — no tiled path yet
-    if (n > MAX_SMALL_LINALG_SIZE) {
+    if (n > 256) {
         auto cpu_input = input.to(Device::cpu());
         auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
         NewOpAttributes attrs;

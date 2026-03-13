@@ -1,0 +1,34 @@
+#version 450
+
+// Compute determinant from LU factorization diagonal + pivot sign.
+// Each workgroup handles one batch element.
+// Input: LU matrix (from blocked LU), pivot indices.
+// Output: scalar determinant per batch element.
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer LUBuf    { float lu_data[]; };
+layout(set = 0, binding = 1) buffer PivotBuf { int pivots[];    };
+layout(set = 0, binding = 2) buffer OutBuf   { float det_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;           // matrix dimension
+    uint batch_size;  // number of matrices in batch
+    uint lda;         // leading dimension (stride between rows, == n for contiguous)
+};
+
+void main() {
+    uint batch_idx = gl_GlobalInvocationID.x;
+    if (batch_idx >= batch_size) return;
+
+    uint offset = batch_idx * n * lda;
+    float det = 1.0;
+    int sign = 1;
+
+    for (uint i = 0; i < n; i++) {
+        det *= lu_data[offset + i * lda + i];  // diagonal element
+        if (pivots[batch_idx * n + i] != int(i)) sign = -sign;
+    }
+
+    det_out[batch_idx] = det * float(sign);
+}

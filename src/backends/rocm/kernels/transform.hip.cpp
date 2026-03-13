@@ -4,6 +4,7 @@
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/shape.hpp"
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace tenzor {
@@ -26,9 +27,8 @@ public:
     do { \
         hipError_t err = call; \
         if (err != hipSuccess) { \
-            fprintf(stderr, "HIP error at %s:%d: %s\n", __FILE__, __LINE__, \
-                    hipGetErrorString(err)); \
-            exit(EXIT_FAILURE); \
+            throw std::runtime_error(std::string("HIP error at ") + __FILE__ + ":" + \
+                std::to_string(__LINE__) + ": " + hipGetErrorString(err)); \
         } \
     } while(0)
 
@@ -123,21 +123,21 @@ auto contiguous_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
             reinterpret_cast<__half*>(result.data<Float16>()),
             d_strides, d_shape, ndim, total_elements);
     } else {
-        hipFree(d_strides);
-        hipFree(d_shape);
+        HIP_CHECK(hipFree(d_strides));
+        HIP_CHECK(hipFree(d_shape));
         throw std::runtime_error("Contiguous only supports Float32, Float64, Float16, Int32, and Int64 dtypes");
     }
 
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
-        hipFree(d_strides);
-        hipFree(d_shape);
+        HIP_CHECK(hipFree(d_strides));
+        HIP_CHECK(hipFree(d_shape));
         throw std::runtime_error(std::string("HIP error in contiguous_kernel: ") + hipGetErrorString(err));
     }
 
     // Free device memory
-    hipFree(d_strides);
-    hipFree(d_shape);
+    HIP_CHECK(hipFree(d_strides));
+    HIP_CHECK(hipFree(d_shape));
 
     return result;
 }

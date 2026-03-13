@@ -364,7 +364,7 @@ struct BroadcastMulComplex128 {};
 struct BroadcastDivComplex64 {};
 struct BroadcastDivComplex128 {};
 
-constexpr int MAX_BROADCAST_DIMS = 8;
+constexpr int MAX_BROADCAST_DIMS = 16;
 
 // Pre-computed broadcast strides for mapping flat output index to input indices.
 // stride=0 for broadcast dimensions (input dim == 1).
@@ -383,6 +383,8 @@ static auto compute_broadcast_info(
 
     BroadcastInfo info{};
     info.ndim = static_cast<int>(out_shape.size());
+    if (out_shape.size() > MAX_BROADCAST_DIMS)
+        throw std::runtime_error("OneAPI: max 16 broadcast dimensions supported");
     info.out_numel = 1;
     for (auto s : out_shape) info.out_numel *= s;
 

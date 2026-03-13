@@ -2,11 +2,11 @@
 #include <hip/hip_fp16.h>
 #include <rocblas/rocblas.h>
 #include <cmath>
-#include <cfloat>
 #include <cstdio>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include <stdexcept>
+#include <string>
 
 namespace tenzor {
 namespace rocm {
@@ -19,9 +19,8 @@ namespace rocm {
     do { \
         hipError_t err = call; \
         if (err != hipSuccess) { \
-            fprintf(stderr, "HIP error at %s:%d: %s\n", __FILE__, __LINE__, \
-                    hipGetErrorString(err)); \
-            exit(EXIT_FAILURE); \
+            throw std::runtime_error(std::string("HIP error at ") + __FILE__ + ":" + \
+                std::to_string(__LINE__) + ": " + hipGetErrorString(err)); \
         } \
     } while(0)
 
@@ -632,12 +631,12 @@ auto lstm_forward_kernel(
     Tensor c_t({batch, hidden}, input.dtype(), input.device());
 
     // Copy h0 and c0 to h_t and c_t
-    hipMemcpyAsync(h_t.data<void>(), h0.data<void>(),
+    HIP_CHECK(hipMemcpyAsync(h_t.data<void>(), h0.data<void>(),
                    batch * hidden * dtype_size(input.dtype()),
-                   hipMemcpyDeviceToDevice, stream);
-    hipMemcpyAsync(c_t.data<void>(), c0.data<void>(),
+                   hipMemcpyDeviceToDevice, stream));
+    HIP_CHECK(hipMemcpyAsync(c_t.data<void>(), c0.data<void>(),
                    batch * hidden * dtype_size(input.dtype()),
-                   hipMemcpyDeviceToDevice, stream);
+                   hipMemcpyDeviceToDevice, stream));
 
     if (input.dtype() == DType::Float32) {
         // Get rocBLAS handle (RAII ensures cleanup on exceptions)
@@ -698,18 +697,18 @@ auto lstm_forward_kernel(
                               batch, hidden);
 
             // Copy h_t to output[t]
-            hipMemcpyAsync(output_ptr + t * batch * hidden, h_t_ptr,
+            HIP_CHECK(hipMemcpyAsync(output_ptr + t * batch * hidden, h_t_ptr,
                           batch * hidden * sizeof(float),
-                          hipMemcpyDeviceToDevice, stream);
+                          hipMemcpyDeviceToDevice, stream));
         }
 
         // Copy final states
-        hipMemcpyAsync(h_n.data<float>(), h_t_ptr,
+        HIP_CHECK(hipMemcpyAsync(h_n.data<float>(), h_t_ptr,
                       batch * hidden * sizeof(float),
-                      hipMemcpyDeviceToDevice, stream);
-        hipMemcpyAsync(c_n.data<float>(), c_t_ptr,
+                      hipMemcpyDeviceToDevice, stream));
+        HIP_CHECK(hipMemcpyAsync(c_n.data<float>(), c_t_ptr,
                       batch * hidden * sizeof(float),
-                      hipMemcpyDeviceToDevice, stream);
+                      hipMemcpyDeviceToDevice, stream));
     } else if (input.dtype() == DType::Float64) {
         // Get rocBLAS handle (RAII ensures cleanup on exceptions)
         RocBLASHandleGuard handle_guard2;
@@ -767,18 +766,18 @@ auto lstm_forward_kernel(
                               batch, hidden);
 
             // Copy h_t to output[t]
-            hipMemcpyAsync(output_ptr + t * batch * hidden, h_t_ptr,
+            HIP_CHECK(hipMemcpyAsync(output_ptr + t * batch * hidden, h_t_ptr,
                           batch * hidden * sizeof(double),
-                          hipMemcpyDeviceToDevice, stream);
+                          hipMemcpyDeviceToDevice, stream));
         }
 
         // Copy final states
-        hipMemcpyAsync(h_n.data<double>(), h_t_ptr,
+        HIP_CHECK(hipMemcpyAsync(h_n.data<double>(), h_t_ptr,
                       batch * hidden * sizeof(double),
-                      hipMemcpyDeviceToDevice, stream);
-        hipMemcpyAsync(c_n.data<double>(), c_t_ptr,
+                      hipMemcpyDeviceToDevice, stream));
+        HIP_CHECK(hipMemcpyAsync(c_n.data<double>(), c_t_ptr,
                       batch * hidden * sizeof(double),
-                      hipMemcpyDeviceToDevice, stream);
+                      hipMemcpyDeviceToDevice, stream));
     } else if (input.dtype() == DType::BFloat16) {
         auto input_f32 = input.to(DType::Float32);
         auto W_ih_f32 = W_ih.to(DType::Float32);
@@ -830,12 +829,12 @@ auto lstm_multi_layer_forward_kernel(
         Tensor h_l({batch, hidden}, input.dtype(), input.device());
         Tensor c_l({batch, hidden}, input.dtype(), input.device());
 
-        hipMemcpyAsync(h_l.data<void>(),
+        HIP_CHECK(hipMemcpyAsync(h_l.data<void>(),
                        static_cast<const char*>(h0.data<void>()) + l * layer_bytes,
-                       layer_bytes, hipMemcpyDeviceToDevice, stream);
-        hipMemcpyAsync(c_l.data<void>(),
+                       layer_bytes, hipMemcpyDeviceToDevice, stream));
+        HIP_CHECK(hipMemcpyAsync(c_l.data<void>(),
                        static_cast<const char*>(c0.data<void>()) + l * layer_bytes,
-                       layer_bytes, hipMemcpyDeviceToDevice, stream);
+                       layer_bytes, hipMemcpyDeviceToDevice, stream));
 
         // Split bias into bias_ih and bias_hh if present
         Tensor bias_combined = bias_list[l];
@@ -853,14 +852,14 @@ auto lstm_multi_layer_forward_kernel(
         layer_input = result[0];  // output becomes input for next layer
 
         // Copy final h, c to h_n[l], c_n[l]
-        hipMemcpyAsync(
+        HIP_CHECK(hipMemcpyAsync(
             static_cast<char*>(h_n.data<void>()) + l * layer_bytes,
             result[1].data<void>(), layer_bytes,
-            hipMemcpyDeviceToDevice, stream);
-        hipMemcpyAsync(
+            hipMemcpyDeviceToDevice, stream));
+        HIP_CHECK(hipMemcpyAsync(
             static_cast<char*>(c_n.data<void>()) + l * layer_bytes,
             result[2].data<void>(), layer_bytes,
-            hipMemcpyDeviceToDevice, stream);
+            hipMemcpyDeviceToDevice, stream));
     }
 
     HIP_CHECK(hipGetLastError());
@@ -960,8 +959,8 @@ auto bilstm_forward_kernel(
     // Extract forward direction states
     Tensor h0_fwd({batch, hidden}, input.dtype(), input.device());
     Tensor c0_fwd({batch, hidden}, input.dtype(), input.device());
-    hipMemcpyAsync(h0_fwd.data<void>(), h0.data<void>(), state_bytes, hipMemcpyDeviceToDevice, stream);
-    hipMemcpyAsync(c0_fwd.data<void>(), c0.data<void>(), state_bytes, hipMemcpyDeviceToDevice, stream);
+    HIP_CHECK(hipMemcpyAsync(h0_fwd.data<void>(), h0.data<void>(), state_bytes, hipMemcpyDeviceToDevice, stream));
+    HIP_CHECK(hipMemcpyAsync(c0_fwd.data<void>(), c0.data<void>(), state_bytes, hipMemcpyDeviceToDevice, stream));
 
     // Combine biases for forward
     Tensor bias_fwd;
@@ -1012,12 +1011,12 @@ auto bilstm_forward_kernel(
 
     Tensor h0_bwd({batch, hidden}, input.dtype(), input.device());
     Tensor c0_bwd({batch, hidden}, input.dtype(), input.device());
-    hipMemcpyAsync(h0_bwd.data<void>(),
+    HIP_CHECK(hipMemcpyAsync(h0_bwd.data<void>(),
                    static_cast<const char*>(h0.data<void>()) + state_bytes,
-                   state_bytes, hipMemcpyDeviceToDevice, stream);
-    hipMemcpyAsync(c0_bwd.data<void>(),
+                   state_bytes, hipMemcpyDeviceToDevice, stream));
+    HIP_CHECK(hipMemcpyAsync(c0_bwd.data<void>(),
                    static_cast<const char*>(c0.data<void>()) + state_bytes,
-                   state_bytes, hipMemcpyDeviceToDevice, stream);
+                   state_bytes, hipMemcpyDeviceToDevice, stream));
 
     Tensor bias_bwd;
     if (bias_ih_bwd.numel() > 0 && bias_hh_bwd.numel() > 0) {
@@ -1081,17 +1080,17 @@ auto bilstm_forward_kernel(
     Tensor h_n({2, batch, hidden}, input.dtype(), input.device());
     Tensor c_n({2, batch, hidden}, input.dtype(), input.device());
 
-    hipMemcpyAsync(h_n.data<void>(), fwd_result[1].data<void>(),
-                   state_bytes, hipMemcpyDeviceToDevice, stream);
-    hipMemcpyAsync(static_cast<char*>(h_n.data<void>()) + state_bytes,
+    HIP_CHECK(hipMemcpyAsync(h_n.data<void>(), fwd_result[1].data<void>(),
+                   state_bytes, hipMemcpyDeviceToDevice, stream));
+    HIP_CHECK(hipMemcpyAsync(static_cast<char*>(h_n.data<void>()) + state_bytes,
                    bwd_result[1].data<void>(),
-                   state_bytes, hipMemcpyDeviceToDevice, stream);
+                   state_bytes, hipMemcpyDeviceToDevice, stream));
 
-    hipMemcpyAsync(c_n.data<void>(), fwd_result[2].data<void>(),
-                   state_bytes, hipMemcpyDeviceToDevice, stream);
-    hipMemcpyAsync(static_cast<char*>(c_n.data<void>()) + state_bytes,
+    HIP_CHECK(hipMemcpyAsync(c_n.data<void>(), fwd_result[2].data<void>(),
+                   state_bytes, hipMemcpyDeviceToDevice, stream));
+    HIP_CHECK(hipMemcpyAsync(static_cast<char*>(c_n.data<void>()) + state_bytes,
                    bwd_result[2].data<void>(),
-                   state_bytes, hipMemcpyDeviceToDevice, stream);
+                   state_bytes, hipMemcpyDeviceToDevice, stream));
 
     HIP_CHECK(hipGetLastError());
 
