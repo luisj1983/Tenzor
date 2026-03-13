@@ -757,7 +757,8 @@ auto VulkanBackend::destroy_stream(StreamHandle stream) -> void {
 auto VulkanBackend::synchronize_stream(StreamHandle stream) -> void {
     // For default stream, synchronize device
     if (stream == nullptr && !devices_.empty()) {
-        vkQueueWaitIdle(devices_[0].computeQueue);
+        vulkan::checkVk(vkQueueWaitIdle(devices_[0].computeQueue),
+                        "Failed to wait for compute queue idle");
     }
 }
 vulkan::ComputePipeline* VulkanBackend::getPipeline(const std::string& shader_name,

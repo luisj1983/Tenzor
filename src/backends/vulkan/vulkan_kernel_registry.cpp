@@ -1767,8 +1767,11 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         -> std::vector<Tensor> {
         return get_vulkan_backend()->dispatchLinalgEigh(inputs[0]);
     });
-    // Eig — general eigenvalue, keep CPU fallback (complex output)
-    VULKAN_CPU_FALLBACK(LinalgEig);
+    // Eig — general eigenvalue decomposition (GPU for ≤32×32, CPU fallback for larger)
+    table.register_kernel(OpId::LinalgEig, [](std::span<const Tensor> inputs, const OpAttributes&)
+        -> std::vector<Tensor> {
+        return get_vulkan_backend()->dispatchLinalgEig(inputs[0]);
+    });
 
     // Flash Attention — composed from existing matmul + softmax shaders (not fused)
     // This avoids the CPU roundtrip of VULKAN_CPU_FALLBACK by keeping all

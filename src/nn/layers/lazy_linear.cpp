@@ -17,6 +17,8 @@ namespace autograd = tenzor;
 // TypeCastBackward - same as in linear.cpp for dtype conversion with gradient flow
 class LazyLinearTypeCastBackward : public Function {
 public:
+    DType original_dtype_ = DType::Float32;
+
     LazyLinearTypeCastBackward() = default;
 
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
@@ -24,11 +26,19 @@ public:
     }
 
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        return {grad_outputs[0]};
+        auto& grad = grad_outputs[0];
+        if (grad.dtype() != original_dtype_) {
+            return {grad.to(original_dtype_)};
+        }
+        return {grad};
     }
 
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
-        return {grad_outputs[0]};
+        auto& grad = grad_outputs[0];
+        if (grad.dtype() != original_dtype_) {
+            return {Variable(grad.tensor().to(original_dtype_), grad.requires_grad())};
+        }
+        return {grad};
     }
 };
 
@@ -43,6 +53,7 @@ static auto variable_cast(const Variable& input, DType target_dtype) -> Variable
 
     if (input.requires_grad() && is_grad_enabled()) {
         auto grad_fn = std::make_shared<LazyLinearTypeCastBackward>();
+        grad_fn->original_dtype_ = input.dtype();
 
         std::vector<Variable> input_vars = {input};
         grad_fn->set_input_variables(input_vars);

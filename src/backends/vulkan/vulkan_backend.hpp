@@ -633,6 +633,7 @@ public:
     auto dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor>;
     auto dispatchLinalgSVD(const Tensor& input, bool full_matrices) -> std::vector<Tensor>;
     auto dispatchLinalgEigh(const Tensor& input) -> std::vector<Tensor>;
+    auto dispatchLinalgEig(const Tensor& input) -> std::vector<Tensor>;
 
     // Tiled blocked linalg helpers for medium matrices (33-256)
     void runBlockedLU(Tensor& A, Tensor& pivots, int64_t n,

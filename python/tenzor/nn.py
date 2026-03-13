@@ -174,24 +174,24 @@ class Module(_CppModule):
             if submodule_cache is None:
                 submodule_cache = self.get_submodules()
                 object.__setattr__(self, '_submodule_cache', submodule_cache)
-        if name in submodule_cache:
-            return submodule_cache[name]
+            if name in submodule_cache:
+                return submodule_cache[name]
 
         with lock:
             param_cache = object.__getattribute__(self, '_param_cache')
             if param_cache is None:
                 param_cache = self._get_own_named_params()
                 object.__setattr__(self, '_param_cache', param_cache)
-        if name in param_cache:
-            return param_cache[name]
+            if name in param_cache:
+                return param_cache[name]
 
         with lock:
             buffer_cache = object.__getattribute__(self, '_buffer_cache')
             if buffer_cache is None:
                 buffer_cache = self._get_own_named_buffers()
                 object.__setattr__(self, '_buffer_cache', buffer_cache)
-        if name in buffer_cache:
-            return buffer_cache[name]
+            if name in buffer_cache:
+                return buffer_cache[name]
 
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 

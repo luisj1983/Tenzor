@@ -23,6 +23,20 @@
 namespace tenzor {
 namespace oneapi {
 
+template <typename T>
+struct SyclDevicePtr {
+    T* ptr = nullptr;
+    sycl::queue& q;
+    SyclDevicePtr(size_t count, sycl::queue& queue) : q(queue) {
+        ptr = sycl::malloc_device<T>(count, queue);
+    }
+    ~SyclDevicePtr() { if (ptr) sycl::free(ptr, q); }
+    operator T*() { return ptr; }
+    T* get() { return ptr; }
+    SyclDevicePtr(const SyclDevicePtr&) = delete;
+    SyclDevicePtr& operator=(const SyclDevicePtr&) = delete;
+};
+
 template<typename T>
 inline auto get_data_ptr(const Tensor& t) -> T* {
     return static_cast<T*>(const_cast<void*>(t.data_ptr()));
@@ -191,7 +205,8 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
         int64_t complex_buf_floats = total_transforms * signal_len * 2;
 
         // Allocate device buffer for interleaved complex data
-        float* complex_buf = sycl::malloc_device<float>(complex_buf_floats, queue);
+        SyclDevicePtr<float> complex_buf_owner(complex_buf_floats, queue);
+        float* complex_buf = complex_buf_owner.get();
 
         // Copy real input into complex buffer (real parts), zero imaginary parts
         const float* in_ptr = get_data_ptr<const float>(input);
@@ -279,14 +294,14 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                 }).wait();
         }
 
-        sycl::free(complex_buf, queue);
         return output;
 
     } else if (input.dtype() == DType::Float64) {
         int64_t total_transforms = batch_size * inner_size;
         int64_t complex_buf_doubles = total_transforms * signal_len * 2;
 
-        double* complex_buf = sycl::malloc_device<double>(complex_buf_doubles, queue);
+        SyclDevicePtr<double> complex_buf_owner(complex_buf_doubles, queue);
+        double* complex_buf = complex_buf_owner.get();
         const double* in_ptr = get_data_ptr<const double>(input);
 
         if (dim == ndim - 1 && inner_size == 1) {
@@ -353,7 +368,6 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                 }).wait();
         }
 
-        sycl::free(complex_buf, queue);
         return output;
 
     } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
@@ -449,7 +463,8 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
         int64_t total_transforms = batch_size * inner_size;
         int64_t complex_buf_floats = total_transforms * signal_len * 2;
 
-        float* complex_buf = sycl::malloc_device<float>(complex_buf_floats, queue);
+        SyclDevicePtr<float> complex_buf_owner(complex_buf_floats, queue);
+        float* complex_buf = complex_buf_owner.get();
         const float* in_ptr = get_data_ptr<const float>(input);
 
         // Gather interleaved complex data into contiguous per-transform layout
@@ -510,14 +525,14 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
                 }).wait();
         }
 
-        sycl::free(complex_buf, queue);
         return output;
 
     } else if (input.dtype() == DType::Float64) {
         int64_t total_transforms = batch_size * inner_size;
         int64_t complex_buf_doubles = total_transforms * signal_len * 2;
 
-        double* complex_buf = sycl::malloc_device<double>(complex_buf_doubles, queue);
+        SyclDevicePtr<double> complex_buf_owner(complex_buf_doubles, queue);
+        double* complex_buf = complex_buf_owner.get();
         const double* in_ptr = get_data_ptr<const double>(input);
 
         if (dim == ndim - 2 && inner_size == 1) {
@@ -570,7 +585,6 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
                 }).wait();
         }
 
-        sycl::free(complex_buf, queue);
         return output;
 
     } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
@@ -639,8 +653,10 @@ auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
         int64_t total_transforms = batch_size * inner_size;
 
         // Allocate contiguous real input buffer and complex output buffer
-        float* real_buf = sycl::malloc_device<float>(total_transforms * signal_len, queue);
-        float* complex_buf = sycl::malloc_device<float>(total_transforms * out_len * 2, queue);
+        SyclDevicePtr<float> real_buf_owner(total_transforms * signal_len, queue);
+        float* real_buf = real_buf_owner.get();
+        SyclDevicePtr<float> complex_buf_owner(total_transforms * out_len * 2, queue);
+        float* complex_buf = complex_buf_owner.get();
 
         const float* in_ptr = get_data_ptr<const float>(input);
 
@@ -712,15 +728,15 @@ auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                 }).wait();
         }
 
-        sycl::free(real_buf, queue);
-        sycl::free(complex_buf, queue);
         return output;
 
     } else if (input.dtype() == DType::Float64) {
         int64_t total_transforms = batch_size * inner_size;
 
-        double* real_buf = sycl::malloc_device<double>(total_transforms * signal_len, queue);
-        double* complex_buf = sycl::malloc_device<double>(total_transforms * out_len * 2, queue);
+        SyclDevicePtr<double> real_buf_owner(total_transforms * signal_len, queue);
+        double* real_buf = real_buf_owner.get();
+        SyclDevicePtr<double> complex_buf_owner(total_transforms * out_len * 2, queue);
+        double* complex_buf = complex_buf_owner.get();
 
         const double* in_ptr = get_data_ptr<const double>(input);
 
@@ -781,8 +797,6 @@ auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                 }).wait();
         }
 
-        sycl::free(real_buf, queue);
-        sycl::free(complex_buf, queue);
         return output;
 
     } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
@@ -854,8 +868,10 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
         int64_t total_transforms = batch_size * inner_size;
 
         // Allocate contiguous complex input buffer and real output buffer
-        float* complex_buf = sycl::malloc_device<float>(total_transforms * complex_len * 2, queue);
-        float* real_buf = sycl::malloc_device<float>(total_transforms * output_len, queue);
+        SyclDevicePtr<float> complex_buf_owner(total_transforms * complex_len * 2, queue);
+        float* complex_buf = complex_buf_owner.get();
+        SyclDevicePtr<float> real_buf_owner(total_transforms * output_len, queue);
+        float* real_buf = real_buf_owner.get();
 
         const float* in_ptr = get_data_ptr<const float>(input);
 
@@ -927,15 +943,15 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                 }).wait();
         }
 
-        sycl::free(complex_buf, queue);
-        sycl::free(real_buf, queue);
         return output;
 
     } else if (input.dtype() == DType::Float64) {
         int64_t total_transforms = batch_size * inner_size;
 
-        double* complex_buf = sycl::malloc_device<double>(total_transforms * complex_len * 2, queue);
-        double* real_buf = sycl::malloc_device<double>(total_transforms * output_len, queue);
+        SyclDevicePtr<double> complex_buf_owner(total_transforms * complex_len * 2, queue);
+        double* complex_buf = complex_buf_owner.get();
+        SyclDevicePtr<double> real_buf_owner(total_transforms * output_len, queue);
+        double* real_buf = real_buf_owner.get();
 
         const double* in_ptr = get_data_ptr<const double>(input);
 
@@ -998,8 +1014,6 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                 }).wait();
         }
 
-        sycl::free(complex_buf, queue);
-        sycl::free(real_buf, queue);
         return output;
 
     } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
@@ -1180,10 +1194,14 @@ void bluestein_fft_sycl(const T* d_in, T* d_out,
     // b_buf: interleaved complex [M, 2] — convolution kernel (shared across all batches/inner)
     // B_buf: FFT of b_buf [M, 2] — precomputed once
     // a_buf: interleaved complex [M, 2] — per-(batch, inner) working buffer
-    T* chirp   = sycl::malloc_device<T>(2 * N, queue);
-    T* b_buf   = sycl::malloc_device<T>(2 * M, queue);
-    T* B_buf   = sycl::malloc_device<T>(2 * M, queue);
-    T* a_buf   = sycl::malloc_device<T>(2 * M, queue);
+    SyclDevicePtr<T> chirp_owner(2 * N, queue);
+    T* chirp   = chirp_owner.get();
+    SyclDevicePtr<T> b_buf_owner(2 * M, queue);
+    T* b_buf   = b_buf_owner.get();
+    SyclDevicePtr<T> B_buf_owner(2 * M, queue);
+    T* B_buf   = B_buf_owner.get();
+    SyclDevicePtr<T> a_buf_owner(2 * M, queue);
+    T* a_buf   = a_buf_owner.get();
 
     // Step 1: Generate chirp sequence: chirp[k] = exp(-j * pi * k^2 / N)
     queue.parallel_for(sycl::range<1>(N), [=](sycl::id<1> idx) {
@@ -1266,10 +1284,6 @@ void bluestein_fft_sycl(const T* d_in, T* d_out,
         }
     }
 
-    sycl::free(chirp, queue);
-    sycl::free(b_buf, queue);
-    sycl::free(B_buf, queue);
-    sycl::free(a_buf, queue);
 }
 
 } // anonymous namespace
@@ -1302,7 +1316,8 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
         for (auto s : out_shape) out_numel *= s;
 
         if (use_cooley_tukey) {
-            float* d_buf = sycl::malloc_device<float>(2 * signal_len * batch_size, queue);
+            SyclDevicePtr<float> d_buf_owner(2 * signal_len * batch_size, queue);
+            float* d_buf = d_buf_owner.get();
             const float* d_in = static_cast<const float*>(input.data_ptr());
             int64_t total = signal_len * batch_size;
             queue.parallel_for(sycl::range<1>(total), [=](sycl::id<1> idx) {
@@ -1326,12 +1341,12 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
             Tensor output(out_shape, DType::Float32, input.device());
             queue.memcpy(const_cast<void*>(output.data_ptr()), d_buf, out_numel * sizeof(float)).wait();
-            sycl::free(d_buf, queue);
             return output;
         } else {
             // Bluestein FFT on device for non-power-of-2 sizes
             const float* d_in = static_cast<const float*>(input.data_ptr());
-            float* d_out = sycl::malloc_device<float>(out_numel, queue);
+            SyclDevicePtr<float> d_out_owner(out_numel, queue);
+            float* d_out = d_out_owner.get();
             queue.memset(d_out, 0, out_numel * sizeof(float)).wait();
             bluestein_fft_sycl(d_in, d_out, signal_len, batch_size, inner_size, queue);
 
@@ -1346,7 +1361,6 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
             Tensor output(out_shape, DType::Float32, input.device());
             queue.memcpy(const_cast<void*>(output.data_ptr()), d_out, out_numel * sizeof(float)).wait();
-            sycl::free(d_out, queue);
             return output;
         }
     } else if (input.dtype() == DType::Float64) {
@@ -1357,7 +1371,8 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
         for (auto s : out_shape) out_numel *= s;
 
         if (use_cooley_tukey) {
-            double* d_buf = sycl::malloc_device<double>(2 * signal_len * batch_size, queue);
+            SyclDevicePtr<double> d_buf_owner(2 * signal_len * batch_size, queue);
+            double* d_buf = d_buf_owner.get();
             const double* d_in = static_cast<const double*>(input.data_ptr());
             int64_t total = signal_len * batch_size;
             queue.parallel_for(sycl::range<1>(total), [=](sycl::id<1> idx) {
@@ -1381,12 +1396,12 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
             Tensor output(out_shape, DType::Float64, input.device());
             queue.memcpy(const_cast<void*>(output.data_ptr()), d_buf, out_numel * sizeof(double)).wait();
-            sycl::free(d_buf, queue);
             return output;
         } else {
             // Bluestein FFT on device for non-power-of-2 sizes
             const double* d_in = static_cast<const double*>(input.data_ptr());
-            double* d_out = sycl::malloc_device<double>(out_numel, queue);
+            SyclDevicePtr<double> d_out_owner(out_numel, queue);
+            double* d_out = d_out_owner.get();
             queue.memset(d_out, 0, out_numel * sizeof(double)).wait();
             bluestein_fft_sycl(d_in, d_out, signal_len, batch_size, inner_size, queue);
 
@@ -1401,7 +1416,6 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
             Tensor output(out_shape, DType::Float64, input.device());
             queue.memcpy(const_cast<void*>(output.data_ptr()), d_out, out_numel * sizeof(double)).wait();
-            sycl::free(d_out, queue);
             return output;
         }
     } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {

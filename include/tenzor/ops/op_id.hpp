@@ -435,7 +435,7 @@ enum class OpId : uint16_t {
     QuantizedLinear,           // 429
     QuantizedConv2d,           // 430
     EmbeddingWithBoundsCheck,  // 431
-    WinogradConv2d,            // 432
+    WinogradConv2d,            // 432 — CPU-only internal optimization, not dispatched separately
     LogSumExp,                 // 433
     HasInfNan,                 // 434
     EmbeddingBagForward,       // 435

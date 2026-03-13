@@ -1,0 +1,262 @@
+#version 450
+
+// General eigenvalue decomposition via QR iteration with implicit double shifts
+// For non-symmetric matrices (up to 32x32)
+// Output: eigenvalues_real (binding 1), eigenvalues_imag (binding 2)
+
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { float data_in[];  };
+layout(set = 0, binding = 1) buffer WRealBuf  { float data_wr[];  };  // eigenvalues real part
+layout(set = 0, binding = 2) buffer WImagBuf  { float data_wi[];  };  // eigenvalues imag part
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint batch;
+    uint max_iterations;
+};
+
+shared float H[32][32];   // Hessenberg matrix
+shared float converged;
+
+void main() {
+    uint batch_idx = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (batch_idx >= batch) return;
+
+    uint mat_offset = batch_idx * n * n;
+
+    // Load matrix into shared memory
+    for (uint row = 0; row < n; row++) {
+        if (tid < n) {
+            H[row][tid] = data_in[mat_offset + row * n + tid];
+        }
+    }
+    barrier();
+
+    // Step 1: Reduce to upper Hessenberg form via Householder reflections
+    // H[i][j] = 0 for i > j+1 after reduction
+    for (uint k = 0; k + 2 < n; k++) {
+        if (tid == 0) {
+            // Compute Householder vector for column k, rows k+1..n-1
+            float sigma = 0.0;
+            for (uint i = k + 1; i < n; i++) {
+                sigma += H[i][k] * H[i][k];
+            }
+            float norm_x = sqrt(sigma);
+            if (norm_x < 1e-30) continue;  // skip if already zero
+
+            float alpha = -sign(H[k+1][k]) * norm_x;
+            float v0 = H[k+1][k] - alpha;
+            float v_norm_sq = v0 * v0;
+            for (uint i = k + 2; i < n; i++) {
+                v_norm_sq += H[i][k] * H[i][k];
+            }
+            if (v_norm_sq < 1e-30) continue;
+
+            // Normalize: v[k+1] = v0, v[i] = H[i][k] for i > k+1
+            // tau = 2 / (v^T v)
+            float tau = 2.0 / v_norm_sq;
+
+            // Apply H = (I - tau * v * v^T) * H
+            for (uint j = k; j < n; j++) {
+                float dot = v0 * H[k+1][j];
+                for (uint i = k + 2; i < n; i++) {
+                    dot += H[i][k] * H[i][j];
+                }
+                dot *= tau;
+                H[k+1][j] -= v0 * dot;
+                for (uint i = k + 2; i < n; i++) {
+                    H[i][j] -= H[i][k] * dot;
+                }
+            }
+
+            // Apply H = H * (I - tau * v * v^T)
+            for (uint i = 0; i < n; i++) {
+                float dot = v0 * H[i][k+1];
+                for (uint j = k + 2; j < n; j++) {
+                    dot += H[j][k] * H[i][j];
+                }
+                dot *= tau;
+                H[i][k+1] -= v0 * dot;
+                for (uint j = k + 2; j < n; j++) {
+                    H[i][j] -= H[j][k] * dot;
+                }
+            }
+
+            // Clean up: set subdiagonal entries to exact zero
+            H[k+1][k] = alpha;
+            for (uint i = k + 2; i < n; i++) {
+                H[i][k] = 0.0;
+            }
+        }
+        barrier();
+    }
+
+    // Step 2: QR iteration with implicit double shifts on Hessenberg matrix
+    // Extract eigenvalues from quasi-upper triangular result
+    uint nn = n;  // active matrix size
+
+    for (uint iter = 0; iter < max_iterations && nn > 0; iter++) {
+        if (tid == 0) {
+            // Check for deflation: if H[nn-1][nn-2] is small, eigenvalue found
+            if (nn >= 2) {
+                float tst = abs(H[nn-2][nn-2]) + abs(H[nn-1][nn-1]);
+                if (tst == 0.0) tst = 1.0;
+                if (abs(H[nn-1][nn-2]) < 1e-7 * tst) {
+                    // Real eigenvalue at H[nn-1][nn-1]
+                    data_wr[batch_idx * n + nn - 1] = H[nn-1][nn-1];
+                    data_wi[batch_idx * n + nn - 1] = 0.0;
+                    H[nn-1][nn-2] = 0.0;
+                    nn--;
+                    continue;
+                }
+            }
+
+            if (nn >= 3) {
+                float tst = abs(H[nn-3][nn-3]) + abs(H[nn-2][nn-2]);
+                if (tst == 0.0) tst = 1.0;
+                if (abs(H[nn-2][nn-3]) < 1e-7 * tst) {
+                    // 2x2 block at bottom — extract complex eigenvalue pair
+                    float a = H[nn-2][nn-2], b = H[nn-2][nn-1];
+                    float c = H[nn-1][nn-2], d = H[nn-1][nn-1];
+                    float trace = a + d;
+                    float det = a * d - b * c;
+                    float disc = trace * trace - 4.0 * det;
+
+                    if (disc >= 0.0) {
+                        float sq = sqrt(disc);
+                        data_wr[batch_idx * n + nn - 2] = 0.5 * (trace + sq);
+                        data_wi[batch_idx * n + nn - 2] = 0.0;
+                        data_wr[batch_idx * n + nn - 1] = 0.5 * (trace - sq);
+                        data_wi[batch_idx * n + nn - 1] = 0.0;
+                    } else {
+                        float sq = sqrt(-disc);
+                        data_wr[batch_idx * n + nn - 2] = 0.5 * trace;
+                        data_wi[batch_idx * n + nn - 2] = 0.5 * sq;
+                        data_wr[batch_idx * n + nn - 1] = 0.5 * trace;
+                        data_wi[batch_idx * n + nn - 1] = -0.5 * sq;
+                    }
+
+                    H[nn-2][nn-3] = 0.0;
+                    nn -= 2;
+                    continue;
+                }
+            }
+
+            if (nn == 1) {
+                data_wr[batch_idx * n] = H[0][0];
+                data_wi[batch_idx * n] = 0.0;
+                nn = 0;
+                continue;
+            }
+
+            // Implicit double-shift QR step (Francis QR step)
+            // Shifts are eigenvalues of bottom-right 2x2 block
+            float s = H[nn-2][nn-2] + H[nn-1][nn-1];  // trace
+            float t = H[nn-2][nn-2] * H[nn-1][nn-1] - H[nn-2][nn-1] * H[nn-1][nn-2];  // det
+
+            // First column of (H - s1*I)(H - s2*I) = H^2 - s*H + t*I
+            float x = H[0][0] * H[0][0] + H[0][1] * H[1][0] - s * H[0][0] + t;
+            float y = H[1][0] * (H[0][0] + H[1][1] - s);
+            float z = (nn > 2) ? H[1][0] * H[2][1] : 0.0;
+
+            // Chase the bulge down
+            for (uint k = 0; k + 2 < nn; k++) {
+                // Compute Householder for [x, y, z]
+                float norm_v = sqrt(x*x + y*y + z*z);
+                if (norm_v < 1e-30) { x = H[k+1][k]; y = (k+2 < nn) ? H[k+2][k] : 0.0; z = (k+3 < nn) ? H[k+3][k] : 0.0; continue; }
+
+                float alpha_h = -sign(x) * norm_v;
+                float v0 = x - alpha_h;
+                float v1 = y;
+                float v2 = z;
+                float v_sq = v0*v0 + v1*v1 + v2*v2;
+                if (v_sq < 1e-30) { x = H[k+1][k]; y = (k+2 < nn) ? H[k+2][k] : 0.0; z = (k+3 < nn) ? H[k+3][k] : 0.0; continue; }
+                float tau_h = 2.0 / v_sq;
+
+                uint r = (k == 0) ? 0 : k;  // apply from row r
+                uint m = min(k + 4, nn);     // apply up to row m
+
+                // Left multiplication: H = (I - tau * v * v^T) * H
+                for (uint j = k; j < nn; j++) {
+                    float dot = v0 * H[k][j] + v1 * H[k+1][j];
+                    if (k + 2 < nn) dot += v2 * H[k+2][j];
+                    dot *= tau_h;
+                    H[k][j]   -= v0 * dot;
+                    H[k+1][j] -= v1 * dot;
+                    if (k + 2 < nn) H[k+2][j] -= v2 * dot;
+                }
+
+                // Right multiplication: H = H * (I - tau * v * v^T)
+                for (uint i = 0; i < m; i++) {
+                    float dot = v0 * H[i][k] + v1 * H[i][k+1];
+                    if (k + 2 < nn) dot += v2 * H[i][k+2];
+                    dot *= tau_h;
+                    H[i][k]   -= v0 * dot;
+                    H[i][k+1] -= v1 * dot;
+                    if (k + 2 < nn) H[i][k+2] -= v2 * dot;
+                }
+
+                // Zero out below subdiagonal
+                if (k > 0) H[k][k-1] = alpha_h;
+                if (k + 2 < nn) H[k+2][k] = 0.0;
+                if (k + 3 < nn) H[k+3][k] = 0.0;
+
+                // Update for next iteration
+                x = H[k+1][k];
+                y = (k + 2 < nn) ? H[k+2][k] : 0.0;
+                z = (k + 3 < nn) ? H[k+3][k] : 0.0;
+            }
+
+            // Final 2x2 Givens rotation
+            if (nn >= 2) {
+                uint k = nn - 2;
+                float norm_v = sqrt(x*x + y*y);
+                if (norm_v > 1e-30) {
+                    float c = x / norm_v;
+                    float s_val = -y / norm_v;
+                    // Left multiply
+                    for (uint j = k; j < nn; j++) {
+                        float tmp = c * H[k][j] - s_val * H[k+1][j];
+                        H[k+1][j] = s_val * H[k][j] + c * H[k+1][j];
+                        H[k][j] = tmp;
+                    }
+                    // Right multiply
+                    for (uint i = 0; i < nn; i++) {
+                        float tmp = c * H[i][k] - s_val * H[i][k+1];
+                        H[i][k+1] = s_val * H[i][k] + c * H[i][k+1];
+                        H[i][k] = tmp;
+                    }
+                }
+            }
+        }
+        barrier();
+    }
+
+    // Handle remaining 1x1 or 2x2 blocks
+    if (tid == 0) {
+        if (nn == 1) {
+            data_wr[batch_idx * n] = H[0][0];
+            data_wi[batch_idx * n] = 0.0;
+        } else if (nn == 2) {
+            float a = H[0][0], b = H[0][1], c = H[1][0], d = H[1][1];
+            float trace = a + d;
+            float det = a * d - b * c;
+            float disc = trace * trace - 4.0 * det;
+            if (disc >= 0.0) {
+                float sq = sqrt(disc);
+                data_wr[batch_idx * n] = 0.5 * (trace + sq);
+                data_wi[batch_idx * n] = 0.0;
+                data_wr[batch_idx * n + 1] = 0.5 * (trace - sq);
+                data_wi[batch_idx * n + 1] = 0.0;
+            } else {
+                float sq = sqrt(-disc);
+                data_wr[batch_idx * n] = 0.5 * trace;
+                data_wi[batch_idx * n] = 0.5 * sq;
+                data_wr[batch_idx * n + 1] = 0.5 * trace;
+                data_wi[batch_idx * n + 1] = -0.5 * sq;
+            }
+        }
+    }
+}

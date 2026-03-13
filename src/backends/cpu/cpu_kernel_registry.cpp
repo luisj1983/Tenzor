@@ -17,6 +17,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "tenzor/ops/detection.hpp"
 #include "tenzor/sparse/sparse_tensor.hpp"
 #include "tenzor/sparse/sparse_ops.hpp"
 #include <cstdlib>
@@ -1486,6 +1487,12 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::BoxIoU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int iou_type = static_cast<int>(attrs.get_int(AttrKey::IouType, 0));
         return cpu::box_iou_kernel(inputs[0], inputs[1], iou_type);
+    });
+
+    table.register_kernel(OpId::NMS, [](std::span<const Tensor> inputs, const OpAttributes& attrs)
+        -> std::vector<Tensor> {
+        float iou_threshold = static_cast<float>(attrs.get_float(AttrKey::IouThreshold, 0.5));
+        return {tenzor::ops::nms(inputs[0], inputs[1], iou_threshold)};
     });
 
     table.register_kernel(OpId::GatherRelativePositionBias,

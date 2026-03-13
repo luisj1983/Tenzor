@@ -4,6 +4,8 @@
 #include <numeric>
 #include <algorithm>
 #include <stdexcept>
+#include <unordered_set>
+#include <unordered_map>
 
 #ifdef TENZOR_HAS_ONEDPL
 #include <oneapi/dpl/algorithm>
@@ -1863,27 +1865,32 @@ auto unique_kernel(const Tensor& input, bool sorted, bool return_inverse, bool r
             std::sort(unique_vals.begin(), unique_vals.end());
             unique_vals.erase(std::unique(unique_vals.begin(), unique_vals.end()), unique_vals.end());
         } else {
+            std::unordered_set<T> seen;
             for (auto v : h_in) {
-                if (std::find(unique_vals.begin(), unique_vals.end(), v) == unique_vals.end()) {
+                if (seen.insert(v).second) {
                     unique_vals.push_back(v);
                 }
             }
         }
 
+        // Build value-to-index map for O(1) lookup
+        std::unordered_map<T, size_t> val_to_idx;
+        if (return_inverse || return_counts) {
+            for (size_t j = 0; j < unique_vals.size(); ++j) {
+                val_to_idx[unique_vals[j]] = j;
+            }
+        }
+
         if (return_inverse) {
             for (int64_t i = 0; i < numel; ++i) {
-                for (size_t j = 0; j < unique_vals.size(); ++j) {
-                    if (h_in[i] == unique_vals[j]) { inverse[i] = j; break; }
-                }
+                inverse[i] = static_cast<int64_t>(val_to_idx[h_in[i]]);
             }
         }
 
         if (return_counts) {
             counts.resize(unique_vals.size(), 0);
             for (int64_t i = 0; i < numel; ++i) {
-                for (size_t j = 0; j < unique_vals.size(); ++j) {
-                    if (h_in[i] == unique_vals[j]) { counts[j]++; break; }
-                }
+                counts[val_to_idx[h_in[i]]]++;
             }
         }
 

@@ -275,7 +275,7 @@ static void sort_1d_thrust(const T* input, T* values, int64_t* indices_out,
     auto policy = thrust::cuda::par.on(stream);
 
     // Copy input to values
-    cudaMemcpyAsync(values, input, n * sizeof(T), cudaMemcpyDeviceToDevice, stream);
+    TENZOR_CUDA_CHECK(cudaMemcpyAsync(values, input, n * sizeof(T), cudaMemcpyDeviceToDevice, stream));
 
     // Initialize indices
     thrust::sequence(policy, thrust::device_pointer_cast(indices_out),
@@ -745,8 +745,8 @@ static auto unique_thrust(const Tensor& input, bool sorted_output,
     // Copy and flatten input
     backend::CachedMemoryGuard sorted_guard(numel * sizeof(T));
     T* d_sorted = static_cast<T*>(sorted_guard.get());
-    cudaMemcpyAsync(d_sorted, input.data<T>(), numel * sizeof(T),
-                    cudaMemcpyDeviceToDevice, stream);
+    TENZOR_CUDA_CHECK(cudaMemcpyAsync(d_sorted, input.data<T>(), numel * sizeof(T),
+                    cudaMemcpyDeviceToDevice, stream));
 
     // Create index mapping for inverse
     backend::CachedMemoryGuard orig_idx_guard(numel * sizeof(int64_t));
@@ -783,20 +783,20 @@ static auto unique_thrust(const Tensor& input, bool sorted_output,
 
     // Get num_unique on host
     int64_t num_unique = 0;
-    cudaMemcpyAsync(&num_unique, d_num_runs, sizeof(int64_t), cudaMemcpyDeviceToHost, stream);
+    TENZOR_CUDA_CHECK(cudaMemcpyAsync(&num_unique, d_num_runs, sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
 
     // Create unique values tensor
     Tensor unique_vals({num_unique}, input.dtype(), device);
-    cudaMemcpyAsync(unique_vals.data<T>(), d_unique, num_unique * sizeof(T),
-                    cudaMemcpyDeviceToDevice, stream);
+    TENZOR_CUDA_CHECK(cudaMemcpyAsync(unique_vals.data<T>(), d_unique, num_unique * sizeof(T),
+                    cudaMemcpyDeviceToDevice, stream));
 
     // Create counts tensor if requested
     Tensor counts_tensor;
     if (return_counts) {
         counts_tensor = Tensor({num_unique}, DType::Int64, device);
-        cudaMemcpyAsync(counts_tensor.data<int64_t>(), d_counts, num_unique * sizeof(int64_t),
-                        cudaMemcpyDeviceToDevice, stream);
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(counts_tensor.data<int64_t>(), d_counts, num_unique * sizeof(int64_t),
+                        cudaMemcpyDeviceToDevice, stream));
     }
 
     // Create inverse indices if requested
@@ -1193,10 +1193,10 @@ auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim,
 
                 // Write mode index to output indices
                 int64_t out_offset = outer * inner_size + inner;
-                cudaMemcpyAsync(
+                TENZOR_CUDA_CHECK(cudaMemcpyAsync(
                     indices.data<int64_t>() + out_offset,
                     d_mode_idx, sizeof(int64_t),
-                    cudaMemcpyDeviceToDevice, stream);
+                    cudaMemcpyDeviceToDevice, stream));
 
                 // Gather the original half value using the mode index
                 // d_half_slice[d_mode_idx[0]] -> out_vals[out_offset]
