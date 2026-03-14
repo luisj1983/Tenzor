@@ -45,13 +45,16 @@ inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
 // Warp and Block Reduction Primitives
 // ============================================================================
 
-// AMD wavefront size (64 for CDNA/RDNA2+)
-constexpr int WAVEFRONT_SIZE = 64;
+// Minimum wavefront size across AMD GPUs (RDNA 3/4 = 32, CDNA = 64).
+// Used for host-side shared memory allocation — must be the SMALLEST possible
+// to ensure enough shared memory for the most warps per block.
+// Device code uses the HIP built-in `warpSize` instead.
+constexpr int MIN_WAVEFRONT_SIZE = 32;
 
 // Warp-level reduction using shuffle instructions
 template<typename T>
 __device__ __forceinline__ T warp_reduce_sum(T val) {
-    for (int offset = WAVEFRONT_SIZE / 2; offset > 0; offset /= 2) {
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
         val += __shfl_down(val, offset);
     }
     return val;
@@ -60,8 +63,8 @@ __device__ __forceinline__ T warp_reduce_sum(T val) {
 // Block-level reduction using shared memory
 template<typename T>
 __device__ T block_reduce_sum(T val, T* shared) {
-    int lane = threadIdx.x % WAVEFRONT_SIZE;
-    int wid = threadIdx.x / WAVEFRONT_SIZE;
+    int lane = threadIdx.x % warpSize;
+    int wid = threadIdx.x / warpSize;
 
     val = warp_reduce_sum(val);
 
@@ -70,7 +73,7 @@ __device__ T block_reduce_sum(T val, T* shared) {
     }
     __syncthreads();
 
-    val = (threadIdx.x < blockDim.x / WAVEFRONT_SIZE) ? shared[lane] : T(0);
+    val = (threadIdx.x < blockDim.x / warpSize) ? shared[lane] : T(0);
     if (wid == 0) {
         val = warp_reduce_sum(val);
     }
@@ -1130,7 +1133,7 @@ auto batchnorm2d_mean_var(const Tensor& input,
     }
 
     if (input.dtype() == DType::Float32) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(float);
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(float);
         hipLaunchKernelGGL(batchnorm_mean_kernel<float>, dim3(C), dim3(BATCHNORM_BLOCK_SIZE),
                           shared_mem_size, stream,
                           input.data<float>(), mean.data<float>(), N, C, H, W);
@@ -1141,7 +1144,7 @@ auto batchnorm2d_mean_var(const Tensor& input,
                           input.data<float>(), mean.data<float>(), variance.data<float>(), N, C, H, W);
         HIP_CHECK(hipGetLastError());
     } else if (input.dtype() == DType::Float64) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(double);
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(double);
         hipLaunchKernelGGL(batchnorm_mean_kernel<double>, dim3(C), dim3(BATCHNORM_BLOCK_SIZE),
                           shared_mem_size, stream,
                           input.data<double>(), mean.data<double>(), N, C, H, W);
@@ -1153,7 +1156,7 @@ auto batchnorm2d_mean_var(const Tensor& input,
         HIP_CHECK(hipGetLastError());
     } else if (input.dtype() == DType::Float16) {
         // For Float16, use __half type
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(__half);
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(__half);
         hipLaunchKernelGGL(batchnorm_mean_kernel<__half>, dim3(C), dim3(BATCHNORM_BLOCK_SIZE),
                           shared_mem_size, stream,
                           reinterpret_cast<const __half*>(input.data<Float16>()),
@@ -1383,7 +1386,7 @@ auto batchnorm2d_backward(const Tensor& grad_output,
     Tensor normalized = batchnorm2d_forward(input, mean, variance, epsilon, stream);
 
     if (input.dtype() == DType::Float32) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(float);
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(float);
 
         // Compute grad_gamma and grad_beta
         hipLaunchKernelGGL(batchnorm_backward_gamma_beta_kernel<float>, dim3(C), dim3(BATCHNORM_BLOCK_SIZE),
@@ -1401,7 +1404,7 @@ auto batchnorm2d_backward(const Tensor& grad_output,
                           epsilon, N, C, H, W);
         HIP_CHECK(hipGetLastError());
     } else if (input.dtype() == DType::Float64) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(double);
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(double);
 
         // Compute grad_gamma and grad_beta
         hipLaunchKernelGGL(batchnorm_backward_gamma_beta_kernel<double>, dim3(C), dim3(BATCHNORM_BLOCK_SIZE),
@@ -1419,7 +1422,7 @@ auto batchnorm2d_backward(const Tensor& grad_output,
                           epsilon, N, C, H, W);
         HIP_CHECK(hipGetLastError());
     } else if (input.dtype() == DType::Float16) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(__half);
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(__half);
 
         // Compute grad_gamma and grad_beta
         hipLaunchKernelGGL(batchnorm_backward_gamma_beta_kernel<__half>, dim3(C), dim3(BATCHNORM_BLOCK_SIZE),
@@ -1473,7 +1476,7 @@ auto layernorm_forward(const Tensor& input,
     int64_t outer_size = total_size / normalized_size;
 
     if (input.dtype() == DType::Float32) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(float);
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(float);
         hipLaunchKernelGGL(layernorm_forward_kernel<float>, dim3(outer_size), dim3(BATCHNORM_BLOCK_SIZE),
                           shared_mem_size, stream,
                           input.data<float>(), output.data<float>(),
@@ -1481,7 +1484,7 @@ auto layernorm_forward(const Tensor& input,
                           epsilon, outer_size, normalized_size);
         HIP_CHECK(hipGetLastError());
     } else if (input.dtype() == DType::Float64) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(double);
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(double);
         hipLaunchKernelGGL(layernorm_forward_kernel<double>, dim3(outer_size), dim3(BATCHNORM_BLOCK_SIZE),
                           shared_mem_size, stream,
                           input.data<double>(), output.data<double>(),
@@ -1489,7 +1492,7 @@ auto layernorm_forward(const Tensor& input,
                           epsilon, outer_size, normalized_size);
         HIP_CHECK(hipGetLastError());
     } else if (input.dtype() == DType::Float16) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(__half);
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(__half);
         hipLaunchKernelGGL(layernorm_forward_kernel<__half>, dim3(outer_size), dim3(BATCHNORM_BLOCK_SIZE),
                           shared_mem_size, stream,
                           reinterpret_cast<const __half*>(input.data<Float16>()),
@@ -1532,7 +1535,7 @@ auto layernorm_backward(const Tensor& grad_output,
     HIP_CHECK(hipMemsetAsync(grad_beta.data_ptr(), 0, normalized_size * dtype_size(input.dtype()), stream));
 
     if (input.dtype() == DType::Float32) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(float);
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(float);
         hipLaunchKernelGGL(layernorm_backward_kernel<float>, dim3(outer_size), dim3(BATCHNORM_BLOCK_SIZE),
                           shared_mem_size, stream,
                           grad_output.data<float>(), input.data<float>(), gamma.data<float>(),
@@ -1540,7 +1543,7 @@ auto layernorm_backward(const Tensor& grad_output,
                           epsilon, outer_size, normalized_size);
         HIP_CHECK(hipGetLastError());
     } else if (input.dtype() == DType::Float64) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(double);
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(double);
         hipLaunchKernelGGL(layernorm_backward_kernel<double>, dim3(outer_size), dim3(BATCHNORM_BLOCK_SIZE),
                           shared_mem_size, stream,
                           grad_output.data<double>(), input.data<double>(), gamma.data<double>(),
@@ -1554,7 +1557,7 @@ auto layernorm_backward(const Tensor& grad_output,
         HIP_CHECK(hipMemsetAsync(grad_gamma_f32.data<float>(), 0, normalized_size * sizeof(float), stream));
         HIP_CHECK(hipMemsetAsync(grad_beta_f32.data<float>(), 0, normalized_size * sizeof(float), stream));
 
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(float);
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(float);
         hipLaunchKernelGGL(layernorm_backward_kernel_fp16, dim3(outer_size), dim3(BATCHNORM_BLOCK_SIZE),
                           shared_mem_size, stream,
                           reinterpret_cast<const __half*>(grad_output.data<Float16>()),
@@ -1606,7 +1609,7 @@ auto instancenorm_forward(const Tensor& input,
     int64_t W = shape[3];
 
     if (input.dtype() == DType::Float32) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(float);
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(float);
         hipLaunchKernelGGL(instancenorm_forward_kernel<float>, dim3(N * C), dim3(BATCHNORM_BLOCK_SIZE),
                           shared_mem_size, stream,
                           input.data<float>(), output.data<float>(),
@@ -1614,7 +1617,7 @@ auto instancenorm_forward(const Tensor& input,
                           epsilon, N, C, H, W);
         HIP_CHECK(hipGetLastError());
     } else if (input.dtype() == DType::Float64) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(double);
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(double);
         hipLaunchKernelGGL(instancenorm_forward_kernel<double>, dim3(N * C), dim3(BATCHNORM_BLOCK_SIZE),
                           shared_mem_size, stream,
                           input.data<double>(), output.data<double>(),
@@ -1622,7 +1625,7 @@ auto instancenorm_forward(const Tensor& input,
                           epsilon, N, C, H, W);
         HIP_CHECK(hipGetLastError());
     } else if (input.dtype() == DType::Float16) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(__half);
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(__half);
         hipLaunchKernelGGL(instancenorm_forward_kernel<__half>, dim3(N * C), dim3(BATCHNORM_BLOCK_SIZE),
                           shared_mem_size, stream,
                           reinterpret_cast<const __half*>(input.data<Float16>()),
@@ -1665,7 +1668,7 @@ auto instancenorm_backward(const Tensor& grad_output,
     HIP_CHECK(hipMemsetAsync(grad_beta.data_ptr(), 0, C * dtype_size(input.dtype()), stream));
 
     if (input.dtype() == DType::Float32) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(float);
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(float);
         hipLaunchKernelGGL(instancenorm_backward_kernel<float>, dim3(N * C), dim3(BATCHNORM_BLOCK_SIZE),
                           shared_mem_size, stream,
                           grad_output.data<float>(), input.data<float>(), gamma.data<float>(),
@@ -1673,7 +1676,7 @@ auto instancenorm_backward(const Tensor& grad_output,
                           epsilon, N, C, H, W);
         HIP_CHECK(hipGetLastError());
     } else if (input.dtype() == DType::Float64) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(double);
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(double);
         hipLaunchKernelGGL(instancenorm_backward_kernel<double>, dim3(N * C), dim3(BATCHNORM_BLOCK_SIZE),
                           shared_mem_size, stream,
                           grad_output.data<double>(), input.data<double>(), gamma.data<double>(),
@@ -1687,7 +1690,7 @@ auto instancenorm_backward(const Tensor& grad_output,
         HIP_CHECK(hipMemsetAsync(grad_gamma_f32.data<float>(), 0, C * sizeof(float), stream));
         HIP_CHECK(hipMemsetAsync(grad_beta_f32.data<float>(), 0, C * sizeof(float), stream));
 
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(float);
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(float);
         hipLaunchKernelGGL(instancenorm_backward_kernel_fp16, dim3(N * C), dim3(BATCHNORM_BLOCK_SIZE),
                           shared_mem_size, stream,
                           reinterpret_cast<const __half*>(grad_output.data<Float16>()),
@@ -1744,7 +1747,7 @@ auto groupnorm_forward(const Tensor& input,
     }
 
     if (input.dtype() == DType::Float32) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(float);
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(float);
         hipLaunchKernelGGL(groupnorm_forward_kernel<float>, dim3(N * groups), dim3(BATCHNORM_BLOCK_SIZE),
                           shared_mem_size, stream,
                           input.data<float>(), output.data<float>(),
@@ -1752,7 +1755,7 @@ auto groupnorm_forward(const Tensor& input,
                           epsilon, N, C, H, W, groups);
         HIP_CHECK(hipGetLastError());
     } else if (input.dtype() == DType::Float64) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(double);
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(double);
         hipLaunchKernelGGL(groupnorm_forward_kernel<double>, dim3(N * groups), dim3(BATCHNORM_BLOCK_SIZE),
                           shared_mem_size, stream,
                           input.data<double>(), output.data<double>(),
@@ -1760,7 +1763,7 @@ auto groupnorm_forward(const Tensor& input,
                           epsilon, N, C, H, W, groups);
         HIP_CHECK(hipGetLastError());
     } else if (input.dtype() == DType::Float16) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(__half);
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(__half);
         hipLaunchKernelGGL(groupnorm_forward_kernel<__half>, dim3(N * groups), dim3(BATCHNORM_BLOCK_SIZE),
                           shared_mem_size, stream,
                           reinterpret_cast<const __half*>(input.data<Float16>()),
@@ -1804,7 +1807,7 @@ auto groupnorm_backward(const Tensor& grad_output,
     HIP_CHECK(hipMemsetAsync(grad_beta.data_ptr(), 0, C * dtype_size(input.dtype()), stream));
 
     if (input.dtype() == DType::Float32) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(float);
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(float);
         hipLaunchKernelGGL(groupnorm_backward_kernel<float>, dim3(N * groups), dim3(BATCHNORM_BLOCK_SIZE),
                           shared_mem_size, stream,
                           grad_output.data<float>(), input.data<float>(), gamma.data<float>(),
@@ -1812,7 +1815,7 @@ auto groupnorm_backward(const Tensor& grad_output,
                           epsilon, N, C, H, W, groups);
         HIP_CHECK(hipGetLastError());
     } else if (input.dtype() == DType::Float64) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(double);
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(double);
         hipLaunchKernelGGL(groupnorm_backward_kernel<double>, dim3(N * groups), dim3(BATCHNORM_BLOCK_SIZE),
                           shared_mem_size, stream,
                           grad_output.data<double>(), input.data<double>(), gamma.data<double>(),
@@ -1826,7 +1829,7 @@ auto groupnorm_backward(const Tensor& grad_output,
         HIP_CHECK(hipMemsetAsync(grad_gamma_f32.data<float>(), 0, C * sizeof(float), stream));
         HIP_CHECK(hipMemsetAsync(grad_beta_f32.data<float>(), 0, C * sizeof(float), stream));
 
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / WAVEFRONT_SIZE) * sizeof(float);
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(float);
         hipLaunchKernelGGL(groupnorm_backward_kernel_fp16, dim3(N * groups), dim3(BATCHNORM_BLOCK_SIZE),
                           shared_mem_size, stream,
                           reinterpret_cast<const __half*>(grad_output.data<Float16>()),

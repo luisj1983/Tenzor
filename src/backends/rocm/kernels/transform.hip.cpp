@@ -1,5 +1,6 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
+#include <hip/hip_bfloat16.h>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/shape.hpp"
@@ -122,10 +123,31 @@ auto contiguous_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()),
             d_strides, d_shape, ndim, total_elements);
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(contiguous_kernel_impl<hip_bfloat16>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()),
+            d_strides, d_shape, ndim, total_elements);
+    } else if (input.dtype() == DType::UInt8) {
+        hipLaunchKernelGGL(contiguous_kernel_impl<uint8_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<uint8_t>(), result.data<uint8_t>(),
+            d_strides, d_shape, ndim, total_elements);
+    } else if (input.dtype() == DType::Int8) {
+        hipLaunchKernelGGL(contiguous_kernel_impl<int8_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<int8_t>(), result.data<int8_t>(),
+            d_strides, d_shape, ndim, total_elements);
+    } else if (input.dtype() == DType::Bool) {
+        hipLaunchKernelGGL(contiguous_kernel_impl<bool>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<bool>(), result.data<bool>(),
+            d_strides, d_shape, ndim, total_elements);
     } else {
         HIP_CHECK(hipFree(d_strides));
         HIP_CHECK(hipFree(d_shape));
-        throw std::runtime_error("Contiguous only supports Float32, Float64, Float16, Int32, and Int64 dtypes");
+        throw std::runtime_error("Contiguous: unsupported dtype");
     }
 
     hipError_t err = hipGetLastError();
@@ -1018,6 +1040,11 @@ static Tensor cast_from_standard(const Tensor& input, DType target_dtype, int64_
                 dim3(num_blocks), dim3(block_size), 0, stream,
                 src, reinterpret_cast<__half*>(result.data<Float16>()), n);
             break;
+        case DType::BFloat16:
+            hipLaunchKernelGGL((cast_kernel_impl<SrcT, hip_bfloat16>),
+                dim3(num_blocks), dim3(block_size), 0, stream,
+                src, reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
+            break;
         default:
             throw std::runtime_error("cast: unsupported target dtype");
     }
@@ -1084,6 +1111,23 @@ auto cast_kernel(const Tensor& input, DType target_dtype, hipStream_t stream) ->
         }
         HIP_CHECK(hipGetLastError());
         return result;
+    }
+
+    // BFloat16 source: upcast to Float32 first, then cast to target
+    if (src_dtype == DType::BFloat16) {
+        if (target_dtype == DType::Float32) {
+            // Direct BF16 → F32
+            Tensor result(shape, DType::Float32, input.device());
+            hipLaunchKernelGGL((cast_kernel_impl<hip_bfloat16, float>),
+                dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
+                result.data<float>(), n);
+            HIP_CHECK(hipGetLastError());
+            return result;
+        }
+        // For other targets, go through Float32
+        auto f32 = cast_kernel(input, DType::Float32, stream);
+        return cast_kernel(f32, target_dtype, stream);
     }
 
     // Standard source types

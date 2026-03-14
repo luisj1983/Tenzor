@@ -27,9 +27,7 @@ dist/
 *.swo
 *~
 .DS_Store
-.claude-flow/
-.hive-mind/
-.swarm/
+.cache/
 
 # CMake
 CMakeCache.txt

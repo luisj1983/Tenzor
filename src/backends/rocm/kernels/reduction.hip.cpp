@@ -24,7 +24,8 @@ namespace rocm {
 // Constants
 // ============================================================================
 
-constexpr int WAVEFRONT_SIZE = 64;  // AMD GPU wavefront size (64 for CDNA/RDNA2+)
+// NOTE: Do NOT hardcode wavefront size — RDNA 3/4 GPUs use wave32, CDNA uses wave64.
+// Use the HIP built-in `warpSize` in device code instead.
 constexpr int MAX_BLOCK_SIZE = 1024;
 constexpr int REDUCTION_BLOCK_SIZE = 256;
 
@@ -64,9 +65,8 @@ __global__ void elementwise_sqrt_kernel(const T* __restrict__ input, T* __restri
  */
 template<typename T>
 __device__ __forceinline__ T wavefront_reduce_sum(T val) {
-    #pragma unroll
-    for (int offset = WAVEFRONT_SIZE / 2; offset > 0; offset /= 2) {
-        val += __shfl_down(val, offset, WAVEFRONT_SIZE);
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        val += __shfl_down(val, offset);
     }
     return val;
 }
@@ -79,9 +79,8 @@ __device__ __forceinline__ T wavefront_reduce_sum(T val) {
  */
 template<typename T>
 __device__ __forceinline__ T wavefront_reduce_max(T val) {
-    #pragma unroll
-    for (int offset = WAVEFRONT_SIZE / 2; offset > 0; offset /= 2) {
-        T other = __shfl_down(val, offset, WAVEFRONT_SIZE);
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        T other = __shfl_down(val, offset);
         val = (val > other) ? val : other;
     }
     return val;
@@ -95,9 +94,8 @@ __device__ __forceinline__ T wavefront_reduce_max(T val) {
  */
 template<typename T>
 __device__ __forceinline__ T wavefront_reduce_min(T val) {
-    #pragma unroll
-    for (int offset = WAVEFRONT_SIZE / 2; offset > 0; offset /= 2) {
-        T other = __shfl_down(val, offset, WAVEFRONT_SIZE);
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        T other = __shfl_down(val, offset);
         val = (val < other) ? val : other;
     }
     return val;
@@ -137,7 +135,7 @@ __global__ void sum_reduce_kernel(const T* input, T* output, int64_t n) {
     __syncthreads();
 
     // Block-level reduction in LDS
-    for (int stride = blockDim.x / 2; stride >= WAVEFRONT_SIZE; stride >>= 1) {
+    for (int stride = blockDim.x / 2; stride >= warpSize; stride >>= 1) {
         if (tid < stride) {
             shared[tid] += shared[tid + stride];
         }
@@ -145,7 +143,7 @@ __global__ void sum_reduce_kernel(const T* input, T* output, int64_t n) {
     }
 
     // Wavefront-level reduction for final stages
-    if (tid < WAVEFRONT_SIZE) {
+    if (tid < warpSize) {
         T val = shared[tid];
         val = wavefront_reduce_sum(val);
 
@@ -190,7 +188,7 @@ __global__ void max_reduce_kernel(const T* input, T* output, int64_t n) {
     __syncthreads();
 
     // Block-level reduction
-    for (int stride = blockDim.x / 2; stride >= WAVEFRONT_SIZE; stride >>= 1) {
+    for (int stride = blockDim.x / 2; stride >= warpSize; stride >>= 1) {
         if (tid < stride) {
             T other = shared[tid + stride];
             shared[tid] = (shared[tid] > other) ? shared[tid] : other;
@@ -199,7 +197,7 @@ __global__ void max_reduce_kernel(const T* input, T* output, int64_t n) {
     }
 
     // Wavefront-level reduction
-    if (tid < WAVEFRONT_SIZE) {
+    if (tid < warpSize) {
         T val = shared[tid];
         val = wavefront_reduce_max(val);
 
@@ -244,7 +242,7 @@ __global__ void min_reduce_kernel(const T* input, T* output, int64_t n) {
     __syncthreads();
 
     // Block-level reduction
-    for (int stride = blockDim.x / 2; stride >= WAVEFRONT_SIZE; stride >>= 1) {
+    for (int stride = blockDim.x / 2; stride >= warpSize; stride >>= 1) {
         if (tid < stride) {
             T other = shared[tid + stride];
             shared[tid] = (shared[tid] < other) ? shared[tid] : other;
@@ -253,7 +251,7 @@ __global__ void min_reduce_kernel(const T* input, T* output, int64_t n) {
     }
 
     // Wavefront-level reduction
-    if (tid < WAVEFRONT_SIZE) {
+    if (tid < warpSize) {
         T val = shared[tid];
         val = wavefront_reduce_min(val);
 
@@ -2662,7 +2660,7 @@ __global__ void any_reduce_kernel(const T* input, uint8_t* output, int64_t n) {
     __syncthreads();
 
     // Block-level OR reduction in LDS
-    for (int stride = blockDim.x / 2; stride >= WAVEFRONT_SIZE; stride >>= 1) {
+    for (int stride = blockDim.x / 2; stride >= warpSize; stride >>= 1) {
         if (tid < stride) {
             shared[tid] = shared[tid] | shared[tid + stride];
         }
@@ -2670,11 +2668,10 @@ __global__ void any_reduce_kernel(const T* input, uint8_t* output, int64_t n) {
     }
 
     // Wavefront-level reduction
-    if (tid < WAVEFRONT_SIZE) {
+    if (tid < warpSize) {
         int val = shared[tid];
-        #pragma unroll
-        for (int offset = WAVEFRONT_SIZE / 2; offset > 0; offset /= 2) {
-            val |= __shfl_down(val, offset, WAVEFRONT_SIZE);
+        for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+            val |= __shfl_down(val, offset);
         }
         if (tid == 0) {
             output[blockIdx.x] = val ? 1 : 0;
@@ -2709,7 +2706,7 @@ __global__ void all_reduce_kernel(const T* input, uint8_t* output, int64_t n) {
     __syncthreads();
 
     // Block-level AND reduction in LDS
-    for (int stride = blockDim.x / 2; stride >= WAVEFRONT_SIZE; stride >>= 1) {
+    for (int stride = blockDim.x / 2; stride >= warpSize; stride >>= 1) {
         if (tid < stride) {
             shared[tid] = shared[tid] & shared[tid + stride];
         }
@@ -2717,11 +2714,10 @@ __global__ void all_reduce_kernel(const T* input, uint8_t* output, int64_t n) {
     }
 
     // Wavefront-level reduction
-    if (tid < WAVEFRONT_SIZE) {
+    if (tid < warpSize) {
         int val = shared[tid];
-        #pragma unroll
-        for (int offset = WAVEFRONT_SIZE / 2; offset > 0; offset /= 2) {
-            val &= __shfl_down(val, offset, WAVEFRONT_SIZE);
+        for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+            val &= __shfl_down(val, offset);
         }
         if (tid == 0) {
             output[blockIdx.x] = val ? 1 : 0;

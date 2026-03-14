@@ -906,13 +906,13 @@ extern "C" {
 // Shared memory size for reductions
 constexpr int SOFTMAX_BLOCK_SIZE = 256;
 
-// AMD wavefront size (64 for CDNA/RDNA2+)
-constexpr int SOFTMAX_WAVEFRONT_SIZE = 64;
+// NOTE: Do NOT hardcode wavefront size — RDNA 3/4 GPUs use wave32, CDNA uses wave64.
+// Use the HIP built-in `warpSize` in device code instead.
 
 // Warp-level reduction using shuffle instructions
 template<typename T>
 __device__ __forceinline__ T warp_reduce_max(T val) {
-    for (int offset = SOFTMAX_WAVEFRONT_SIZE / 2; offset > 0; offset /= 2) {
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
         val = max(val, __shfl_down(val, offset));
     }
     return val;
@@ -920,7 +920,7 @@ __device__ __forceinline__ T warp_reduce_max(T val) {
 
 template<typename T>
 __device__ __forceinline__ T warp_reduce_sum(T val) {
-    for (int offset = SOFTMAX_WAVEFRONT_SIZE / 2; offset > 0; offset /= 2) {
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
         val += __shfl_down(val, offset);
     }
     return val;
@@ -930,8 +930,8 @@ __device__ __forceinline__ T warp_reduce_sum(T val) {
 // Optimized for AMD GPU memory hierarchy (LDS - Local Data Share)
 template<typename T>
 __device__ T block_reduce_max(T val, T* shared) {
-    int lane = threadIdx.x % SOFTMAX_WAVEFRONT_SIZE;
-    int wid = threadIdx.x / SOFTMAX_WAVEFRONT_SIZE;
+    int lane = threadIdx.x % warpSize;
+    int wid = threadIdx.x / warpSize;
 
     val = warp_reduce_max(val);
 
@@ -940,7 +940,7 @@ __device__ T block_reduce_max(T val, T* shared) {
     }
     __syncthreads();
 
-    val = (threadIdx.x < blockDim.x / SOFTMAX_WAVEFRONT_SIZE) ? shared[lane] : -FLT_MAX;
+    val = (threadIdx.x < blockDim.x / warpSize) ? shared[lane] : -FLT_MAX;
     if (wid == 0) {
         val = warp_reduce_max(val);
     }
@@ -950,8 +950,8 @@ __device__ T block_reduce_max(T val, T* shared) {
 
 template<typename T>
 __device__ T block_reduce_sum(T val, T* shared) {
-    int lane = threadIdx.x % SOFTMAX_WAVEFRONT_SIZE;
-    int wid = threadIdx.x / SOFTMAX_WAVEFRONT_SIZE;
+    int lane = threadIdx.x % warpSize;
+    int wid = threadIdx.x / warpSize;
 
     val = warp_reduce_sum(val);
 
@@ -960,7 +960,7 @@ __device__ T block_reduce_sum(T val, T* shared) {
     }
     __syncthreads();
 
-    val = (threadIdx.x < blockDim.x / SOFTMAX_WAVEFRONT_SIZE) ? shared[lane] : T(0);
+    val = (threadIdx.x < blockDim.x / warpSize) ? shared[lane] : T(0);
     if (wid == 0) {
         val = warp_reduce_sum(val);
     }

@@ -2,6 +2,7 @@
 #include "tenzor/core/dtype.hpp"
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
+#include <hip/hip_bfloat16.h>
 #ifdef TENZOR_HAS_HIPRAND
 #include <hiprand_kernel.h>
 #endif
@@ -2556,6 +2557,12 @@ auto fill_kernel(const Tensor& tensor, float value, hipStream_t stream) -> Tenso
     } else if (tensor.dtype() == DType::Int64) {
         hipLaunchKernelGGL(fill_kernel_device<int64_t>, grid, block, 0, stream,
             result.data<int64_t>(), static_cast<int64_t>(value), n);
+    } else if (tensor.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(fill_kernel_device<__half>, grid, block, 0, stream,
+            reinterpret_cast<__half*>(result.data<Float16>()), __float2half(static_cast<float>(value)), n);
+    } else if (tensor.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(fill_kernel_device<hip_bfloat16>, grid, block, 0, stream,
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), hip_bfloat16(static_cast<float>(value)), n);
     } else {
         throw std::runtime_error("Unsupported dtype for fill operation");
     }
@@ -2607,6 +2614,9 @@ auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
     } else if (dtype == DType::Float16) {
         hipLaunchKernelGGL(fill_kernel_device<__half>, grid, block, 0, stream,
             reinterpret_cast<__half*>(result.data<Float16>()), __float2half(0.0f), n);
+    } else if (dtype == DType::BFloat16) {
+        hipLaunchKernelGGL(fill_kernel_device<hip_bfloat16>, grid, block, 0, stream,
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), hip_bfloat16(0.0f), n);
     } else {
         throw std::runtime_error("Unsupported dtype for zeros operation");
     }
@@ -2658,6 +2668,9 @@ auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
     } else if (dtype == DType::Float16) {
         hipLaunchKernelGGL(fill_kernel_device<__half>, grid, block, 0, stream,
             reinterpret_cast<__half*>(result.data<Float16>()), __float2half(1.0f), n);
+    } else if (dtype == DType::BFloat16) {
+        hipLaunchKernelGGL(fill_kernel_device<hip_bfloat16>, grid, block, 0, stream,
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), hip_bfloat16(1.0f), n);
     } else {
         throw std::runtime_error("Unsupported dtype for ones operation");
     }
@@ -2710,6 +2723,9 @@ auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, De
     } else if (dtype == DType::Float16) {
         hipLaunchKernelGGL(fill_kernel_device<__half>, grid, block, 0, stream,
             reinterpret_cast<__half*>(result.data<Float16>()), __float2half(value), n);
+    } else if (dtype == DType::BFloat16) {
+        hipLaunchKernelGGL(fill_kernel_device<hip_bfloat16>, grid, block, 0, stream,
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), hip_bfloat16(value), n);
     } else {
         throw std::runtime_error("Unsupported dtype for full operation");
     }

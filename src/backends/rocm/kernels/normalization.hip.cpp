@@ -36,10 +36,11 @@ namespace rocm {
 
 constexpr int BLOCK_SIZE = 256;
 
-// Warp-level reduction using shuffle instructions (AMD wavefront = 64)
+// Warp-level reduction using shuffle instructions
+// Uses HIP built-in warpSize to support both wave32 (RDNA 3/4) and wave64 (CDNA)
 template<typename T>
 __device__ __forceinline__ T warp_reduce_sum(T val) {
-    for (int offset = 32; offset > 0; offset /= 2) {
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
         val += __shfl_down(val, offset);
     }
     return val;
@@ -48,8 +49,8 @@ __device__ __forceinline__ T warp_reduce_sum(T val) {
 // Block-level reduction using shared memory
 template<typename T>
 __device__ T block_reduce_sum(T val, T* shared) {
-    int lane = threadIdx.x % 64;  // AMD wavefront size
-    int wid = threadIdx.x / 64;
+    int lane = threadIdx.x % warpSize;
+    int wid = threadIdx.x / warpSize;
 
     val = warp_reduce_sum(val);
 
@@ -58,7 +59,7 @@ __device__ T block_reduce_sum(T val, T* shared) {
     }
     __syncthreads();
 
-    int num_warps = (blockDim.x + 63) / 64;
+    int num_warps = (blockDim.x + warpSize - 1) / warpSize;
     val = (threadIdx.x < num_warps) ? shared[threadIdx.x] : T(0);
     if (wid == 0) {
         val = warp_reduce_sum(val);
@@ -226,7 +227,7 @@ auto layer_norm_kernel(
                   input.dtype(), input.device());
 
     int threads = std::min(static_cast<int64_t>(BLOCK_SIZE), normalized_size);
-    int shared_mem_size = (threads / 64 + 1) * sizeof(float);
+    int shared_mem_size = (threads / 32 + 1) * sizeof(float);
 
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(layer_norm_forward_kernel<float>,
@@ -430,7 +431,7 @@ auto layer_norm_backward_kernel(
     }
 
     int threads = std::min(static_cast<int64_t>(BLOCK_SIZE), normalized_size);
-    int shared_mem_size = (threads / 64 + 1) * sizeof(float);
+    int shared_mem_size = (threads / 32 + 1) * sizeof(float);
 
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(layer_norm_backward_kernel<float>,
@@ -696,7 +697,7 @@ auto group_norm_kernel(
     int64_t group_size = channels_per_group * HW;
     int threads = std::min(static_cast<int64_t>(BLOCK_SIZE), group_size);
     int blocks = N * num_groups;
-    int shared_mem_size = (threads / 64 + 1) * sizeof(float);
+    int shared_mem_size = (threads / 32 + 1) * sizeof(float);
 
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(group_norm_forward_kernel<float>,
@@ -737,6 +738,72 @@ auto group_norm_kernel(
 
     HIP_CHECK(hipGetLastError());
     return output;
+}
+
+// Wrapper that returns (output, saved_mean, saved_rstd) for the backward pass.
+// Mean and rstd are computed per (N, num_groups).
+auto group_norm_forward_with_stats(
+    const Tensor& input,
+    int64_t num_groups,
+    const Tensor* weight,
+    const Tensor* bias,
+    float eps,
+    hipStream_t stream
+) -> std::vector<Tensor> {
+    auto output = group_norm_kernel(input, num_groups, weight, bias, eps, stream);
+
+    // Compute mean and rstd for backward pass
+    auto input_shape = input.shape();
+    int64_t N = input_shape[0];
+    int64_t C = input_shape[1];
+    int64_t HW = 1;
+    for (size_t i = 2; i < input_shape.size(); ++i) HW *= input_shape[i];
+    int64_t cpg = C / num_groups;
+    int64_t group_size = cpg * HW;
+
+    // Allocate mean/rstd on device
+    Tensor saved_mean({N, num_groups}, DType::Float32, input.device());
+    Tensor saved_rstd({N, num_groups}, DType::Float32, input.device());
+
+    // Compute on CPU (small: N * num_groups elements)
+    auto input_cpu = input.to(Device::cpu()).to(DType::Float32).contiguous();
+    const float* inp = input_cpu.data<float>();
+
+    std::vector<float> mean_host(N * num_groups);
+    std::vector<float> rstd_host(N * num_groups);
+
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t g = 0; g < num_groups; ++g) {
+            float sum = 0.0f;
+            for (int64_t cl = 0; cl < cpg; ++cl) {
+                int64_t c = g * cpg + cl;
+                for (int64_t hw = 0; hw < HW; ++hw) {
+                    sum += inp[n * C * HW + c * HW + hw];
+                }
+            }
+            float mean_val = sum / static_cast<float>(group_size);
+            float var_sum = 0.0f;
+            for (int64_t cl = 0; cl < cpg; ++cl) {
+                int64_t c = g * cpg + cl;
+                for (int64_t hw = 0; hw < HW; ++hw) {
+                    float diff = inp[n * C * HW + c * HW + hw] - mean_val;
+                    var_sum += diff * diff;
+                }
+            }
+            float var = var_sum / static_cast<float>(group_size);
+            mean_host[n * num_groups + g] = mean_val;
+            rstd_host[n * num_groups + g] = 1.0f / std::sqrt(var + eps);
+        }
+    }
+
+    // Copy to device
+    HIP_CHECK(hipMemcpyAsync(saved_mean.data<float>(), mean_host.data(),
+        N * num_groups * sizeof(float), hipMemcpyHostToDevice, stream));
+    HIP_CHECK(hipMemcpyAsync(saved_rstd.data<float>(), rstd_host.data(),
+        N * num_groups * sizeof(float), hipMemcpyHostToDevice, stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
+
+    return {output, saved_mean, saved_rstd};
 }
 
 // ==============================================================================
@@ -880,7 +947,7 @@ auto instance_norm_kernel(
 
     int threads = std::min(static_cast<int64_t>(BLOCK_SIZE), HW);
     int blocks = N * C;
-    int shared_mem_size = (threads / 64 + 1) * sizeof(float);
+    int shared_mem_size = (threads / 32 + 1) * sizeof(float);
 
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(instance_norm_forward_kernel<float>,

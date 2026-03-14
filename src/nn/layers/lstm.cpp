@@ -629,7 +629,6 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
     // =========================================================================
     // STANDARD PATH: Use autograd operations (required for training/gradients)
     // =========================================================================
-
     // Split states by layer
     std::vector<Variable> h_layers;
     std::vector<Variable> c_layers;
@@ -664,6 +663,7 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
         auto x_flat = x_tensor.reshape({seq_len * batch_size, layer_feat_size});
 
         // Compute all input gates at once: (seq*batch, 4*hidden)
+
         auto all_gates_ih = forward_cell->weight_ih()->forward(Variable(x_flat, false));
 
         // Reshape to (seq, batch, 4*hidden)
@@ -679,7 +679,7 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
             auto [h_next, c_next] = forward_cell->forward_with_precomputed_ih(gates_ih_t, forward_h, forward_c);
 
             // Apply sequence length masking: preserve old state for padded positions
-            if (lengths.numel() > 0) {
+            if (lengths.is_valid() && lengths.numel() > 0) {
                 // Create mask: (batch, 1) where mask[b] = (t < lengths[b]) ? 1 : 0
                 auto lengths_dev = lengths.to(input.device()).to(DType::Float32);
                 auto t_scalar = full({batch_size}, static_cast<float>(t), DType::Float32, input.device());
@@ -722,7 +722,7 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
                 auto [h_next, c_next] = backward_cell->forward_with_precomputed_ih(gates_ih_t, backward_h, backward_c);
 
                 // Apply sequence length masking for backward direction
-                if (lengths.numel() > 0) {
+                if (lengths.is_valid() && lengths.numel() > 0) {
                     auto lengths_dev = lengths.to(input.device()).to(DType::Float32);
                     auto t_scalar = full({batch_size}, static_cast<float>(t), DType::Float32, input.device());
                     auto mask = gt(lengths_dev, t_scalar).to(input.dtype()).reshape({batch_size, 1});
@@ -776,7 +776,6 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
     }
 
     // Stack final states
-    // Each state is (batch, hidden_size), stack to (num_layers * num_directions, batch, hidden_size)
     std::vector<Tensor> h_final_tensors, c_final_tensors;
     for (const auto& h_state : final_h_states) {
         h_final_tensors.push_back(h_state.tensor());

@@ -408,7 +408,7 @@ auto GRU::forward(const Variable& input, const Variable& hx,
             auto h_next = forward_cell->forward_with_precomputed_ih(gates_ih_t, forward_h);
 
             // Apply sequence length masking: preserve old state for padded positions
-            if (lengths.numel() > 0) {
+            if (lengths.is_valid() && lengths.numel() > 0) {
                 auto lengths_dev = lengths.to(input.device()).to(DType::Float32);
                 auto t_scalar = full({batch_size}, static_cast<float>(t), DType::Float32, input.device());
                 auto mask = gt(lengths_dev, t_scalar).to(input.dtype()).reshape({batch_size, 1});
@@ -444,7 +444,7 @@ auto GRU::forward(const Variable& input, const Variable& hx,
                 auto h_next = backward_cell->forward_with_precomputed_ih(gates_ih_t, backward_h);
 
                 // Apply sequence length masking for backward direction
-                if (lengths.numel() > 0) {
+                if (lengths.is_valid() && lengths.numel() > 0) {
                     auto lengths_dev = lengths.to(input.device()).to(DType::Float32);
                     auto t_scalar = full({batch_size}, static_cast<float>(t), DType::Float32, input.device());
                     auto mask = gt(lengths_dev, t_scalar).to(input.dtype()).reshape({batch_size, 1});
