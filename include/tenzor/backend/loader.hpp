@@ -81,7 +81,8 @@ public:
      *
      * @note The library is kept open until unload_backend() or destruction.
      */
-    auto load_backend(const std::filesystem::path& library_path)
+    auto load_backend(const std::filesystem::path& library_path,
+                      bool skip_probe = false)
         -> std::expected<std::unique_ptr<Backend>, std::string>;
 
     /**

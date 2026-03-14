@@ -21,8 +21,8 @@ if(TENZOR_BUILD_CUDA)
     set_target_properties(test_fp16_kernels PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
     # Test registration
-    tenzor_discover_tests(test_cuda_kernels DISCOVERY_TIMEOUT 30)
-    tenzor_discover_tests(test_fp16_kernels DISCOVERY_TIMEOUT 30)
+    tenzor_discover_tests(test_cuda_kernels DISCOVERY_TIMEOUT 60)
+    tenzor_discover_tests(test_fp16_kernels DISCOVERY_TIMEOUT 60)
 endif()
 
 # ROCm-specific tests
@@ -55,5 +55,5 @@ if(TENZOR_BUILD_VULKAN)
     target_link_libraries(test_vulkan_allocator_merge PRIVATE
         tenzor_core tenzor_backend_vulkan ${Vulkan_LIBRARIES} GTest::gtest_main)
     target_include_directories(test_vulkan_allocator_merge PRIVATE ${Vulkan_INCLUDE_DIRS})
-    tenzor_discover_tests(test_vulkan_allocator_merge DISCOVERY_TIMEOUT 30)
+    tenzor_discover_tests(test_vulkan_allocator_merge DISCOVERY_TIMEOUT 60)
 endif()

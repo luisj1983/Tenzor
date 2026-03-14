@@ -58,6 +58,14 @@
 #include <tenzor/utils/benchmark.hpp>
 #include <tenzor/nn/optim/adam_atan2.hpp>
 #include <tenzor/nn/layers/hrm.hpp>
+#include <tenzor/nn/layers/alibi.hpp>
+#include <tenzor/nn/layers/gqa_attention.hpp>
+#include <tenzor/nn/layers/drop_path.hpp>
+#include <tenzor/nn/layers/vision.hpp>
+#include <tenzor/nn/layers/mobilenet.hpp>
+#include <tenzor/nn/layers/segmentation.hpp>
+#include <tenzor/nn/layers/sparse_linear.hpp>
+#include <tenzor/nn/layers/sparse_embedding.hpp>
 #include <tenzor/nn/serialize.hpp>
 #include <tenzor/models/resnet.hpp>
 #include <tenzor/onnx/importer.hpp>
@@ -3187,6 +3195,7 @@ PYBIND11_MODULE(tenzor_core, m) {
              "Perform forward pass (calls forward_impl with hooks)")
         .def("forward_impl", &tenzor::nn::Module::forward_impl,
              py::arg("input"),
+             py::call_guard<py::gil_scoped_release>(),
              "Implementation of forward pass - override this in subclasses")
         .def("extra_repr", &tenzor::nn::Module::extra_repr,
              "Extra representation string for __repr__ — override in subclasses")
@@ -4392,6 +4401,242 @@ PYBIND11_MODULE(tenzor_core, m) {
             return self.forward(input, offsets);
         }, py::arg("input"), py::arg("offsets") = tenzor::Variable{},
            py::call_guard<py::gil_scoped_release>());
+
+    // =========================================================================
+    // Priority 1: LLM-critical layers
+    // =========================================================================
+
+    py::class_<tenzor::nn::ALiBi, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::ALiBi>>(nn, "ALiBi",
+        "Attention with Linear Biases (ALiBi) positional encoding")
+        .def(py::init<int64_t>(),
+             py::arg("num_heads"))
+        .def("forward", &tenzor::nn::ALiBi::forward_impl,
+             py::arg("input"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Forward pass (identity — use get_bias() for the bias tensor)")
+        .def("get_bias", &tenzor::nn::ALiBi::get_bias,
+             py::arg("seq_q"), py::arg("seq_k"),
+             py::arg("device") = tenzor::Device::cpu(),
+             py::arg("dtype") = tenzor::DType::Float32,
+             py::call_guard<py::gil_scoped_release>(),
+             "Get ALiBi bias tensor of shape (1, num_heads, seq_q, seq_k)");
+
+    py::class_<tenzor::nn::GroupedQueryAttention, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::GroupedQueryAttention>>(nn, "GroupedQueryAttention",
+        "Grouped Query Attention (GQA / MQA) layer")
+        .def(py::init<int64_t, int64_t, int64_t, double, bool, bool>(),
+             py::arg("embed_dim"),
+             py::arg("num_heads"),
+             py::arg("num_kv_heads"),
+             py::arg("dropout") = 0.0,
+             py::arg("bias") = true,
+             py::arg("is_causal") = false)
+        .def("forward", [](tenzor::nn::GroupedQueryAttention& self,
+                           const tenzor::Variable& query,
+                           const tenzor::Variable& key,
+                           const tenzor::Variable& value,
+                           const tenzor::Tensor& attn_mask,
+                           bool need_weights) {
+            return self.forward(query, key, value, attn_mask, need_weights);
+        }, py::arg("query"), py::arg("key"), py::arg("value"),
+           py::arg("attn_mask") = tenzor::Tensor{},
+           py::arg("need_weights") = false,
+           py::call_guard<py::gil_scoped_release>(),
+           "Forward pass through grouped query attention")
+        .def_property_readonly("embed_dim", &tenzor::nn::GroupedQueryAttention::embed_dim)
+        .def_property_readonly("num_heads", &tenzor::nn::GroupedQueryAttention::num_heads)
+        .def_property_readonly("num_kv_heads", &tenzor::nn::GroupedQueryAttention::num_kv_heads)
+        .def_property_readonly("num_heads_per_group", &tenzor::nn::GroupedQueryAttention::num_heads_per_group)
+        .def_property_readonly("head_dim", &tenzor::nn::GroupedQueryAttention::head_dim)
+        .def_property_readonly("is_causal", &tenzor::nn::GroupedQueryAttention::is_causal);
+
+    // =========================================================================
+    // Priority 2: ViT-critical layers
+    // =========================================================================
+
+    py::class_<tenzor::nn::DropPath, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::DropPath>>(nn, "DropPath",
+        "DropPath (Stochastic Depth) regularization — drops entire samples")
+        .def(py::init<double>(),
+             py::arg("p") = 0.0)
+        .def("forward", &tenzor::nn::DropPath::forward_impl,
+             py::arg("input"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Forward pass through DropPath");
+
+    py::class_<tenzor::nn::PatchEmbedding, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::PatchEmbedding>>(nn, "PatchEmbedding",
+        "Patch embedding layer for Vision Transformers")
+        .def(py::init<int64_t, int64_t, int64_t, int64_t>(),
+             py::arg("in_channels"),
+             py::arg("embed_dim"),
+             py::arg("patch_size"),
+             py::arg("img_size") = 224)
+        .def("forward", &tenzor::nn::PatchEmbedding::forward_impl,
+             py::arg("input"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Convert image to patch embeddings: (N,C,H,W) -> (N,num_patches,embed_dim)")
+        .def_property_readonly("num_patches", &tenzor::nn::PatchEmbedding::num_patches)
+        .def_property_readonly("patch_size", &tenzor::nn::PatchEmbedding::patch_size)
+        .def_property_readonly("embed_dim", &tenzor::nn::PatchEmbedding::embed_dim);
+
+    py::class_<tenzor::nn::WindowAttention, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::WindowAttention>>(nn, "WindowAttention",
+        "Window-based Multi-Head Self-Attention for Swin Transformer")
+        .def(py::init<int64_t, int64_t, int64_t, bool, double, double, double>(),
+             py::arg("dim"),
+             py::arg("window_size") = 7,
+             py::arg("num_heads") = 3,
+             py::arg("qkv_bias") = true,
+             py::arg("qk_scale") = 0.0,
+             py::arg("attn_drop") = 0.0,
+             py::arg("proj_drop") = 0.0)
+        .def("forward", [](tenzor::nn::WindowAttention& self,
+                           const tenzor::Variable& input,
+                           const py::object& mask_obj) {
+            tenzor::Tensor mask;
+            if (!mask_obj.is_none()) {
+                mask = mask_obj.cast<tenzor::Tensor>();
+            }
+            py::gil_scoped_release release;
+            return self.forward(input, mask);
+        }, py::arg("input"), py::arg("mask") = py::none(),
+           "Forward pass through window attention")
+        .def_property_readonly("dim", &tenzor::nn::WindowAttention::dim)
+        .def_property_readonly("window_size", &tenzor::nn::WindowAttention::window_size)
+        .def_property_readonly("num_heads", &tenzor::nn::WindowAttention::num_heads);
+
+    // Vision helper functions
+    nn.def("window_partition", &tenzor::nn::window_partition,
+           py::arg("input"), py::arg("window_size"),
+           py::call_guard<py::gil_scoped_release>(),
+           "Partition tensor into non-overlapping windows: (B,H,W,C) -> (B*nW,M*M,C)");
+
+    nn.def("window_reverse", &tenzor::nn::window_reverse,
+           py::arg("windows"), py::arg("window_size"),
+           py::arg("H"), py::arg("W"),
+           py::call_guard<py::gil_scoped_release>(),
+           "Reverse window partition: (B*nW,M*M,C) -> (B,H,W,C)");
+
+    nn.def("create_shifted_window_mask", &tenzor::nn::create_shifted_window_mask,
+           py::arg("H"), py::arg("W"),
+           py::arg("window_size"), py::arg("shift_size"),
+           py::arg("device") = tenzor::Device::cpu(),
+           py::arg("dtype") = tenzor::DType::Float32,
+           py::call_guard<py::gil_scoped_release>(),
+           "Create attention mask for shifted window attention");
+
+    // =========================================================================
+    // Priority 3: Mobile/Segmentation layers
+    // =========================================================================
+
+    py::class_<tenzor::nn::SqueezeExcitation, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::SqueezeExcitation>>(nn, "SqueezeExcitation",
+        "Squeeze-and-Excitation channel attention block")
+        .def(py::init<int64_t, int64_t, std::string>(),
+             py::arg("channels"),
+             py::arg("reduction") = 16,
+             py::arg("activation") = "relu")
+        .def("forward", &tenzor::nn::SqueezeExcitation::forward_impl,
+             py::arg("input"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Forward pass through SE block: (N,C,H,W) -> (N,C,H,W)");
+
+    py::class_<tenzor::nn::InvertedResidual, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::InvertedResidual>>(nn, "InvertedResidual",
+        "Inverted residual block (MBConv) for MobileNet/EfficientNet")
+        .def(py::init<int64_t, int64_t, int64_t, int64_t, bool, int64_t, std::string>(),
+             py::arg("in_channels"),
+             py::arg("out_channels"),
+             py::arg("expand_ratio") = 6,
+             py::arg("stride") = 1,
+             py::arg("use_se") = false,
+             py::arg("kernel_size") = 3,
+             py::arg("activation") = "relu6")
+        .def("forward", &tenzor::nn::InvertedResidual::forward_impl,
+             py::arg("input"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Forward pass through inverted residual block");
+
+    py::class_<tenzor::nn::FusedMBConv, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::FusedMBConv>>(nn, "FusedMBConv",
+        "Fused Mobile Inverted Bottleneck for EfficientNetV2")
+        .def(py::init<int64_t, int64_t, int64_t, int64_t, bool, std::string>(),
+             py::arg("in_channels"),
+             py::arg("out_channels"),
+             py::arg("expand_ratio") = 4,
+             py::arg("stride") = 1,
+             py::arg("use_se") = false,
+             py::arg("activation") = "swish")
+        .def("forward", &tenzor::nn::FusedMBConv::forward_impl,
+             py::arg("input"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Forward pass through fused MBConv block");
+
+    py::class_<tenzor::nn::AtrousSeparableConv2d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::AtrousSeparableConv2d>>(nn, "AtrousSeparableConv2d",
+        "Atrous (Dilated) Separable Convolution for DeepLab")
+        .def(py::init<int64_t, int64_t, int64_t, int64_t, bool>(),
+             py::arg("in_channels"),
+             py::arg("out_channels"),
+             py::arg("kernel_size") = 3,
+             py::arg("dilation") = 1,
+             py::arg("bias") = false)
+        .def("forward", &tenzor::nn::AtrousSeparableConv2d::forward_impl,
+             py::arg("input"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Forward pass through atrous separable convolution");
+
+    py::class_<tenzor::nn::ASPP, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::ASPP>>(nn, "ASPP",
+        "Atrous Spatial Pyramid Pooling for semantic segmentation")
+        .def(py::init<int64_t, int64_t, std::vector<int64_t>, bool, float>(),
+             py::arg("in_channels"),
+             py::arg("out_channels") = 256,
+             py::arg("atrous_rates") = std::vector<int64_t>{6, 12, 18},
+             py::arg("use_separable") = true,
+             py::arg("dropout_rate") = 0.5f)
+        .def("forward", &tenzor::nn::ASPP::forward_impl,
+             py::arg("input"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Forward pass through ASPP: (N,C_in,H,W) -> (N,C_out,H,W)");
+
+    // =========================================================================
+    // Priority 4: Sparse layers
+    // =========================================================================
+
+    py::class_<tenzor::nn::SparseLinear, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::SparseLinear>>(nn, "SparseLinear",
+        "Linear layer with sparse weight matrix (CSR format)")
+        .def(py::init<int64_t, int64_t, double, bool>(),
+             py::arg("in_features"),
+             py::arg("out_features"),
+             py::arg("density") = 0.1,
+             py::arg("bias") = true)
+        .def(py::init<const tenzor::SparseTensor&, bool>(),
+             py::arg("sparse_weight"),
+             py::arg("bias") = true)
+        .def("forward", &tenzor::nn::SparseLinear::forward_impl,
+             py::arg("input"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Forward pass: y = spmm(sparse_weight, x^T)^T + bias")
+        .def_property_readonly("has_bias", &tenzor::nn::SparseLinear::has_bias)
+        .def_property_readonly("density", &tenzor::nn::SparseLinear::density);
+
+    py::class_<tenzor::nn::SparseEmbedding, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::SparseEmbedding>>(nn, "SparseEmbedding",
+        "Embedding layer with sparse gradient accumulation")
+        .def(py::init<int64_t, int64_t, int64_t>(),
+             py::arg("num_embeddings"),
+             py::arg("embedding_dim"),
+             py::arg("padding_idx") = -1)
+        .def("forward", &tenzor::nn::SparseEmbedding::forward_impl,
+             py::arg("input"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Lookup embeddings with sparse gradient support")
+        .def_property_readonly("num_embeddings", &tenzor::nn::SparseEmbedding::num_embeddings)
+        .def_property_readonly("embedding_dim", &tenzor::nn::SparseEmbedding::embedding_dim);
 
     // Functional activation functions
     nn.def("relu", &tenzor::nn::relu, "ReLU activation function");

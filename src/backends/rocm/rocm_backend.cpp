@@ -35,7 +35,6 @@ auto ROCmBackend::device_count() const -> int32_t {
     int count = 0;
     hipError_t err = hipGetDeviceCount(&count);
     if (err != hipSuccess) {
-        // Return 0 if ROCm is not available or has no devices
         return 0;
     }
     return count;

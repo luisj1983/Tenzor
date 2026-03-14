@@ -17279,20 +17279,33 @@ static std::vector<int> factorize_fft(int64_t N) {
 // Max FFT size we handle natively
 static constexpr int64_t MAX_VULKAN_FFT_SIZE = 1 << 26;  // 64M elements (increased from 4M)
 
-// Max matrix size for native linalg shaders.
+// Max matrix size for native linalg shaders (det, inv, solve, cholesky, qr).
 //
-// LIMITATION: Vulkan linalg shaders (det, inv, solve) use two tiers:
-//   1. Single-workgroup shaders for matrices up to 128x128, using O(n^3) serial
-//      pivoting loops within shared memory.
-//   2. Tiled blocked algorithms (panel factorization + trailing update) for
-//      matrices from 129x129 up to 512x512.
-//   3. Matrices larger than 512x512 fall back to CPU LAPACK.
+// Tiled blocked algorithms use panel factorization (panel_width=32) + trailing
+// matrix update shaders.  Memory usage is O(panel_width * N) per panel step,
+// so arbitrarily large matrices are supported in principle.  The limit below is
+// a practical guard to avoid very long GPU stalls; matrices beyond this fall
+// back to CPU LAPACK (GPU->CPU->GPU roundtrip).
+//
+// Tiers:
+//   1. Single-workgroup shaders for matrices up to 128x128 (shared-memory LU).
+//   2. Tiled blocked algorithms for 129x129 up to MAX_VULKAN_LINALG_SIZE.
+//   3. Matrices larger than MAX_VULKAN_LINALG_SIZE fall back to CPU LAPACK.
 //
 // SVD and Eigh only have single-workgroup shaders — they fall back to CPU
-// for matrices larger than 128x128.
-static constexpr int64_t MAX_VULKAN_LINALG_SIZE = 512;
+// for matrices larger than MAX_VULKAN_SVD_EIGH_SIZE (currently 256).
+static constexpr int64_t MAX_VULKAN_LINALG_SIZE = 4096;
 static constexpr int64_t MAX_SMALL_LINALG_SIZE = 128;  // single-workgroup shader limit
 static constexpr int64_t TILED_BLOCK_SIZE = 32;        // panel width for blocked algorithms
+
+// SVD and Eigh use single-workgroup shaders only (no tiled path).
+// The shaders use shared memory proportional to n^2, so the practical limit
+// is dictated by the maxComputeSharedMemorySize of the Vulkan device.
+// 256x256 uses ~256 KB of shared memory (Float32), which is within the
+// guaranteed Vulkan minimum of 16 KB only for very small matrices, but most
+// desktop GPUs support 48-96 KB.  256 is a safe upper bound for common GPUs.
+// Matrices larger than this fall back to CPU LAPACK.
+static constexpr int64_t MAX_VULKAN_SVD_EIGH_SIZE = 256;
 
 auto VulkanBackend::runFFTButterfly(const Tensor& input, uint32_t fft_size,
                                      uint32_t direction, uint32_t batch_offset) -> Tensor {
@@ -18852,7 +18865,7 @@ auto VulkanBackend::dispatchLinalgDet(const Tensor& input) -> Tensor {
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
     } else {
-        // Tiled path (32 < n <= 256): blocked LU, then compute det from diagonal
+        // Tiled path (n > 128): blocked LU, then compute det from diagonal
         Tensor A = dispatchClone(input.contiguous());
         Tensor pivots({batch_size, n}, DType::Int32, input.device());
 
@@ -18981,7 +18994,7 @@ auto VulkanBackend::dispatchLinalgInv(const Tensor& input) -> Tensor {
         return output;
     }
 
-    // Tiled path (32 < n <= 512): LU factorize on GPU, then backsolve on GPU via TRSM shader
+    // Tiled path (n > 128): LU factorize on GPU, then backsolve on GPU via TRSM shader
     Tensor A = dispatchClone(input.contiguous());
     Tensor pivots({batch_size, n}, DType::Int32, input.device());
 
@@ -19129,7 +19142,7 @@ auto VulkanBackend::dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Ten
         return output;
     }
 
-    // Tiled path (32 < n <= 512): LU factorize on GPU, backsolve on GPU via TRSM shader
+    // Tiled path (n > 128): LU factorize on GPU, backsolve on GPU via TRSM shader
     Tensor A = dispatchClone(a.contiguous());
     Tensor pivots({batch_size, n}, DType::Int32, a.device());
 
@@ -19251,7 +19264,7 @@ auto VulkanBackend::dispatchLinalgCholesky(const Tensor& input, bool upper) -> T
         return output;
     }
 
-    // Tiled path (32 < n <= 256): blocked Cholesky factorization
+    // Tiled path (n > 128): blocked Cholesky factorization
     Tensor A = dispatchClone(input.contiguous());
 
     runBlockedCholesky(A, n, batch_size, device_id, is_f64, is_f16);
@@ -19268,7 +19281,7 @@ auto VulkanBackend::dispatchLinalgCholesky(const Tensor& input, bool upper) -> T
 }
 
 // ============================================================================
-// QR Decomposition (GPU for ≤256×256, CPU fallback for larger)
+// QR Decomposition (GPU for ≤4096×4096, CPU fallback for larger)
 // ============================================================================
 
 auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor> {
@@ -19340,7 +19353,7 @@ auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor>
         return {Q, R};
     }
 
-    // Tiled path (32 < m,n <= 256): blocked QR via Householder reflections
+    // Tiled path (m,n > 128): blocked QR via Householder reflections
     // After blocked QR, A contains R on/above diagonal and Householder vectors below.
     // Reconstruct Q on GPU via dedicated Q-reconstruction shader.
     int64_t k = std::min(m, n);
@@ -19407,7 +19420,7 @@ auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor>
 }
 
 // ============================================================================
-// SVD (GPU for ≤32×32, CPU fallback for larger)
+// SVD (GPU for ≤256×256, CPU fallback for larger)
 // ============================================================================
 
 auto VulkanBackend::dispatchLinalgSVD(const Tensor& input, bool full_matrices) -> std::vector<Tensor> {
@@ -19418,8 +19431,9 @@ auto VulkanBackend::dispatchLinalgSVD(const Tensor& input, bool full_matrices) -
     int64_t m = shape[ndim - 2];
     int64_t n = shape[ndim - 1];
 
-    // SVD only has single-workgroup shaders — no tiled path yet
-    if (m > 256 || n > 256) {
+    // SVD only has single-workgroup shaders — no tiled path.
+    // Falls back to CPU LAPACK for matrices larger than MAX_VULKAN_SVD_EIGH_SIZE.
+    if (m > MAX_VULKAN_SVD_EIGH_SIZE || n > MAX_VULKAN_SVD_EIGH_SIZE) {
         auto cpu_input = input.to(Device::cpu());
         auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
         NewOpAttributes attrs;
@@ -19490,7 +19504,7 @@ auto VulkanBackend::dispatchLinalgSVD(const Tensor& input, bool full_matrices) -
 }
 
 // ============================================================================
-// Eigh — Symmetric Eigenvalue Decomposition (GPU for ≤32×32, CPU fallback for larger)
+// Eigh — Symmetric Eigenvalue Decomposition (GPU for ≤256×256, CPU fallback for larger)
 // ============================================================================
 
 auto VulkanBackend::dispatchLinalgEigh(const Tensor& input) -> std::vector<Tensor> {
@@ -19501,8 +19515,9 @@ auto VulkanBackend::dispatchLinalgEigh(const Tensor& input) -> std::vector<Tenso
     int64_t n = shape[ndim - 1];
     if (shape[ndim - 2] != n) throw std::runtime_error("linalg.eigh: input must be square");
 
-    // Eigh only has single-workgroup shaders — no tiled path yet
-    if (n > 256) {
+    // Eigh only has single-workgroup shaders — no tiled path.
+    // Falls back to CPU LAPACK for matrices larger than MAX_VULKAN_SVD_EIGH_SIZE.
+    if (n > MAX_VULKAN_SVD_EIGH_SIZE) {
         auto cpu_input = input.to(Device::cpu());
         auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
         NewOpAttributes attrs;

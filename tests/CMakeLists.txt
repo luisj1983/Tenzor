@@ -22,7 +22,7 @@ function(tenzor_discover_tests target)
     cmake_parse_arguments(PARSE_ARGV 1 ARG "" "DISCOVERY_TIMEOUT;DISCOVERY_MODE" "PROPERTIES")
     set(TIMEOUT ${ARG_DISCOVERY_TIMEOUT})
     if(NOT TIMEOUT)
-        set(TIMEOUT 30)
+        set(TIMEOUT 60)
     endif()
     set(PROPS ${ARG_PROPERTIES})
     set(MODE ${ARG_DISCOVERY_MODE})
@@ -43,7 +43,7 @@ macro(tenzor_add_test)
     cmake_parse_arguments(ARG "" "NAME;SOURCE" "LIBS" ${ARGN})
     add_executable(${ARG_NAME} ${ARG_SOURCE})
     target_link_libraries(${ARG_NAME} PRIVATE tenzor_core GTest::gtest_main ${ARG_LIBS})
-    tenzor_discover_tests(${ARG_NAME} DISCOVERY_TIMEOUT 30)
+    tenzor_discover_tests(${ARG_NAME} DISCOVERY_TIMEOUT 60)
 endmacro()
 
 # ============================================================================
@@ -114,7 +114,7 @@ target_link_libraries(tenzor_simd_benchmark PRIVATE
 # CUDA scalar debug test (separate executable for quick debugging)
 add_executable(test_cuda_scalar_debug test_cuda_scalar_debug.cpp)
 target_link_libraries(test_cuda_scalar_debug PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_cuda_scalar_debug DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_cuda_scalar_debug DISCOVERY_TIMEOUT 60)
 
 # Legacy integration tests (kept for compatibility)
 add_executable(tenzor_integration_tests
@@ -128,22 +128,22 @@ target_link_libraries(tenzor_integration_tests PRIVATE
     GTest::gtest_main
 )
 
-tenzor_discover_tests(tenzor_integration_tests DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(tenzor_integration_tests DISCOVERY_TIMEOUT 60)
 
 # Conv1d tests
 add_executable(test_conv1d test_conv1d.cpp)
 target_link_libraries(test_conv1d PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_conv1d DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_conv1d DISCOVERY_TIMEOUT 60)
 
 # ConvTranspose2d tests
 add_executable(test_convtranspose2d test_convtranspose2d.cpp)
 target_link_libraries(test_convtranspose2d PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_convtranspose2d DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_convtranspose2d DISCOVERY_TIMEOUT 60)
 
 # Minimal training test (debugging NaN issue)
 add_executable(test_minimal_training test_minimal_training.cpp)
 target_link_libraries(test_minimal_training PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_minimal_training DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_minimal_training DISCOVERY_TIMEOUT 60)
 
 # Minimal Float16 tests (debugging Float16 corruption)
 add_executable(minimal_float16_test minimal_float16_test.cpp)
@@ -161,37 +161,37 @@ target_link_libraries(minimal_float16_attention_test PRIVATE tenzor_core)
 # Split operation tests
 add_executable(test_split_operation test_split_operation.cpp)
 target_link_libraries(test_split_operation PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_split_operation DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_split_operation DISCOVERY_TIMEOUT 60)
 
 # DType conversion tests
 add_executable(test_dtype_conversion test_dtype_conversion.cpp)
 target_link_libraries(test_dtype_conversion PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_dtype_conversion DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_dtype_conversion DISCOVERY_TIMEOUT 60)
 
 # BMM autograd tests
 add_executable(test_bmm_autograd test_bmm_autograd.cpp)
 target_link_libraries(test_bmm_autograd PRIVATE tenzor_core GTest::gtest)
-tenzor_discover_tests(test_bmm_autograd DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_bmm_autograd DISCOVERY_TIMEOUT 60)
 
 # Linear reshape integration tests
 add_executable(test_linear_reshape_integration test_linear_reshape_integration.cpp)
 target_link_libraries(test_linear_reshape_integration PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_linear_reshape_integration DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_linear_reshape_integration DISCOVERY_TIMEOUT 60)
 
 # Creation operations tests
 add_executable(test_creation_ops test_creation_ops.cpp)
 target_link_libraries(test_creation_ops PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_creation_ops DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_creation_ops DISCOVERY_TIMEOUT 60)
 
 # Creation operations multi-dtype tests
 add_executable(test_creation_ops_multidtype test_creation_ops_multidtype.cpp)
 target_link_libraries(test_creation_ops_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_creation_ops_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_creation_ops_multidtype DISCOVERY_TIMEOUT 60)
 
 # Comparison operators tests
 add_executable(test_comparison_operators test_comparison_operators.cpp)
 target_link_libraries(test_comparison_operators PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_comparison_operators DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_comparison_operators DISCOVERY_TIMEOUT 60)
 
 # Checkpoint leaf fix test
 add_executable(test_checkpoint_leaf_fix test_checkpoint_leaf_fix.cpp)
@@ -209,54 +209,54 @@ add_test(NAME KLDivManual.SimpleMultiply COMMAND test_kldiv_manual --gtest_filte
 # ONNX import tests
 add_executable(test_onnx_import test_onnx_import.cpp)
 target_link_libraries(test_onnx_import PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_onnx_import DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_onnx_import DISCOVERY_TIMEOUT 60)
 
 # Quantization tests
 add_executable(test_quantization test_quantization.cpp)
 target_link_libraries(test_quantization PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_quantization DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_quantization DISCOVERY_TIMEOUT 60)
 
 # ============================================================================
 # Phase 11 Tests - Additional Backend Support
 # ============================================================================
 add_executable(test_phase11_backends test_phase11_backends.cpp)
 target_link_libraries(test_phase11_backends PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_phase11_backends DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_phase11_backends DISCOVERY_TIMEOUT 60)
 
 # CIoU Loss Tests
 add_executable(test_ciou_loss test_ciou_loss.cpp)
 target_link_libraries(test_ciou_loss PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_ciou_loss DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_ciou_loss DISCOVERY_TIMEOUT 60)
 
 # Backend Parity Test - Verify slice operations work correctly on all backends
 add_executable(test_slice_backend_parity test_slice_backend_parity.cpp)
 target_link_libraries(test_slice_backend_parity PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_slice_backend_parity DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_slice_backend_parity DISCOVERY_TIMEOUT 60)
 
 # Slice Debug Test - Debug slice offset and data_ptr behavior
 add_executable(test_slice_debug test_slice_debug.cpp)
 target_link_libraries(test_slice_debug PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_slice_debug DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_slice_debug DISCOVERY_TIMEOUT 60)
 
 # Contiguous Fix Test - Verify .contiguous() fixes slice data access
 add_executable(test_contiguous_fix test_contiguous_fix.cpp)
 target_link_libraries(test_contiguous_fix PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_contiguous_fix DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_contiguous_fix DISCOVERY_TIMEOUT 60)
 
 # Tensor Lifetime Test - Debug tensor data pointer stability
 add_executable(test_tensor_lifetime test_tensor_lifetime.cpp)
 target_link_libraries(test_tensor_lifetime PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_tensor_lifetime DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_tensor_lifetime DISCOVERY_TIMEOUT 60)
 
 # Backend Parity Example - Shows how to write multi-backend tests
 add_executable(test_backend_parity_example test_backend_parity_example.cpp)
 target_link_libraries(test_backend_parity_example PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_backend_parity_example DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_backend_parity_example DISCOVERY_TIMEOUT 60)
 
 # Tensor indexing operator test
 add_executable(test_indexing_operator test_indexing_operator.cpp)
 target_link_libraries(test_indexing_operator PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_indexing_operator DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_indexing_operator DISCOVERY_TIMEOUT 60)
 
 # ============================================================================
 # Phase 12 Tests - Enhanced Test Coverage and Validation
@@ -265,22 +265,22 @@ tenzor_discover_tests(test_indexing_operator DISCOVERY_TIMEOUT 30)
 # Quantization conversion tests
 add_executable(test_quantization_conversion test_quantization_conversion.cpp)
 target_link_libraries(test_quantization_conversion PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_quantization_conversion DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_quantization_conversion DISCOVERY_TIMEOUT 60)
 
 # Mask R-CNN loss tests
 add_executable(test_mask_rcnn_losses test_mask_rcnn_losses.cpp)
 target_link_libraries(test_mask_rcnn_losses PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_mask_rcnn_losses DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_mask_rcnn_losses DISCOVERY_TIMEOUT 60)
 
 # Vulkan complete operations tests
 add_executable(test_vulkan_complete_ops test_vulkan_complete_ops.cpp)
 target_link_libraries(test_vulkan_complete_ops PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_vulkan_complete_ops DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_vulkan_complete_ops DISCOVERY_TIMEOUT 60)
 
 # Repeat and Tile tests
 add_executable(test_repeat_tile test_repeat_tile.cpp)
 target_link_libraries(test_repeat_tile PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_repeat_tile DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_repeat_tile DISCOVERY_TIMEOUT 60)
 
 # Vulkan tensor creation test (standalone, non-GTest)
 add_executable(vulkan_tensor_test vulkan_tensor_test.cpp)

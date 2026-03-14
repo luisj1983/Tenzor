@@ -14,6 +14,7 @@
 #include <cmath>
 #include <algorithm>
 #include <vector>
+#include <type_traits>
 
 namespace tenzor {
 namespace cuda {
@@ -2531,6 +2532,247 @@ __global__ void flash_attention_backward_kernel(
     }
 }
 
+// ==============================================================================
+// Mixed-Precision Flash Attention Backward CUDA Kernel (FP16 / BF16)
+// ==============================================================================
+
+/**
+ * @brief Converts a low-precision value to float for accumulation.
+ */
+__device__ __forceinline__ float to_float(__half x) { return __half2float(x); }
+__device__ __forceinline__ float to_float(__nv_bfloat16 x) { return __bfloat162float(x); }
+__device__ __forceinline__ float to_float(float x) { return x; }
+
+__device__ __forceinline__ __half from_float_to(__half /*tag*/, float x) { return __float2half(x); }
+__device__ __forceinline__ __nv_bfloat16 from_float_to(__nv_bfloat16 /*tag*/, float x) { return __float2bfloat16(x); }
+
+/**
+ * @brief Mixed-precision flash attention backward kernel.
+ *
+ * Reads Q, K, V, O, dO in type T (FP16 or BF16), performs all accumulation
+ * in FP32 shared memory / registers, writes dQ/dK/dV back in type T.
+ * L (logsumexp) is always FP32 (saved from forward pass).
+ *
+ * Same tiling strategy as the FP32 kernel: each block owns one KV tile,
+ * iterates over Q tiles.  dQ via atomicAdd (FP32 scratch), dK/dV in registers.
+ */
+template<typename T, int HEAD_DIM, int Br, int Bc, int BLOCK_SIZE>
+__global__ void flash_attention_backward_kernel_mp(
+    const T* __restrict__ Q,     // [batch_heads, seq_len, HEAD_DIM]
+    const T* __restrict__ K,     // [batch_heads, seq_len, HEAD_DIM]
+    const T* __restrict__ V,     // [batch_heads, seq_len, HEAD_DIM]
+    const T* __restrict__ O,     // [batch_heads, seq_len, HEAD_DIM]
+    const T* __restrict__ dO,    // [batch_heads, seq_len, HEAD_DIM]
+    const float* __restrict__ L, // [batch_heads, seq_len] logsumexp (always FP32)
+    float* __restrict__ dQ_f32,  // [batch_heads, seq_len, HEAD_DIM] FP32 scratch for atomicAdd
+    T* __restrict__ dK,          // [batch_heads, seq_len, HEAD_DIM]
+    T* __restrict__ dV,          // [batch_heads, seq_len, HEAD_DIM]
+    const int seq_len,
+    const float scale,
+    const bool causal
+) {
+    const int kv_tile_idx = blockIdx.x;
+    const int batch_head = blockIdx.y;
+    const int tid = threadIdx.x;
+
+    const int kv_start = kv_tile_idx * Bc;
+    if (kv_start >= seq_len) return;
+    const int actual_Bc = min(Bc, seq_len - kv_start);
+
+    // Base pointers
+    const T* Q_base      = Q  + batch_head * seq_len * HEAD_DIM;
+    const T* K_base      = K  + batch_head * seq_len * HEAD_DIM;
+    const T* V_base      = V  + batch_head * seq_len * HEAD_DIM;
+    const T* O_base      = O  + batch_head * seq_len * HEAD_DIM;
+    const T* dO_base     = dO + batch_head * seq_len * HEAD_DIM;
+    const float* L_base  = L  + batch_head * seq_len;
+    float* dQ_base       = dQ_f32 + batch_head * seq_len * HEAD_DIM;
+    T* dK_base           = dK + batch_head * seq_len * HEAD_DIM;
+    T* dV_base           = dV + batch_head * seq_len * HEAD_DIM;
+
+    // All shared memory tiles in FP32 for numerical stability
+    extern __shared__ float smem[];
+    float* K_tile  = smem;
+    float* V_tile  = K_tile  + Bc * HEAD_DIM;
+    float* Q_tile  = V_tile  + Bc * HEAD_DIM;
+    float* dO_tile = Q_tile  + Br * HEAD_DIM;
+    float* S_tile  = dO_tile + Br * HEAD_DIM;
+    float* l_tile  = S_tile  + Br * Bc;
+    float* D_tile  = l_tile  + Br;
+
+    // Load K_j and V_j tiles: convert T -> float
+    for (int i = tid; i < actual_Bc * HEAD_DIM; i += BLOCK_SIZE) {
+        int row = i / HEAD_DIM;
+        int col = i % HEAD_DIM;
+        K_tile[row * HEAD_DIM + col] = to_float(K_base[(kv_start + row) * HEAD_DIM + col]);
+        V_tile[row * HEAD_DIM + col] = to_float(V_base[(kv_start + row) * HEAD_DIM + col]);
+    }
+    for (int i = tid + actual_Bc * HEAD_DIM; i < Bc * HEAD_DIM; i += BLOCK_SIZE) {
+        K_tile[i] = 0.0f;
+        V_tile[i] = 0.0f;
+    }
+    __syncthreads();
+
+    // Per-thread register accumulators for dK and dV (FP32)
+    constexpr int MAX_ELEMS_PER_THREAD = (Bc * HEAD_DIM + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    float dk_acc[MAX_ELEMS_PER_THREAD];
+    float dv_acc[MAX_ELEMS_PER_THREAD];
+    #pragma unroll
+    for (int e = 0; e < MAX_ELEMS_PER_THREAD; ++e) {
+        dk_acc[e] = 0.0f;
+        dv_acc[e] = 0.0f;
+    }
+
+    const int num_q_tiles = (seq_len + Br - 1) / Br;
+
+    for (int q_tile_idx = 0; q_tile_idx < num_q_tiles; ++q_tile_idx) {
+        const int q_start = q_tile_idx * Br;
+        if (q_start >= seq_len) break;
+        const int actual_Br = min(Br, seq_len - q_start);
+
+        if (causal && (q_start + actual_Br - 1) < kv_start) {
+            continue;
+        }
+
+        // Load Q_i and dO_i: convert T -> float
+        for (int i = tid; i < actual_Br * HEAD_DIM; i += BLOCK_SIZE) {
+            int row = i / HEAD_DIM;
+            int col = i % HEAD_DIM;
+            Q_tile[row * HEAD_DIM + col]  = to_float(Q_base[(q_start + row) * HEAD_DIM + col]);
+            dO_tile[row * HEAD_DIM + col] = to_float(dO_base[(q_start + row) * HEAD_DIM + col]);
+        }
+        for (int i = tid + actual_Br * HEAD_DIM; i < Br * HEAD_DIM; i += BLOCK_SIZE) {
+            Q_tile[i] = 0.0f;
+            dO_tile[i] = 0.0f;
+        }
+
+        // Load l_i (already FP32) and compute D_i = rowsum(dO_i * O_i) in FP32
+        for (int row = tid; row < actual_Br; row += BLOCK_SIZE) {
+            l_tile[row] = L_base[q_start + row];
+
+            float d_sum = 0.0f;
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                d_sum += to_float(dO_base[(q_start + row) * HEAD_DIM + d])
+                       * to_float(O_base[(q_start + row) * HEAD_DIM + d]);
+            }
+            D_tile[row] = d_sum;
+        }
+        for (int row = tid + actual_Br; row < Br; row += BLOCK_SIZE) {
+            l_tile[row] = -INFINITY;
+            D_tile[row] = 0.0f;
+        }
+        __syncthreads();
+
+        // Compute S_ij = Q_i @ K_j^T * scale  [Br x Bc]
+        for (int idx = tid; idx < actual_Br * actual_Bc; idx += BLOCK_SIZE) {
+            int i = idx / actual_Bc;
+            int j = idx % actual_Bc;
+            float dot = 0.0f;
+            #pragma unroll 8
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                dot += Q_tile[i * HEAD_DIM + d] * K_tile[j * HEAD_DIM + d];
+            }
+            S_tile[i * Bc + j] = dot * scale;
+        }
+        for (int idx = tid; idx < Br * Bc; idx += BLOCK_SIZE) {
+            int i = idx / Bc;
+            int j = idx % Bc;
+            if (i >= actual_Br || j >= actual_Bc) {
+                S_tile[idx] = -INFINITY;
+            }
+        }
+        __syncthreads();
+
+        // Compute P_ij = exp(S_ij - l_i), causal mask
+        for (int idx = tid; idx < Br * Bc; idx += BLOCK_SIZE) {
+            int i = idx / Bc;
+            int j = idx % Bc;
+            float p = 0.0f;
+            if (i < actual_Br && j < actual_Bc) {
+                if (causal && (q_start + i) < (kv_start + j)) {
+                    p = 0.0f;
+                } else {
+                    p = expf(S_tile[i * Bc + j] - l_tile[i]);
+                }
+            }
+            S_tile[i * Bc + j] = p;
+        }
+        __syncthreads();
+
+        // Accumulate dV_j += P_ij^T @ dO_i
+        {
+            int e = 0;
+            for (int idx = tid; idx < Bc * HEAD_DIM; idx += BLOCK_SIZE, ++e) {
+                int j = idx / HEAD_DIM;
+                int d = idx % HEAD_DIM;
+                if (j < actual_Bc) {
+                    float sum = 0.0f;
+                    for (int i = 0; i < actual_Br; ++i) {
+                        sum += S_tile[i * Bc + j] * dO_tile[i * HEAD_DIM + d];
+                    }
+                    dv_acc[e] += sum;
+                }
+            }
+        }
+        __syncthreads();
+
+        // Compute dS_ij = P_ij * (dP_ij - D_i)
+        for (int idx = tid; idx < actual_Br * actual_Bc; idx += BLOCK_SIZE) {
+            int i = idx / actual_Bc;
+            int j = idx % actual_Bc;
+            float dp = 0.0f;
+            #pragma unroll 8
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                dp += dO_tile[i * HEAD_DIM + d] * V_tile[j * HEAD_DIM + d];
+            }
+            float p_ij = S_tile[i * Bc + j];
+            S_tile[i * Bc + j] = p_ij * (dp - D_tile[i]);
+        }
+        __syncthreads();
+
+        // Accumulate dK_j += dS_ij^T @ Q_i * scale
+        {
+            int e = 0;
+            for (int idx = tid; idx < Bc * HEAD_DIM; idx += BLOCK_SIZE, ++e) {
+                int j = idx / HEAD_DIM;
+                int d = idx % HEAD_DIM;
+                if (j < actual_Bc) {
+                    float sum = 0.0f;
+                    for (int i = 0; i < actual_Br; ++i) {
+                        sum += S_tile[i * Bc + j] * Q_tile[i * HEAD_DIM + d];
+                    }
+                    dk_acc[e] += sum * scale;
+                }
+            }
+        }
+
+        // dQ_i += dS_ij @ K_j * scale — atomicAdd into FP32 scratch
+        for (int idx = tid; idx < actual_Br * HEAD_DIM; idx += BLOCK_SIZE) {
+            int i = idx / HEAD_DIM;
+            int d = idx % HEAD_DIM;
+            float sum = 0.0f;
+            for (int j = 0; j < actual_Bc; ++j) {
+                sum += S_tile[i * Bc + j] * K_tile[j * HEAD_DIM + d];
+            }
+            atomicAdd(&dQ_base[(q_start + i) * HEAD_DIM + d], sum * scale);
+        }
+        __syncthreads();
+    }
+
+    // Write dK and dV: convert float -> T
+    {
+        int e = 0;
+        for (int idx = tid; idx < Bc * HEAD_DIM; idx += BLOCK_SIZE, ++e) {
+            int row = idx / HEAD_DIM;
+            int col = idx % HEAD_DIM;
+            if (row < actual_Bc) {
+                dK_base[(kv_start + row) * HEAD_DIM + col] = from_float_to(T{}, dk_acc[e]);
+                dV_base[(kv_start + row) * HEAD_DIM + col] = from_float_to(T{}, dv_acc[e]);
+            }
+        }
+    }
+}
+
 // Host wrapper for fused flash attention backward
 auto flash_attention_backward_cuda(
     const Tensor& dO,    // [batch_heads, seq_len, head_dim]
@@ -2546,13 +2788,13 @@ auto flash_attention_backward_cuda(
     int64_t seq_len = Q.shape()[1];
     int64_t head_dim = Q.shape()[2];
 
-    if (Q.dtype() != DType::Float32) {
-        throw std::runtime_error("flash_attention_backward_cuda: Only Float32 supported");
-    }
+    const auto dtype = Q.dtype();
 
-    Tensor dQ = create_cuda_zeros({batch_heads, seq_len, head_dim}, Q.dtype(), Q.device());
-    Tensor dK = create_cuda_zeros({batch_heads, seq_len, head_dim}, K.dtype(), K.device());
-    Tensor dV = create_cuda_zeros({batch_heads, seq_len, head_dim}, V.dtype(), V.device());
+    if (dtype != DType::Float32 && dtype != DType::Float16 && dtype != DType::BFloat16) {
+        throw std::runtime_error(
+            "flash_attention_backward_cuda: Unsupported dtype. "
+            "Supported: Float32, Float16, BFloat16");
+    }
 
     constexpr int Br = 32;
     constexpr int Bc = 32;
@@ -2562,23 +2804,10 @@ auto flash_attention_backward_cuda(
     dim3 grid(num_kv_tiles, batch_heads);
     dim3 threads(BLOCK_SIZE);
 
-    // Shared memory: K_tile[Bc*HD] + V_tile[Bc*HD] + Q_tile[Br*HD] + dO_tile[Br*HD]
-    //              + S_tile[Br*Bc] + l_tile[Br] + D_tile[Br]
-    // dK/dV accumulated in registers, not shared memory
+    // Shared memory is always FP32 regardless of input dtype
     auto compute_bwd_smem = [&](int hd) -> size_t {
         return (2 * Bc * hd + 2 * Br * hd + Br * Bc + Br + Br) * sizeof(float);
     };
-
-    const float* q_ptr  = Q.data<float>();
-    const float* k_ptr  = K.data<float>();
-    const float* v_ptr  = V.data<float>();
-    const float* o_ptr  = O.data<float>();
-    const float* do_ptr = dO.data<float>();
-    const float* l_ptr  = L.data<float>();
-    float* dq_ptr = dQ.data<float>();
-    float* dk_ptr = dK.data<float>();
-    float* dv_ptr = dV.data<float>();
-    int seq_len_int = static_cast<int>(seq_len);
 
     // Helper to optionally request extended shared memory for large tile sizes
     auto maybe_set_max_smem = [](const void* func, size_t smem_bytes) {
@@ -2588,36 +2817,118 @@ auto flash_attention_backward_cuda(
         }
     };
 
-    // Dispatch based on head_dim for optimal unrolling
-    if (head_dim == 32) {
-        size_t smem = compute_bwd_smem(32);
-        flash_attention_backward_kernel<32, Br, Bc, BLOCK_SIZE><<<grid, threads, smem>>>(
-            q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
-            seq_len_int, scale, causal);
+    if (dtype == DType::Float32) {
+        // Float32 path — use original kernel (no conversion overhead)
+        Tensor dQ = create_cuda_zeros({batch_heads, seq_len, head_dim}, DType::Float32, Q.device());
+        Tensor dK = create_cuda_zeros({batch_heads, seq_len, head_dim}, DType::Float32, K.device());
+        Tensor dV = create_cuda_zeros({batch_heads, seq_len, head_dim}, DType::Float32, V.device());
+
+        const float* q_ptr  = Q.data<float>();
+        const float* k_ptr  = K.data<float>();
+        const float* v_ptr  = V.data<float>();
+        const float* o_ptr  = O.data<float>();
+        const float* do_ptr = dO.data<float>();
+        const float* l_ptr  = L.data<float>();
+        float* dq_ptr = dQ.data<float>();
+        float* dk_ptr = dK.data<float>();
+        float* dv_ptr = dV.data<float>();
+        int seq_len_int = static_cast<int>(seq_len);
+
+        if (head_dim == 32) {
+            size_t smem = compute_bwd_smem(32);
+            flash_attention_backward_kernel<32, Br, Bc, BLOCK_SIZE><<<grid, threads, smem>>>(
+                q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
+                seq_len_int, scale, causal);
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
+        } else if (head_dim == 64) {
+            size_t smem = compute_bwd_smem(64);
+            flash_attention_backward_kernel<64, Br, Bc, BLOCK_SIZE><<<grid, threads, smem>>>(
+                q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
+                seq_len_int, scale, causal);
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
+        } else if (head_dim == 128) {
+            size_t smem = compute_bwd_smem(128);
+            auto kernel_fn = flash_attention_backward_kernel<128, Br, Bc, BLOCK_SIZE>;
+            maybe_set_max_smem(reinterpret_cast<const void*>(kernel_fn), smem);
+            kernel_fn<<<grid, threads, smem>>>(
+                q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
+                seq_len_int, scale, causal);
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
+        } else {
+            throw std::runtime_error(
+                "flash_attention_backward_cuda: Unsupported head_dim " + std::to_string(head_dim) +
+                ". Fused backward supports 32, 64, 128.");
+        }
+
         TENZOR_CUDA_POST_LAUNCH_CHECK();
-    } else if (head_dim == 64) {
-        size_t smem = compute_bwd_smem(64);
-        flash_attention_backward_kernel<64, Br, Bc, BLOCK_SIZE><<<grid, threads, smem>>>(
-            q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
-            seq_len_int, scale, causal);
-        TENZOR_CUDA_POST_LAUNCH_CHECK();
-    } else if (head_dim == 128) {
-        size_t smem = compute_bwd_smem(128);
-        auto kernel_fn = flash_attention_backward_kernel<128, Br, Bc, BLOCK_SIZE>;
-        maybe_set_max_smem(reinterpret_cast<const void*>(kernel_fn), smem);
-        kernel_fn<<<grid, threads, smem>>>(
-            q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
-            seq_len_int, scale, causal);
-        TENZOR_CUDA_POST_LAUNCH_CHECK();
+        return {dQ, dK, dV};
+    }
+
+    // FP16 / BF16 path — mixed-precision kernel with FP32 accumulation
+    // dQ uses FP32 scratch for atomicAdd, then convert to output dtype
+    Tensor dQ_f32 = create_cuda_zeros({batch_heads, seq_len, head_dim}, DType::Float32, Q.device());
+    Tensor dK = create_cuda_zeros({batch_heads, seq_len, head_dim}, dtype, K.device());
+    Tensor dV = create_cuda_zeros({batch_heads, seq_len, head_dim}, dtype, V.device());
+
+    const float* l_ptr = L.data<float>();
+    float* dq_f32_ptr = dQ_f32.data<float>();
+    int seq_len_int = static_cast<int>(seq_len);
+
+    // Dispatch FP16 / BF16 kernel launches
+    auto launch_mp_kernels = [&](auto q_ptr, auto k_ptr, auto v_ptr, auto o_ptr, auto do_ptr,
+                                  auto dk_ptr, auto dv_ptr) {
+        using T = std::remove_const_t<std::remove_pointer_t<decltype(q_ptr)>>;
+        if (head_dim == 32) {
+            size_t smem = compute_bwd_smem(32);
+            flash_attention_backward_kernel_mp<T, 32, Br, Bc, BLOCK_SIZE><<<grid, threads, smem>>>(
+                q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_f32_ptr, dk_ptr, dv_ptr,
+                seq_len_int, scale, causal);
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
+        } else if (head_dim == 64) {
+            size_t smem = compute_bwd_smem(64);
+            flash_attention_backward_kernel_mp<T, 64, Br, Bc, BLOCK_SIZE><<<grid, threads, smem>>>(
+                q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_f32_ptr, dk_ptr, dv_ptr,
+                seq_len_int, scale, causal);
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
+        } else if (head_dim == 128) {
+            size_t smem = compute_bwd_smem(128);
+            auto kernel_fn = flash_attention_backward_kernel_mp<T, 128, Br, Bc, BLOCK_SIZE>;
+            maybe_set_max_smem(reinterpret_cast<const void*>(kernel_fn), smem);
+            kernel_fn<<<grid, threads, smem>>>(
+                q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_f32_ptr, dk_ptr, dv_ptr,
+                seq_len_int, scale, causal);
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
+        } else {
+            throw std::runtime_error(
+                "flash_attention_backward_cuda: Unsupported head_dim " + std::to_string(head_dim) +
+                ". Fused backward supports 32, 64, 128.");
+        }
+    };
+
+    if (dtype == DType::Float16) {
+        launch_mp_kernels(
+            reinterpret_cast<const __half*>(Q.data_ptr()),
+            reinterpret_cast<const __half*>(K.data_ptr()),
+            reinterpret_cast<const __half*>(V.data_ptr()),
+            reinterpret_cast<const __half*>(O.data_ptr()),
+            reinterpret_cast<const __half*>(dO.data_ptr()),
+            reinterpret_cast<__half*>(dK.data_ptr()),
+            reinterpret_cast<__half*>(dV.data_ptr()));
     } else {
-        // Fallback: unsupported head_dim for fused kernel — should not reach here
-        // (caller should use composed-ops fallback)
-        throw std::runtime_error(
-            "flash_attention_backward_cuda: Unsupported head_dim " + std::to_string(head_dim) +
-            ". Fused backward supports 32, 64, 128.");
+        launch_mp_kernels(
+            reinterpret_cast<const __nv_bfloat16*>(Q.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(K.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(V.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(O.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(dO.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(dK.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(dV.data_ptr()));
     }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+    // Convert dQ from FP32 scratch to output dtype
+    Tensor dQ = dQ_f32.to(dtype);
 
     return {dQ, dK, dV};
 }

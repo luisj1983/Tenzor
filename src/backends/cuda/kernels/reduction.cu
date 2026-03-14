@@ -3738,6 +3738,59 @@ static void launch_variance_computation(const T* d_input, T* d_output, int64_t n
     CUDA_CHECK(cudaGetLastError());
 }
 
+// Per-dimension variance reduction kernel (single-pass Welford)
+template<typename T>
+__global__ void var_along_dim_kernel(
+    const T* input,
+    T* output,
+    DimMeta meta,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size,
+    int64_t correction
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= output_size) return;
+
+    // Compute multi-dimensional indices for output position
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+
+    for (int64_t d = ndim - 1; d >= 0; --d) {
+        if (d == dim) {
+            indices[d] = 0;
+            continue;
+        }
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
+    }
+
+    // Welford single-pass algorithm along the reduction dimension
+    using Acc = typename AccumType<T>::type;
+    Acc mean = Acc(0);
+    Acc m2 = Acc(0);
+    int64_t count = 0;
+
+    for (int64_t i = 0; i < dim_size; i++) {
+        indices[dim] = i;
+        int64_t in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * meta.strides[d];
+        }
+        Acc val = Acc(input[in_idx]);
+        count++;
+        Acc delta = val - mean;
+        mean = mean + delta / Acc(count);
+        Acc delta2 = val - mean;
+        m2 = m2 + delta * delta2;
+    }
+
+    // variance = m2 / (count - correction)
+    int64_t denom = count - correction;
+    output[out_idx] = denom > 0 ? T(m2 / Acc(denom)) : T(0);
+}
+
 // Public API for variance
 auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction, cudaStream_t stream) -> Tensor {
     auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
@@ -3747,13 +3800,58 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
     const auto& device = input.device();
     const auto& input_shape = input.shape();
 
-    // For now, only support full reduction (dim=INT64_MIN or dim=-1)
     // INT64_MIN is the sentinel for "reduce all dimensions"
     if (dim != INT64_MIN && dim != -1) {
-        throw std::runtime_error("var: only full reduction is currently supported for CUDA");
+        // Per-dimension variance reduction
+        auto strides_span = input.strides();
+        int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+        // Normalize dim
+        int64_t actual_dim = dim;
+        if (actual_dim < 0) actual_dim += ndim;
+        if (actual_dim < 0 || actual_dim >= ndim) {
+            throw std::runtime_error("var: dim out of range");
+        }
+
+        int64_t dim_size = input_shape[actual_dim];
+
+        // Compute output shape
+        std::vector<int64_t> output_shape;
+        for (int64_t d = 0; d < ndim; d++) {
+            if (d == actual_dim) {
+                if (keepdim) output_shape.push_back(1);
+            } else {
+                output_shape.push_back(input_shape[d]);
+            }
+        }
+        if (output_shape.empty()) output_shape.push_back(1);
+
+        int64_t output_size = 1;
+        for (auto s : output_shape) output_size *= s;
+
+        Tensor output(output_shape, dtype, device);
+
+        // Build DimMeta from input shape/strides
+        std::vector<int64_t> shape_vec(input_shape.begin(), input_shape.end());
+        std::vector<int64_t> strides_vec(strides_span.begin(), strides_span.end());
+        DimMeta meta = make_dim_meta(shape_vec, strides_vec);
+
+        constexpr int BLOCK = 256;
+        int blocks = (output_size + BLOCK - 1) / BLOCK;
+
+        TENZOR_DISPATCH_FLOATING_TYPES(dtype, "var", [&]() {
+            var_along_dim_kernel<scalar_t><<<blocks, BLOCK, 0, stream>>>(
+                input.data<scalar_t>(), output.data<scalar_t>(), meta,
+                ndim, actual_dim, output_size, dim_size, correction);
+            CUDA_CHECK(cudaGetLastError());
+        });
+
+        CUDA_PEEK_AND_THROW(stream, "var_along_dim_kernel");
+
+        return output;
     }
 
-    // Compute output shape
+    // Full reduction — compute output shape
     std::vector<int64_t> output_shape;
     if (keepdim) {
         output_shape.resize(input_shape.size(), 1);

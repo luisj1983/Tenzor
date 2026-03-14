@@ -329,6 +329,98 @@ __global__ void sum_along_dim_kernel(
 }
 
 /**
+ * @brief Variance reduction along a specific dimension using Welford's algorithm
+ * @tparam T Data type
+ */
+template<typename T>
+__global__ void var_along_dim_kernel(
+    const T* input,
+    T* output,
+    const int64_t* input_shape,
+    const int64_t* input_strides,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size,
+    int64_t correction
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= output_size) return;
+
+    // Compute multi-dimensional indices for output position
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+    for (int64_t d = ndim - 1; d >= 0; --d) {
+        if (d == dim) { indices[d] = 0; continue; }
+        indices[d] = tmp % input_shape[d];
+        tmp /= input_shape[d];
+    }
+
+    // Welford single-pass algorithm for numerical stability
+    T mean = T(0), m2 = T(0);
+    int64_t count = 0;
+    for (int64_t i = 0; i < dim_size; i++) {
+        indices[dim] = i;
+        int64_t in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) in_idx += indices[d] * input_strides[d];
+        T val = input[in_idx];
+        count++;
+        T delta = val - mean;
+        mean = mean + delta / T(count);
+        T delta2 = val - mean;
+        m2 = m2 + delta * delta2;
+    }
+
+    int64_t denom = count - correction;
+    output[out_idx] = denom > 0 ? m2 / T(denom) : T(0);
+}
+
+/**
+ * @brief Norm reduction along a specific dimension (p-norm)
+ * @tparam T Data type
+ */
+template<typename T>
+__global__ void norm_along_dim_kernel(
+    const T* input,
+    T* output,
+    const int64_t* input_shape,
+    const int64_t* input_strides,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size,
+    T p
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= output_size) return;
+
+    // Compute multi-dimensional indices for output position
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+    for (int64_t d = ndim - 1; d >= 0; --d) {
+        if (d == dim) { indices[d] = 0; continue; }
+        indices[d] = tmp % input_shape[d];
+        tmp /= input_shape[d];
+    }
+
+    T acc = T(0);
+    for (int64_t i = 0; i < dim_size; i++) {
+        indices[dim] = i;
+        int64_t in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) in_idx += indices[d] * input_strides[d];
+        T val = input[in_idx];
+        T abs_val = val < T(0) ? -val : val;
+        if (p == T(1)) acc += abs_val;
+        else if (p == T(2)) acc += abs_val * abs_val;
+        else acc += pow(abs_val, p);
+    }
+
+    if (p == T(1)) output[out_idx] = acc;
+    else if (p == T(2)) output[out_idx] = sqrt(acc);
+    else output[out_idx] = pow(acc, T(1) / p);
+}
+
+/**
  * @brief Max reduction along a specific dimension
  * @tparam T Data type
  */
@@ -811,6 +903,102 @@ static void launch_dim_reduction_sum(
     int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
     hipLaunchKernelGGL(sum_along_dim_kernel<T>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
         d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size);
+
+    // Must wait for kernel to complete before freeing device memory it uses
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipFree(d_shape));
+    HIP_CHECK(hipFree(d_strides));
+}
+
+/**
+ * @brief Launch dimensional reduction variance (Welford)
+ * @tparam T Data type
+ */
+template<typename T>
+static void launch_dim_reduction_var(
+    const T* d_input,
+    T* d_output,
+    const std::vector<int64_t>& input_shape,
+    const std::vector<int64_t>& input_strides,
+    int64_t dim,
+    int64_t correction,
+    hipStream_t stream
+) {
+    const int64_t ndim = input_shape.size();
+    const int64_t dim_size = input_shape[dim];
+
+    // Compute output size
+    int64_t output_size = 1;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != dim) {
+            output_size *= input_shape[i];
+        }
+    }
+
+    if (output_size == 0 || dim_size == 0) {
+        return;
+    }
+
+    // Copy shape and strides to device
+    int64_t* d_shape;
+    int64_t* d_strides;
+    HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
+    HIP_CHECK(hipMalloc(&d_strides, ndim * sizeof(int64_t)));
+    HIP_CHECK(hipMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+
+    // Launch kernel
+    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    hipLaunchKernelGGL(var_along_dim_kernel<T>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+        d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size, correction);
+
+    // Must wait for kernel to complete before freeing device memory it uses
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipFree(d_shape));
+    HIP_CHECK(hipFree(d_strides));
+}
+
+/**
+ * @brief Launch dimensional reduction norm (p-norm)
+ * @tparam T Data type
+ */
+template<typename T>
+static void launch_dim_reduction_norm(
+    const T* d_input,
+    T* d_output,
+    const std::vector<int64_t>& input_shape,
+    const std::vector<int64_t>& input_strides,
+    int64_t dim,
+    T p,
+    hipStream_t stream
+) {
+    const int64_t ndim = input_shape.size();
+    const int64_t dim_size = input_shape[dim];
+
+    // Compute output size
+    int64_t output_size = 1;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != dim) {
+            output_size *= input_shape[i];
+        }
+    }
+
+    if (output_size == 0 || dim_size == 0) {
+        return;
+    }
+
+    // Copy shape and strides to device
+    int64_t* d_shape;
+    int64_t* d_strides;
+    HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
+    HIP_CHECK(hipMalloc(&d_strides, ndim * sizeof(int64_t)));
+    HIP_CHECK(hipMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+
+    // Launch kernel
+    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    hipLaunchKernelGGL(norm_along_dim_kernel<T>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+        d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size, p);
 
     // Must wait for kernel to complete before freeing device memory it uses
     HIP_CHECK(hipStreamSynchronize(stream));
@@ -2282,7 +2470,30 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, bool unbiased, h
             HIP_CHECK(hipFree(d_partial));
         }
     } else {
-        throw std::runtime_error("var along specific dimension not yet implemented");
+        // Per-dimension variance using Welford's algorithm
+        const auto& input_shape = input.shape();
+        const auto& input_strides = input.strides();
+        int64_t ndim = static_cast<int64_t>(input_shape.size());
+        int64_t actual_dim = dim;
+        if (actual_dim < 0) actual_dim += ndim;
+        if (actual_dim < 0 || actual_dim >= ndim) {
+            throw std::runtime_error("var: dimension out of range");
+        }
+        int64_t correction = unbiased ? 1 : 0;
+
+        if (dtype == DType::Float32) {
+            launch_dim_reduction_var(
+                input.data<float>(), output.data<float>(),
+                std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                actual_dim, correction, stream);
+        } else {
+            launch_dim_reduction_var(
+                input.data<double>(), output.data<double>(),
+                std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                actual_dim, correction, stream);
+        }
     }
 
     HIP_CHECK(hipGetLastError());
@@ -2389,7 +2600,29 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, hipStr
             HIP_CHECK(hipFree(d_partial));
         }
     } else {
-        throw std::runtime_error("norm along specific dimension not yet implemented");
+        // Per-dimension p-norm reduction
+        const auto& input_shape = input.shape();
+        const auto& input_strides = input.strides();
+        int64_t ndim = static_cast<int64_t>(input_shape.size());
+        int64_t actual_dim = dim;
+        if (actual_dim < 0) actual_dim += ndim;
+        if (actual_dim < 0 || actual_dim >= ndim) {
+            throw std::runtime_error("norm: dimension out of range");
+        }
+
+        if (dtype == DType::Float32) {
+            launch_dim_reduction_norm(
+                input.data<float>(), output.data<float>(),
+                std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                actual_dim, p, stream);
+        } else {
+            launch_dim_reduction_norm(
+                input.data<double>(), output.data<double>(),
+                std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                actual_dim, static_cast<double>(p), stream);
+        }
     }
 
     HIP_CHECK(hipGetLastError());

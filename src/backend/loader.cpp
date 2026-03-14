@@ -9,6 +9,10 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#include <sys/wait.h>
+#include <signal.h>
+#include <unistd.h>
+#include <fcntl.h>
 #endif
 
 namespace tenzor {
@@ -77,7 +81,8 @@ BackendLoader::~BackendLoader() {
     }
 }
 
-auto BackendLoader::load_backend(const std::filesystem::path& library_path)
+auto BackendLoader::load_backend(const std::filesystem::path& library_path,
+                                 bool skip_probe)
     -> std::expected<std::unique_ptr<Backend>, std::string> {
 
     auto handle = load_library(library_path);
@@ -101,7 +106,109 @@ auto BackendLoader::load_backend(const std::filesystem::path& library_path)
         return std::unexpected("Failed to find create_backend symbol");
     }
 
-    // Create backend
+#ifndef _WIN32
+  if (!skip_probe) {
+    // Probe: fork a child process to test if the factory hangs.
+    // Some backend constructors (ROCm hipGetDeviceCount, OneAPI sycl::platform::get_platforms)
+    // can enter uninterruptible kernel sleep (D state) on misconfigured/unsupported GPU drivers.
+    // A hung thread can't be killed, making the entire process unkillable.
+    // Fork-based probing isolates this risk to a disposable child process.
+    //
+    // Results are cached in /tmp/tenzor_probe_<filename>_<mtime> to avoid
+    // repeated 5s probes when many test binaries initialize concurrently.
+    int probe_timeout = 5;
+    if (const char* env = std::getenv("TENZOR_BACKEND_INIT_TIMEOUT")) {
+        probe_timeout = std::atoi(env);
+        if (probe_timeout <= 0) probe_timeout = 5;
+    }
+
+    // Build cache key from library filename + modification time
+    auto lib_filename = library_path.filename().string();
+    auto lib_mtime = std::filesystem::last_write_time(library_path);
+    auto mtime_val = lib_mtime.time_since_epoch().count();
+    std::string cache_file = "/tmp/tenzor_probe_" + lib_filename + "_" +
+                             std::to_string(mtime_val);
+
+    // Check cache first
+    int cached_result = -1;  // -1 = no cache, 0 = ok, 1 = failed, 2 = hung
+    {
+        int cache_fd = open(cache_file.c_str(), O_RDONLY);
+        if (cache_fd >= 0) {
+            char buf[2] = {};
+            if (read(cache_fd, buf, 1) == 1) {
+                cached_result = buf[0] - '0';
+            }
+            close(cache_fd);
+        }
+    }
+
+    if (cached_result == 1) {
+        unload_library(handle);
+        return std::unexpected("Backend probe failed (cached)");
+    }
+    if (cached_result == 2) {
+        unload_library(handle);
+        return std::unexpected("Backend initialization hangs (cached)");
+    }
+
+    if (cached_result != 0) {
+        // No cache — run fork probe
+        pid_t pid = fork();
+        if (pid == 0) {
+            // Child: try calling the factory. Exit 0 on success, 1 on failure.
+            try {
+                auto test_backend = factory();
+                _exit(test_backend ? 0 : 1);
+            } catch (...) {
+                _exit(1);
+            }
+        } else if (pid > 0) {
+            // Parent: wait for child with timeout
+            int status = 0;
+            bool child_exited = false;
+            for (int i = 0; i < probe_timeout * 20; ++i) {
+                pid_t result = waitpid(pid, &status, WNOHANG);
+                if (result == pid) {
+                    child_exited = true;
+                    break;
+                }
+                usleep(50000);  // 50ms
+            }
+
+            // Write cache result
+            auto write_cache = [&](char result) {
+                int fd = open(cache_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (fd >= 0) {
+                    [[maybe_unused]] auto _ = write(fd, &result, 1);
+                    close(fd);
+                }
+            };
+
+            if (!child_exited) {
+                kill(pid, SIGKILL);
+                usleep(100000);
+                waitpid(pid, &status, WNOHANG);
+                write_cache('2');  // hung
+                unload_library(handle);
+                return std::unexpected(
+                    "Backend initialization hung (probe timed out after " +
+                    std::to_string(probe_timeout) + "s)");
+            }
+
+            if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+                write_cache('1');  // failed
+                unload_library(handle);
+                return std::unexpected("Backend probe process failed");
+            }
+
+            write_cache('0');  // success
+        }
+        // pid < 0: fork failed, proceed without probe
+    }
+  } // !skip_probe
+#endif
+
+    // Create backend (safe — probe confirmed it doesn't hang)
     auto backend = factory();
     if (!backend) {
         unload_library(handle);

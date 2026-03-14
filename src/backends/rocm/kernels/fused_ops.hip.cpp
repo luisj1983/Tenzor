@@ -1253,12 +1253,45 @@ auto flash_attention_backward_hip(
     float scale,
     bool causal
 ) -> std::vector<Tensor> {
+    const auto dtype = Q.dtype();
+
+    // Float16: upcast to Float32, compute, convert back
+    if (dtype == DType::Float16) {
+        auto dO_f32 = dO.to(DType::Float32);
+        auto Q_f32  = Q.to(DType::Float32);
+        auto K_f32  = K.to(DType::Float32);
+        auto V_f32  = V.to(DType::Float32);
+        auto O_f32  = O.to(DType::Float32);
+        // L is already Float32 from the forward pass
+        auto [dQ, dK, dV] = [&]() {
+            auto result = flash_attention_backward_hip(dO_f32, Q_f32, K_f32, V_f32, O_f32, L, scale, causal);
+            return std::make_tuple(std::move(result[0]), std::move(result[1]), std::move(result[2]));
+        }();
+        return {dQ.to(DType::Float16), dK.to(DType::Float16), dV.to(DType::Float16)};
+    }
+
+    // BFloat16: upcast to Float32, compute, convert back
+    if (dtype == DType::BFloat16) {
+        auto dO_f32 = dO.to(DType::Float32);
+        auto Q_f32  = Q.to(DType::Float32);
+        auto K_f32  = K.to(DType::Float32);
+        auto V_f32  = V.to(DType::Float32);
+        auto O_f32  = O.to(DType::Float32);
+        auto [dQ, dK, dV] = [&]() {
+            auto result = flash_attention_backward_hip(dO_f32, Q_f32, K_f32, V_f32, O_f32, L, scale, causal);
+            return std::make_tuple(std::move(result[0]), std::move(result[1]), std::move(result[2]));
+        }();
+        return {dQ.to(DType::BFloat16), dK.to(DType::BFloat16), dV.to(DType::BFloat16)};
+    }
+
     int64_t batch_heads = Q.shape()[0];
     int64_t seq_len = Q.shape()[1];
     int64_t head_dim = Q.shape()[2];
 
-    if (Q.dtype() != DType::Float32) {
-        throw std::runtime_error("flash_attention_backward_hip: Only Float32 supported");
+    if (dtype != DType::Float32) {
+        throw std::runtime_error(
+            "flash_attention_backward_hip: Unsupported dtype. "
+            "Supported: Float32, Float16, BFloat16");
     }
 
     Tensor dQ = zeros({batch_heads, seq_len, head_dim}, Q.dtype(), Q.device());

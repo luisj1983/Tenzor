@@ -62,11 +62,11 @@ if(TENZOR_BUILD_CUDA)
     # ============================================================================
     # Test Registration
     # ============================================================================
-    tenzor_discover_tests(test_memory_manager DISCOVERY_TIMEOUT 30)
-    tenzor_discover_tests(test_pinned_allocator DISCOVERY_TIMEOUT 30)
-    tenzor_discover_tests(test_transfer_engine DISCOVERY_TIMEOUT 30)
-    tenzor_discover_tests(test_transfer_benchmark DISCOVERY_TIMEOUT 30)
-    tenzor_discover_tests(test_offload_engine DISCOVERY_TIMEOUT 30)
-    tenzor_discover_tests(test_parameter_offload DISCOVERY_TIMEOUT 30)
-    tenzor_discover_tests(test_cuda_training DISCOVERY_TIMEOUT 30)
+    tenzor_discover_tests(test_memory_manager DISCOVERY_TIMEOUT 60)
+    tenzor_discover_tests(test_pinned_allocator DISCOVERY_TIMEOUT 60)
+    tenzor_discover_tests(test_transfer_engine DISCOVERY_TIMEOUT 60)
+    tenzor_discover_tests(test_transfer_benchmark DISCOVERY_TIMEOUT 60)
+    tenzor_discover_tests(test_offload_engine DISCOVERY_TIMEOUT 60)
+    tenzor_discover_tests(test_parameter_offload DISCOVERY_TIMEOUT 60)
+    tenzor_discover_tests(test_cuda_training DISCOVERY_TIMEOUT 60)
 endif()

@@ -17,8 +17,11 @@
 #include "tenzor/core/device.hpp"
 #include "tenzor/sparse/sparse_tensor.hpp"
 
+#include "tenzor/backend/loader.hpp"
+
 #include <rocsparse/rocsparse.h>
 #include <hip/hip_runtime.h>
+#include <climits>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -99,13 +102,28 @@ struct DnVecGuard {
     DnVecGuard& operator=(const DnVecGuard&) = delete;
 };
 
-/// Per-thread rocSPARSE handle.
-rocsparse_handle get_rocsparse_handle() {
-    static thread_local rocsparse_handle handle = nullptr;
-    if (!handle) {
+/// RAII wrapper for per-thread rocSPARSE handle.
+struct RocsparseHandleRAII {
+    rocsparse_handle handle = nullptr;
+
+    RocsparseHandleRAII() {
         ROCSPARSE_CHECK(rocsparse_create_handle(&handle));
     }
-    return handle;
+
+    ~RocsparseHandleRAII() {
+        if (handle && is_backend_registry_alive()) {
+            rocsparse_destroy_handle(handle);
+        }
+    }
+
+    RocsparseHandleRAII(const RocsparseHandleRAII&) = delete;
+    RocsparseHandleRAII& operator=(const RocsparseHandleRAII&) = delete;
+};
+
+/// Per-thread rocSPARSE handle.
+rocsparse_handle get_rocsparse_handle() {
+    static thread_local RocsparseHandleRAII wrapper;
+    return wrapper.handle;
 }
 
 /// Get rocSPARSE data type from DType.
@@ -133,6 +151,42 @@ __global__ void cast_i32_to_i64(const int32_t* __restrict__ src,
     if (i < n) dst[i] = static_cast<int64_t>(src[i]);
 }
 
+/// HIP kernel: check if any int64 value overflows int32 range.
+__global__ void check_i64_overflow(const int64_t* __restrict__ src,
+                                    int64_t n, int* overflow_flag) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        if (src[i] > INT32_MAX || src[i] < INT32_MIN) {
+            atomicExch(overflow_flag, 1);
+        }
+    }
+}
+
+/// Check that all int64 indices fit in int32. Throws std::overflow_error on failure.
+static void verify_i64_fits_i32(const int64_t* d_data, int64_t n,
+                                 hipStream_t stream = nullptr) {
+    if (n == 0) return;
+    int* d_flag;
+    HIP_CHECK_SPARSE(hipMalloc(&d_flag, sizeof(int)));
+    HIP_CHECK_SPARSE(hipMemset(d_flag, 0, sizeof(int)));
+
+    int threads = 256;
+    int blocks = static_cast<int>((n + threads - 1) / threads);
+    hipLaunchKernelGGL(check_i64_overflow, dim3(blocks), dim3(threads),
+                       0, stream, d_data, n, d_flag);
+    HIP_CHECK_SPARSE(hipGetLastError());
+
+    int h_flag = 0;
+    HIP_CHECK_SPARSE(hipMemcpy(&h_flag, d_flag, sizeof(int),
+                                hipMemcpyDeviceToHost));
+    HIP_CHECK_SPARSE(hipFree(d_flag));
+
+    if (h_flag != 0) {
+        throw std::overflow_error(
+            "rocm_sparse: int64 index value exceeds int32 range");
+    }
+}
+
 /// Helper to build a CSR SparseTensor on GPU from a COO SparseTensor.
 SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse) {
     auto sp = (sparse.device().type != Device::Type::ROCm)
@@ -158,6 +212,7 @@ SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse) {
 
         int threads = 256;
         int blocks_nnz = static_cast<int>((nnz + threads - 1) / threads);
+        verify_i64_fits_i32(row_indices_ptr, nnz);
         cast_i64_to_i32<<<blocks_nnz, threads>>>(row_indices_ptr, row_i32_buf.as<int32_t>(), nnz);
         HIP_CHECK_SPARSE(hipGetLastError());
 

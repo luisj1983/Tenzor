@@ -33,10 +33,10 @@ target_link_libraries(test_inplace_autograd PRIVATE tenzor_core GTest::gtest_mai
 # ============================================================================
 # Test Registration
 # ============================================================================
-tenzor_discover_tests(test_autograd_edge_cases DISCOVERY_TIMEOUT 30)
-tenzor_discover_tests(test_higher_order_gradients DISCOVERY_TIMEOUT 30)
-tenzor_discover_tests(test_gradcheck DISCOVERY_TIMEOUT 30)
-tenzor_discover_tests(test_gradcheck_extended DISCOVERY_TIMEOUT 30)
-tenzor_discover_tests(test_autograd_additional DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_autograd_edge_cases DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_higher_order_gradients DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_gradcheck DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_gradcheck_extended DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_autograd_additional DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_hooks DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_inplace_autograd DISCOVERY_TIMEOUT 60)

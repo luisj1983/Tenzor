@@ -224,7 +224,13 @@ auto initialize() -> void {
     // Try to load ROCm backend if available
     std::filesystem::path rocm_backend_path = bin_path / "tenzor_backend_rocm.so";
 
-    if (std::filesystem::exists(rocm_backend_path)) {
+    // Allow disabling ROCm loading via environment variable
+    bool skip_rocm = (std::getenv("TENZOR_DISABLE_ROCM") != nullptr);
+    if (skip_rocm) {
+        std::cout << "ROCm backend skipped (TENZOR_DISABLE_ROCM set)" << std::endl;
+    }
+
+    if (!skip_rocm && std::filesystem::exists(rocm_backend_path)) {
         std::cout << "Loading ROCm backend from: " << rocm_backend_path << std::endl;
 
         auto rocm_result = loader.load_backend(rocm_backend_path);
@@ -268,17 +274,36 @@ auto initialize() -> void {
         } else {
             std::cout << "Warning: Failed to load ROCm backend: " << rocm_result.error() << std::endl;
         }
-    } else {
+    } else if (!skip_rocm) {
         std::cout << "ROCm backend not found at: " << rocm_backend_path << std::endl;
     }
 
     // Try to load OneAPI backend if available
     std::filesystem::path oneapi_backend_path = bin_path / "tenzor_backend_oneapi.so";
 
+    // SYCL's platform::get_platforms() probes ALL OpenCL ICDs, including AMD's
+    // which can hang if the ROCm/HSA runtime is broken (same bug as hipGetDeviceCount).
+    // Create a filtered ICD directory with only Intel's OpenCL to prevent the hang.
+    bool oneapi_skip_probe = false;
+    if (!std::getenv("OCL_ICD_VENDORS")) {
+        // Create a temp directory with only Intel's ICD to avoid loading amdocl64
+        std::string icd_dir = "/tmp/tenzor_ocl_vendors";
+        std::filesystem::create_directories(icd_dir);
+        std::string intel_icd = icd_dir + "/intel64.icd";
+        if (!std::filesystem::exists(intel_icd)) {
+            std::ofstream(intel_icd) << "/opt/intel/oneapi/compiler/latest/lib/libintelocl.so\n";
+        }
+        setenv("OCL_ICD_VENDORS", icd_dir.c_str(), 0);
+        oneapi_skip_probe = true;
+    }
+    if (!std::getenv("ONEAPI_DEVICE_SELECTOR")) {
+        setenv("ONEAPI_DEVICE_SELECTOR", "*:cpu", 0);
+    }
+
     if (std::filesystem::exists(oneapi_backend_path)) {
         std::cout << "Loading OneAPI backend from: " << oneapi_backend_path << std::endl;
 
-        auto oneapi_result = loader.load_backend(oneapi_backend_path);
+        auto oneapi_result = loader.load_backend(oneapi_backend_path, oneapi_skip_probe);
         if (oneapi_result) {
             auto oneapi_backend_unique = std::move(oneapi_result.value());
             auto* oneapi_backend_ptr = oneapi_backend_unique.get();

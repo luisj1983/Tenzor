@@ -14,6 +14,7 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/utils/error.hpp"
+#include "tenzor/utils/safe_math.hpp"
 #include <cmath>
 #include <iostream>
 #include <string>
@@ -449,9 +450,16 @@ auto DivBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     const auto& a = saved_tensors_[0];
     const auto& b = saved_tensors_[1];
 
-    auto grad_a_unreduced = div(grad_outputs[0], b);
+    // Zero-safe: replace zero denominator with epsilon to avoid NaN/Inf
+    auto zero_b = zeros(std::vector<int64_t>(b.shape().begin(), b.shape().end()),
+                        b.dtype(), b.device());
+    auto eps_b = full(std::vector<int64_t>(b.shape().begin(), b.shape().end()),
+                      detail::dtype_epsilon(b.dtype()), b.dtype(), b.device());
+    auto safe_b = where(eq(b, zero_b), eps_b, b);
+
+    auto grad_a_unreduced = div(grad_outputs[0], safe_b);
     // grad_b = -a / (b^2) * grad_output = -(a * grad_output) / (b * b)
-    auto grad_b_unreduced = neg(div(mul(a, grad_outputs[0]), mul(b, b)));
+    auto grad_b_unreduced = neg(div(mul(a, grad_outputs[0]), mul(safe_b, safe_b)));
 
     auto grad_a = reduce_grad_for_broadcasting(grad_a_unreduced, input_shape_a_);
     auto grad_b = reduce_grad_for_broadcasting(grad_b_unreduced, input_shape_b_);
@@ -848,7 +856,7 @@ auto LogBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     auto zero = zeros(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                       input.dtype(), input.device());
     auto eps = full(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                    static_cast<double>(std::numeric_limits<float>::min()),
+                    detail::dtype_epsilon(input.dtype()),
                     input.dtype(), input.device());
     auto safe_input = where(eq(input, zero), eps, input);
     auto grad_input = div(grad_outputs[0], safe_input);
@@ -1279,8 +1287,90 @@ auto MedianBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
 }
 
 auto MedianBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // Replicate backward() logic using Variable-level ops for higher-order gradients.
+    // The mask is computed from saved tensors (constants), so only grad_output needs
+    // Variable-level tracking. We wrap the mask as a non-grad Variable.
+    const auto& input = saved_tensors_[0];
+    const auto& output = saved_tensors_[1];
+    const auto& grad_var = grad_outputs[0];
+
+    TENZOR_CHECK_SHAPE(input.numel() > 0,
+        "MedianBackward: cannot compute gradient of median over empty tensor");
+
+    auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+
+    if (!dim_.has_value()) {
+        // Global median
+        auto output_reshaped = output;
+        if (output.ndim() == 0) {
+            std::vector<int64_t> ones_shape(input_shape_vec.size(), 1);
+            output_reshaped = reshape(output, ones_shape);
+        }
+        auto output_expanded = expand(output_reshaped, input_shape_vec);
+
+        auto diff = sub(input, output_expanded);
+        auto abs_diff = abs(diff);
+        double eps_val;
+        switch (input.dtype()) {
+            case DType::Float64:  eps_val = 1e-12; break;
+            case DType::Float16:
+            case DType::BFloat16: eps_val = 1e-3; break;
+            default:              eps_val = 1e-7; break;
+        }
+        auto epsilon = full(input_shape_vec, eps_val, input.dtype(), input.device());
+        auto mask_bool = lt(abs_diff, epsilon);
+        auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
+        auto zeros_tensor = zeros(input_shape_vec, input.dtype(), input.device());
+        auto mask = where(mask_bool, ones_tensor, zeros_tensor);
+
+        auto tie_count = sum(mask);
+        mask = div(mask, tie_count);
+
+        // Variable-level: broadcast grad and multiply by mask
+        auto grad_v = grad_var;
+        if (grad_var.tensor().ndim() == 0) {
+            std::vector<int64_t> ones_shape(input_shape_vec.size(), 1);
+            grad_v = tenzor::reshape(grad_v, ones_shape);
+        }
+        auto grad_expanded = tenzor::expand(grad_v, input_shape_vec);
+        auto mask_var = Variable(mask, false);
+        return {grad_expanded * mask_var};
+    } else {
+        int64_t dim = dim_.value();
+        if (dim < 0) dim += static_cast<int64_t>(input.shape().size());
+
+        auto grad_v = grad_var;
+        auto out = output;
+
+        if (!keepdim_) {
+            grad_v = tenzor::unsqueeze(grad_v, dim);
+            out = unsqueeze(out, dim);
+        }
+
+        auto out_expanded = expand(out, input_shape_vec);
+        auto grad_expanded = tenzor::expand(grad_v, input_shape_vec);
+
+        auto diff = sub(input, out_expanded);
+        auto abs_diff = abs(diff);
+        double eps_val2;
+        switch (input.dtype()) {
+            case DType::Float64:  eps_val2 = 1e-12; break;
+            case DType::Float16:
+            case DType::BFloat16: eps_val2 = 1e-3; break;
+            default:              eps_val2 = 1e-7; break;
+        }
+        auto epsilon = full(input_shape_vec, eps_val2, input.dtype(), input.device());
+        auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
+        auto scaled_diff = div(abs_diff, epsilon);
+        auto clamped = clamp(scaled_diff, 0.0f, 1.0f);
+        auto mask = sub(ones_tensor, clamped);
+
+        auto tie_count = sum(mask, dim, /*keepdim=*/true);
+        mask = div(mask, tie_count);
+
+        auto mask_var = Variable(mask, false);
+        return {grad_expanded * mask_var};
+    }
 }
 
 // ModeBackward implementation
@@ -1381,8 +1471,88 @@ auto ModeBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 }
 
 auto ModeBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // Replicate backward() logic using Variable-level ops for higher-order gradients.
+    const auto& input = saved_tensors_[0];
+    const auto& output = saved_tensors_[1];
+    const auto& grad_var = grad_outputs[0];
+
+    TENZOR_CHECK_SHAPE(input.numel() > 0,
+        "ModeBackward: cannot compute gradient of mode over empty tensor");
+
+    auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+
+    if (!dim_.has_value()) {
+        // Global mode
+        auto output_reshaped = output;
+        if (output.ndim() == 0) {
+            std::vector<int64_t> ones_shape(input_shape_vec.size(), 1);
+            output_reshaped = reshape(output, ones_shape);
+        }
+        auto output_expanded = expand(output_reshaped, input_shape_vec);
+
+        auto diff = sub(input, output_expanded);
+        auto abs_diff = abs(diff);
+        double eps_val;
+        switch (input.dtype()) {
+            case DType::Float64:  eps_val = 1e-12; break;
+            case DType::Float16:
+            case DType::BFloat16: eps_val = 1e-3; break;
+            default:              eps_val = 1e-7; break;
+        }
+        auto epsilon = full(input_shape_vec, eps_val, input.dtype(), input.device());
+        auto mask_bool = lt(abs_diff, epsilon);
+        auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
+        auto zeros_tensor = zeros(input_shape_vec, input.dtype(), input.device());
+        auto mask = where(mask_bool, ones_tensor, zeros_tensor);
+
+        auto tie_count = sum(mask);
+        mask = div(mask, tie_count);
+
+        // Variable-level: broadcast grad and multiply by mask
+        auto grad_v = grad_var;
+        if (grad_var.tensor().ndim() == 0) {
+            std::vector<int64_t> ones_shape(input_shape_vec.size(), 1);
+            grad_v = tenzor::reshape(grad_v, ones_shape);
+        }
+        auto grad_expanded = tenzor::expand(grad_v, input_shape_vec);
+        auto mask_var = Variable(mask, false);
+        return {grad_expanded * mask_var};
+    } else {
+        int64_t dim = dim_.value();
+        if (dim < 0) dim += static_cast<int64_t>(input.shape().size());
+
+        auto grad_v = grad_var;
+        auto out = output;
+
+        if (!keepdim_) {
+            grad_v = tenzor::unsqueeze(grad_v, dim);
+            out = unsqueeze(out, dim);
+        }
+
+        auto out_expanded = expand(out, input_shape_vec);
+        auto grad_expanded = tenzor::expand(grad_v, input_shape_vec);
+
+        auto diff = sub(input, out_expanded);
+        auto abs_diff = abs(diff);
+        double eps_val2;
+        switch (input.dtype()) {
+            case DType::Float64:  eps_val2 = 1e-12; break;
+            case DType::Float16:
+            case DType::BFloat16: eps_val2 = 1e-3; break;
+            default:              eps_val2 = 1e-7; break;
+        }
+        auto epsilon = full(input_shape_vec, eps_val2, input.dtype(), input.device());
+        auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
+        auto scaled_diff = div(abs_diff, epsilon);
+        auto clamped = clamp(scaled_diff, 0.0f, 1.0f);
+        auto mask = sub(ones_tensor, clamped);
+
+        auto tie_count = sum(mask, dim, /*keepdim=*/true);
+        mask = div(mask, tie_count);
+
+        auto mask_var = Variable(mask, false);
+        return {grad_expanded * mask_var};
+    }
 }
 
 // ReshapeBackward implementation
@@ -2006,10 +2176,27 @@ auto PowBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
 
     float exp_val = exp_tensor.data<float>()[0];
 
-    // grad * exponent * pow(input, exponent - 1)
-    auto pow_term = pow(input, exp_val - 1.0f);
+    // Special cases for numerical safety
+    if (exp_val == 0.0f) {
+        // d/dx(x^0) = 0
+        return {zeros(std::vector<int64_t>(grad.shape().begin(), grad.shape().end()),
+                       grad.dtype(), grad.device())};
+    }
+    if (exp_val == 1.0f) {
+        // d/dx(x^1) = 1
+        return {grad};
+    }
+
+    // General case: grad * exponent * pow(input, exponent - 1)
+    // Use abs(input) + eps for negative base safety with fractional exponents
+    auto eps = full(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                    detail::dtype_epsilon(input.dtype()), input.dtype(), input.device());
+    auto safe_input = add(abs(input), eps);
+    auto pow_term = pow(safe_input, exp_val - 1.0f);
     auto scaled = mul(pow_term, static_cast<double>(exp_val));
-    return {mul(grad, scaled)};
+    // Restore sign: d/dx(|x|^n) * sign(x) for odd integer exponents
+    auto result = mul(grad, mul(scaled, sign(input)));
+    return {result};
 }
 
 auto PowBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
@@ -2101,11 +2288,14 @@ auto AsinBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 auto AsinBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     const auto& grad = grad_outputs[0];
     const auto& input = saved_tensors_[0];
-    // 1 / sqrt(1 - x^2)
+    // 1 / sqrt(1 - x^2), with clamping for numerical safety
     auto x_sq = mul(input, input);
     auto one_minus_sq = sub(ones(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                                   input.dtype(), input.device()), x_sq);
-    auto denom = sqrt(one_minus_sq);
+    auto clamped = clamp_min(one_minus_sq, 0.0);
+    auto eps = full(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                    detail::dtype_epsilon(input.dtype()), input.dtype(), input.device());
+    auto denom = sqrt(add(clamped, eps));
     return {div(grad, denom)};
 }
 
@@ -2123,11 +2313,14 @@ auto AcosBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 auto AcosBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     const auto& grad = grad_outputs[0];
     const auto& input = saved_tensors_[0];
-    // -1 / sqrt(1 - x^2)
+    // -1 / sqrt(1 - x^2), with clamping for numerical safety
     auto x_sq = mul(input, input);
     auto one_minus_sq = sub(ones(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                                   input.dtype(), input.device()), x_sq);
-    auto denom = sqrt(one_minus_sq);
+    auto clamped = clamp_min(one_minus_sq, 0.0);
+    auto eps = full(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                    detail::dtype_epsilon(input.dtype()), input.dtype(), input.device());
+    auto denom = sqrt(add(clamped, eps));
     return {neg(div(grad, denom))};
 }
 
@@ -3177,18 +3370,9 @@ auto CholeskyBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector
 
         // phi(S): take lower triangle and halve diagonal
         auto S_tril = tril(S);
-        // Halve diagonal: S_tril = S_tril - 0.5 * diag(diag(S_tril)) -- approximate via element ops
-        // A simpler approach: S_sym = tril(S) with diagonal * 0.5
-        // We use: phi(S) = tril(S, -1) + 0.5 * diag(diag(S))
         auto S_strict_lower = tril(S, -1);
-        auto S_diag = mul(tril(S), 0.5);  // This isn't quite right, let's use a different approach
-
-        // Actually: phi(X) = tril(X) but with diagonal halved
-        // phi(X) = tril(X, -1) + 0.5 * (tril(X, 0) - tril(X, -1))
-        // = tril(X, -1) + 0.5 * diag_matrix(diag(X))
-        // Simpler: just use tril(S) and subtract 0.5 * diag elements
-        // Let's compute: phi(S) where phi takes tril and halves diagonal
-        auto phi_S = add(S_strict_lower, sub(S_tril, S_strict_lower) * 0.5);
+        // phi(S): tril(S) with diagonal halved
+        auto phi_S = add(S_strict_lower, mul(sub(S_tril, S_strict_lower), 0.5));
 
         // dL/dA = L^{-T} @ phi_S @ L^{-1}
         // = solve(L^T, phi_S) then solve(L, result^T)^T
@@ -3345,9 +3529,15 @@ auto SvdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     auto S_col = reshape(S_sq, {K, 1});
     auto diffs = sub(S_row, S_col);  // (K, K): diffs[i][j] = s_j^2 - s_i^2
 
-    // Replace zeros on diagonal with 1 to avoid division by zero
+    // Clamp small |s_j^2 - s_i^2| to epsilon for near-degenerate singular values
+    auto eps_val = detail::dtype_epsilon(S.dtype());
+    auto eps_t = full({K, K}, eps_val, S.dtype(), S.device());
+    auto abs_diffs = abs(diffs);
+    auto safe_diffs = where(lt(abs_diffs, eps_t), mul(sign(diffs), eps_t), diffs);
+
+    // Replace diagonal with 1 to avoid division by zero
     auto mask = eye(K, std::nullopt, S.dtype(), S.device());
-    auto safe_diffs = add(diffs, mask);  // diagonal becomes 1 instead of 0
+    safe_diffs = add(safe_diffs, mask);
 
     // F = 1/safe_diffs, then zero out diagonal
     auto F = reciprocal(safe_diffs);
@@ -3462,9 +3652,15 @@ auto EighBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
     auto W_col = reshape(W, {N, 1});
     auto diffs = sub(W_row, W_col);  // (N, N): diffs[i][j] = w_j - w_i
 
-    // Replace zeros on diagonal with 1 to avoid division by zero
+    // Clamp small |w_j - w_i| to epsilon to avoid singularity from degenerate eigenvalues
+    auto eps_val = detail::dtype_epsilon(W.dtype());
+    auto eps_t = full({N, N}, eps_val, W.dtype(), W.device());
+    auto abs_diffs = abs(diffs);
+    auto safe_diffs = where(lt(abs_diffs, eps_t), mul(sign(diffs), eps_t), diffs);
+
+    // Replace diagonal with 1 to avoid division by zero
     auto mask = eye(N, std::nullopt, W.dtype(), W.device());
-    auto safe_diffs = add(diffs, mask);
+    safe_diffs = add(safe_diffs, mask);
 
     auto F = reciprocal(safe_diffs);
     auto anti_mask = sub(ones({N, N}, W.dtype(), W.device()), mask);
@@ -3687,40 +3883,240 @@ auto SlogdetBackward::backward_with_variables(std::vector<Variable> grad_outputs
 }
 
 auto EigvalshBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    // dL/dA = V @ diag(dL/dW) @ V^T — delegates to backward() since diag() has no Variable-level op
-    auto result_tensors = backward({grad_outputs[0].tensor()});
-    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+    // dL/dA = V @ diag(dL/dW) @ V^T, symmetrized
+    // V is a saved tensor (constant), grad_W is a Variable for higher-order grad tracking
+    const auto& V_tensor = saved_tensors_[0];  // eigenvectors, (..., N, N)
+    auto V = Variable(V_tensor, false);
+
+    auto ndim = V_tensor.ndim();
+    auto Vt = tenzor::transpose(V, ndim - 2, ndim - 1);
+
+    // Variable-level diag and matmul
+    auto grad_diag = tenzor::diag(grad_outputs[0]);  // (N, N)
+    auto grad_A = tenzor::matmul(tenzor::matmul(V, grad_diag), Vt);
+
+    // Symmetrize (since A is symmetric)
+    auto grad_At = tenzor::transpose(grad_A, ndim - 2, ndim - 1);
+    grad_A = (grad_A + grad_At) * 0.5;
+
+    return {grad_A};
 }
 
-// Complex linalg ops — delegate to backward() and wrap (diag/tril/eye have no Variable-level ops)
-
 auto CholeskyBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result_tensors = backward({grad_outputs[0].tensor()});
-    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+    // dL/dA = L^{-T} @ phi(L^T @ grad_L) @ L^{-1}, symmetrized
+    // where phi(S) = tril(S) with diagonal halved
+    // Use Variable-level ops for higher-order gradient support
+
+    auto grad_L_var = grad_outputs[0];
+    const auto& L_tensor = saved_tensors_[0];
+    auto L = Variable(L_tensor, false);
+
+    auto ndim = L_tensor.ndim();
+
+    if (upper_) {
+        // If upper triangular was returned, transpose to work with lower
+        grad_L_var = tenzor::transpose(grad_L_var, ndim - 2, ndim - 1);
+        auto L_lower = tenzor::transpose(L, ndim - 2, ndim - 1);
+
+        auto Lt = tenzor::transpose(L_lower, ndim - 2, ndim - 1);
+
+        // S = L^T @ grad_L  (Variable-level matmul)
+        auto S = tenzor::matmul(Lt, grad_L_var);
+
+        // phi(S): tril(S) with diagonal halved
+        // phi(S) = tril(S, -1) + 0.5 * diag(diag(S))
+        // Equivalently: phi(S) = tril(S) - 0.5 * (tril(S) - tril(S, -1))
+        auto S_tril = tenzor::tril(S);
+        auto S_strict_lower = tenzor::tril(S, -1);
+        auto phi_S = S_strict_lower + (S_tril - S_strict_lower) * 0.5;
+
+        // grad_A = L^{-T} @ phi_S @ L^{-1}
+        // = solve(L^T, phi_S), then solve(L^T, result^T)^T
+        auto temp = tenzor::solve(Lt, phi_S);
+        auto grad_A = tenzor::solve(Lt, tenzor::transpose(temp, ndim - 2, ndim - 1));
+        grad_A = tenzor::transpose(grad_A, ndim - 2, ndim - 1);
+
+        // Symmetrize
+        auto grad_At = tenzor::transpose(grad_A, ndim - 2, ndim - 1);
+        grad_A = (grad_A + grad_At) * 0.5;
+
+        return {grad_A};
+    }
+
+    auto Lt = tenzor::transpose(L, ndim - 2, ndim - 1);
+
+    // S = L^T @ grad_L
+    auto S = tenzor::matmul(Lt, grad_L_var);
+
+    // phi(S): tril(S) with diagonal halved
+    auto S_tril = tenzor::tril(S);
+    auto S_strict_lower = tenzor::tril(S, -1);
+    auto phi_S = S_strict_lower + (S_tril - S_strict_lower) * 0.5;
+
+    // grad_A = L^{-T} @ phi_S @ L^{-1}
+    auto temp = tenzor::solve(Lt, phi_S);
+    auto grad_A = tenzor::solve(Lt, tenzor::transpose(temp, ndim - 2, ndim - 1));
+    grad_A = tenzor::transpose(grad_A, ndim - 2, ndim - 1);
+
+    // Symmetrize
+    auto grad_At = tenzor::transpose(grad_A, ndim - 2, ndim - 1);
+    grad_A = (grad_A + grad_At) * 0.5;
+
+    return {grad_A};
 }
 
 auto SvdBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    std::vector<Tensor> tensor_grads;
-    tensor_grads.reserve(grad_outputs.size());
-    for (auto& var : grad_outputs) {
-        tensor_grads.push_back(var.tensor());
-    }
-    auto result_tensors = backward(tensor_grads);
-    bool any_rg = false;
-    for (auto& var : grad_outputs) { if (var.requires_grad()) { any_rg = true; break; } }
-    return {Variable(result_tensors[0], any_rg)};
+    // SVD backward using Variable-level ops for higher-order gradient support.
+    // Formula from Ionescu et al. 2015:
+    //   dA = U @ (diag(grad_S) + (F * (Ut@gU)) @ S + S @ (F * (gVh@V))) @ Vh
+    // where F_{ij} = 1/(s_j^2 - s_i^2) for i != j, 0 on diagonal
+
+    auto grad_U_var = grad_outputs[0];
+    auto grad_S_var = grad_outputs[1];
+    auto grad_Vh_var = grad_outputs[2];
+
+    // Wrap saved tensors as non-grad Variables
+    auto U = Variable(saved_tensors_[0], false);   // (..., M, K)
+    auto S = Variable(saved_tensors_[1], false);   // (..., K)
+    auto Vh = Variable(saved_tensors_[2], false);  // (..., K, N)
+
+    auto ndim = saved_tensors_[0].ndim();
+    auto K = saved_tensors_[1].shape()[saved_tensors_[1].ndim() - 1];
+
+    // Compute F matrix from singular values (constant — no grad needed)
+    // F_{ij} = 1/(s_j^2 - s_i^2) for i != j, 0 on diagonal
+    const auto& S_tensor = saved_tensors_[1];
+    auto S_sq = mul(S_tensor, S_tensor);
+    auto S_row = reshape(S_sq, {1, K});
+    auto S_col = reshape(S_sq, {K, 1});
+    auto diffs = sub(S_row, S_col);
+
+    auto eps_val = detail::dtype_epsilon(S_tensor.dtype());
+    auto eps_t = full({K, K}, eps_val, S_tensor.dtype(), S_tensor.device());
+    auto abs_diffs = abs(diffs);
+    auto safe_diffs = where(lt(abs_diffs, eps_t), mul(sign(diffs), eps_t), diffs);
+
+    auto mask = eye(K, std::nullopt, S_tensor.dtype(), S_tensor.device());
+    safe_diffs = add(safe_diffs, mask);
+    auto F_tensor = reciprocal(safe_diffs);
+    auto anti_mask = sub(ones({K, K}, S_tensor.dtype(), S_tensor.device()), mask);
+    F_tensor = mul(F_tensor, anti_mask);
+
+    auto F = Variable(F_tensor, false);
+
+    // S_diag as Variable
+    auto S_diag = tenzor::diag(S);  // (..., K, K)
+
+    // U^T and V
+    auto Ut = tenzor::transpose(U, ndim - 2, ndim - 1);
+    auto V = tenzor::transpose(Vh, saved_tensors_[2].ndim() - 2, saved_tensors_[2].ndim() - 1);
+
+    // Variable-level computations
+    auto UtgU = tenzor::matmul(Ut, grad_U_var);       // (K, K)
+    auto gVhV = tenzor::matmul(grad_Vh_var, V);       // (K, K)
+
+    auto F_UtgU = F * UtgU;
+    auto F_gVhV = F * gVhV;
+
+    auto term1 = tenzor::diag(grad_S_var);             // diag(grad_S), (K, K)
+    auto term2 = tenzor::matmul(F_UtgU, S_diag);       // F*(Ut@gU) @ S
+    auto term3 = tenzor::matmul(S_diag, F_gVhV);       // S @ F*(gVh@V)
+
+    auto middle = term1 + term2 + term3;
+
+    auto grad_A = tenzor::matmul(tenzor::matmul(U, middle), Vh);
+
+    return {grad_A};
 }
 
 auto QrBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result_tensors = backward({grad_outputs[0].tensor(), grad_outputs[1].tensor()});
-    bool any_rg = grad_outputs[0].requires_grad() || grad_outputs[1].requires_grad();
-    return {Variable(result_tensors[0], any_rg)};
+    // QR backward using Variable-level ops for higher-order gradient support.
+    // Formula from Seeger et al.:
+    //   M = R @ grad_R^T - grad_Q^T @ Q
+    //   copyltu(M) = tril(M) + tril(M, -1)^T
+    //   dL/dA = (grad_Q + Q @ copyltu(M)) @ R^{-T}
+
+    auto grad_Q_var = grad_outputs[0];
+    auto grad_R_var = grad_outputs[1];
+
+    auto Q = Variable(saved_tensors_[0], false);
+    auto R = Variable(saved_tensors_[1], false);
+
+    auto ndim = saved_tensors_[1].ndim();
+    auto Rt = tenzor::transpose(R, ndim - 2, ndim - 1);
+    auto Qt = tenzor::transpose(Q, saved_tensors_[0].ndim() - 2, saved_tensors_[0].ndim() - 1);
+
+    // M = R @ grad_R^T - grad_Q^T @ Q
+    auto grad_Rt_var = tenzor::transpose(grad_R_var, ndim - 2, ndim - 1);
+    auto M = tenzor::matmul(R, grad_Rt_var) - tenzor::matmul(Qt, grad_Q_var);
+
+    // copyltu(M) = tril(M) + tril(M, -1)^T
+    auto M_tril = tenzor::tril(M);
+    auto M_strict_lower = tenzor::tril(M, -1);
+    auto M_strict_lower_t = tenzor::transpose(M_strict_lower, ndim - 2, ndim - 1);
+    auto copyltu_M = M_tril + M_strict_lower_t;
+
+    // dL/dA = (grad_Q + Q @ copyltu_M) @ R^{-T}
+    auto Q_copyltu = tenzor::matmul(Q, copyltu_M);
+    auto rhs = grad_Q_var + Q_copyltu;
+
+    // rhs @ R^{-T} = solve(R, rhs^T)^T
+    auto rhs_t = tenzor::transpose(rhs, rhs.tensor().ndim() - 2, rhs.tensor().ndim() - 1);
+    auto solve_result = tenzor::solve(R, rhs_t);
+    auto grad_A = tenzor::transpose(solve_result, solve_result.tensor().ndim() - 2, solve_result.tensor().ndim() - 1);
+
+    return {grad_A};
 }
 
 auto EighBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result_tensors = backward({grad_outputs[0].tensor(), grad_outputs[1].tensor()});
-    bool any_rg = grad_outputs[0].requires_grad() || grad_outputs[1].requires_grad();
-    return {Variable(result_tensors[0], any_rg)};
+    // Eigh backward using Variable-level ops for higher-order gradient support.
+    // Formula: dL/dA = V @ (F * (V^T @ dL/dV) + diag(dL/dW)) @ V^T, symmetrized
+    // F_{ij} = 1/(w_j - w_i) for i != j, 0 on diagonal
+
+    auto grad_W_var = grad_outputs[0];
+    auto grad_V_var = grad_outputs[1];
+
+    const auto& W_tensor = saved_tensors_[0];  // eigenvalues, (..., N)
+    const auto& V_tensor = saved_tensors_[1];  // eigenvectors, (..., N, N)
+
+    auto V = Variable(V_tensor, false);
+    auto N = W_tensor.shape()[W_tensor.ndim() - 1];
+
+    // Compute F matrix (constant — from eigenvalues)
+    auto W_row = reshape(W_tensor, {1, N});
+    auto W_col = reshape(W_tensor, {N, 1});
+    auto diffs = sub(W_row, W_col);
+
+    auto eps_val = detail::dtype_epsilon(W_tensor.dtype());
+    auto eps_t = full({N, N}, eps_val, W_tensor.dtype(), W_tensor.device());
+    auto abs_diffs = abs(diffs);
+    auto safe_diffs = where(lt(abs_diffs, eps_t), mul(sign(diffs), eps_t), diffs);
+
+    auto mask = eye(N, std::nullopt, W_tensor.dtype(), W_tensor.device());
+    safe_diffs = add(safe_diffs, mask);
+    auto F_tensor = reciprocal(safe_diffs);
+    auto anti_mask = sub(ones({N, N}, W_tensor.dtype(), W_tensor.device()), mask);
+    F_tensor = mul(F_tensor, anti_mask);
+
+    auto F = Variable(F_tensor, false);
+
+    auto ndim = V_tensor.ndim();
+    auto Vt = tenzor::transpose(V, ndim - 2, ndim - 1);
+
+    // V^T @ dL/dV (Variable-level)
+    auto VtgV = tenzor::matmul(Vt, grad_V_var);
+
+    // F * (V^T @ dL/dV) + diag(dL/dW)
+    auto middle = F * VtgV + tenzor::diag(grad_W_var);
+
+    // dL/dA = V @ middle @ V^T
+    auto grad_A = tenzor::matmul(tenzor::matmul(V, middle), Vt);
+
+    // Symmetrize
+    auto grad_At = tenzor::transpose(grad_A, ndim - 2, ndim - 1);
+    grad_A = (grad_A + grad_At) * 0.5;
+
+    return {grad_A};
 }
 
 // ============================================================================
@@ -3765,19 +4161,16 @@ auto CumProdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<
     auto rev_cum = flip(cum, {dim_});
 
     // Zero-safe: where input == 0, use 0 gradient
+    auto zero_t = zeros(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                        input.dtype(), input.device());
     auto eps = full(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                    1e-30, input.dtype(), input.device());
-    auto safe_input = where(eq(input, zeros(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                                            input.dtype(), input.device())),
-                           eps, input);
+                    detail::dtype_epsilon(input.dtype()), input.dtype(), input.device());
+    auto zero_mask = eq(input, zero_t);
+    auto safe_input = where(zero_mask, eps, input);
     auto result = div(rev_cum, safe_input);
 
     // Zero out positions where input was zero
-    auto zero_mask = eq(input, zeros(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                                     input.dtype(), input.device()));
-    auto zero_tensor = zeros(std::vector<int64_t>(result.shape().begin(), result.shape().end()),
-                            result.dtype(), result.device());
-    return {where(zero_mask, zero_tensor, result)};
+    return {where(zero_mask, zero_t, result)};
 }
 
 auto CumProdBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {

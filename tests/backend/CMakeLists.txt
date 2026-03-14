@@ -22,7 +22,7 @@ if(TENZOR_BUILD_VULKAN)
     target_link_libraries(test_vulkan_caching_allocator PRIVATE
         tenzor_core tenzor_backend_vulkan ${Vulkan_LIBRARIES} GTest::gtest_main)
     target_include_directories(test_vulkan_caching_allocator PRIVATE ${Vulkan_INCLUDE_DIRS})
-    tenzor_discover_tests(test_vulkan_caching_allocator DISCOVERY_TIMEOUT 30)
+    tenzor_discover_tests(test_vulkan_caching_allocator DISCOVERY_TIMEOUT 60)
 endif()
 
 # OneAPI Caching Allocator Tests
@@ -39,5 +39,5 @@ if(TENZOR_BUILD_ONEAPI AND TARGET tenzor_backend_oneapi)
     # Ensure the oneapi backend is built before the test
     add_dependencies(test_oneapi_caching_allocator tenzor_backend_oneapi)
 
-    tenzor_discover_tests(test_oneapi_caching_allocator DISCOVERY_TIMEOUT 30)
+    tenzor_discover_tests(test_oneapi_caching_allocator DISCOVERY_TIMEOUT 60)
 endif()

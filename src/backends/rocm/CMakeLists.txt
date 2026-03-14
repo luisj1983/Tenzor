@@ -9,6 +9,12 @@
 string(REGEX REPLACE "-x hip" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
 string(REGEX REPLACE "--offload-arch=[^ ]+" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
 
+# Ensure HIP_PLATFORM is set — some ROCm packages disable hipconfig,
+# preventing hip-config.cmake from auto-detecting the platform.
+if(NOT DEFINED HIP_PLATFORM AND NOT DEFINED ENV{HIP_PLATFORM})
+    set(HIP_PLATFORM "amd" CACHE STRING "HIP platform (amd or nvidia)")
+endif()
+
 # Find ROCm/HIP packages
 find_package(hip QUIET CONFIG PATHS /opt/rocm)
 find_package(rocblas QUIET CONFIG PATHS /opt/rocm)
