@@ -316,27 +316,29 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                 // When thread_safe_ is enabled, lock to prevent concurrent
                 // accumulation from corrupting the gradient tensor.
                 if (var.is_leaf() || var.retains_grad()) {
-                    auto accumulate = [&]() {
-                        if (var.has_grad()) {
-                            auto existing_grad = var.grad().value();
+                    // Access impl_->grad_ directly under the lock to avoid
+                    // re-entrant locking (has_grad/set_grad also lock grad_mutex_
+                    // when thread_safe_ is true, causing self-deadlock).
+                    auto accumulate_unlocked = [&]() {
+                        if (var.impl_->grad_.has_value()) {
+                            auto existing_grad = var.impl_->grad_.value();
                             if (grad_to_apply.dtype() != existing_grad.dtype()) {
                                 DType target = promote_types(grad_to_apply.dtype(), existing_grad.dtype());
                                 existing_grad = existing_grad.to(target);
                                 grad_to_apply = grad_to_apply.to(target);
                             }
-                            var.set_grad(existing_grad + grad_to_apply);
+                            var.impl_->grad_ = existing_grad + grad_to_apply;
                         } else {
-                            var.set_grad(grad_to_apply);
+                            var.impl_->grad_ = grad_to_apply;
                         }
                     };
 
                     if (var.impl_) {
-                        // Always acquire mutex to prevent TOCTOU race:
-                        // thread_safe_ could be set between check and lock acquisition
                         std::lock_guard lock(*var.impl_->grad_mutex_);
-                        accumulate();
+                        accumulate_unlocked();
                     } else {
-                        accumulate();
+                        // No impl_ — shouldn't happen for leaf vars, but handle gracefully
+                        var.set_grad(grad_to_apply);
                     }
                 }
             }
@@ -603,27 +605,28 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                 }
 
                 if (var.is_leaf() || var.retains_grad()) {
-                    auto accumulate = [&]() {
-                        if (var.has_grad()) {
-                            auto existing_grad = var.grad().value();
+                    // Access impl_->grad_ directly under the lock to avoid
+                    // re-entrant locking (has_grad/set_grad also lock grad_mutex_
+                    // when thread_safe_ is true, causing self-deadlock).
+                    auto accumulate_unlocked = [&]() {
+                        if (var.impl_->grad_.has_value()) {
+                            auto existing_grad = var.impl_->grad_.value();
                             if (grad_to_apply.dtype() != existing_grad.dtype()) {
                                 DType target = promote_types(grad_to_apply.dtype(), existing_grad.dtype());
                                 existing_grad = existing_grad.to(target);
                                 grad_to_apply = grad_to_apply.to(target);
                             }
-                            var.set_grad(existing_grad + grad_to_apply);
+                            var.impl_->grad_ = existing_grad + grad_to_apply;
                         } else {
-                            var.set_grad(grad_to_apply);
+                            var.impl_->grad_ = grad_to_apply;
                         }
                     };
 
                     if (var.impl_) {
-                        // Always acquire mutex to prevent TOCTOU race:
-                        // thread_safe_ could be set between check and lock acquisition
                         std::lock_guard lock(*var.impl_->grad_mutex_);
-                        accumulate();
+                        accumulate_unlocked();
                     } else {
-                        accumulate();
+                        var.set_grad(grad_to_apply);
                     }
                 }
             }
