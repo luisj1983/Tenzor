@@ -204,6 +204,10 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices, hipStream_t s
 
     Tensor output(out_shape, weight.dtype(), weight.device());
 
+    if (num_indices == 0) {
+        return output;
+    }
+
     int64_t total_elements = num_indices * embedding_dim;
     int num_blocks = get_num_blocks(total_elements);
 
@@ -251,7 +255,7 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
 
     // Initialize grad_weight to zeros
     Tensor grad_weight({num_embeddings, embedding_dim}, grad_output.dtype(), grad_output.device());
-    HIP_CHECK(hipMemsetAsync(grad_weight.data<void>(), 0,
+    HIP_CHECK(hipMemsetAsync(grad_weight.data_ptr(), 0,
         num_embeddings * embedding_dim * dtype_size(grad_output.dtype()), stream));
 
     int64_t total_elements = num_indices * embedding_dim;

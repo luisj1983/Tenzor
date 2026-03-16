@@ -245,12 +245,13 @@ auto roi_align_forward(const Tensor& features, const Tensor& rois,
                        int64_t output_h, int64_t output_w,
                        float spatial_scale, int64_t sampling_ratio,
                        bool aligned) -> Tensor {
-    // BFloat16: upcast features to Float32, compute, downcast result
-    if (features.dtype() == DType::BFloat16) {
+    // Non-Float32 types: compute in Float32 and convert back to original dtype
+    const DType orig_dtype = features.dtype();
+    if (orig_dtype != DType::Float32) {
         auto features_f32 = features.to(DType::Float32);
         auto result_f32 = roi_align_forward(features_f32, rois, output_h, output_w,
                                             spatial_scale, sampling_ratio, aligned);
-        return result_f32.to(DType::BFloat16);
+        return result_f32.to(orig_dtype);
     }
 
     auto shape = features.shape();
@@ -270,14 +271,11 @@ auto roi_align_forward(const Tensor& features, const Tensor& rois,
     const Tensor rois_f32 = (rois.dtype() == DType::Float32) ? rois : rois.to(DType::Float32);
     const float* rois_ptr = rois_f32.data<float>();
 
-    // Ensure features are Float32 (ROI Align operates on float)
-    const Tensor feat_f32 = (features.dtype() == DType::Float32) ? features : features.to(DType::Float32);
-
     const int threads = 512;
     const int blocks = (total_outputs + threads - 1) / threads;
 
     hipLaunchKernelGGL(roi_align_forward_kernel, dim3(blocks), dim3(threads), 0, 0,
-                      feat_f32.data<float>(), rois_ptr, output.data<float>(),
+                      features.data<float>(), rois_ptr, output.data<float>(),
                       num_rois, channels, feat_height, feat_width,
                       output_h, output_w, spatial_scale, sampling_ratio, aligned);
 
@@ -289,12 +287,13 @@ auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
                         int64_t batch_size, int64_t feat_height, int64_t feat_width,
                         float spatial_scale, int64_t sampling_ratio,
                         bool aligned) -> Tensor {
-    // BFloat16: upcast grad_output to Float32, compute, downcast result
-    if (grad_output.dtype() == DType::BFloat16) {
+    // Non-Float32 types: compute in Float32 and convert back to original dtype
+    const DType orig_dtype = grad_output.dtype();
+    if (orig_dtype != DType::Float32) {
         auto grad_f32 = grad_output.to(DType::Float32);
         auto result_f32 = roi_align_backward(grad_f32, rois, batch_size, feat_height,
                                              feat_width, spatial_scale, sampling_ratio, aligned);
-        return result_f32.to(DType::BFloat16);
+        return result_f32.to(orig_dtype);
     }
 
     int64_t num_rois = rois.shape()[0];

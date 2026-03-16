@@ -178,6 +178,7 @@ public:
     void release_saved_tensors() {
         std::lock_guard lock(offload_mutex_);
         saved_tensors_.clear();
+        saved_versions_.clear();
         tensors_offloaded_.store(false, std::memory_order_relaxed);
     }
 

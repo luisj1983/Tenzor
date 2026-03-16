@@ -369,6 +369,52 @@ __global__ void broadcast_div_kernel_f16(
     }
 }
 
+/**
+ * @brief Division kernel specialized for BFloat16
+ * Uses float conversion for correct division and infinity handling
+ */
+__global__ void div_kernel_bf16(const hip_bfloat16* a, const hip_bfloat16* b, hip_bfloat16* c, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float divisor = static_cast<float>(b[idx]);
+        if (divisor == 0.0f) {
+            c[idx] = hip_bfloat16(INFINITY);
+        } else {
+            float result = static_cast<float>(a[idx]) / divisor;
+            c[idx] = hip_bfloat16(result);
+        }
+    }
+}
+
+/**
+ * @brief Broadcasting division kernel specialized for BFloat16
+ */
+__global__ void broadcast_div_kernel_bf16(
+    const hip_bfloat16* a, const hip_bfloat16* b, hip_bfloat16* c,
+    const int64_t* strides_a, const int64_t* strides_b,
+    const int64_t* output_shape, int64_t ndim, int64_t n) {
+
+    HIP_KERNEL_LOOP(out_idx, n) {
+        int64_t idx_a = 0;
+        int64_t idx_b = 0;
+        int64_t tmp = out_idx;
+
+        for (int64_t i = ndim - 1; i >= 0; --i) {
+            int64_t coord = tmp % output_shape[i];
+            tmp /= output_shape[i];
+            idx_a += coord * strides_a[i];
+            idx_b += coord * strides_b[i];
+        }
+
+        float divisor = static_cast<float>(b[idx_b]);
+        if (divisor == 0.0f) {
+            c[out_idx] = hip_bfloat16(INFINITY);
+        } else {
+            float result = static_cast<float>(a[idx_a]) / divisor;
+            c[out_idx] = hip_bfloat16(result);
+        }
+    }
+}
+
 // ============================================================================
 // Complex Elementwise Arithmetic Kernels
 // ============================================================================
@@ -915,6 +961,11 @@ auto add_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
                 reinterpret_cast<const __half*>(a.data<Float16>()),
                 reinterpret_cast<const __half*>(b.data<Float16>()),
                 reinterpret_cast<__half*>(result.data<Float16>()), n);
+        } else if (a.dtype() == DType::BFloat16) {
+            hipLaunchKernelGGL(add_kernel_device<hip_bfloat16>, grid, block, 0, stream,
+                reinterpret_cast<const hip_bfloat16*>(a.data<BFloat16>()),
+                reinterpret_cast<const hip_bfloat16*>(b.data<BFloat16>()),
+                reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
         } else if (a.dtype() == DType::Int8) {
             hipLaunchKernelGGL(add_kernel_device<int8_t>, grid, block, 0, stream,
                 a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(), n);
@@ -988,6 +1039,12 @@ auto add_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
             reinterpret_cast<const __half*>(a.data<Float16>()),
             reinterpret_cast<const __half*>(b.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, AddOp());
+    } else if (a.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<hip_bfloat16, AddOp>), grid, block, 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(a.data<BFloat16>()),
+            reinterpret_cast<const hip_bfloat16*>(b.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()),
             d_strides_a, d_strides_b, d_output_shape, ndim, n, AddOp());
     } else if (a.dtype() == DType::Int8) {
         hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<int8_t, AddOp>), grid, block, 0, stream,
@@ -1067,6 +1124,11 @@ auto sub_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
                 reinterpret_cast<const __half*>(a.data<Float16>()),
                 reinterpret_cast<const __half*>(b.data<Float16>()),
                 reinterpret_cast<__half*>(result.data<Float16>()), n);
+        } else if (a.dtype() == DType::BFloat16) {
+            hipLaunchKernelGGL(sub_kernel_device<hip_bfloat16>, grid, block, 0, stream,
+                reinterpret_cast<const hip_bfloat16*>(a.data<BFloat16>()),
+                reinterpret_cast<const hip_bfloat16*>(b.data<BFloat16>()),
+                reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
         } else if (a.dtype() == DType::Int32) {
             hipLaunchKernelGGL(sub_kernel_device<int32_t>, grid, block, 0, stream,
                 a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n);
@@ -1132,6 +1194,12 @@ auto sub_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
             reinterpret_cast<const __half*>(a.data<Float16>()),
             reinterpret_cast<const __half*>(b.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, SubOp());
+    } else if (a.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<hip_bfloat16, SubOp>), grid, block, 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(a.data<BFloat16>()),
+            reinterpret_cast<const hip_bfloat16*>(b.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()),
             d_strides_a, d_strides_b, d_output_shape, ndim, n, SubOp());
     } else if (a.dtype() == DType::Int32) {
         hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<int32_t, SubOp>), grid, block, 0, stream,
@@ -1219,6 +1287,11 @@ auto mul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
                 reinterpret_cast<const __half*>(a.data<Float16>()),
                 reinterpret_cast<const __half*>(b.data<Float16>()),
                 reinterpret_cast<__half*>(result.data<Float16>()), n);
+        } else if (a.dtype() == DType::BFloat16) {
+            hipLaunchKernelGGL(mul_kernel_device<hip_bfloat16>, grid, block, 0, stream,
+                reinterpret_cast<const hip_bfloat16*>(a.data<BFloat16>()),
+                reinterpret_cast<const hip_bfloat16*>(b.data<BFloat16>()),
+                reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
         } else if (a.dtype() == DType::Bool) {
             // For Bool, mul acts as logical AND
             hipLaunchKernelGGL(mul_kernel_device<bool>, grid, block, 0, stream,
@@ -1284,6 +1357,12 @@ auto mul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
             reinterpret_cast<const __half*>(a.data<Float16>()),
             reinterpret_cast<const __half*>(b.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, MulOp());
+    } else if (a.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<hip_bfloat16, MulOp>), grid, block, 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(a.data<BFloat16>()),
+            reinterpret_cast<const hip_bfloat16*>(b.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()),
             d_strides_a, d_strides_b, d_output_shape, ndim, n, MulOp());
     } else if (a.dtype() == DType::Bool) {
         // For Bool, mul acts as logical AND
@@ -1356,6 +1435,11 @@ auto div_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
                 reinterpret_cast<const __half*>(a.data<Float16>()),
                 reinterpret_cast<const __half*>(b.data<Float16>()),
                 reinterpret_cast<__half*>(result.data<Float16>()), n);
+        } else if (a.dtype() == DType::BFloat16) {
+            hipLaunchKernelGGL(div_kernel_bf16, grid, block, 0, stream,
+                reinterpret_cast<const hip_bfloat16*>(a.data<BFloat16>()),
+                reinterpret_cast<const hip_bfloat16*>(b.data<BFloat16>()),
+                reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
         } else if (a.dtype() == DType::Int32) {
             hipLaunchKernelGGL(div_kernel_device<int32_t>, grid, block, 0, stream,
                 a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n);
@@ -1424,6 +1508,12 @@ auto div_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
             reinterpret_cast<const __half*>(b.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()),
             d_strides_a, d_strides_b, d_output_shape, ndim, n);
+    } else if (a.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(broadcast_div_kernel_bf16, grid, block, 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(a.data<BFloat16>()),
+            reinterpret_cast<const hip_bfloat16*>(b.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n);
     } else if (a.dtype() == DType::Complex64) {
         hipLaunchKernelGGL(broadcast_complex_div_kernel<float>, grid, block, 0, stream,
             reinterpret_cast<const float*>(a.data_ptr()),
@@ -1478,6 +1568,10 @@ auto neg_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(neg_kernel_device<__half>, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(neg_kernel_device<hip_bfloat16>, grid, block, 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
     } else {
         throw std::runtime_error("Unsupported dtype for neg operation");
     }
@@ -1516,6 +1610,10 @@ auto abs_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(abs_kernel_device<__half>, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(abs_kernel_device<hip_bfloat16>, grid, block, 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
     } else {
         throw std::runtime_error("Unsupported dtype for abs operation");
     }
@@ -2289,6 +2387,14 @@ void add_inplace_kernel(Tensor& a, const Tensor& b, hipStream_t stream) {
     } else if (a.dtype() == DType::Int64) {
         hipLaunchKernelGGL(add_inplace_kernel_device<int64_t>, grid, block, 0, stream,
             a.data<int64_t>(), b.data<int64_t>(), n);
+    } else if (a.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(add_inplace_kernel_device<__half>, grid, block, 0, stream,
+            reinterpret_cast<__half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(b.data<Float16>()), n);
+    } else if (a.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(add_inplace_kernel_device<hip_bfloat16>, grid, block, 0, stream,
+            reinterpret_cast<hip_bfloat16*>(a.data<BFloat16>()),
+            reinterpret_cast<const hip_bfloat16*>(b.data<BFloat16>()), n);
     } else {
         throw std::runtime_error("add_inplace operation unsupported dtype");
     }
@@ -2836,8 +2942,14 @@ __global__ void randn_kernel_device_f16(__half* output, hiprandState* states, in
  */
 auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, hipStream_t stream) -> Tensor {
 #ifdef TENZOR_HAS_HIPRAND
+    // BFloat16: generate as Float32 and convert
+    if (dtype == DType::BFloat16) {
+        auto result_f32 = rand_kernel(shape, DType::Float32, device, stream);
+        return result_f32.to(DType::BFloat16);
+    }
+
     if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16) {
-        throw std::runtime_error("rand operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("rand operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     Tensor result(shape, dtype, device);
@@ -2895,8 +3007,14 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
  */
 auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, hipStream_t stream) -> Tensor {
 #ifdef TENZOR_HAS_HIPRAND
+    // BFloat16: generate as Float32 and convert
+    if (dtype == DType::BFloat16) {
+        auto result_f32 = randn_kernel(shape, DType::Float32, device, stream);
+        return result_f32.to(DType::BFloat16);
+    }
+
     if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16) {
-        throw std::runtime_error("randn operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("randn operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     Tensor result(shape, dtype, device);
@@ -3088,8 +3206,20 @@ auto linspace_kernel(double start, double end, int64_t steps, DType dtype, Devic
             hipLaunchKernelGGL(linspace_kernel_impl<double>, grid, block, 0, stream,
                 result.data<double>(), start, step, steps);
             break;
+        case DType::Float16:
+            hipLaunchKernelGGL(linspace_kernel_impl<__half>, grid, block, 0, stream,
+                reinterpret_cast<__half*>(result.data<Float16>()),
+                __float2half(static_cast<float>(start)),
+                __float2half(static_cast<float>(step)), steps);
+            break;
+        case DType::BFloat16:
+            hipLaunchKernelGGL(linspace_kernel_impl<hip_bfloat16>, grid, block, 0, stream,
+                reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()),
+                hip_bfloat16(static_cast<float>(start)),
+                hip_bfloat16(static_cast<float>(step)), steps);
+            break;
         default:
-            throw std::runtime_error("linspace_kernel: only Float32 and Float64 supported");
+            throw std::runtime_error("linspace_kernel: only Float32, Float64, Float16, BFloat16 supported");
     }
 
     HIP_CHECK(hipGetLastError());

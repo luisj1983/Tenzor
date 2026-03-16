@@ -440,7 +440,7 @@ auto fold_kernel(const Tensor& input,
     Tensor output(output_shape, input.dtype(), input.device());
 
     // Initialize to zero
-    HIP_CHECK(hipMemsetAsync(output.data<void>(), 0,
+    HIP_CHECK(hipMemsetAsync(output.data_ptr(), 0,
         output.numel() * dtype_size(input.dtype()), stream));
 
     // Launch kernel

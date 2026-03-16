@@ -43,7 +43,7 @@ public:
     BatchNorm2dBackward(bool affine, double eps, std::vector<Tensor> tensors_to_save)
         : affine_(affine), eps_(eps) {
         // Save tensors in constructor (protected member access is allowed here)
-        saved_tensors_ = std::move(tensors_to_save);
+        save_for_backward(std::move(tensors_to_save));
     }
 
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
@@ -656,7 +656,7 @@ class BatchNorm1dBackward : public Function {
 public:
     BatchNorm1dBackward(bool affine, double eps, std::vector<Tensor> tensors_to_save)
         : affine_(affine), eps_(eps) {
-        saved_tensors_ = std::move(tensors_to_save);
+        save_for_backward(std::move(tensors_to_save));
     }
 
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {

@@ -631,10 +631,10 @@ auto lstm_forward_kernel(
     Tensor c_t({batch, hidden}, input.dtype(), input.device());
 
     // Copy h0 and c0 to h_t and c_t
-    HIP_CHECK(hipMemcpyAsync(h_t.data<void>(), h0.data<void>(),
+    HIP_CHECK(hipMemcpyAsync(h_t.data_ptr(), h0.data_ptr(),
                    batch * hidden * dtype_size(input.dtype()),
                    hipMemcpyDeviceToDevice, stream));
-    HIP_CHECK(hipMemcpyAsync(c_t.data<void>(), c0.data<void>(),
+    HIP_CHECK(hipMemcpyAsync(c_t.data_ptr(), c0.data_ptr(),
                    batch * hidden * dtype_size(input.dtype()),
                    hipMemcpyDeviceToDevice, stream));
 
@@ -829,11 +829,11 @@ auto lstm_multi_layer_forward_kernel(
         Tensor h_l({batch, hidden}, input.dtype(), input.device());
         Tensor c_l({batch, hidden}, input.dtype(), input.device());
 
-        HIP_CHECK(hipMemcpyAsync(h_l.data<void>(),
-                       static_cast<const char*>(h0.data<void>()) + l * layer_bytes,
+        HIP_CHECK(hipMemcpyAsync(h_l.data_ptr(),
+                       static_cast<const char*>(h0.data_ptr()) + l * layer_bytes,
                        layer_bytes, hipMemcpyDeviceToDevice, stream));
-        HIP_CHECK(hipMemcpyAsync(c_l.data<void>(),
-                       static_cast<const char*>(c0.data<void>()) + l * layer_bytes,
+        HIP_CHECK(hipMemcpyAsync(c_l.data_ptr(),
+                       static_cast<const char*>(c0.data_ptr()) + l * layer_bytes,
                        layer_bytes, hipMemcpyDeviceToDevice, stream));
 
         // Split bias into bias_ih and bias_hh if present
@@ -853,12 +853,12 @@ auto lstm_multi_layer_forward_kernel(
 
         // Copy final h, c to h_n[l], c_n[l]
         HIP_CHECK(hipMemcpyAsync(
-            static_cast<char*>(h_n.data<void>()) + l * layer_bytes,
-            result[1].data<void>(), layer_bytes,
+            static_cast<char*>(h_n.data_ptr()) + l * layer_bytes,
+            result[1].data_ptr(), layer_bytes,
             hipMemcpyDeviceToDevice, stream));
         HIP_CHECK(hipMemcpyAsync(
-            static_cast<char*>(c_n.data<void>()) + l * layer_bytes,
-            result[2].data<void>(), layer_bytes,
+            static_cast<char*>(c_n.data_ptr()) + l * layer_bytes,
+            result[2].data_ptr(), layer_bytes,
             hipMemcpyDeviceToDevice, stream));
     }
 
@@ -959,8 +959,8 @@ auto bilstm_forward_kernel(
     // Extract forward direction states
     Tensor h0_fwd({batch, hidden}, input.dtype(), input.device());
     Tensor c0_fwd({batch, hidden}, input.dtype(), input.device());
-    HIP_CHECK(hipMemcpyAsync(h0_fwd.data<void>(), h0.data<void>(), state_bytes, hipMemcpyDeviceToDevice, stream));
-    HIP_CHECK(hipMemcpyAsync(c0_fwd.data<void>(), c0.data<void>(), state_bytes, hipMemcpyDeviceToDevice, stream));
+    HIP_CHECK(hipMemcpyAsync(h0_fwd.data_ptr(), h0.data_ptr(), state_bytes, hipMemcpyDeviceToDevice, stream));
+    HIP_CHECK(hipMemcpyAsync(c0_fwd.data_ptr(), c0.data_ptr(), state_bytes, hipMemcpyDeviceToDevice, stream));
 
     // Combine biases for forward
     Tensor bias_fwd;
@@ -1011,11 +1011,11 @@ auto bilstm_forward_kernel(
 
     Tensor h0_bwd({batch, hidden}, input.dtype(), input.device());
     Tensor c0_bwd({batch, hidden}, input.dtype(), input.device());
-    HIP_CHECK(hipMemcpyAsync(h0_bwd.data<void>(),
-                   static_cast<const char*>(h0.data<void>()) + state_bytes,
+    HIP_CHECK(hipMemcpyAsync(h0_bwd.data_ptr(),
+                   static_cast<const char*>(h0.data_ptr()) + state_bytes,
                    state_bytes, hipMemcpyDeviceToDevice, stream));
-    HIP_CHECK(hipMemcpyAsync(c0_bwd.data<void>(),
-                   static_cast<const char*>(c0.data<void>()) + state_bytes,
+    HIP_CHECK(hipMemcpyAsync(c0_bwd.data_ptr(),
+                   static_cast<const char*>(c0.data_ptr()) + state_bytes,
                    state_bytes, hipMemcpyDeviceToDevice, stream));
 
     Tensor bias_bwd;
@@ -1080,16 +1080,16 @@ auto bilstm_forward_kernel(
     Tensor h_n({2, batch, hidden}, input.dtype(), input.device());
     Tensor c_n({2, batch, hidden}, input.dtype(), input.device());
 
-    HIP_CHECK(hipMemcpyAsync(h_n.data<void>(), fwd_result[1].data<void>(),
+    HIP_CHECK(hipMemcpyAsync(h_n.data_ptr(), fwd_result[1].data_ptr(),
                    state_bytes, hipMemcpyDeviceToDevice, stream));
-    HIP_CHECK(hipMemcpyAsync(static_cast<char*>(h_n.data<void>()) + state_bytes,
-                   bwd_result[1].data<void>(),
+    HIP_CHECK(hipMemcpyAsync(static_cast<char*>(h_n.data_ptr()) + state_bytes,
+                   bwd_result[1].data_ptr(),
                    state_bytes, hipMemcpyDeviceToDevice, stream));
 
-    HIP_CHECK(hipMemcpyAsync(c_n.data<void>(), fwd_result[2].data<void>(),
+    HIP_CHECK(hipMemcpyAsync(c_n.data_ptr(), fwd_result[2].data_ptr(),
                    state_bytes, hipMemcpyDeviceToDevice, stream));
-    HIP_CHECK(hipMemcpyAsync(static_cast<char*>(c_n.data<void>()) + state_bytes,
-                   bwd_result[2].data<void>(),
+    HIP_CHECK(hipMemcpyAsync(static_cast<char*>(c_n.data_ptr()) + state_bytes,
+                   bwd_result[2].data_ptr(),
                    state_bytes, hipMemcpyDeviceToDevice, stream));
 
     HIP_CHECK(hipGetLastError());

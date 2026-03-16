@@ -193,7 +193,7 @@ public:
           padding_h_(padding_h), padding_w_(padding_w),
           dilation_h_(dilation_h), dilation_w_(dilation_w),
           groups_(groups) {
-        saved_tensors_ = std::move(tensors_to_save);
+        save_for_backward(std::move(tensors_to_save));
     }
 
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
@@ -451,7 +451,7 @@ public:
     Conv1dBackward(int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
                    std::vector<Tensor> tensors_to_save)
         : stride_(stride), padding_(padding), dilation_(dilation), groups_(groups) {
-        saved_tensors_ = std::move(tensors_to_save);
+        save_for_backward(std::move(tensors_to_save));
     }
 
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
@@ -691,7 +691,7 @@ public:
                             std::vector<Tensor> tensors_to_save)
         : stride_(stride), padding_(padding), output_padding_(output_padding),
           dilation_(dilation), groups_(groups) {
-        saved_tensors_ = std::move(tensors_to_save);
+        save_for_backward(std::move(tensors_to_save));
     }
 
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
@@ -963,7 +963,7 @@ public:
     Conv3dBackward(int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
                    std::vector<Tensor> tensors_to_save)
         : stride_(stride), padding_(padding), dilation_(dilation), groups_(groups) {
-        saved_tensors_ = std::move(tensors_to_save);
+        save_for_backward(std::move(tensors_to_save));
     }
 
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
@@ -1199,7 +1199,7 @@ public:
                             std::vector<Tensor> tensors_to_save)
         : stride_(stride), padding_(padding), output_padding_(output_padding),
           dilation_(dilation), groups_(groups) {
-        saved_tensors_ = std::move(tensors_to_save);
+        save_for_backward(std::move(tensors_to_save));
     }
 
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
@@ -1435,7 +1435,7 @@ public:
                             int64_t groups, std::vector<Tensor> tensors_to_save)
         : stride_(stride), padding_(padding), output_padding_(output_padding),
           groups_(groups) {
-        saved_tensors_ = std::move(tensors_to_save);
+        save_for_backward(std::move(tensors_to_save));
     }
 
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {

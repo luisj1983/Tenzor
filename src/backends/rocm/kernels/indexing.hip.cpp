@@ -1,5 +1,6 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
+#include <hip/hip_bfloat16.h>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/backend/backend.hpp"
@@ -61,6 +62,22 @@ __device__ __forceinline__ __half atomicAddHelper<__half>(__half* address, __hal
         old = atomicCAS(address_as_ushort, assumed, new_bits);
     } while (assumed != old);
     return *reinterpret_cast<__half*>(&old);
+}
+
+// Specialization for hip_bfloat16
+template<>
+__device__ __forceinline__ hip_bfloat16 atomicAddHelper<hip_bfloat16>(hip_bfloat16* address, hip_bfloat16 val) {
+    unsigned short int* address_as_ushort = (unsigned short int*)address;
+    unsigned short int old = *address_as_ushort, assumed;
+    do {
+        assumed = old;
+        float assumed_f = static_cast<float>(*reinterpret_cast<hip_bfloat16*>(&assumed));
+        float new_f = assumed_f + static_cast<float>(val);
+        hip_bfloat16 new_bf16(new_f);
+        unsigned short int new_bits = *reinterpret_cast<unsigned short int*>(&new_bf16);
+        old = atomicCAS(address_as_ushort, assumed, new_bits);
+    } while (assumed != old);
+    return *reinterpret_cast<hip_bfloat16*>(&old);
 }
 
 // ==============================================================================
@@ -178,6 +195,28 @@ auto gather_hip(
             input.data<int64_t>(),
             indices.data<int64_t>(),
             output.data<int64_t>(),
+            input.numel(),
+            indices_size,
+            inner_size,
+            dim_size
+        );
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(gather_kernel<__half>,
+            dim3(blocks), dim3(threads), 0, 0,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            indices.data<int64_t>(),
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            input.numel(),
+            indices_size,
+            inner_size,
+            dim_size
+        );
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(gather_kernel<hip_bfloat16>,
+            dim3(blocks), dim3(threads), 0, 0,
+            reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
+            indices.data<int64_t>(),
+            reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
             input.numel(),
             indices_size,
             inner_size,
@@ -308,6 +347,19 @@ auto scatter_hip(
             reinterpret_cast<__half*>(output.data<Float16>()),
             indices.data<int64_t>(),
             reinterpret_cast<const __half*>(src.data<Float16>()),
+            outer_size,
+            dim_size,
+            inner_size,
+            index_dim_size,
+            total_scatter,
+            reduce_add
+        );
+    } else if (output.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(scatter_kernel<hip_bfloat16>,
+            dim3(blocks), dim3(threads), 0, 0,
+            reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
+            indices.data<int64_t>(),
+            reinterpret_cast<const hip_bfloat16*>(src.data<BFloat16>()),
             outer_size,
             dim_size,
             inner_size,
@@ -463,6 +515,28 @@ auto index_select_hip(
             inner_size,
             num_indices
         );
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(index_select_kernel<__half>,
+            dim3(blocks), dim3(threads), 0, 0,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            indices.data<int64_t>(),
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            outer_size,
+            dim_size,
+            inner_size,
+            num_indices
+        );
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(index_select_kernel<hip_bfloat16>,
+            dim3(blocks), dim3(threads), 0, 0,
+            reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
+            indices.data<int64_t>(),
+            reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
+            outer_size,
+            dim_size,
+            inner_size,
+            num_indices
+        );
     } else {
         throw std::runtime_error("index_select_hip: Unsupported dtype");
     }
@@ -532,6 +606,22 @@ auto masked_fill_hip(
             output.data<int64_t>(),
             mask.data<bool>(),
             static_cast<int64_t>(value),
+            total_elements
+        );
+    } else if (output.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(masked_fill_kernel<__half>,
+            dim3(blocks), dim3(threads), 0, 0,
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            mask.data<bool>(),
+            __float2half(static_cast<float>(value)),
+            total_elements
+        );
+    } else if (output.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(masked_fill_kernel<hip_bfloat16>,
+            dim3(blocks), dim3(threads), 0, 0,
+            reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
+            mask.data<bool>(),
+            hip_bfloat16(static_cast<float>(value)),
             total_elements
         );
     } else {
@@ -822,6 +912,24 @@ auto where_hip(
             output.data<int64_t>(),
             total_elements
         );
+    } else if (x.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(where_kernel<__half>,
+            dim3(blocks), dim3(threads), 0, stream,
+            condition.data<bool>(),
+            reinterpret_cast<const __half*>(x.data<Float16>()),
+            reinterpret_cast<const __half*>(y.data<Float16>()),
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            total_elements
+        );
+    } else if (x.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(where_kernel<hip_bfloat16>,
+            dim3(blocks), dim3(threads), 0, stream,
+            condition.data<bool>(),
+            reinterpret_cast<const hip_bfloat16*>(x.data<BFloat16>()),
+            reinterpret_cast<const hip_bfloat16*>(y.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
+            total_elements
+        );
     } else {
         throw std::runtime_error("where_hip: Unsupported dtype");
     }
@@ -951,6 +1059,32 @@ auto slice_hip(
             dim3(blocks), dim3(threads), 0, stream,
             input.data<int64_t>(),
             output.data<int64_t>(),
+            outer_size,
+            input_shape[dim],
+            inner_size,
+            start,
+            end,
+            step,
+            output_dim_size
+        );
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(slice_kernel<__half>,
+            dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            outer_size,
+            input_shape[dim],
+            inner_size,
+            start,
+            end,
+            step,
+            output_dim_size
+        );
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(slice_kernel<hip_bfloat16>,
+            dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
             outer_size,
             input_shape[dim],
             inner_size,
@@ -1142,6 +1276,18 @@ auto cat_hip(
             (const __half* const*)d_input_ptrs,
             d_input_offsets,
             reinterpret_cast<__half*>(output.data<Float16>()),
+            static_cast<int64_t>(cont_tensors.size()),
+            outer_size,
+            total_dim_size,
+            inner_size,
+            d_dim_sizes
+        );
+    } else if (first.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(cat_kernel<hip_bfloat16>,
+            dim3(blocks), dim3(threads), 0, stream,
+            (const hip_bfloat16* const*)d_input_ptrs,
+            d_input_offsets,
+            reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
             static_cast<int64_t>(cont_tensors.size()),
             outer_size,
             total_dim_size,
@@ -1345,6 +1491,28 @@ auto gather_hip(
             inner_size,
             dim_size
         );
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(gather_kernel<__half>,
+            dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            indices.data<int64_t>(),
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            input.numel(),
+            indices_size,
+            inner_size,
+            dim_size
+        );
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(gather_kernel<hip_bfloat16>,
+            dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
+            indices.data<int64_t>(),
+            reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
+            input.numel(),
+            indices_size,
+            inner_size,
+            dim_size
+        );
     } else {
         throw std::runtime_error("gather_hip: Unsupported dtype");
     }
@@ -1418,6 +1586,19 @@ auto scatter_hip(
             reinterpret_cast<__half*>(output.data<Float16>()),
             indices.data<int64_t>(),
             reinterpret_cast<const __half*>(src.data<Float16>()),
+            outer_size,
+            dim_size,
+            inner_size,
+            index_dim_size,
+            total_scatter,
+            false
+        );
+    } else if (output.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(scatter_kernel<hip_bfloat16>,
+            dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
+            indices.data<int64_t>(),
+            reinterpret_cast<const hip_bfloat16*>(src.data<BFloat16>()),
             outer_size,
             dim_size,
             inner_size,
@@ -1534,6 +1715,28 @@ auto index_select_hip(
             inner_size,
             num_indices
         );
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(index_select_kernel<__half>,
+            dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            indices.data<int64_t>(),
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            outer_size,
+            dim_size,
+            inner_size,
+            num_indices
+        );
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(index_select_kernel<hip_bfloat16>,
+            dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
+            indices.data<int64_t>(),
+            reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
+            outer_size,
+            dim_size,
+            inner_size,
+            num_indices
+        );
     } else {
         throw std::runtime_error("index_select_hip: Unsupported dtype");
     }
@@ -1584,6 +1787,22 @@ auto masked_fill_hip(
             output.data<int64_t>(),
             mask.data<bool>(),
             static_cast<int64_t>(value),
+            total_elements
+        );
+    } else if (output.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(masked_fill_kernel<__half>,
+            dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            mask.data<bool>(),
+            __float2half(static_cast<float>(value)),
+            total_elements
+        );
+    } else if (output.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(masked_fill_kernel<hip_bfloat16>,
+            dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
+            mask.data<bool>(),
+            hip_bfloat16(static_cast<float>(value)),
             total_elements
         );
     } else {

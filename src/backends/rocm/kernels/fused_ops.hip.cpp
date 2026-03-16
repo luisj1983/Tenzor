@@ -1,15 +1,72 @@
-#ifdef TENZOR_ROCM_AVAILABLE
-
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
+#include <hip/hip_bfloat16.h>
 #include "tenzor/core/tensor.hpp"
 #include <stdexcept>
 #include <cmath>
+#include <algorithm>
 #include <tuple>
 #include <vector>
+#include <span>
 
 namespace tenzor {
 namespace rocm {
+
+// Helper to create zero-initialized tensor on HIP device
+inline Tensor create_hip_zeros(const std::vector<int64_t>& shape, DType dtype, Device device, hipStream_t stream = nullptr) {
+    Tensor t(shape, dtype, device);
+    size_t bytes = t.numel() * dtype_size(dtype);
+    if (bytes > 0) {
+        hipMemsetAsync(t.data_ptr(), 0, bytes, stream);
+    }
+    return t;
+}
+
+// Helper to convert span to vector
+inline std::vector<int64_t> to_vec(std::span<const int64_t> s) {
+    return std::vector<int64_t>(s.begin(), s.end());
+}
+
+// Simple reduction: sum all elements to a scalar tensor (host-side for small tensors)
+inline Tensor reduce_sum_hip(const Tensor& t) {
+    int64_t n = t.numel();
+    Tensor result({}, t.dtype(), t.device());
+    if (t.dtype() == DType::Float32) {
+        std::vector<float> host(n);
+        hipMemcpy(host.data(), t.data<float>(), n * sizeof(float), hipMemcpyDeviceToHost);
+        float s = 0;
+        for (auto v : host) s += v;
+        hipMemcpy(result.data<float>(), &s, sizeof(float), hipMemcpyHostToDevice);
+    } else if (t.dtype() == DType::Float64) {
+        std::vector<double> host(n);
+        hipMemcpy(host.data(), t.data<double>(), n * sizeof(double), hipMemcpyDeviceToHost);
+        double s = 0;
+        for (auto v : host) s += v;
+        hipMemcpy(result.data<double>(), &s, sizeof(double), hipMemcpyHostToDevice);
+    }
+    return result;
+}
+
+inline Tensor reduce_mean_hip(const Tensor& t) {
+    int64_t n = t.numel();
+    Tensor result({}, t.dtype(), t.device());
+    if (t.dtype() == DType::Float32) {
+        std::vector<float> host(n);
+        hipMemcpy(host.data(), t.data<float>(), n * sizeof(float), hipMemcpyDeviceToHost);
+        float s = 0;
+        for (auto v : host) s += v;
+        s /= static_cast<float>(n);
+        hipMemcpy(result.data<float>(), &s, sizeof(float), hipMemcpyHostToDevice);
+    } else if (t.dtype() == DType::Float64) {
+        std::vector<double> host(n);
+        hipMemcpy(host.data(), t.data<double>(), n * sizeof(double), hipMemcpyDeviceToHost);
+        double s = 0;
+        for (auto v : host) s += v;
+        s /= static_cast<double>(n);
+        hipMemcpy(result.data<double>(), &s, sizeof(double), hipMemcpyHostToDevice);
+    }
+    return result;
+}
 
 // Error checking macro
 #define HIP_CHECK(call) \
@@ -75,8 +132,9 @@ auto fused_linear_relu_hip(
     const Tensor* bias,
     hipStream_t stream
 ) -> Tensor {
-    // BFloat16: upcast to Float32, compute, convert back
-    if (input.dtype() == DType::BFloat16) {
+    // Non-Float32: upcast to Float32, compute, convert back
+    if (input.dtype() != DType::Float32) {
+        DType orig_dtype = input.dtype();
         auto input_f32 = input.to(DType::Float32);
         auto weight_f32 = weight.to(DType::Float32);
         Tensor bias_f32;
@@ -86,7 +144,7 @@ auto fused_linear_relu_hip(
             bias_f32_ptr = &bias_f32;
         }
         auto result = fused_linear_relu_hip(input_f32, weight_f32, bias_f32_ptr, stream);
-        return result.to(DType::BFloat16);
+        return result.to(orig_dtype);
     }
 
     // Flatten input to 2D
@@ -101,13 +159,13 @@ auto fused_linear_relu_hip(
     // Create output tensor
     std::vector<int64_t> output_shape(input_shape.begin(), input_shape.end() - 1);
     output_shape.push_back(out_features);
-    Tensor output = zeros(output_shape, input.dtype(), input.device());
+    Tensor output = create_hip_zeros(output_shape, input.dtype(), input.device());
 
     // Launch kernel
     int64_t total_elements = batch_size * out_features;
     int threads = 256;
     int blocks = (total_elements + threads - 1) / threads;
-    blocks = std::min(blocks, static_cast<int64_t>(65535));
+    blocks = std::min(blocks, 65535);
 
     if (input.dtype() == DType::Float32) {
         const float* bias_ptr = bias ? bias->data<float>() : nullptr;
@@ -173,15 +231,16 @@ auto fused_batchnorm_relu_hip(
     const Tensor& bias,
     float eps
 ) -> Tensor {
-    // BFloat16: upcast to Float32, compute, convert back
-    if (input.dtype() == DType::BFloat16) {
+    // Non-Float32: upcast to Float32, compute, convert back
+    if (input.dtype() != DType::Float32) {
+        DType orig_dtype = input.dtype();
         auto input_f32 = input.to(DType::Float32);
         auto rm_f32 = running_mean.to(DType::Float32);
         auto rv_f32 = running_var.to(DType::Float32);
         auto w_f32 = weight.to(DType::Float32);
         auto b_f32 = bias.to(DType::Float32);
         auto result = fused_batchnorm_relu_hip(input_f32, rm_f32, rv_f32, w_f32, b_f32, eps);
-        return result.to(DType::BFloat16);
+        return result.to(orig_dtype);
     }
 
     int64_t batch_size = input.shape()[0];
@@ -191,12 +250,12 @@ auto fused_batchnorm_relu_hip(
         spatial_size *= input.shape()[i];
     }
 
-    Tensor output = zeros(input.shape(), input.dtype(), input.device());
+    Tensor output = create_hip_zeros(to_vec(input.shape()), input.dtype(), input.device());
 
     int64_t total_elements = input.numel();
     int threads = 256;
     int blocks = (total_elements + threads - 1) / threads;
-    blocks = std::min(blocks, static_cast<int64_t>(65535));
+    blocks = std::min(blocks, 65535);
 
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(fused_batchnorm_relu_kernel<float>,
@@ -290,8 +349,8 @@ auto fused_softmax_cross_entropy_hip(
     const Tensor& targets,
     const std::string& reduction
 ) -> Tensor {
-    // BFloat16: upcast to Float32, compute (loss stays Float32)
-    if (logits.dtype() == DType::BFloat16) {
+    // Non-Float32: upcast to Float32, compute (loss stays Float32)
+    if (logits.dtype() != DType::Float32) {
         auto logits_f32 = logits.to(DType::Float32);
         return fused_softmax_cross_entropy_hip(logits_f32, targets, reduction);
     }
@@ -299,7 +358,7 @@ auto fused_softmax_cross_entropy_hip(
     int64_t batch_size = logits.shape()[0];
     int64_t num_classes = logits.shape()[1];
 
-    Tensor losses = zeros({batch_size}, logits.dtype(), logits.device());
+    Tensor losses = create_hip_zeros({batch_size}, logits.dtype(), logits.device());
 
     constexpr int BLOCK_SIZE = 256;
     int blocks = batch_size;
@@ -322,9 +381,9 @@ auto fused_softmax_cross_entropy_hip(
 
     // Apply reduction
     if (reduction == "mean") {
-        return mean(losses);
+        return reduce_mean_hip(losses);
     } else if (reduction == "sum") {
-        return sum(losses);
+        return reduce_sum_hip(losses);
     } else {
         return losses;
     }
@@ -351,20 +410,21 @@ __global__ void fused_add_relu_kernel(
 }
 
 auto fused_add_relu_hip(const Tensor& a, const Tensor& b) -> Tensor {
-    // BFloat16: upcast to Float32, compute, convert back
-    if (a.dtype() == DType::BFloat16) {
+    // Non-Float32: upcast to Float32, compute, convert back
+    if (a.dtype() != DType::Float32) {
+        DType orig_dtype = a.dtype();
         auto a_f32 = a.to(DType::Float32);
         auto b_f32 = b.to(DType::Float32);
         auto result = fused_add_relu_hip(a_f32, b_f32);
-        return result.to(DType::BFloat16);
+        return result.to(orig_dtype);
     }
 
-    Tensor result = zeros(a.shape(), a.dtype(), a.device());
+    Tensor result = create_hip_zeros(to_vec(a.shape()), a.dtype(), a.device());
 
     int64_t n = a.numel();
     int threads = 256;
     int blocks = (n + threads - 1) / threads;
-    blocks = std::min(blocks, static_cast<int64_t>(65535));
+    blocks = std::min(blocks, 65535);
 
     if (a.dtype() == DType::Float32) {
         hipLaunchKernelGGL(fused_add_relu_kernel<float>,
@@ -409,19 +469,20 @@ __global__ void fused_gelu_kernel(
 }
 
 auto fused_gelu_hip(const Tensor& input) -> Tensor {
-    // BFloat16: upcast to Float32, compute, convert back
-    if (input.dtype() == DType::BFloat16) {
+    // Non-Float32: upcast to Float32, compute, convert back
+    if (input.dtype() != DType::Float32) {
+        DType orig_dtype = input.dtype();
         auto input_f32 = input.to(DType::Float32);
         auto result = fused_gelu_hip(input_f32);
-        return result.to(DType::BFloat16);
+        return result.to(orig_dtype);
     }
 
-    Tensor output = zeros(input.shape(), input.dtype(), input.device());
+    Tensor output = create_hip_zeros(to_vec(input.shape()), input.dtype(), input.device());
 
     int64_t n = input.numel();
     int threads = 256;
     int blocks = (n + threads - 1) / threads;
-    blocks = std::min(blocks, static_cast<int64_t>(65535));
+    blocks = std::min(blocks, 65535);
 
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(fused_gelu_kernel<float>,
@@ -514,13 +575,14 @@ auto fused_layer_norm_hip(
     const Tensor& bias,
     float eps
 ) -> Tensor {
-    // BFloat16: upcast to Float32, compute, convert back
-    if (input.dtype() == DType::BFloat16) {
+    // Non-Float32: upcast to Float32, compute, convert back
+    if (input.dtype() != DType::Float32) {
+        DType orig_dtype = input.dtype();
         auto input_f32 = input.to(DType::Float32);
         auto w_f32 = weight.to(DType::Float32);
         auto b_f32 = bias.to(DType::Float32);
         auto result = fused_layer_norm_hip(input_f32, normalized_shape, w_f32, b_f32, eps);
-        return result.to(DType::BFloat16);
+        return result.to(orig_dtype);
     }
 
     int64_t norm_size = 1;
@@ -530,7 +592,7 @@ auto fused_layer_norm_hip(
 
     int64_t batch_size = input.numel() / norm_size;
 
-    Tensor output = zeros(input.shape(), input.dtype(), input.device());
+    Tensor output = create_hip_zeros(to_vec(input.shape()), input.dtype(), input.device());
 
     constexpr int BLOCK_SIZE = 256;
     int blocks = batch_size;
@@ -599,15 +661,16 @@ auto fused_conv_batchnorm_relu_hip(
     const Tensor& bias,
     float eps
 ) -> Tensor {
-    // BFloat16: upcast to Float32, compute, convert back
-    if (conv_output.dtype() == DType::BFloat16) {
+    // Non-Float32: upcast to Float32, compute, convert back
+    if (conv_output.dtype() != DType::Float32) {
+        DType orig_dtype = conv_output.dtype();
         auto co_f32 = conv_output.to(DType::Float32);
         auto rm_f32 = running_mean.to(DType::Float32);
         auto rv_f32 = running_var.to(DType::Float32);
         auto w_f32 = weight.to(DType::Float32);
         auto b_f32 = bias.to(DType::Float32);
         auto result = fused_conv_batchnorm_relu_hip(co_f32, rm_f32, rv_f32, w_f32, b_f32, eps);
-        return result.to(DType::BFloat16);
+        return result.to(orig_dtype);
     }
 
     int64_t batch_size = conv_output.shape()[0];
@@ -617,12 +680,12 @@ auto fused_conv_batchnorm_relu_hip(
         spatial_size *= conv_output.shape()[i];
     }
 
-    Tensor output = zeros(conv_output.shape(), conv_output.dtype(), conv_output.device());
+    Tensor output = create_hip_zeros(to_vec(conv_output.shape()), conv_output.dtype(), conv_output.device());
 
     int64_t total_elements = conv_output.numel();
     int threads = 256;
     int blocks = (total_elements + threads - 1) / threads;
-    blocks = std::min(blocks, static_cast<int64_t>(65535));
+    blocks = std::min(blocks, 65535);
 
     if (conv_output.dtype() == DType::Float32) {
         hipLaunchKernelGGL(fused_conv_batchnorm_relu_kernel<float>,
@@ -707,8 +770,9 @@ auto fused_matmul_add_hip(
     const Tensor& B,
     const Tensor* bias
 ) -> Tensor {
-    // BFloat16: upcast to Float32, compute, convert back
-    if (A.dtype() == DType::BFloat16) {
+    // Non-Float32: upcast to Float32, compute, convert back
+    if (A.dtype() != DType::Float32) {
+        DType orig_dtype = A.dtype();
         auto a_f32 = A.to(DType::Float32);
         auto b_f32 = B.to(DType::Float32);
         Tensor bias_f32;
@@ -718,14 +782,14 @@ auto fused_matmul_add_hip(
             bias_f32_ptr = &bias_f32;
         }
         auto result = fused_matmul_add_hip(a_f32, b_f32, bias_f32_ptr);
-        return result.to(DType::BFloat16);
+        return result.to(orig_dtype);
     }
 
     int64_t M = A.shape()[0];
     int64_t K = A.shape()[1];
     int64_t N = B.shape()[1];
 
-    Tensor C = zeros({M, N}, A.dtype(), A.device());
+    Tensor C = create_hip_zeros({M, N}, A.dtype(), A.device());
 
     constexpr int TILE_SIZE = 16;
     dim3 threads(TILE_SIZE, TILE_SIZE);
@@ -794,21 +858,22 @@ auto fused_elementwise_chain_hip(
     const Tensor& c,
     int op_type
 ) -> Tensor {
-    // BFloat16: upcast to Float32, compute, convert back
-    if (a.dtype() == DType::BFloat16) {
+    // Non-Float32: upcast to Float32, compute, convert back
+    if (a.dtype() != DType::Float32) {
+        DType orig_dtype = a.dtype();
         auto a_f32 = a.to(DType::Float32);
         auto b_f32 = b.to(DType::Float32);
         auto c_f32 = c.to(DType::Float32);
         auto result = fused_elementwise_chain_hip(a_f32, b_f32, c_f32, op_type);
-        return result.to(DType::BFloat16);
+        return result.to(orig_dtype);
     }
 
-    Tensor output = zeros(a.shape(), a.dtype(), a.device());
+    Tensor output = create_hip_zeros(to_vec(a.shape()), a.dtype(), a.device());
 
     int64_t n = a.numel();
     int threads = 256;
     int blocks = (n + threads - 1) / threads;
-    blocks = std::min(blocks, static_cast<int64_t>(65535));
+    blocks = std::min(blocks, 65535);
 
     if (a.dtype() == DType::Float32) {
         hipLaunchKernelGGL(fused_elementwise_chain_kernel<float>,
@@ -1294,9 +1359,9 @@ auto flash_attention_backward_hip(
             "Supported: Float32, Float16, BFloat16");
     }
 
-    Tensor dQ = zeros({batch_heads, seq_len, head_dim}, Q.dtype(), Q.device());
-    Tensor dK = zeros({batch_heads, seq_len, head_dim}, K.dtype(), K.device());
-    Tensor dV = zeros({batch_heads, seq_len, head_dim}, V.dtype(), V.device());
+    Tensor dQ = create_hip_zeros({batch_heads, seq_len, head_dim}, Q.dtype(), Q.device());
+    Tensor dK = create_hip_zeros({batch_heads, seq_len, head_dim}, K.dtype(), K.device());
+    Tensor dV = create_hip_zeros({batch_heads, seq_len, head_dim}, V.dtype(), V.device());
 
     constexpr int Br = 32;
     constexpr int Bc = 32;
@@ -1365,13 +1430,14 @@ auto fused_attention_hip(
     const Tensor& V,
     float scale
 ) -> std::pair<Tensor, Tensor> {
-    // BFloat16: upcast to Float32, compute, convert back
-    if (Q.dtype() == DType::BFloat16) {
+    // Non-Float32: upcast to Float32, compute, convert back
+    if (Q.dtype() != DType::Float32) {
+        DType orig_dtype = Q.dtype();
         auto q_f32 = Q.to(DType::Float32);
         auto k_f32 = K.to(DType::Float32);
         auto v_f32 = V.to(DType::Float32);
         auto [result, lse] = fused_attention_hip(q_f32, k_f32, v_f32, scale);
-        return {result.to(DType::BFloat16), lse};
+        return {result.to(orig_dtype), lse};
     }
 
     int64_t batch_size = Q.shape()[0];
@@ -1379,8 +1445,8 @@ auto fused_attention_hip(
     int64_t d_k = Q.shape()[2];
     int64_t d_v = V.shape()[2];
 
-    Tensor output = zeros({batch_size, seq_len, d_v}, Q.dtype(), Q.device());
-    Tensor lse = zeros({batch_size, seq_len}, Q.dtype(), Q.device());
+    Tensor output = create_hip_zeros({batch_size, seq_len, d_v}, Q.dtype(), Q.device());
+    Tensor lse = create_hip_zeros({batch_size, seq_len}, Q.dtype(), Q.device());
 
     constexpr int BLOCK_SIZE = 256;
     dim3 threads(BLOCK_SIZE);
@@ -1486,12 +1552,13 @@ auto fused_rms_norm_hip(
     const Tensor& weight,
     float eps
 ) -> std::pair<Tensor, Tensor> {
-    // BFloat16: upcast to Float32, compute, convert back
-    if (input.dtype() == DType::BFloat16) {
+    // Non-Float32: upcast to Float32, compute, convert back
+    if (input.dtype() != DType::Float32) {
+        DType orig_dtype = input.dtype();
         auto input_f32 = input.to(DType::Float32);
         auto weight_f32 = weight.to(DType::Float32);
         auto [result, rrms] = fused_rms_norm_hip(input_f32, weight_f32, eps);
-        return {result.to(DType::BFloat16), rrms};
+        return {result.to(orig_dtype), rrms};
     }
 
     auto shape = input.shape();
@@ -1502,8 +1569,8 @@ auto fused_rms_norm_hip(
         batch_size *= shape[i];
     }
 
-    Tensor output = zeros(input.shape(), input.dtype(), input.device());
-    Tensor rrms = zeros({batch_size}, input.dtype(), input.device());
+    Tensor output = create_hip_zeros(to_vec(input.shape()), input.dtype(), input.device());
+    Tensor rrms = create_hip_zeros({batch_size}, input.dtype(), input.device());
 
     constexpr int BLOCK_SIZE = 256;
     int blocks = batch_size;
@@ -1609,8 +1676,9 @@ auto fused_conv2d_bn_relu_full_hip(
     int64_t padding,
     float eps
 ) -> Tensor {
-    // BFloat16: upcast to Float32, compute, convert back
-    if (input.dtype() == DType::BFloat16) {
+    // Non-Float32: upcast to Float32, compute, convert back
+    if (input.dtype() != DType::Float32) {
+        DType orig_dtype = input.dtype();
         auto input_f32 = input.to(DType::Float32);
         auto weight_f32 = weight.to(DType::Float32);
         Tensor bias_f32;
@@ -1626,7 +1694,7 @@ auto fused_conv2d_bn_relu_full_hip(
         auto result = fused_conv2d_bn_relu_full_hip(input_f32, weight_f32, bias_f32_ptr,
                                                      bn_mean_f32, bn_var_f32, bn_gamma_f32,
                                                      bn_beta_f32, stride, padding, eps);
-        return result.to(DType::BFloat16);
+        return result.to(orig_dtype);
     }
 
     int64_t batch_size = input.shape()[0];
@@ -1641,12 +1709,12 @@ auto fused_conv2d_bn_relu_full_hip(
     int64_t out_h = (in_h + 2 * padding - kernel_h) / stride + 1;
     int64_t out_w = (in_w + 2 * padding - kernel_w) / stride + 1;
 
-    Tensor output = zeros({batch_size, out_channels, out_h, out_w}, input.dtype(), input.device());
+    Tensor output = create_hip_zeros({batch_size, out_channels, out_h, out_w}, input.dtype(), input.device());
 
     int64_t total_elements = batch_size * out_channels * out_h * out_w;
     int threads = 256;
     int blocks = (total_elements + threads - 1) / threads;
-    blocks = std::min(blocks, static_cast<int64_t>(65535));
+    blocks = std::min(blocks, 65535);
 
     if (input.dtype() == DType::Float32) {
         const float* bias_ptr = bias ? bias->data<float>() : nullptr;
@@ -1760,7 +1828,7 @@ auto fused_sgd_step_hip(
     int64_t numel = param.numel();
     constexpr int BLOCK_SIZE = 256;
     int blocks = (numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    blocks = std::min(blocks, static_cast<int64_t>(65535));
+    blocks = std::min(blocks, 65535);
 
     if (param.dtype() == DType::Float32) {
         float* momentum_ptr = momentum_buffer ? momentum_buffer->data<float>() : nullptr;
@@ -1899,7 +1967,7 @@ auto fused_adam_step_hip(
     int64_t numel = param.numel();
     constexpr int BLOCK_SIZE = 256;
     int blocks = (numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    blocks = std::min(blocks, static_cast<int64_t>(65535));
+    blocks = std::min(blocks, 65535);
 
     double bias_correction1 = 1.0 - std::pow(beta1, static_cast<double>(step));
     double bias_correction2 = 1.0 - std::pow(beta2, static_cast<double>(step));
@@ -2283,7 +2351,7 @@ auto fused_adam_atan2_step_hip(
     int64_t numel = param.numel();
     constexpr int BLOCK_SIZE = 256;
     int blocks = (numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    blocks = std::min(blocks, static_cast<int64_t>(65535));
+    blocks = std::min(blocks, 65535);
 
     float bias_correction1 = 1.0f - std::pow(beta1, static_cast<float>(step));
     float bias_correction2 = 1.0f - std::pow(beta2, static_cast<float>(step));
@@ -2617,5 +2685,3 @@ auto fused_layer_norm_backward_hip(
 
 } // namespace rocm
 } // namespace tenzor
-
-#endif // TENZOR_ROCM_AVAILABLE

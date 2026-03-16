@@ -403,7 +403,7 @@ public:
                      int64_t normalized_size, std::vector<Tensor> tensors_to_save)
         : elementwise_affine_(elementwise_affine), eps_(eps),
           normalized_size_(normalized_size) {
-        saved_tensors_ = std::move(tensors_to_save);
+        save_for_backward(std::move(tensors_to_save));
     }
 
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
@@ -1290,7 +1290,7 @@ public:
                      std::vector<Tensor> tensors_to_save)
         : affine_(affine), eps_(eps), num_groups_(num_groups),
           num_channels_(num_channels), group_size_(group_size) {
-        saved_tensors_ = std::move(tensors_to_save);
+        save_for_backward(std::move(tensors_to_save));
     }
 
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
@@ -1765,7 +1765,7 @@ public:
     InstanceNormBackwardFn(bool affine, double eps, int64_t num_features,
                            std::vector<Tensor> tensors_to_save)
         : affine_(affine), eps_(eps), num_features_(num_features) {
-        saved_tensors_ = std::move(tensors_to_save);
+        save_for_backward(std::move(tensors_to_save));
     }
 
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
@@ -2081,7 +2081,7 @@ class RMSNormBackward : public Function {
 public:
     RMSNormBackward(double eps, int64_t normalized_size, std::vector<Tensor> tensors_to_save)
         : eps_(eps), normalized_size_(normalized_size) {
-        saved_tensors_ = std::move(tensors_to_save);
+        save_for_backward(std::move(tensors_to_save));
     }
 
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {

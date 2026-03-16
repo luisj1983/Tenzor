@@ -40,7 +40,7 @@ public:
     MaxPool2dBackward(int64_t kernel_size, int64_t stride, int64_t padding,
                      std::vector<Tensor> tensors_to_save)
         : kernel_size_(kernel_size), stride_(stride), padding_(padding) {
-        saved_tensors_ = std::move(tensors_to_save);
+        save_for_backward(std::move(tensors_to_save));
     }
 
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
@@ -406,7 +406,7 @@ public:
                      std::vector<Tensor> tensors_to_save)
         : kernel_size_(kernel_size), stride_(stride), padding_(padding),
           H_in_(H_in), W_in_(W_in) {
-        saved_tensors_ = std::move(tensors_to_save);
+        save_for_backward(std::move(tensors_to_save));
     }
 
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
@@ -755,7 +755,7 @@ public:
                              int64_t H_out, int64_t W_out,
                              std::vector<Tensor> tensors_to_save)
         : H_in_(H_in), W_in_(W_in), H_out_(H_out), W_out_(W_out) {
-        saved_tensors_ = std::move(tensors_to_save);
+        save_for_backward(std::move(tensors_to_save));
     }
 
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {

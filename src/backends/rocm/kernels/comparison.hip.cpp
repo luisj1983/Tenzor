@@ -198,7 +198,7 @@ auto eq_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
             break;
         case DType::Float16:
             hipLaunchKernelGGL(eq_kernel<__half>, dim3(blocks), dim3(threads), 0, stream,
-                a.data<__half>(), b.data<__half>(), output.data<bool>(), n);
+                reinterpret_cast<const __half*>(a.data<Float16>()), reinterpret_cast<const __half*>(b.data<Float16>()), output.data<bool>(), n);
             break;
         case DType::BFloat16: {
             auto a_f32 = a.to(DType::Float32);
@@ -252,7 +252,7 @@ auto ne_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
             break;
         case DType::Float16:
             hipLaunchKernelGGL(ne_kernel<__half>, dim3(blocks), dim3(threads), 0, stream,
-                a.data<__half>(), b.data<__half>(), output.data<bool>(), n);
+                reinterpret_cast<const __half*>(a.data<Float16>()), reinterpret_cast<const __half*>(b.data<Float16>()), output.data<bool>(), n);
             break;
         case DType::BFloat16: {
             auto a_f32 = a.to(DType::Float32);
@@ -302,7 +302,7 @@ auto lt_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
             break;
         case DType::Float16:
             hipLaunchKernelGGL(lt_kernel<__half>, dim3(blocks), dim3(threads), 0, stream,
-                a.data<__half>(), b.data<__half>(), output.data<bool>(), n);
+                reinterpret_cast<const __half*>(a.data<Float16>()), reinterpret_cast<const __half*>(b.data<Float16>()), output.data<bool>(), n);
             break;
         case DType::BFloat16: {
             auto a_f32 = a.to(DType::Float32);
@@ -352,7 +352,7 @@ auto le_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
             break;
         case DType::Float16:
             hipLaunchKernelGGL(le_kernel<__half>, dim3(blocks), dim3(threads), 0, stream,
-                a.data<__half>(), b.data<__half>(), output.data<bool>(), n);
+                reinterpret_cast<const __half*>(a.data<Float16>()), reinterpret_cast<const __half*>(b.data<Float16>()), output.data<bool>(), n);
             break;
         case DType::BFloat16: {
             auto a_f32 = a.to(DType::Float32);
@@ -402,7 +402,7 @@ auto gt_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
             break;
         case DType::Float16:
             hipLaunchKernelGGL(gt_kernel<__half>, dim3(blocks), dim3(threads), 0, stream,
-                a.data<__half>(), b.data<__half>(), output.data<bool>(), n);
+                reinterpret_cast<const __half*>(a.data<Float16>()), reinterpret_cast<const __half*>(b.data<Float16>()), output.data<bool>(), n);
             break;
         case DType::BFloat16: {
             auto a_f32 = a.to(DType::Float32);
@@ -452,7 +452,7 @@ auto ge_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
             break;
         case DType::Float16:
             hipLaunchKernelGGL(ge_kernel<__half>, dim3(blocks), dim3(threads), 0, stream,
-                a.data<__half>(), b.data<__half>(), output.data<bool>(), n);
+                reinterpret_cast<const __half*>(a.data<Float16>()), reinterpret_cast<const __half*>(b.data<Float16>()), output.data<bool>(), n);
             break;
         case DType::BFloat16: {
             auto a_f32 = a.to(DType::Float32);

@@ -596,6 +596,18 @@ auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, hip
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
             input.data<int64_t>(), output.data<int64_t>(),
             d_input_shape, d_output_shape, d_repeats, ndim, total_elements);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(repeat_kernel_impl<__half>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            d_input_shape, d_output_shape, d_repeats, ndim, total_elements);
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(repeat_kernel_impl<hip_bfloat16>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
+            d_input_shape, d_output_shape, d_repeats, ndim, total_elements);
     } else {
         HIP_CHECK(hipFree(d_input_shape));
         HIP_CHECK(hipFree(d_output_shape));
@@ -726,6 +738,18 @@ auto stack_kernel(const std::vector<Tensor>& tensors, int64_t dim, hipStream_t s
         hipLaunchKernelGGL(stack_kernel_impl<int64_t>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
             (const int64_t* const*)d_input_ptrs, output.data<int64_t>(),
+            static_cast<int64_t>(tensors.size()), tensor_size);
+    } else if (first.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(stack_kernel_impl<__half>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            (const __half* const*)d_input_ptrs,
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            static_cast<int64_t>(tensors.size()), tensor_size);
+    } else if (first.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(stack_kernel_impl<hip_bfloat16>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            (const hip_bfloat16* const*)d_input_ptrs,
+            reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
             static_cast<int64_t>(tensors.size()), tensor_size);
     } else {
         HIP_CHECK(hipFree(d_input_ptrs));

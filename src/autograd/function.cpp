@@ -98,8 +98,12 @@ auto Function::saved_tensors() const -> const std::vector<Tensor>& {
 }
 
 void Function::validate_saved_tensors() const {
-    assert(saved_tensors_.size() == saved_versions_.size() &&
-           "saved_tensors_ and saved_versions_ size mismatch — save_for_backward() is broken");
+    if (saved_tensors_.size() != saved_versions_.size()) {
+        throw std::runtime_error(
+            "saved_tensors_/saved_versions_ size mismatch: " +
+            std::to_string(saved_tensors_.size()) + " tensors vs " +
+            std::to_string(saved_versions_.size()) + " versions in " + name());
+    }
     for (size_t i = 0; i < saved_tensors_.size(); ++i) {
         if (saved_tensors_[i].version() != saved_versions_[i]) {
             throw std::runtime_error(

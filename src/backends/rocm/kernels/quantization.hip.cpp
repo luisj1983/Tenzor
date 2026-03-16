@@ -1,5 +1,3 @@
-#ifdef TENZOR_ROCM_AVAILABLE
-
 #include <hip/hip_runtime.h>
 #include <rocblas/rocblas.h>
 #include "tenzor/core/tensor.hpp"
@@ -397,5 +395,3 @@ auto quantized_conv2d_hip(
 
 } // namespace rocm
 } // namespace tenzor
-
-#endif // TENZOR_ROCM_AVAILABLE

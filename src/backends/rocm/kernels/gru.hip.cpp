@@ -804,7 +804,7 @@ auto gru_forward_kernel(
     Tensor h_t({batch, hidden}, input.dtype(), input.device());
 
     // Copy h0 to h_t
-    HIP_CHECK(hipMemcpyAsync(h_t.data<void>(), h0.data<void>(),
+    HIP_CHECK(hipMemcpyAsync(h_t.data_ptr(), h0.data_ptr(),
                    batch * hidden * dtype_size(input.dtype()),
                    hipMemcpyDeviceToDevice, stream));
 
@@ -1078,8 +1078,8 @@ auto gru_multi_layer_forward_kernel(
     for (int64_t l = 0; l < num_layers; ++l) {
         // Extract h0 for this layer
         Tensor h_l({batch, hidden}, input.dtype(), input.device());
-        HIP_CHECK(hipMemcpyAsync(h_l.data<void>(),
-                       static_cast<const char*>(h0.data<void>()) + l * layer_bytes,
+        HIP_CHECK(hipMemcpyAsync(h_l.data_ptr(),
+                       static_cast<const char*>(h0.data_ptr()) + l * layer_bytes,
                        layer_bytes, hipMemcpyDeviceToDevice, stream));
 
         auto result = gru_forward_kernel(
@@ -1089,8 +1089,8 @@ auto gru_multi_layer_forward_kernel(
         layer_input = result[0];
 
         HIP_CHECK(hipMemcpyAsync(
-            static_cast<char*>(h_n.data<void>()) + l * layer_bytes,
-            result[1].data<void>(), layer_bytes,
+            static_cast<char*>(h_n.data_ptr()) + l * layer_bytes,
+            result[1].data_ptr(), layer_bytes,
             hipMemcpyDeviceToDevice, stream));
     }
 
