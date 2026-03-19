@@ -49,6 +49,30 @@ __device__ __host__ inline BFloat16 from_cuda_bfloat16(const __nv_bfloat16& x) {
 }
 
 // ============================================================================
+// FP16 Saturation Utility
+// ============================================================================
+
+// Clamp ±Inf to ±65504 in-place for Float16 arrays.
+// cuBLAS FP16 output uses standard rounding which can produce Inf for values > 65504.
+// This prevents NaN propagation when Inf interacts with 0 or other Inf values.
+__global__ void matmul_fp16_saturate_kernel(__half* data, int64_t n) {
+    constexpr float kHalfMax = 65504.0f;
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += blockDim.x * gridDim.x) {
+        float val = __half2float(data[idx]);
+        if (val > kHalfMax || val < -kHalfMax) {
+            data[idx] = __float2half(fminf(fmaxf(val, -kHalfMax), kHalfMax));
+        }
+    }
+}
+
+static void saturate_fp16(__half* data, int64_t n, cudaStream_t stream) {
+    if (n <= 0) return;
+    constexpr int kBlock = 256;
+    int grid = static_cast<int>((n + kBlock - 1) / kBlock);
+    matmul_fp16_saturate_kernel<<<grid, kBlock, 0, stream>>>(data, n);
+}
+
+// ============================================================================
 // Tiled Matrix Multiplication Kernels
 // ============================================================================
 
@@ -1256,6 +1280,11 @@ void matmul_cublas_f16(
     if (status != CUBLAS_STATUS_SUCCESS) {
         throw std::runtime_error("cuBLAS GemmEx (FP16) failed with status: " + std::to_string(status));
     }
+
+    // Saturate output: clamp ±Inf to ±65504 to prevent NaN propagation.
+    // cuBLAS FP32→FP16 conversion uses standard rounding (not saturation),
+    // so accumulated values > 65504 become Inf in FP16.
+    saturate_fp16(C, M * N, stream);
 }
 
 // Batched Float16 cuBLAS matmul
@@ -1289,6 +1318,9 @@ void batched_matmul_cublas_f16(
     if (status != CUBLAS_STATUS_SUCCESS) {
         throw std::runtime_error("cuBLAS batched GemmEx (FP16) failed with status: " + std::to_string(status));
     }
+
+    // Saturate output: clamp ±Inf to ±65504 to prevent NaN propagation
+    saturate_fp16(C, batch_size * M * N, stream);
 }
 
 #endif // TENZOR_HAS_CUBLAS

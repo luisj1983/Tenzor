@@ -47,6 +47,7 @@ __device__ __forceinline__ T warp_reduce_sum(T val) {
 }
 
 // Block-level reduction using shared memory
+// Returns the total sum in ALL threads (broadcast via shared memory)
 template<typename T>
 __device__ T block_reduce_sum(T val, T* shared) {
     int lane = threadIdx.x % warpSize;
@@ -65,7 +66,13 @@ __device__ T block_reduce_sum(T val, T* shared) {
         val = warp_reduce_sum(val);
     }
 
-    return val;
+    // Broadcast result from thread 0 to all threads
+    if (threadIdx.x == 0) {
+        shared[0] = val;
+    }
+    __syncthreads();
+
+    return shared[0];
 }
 
 // ==============================================================================

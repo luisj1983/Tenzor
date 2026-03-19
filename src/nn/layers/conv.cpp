@@ -220,14 +220,38 @@ public:
         backward_attrs.set(AttrKey::DilationW, dilation_w_);
         backward_attrs.set(AttrKey::Groups, groups_);
 
-        std::vector<Tensor> backward_inputs = {grad_output, input, weight};
+        // Set shape attributes required by backward kernels (as comma-separated strings)
+        {
+            auto is = input.shape();
+            std::string is_str;
+            for (size_t i = 0; i < is.size(); ++i) {
+                if (i > 0) is_str += ',';
+                is_str += std::to_string(is[i]);
+            }
+            backward_attrs.set(AttrKey::InputShape, is_str);
 
-        // Dispatch individual backward ops via OpId
-        auto grad_input_result = dispatch(OpId::Conv2dBackwardInput, backward_inputs, backward_attrs);
-        auto grad_weight_result = dispatch(OpId::Conv2dBackwardWeight, backward_inputs, backward_attrs);
+            auto ws = weight.shape();
+            std::string ws_str;
+            for (size_t i = 0; i < ws.size(); ++i) {
+                if (i > 0) ws_str += ',';
+                ws_str += std::to_string(ws[i]);
+            }
+            backward_attrs.set(AttrKey::WeightShape, ws_str);
+        }
+
+        // Conv2dBackwardInput: inputs = {grad_output, input, weight}
+        // All 3 tensors needed for cuDNN backward (grad_output for both, weight for grad_input, input for grad_weight)
+        std::vector<Tensor> grad_input_inputs = {grad_output, input, weight};
+        auto grad_input_result = dispatch(OpId::Conv2dBackwardInput, grad_input_inputs, backward_attrs);
+
+        // Conv2dBackwardWeight: inputs = {grad_output, input, weight}
+        std::vector<Tensor> grad_weight_inputs = {grad_output, input, weight};
+        auto grad_weight_result = dispatch(OpId::Conv2dBackwardWeight, grad_weight_inputs, backward_attrs);
 
         if (has_bias) {
-            auto grad_bias_result = dispatch(OpId::Conv2dBackwardBias, backward_inputs, backward_attrs);
+            // Conv2dBackwardBias: inputs = {grad_output}
+            std::vector<Tensor> grad_bias_inputs = {grad_output};
+            auto grad_bias_result = dispatch(OpId::Conv2dBackwardBias, grad_bias_inputs, backward_attrs);
             return {grad_input_result[0], grad_weight_result[0], grad_bias_result[0]};
         }
         return {grad_input_result[0], grad_weight_result[0]};
@@ -992,16 +1016,16 @@ public:
         common_attrs.set(AttrKey::Dilation, dilation_);
         common_attrs.set(AttrKey::Groups, groups_);
 
-        // Backward input
+        // Backward input: inputs = {grad_output, input, weight}
         NewOpAttributes bi_attrs = common_attrs;
         bi_attrs.set(AttrKey::InputShape, std::string_view(shape_to_str(input.shape())));
-        std::vector<Tensor> bi_inputs = {grad_output, weight};
+        std::vector<Tensor> bi_inputs = {grad_output, input, weight};
         auto grad_input = dispatch<OpId::Conv3dBackwardInput>(bi_inputs, bi_attrs)[0];
 
-        // Backward weight
+        // Backward weight: inputs = {grad_output, input, weight}
         NewOpAttributes bw_attrs = common_attrs;
         bw_attrs.set(AttrKey::WeightShape, std::string_view(shape_to_str(weight.shape())));
-        std::vector<Tensor> bw_inputs = {grad_output, input};
+        std::vector<Tensor> bw_inputs = {grad_output, input, weight};
         auto grad_weight = dispatch<OpId::Conv3dBackwardWeight>(bw_inputs, bw_attrs)[0];
 
         if (has_bias) {

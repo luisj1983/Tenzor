@@ -1194,6 +1194,8 @@ auto cudnn_conv2d_backward(
                 input_desc.get(),
                 grad_input.data<Float16>()
             ));
+            // Saturate FP16 output: clamp ±Inf to ±65504 to prevent NaN propagation
+            fp16_saturate(grad_input.data<Float16>(), grad_input.numel(), stream);
         } else if (input.dtype() == DType::BFloat16) {
             CUDNN_CHECK(cudnnConvolutionBackwardData(
                 handle,
@@ -1331,6 +1333,8 @@ auto cudnn_conv2d_backward(
                 filter_desc.get(),
                 grad_weight.data<Float16>()
             ));
+            // Saturate FP16 output: clamp ±Inf to ±65504 to prevent NaN propagation
+            fp16_saturate(grad_weight.data<Float16>(), grad_weight.numel(), stream);
         } else if (input.dtype() == DType::BFloat16) {
             CUDNN_CHECK(cudnnConvolutionBackwardFilter(
                 handle,

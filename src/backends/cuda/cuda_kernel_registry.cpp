@@ -1745,13 +1745,14 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, false, true, false, get_cuda_stream(attrs));
         return {grad_weight};
     });
-    table.register_kernel(OpId::Conv2dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-        auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv2d_backward(
-            inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, false, false, true, get_cuda_stream(attrs));
+    // Conv2dBackwardBias: inputs = {grad_output}
+    // Bias gradient = sum of grad_output over batch and spatial dims (N,H,W)
+    table.register_kernel(OpId::Conv2dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+        const Tensor& grad_output = inputs[0]; // (N, C, H, W)
+        // Sum over dim 3 (W), then 2 (H), then 0 (N) to get (C,)
+        auto t1 = tenzor::sum(grad_output, 3); // (N, C, H)
+        auto t2 = tenzor::sum(t1, 2);          // (N, C)
+        auto grad_bias = tenzor::sum(t2, 0);   // (C,)
         return {grad_bias};
     });
 #else
@@ -1840,13 +1841,14 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, false, true, false, get_cuda_stream(attrs));
         return {grad_weight};
     });
-    table.register_kernel(OpId::Conv3dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-        auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv3d_backward(
-            inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, false, false, true, get_cuda_stream(attrs));
+    // Conv3dBackwardBias: inputs = {grad_output}
+    // Bias gradient = sum of grad_output over batch and spatial dims (N,D,H,W)
+    table.register_kernel(OpId::Conv3dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+        const Tensor& grad_output = inputs[0]; // (N, C, D, H, W)
+        auto t1 = tenzor::sum(grad_output, 4); // (N, C, D, H)
+        auto t2 = tenzor::sum(t1, 3);          // (N, C, D)
+        auto t3 = tenzor::sum(t2, 2);          // (N, C)
+        auto grad_bias = tenzor::sum(t3, 0);   // (C,)
         return {grad_bias};
     });
 

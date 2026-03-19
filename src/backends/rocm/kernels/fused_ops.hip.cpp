@@ -132,8 +132,8 @@ auto fused_linear_relu_hip(
     const Tensor* bias,
     hipStream_t stream
 ) -> Tensor {
-    // Non-Float32: upcast to Float32, compute, convert back
-    if (input.dtype() != DType::Float32) {
+    // Float16/BFloat16: upcast to Float32, compute, convert back
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         DType orig_dtype = input.dtype();
         auto input_f32 = input.to(DType::Float32);
         auto weight_f32 = weight.to(DType::Float32);
@@ -180,8 +180,21 @@ auto fused_linear_relu_hip(
             out_features,
             bias != nullptr
         );
+    } else if (input.dtype() == DType::Float64) {
+        const double* bias_ptr = bias ? bias->data<double>() : nullptr;
+        hipLaunchKernelGGL(fused_linear_relu_kernel<double>,
+            dim3(blocks), dim3(threads), 0, stream,
+            input.data<double>(),
+            weight.data<double>(),
+            bias_ptr,
+            output.data<double>(),
+            batch_size,
+            in_features,
+            out_features,
+            bias != nullptr
+        );
     } else {
-        throw std::runtime_error("fused_linear_relu_hip: Only Float32 supported");
+        throw std::runtime_error("fused_linear_relu_hip: unsupported dtype");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -409,9 +422,93 @@ __global__ void fused_add_relu_kernel(
     }
 }
 
+template<typename T>
+__global__ void fused_add_relu_broadcast_kernel(
+    const T* a,
+    const T* b,
+    T* output,
+    const int64_t* strides_a,
+    const int64_t* strides_b,
+    const int64_t* output_shape,
+    int64_t ndim,
+    int64_t n
+) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t stride = blockDim.x * gridDim.x;
+
+    for (int64_t out_idx = tid; out_idx < n; out_idx += stride) {
+        int64_t idx_a = 0;
+        int64_t idx_b = 0;
+        int64_t tmp = out_idx;
+
+        for (int64_t i = ndim - 1; i >= 0; --i) {
+            int64_t coord = tmp % output_shape[i];
+            tmp /= output_shape[i];
+            idx_a += coord * strides_a[i];
+            idx_b += coord * strides_b[i];
+        }
+
+        T sum = a[idx_a] + b[idx_b];
+        output[out_idx] = (sum > T(0)) ? sum : T(0);
+    }
+}
+
+namespace detail_fused {
+
+inline std::vector<int64_t> compute_broadcast_shape(
+    const std::vector<int64_t>& shape_a,
+    const std::vector<int64_t>& shape_b) {
+    size_t max_ndim = std::max(shape_a.size(), shape_b.size());
+    std::vector<int64_t> result(max_ndim);
+    for (size_t i = 0; i < max_ndim; ++i) {
+        int64_t dim_a = i < shape_a.size() ? shape_a[shape_a.size() - 1 - i] : 1;
+        int64_t dim_b = i < shape_b.size() ? shape_b[shape_b.size() - 1 - i] : 1;
+        if (dim_a == dim_b || dim_a == 1 || dim_b == 1) {
+            result[max_ndim - 1 - i] = std::max(dim_a, dim_b);
+        } else {
+            throw std::runtime_error("fused_add_relu: shapes are not broadcastable");
+        }
+    }
+    return result;
+}
+
+inline std::vector<int64_t> compute_broadcast_strides(
+    const std::vector<int64_t>& shape,
+    const std::vector<int64_t>& broadcast_shape) {
+    std::vector<int64_t> strides(broadcast_shape.size(), 0);
+    std::vector<int64_t> original_strides(shape.size());
+    if (!shape.empty()) {
+        original_strides.back() = 1;
+        for (int64_t i = static_cast<int64_t>(shape.size()) - 2; i >= 0; --i) {
+            original_strides[i] = original_strides[i + 1] * shape[i + 1];
+        }
+    }
+    int64_t offset = static_cast<int64_t>(broadcast_shape.size()) - static_cast<int64_t>(shape.size());
+    for (size_t i = 0; i < shape.size(); ++i) {
+        if (shape[i] == 1) {
+            strides[offset + i] = 0;
+        } else {
+            strides[offset + i] = original_strides[i];
+        }
+    }
+    return strides;
+}
+
+inline bool have_same_shape(const Tensor& a, const Tensor& b) {
+    if (a.ndim() != b.ndim()) return false;
+    auto sa = a.shape();
+    auto sb = b.shape();
+    for (size_t i = 0; i < sa.size(); ++i) {
+        if (sa[i] != sb[i]) return false;
+    }
+    return true;
+}
+
+} // namespace detail_fused
+
 auto fused_add_relu_hip(const Tensor& a, const Tensor& b) -> Tensor {
-    // Non-Float32: upcast to Float32, compute, convert back
-    if (a.dtype() != DType::Float32) {
+    // Float16/BFloat16: upcast to Float32, compute, convert back
+    if (a.dtype() == DType::Float16 || a.dtype() == DType::BFloat16) {
         DType orig_dtype = a.dtype();
         auto a_f32 = a.to(DType::Float32);
         auto b_f32 = b.to(DType::Float32);
@@ -419,26 +516,71 @@ auto fused_add_relu_hip(const Tensor& a, const Tensor& b) -> Tensor {
         return result.to(orig_dtype);
     }
 
-    Tensor result = create_hip_zeros(to_vec(a.shape()), a.dtype(), a.device());
+    auto a_shape = to_vec(a.shape());
+    auto b_shape = to_vec(b.shape());
 
-    int64_t n = a.numel();
-    int threads = 256;
-    int blocks = (n + threads - 1) / threads;
-    blocks = std::min(blocks, 65535);
+    // Fast path: same shape, no broadcasting needed
+    if (detail_fused::have_same_shape(a, b)) {
+        Tensor result = create_hip_zeros(a_shape, a.dtype(), a.device());
+        int64_t n = a.numel();
+        int threads = 256;
+        int blocks = std::min((int)((n + threads - 1) / threads), 65535);
 
-    if (a.dtype() == DType::Float32) {
-        hipLaunchKernelGGL(fused_add_relu_kernel<float>,
-            dim3(blocks), dim3(threads), 0, 0,
-            a.data<float>(),
-            b.data<float>(),
-            result.data<float>(),
-            n
-        );
-    } else {
-        throw std::runtime_error("fused_add_relu_hip: Only Float32 supported");
+        if (a.dtype() == DType::Float64) {
+            hipLaunchKernelGGL(fused_add_relu_kernel<double>,
+                dim3(blocks), dim3(threads), 0, 0,
+                a.data<double>(), b.data<double>(), result.data<double>(), n);
+        } else {
+            hipLaunchKernelGGL(fused_add_relu_kernel<float>,
+                dim3(blocks), dim3(threads), 0, 0,
+                a.data<float>(), b.data<float>(), result.data<float>(), n);
+        }
+        HIP_CHECK(hipGetLastError());
+        return result;
     }
 
+    // Broadcasting path
+    auto output_shape = detail_fused::compute_broadcast_shape(a_shape, b_shape);
+    auto strides_a = detail_fused::compute_broadcast_strides(a_shape, output_shape);
+    auto strides_b = detail_fused::compute_broadcast_strides(b_shape, output_shape);
+    int64_t ndim = static_cast<int64_t>(output_shape.size());
+    int64_t n = 1;
+    for (auto d : output_shape) n *= d;
+
+    Tensor result = create_hip_zeros(output_shape, a.dtype(), a.device());
+
+    // Copy strides and shape to device
+    int64_t* d_strides_a = nullptr;
+    int64_t* d_strides_b = nullptr;
+    int64_t* d_output_shape = nullptr;
+    size_t meta_bytes = ndim * sizeof(int64_t);
+    HIP_CHECK(hipMalloc(&d_strides_a, meta_bytes));
+    HIP_CHECK(hipMalloc(&d_strides_b, meta_bytes));
+    HIP_CHECK(hipMalloc(&d_output_shape, meta_bytes));
+    HIP_CHECK(hipMemcpy(d_strides_a, strides_a.data(), meta_bytes, hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_strides_b, strides_b.data(), meta_bytes, hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_output_shape, output_shape.data(), meta_bytes, hipMemcpyHostToDevice));
+
+    int threads = 256;
+    int blocks = std::min((int)((n + threads - 1) / threads), 65535);
+
+    if (a.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(fused_add_relu_broadcast_kernel<double>,
+            dim3(blocks), dim3(threads), 0, 0,
+            a.data<double>(), b.data<double>(), result.data<double>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n);
+    } else {
+        hipLaunchKernelGGL(fused_add_relu_broadcast_kernel<float>,
+            dim3(blocks), dim3(threads), 0, 0,
+            a.data<float>(), b.data<float>(), result.data<float>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n);
+    }
     HIP_CHECK(hipGetLastError());
+    HIP_CHECK(hipDeviceSynchronize());
+
+    HIP_CHECK(hipFree(d_strides_a));
+    HIP_CHECK(hipFree(d_strides_b));
+    HIP_CHECK(hipFree(d_output_shape));
 
     return result;
 }

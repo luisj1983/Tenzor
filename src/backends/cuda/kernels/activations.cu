@@ -635,7 +635,7 @@ __global__ void tanh_backward_kernel<__half>(const __half* grad_output, const __
                                             __half* grad_input, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float tanh_x = tanhf(__half2float(input[idx]));
-        grad_input[idx] = __float2half(__half2float(grad_output[idx]) * (1.0f - tanh_x * tanh_x));
+        grad_input[idx] = float2half_sat(__half2float(grad_output[idx]) * (1.0f - tanh_x * tanh_x));
     }
 }
 
@@ -777,7 +777,7 @@ __global__ void gelu_backward_kernel<__half>(const __half* grad_output, const __
         // Compute df/dx
         float df_dx = 0.5f * (1.0f + tanh_z) + 0.5f * x * sech2_z * dz_dx;
 
-        grad_input[idx] = __float2half(__half2float(grad_output[idx]) * df_dx);
+        grad_input[idx] = float2half_sat(__half2float(grad_output[idx]) * df_dx);
     }
 }
 
@@ -879,7 +879,7 @@ __global__ void leaky_relu_backward_fp16_kernel(const __half* grad_output, const
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float grad = __half2float(grad_output[idx]);
         float val = __half2float(input[idx]);
-        grad_input[idx] = __float2half(grad * (val > 0.0f ? 1.0f : alpha));
+        grad_input[idx] = float2half_sat(grad * (val > 0.0f ? 1.0f : alpha));
     }
 }
 
@@ -3441,7 +3441,7 @@ __global__ void dropout_forward_kernel_f16(
     bool keep = rand_val >= p;
     mask[idx] = keep ? 1 : 0;
     float val = keep ? __half2float(input[idx]) * scale : 0.0f;
-    output[idx] = __float2half(val);
+    output[idx] = float2half_sat(val);
 }
 
 template<typename T>
@@ -3469,7 +3469,7 @@ __global__ void dropout_backward_kernel_f16(
     if (idx >= n) return;
 
     float val = mask[idx] ? __half2float(grad_output[idx]) * scale : 0.0f;
-    grad_input[idx] = __float2half(val);
+    grad_input[idx] = float2half_sat(val);
 }
 
 // Dropout forward: returns {output, mask}

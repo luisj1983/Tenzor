@@ -1957,6 +1957,63 @@ __global__ void div_inplace_kernel_device(T* a, const T* b, int64_t n) {
     }
 }
 
+// Broadcast in-place kernels: a[i] op= b[broadcast_index(i)]
+template<typename T>
+__global__ void add_inplace_broadcast_kernel(T* a, const T* b, const int64_t* strides_b,
+    const int64_t* a_shape, int64_t ndim, int64_t n) {
+    HIP_KERNEL_LOOP(out_idx, n) {
+        int64_t idx_b = 0, tmp = out_idx;
+        for (int64_t i = ndim - 1; i >= 0; --i) {
+            int64_t coord = tmp % a_shape[i];
+            tmp /= a_shape[i];
+            idx_b += coord * strides_b[i];
+        }
+        a[out_idx] += b[idx_b];
+    }
+}
+
+template<typename T>
+__global__ void sub_inplace_broadcast_kernel(T* a, const T* b, const int64_t* strides_b,
+    const int64_t* a_shape, int64_t ndim, int64_t n) {
+    HIP_KERNEL_LOOP(out_idx, n) {
+        int64_t idx_b = 0, tmp = out_idx;
+        for (int64_t i = ndim - 1; i >= 0; --i) {
+            int64_t coord = tmp % a_shape[i];
+            tmp /= a_shape[i];
+            idx_b += coord * strides_b[i];
+        }
+        a[out_idx] -= b[idx_b];
+    }
+}
+
+template<typename T>
+__global__ void mul_inplace_broadcast_kernel(T* a, const T* b, const int64_t* strides_b,
+    const int64_t* a_shape, int64_t ndim, int64_t n) {
+    HIP_KERNEL_LOOP(out_idx, n) {
+        int64_t idx_b = 0, tmp = out_idx;
+        for (int64_t i = ndim - 1; i >= 0; --i) {
+            int64_t coord = tmp % a_shape[i];
+            tmp /= a_shape[i];
+            idx_b += coord * strides_b[i];
+        }
+        a[out_idx] *= b[idx_b];
+    }
+}
+
+template<typename T>
+__global__ void div_inplace_broadcast_kernel(T* a, const T* b, const int64_t* strides_b,
+    const int64_t* a_shape, int64_t ndim, int64_t n) {
+    HIP_KERNEL_LOOP(out_idx, n) {
+        int64_t idx_b = 0, tmp = out_idx;
+        for (int64_t i = ndim - 1; i >= 0; --i) {
+            int64_t coord = tmp % a_shape[i];
+            tmp /= a_shape[i];
+            idx_b += coord * strides_b[i];
+        }
+        a[out_idx] /= b[idx_b];
+    }
+}
+
 // ============================================================================
 // Dot Product Kernel
 // ============================================================================
@@ -2364,16 +2421,101 @@ auto trunc_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 // Host Wrapper Functions for In-place Binary Operations
 // ============================================================================
 
+namespace detail {
+
+// Check if b is broadcastable to a's shape (for in-place ops, result shape must be a's shape)
+inline bool needs_broadcast_inplace(const Tensor& a, const Tensor& b) {
+    if (a.ndim() == b.ndim()) {
+        auto sa = a.shape();
+        auto sb = b.shape();
+        for (size_t i = 0; i < sa.size(); ++i) {
+            if (sa[i] != sb[i]) return true;
+        }
+        return false;
+    }
+    return true;
+}
+
+// Compute broadcast strides for b relative to a's shape
+// Returns empty vector if not broadcastable
+inline std::vector<int64_t> compute_inplace_broadcast_strides(const Tensor& a, const Tensor& b) {
+    auto a_shape_span = a.shape();
+    auto b_shape_span = b.shape();
+    std::vector<int64_t> a_shape(a_shape_span.begin(), a_shape_span.end());
+    std::vector<int64_t> b_shape(b_shape_span.begin(), b_shape_span.end());
+    return compute_broadcast_strides(b_shape, a_shape);
+}
+
+struct InplaceBroadcastMeta {
+    int64_t* d_strides_b;
+    int64_t* d_a_shape;
+    int64_t ndim;
+
+    static InplaceBroadcastMeta create(const Tensor& a, const Tensor& b) {
+        auto a_shape_span = a.shape();
+        std::vector<int64_t> a_shape(a_shape_span.begin(), a_shape_span.end());
+        auto b_shape_span = b.shape();
+        std::vector<int64_t> b_shape(b_shape_span.begin(), b_shape_span.end());
+        auto strides_b = compute_broadcast_strides(b_shape, a_shape);
+
+        InplaceBroadcastMeta meta;
+        meta.ndim = static_cast<int64_t>(a_shape.size());
+        size_t bytes = meta.ndim * sizeof(int64_t);
+        HIP_CHECK(hipMalloc(&meta.d_strides_b, bytes));
+        HIP_CHECK(hipMalloc(&meta.d_a_shape, bytes));
+        HIP_CHECK(hipMemcpy(meta.d_strides_b, strides_b.data(), bytes, hipMemcpyHostToDevice));
+        HIP_CHECK(hipMemcpy(meta.d_a_shape, a_shape.data(), bytes, hipMemcpyHostToDevice));
+        return meta;
+    }
+
+    void free() {
+        HIP_CHECK(hipFree(d_strides_b));
+        HIP_CHECK(hipFree(d_a_shape));
+    }
+};
+
+} // namespace detail
+
 void add_inplace_kernel(Tensor& a, const Tensor& b, hipStream_t stream) {
     int64_t n = a.numel();
     if (n == 0) return;
 
-    if (a.numel() != b.numel()) {
-        throw std::invalid_argument("Tensor sizes must match for in-place operation");
-    }
-
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
+
+    if (detail::needs_broadcast_inplace(a, b)) {
+        auto meta = detail::InplaceBroadcastMeta::create(a, b);
+        if (a.dtype() == DType::Float32) {
+            hipLaunchKernelGGL(add_inplace_broadcast_kernel<float>, grid, block, 0, stream,
+                a.data<float>(), b.data<float>(), meta.d_strides_b, meta.d_a_shape, meta.ndim, n);
+        } else if (a.dtype() == DType::Float64) {
+            hipLaunchKernelGGL(add_inplace_broadcast_kernel<double>, grid, block, 0, stream,
+                a.data<double>(), b.data<double>(), meta.d_strides_b, meta.d_a_shape, meta.ndim, n);
+        } else if (a.dtype() == DType::Int32) {
+            hipLaunchKernelGGL(add_inplace_broadcast_kernel<int32_t>, grid, block, 0, stream,
+                a.data<int32_t>(), b.data<int32_t>(), meta.d_strides_b, meta.d_a_shape, meta.ndim, n);
+        } else if (a.dtype() == DType::Int64) {
+            hipLaunchKernelGGL(add_inplace_broadcast_kernel<int64_t>, grid, block, 0, stream,
+                a.data<int64_t>(), b.data<int64_t>(), meta.d_strides_b, meta.d_a_shape, meta.ndim, n);
+        } else if (a.dtype() == DType::Float16) {
+            hipLaunchKernelGGL(add_inplace_broadcast_kernel<__half>, grid, block, 0, stream,
+                reinterpret_cast<__half*>(a.data<Float16>()),
+                reinterpret_cast<const __half*>(b.data<Float16>()),
+                meta.d_strides_b, meta.d_a_shape, meta.ndim, n);
+        } else if (a.dtype() == DType::BFloat16) {
+            hipLaunchKernelGGL(add_inplace_broadcast_kernel<hip_bfloat16>, grid, block, 0, stream,
+                reinterpret_cast<hip_bfloat16*>(a.data<BFloat16>()),
+                reinterpret_cast<const hip_bfloat16*>(b.data<BFloat16>()),
+                meta.d_strides_b, meta.d_a_shape, meta.ndim, n);
+        } else {
+            meta.free();
+            throw std::runtime_error("add_inplace operation unsupported dtype");
+        }
+        HIP_CHECK(hipGetLastError());
+        HIP_CHECK(hipDeviceSynchronize());
+        meta.free();
+        return;
+    }
 
     if (a.dtype() == DType::Float32) {
         hipLaunchKernelGGL(add_inplace_kernel_device<float>, grid, block, 0, stream,
@@ -2406,12 +2548,42 @@ void sub_inplace_kernel(Tensor& a, const Tensor& b, hipStream_t stream) {
     int64_t n = a.numel();
     if (n == 0) return;
 
-    if (a.numel() != b.numel()) {
-        throw std::invalid_argument("Tensor sizes must match for in-place operation");
-    }
-
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
+
+    if (detail::needs_broadcast_inplace(a, b)) {
+        auto meta = detail::InplaceBroadcastMeta::create(a, b);
+        if (a.dtype() == DType::Float32) {
+            hipLaunchKernelGGL(sub_inplace_broadcast_kernel<float>, grid, block, 0, stream,
+                a.data<float>(), b.data<float>(), meta.d_strides_b, meta.d_a_shape, meta.ndim, n);
+        } else if (a.dtype() == DType::Float64) {
+            hipLaunchKernelGGL(sub_inplace_broadcast_kernel<double>, grid, block, 0, stream,
+                a.data<double>(), b.data<double>(), meta.d_strides_b, meta.d_a_shape, meta.ndim, n);
+        } else if (a.dtype() == DType::Int32) {
+            hipLaunchKernelGGL(sub_inplace_broadcast_kernel<int32_t>, grid, block, 0, stream,
+                a.data<int32_t>(), b.data<int32_t>(), meta.d_strides_b, meta.d_a_shape, meta.ndim, n);
+        } else if (a.dtype() == DType::Int64) {
+            hipLaunchKernelGGL(sub_inplace_broadcast_kernel<int64_t>, grid, block, 0, stream,
+                a.data<int64_t>(), b.data<int64_t>(), meta.d_strides_b, meta.d_a_shape, meta.ndim, n);
+        } else if (a.dtype() == DType::Float16) {
+            hipLaunchKernelGGL(sub_inplace_broadcast_kernel<__half>, grid, block, 0, stream,
+                reinterpret_cast<__half*>(a.data<Float16>()),
+                reinterpret_cast<const __half*>(b.data<Float16>()),
+                meta.d_strides_b, meta.d_a_shape, meta.ndim, n);
+        } else if (a.dtype() == DType::BFloat16) {
+            hipLaunchKernelGGL(sub_inplace_broadcast_kernel<hip_bfloat16>, grid, block, 0, stream,
+                reinterpret_cast<hip_bfloat16*>(a.data<BFloat16>()),
+                reinterpret_cast<const hip_bfloat16*>(b.data<BFloat16>()),
+                meta.d_strides_b, meta.d_a_shape, meta.ndim, n);
+        } else {
+            meta.free();
+            throw std::runtime_error("sub_inplace operation unsupported dtype");
+        }
+        HIP_CHECK(hipGetLastError());
+        HIP_CHECK(hipDeviceSynchronize());
+        meta.free();
+        return;
+    }
 
     if (a.dtype() == DType::Float32) {
         hipLaunchKernelGGL(sub_inplace_kernel_device<float>, grid, block, 0, stream,
@@ -2425,6 +2597,14 @@ void sub_inplace_kernel(Tensor& a, const Tensor& b, hipStream_t stream) {
     } else if (a.dtype() == DType::Int64) {
         hipLaunchKernelGGL(sub_inplace_kernel_device<int64_t>, grid, block, 0, stream,
             a.data<int64_t>(), b.data<int64_t>(), n);
+    } else if (a.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(sub_inplace_kernel_device<__half>, grid, block, 0, stream,
+            reinterpret_cast<__half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(b.data<Float16>()), n);
+    } else if (a.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(sub_inplace_kernel_device<hip_bfloat16>, grid, block, 0, stream,
+            reinterpret_cast<hip_bfloat16*>(a.data<BFloat16>()),
+            reinterpret_cast<const hip_bfloat16*>(b.data<BFloat16>()), n);
     } else {
         throw std::runtime_error("sub_inplace operation unsupported dtype");
     }
@@ -2436,12 +2616,42 @@ void mul_inplace_kernel(Tensor& a, const Tensor& b, hipStream_t stream) {
     int64_t n = a.numel();
     if (n == 0) return;
 
-    if (a.numel() != b.numel()) {
-        throw std::invalid_argument("Tensor sizes must match for in-place operation");
-    }
-
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
+
+    if (detail::needs_broadcast_inplace(a, b)) {
+        auto meta = detail::InplaceBroadcastMeta::create(a, b);
+        if (a.dtype() == DType::Float32) {
+            hipLaunchKernelGGL(mul_inplace_broadcast_kernel<float>, grid, block, 0, stream,
+                a.data<float>(), b.data<float>(), meta.d_strides_b, meta.d_a_shape, meta.ndim, n);
+        } else if (a.dtype() == DType::Float64) {
+            hipLaunchKernelGGL(mul_inplace_broadcast_kernel<double>, grid, block, 0, stream,
+                a.data<double>(), b.data<double>(), meta.d_strides_b, meta.d_a_shape, meta.ndim, n);
+        } else if (a.dtype() == DType::Int32) {
+            hipLaunchKernelGGL(mul_inplace_broadcast_kernel<int32_t>, grid, block, 0, stream,
+                a.data<int32_t>(), b.data<int32_t>(), meta.d_strides_b, meta.d_a_shape, meta.ndim, n);
+        } else if (a.dtype() == DType::Int64) {
+            hipLaunchKernelGGL(mul_inplace_broadcast_kernel<int64_t>, grid, block, 0, stream,
+                a.data<int64_t>(), b.data<int64_t>(), meta.d_strides_b, meta.d_a_shape, meta.ndim, n);
+        } else if (a.dtype() == DType::Float16) {
+            hipLaunchKernelGGL(mul_inplace_broadcast_kernel<__half>, grid, block, 0, stream,
+                reinterpret_cast<__half*>(a.data<Float16>()),
+                reinterpret_cast<const __half*>(b.data<Float16>()),
+                meta.d_strides_b, meta.d_a_shape, meta.ndim, n);
+        } else if (a.dtype() == DType::BFloat16) {
+            hipLaunchKernelGGL(mul_inplace_broadcast_kernel<hip_bfloat16>, grid, block, 0, stream,
+                reinterpret_cast<hip_bfloat16*>(a.data<BFloat16>()),
+                reinterpret_cast<const hip_bfloat16*>(b.data<BFloat16>()),
+                meta.d_strides_b, meta.d_a_shape, meta.ndim, n);
+        } else {
+            meta.free();
+            throw std::runtime_error("mul_inplace operation unsupported dtype");
+        }
+        HIP_CHECK(hipGetLastError());
+        HIP_CHECK(hipDeviceSynchronize());
+        meta.free();
+        return;
+    }
 
     if (a.dtype() == DType::Float32) {
         hipLaunchKernelGGL(mul_inplace_kernel_device<float>, grid, block, 0, stream,
@@ -2455,6 +2665,14 @@ void mul_inplace_kernel(Tensor& a, const Tensor& b, hipStream_t stream) {
     } else if (a.dtype() == DType::Int64) {
         hipLaunchKernelGGL(mul_inplace_kernel_device<int64_t>, grid, block, 0, stream,
             a.data<int64_t>(), b.data<int64_t>(), n);
+    } else if (a.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(mul_inplace_kernel_device<__half>, grid, block, 0, stream,
+            reinterpret_cast<__half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(b.data<Float16>()), n);
+    } else if (a.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(mul_inplace_kernel_device<hip_bfloat16>, grid, block, 0, stream,
+            reinterpret_cast<hip_bfloat16*>(a.data<BFloat16>()),
+            reinterpret_cast<const hip_bfloat16*>(b.data<BFloat16>()), n);
     } else {
         throw std::runtime_error("mul_inplace operation unsupported dtype");
     }
@@ -2466,12 +2684,31 @@ void div_inplace_kernel(Tensor& a, const Tensor& b, hipStream_t stream) {
     int64_t n = a.numel();
     if (n == 0) return;
 
-    if (a.numel() != b.numel()) {
-        throw std::invalid_argument("Tensor sizes must match for in-place operation");
-    }
-
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
+
+    if (detail::needs_broadcast_inplace(a, b)) {
+        auto meta = detail::InplaceBroadcastMeta::create(a, b);
+        if (a.dtype() == DType::Float32) {
+            hipLaunchKernelGGL(div_inplace_broadcast_kernel<float>, grid, block, 0, stream,
+                a.data<float>(), b.data<float>(), meta.d_strides_b, meta.d_a_shape, meta.ndim, n);
+        } else if (a.dtype() == DType::Float64) {
+            hipLaunchKernelGGL(div_inplace_broadcast_kernel<double>, grid, block, 0, stream,
+                a.data<double>(), b.data<double>(), meta.d_strides_b, meta.d_a_shape, meta.ndim, n);
+        } else if (a.dtype() == DType::Float16) {
+            hipLaunchKernelGGL(div_inplace_broadcast_kernel<__half>, grid, block, 0, stream,
+                reinterpret_cast<__half*>(a.data<Float16>()),
+                reinterpret_cast<const __half*>(b.data<Float16>()),
+                meta.d_strides_b, meta.d_a_shape, meta.ndim, n);
+        } else {
+            meta.free();
+            throw std::runtime_error("div_inplace operation unsupported dtype");
+        }
+        HIP_CHECK(hipGetLastError());
+        HIP_CHECK(hipDeviceSynchronize());
+        meta.free();
+        return;
+    }
 
     if (a.dtype() == DType::Float32) {
         hipLaunchKernelGGL(div_inplace_kernel_device<float>, grid, block, 0, stream,

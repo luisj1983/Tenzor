@@ -3946,6 +3946,24 @@ auto eq_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const int64_t* b_data = b.data<int64_t>();
             #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
             for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] == b_data[i]); }
+        } else if (a.dtype() == DType::Float16) {
+            const Float16* a_data = a.data<Float16>();
+            const Float16* b_data = b.data<Float16>();
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; ++i) {
+                float af = static_cast<float>(a_data[i]);
+                float bf = static_cast<float>(b_data[i]);
+                c_data[i] = (af == bf) && !std::isnan(af) && !std::isnan(bf);
+            }
+        } else if (a.dtype() == DType::BFloat16) {
+            const BFloat16* a_data = a.data<BFloat16>();
+            const BFloat16* b_data = b.data<BFloat16>();
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; ++i) {
+                float af = static_cast<float>(a_data[i]);
+                float bf = static_cast<float>(b_data[i]);
+                c_data[i] = (af == bf) && !std::isnan(af) && !std::isnan(bf);
+            }
         } else if (a.dtype() == DType::Bool) {
             const bool* a_data = a.data<bool>();
             const bool* b_data = b.data<bool>();
@@ -3984,6 +4002,24 @@ auto eq_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const int64_t* b_data = b.data<int64_t>();
             detail::broadcast_op<int64_t, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](int64_t x, int64_t y) { return x == y; });
+        } else if (a.dtype() == DType::Float16) {
+            const Float16* a_data = a.data<Float16>();
+            const Float16* b_data = b.data<Float16>();
+            detail::broadcast_op<Float16, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](Float16 x, Float16 y) {
+                                    float xf = static_cast<float>(x), yf = static_cast<float>(y);
+                                    if (std::isnan(xf) || std::isnan(yf)) return false;
+                                    return xf == yf;
+                                });
+        } else if (a.dtype() == DType::BFloat16) {
+            const BFloat16* a_data = a.data<BFloat16>();
+            const BFloat16* b_data = b.data<BFloat16>();
+            detail::broadcast_op<BFloat16, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](BFloat16 x, BFloat16 y) {
+                                    float xf = static_cast<float>(x), yf = static_cast<float>(y);
+                                    if (std::isnan(xf) || std::isnan(yf)) return false;
+                                    return xf == yf;
+                                });
         } else if (a.dtype() == DType::Bool) {
             const bool* a_data = a.data<bool>();
             const bool* b_data = b.data<bool>();

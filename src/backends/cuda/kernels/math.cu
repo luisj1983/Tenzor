@@ -76,9 +76,16 @@ template<typename T>
 __global__ void fill_kernel_device(T* output, T value, int64_t n);
 
 inline void compute_launch_config_1d(int64_t n, dim3& grid, dim3& block) {
-    auto [num_blocks, block_size] = optimal_launch_config(
-        fill_kernel_device<float>, n);
-    block = dim3(static_cast<unsigned int>(block_size), 1, 1);
+    // Use a safe conservative block size (256) that works for ALL kernels
+    // regardless of register pressure. Using occupancy-based config with a
+    // specific simple kernel (e.g. fill_kernel) produces block sizes that are
+    // too large for complex kernels (adaptive_avg_pool2d, etc.) causing
+    // "too many resources requested for launch" errors on Float64/Float16/BFloat16.
+    // For kernel-specific optimization, use OCCUPANCY_CONFIG(kernel_ptr, ...) instead.
+    constexpr int kBlockSize = 256;
+    int num_blocks = static_cast<int>((n + kBlockSize - 1) / kBlockSize);
+    if (num_blocks < 1) num_blocks = 1;
+    block = dim3(static_cast<unsigned int>(kBlockSize), 1, 1);
     grid  = dim3(static_cast<unsigned int>(num_blocks), 1, 1);
 }
 
@@ -4934,11 +4941,11 @@ __global__ void cast_from_f16_kernel(const __half* input, To* output, int64_t n)
     }
 }
 
-// Specialization for Float16 destination (convert via float)
+// Specialization for Float16 destination (convert via float with saturation)
 template<typename From>
 __global__ void cast_to_f16_kernel(const From* input, __half* output, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(static_cast<float>(input[idx]));
+        output[idx] = float2half_sat(static_cast<float>(input[idx]));
     }
 }
 
@@ -4982,7 +4989,7 @@ __global__ void cast_f16_to_bf16_kernel(const __half* input, __nv_bfloat16* outp
 // BFloat16 -> Float16
 __global__ void cast_bf16_to_f16_kernel(const __nv_bfloat16* input, __half* output, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
-        output[idx] = __float2half(__bfloat162float(input[idx]));
+        output[idx] = float2half_sat(__bfloat162float(input[idx]));
     }
 }
 

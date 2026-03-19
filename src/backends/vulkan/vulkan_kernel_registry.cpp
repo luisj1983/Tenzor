@@ -693,17 +693,19 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConv2dForward(inputs[0], inputs[1], bias_ptr, attrs)};
     });
 
+    // Conv2dBackwardInput: inputs = {grad_output, input, weight}
     table.register_kernel(OpId::Conv2dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConv2dBackwardInput(
-            inputs[0], inputs[1],
+            inputs[0], inputs[2],  // grad_output, weight
             attrs.get_int(AttrKey::Stride, 1), attrs.get_int(AttrKey::Padding, 0),
             attrs.get_int(AttrKey::Dilation, 1), attrs.get_int_list(AttrKey::InputShape),
             attrs.get_int(AttrKey::Groups, 1))};
     });
 
+    // Conv2dBackwardWeight: inputs = {grad_output, input, weight}
     table.register_kernel(OpId::Conv2dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConv2dBackwardWeight(
-            inputs[0], inputs[1],
+            inputs[0], inputs[1],  // grad_output, input
             attrs.get_int(AttrKey::Stride, 1), attrs.get_int(AttrKey::Padding, 0),
             attrs.get_int(AttrKey::Dilation, 1), attrs.get_int_list(AttrKey::WeightShape),
             attrs.get_int(AttrKey::Groups, 1))};
@@ -721,17 +723,19 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConv3dForward(inputs[0], inputs[1], bias_ptr, attrs)};
     });
 
+    // Conv3dBackwardInput: inputs = {grad_output, input, weight}
     table.register_kernel(OpId::Conv3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConv3dBackwardInput(
-            inputs[0], inputs[1],
+            inputs[0], inputs[2],  // grad_output, weight
             attrs.get_int(AttrKey::Stride, 1), attrs.get_int(AttrKey::Padding, 0),
             attrs.get_int(AttrKey::Dilation, 1), attrs.get_int_list(AttrKey::InputShape),
             attrs.get_int(AttrKey::Groups, 1))};
     });
 
+    // Conv3dBackwardWeight: inputs = {grad_output, input, weight}
     table.register_kernel(OpId::Conv3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConv3dBackwardWeight(
-            inputs[0], inputs[1],
+            inputs[0], inputs[1],  // grad_output, input
             attrs.get_int(AttrKey::Stride, 1), attrs.get_int(AttrKey::Padding, 0),
             attrs.get_int(AttrKey::Dilation, 1), attrs.get_int_list(AttrKey::WeightShape),
             attrs.get_int(AttrKey::Groups, 1))};

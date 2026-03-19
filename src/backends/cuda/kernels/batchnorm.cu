@@ -640,15 +640,16 @@ auto batchnorm2d_mean_var(const Tensor& input,
     bool use_chunked = (C < CHUNKED_THRESHOLD);
 
     if (input.dtype() == DType::Float32) {
-        // Use occupancy API for optimal block size (dynamic shared mem = warps * sizeof(T))
-        auto [grid_f32, bs_f32] = optimal_launch_config(
-            batchnorm_mean_kernel<float>, N * H * W, (256 / 32) * sizeof(float));
-        int bn_bs = std::max(32, std::min(bs_f32, 1024));
-        // Round down to multiple of warp size
-        bn_bs = (bn_bs / 32) * 32;
-        int shared_mem_size = (bn_bs / 32) * sizeof(float);
-
         if (use_chunked) {
+            // Query occupancy for both chunked kernels and use the smaller block size
+            auto [grid_cm, bs_cm] = optimal_launch_config(
+                batchnorm_mean_chunked_kernel<float>, N * H * W, (256 / 32) * sizeof(float));
+            auto [grid_cv, bs_cv] = optimal_launch_config(
+                batchnorm_variance_chunked_kernel<float>, N * H * W, (256 / 32) * sizeof(float));
+            int bn_bs = std::max(32, std::min(std::min(bs_cm, bs_cv), 1024));
+            bn_bs = (bn_bs / 32) * 32;
+            int shared_mem_size = (bn_bs / 32) * sizeof(float);
+
             int64_t spatial_chunk_size = static_cast<int64_t>(bn_bs) * 4;
             int64_t spatial_chunks = (total_elements + spatial_chunk_size - 1) / spatial_chunk_size;
             dim3 grid(C, spatial_chunks);
@@ -674,6 +675,15 @@ auto batchnorm2d_mean_var(const Tensor& input,
                 variance.data<float>(), C, total_elements);
             CUDA_CHECK(cudaGetLastError());
         } else {
+            // Use occupancy API — take minimum of mean and variance kernel block sizes
+            auto [grid_m, bs_m] = optimal_launch_config(
+                batchnorm_mean_kernel<float>, N * H * W, (256 / 32) * sizeof(float));
+            auto [grid_v, bs_v] = optimal_launch_config(
+                batchnorm_variance_kernel<float>, N * H * W, (256 / 32) * sizeof(float));
+            int bn_bs = std::max(32, std::min(std::min(bs_m, bs_v), 1024));
+            bn_bs = (bn_bs / 32) * 32;
+            int shared_mem_size = (bn_bs / 32) * sizeof(float);
+
             batchnorm_mean_kernel<float><<<C, bn_bs, shared_mem_size, stream>>>(
                 input.data<float>(), mean.data<float>(), N, C, H, W);
             CUDA_CHECK(cudaGetLastError());
@@ -683,13 +693,15 @@ auto batchnorm2d_mean_var(const Tensor& input,
             CUDA_CHECK(cudaGetLastError());
         }
     } else if (input.dtype() == DType::Float64) {
-        auto [grid_f64, bs_f64] = optimal_launch_config(
-            batchnorm_mean_kernel<double>, N * H * W, (256 / 32) * sizeof(double));
-        int bn_bs = std::max(32, std::min(bs_f64, 1024));
-        bn_bs = (bn_bs / 32) * 32;
-        int shared_mem_size = (bn_bs / 32) * sizeof(double);
-
         if (use_chunked) {
+            auto [grid_cm, bs_cm] = optimal_launch_config(
+                batchnorm_mean_chunked_kernel<double>, N * H * W, (256 / 32) * sizeof(double));
+            auto [grid_cv, bs_cv] = optimal_launch_config(
+                batchnorm_variance_chunked_kernel<double>, N * H * W, (256 / 32) * sizeof(double));
+            int bn_bs = std::max(32, std::min(std::min(bs_cm, bs_cv), 1024));
+            bn_bs = (bn_bs / 32) * 32;
+            int shared_mem_size = (bn_bs / 32) * sizeof(double);
+
             int64_t spatial_chunk_size = static_cast<int64_t>(bn_bs) * 4;
             int64_t spatial_chunks = (total_elements + spatial_chunk_size - 1) / spatial_chunk_size;
             dim3 grid(C, spatial_chunks);
@@ -712,6 +724,14 @@ auto batchnorm2d_mean_var(const Tensor& input,
                 variance.data<double>(), C, total_elements);
             CUDA_CHECK(cudaGetLastError());
         } else {
+            auto [grid_m, bs_m] = optimal_launch_config(
+                batchnorm_mean_kernel<double>, N * H * W, (256 / 32) * sizeof(double));
+            auto [grid_v, bs_v] = optimal_launch_config(
+                batchnorm_variance_kernel<double>, N * H * W, (256 / 32) * sizeof(double));
+            int bn_bs = std::max(32, std::min(std::min(bs_m, bs_v), 1024));
+            bn_bs = (bn_bs / 32) * 32;
+            int shared_mem_size = (bn_bs / 32) * sizeof(double);
+
             batchnorm_mean_kernel<double><<<C, bn_bs, shared_mem_size, stream>>>(
                 input.data<double>(), mean.data<double>(), N, C, H, W);
             CUDA_CHECK(cudaGetLastError());
@@ -721,13 +741,15 @@ auto batchnorm2d_mean_var(const Tensor& input,
             CUDA_CHECK(cudaGetLastError());
         }
     } else if (input.dtype() == DType::Float16) {
-        auto [grid_f16, bs_f16] = optimal_launch_config(
-            batchnorm_mean_kernel<__half>, N * H * W, (256 / 32) * sizeof(__half));
-        int bn_bs = std::max(32, std::min(bs_f16, 1024));
-        bn_bs = (bn_bs / 32) * 32;
-        int shared_mem_size = (bn_bs / 32) * sizeof(__half);
-
         if (use_chunked) {
+            auto [grid_cm, bs_cm] = optimal_launch_config(
+                batchnorm_mean_chunked_kernel<__half>, N * H * W, (256 / 32) * sizeof(__half));
+            auto [grid_cv, bs_cv] = optimal_launch_config(
+                batchnorm_variance_chunked_kernel<__half>, N * H * W, (256 / 32) * sizeof(__half));
+            int bn_bs = std::max(32, std::min(std::min(bs_cm, bs_cv), 1024));
+            bn_bs = (bn_bs / 32) * 32;
+            int shared_mem_size = (bn_bs / 32) * sizeof(__half);
+
             int64_t spatial_chunk_size = static_cast<int64_t>(bn_bs) * 4;
             int64_t spatial_chunks = (total_elements + spatial_chunk_size - 1) / spatial_chunk_size;
             dim3 grid(C, spatial_chunks);
@@ -754,6 +776,14 @@ auto batchnorm2d_mean_var(const Tensor& input,
                 reinterpret_cast<__half*>(variance.data<Float16>()), C, total_elements);
             CUDA_CHECK(cudaGetLastError());
         } else {
+            auto [grid_m, bs_m] = optimal_launch_config(
+                batchnorm_mean_kernel<__half>, N * H * W, (256 / 32) * sizeof(__half));
+            auto [grid_v, bs_v] = optimal_launch_config(
+                batchnorm_variance_kernel<__half>, N * H * W, (256 / 32) * sizeof(__half));
+            int bn_bs = std::max(32, std::min(std::min(bs_m, bs_v), 1024));
+            bn_bs = (bn_bs / 32) * 32;
+            int shared_mem_size = (bn_bs / 32) * sizeof(__half);
+
             batchnorm_mean_kernel<__half><<<C, bn_bs, shared_mem_size, stream>>>(
                 reinterpret_cast<const __half*>(input.data<Float16>()),
                 reinterpret_cast<__half*>(mean.data<Float16>()), N, C, H, W);

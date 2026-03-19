@@ -954,21 +954,25 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{cpu::conv2d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups)};
     });
 
+    // Conv2dBackwardInput: inputs = {grad_output, input, weight}
     table.register_kernel(OpId::Conv2dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t stride = attrs.get_int(AttrKey::Stride, 1);
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
-        return std::vector<Tensor>{cpu::conv2d_backward_input_kernel(inputs[0], inputs[1], input_shape, stride, padding, dilation, groups)};
+        // inputs[0]=grad_output, inputs[2]=weight
+        return std::vector<Tensor>{cpu::conv2d_backward_input_kernel(inputs[0], inputs[2], input_shape, stride, padding, dilation, groups)};
     });
 
+    // Conv2dBackwardWeight: inputs = {grad_output, input, weight}
     table.register_kernel(OpId::Conv2dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t stride = attrs.get_int(AttrKey::Stride, 1);
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
+        // inputs[0]=grad_output, inputs[1]=input
         return std::vector<Tensor>{cpu::conv2d_backward_weight_kernel(inputs[0], inputs[1], weight_shape, stride, padding, dilation, groups)};
     });
 
@@ -986,21 +990,25 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{cpu::conv3d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups)};
     });
 
+    // Conv3dBackwardInput: inputs = {grad_output, input, weight}
     table.register_kernel(OpId::Conv3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t stride = attrs.get_int(AttrKey::Stride, 1);
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
-        return std::vector<Tensor>{cpu::conv3d_backward_input_kernel(inputs[0], inputs[1], input_shape, stride, padding, dilation, groups)};
+        // inputs[0]=grad_output, inputs[2]=weight
+        return std::vector<Tensor>{cpu::conv3d_backward_input_kernel(inputs[0], inputs[2], input_shape, stride, padding, dilation, groups)};
     });
 
+    // Conv3dBackwardWeight: inputs = {grad_output, input, weight}
     table.register_kernel(OpId::Conv3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t stride = attrs.get_int(AttrKey::Stride, 1);
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
+        // inputs[0]=grad_output, inputs[1]=input
         return std::vector<Tensor>{cpu::conv3d_backward_weight_kernel(inputs[0], inputs[1], weight_shape, stride, padding, dilation, groups)};
     });
 

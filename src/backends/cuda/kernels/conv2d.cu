@@ -32,9 +32,15 @@ __global__ void im2col_kernel(
     int64_t dilation, int64_t out_h, int64_t out_w);
 
 inline void compute_launch_config_1d(int64_t n, dim3& grid, dim3& block) {
-    auto [num_blocks, block_size] = optimal_launch_config(
-        im2col_kernel<float>, n);
-    block = dim3(static_cast<unsigned int>(block_size), 1, 1);
+    // Use a safe conservative block size (256) that works for ALL kernels
+    // regardless of register pressure. Using occupancy-based config with a
+    // specific simple kernel (e.g. im2col) produces block sizes that are
+    // too large for complex kernels (conv_transpose2d, depthwise_conv2d, etc.)
+    // causing "too many resources requested for launch" on Float64/Float16/BFloat16.
+    constexpr int kBlockSize = 256;
+    int num_blocks = static_cast<int>((n + kBlockSize - 1) / kBlockSize);
+    if (num_blocks < 1) num_blocks = 1;
+    block = dim3(static_cast<unsigned int>(kBlockSize), 1, 1);
     grid  = dim3(static_cast<unsigned int>(num_blocks), 1, 1);
 }
 

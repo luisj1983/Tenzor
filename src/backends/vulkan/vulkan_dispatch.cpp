@@ -366,16 +366,17 @@ static const std::unordered_map<std::string, VkDispatchHandler>& get_dispatch_ta
         // ==================================================================
         // Conv2d backward operations
         // ==================================================================
+        // Conv2d backward: inputs = {grad_output, input, weight}
         {"conv2d_backward_input", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
-            if (inputs.size() != 2) throw std::invalid_argument("conv2d_backward_input requires 2 inputs (grad_output, weight)");
+            if (inputs.size() < 3) throw std::invalid_argument("conv2d_backward_input requires 3 inputs (grad_output, input, weight)");
             int64_t stride = attrs.get_int(AttrKey::Stride, 1);
             int64_t padding = attrs.get_int(AttrKey::Padding, 0);
             int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
             std::vector<int64_t> input_shape = attrs.get_int_list(AttrKey::InputShape);
-            return std::vector<Tensor>{b->dispatchConv2dBackwardInput(inputs[0], inputs[1], stride, padding, dilation, input_shape)};
+            return std::vector<Tensor>{b->dispatchConv2dBackwardInput(inputs[0], inputs[2], stride, padding, dilation, input_shape)};
         }},
         {"conv2d_backward_weight", [](VulkanBackend* b, const std::string&, std::span<const Tensor> inputs, const OpAttributes& attrs) {
-            if (inputs.size() != 2) throw std::invalid_argument("conv2d_backward_weight requires 2 inputs (grad_output, input)");
+            if (inputs.size() < 3) throw std::invalid_argument("conv2d_backward_weight requires 3 inputs (grad_output, input, weight)");
             int64_t stride = attrs.get_int(AttrKey::Stride, 1);
             int64_t padding = attrs.get_int(AttrKey::Padding, 0);
             int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
