@@ -11,18 +11,15 @@ layout(push_constant) uniform PushConstants {
     uint n;          // Total number of elements
     uint ndim;       // Number of dimensions
     uint transform;  // 0=copy, 1=transpose, 2=permute
-    uint dim0;       // First dimension for transpose
-    uint dim1;       // Second dimension for transpose
+    uint rows;       // Number of rows (input dim0)
+    uint cols;       // Number of cols (input dim1)
 } params;
 
-// Simplified transpose for 2D
+// Transpose for arbitrary 2D matrix (rows x cols) -> (cols x rows)
 void transpose_2d(uint idx) {
-    // Assumes square matrix for simplicity
-    // Production would handle arbitrary dimensions
-    uint size = uint(sqrt(float(params.n)));
-    uint row = idx / size;
-    uint col = idx % size;
-    uint new_idx = col * size + row;
+    uint row = idx / params.cols;
+    uint col = idx % params.cols;
+    uint new_idx = col * params.rows + row;
     output_data[new_idx] = input_data[idx];
 }
 

@@ -47,6 +47,21 @@ inline DType dtype_from_string(std::string_view s, DType default_val = DType::Fl
     return default_val;
 }
 
+// Helper: extract normalized_shape from attrs (may be string or int list)
+static int64_t vulkan_extract_normalized_size(const OpAttributes& attrs, const Tensor& fallback) {
+    auto ns_str = attrs.get_string(AttrKey::NormalizedShape);
+    if (!ns_str.empty()) {
+        return std::stoll(std::string(ns_str));
+    }
+    auto ns_list = attrs.get_int_list(AttrKey::NormalizedShape);
+    if (!ns_list.empty()) {
+        int64_t sz = 1;
+        for (auto s : ns_list) sz *= s;
+        if (sz > 0) return sz;
+    }
+    return fallback.shape().back();
+}
+
 /**
  * @brief Register all Vulkan kernels with the dispatch table.
  *
@@ -246,22 +261,22 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // ========================================================================
     table.register_kernel(OpId::Sum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchReduction("sum", inputs[0],
-            attrs.get_int(AttrKey::Dim, -1), attrs.get_bool(AttrKey::Keepdim, false))};
+            attrs.get_int(AttrKey::Dim, LLONG_MIN), attrs.get_bool(AttrKey::Keepdim, false))};
     });
 
     table.register_kernel(OpId::Mean, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchReduction("mean", inputs[0],
-            attrs.get_int(AttrKey::Dim, -1), attrs.get_bool(AttrKey::Keepdim, false))};
+            attrs.get_int(AttrKey::Dim, LLONG_MIN), attrs.get_bool(AttrKey::Keepdim, false))};
     });
 
     table.register_kernel(OpId::Max, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchReduction("max", inputs[0],
-            attrs.get_int(AttrKey::Dim, -1), attrs.get_bool(AttrKey::Keepdim, false))};
+            attrs.get_int(AttrKey::Dim, LLONG_MIN), attrs.get_bool(AttrKey::Keepdim, false))};
     });
 
     table.register_kernel(OpId::Min, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchReduction("min", inputs[0],
-            attrs.get_int(AttrKey::Dim, -1), attrs.get_bool(AttrKey::Keepdim, false))};
+            attrs.get_int(AttrKey::Dim, LLONG_MIN), attrs.get_bool(AttrKey::Keepdim, false))};
     });
 
     table.register_kernel(OpId::ArgMax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -563,7 +578,16 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // Pooling Operations
     // ========================================================================
     table.register_kernel(OpId::MaxPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchMaxPool2dForward(inputs[0], attrs)};
+        // Extract scalar attrs (from nn::MaxPool2d) or per-dimension attrs
+        int64_t kernel_h = attrs.has(AttrKey::KernelSizeH) ? attrs.get_int(AttrKey::KernelSizeH) : attrs.get_int(AttrKey::KernelSize, 2);
+        int64_t kernel_w = attrs.has(AttrKey::KernelSizeW) ? attrs.get_int(AttrKey::KernelSizeW) : kernel_h;
+        int64_t stride_h = attrs.has(AttrKey::StrideH) ? attrs.get_int(AttrKey::StrideH) : attrs.get_int(AttrKey::Stride, kernel_h);
+        int64_t stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : stride_h;
+        int64_t padding_h = attrs.has(AttrKey::PaddingH) ? attrs.get_int(AttrKey::PaddingH) : attrs.get_int(AttrKey::Padding, 0);
+        int64_t padding_w = attrs.has(AttrKey::PaddingW) ? attrs.get_int(AttrKey::PaddingW) : padding_h;
+        auto [output, indices] = get_vulkan_backend()->dispatchMaxPool2d(
+            inputs[0], kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w);
+        return std::vector<Tensor>{output, indices};
     });
 
     table.register_kernel(OpId::MaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -834,10 +858,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // Normalization Operations
     // ========================================================================
     table.register_kernel(OpId::LayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
-        int64_t normalized_size = 1;
-        for (auto s : normalized_shape) normalized_size *= s;
-        if (normalized_size <= 0) normalized_size = inputs[0].shape().back();
+        int64_t normalized_size = vulkan_extract_normalized_size(attrs, inputs[0]);
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         const Tensor* gamma = inputs.size() > 1 ? &inputs[1] : nullptr;
         const Tensor* beta = inputs.size() > 2 ? &inputs[2] : nullptr;
@@ -846,7 +867,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::LayerNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t normalized_shape = attrs.get_int(AttrKey::NormalizedShape, inputs[0].shape().back());
+        int64_t normalized_shape = vulkan_extract_normalized_size(attrs, inputs[0]);
         auto [grad_input, grad_weight, grad_bias] = get_vulkan_backend()->dispatchLayerNormBackward(
             inputs[0], inputs[1], inputs[2], inputs[3], &inputs[4], normalized_shape);
         return std::vector<Tensor>{grad_input, grad_weight, grad_bias};
@@ -1035,7 +1056,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // ========================================================================
     table.register_kernel(OpId::FusedLinearReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto vk = get_vulkan_backend();
-        bool has_bias = attrs.get_string(AttrKey::Mode) == "true";
+        bool has_bias = attrs.get_bool(AttrKey::HasBias, false);
         auto input_shape = inputs[0].shape();
         int64_t in_features = input_shape.back();
         int64_t batch_size = 1;

@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ninja:*)",
+      "Bash(cmake:*)",
+      "Bash(python3:*)",
+      "Bash(ctest:*)"
+    ]
+  }
+}

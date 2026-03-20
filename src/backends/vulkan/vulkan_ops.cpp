@@ -6574,16 +6574,15 @@ auto VulkanBackend::dispatchTranspose(const Tensor& input, int64_t dim0, int64_t
     int32_t device_id = input.device().index;
 
     // For simple 2D transpose or contiguous case, use optimized path
-    if (ndim == 2 && input.is_contiguous()) {
-        // Use simplified transform shader for 2D case
+    if (ndim == 2 && input.is_contiguous() &&
+        (input.dtype() == DType::Float32 || input.dtype() == DType::Float64)) {
+        // Use simplified transform shader for 2D Float32/Float64 case
+        // Float16/BFloat16 fall through to the generic permute path
         std::string shader_name;
         if (input.dtype() == DType::Float64) {
             shader_name = "transform_f64";
-        } else if (input.dtype() == DType::Float32) {
-            shader_name = "transform";
         } else {
-            vulkan_assert_dtype_supported("transpose_2d", input.dtype(),
-                {DType::Float32, DType::Float64});
+            shader_name = "transform";
         }
         auto* pipeline = getPipeline(shader_name, device_id);
         Tensor output(out_shape, input.dtype(), input.device());
@@ -6607,15 +6606,15 @@ auto VulkanBackend::dispatchTranspose(const Tensor& input, int64_t dim0, int64_t
             uint32_t n;
             uint32_t ndim;
             uint32_t transform;
-            uint32_t dim0;
-            uint32_t dim1;
+            uint32_t rows;
+            uint32_t cols;
         } push_constants;
 
         push_constants.n = static_cast<uint32_t>(input.numel());
         push_constants.ndim = static_cast<uint32_t>(ndim);
         push_constants.transform = 1; // transpose
-        push_constants.dim0 = static_cast<uint32_t>(dim0);
-        push_constants.dim1 = static_cast<uint32_t>(dim1);
+        push_constants.rows = static_cast<uint32_t>(input_shape[0]);
+        push_constants.cols = static_cast<uint32_t>(input_shape[1]);
 
         VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
 
@@ -6681,10 +6680,13 @@ auto VulkanBackend::dispatchPermute(const Tensor& input, const std::vector<int64
     // Create output tensor
     Tensor output(out_shape, input.dtype(), input.device());
 
-    // Get pipeline - select F16 variant for Float16 dtype
-    bool is_permute_f16 = (input.dtype() == DType::Float16);
-    bool is_permute_f64 = (input.dtype() == DType::Float64);
-    auto* pipeline = getPipeline(is_permute_f64 ? "permute_f64" : is_permute_f16 ? "permute_f16" : "permute", device_id);
+    // Get pipeline - select dtype-specific shader variant
+    std::string permute_shader;
+    if (input.dtype() == DType::Float64) permute_shader = "permute_f64";
+    else if (input.dtype() == DType::Float16) permute_shader = "permute_f16";
+    else if (input.dtype() == DType::BFloat16) permute_shader = "permute_bf16";
+    else permute_shader = "permute";
+    auto* pipeline = getPipeline(permute_shader, device_id);
     auto& ctx = devices_[device_id];
 
     // Get Vulkan buffers for input and output
@@ -11244,16 +11246,17 @@ auto VulkanBackend::dispatchWhere(const Tensor& condition, const Tensor& x, cons
     // where(cond, x, y) = cond * x + (1 - cond) * y
     // This works if condition is 0 or 1
 
-    // Convert condition to float if needed
-    Tensor cond_float = condition.dtype() == DType::Float32 ? condition : condition.to(DType::Float32);
+    // Convert condition to the same dtype as x to preserve output dtype
+    DType target_dtype = x.dtype();
+    Tensor cond_typed = condition.dtype() == target_dtype ? condition : condition.to(target_dtype);
 
     // Compute: cond * x
-    Tensor term1 = dispatchBinaryOp("mul", cond_float, x);
+    Tensor term1 = dispatchBinaryOp("mul", cond_typed, x);
 
     // Compute: (1 - cond)
     std::vector<int64_t> cond_shape_vec(cond_shape.begin(), cond_shape.end());
-    Tensor one_tensor = dispatchFull(cond_shape_vec, 1.0f, DType::Float32);
-    Tensor inv_cond = dispatchBinaryOp("sub", one_tensor, cond_float);
+    Tensor one_tensor = dispatchFull(cond_shape_vec, 1.0f, target_dtype);
+    Tensor inv_cond = dispatchBinaryOp("sub", one_tensor, cond_typed);
 
     // Compute: (1 - cond) * y
     Tensor term2 = dispatchBinaryOp("mul", inv_cond, y);

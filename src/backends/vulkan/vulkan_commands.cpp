@@ -12,6 +12,15 @@
 namespace tenzor {
 
 VkCommandBuffer VulkanBackend::beginSingleTimeCommands(int32_t device_id) {
+    auto& ctx = devices_[device_id];
+    // Lock the device mutex for the entire command recording sequence.
+    // This prevents two threads from interleaving vkCmd* calls on the
+    // same command buffer (undefined behavior in Vulkan).
+    // The recursive_mutex allows re-entrant calls from the same thread
+    // (e.g., dispatchContiguous called within dispatchMatmul).
+    // Unlocked in endSingleTimeCommands.
+    ctx.mutex.lock();
+
     if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
         // Use batched command buffer for reduced submission overhead
         return getOrCreateBatchCommandBuffer(device_id);
@@ -29,6 +38,10 @@ void VulkanBackend::endSingleTimeCommands(VkCommandBuffer commandBuffer, int32_t
         // Legacy path: submit immediately with fence tracking
         endSingleTimeCommandsAsync(commandBuffer, device_id);
     }
+
+    // Unlock the device mutex acquired in beginSingleTimeCommands.
+    auto& ctx = devices_[device_id];
+    ctx.mutex.unlock();
 }
 
 void VulkanBackend::initCommandBufferPool(DeviceContext& ctx) {
