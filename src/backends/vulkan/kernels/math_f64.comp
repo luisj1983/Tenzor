@@ -126,8 +126,9 @@ double log_double(double x) {
     double t2 = c4 + c5 * s2 + c6 * s4 + c7 * s6;
     double R = t1 + t2 * s6;
 
-    // log(m) = 2*s + 2*s*s2*R = 2*s*(1 + s2*R)
-    double log_m = 2.0LF * s + 2.0LF * s * s2 * R;
+    // log(1+f) = 2*atanh(s) = 2*s + s*s2*R where R uses fdlibm minimax coefficients
+    // (R already contains the factor of 2 from the atanh series: c1≈2/3, c2≈2/5, etc.)
+    double log_m = 2.0LF * s + s * s2 * R;
 
     // ln(2) split into high and low parts for precision
     double ln2_hi = 0.69314718055994530942LF;

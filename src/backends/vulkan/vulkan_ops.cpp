@@ -1030,6 +1030,16 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
     bool is_float16 = (input.dtype() == DType::Float16);
     bool is_bfloat16 = (input.dtype() == DType::BFloat16);
     bool is_int32 = (input.dtype() == DType::Int32);
+    bool is_int64 = (input.dtype() == DType::Int64);
+
+    // Int64 has no native shader; convert to Float64 for reduction, then convert back
+    DType orig_dtype = input.dtype();
+    Tensor reduction_input = input;
+    if (is_int64) {
+        reduction_input = input.to(DType::Float64);
+        is_float64 = true;
+    }
+
     std::string shader_name;
     if (is_float64) {
         shader_name = "reduction_f64";
@@ -1080,14 +1090,14 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
         }
     }
 
-    Tensor output(out_shape, input.dtype(), input.device());
+    Tensor output(out_shape, reduction_input.dtype(), reduction_input.device());
 
     // Get VkBuffer handles from tensor data pointers
-    const void* buffer_in = input.data_ptr();
+    const void* buffer_in = reduction_input.data_ptr();
     const void* buffer_out = output.data_ptr();
 
     // Calculate buffer sizes
-    size_t buffer_size_in = input.numel() * input.dtype_size();
+    size_t buffer_size_in = reduction_input.numel() * reduction_input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
     if (is_float16 || is_bfloat16) {
         // Round up to 4-byte boundary for uint32 shader access (2 Float16/BFloat16 per uint32)
@@ -1132,7 +1142,7 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
         uint32_t op;            // Operation code (0=sum, 1=mean, 2=max, 3=min)
     } pushConstants;
 
-    pushConstants.n = static_cast<uint32_t>(input.numel());
+    pushConstants.n = static_cast<uint32_t>(reduction_input.numel());
     pushConstants.reduce_size = full_reduction ? pushConstants.n : static_cast<uint32_t>(input_shape[dim]);
     pushConstants.outer_size = full_reduction ? 1 : static_cast<uint32_t>(output.numel());
     pushConstants.inner_size = inner_size;
@@ -1160,6 +1170,10 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
     // Synchronize to ensure GPU has completed before reading results
     synchronize(device_id);
 
+    // Convert back to original dtype if we did an Int64->Float64 conversion
+    if (orig_dtype != output.dtype()) {
+        return output.to(orig_dtype);
+    }
     return output;
 }
 
@@ -3217,8 +3231,9 @@ auto VulkanBackend::dispatchLayerNorm(const Tensor& input, int64_t normalized_sh
     auto input_shape = input.shape();
     int32_t device_id = input.device().index;
 
-    // For Float16, upcast to Float32 for numerical stability
-    if (input.dtype() == DType::Float16) {
+    // For Float16/BFloat16, upcast to Float32 for numerical stability
+    // (BFloat16 has only 7 mantissa bits, gamma/beta dtype must also match shader expectations)
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         DType orig_dtype = input.dtype();
         auto input_f32 = input.to(DType::Float32);
         Tensor gamma_f32, beta_f32;
@@ -5064,8 +5079,22 @@ auto VulkanBackend::dispatchNorm(const Tensor& input, float p, int64_t dim, bool
 auto VulkanBackend::dispatchProd(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
     int32_t device_id = input.device().index;
 
+    // Int64 has no native prod shader; convert to Float64, compute, convert back
+    DType orig_dtype = input.dtype();
+    Tensor prod_input = input;
+    if (orig_dtype == DType::Int64) {
+        prod_input = input.to(DType::Float64);
+    }
+
     // Select correct pipeline based on dtype
-    std::string shader_name = (input.dtype() == DType::Int32) ? "prod_reduction_i32" : "prod_reduction";
+    std::string shader_name;
+    if (prod_input.dtype() == DType::Int32) {
+        shader_name = "prod_reduction_i32";
+    } else if (prod_input.dtype() == DType::Float64) {
+        shader_name = "prod_reduction_f64";
+    } else {
+        shader_name = "prod_reduction";
+    }
     auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<int64_t> out_shape;
@@ -5092,14 +5121,14 @@ auto VulkanBackend::dispatchProd(const Tensor& input, int64_t dim, bool keepdim)
 
     // For full reduction to scalar, we still need buffer space, so use [1] internally
     std::vector<int64_t> buffer_shape = out_shape.empty() ? std::vector<int64_t>{1} : out_shape;
-    Tensor output(buffer_shape, input.dtype(), input.device());
+    Tensor output(buffer_shape, prod_input.dtype(), prod_input.device());
 
     // Get VkBuffer handles from tensor data pointers
-    const void* buffer_in = input.data_ptr();
+    const void* buffer_in = prod_input.data_ptr();
     const void* buffer_out = output.data_ptr();
 
     // Calculate buffer sizes
-    size_t buffer_size_in = input.numel() * input.dtype_size();
+    size_t buffer_size_in = prod_input.numel() * prod_input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
 
     // Allocate and write descriptor set
@@ -5135,7 +5164,7 @@ auto VulkanBackend::dispatchProd(const Tensor& input, int64_t dim, bool keepdim)
         uint32_t inner_size;
     } pushConstants;
 
-    pushConstants.n = static_cast<uint32_t>(input.numel());
+    pushConstants.n = static_cast<uint32_t>(prod_input.numel());
     pushConstants.reduce_size = (dim >= 0) ? static_cast<uint32_t>(input_shape[dim]) : pushConstants.n;
     pushConstants.outer_size = (dim >= 0) ? static_cast<uint32_t>(output.numel()) : 1;
     pushConstants.inner_size = inner_size;
@@ -5155,11 +5184,17 @@ auto VulkanBackend::dispatchProd(const Tensor& input, int64_t dim, bool keepdim)
     // Synchronize to ensure GPU has completed before reading results
     synchronize(device_id);
 
+    // Convert back to original dtype if we did an Int64->Float64 conversion
+    Tensor result = output;
+    if (orig_dtype != result.dtype()) {
+        result = result.to(orig_dtype);
+    }
+
     // If output should be scalar but we used [1] internally, reshape to scalar
     if (full_reduction && !keepdim) {
-        return output.reshape({});
+        return result.reshape({});
     }
-    return output;
+    return result;
 }
 
 auto VulkanBackend::dispatchBooleanReduction(const std::string& op_name,
@@ -6574,23 +6609,27 @@ auto VulkanBackend::dispatchTranspose(const Tensor& input, int64_t dim0, int64_t
     int32_t device_id = input.device().index;
 
     // For simple 2D transpose or contiguous case, use optimized path
-    if (ndim == 2 && input.is_contiguous() &&
-        (input.dtype() == DType::Float32 || input.dtype() == DType::Float64)) {
-        // Use simplified transform shader for 2D Float32/Float64 case
-        // Float16/BFloat16 fall through to the generic permute path
+    if (ndim == 2 && input.is_contiguous()) {
+        // Use simplified transform shader for 2D case
+        // For Float16/BFloat16, convert to Float32, transpose, convert back
+        DType orig_dtype = input.dtype();
+        Tensor transpose_input = input;
+        if (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16) {
+            transpose_input = input.to(DType::Float32);
+        }
         std::string shader_name;
-        if (input.dtype() == DType::Float64) {
+        if (transpose_input.dtype() == DType::Float64) {
             shader_name = "transform_f64";
         } else {
             shader_name = "transform";
         }
         auto* pipeline = getPipeline(shader_name, device_id);
-        Tensor output(out_shape, input.dtype(), input.device());
+        Tensor output(out_shape, transpose_input.dtype(), transpose_input.device());
 
-        const void* buffer_in = input.data_ptr();
+        const void* buffer_in = transpose_input.data_ptr();
         const void* buffer_out = output.data_ptr();
 
-        size_t buffer_size_in = input.numel() * input.dtype_size();
+        size_t buffer_size_in = transpose_input.numel() * transpose_input.dtype_size();
         size_t buffer_size_out = output.numel() * output.dtype_size();
 
         std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -6610,7 +6649,7 @@ auto VulkanBackend::dispatchTranspose(const Tensor& input, int64_t dim0, int64_t
             uint32_t cols;
         } push_constants;
 
-        push_constants.n = static_cast<uint32_t>(input.numel());
+        push_constants.n = static_cast<uint32_t>(transpose_input.numel());
         push_constants.ndim = static_cast<uint32_t>(ndim);
         push_constants.transform = 1; // transpose
         push_constants.rows = static_cast<uint32_t>(input_shape[0]);
@@ -6628,13 +6667,18 @@ auto VulkanBackend::dispatchTranspose(const Tensor& input, int64_t dim0, int64_t
                           VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(PushConstants), &push_constants);
 
-        uint32_t workgroups = div_wg(input.numel(), devices_[device_id].workgroupSize);
+        uint32_t workgroups = div_wg(transpose_input.numel(), devices_[device_id].workgroupSize);
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
         insertComputeOnlyBarrier(cmdBuffer);
 
         endSingleTimeCommands(cmdBuffer, device_id);
+
+        // Convert back to original dtype if we converted F16/BF16 to F32
+        if (orig_dtype != output.dtype()) {
+            return output.to(orig_dtype);
+        }
         return output;
     }
 
@@ -8520,14 +8564,14 @@ auto VulkanBackend::dispatchAvgPool2dForward(const Tensor& input, const OpAttrib
         throw std::invalid_argument("avg_pool2d requires 4D input (N, C, H, W)");
     }
 
-    // Extract attributes
-    int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH);
-    int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW);
-    int64_t stride_h = attrs.has(AttrKey::StrideH) ? attrs.get_int(AttrKey::StrideH) : kernel_h;
-    int64_t stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : kernel_w;
-    int64_t padding_h = attrs.get_int(AttrKey::PaddingH, 0);
-    int64_t padding_w = attrs.get_int(AttrKey::PaddingW, 0);
-    int64_t count_include_pad = attrs.get_int(AttrKey::CountIncludePad, 1);
+    // Extract attributes (support both split H/W and single-value forms)
+    int64_t kernel_h = attrs.has(AttrKey::KernelSizeH) ? attrs.get_int(AttrKey::KernelSizeH) : attrs.get_int(AttrKey::KernelSize, 2);
+    int64_t kernel_w = attrs.has(AttrKey::KernelSizeW) ? attrs.get_int(AttrKey::KernelSizeW) : kernel_h;
+    int64_t stride_h = attrs.has(AttrKey::StrideH) ? attrs.get_int(AttrKey::StrideH) : attrs.get_int(AttrKey::Stride, kernel_h);
+    int64_t stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : stride_h;
+    int64_t padding_h = attrs.has(AttrKey::PaddingH) ? attrs.get_int(AttrKey::PaddingH) : attrs.get_int(AttrKey::Padding, 0);
+    int64_t padding_w = attrs.has(AttrKey::PaddingW) ? attrs.get_int(AttrKey::PaddingW) : padding_h;
+    int64_t count_include_pad = attrs.get_int(AttrKey::CountIncludePad, 0);
 
     int64_t batch = input_shape[0];
     int64_t channels = input_shape[1];
@@ -8757,14 +8801,14 @@ auto VulkanBackend::dispatchAvgPool2dBackward(const Tensor& grad_output, const T
         throw std::invalid_argument("avg_pool2d_backward requires 4D input (N, C, H, W)");
     }
 
-    // Extract attributes
-    int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH);
-    int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW);
-    int64_t stride_h = attrs.has(AttrKey::StrideH) ? attrs.get_int(AttrKey::StrideH) : kernel_h;
-    int64_t stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : kernel_w;
-    int64_t padding_h = attrs.get_int(AttrKey::PaddingH, 0);
-    int64_t padding_w = attrs.get_int(AttrKey::PaddingW, 0);
-    int64_t count_include_pad = attrs.get_int(AttrKey::CountIncludePad, 1);
+    // Extract attributes (support both split H/W and single-value forms)
+    int64_t kernel_h = attrs.has(AttrKey::KernelSizeH) ? attrs.get_int(AttrKey::KernelSizeH) : attrs.get_int(AttrKey::KernelSize, 2);
+    int64_t kernel_w = attrs.has(AttrKey::KernelSizeW) ? attrs.get_int(AttrKey::KernelSizeW) : kernel_h;
+    int64_t stride_h = attrs.has(AttrKey::StrideH) ? attrs.get_int(AttrKey::StrideH) : attrs.get_int(AttrKey::Stride, kernel_h);
+    int64_t stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : stride_h;
+    int64_t padding_h = attrs.has(AttrKey::PaddingH) ? attrs.get_int(AttrKey::PaddingH) : attrs.get_int(AttrKey::Padding, 0);
+    int64_t padding_w = attrs.has(AttrKey::PaddingW) ? attrs.get_int(AttrKey::PaddingW) : padding_h;
+    int64_t count_include_pad = attrs.get_int(AttrKey::CountIncludePad, 0);
 
     int64_t batch = input_shape[0];
     int64_t channels = input_shape[1];
@@ -8879,13 +8923,13 @@ auto VulkanBackend::dispatchMaxPool2dBackward(const Tensor& grad_output, const T
         throw std::invalid_argument("max_pool2d_backward requires 4D input (N, C, H, W)");
     }
 
-    // Extract attributes
-    int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH);
-    int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW);
-    int64_t stride_h = attrs.has(AttrKey::StrideH) ? attrs.get_int(AttrKey::StrideH) : kernel_h;
-    int64_t stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : kernel_w;
-    int64_t padding_h = attrs.get_int(AttrKey::PaddingH, 0);
-    int64_t padding_w = attrs.get_int(AttrKey::PaddingW, 0);
+    // Extract attributes (support both split H/W and single-value forms)
+    int64_t kernel_h = attrs.has(AttrKey::KernelSizeH) ? attrs.get_int(AttrKey::KernelSizeH) : attrs.get_int(AttrKey::KernelSize, 2);
+    int64_t kernel_w = attrs.has(AttrKey::KernelSizeW) ? attrs.get_int(AttrKey::KernelSizeW) : kernel_h;
+    int64_t stride_h = attrs.has(AttrKey::StrideH) ? attrs.get_int(AttrKey::StrideH) : attrs.get_int(AttrKey::Stride, kernel_h);
+    int64_t stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : stride_h;
+    int64_t padding_h = attrs.has(AttrKey::PaddingH) ? attrs.get_int(AttrKey::PaddingH) : attrs.get_int(AttrKey::Padding, 0);
+    int64_t padding_w = attrs.has(AttrKey::PaddingW) ? attrs.get_int(AttrKey::PaddingW) : padding_h;
     int64_t dilation_h = attrs.get_int(AttrKey::DilationH, 1);
     int64_t dilation_w = attrs.get_int(AttrKey::DilationW, 1);
 
@@ -10568,6 +10612,12 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
     if (dtype == DType::Int32) {
         int32_t int_value = static_cast<int32_t>(value);
         std::memcpy(&push_constants.fill_value_bits, &int_value, sizeof(uint32_t));
+    } else if (dtype == DType::BFloat16) {
+        // BFloat16 is the upper 16 bits of float32 with round-to-nearest-even
+        uint32_t float_bits;
+        std::memcpy(&float_bits, &value, sizeof(uint32_t));
+        uint32_t bf16_bits = (float_bits + 0x7FFFu + ((float_bits >> 16) & 1u)) >> 16;
+        push_constants.fill_value_bits = bf16_bits;
     } else {
         // For float types, use the float bits directly
         std::memcpy(&push_constants.fill_value_bits, &value, sizeof(uint32_t));

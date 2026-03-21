@@ -144,15 +144,17 @@ auto Linear::forward_impl(const Variable& input) -> Variable {
     if (is_2d) {
         DType compute_dtype = input.dtype();
 
-        // Handle device mismatch - transfer input to weight's device via autograd
-        Variable input_device = input;
+        // Handle device mismatch - transfer weight/bias to input's device via autograd
+        // This keeps computation on the input's device (e.g., GPU), avoiding
+        // cross-device data access issues with backend-specific runtimes
+        Variable weight_device = weight;
         if (input.tensor().device() != weight.tensor().device()) {
-            input_device = tenzor::to_device(input, weight.tensor().device());
+            weight_device = tenzor::to_device(weight, input.tensor().device());
         }
 
         // Handle dtype mismatch - convert weight/bias to input's dtype using gradient-aware cast
         // This ensures gradients flow back to weight with proper dtype conversion
-        Variable weight_matched = variable_cast(weight, compute_dtype);
+        Variable weight_matched = variable_cast(weight_device, compute_dtype);
 
         // Get bias and convert if needed
         Variable bias_matched;
@@ -160,22 +162,26 @@ auto Linear::forward_impl(const Variable& input) -> Variable {
         if (has_bias_) {
             auto bias_it = parameters_.find("bias");
             if (bias_it != parameters_.end()) {
-                bias_matched = variable_cast(*bias_it->second, compute_dtype);
+                Variable bias_device = *bias_it->second;
+                if (input.tensor().device() != bias_device.tensor().device()) {
+                    bias_device = tenzor::to_device(bias_device, input.tensor().device());
+                }
+                bias_matched = variable_cast(bias_device, compute_dtype);
                 bias_ptr = &bias_matched;
             }
         }
 
         // Use fused linear kernel if available (CPU with MKL, CUDA with cuBLAS)
         // Falls back to matmul + add for other backends
-        if (has_fused_linear_kernel(weight.tensor().device())) {
+        if (has_fused_linear_kernel(input.tensor().device())) {
             if (!bias_ptr) {
                 // No bias: use matmul path to avoid unnecessary zero tensor allocation
-                return linear_via_matmul(input_device, weight_matched, nullptr);
+                return linear_via_matmul(input, weight_matched, nullptr);
             } else {
-                return autograd::linear(input_device, weight_matched, *bias_ptr);
+                return autograd::linear(input, weight_matched, *bias_ptr);
             }
         } else {
-            return linear_via_matmul(input_device, weight_matched, bias_ptr);
+            return linear_via_matmul(input, weight_matched, bias_ptr);
         }
     }
 
@@ -193,14 +199,14 @@ auto Linear::forward_impl(const Variable& input) -> Variable {
     std::vector<int64_t> flat_shape = {batch_total, in_features_};
     auto input_2d = autograd::reshape(input, flat_shape);
 
-    // Handle device mismatch - transfer input to weight's device via autograd
-    Variable input_2d_device = input_2d;
+    // Handle device mismatch - transfer weight/bias to input's device via autograd
+    Variable weight_device = weight;
     if (input_2d.tensor().device() != weight.tensor().device()) {
-        input_2d_device = tenzor::to_device(input_2d, weight.tensor().device());
+        weight_device = tenzor::to_device(weight, input_2d.tensor().device());
     }
 
     // Handle dtype mismatch - convert weight/bias to input's dtype using gradient-aware cast
-    Variable weight_matched = variable_cast(weight, compute_dtype);
+    Variable weight_matched = variable_cast(weight_device, compute_dtype);
 
     // Get bias and convert if needed
     Variable bias_matched;
@@ -208,19 +214,23 @@ auto Linear::forward_impl(const Variable& input) -> Variable {
     if (has_bias_) {
         auto bias_it = parameters_.find("bias");
         if (bias_it != parameters_.end()) {
-            bias_matched = variable_cast(*bias_it->second, compute_dtype);
+            Variable bias_device = *bias_it->second;
+            if (input_2d.tensor().device() != bias_device.tensor().device()) {
+                bias_device = tenzor::to_device(bias_device, input_2d.tensor().device());
+            }
+            bias_matched = variable_cast(bias_device, compute_dtype);
             bias_ptr = &bias_matched;
         }
     }
 
     // Compute linear operation
     Variable output_2d;
-    if (has_fused_linear_kernel(weight.tensor().device()) && bias_ptr) {
+    if (has_fused_linear_kernel(input_2d.tensor().device()) && bias_ptr) {
         // Use fused linear kernel (CPU with MKL, CUDA with cuBLAS) — only when bias present
-        output_2d = autograd::linear(input_2d_device, weight_matched, *bias_ptr);
+        output_2d = autograd::linear(input_2d, weight_matched, *bias_ptr);
     } else {
         // Fallback: use matmul + add for other backends
-        output_2d = linear_via_matmul(input_2d_device, weight_matched, bias_ptr);
+        output_2d = linear_via_matmul(input_2d, weight_matched, bias_ptr);
     }
 
     // Reshape output back

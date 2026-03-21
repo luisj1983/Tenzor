@@ -104,22 +104,34 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // In-place Binary Operations
     // ========================================================================
     table.register_inplace_kernel(OpId::AddInplace, [](Tensor& target, std::span<const Tensor> others, const OpAttributes&) -> Tensor& {
-        get_vulkan_backend()->dispatchBinaryOp("add_inplace", target, others[0]);
+        auto vk = get_vulkan_backend();
+        auto result = vk->dispatchBinaryOp("add", target, others[0]);
+        auto bytes = target.numel() * dtype_size(target.dtype());
+        if (bytes > 0) vk->copy(target.data_ptr(), result.data_ptr(), bytes, CopyKind::DeviceToDevice);
         return target;
     });
 
     table.register_inplace_kernel(OpId::SubInplace, [](Tensor& target, std::span<const Tensor> others, const OpAttributes&) -> Tensor& {
-        get_vulkan_backend()->dispatchBinaryOp("sub_inplace", target, others[0]);
+        auto vk = get_vulkan_backend();
+        auto result = vk->dispatchBinaryOp("sub", target, others[0]);
+        auto bytes = target.numel() * dtype_size(target.dtype());
+        if (bytes > 0) vk->copy(target.data_ptr(), result.data_ptr(), bytes, CopyKind::DeviceToDevice);
         return target;
     });
 
     table.register_inplace_kernel(OpId::MulInplace, [](Tensor& target, std::span<const Tensor> others, const OpAttributes&) -> Tensor& {
-        get_vulkan_backend()->dispatchBinaryOp("mul_inplace", target, others[0]);
+        auto vk = get_vulkan_backend();
+        auto result = vk->dispatchBinaryOp("mul", target, others[0]);
+        auto bytes = target.numel() * dtype_size(target.dtype());
+        if (bytes > 0) vk->copy(target.data_ptr(), result.data_ptr(), bytes, CopyKind::DeviceToDevice);
         return target;
     });
 
     table.register_inplace_kernel(OpId::DivInplace, [](Tensor& target, std::span<const Tensor> others, const OpAttributes&) -> Tensor& {
-        get_vulkan_backend()->dispatchBinaryOp("div_inplace", target, others[0]);
+        auto vk = get_vulkan_backend();
+        auto result = vk->dispatchBinaryOp("div", target, others[0]);
+        auto bytes = target.numel() * dtype_size(target.dtype());
+        if (bytes > 0) vk->copy(target.data_ptr(), result.data_ptr(), bytes, CopyKind::DeviceToDevice);
         return target;
     });
 
@@ -591,9 +603,9 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::MaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchMaxPool2dBackwardWithIndices(
-            inputs[0], inputs[1],
-            attrs.get_int(AttrKey::InputH, 0), attrs.get_int(AttrKey::InputW, 0))};
+        // inputs: [grad_output, input, output] from autograd
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchMaxPool2dBackward(
+            inputs[0], inputs[1], attrs)};
     });
 
     table.register_kernel(OpId::AvgPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -874,7 +886,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::GroupNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t num_groups = attrs.get_int(AttrKey::Groups, 1);
+        int64_t num_groups = attrs.get_int(AttrKey::NumGroups, attrs.get_int(AttrKey::Groups, 1));
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         const Tensor* gamma = inputs.size() > 1 ? &inputs[1] : nullptr;
         const Tensor* beta = inputs.size() > 2 ? &inputs[2] : nullptr;
@@ -882,7 +894,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::GroupNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t num_groups = attrs.get_int(AttrKey::Groups, 1);
+        int64_t num_groups = attrs.get_int(AttrKey::NumGroups, attrs.get_int(AttrKey::Groups, 1));
         auto [grad_input, grad_weight, grad_bias] = get_vulkan_backend()->dispatchGroupNormBackward(
             inputs[0], inputs[1], inputs[2], inputs[3], &inputs[4], num_groups);
         return std::vector<Tensor>{grad_input, grad_weight, grad_bias};
@@ -1110,6 +1122,17 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         for (auto s : normalized_shape) normalized_size *= s;
         if (normalized_size <= 0) normalized_size = inputs[0].shape().back();
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+
+        // BFloat16: upcast all inputs to Float32 for numerical stability, then convert back
+        if (inputs[0].dtype() == DType::BFloat16) {
+            Tensor input_f32 = inputs[0].to(DType::Float32);
+            Tensor gamma_f32 = inputs[1].to(DType::Float32);
+            Tensor beta_f32 = inputs[2].to(DType::Float32);
+            auto result = get_vulkan_backend()->dispatchLayerNorm(
+                input_f32, normalized_size, &gamma_f32, &beta_f32, eps);
+            return std::vector<Tensor>{result.to(DType::BFloat16)};
+        }
+
         return std::vector<Tensor>{get_vulkan_backend()->dispatchLayerNorm(
             inputs[0], normalized_size, &inputs[1], &inputs[2], eps)};
     });

@@ -33,10 +33,19 @@ float readF16Element(uint idx) {
 
 void writeF16Element(uint idx, float val) {
     uint word_idx = idx >> 1u;
-    uint packed = output_data[word_idx];
-    vec2 pair = unpackHalf2x16(packed);
-    if ((idx & 1u) == 0u) pair.x = val; else pair.y = val;
-    output_data[word_idx] = packHalf2x16(pair);
+    uint word_offset = idx & 1u;
+    uint new_bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = word_offset * 16;
+    uint mask = 0xFFFFu << shift;
+
+    // Atomic compare-swap to avoid race when two threads write adjacent F16 elements
+    uint old_val = output_data[word_idx];
+    uint new_val, expected;
+    do {
+        expected = old_val;
+        new_val = (expected & ~mask) | (new_bits << shift);
+        old_val = atomicCompSwap(output_data[word_idx], expected, new_val);
+    } while (old_val != expected);
 }
 
 void main() {

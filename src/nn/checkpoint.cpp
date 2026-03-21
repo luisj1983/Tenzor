@@ -301,9 +301,10 @@ auto ModelCheckpoint::write_checkpoint(const std::string& path, const Checkpoint
         uint8_t dtype = static_cast<uint8_t>(tensor.dtype());
         file.write(reinterpret_cast<const char*>(&dtype), sizeof(dtype));
 
-        // Write tensor data
-        size_t data_size = tensor.numel() * tensor.dtype_size();
-        const void* data_ptr = tensor.data_ptr();
+        // Write tensor data - transfer to CPU if on a GPU device
+        Tensor host_tensor = (tensor.device().type != Device::Type::CPU) ? tensor.cpu() : tensor;
+        size_t data_size = host_tensor.numel() * host_tensor.dtype_size();
+        const void* data_ptr = host_tensor.data_ptr();
         file.write(reinterpret_cast<const char*>(data_ptr), data_size);
     }
 
@@ -327,9 +328,10 @@ auto ModelCheckpoint::write_checkpoint(const std::string& path, const Checkpoint
         uint8_t dtype = static_cast<uint8_t>(tensor.dtype());
         file.write(reinterpret_cast<const char*>(&dtype), sizeof(dtype));
 
-        // Write tensor data
-        size_t data_size = tensor.numel() * tensor.dtype_size();
-        const void* data_ptr = tensor.data_ptr();
+        // Write tensor data - transfer to CPU if on a GPU device
+        Tensor host_tensor = (tensor.device().type != Device::Type::CPU) ? tensor.cpu() : tensor;
+        size_t data_size = host_tensor.numel() * host_tensor.dtype_size();
+        const void* data_ptr = host_tensor.data_ptr();
         file.write(reinterpret_cast<const char*>(data_ptr), data_size);
     }
 
@@ -353,9 +355,10 @@ auto ModelCheckpoint::write_checkpoint(const std::string& path, const Checkpoint
         uint8_t dtype = static_cast<uint8_t>(tensor.dtype());
         file.write(reinterpret_cast<const char*>(&dtype), sizeof(dtype));
 
-        // Write tensor data
-        size_t data_size = tensor.numel() * tensor.dtype_size();
-        const void* data_ptr = tensor.data_ptr();
+        // Write tensor data - transfer to CPU if on a GPU device
+        Tensor host_tensor = (tensor.device().type != Device::Type::CPU) ? tensor.cpu() : tensor;
+        size_t data_size = host_tensor.numel() * host_tensor.dtype_size();
+        const void* data_ptr = host_tensor.data_ptr();
         file.write(reinterpret_cast<const char*>(data_ptr), data_size);
     }
 
