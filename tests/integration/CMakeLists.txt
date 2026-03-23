@@ -11,7 +11,7 @@ target_link_libraries(test_training_loops PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_training_loops DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 600)
+gtest_discover_tests(test_training_loops DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT})
 
 # Model persistence integration tests
 add_executable(test_model_persistence
@@ -23,7 +23,7 @@ target_link_libraries(test_model_persistence PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_model_persistence DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 600)
+gtest_discover_tests(test_model_persistence DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT})
 
 # Cross-backend integration tests
 add_executable(test_cross_backend
@@ -35,7 +35,7 @@ target_link_libraries(test_cross_backend PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_cross_backend DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 600)
+gtest_discover_tests(test_cross_backend DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT})
 
 # Data pipeline integration tests
 add_executable(test_data_pipeline
@@ -47,7 +47,7 @@ target_link_libraries(test_data_pipeline PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_data_pipeline DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 600)
+gtest_discover_tests(test_data_pipeline DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT})
 
 # Model zoo integration tests
 add_executable(test_model_zoo
@@ -59,7 +59,7 @@ target_link_libraries(test_model_zoo PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_model_zoo DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 600)
+gtest_discover_tests(test_model_zoo DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT})
 
 # Optimization integration tests
 add_executable(test_optimization
@@ -71,7 +71,7 @@ target_link_libraries(test_optimization PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_optimization DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 600)
+gtest_discover_tests(test_optimization DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT})
 
 # DataParallel multi-GPU integration tests
 add_executable(test_data_parallel_integration
@@ -83,7 +83,7 @@ target_link_libraries(test_data_parallel_integration PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_data_parallel_integration DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 600)
+gtest_discover_tests(test_data_parallel_integration DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT})
 
 # Distributed training tests
 add_executable(test_distributed
@@ -97,7 +97,7 @@ target_link_libraries(test_distributed PRIVATE
 
 # Distributed tests require special setup (multi-process environment)
 # Tests will automatically skip if RANK/WORLD_SIZE environment variables are not set
-gtest_discover_tests(test_distributed DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 600)
+gtest_discover_tests(test_distributed DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT})
 
 # Multi-GPU integration tests (CUDA required)
 if(TENZOR_BUILD_CUDA)
@@ -121,8 +121,8 @@ if(TENZOR_BUILD_CUDA)
         TENZOR_USE_CUDA
     )
 
-    # Multi-GPU tests require longer timeout for device synchronization
-    gtest_discover_tests(test_multi_gpu DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 900)
+    # Multi-GPU tests capped at maximum test timeout
+    gtest_discover_tests(test_multi_gpu DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT})
 endif()
 
 # Note: Existing integration tests

@@ -17,6 +17,9 @@ endif()
 # Include GoogleTest module for gtest_discover_tests
 include(GoogleTest)
 
+# Maximum test execution timeout (10 minutes)
+set(TENZOR_TEST_TIMEOUT 600)
+
 # Custom function that wraps gtest_discover_tests
 function(tenzor_discover_tests target)
     cmake_parse_arguments(PARSE_ARGV 1 ARG "" "DISCOVERY_TIMEOUT;DISCOVERY_MODE" "PROPERTIES")
@@ -28,6 +31,12 @@ function(tenzor_discover_tests target)
     set(MODE ${ARG_DISCOVERY_MODE})
     if(NOT MODE)
         set(MODE "POST_BUILD")
+    endif()
+
+    # Inject TIMEOUT into properties if not already specified
+    list(FIND PROPS "TIMEOUT" _timeout_idx)
+    if(_timeout_idx EQUAL -1)
+        list(APPEND PROPS TIMEOUT ${TENZOR_TEST_TIMEOUT})
     endif()
 
     # Now call gtest_discover_tests
@@ -94,7 +103,7 @@ target_link_libraries(tenzor_unit_tests PRIVATE
 # tenzor_unit_tests crashes during --gtest_list_tests (static destruction in linked
 # backends), so use add_test instead of gtest_discover_tests
 add_test(NAME tenzor_unit_tests COMMAND tenzor_unit_tests)
-set_tests_properties(tenzor_unit_tests PROPERTIES TIMEOUT 120)
+set_tests_properties(tenzor_unit_tests PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT})
 
 # SIMD Benchmark tests (separate executable for benchmarking)
 add_executable(tenzor_simd_benchmark
@@ -198,6 +207,7 @@ add_executable(test_checkpoint_leaf_fix test_checkpoint_leaf_fix.cpp)
 target_link_libraries(test_checkpoint_leaf_fix tenzor_core)
 target_include_directories(test_checkpoint_leaf_fix PRIVATE ${PROJECT_SOURCE_DIR}/include)
 add_test(NAME CheckpointLeafFix COMMAND test_checkpoint_leaf_fix)
+set_tests_properties(CheckpointLeafFix PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT})
 
 # Manual KLDiv debug test
 add_executable(test_kldiv_manual test_kldiv_manual.cpp)
@@ -205,6 +215,8 @@ target_link_libraries(test_kldiv_manual PRIVATE tenzor_core GTest::gtest_main)
 add_test(NAME KLDivManual.StepByStepBackward COMMAND test_kldiv_manual --gtest_filter=KLDivManual.StepByStepBackward)
 add_test(NAME KLDivManual.SimpleSubtract COMMAND test_kldiv_manual --gtest_filter=KLDivManual.SimpleSubtract)
 add_test(NAME KLDivManual.SimpleMultiply COMMAND test_kldiv_manual --gtest_filter=KLDivManual.SimpleMultiply)
+set_tests_properties(KLDivManual.StepByStepBackward KLDivManual.SimpleSubtract KLDivManual.SimpleMultiply
+    PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT})
 
 # ONNX import tests
 add_executable(test_onnx_import test_onnx_import.cpp)
@@ -381,6 +393,7 @@ if(TENZOR_BUILD_CUDA)
     target_include_directories(test_cuda_cat PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
     set_target_properties(test_cuda_cat PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
     add_test(NAME CUDAConcatenation COMMAND test_cuda_cat)
+    set_tests_properties(CUDAConcatenation PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT})
 endif()
 
 # ============================================================================
@@ -505,7 +518,7 @@ if(TENZOR_BUILD_PYTHON)
             )
             set_tests_properties("python_${test_name}" PROPERTIES
                 LABELS "python"
-                TIMEOUT 60
+                TIMEOUT ${TENZOR_TEST_TIMEOUT}
                 ENVIRONMENT "${PYTHON_TEST_ENV}"
             )
         endforeach()

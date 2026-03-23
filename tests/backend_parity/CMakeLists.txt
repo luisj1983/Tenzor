@@ -29,7 +29,7 @@ function(add_parity_test TEST_NAME SOURCE_FILE)
 
     # Set test properties
     set_tests_properties(${TEST_NAME} PROPERTIES
-        TIMEOUT 600  # 10 minute timeout for stress tests
+        TIMEOUT ${TENZOR_TEST_TIMEOUT}  # 10 minute timeout for all tests
         LABELS "backend_parity"
     )
 
