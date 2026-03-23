@@ -71,11 +71,12 @@ public:
         int64_t batch_size = N * spatial_size;
 
         // ================================================================
-        // FAST CUDA PATH: Use cuDNN backward kernel (single kernel launch)
+        // FAST GPU PATH: Use dedicated backward kernel (single kernel launch)
+        // Works for CUDA (cuDNN) and Vulkan (compute shader)
         // ================================================================
-        if (input.device().type == Device::Type::CUDA &&
+        if ((input.device().type == Device::Type::CUDA || input.device().type == Device::Type::Vulkan) &&
             (input.dtype() == DType::Float32 || input.dtype() == DType::Float16 || input.dtype() == DType::Float64)) {
-            // Dispatch to cuDNN/CUDA kernel for BatchNorm backward
+            // Dispatch to backend kernel for BatchNorm backward
             // inputs: [grad_output, input, gamma, saved_mean, saved_inv_var]
             OpAttributes backward_attrs;
             backward_attrs.set(AttrKey::Eps, static_cast<float>(eps_));

@@ -909,6 +909,12 @@ auto expand_kernel(const Tensor& input, const std::vector<int64_t>& new_shape, v
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(output.data<Float16>()),
             d_input_shape, d_input_strides, d_output_shape, ndim, total_elements);
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(expand_kernel_impl<hip_bfloat16>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
+            d_input_shape, d_input_strides, d_output_shape, ndim, total_elements);
     } else {
         HIP_CHECK(hipFree(d_input_shape));
         HIP_CHECK(hipFree(d_input_strides));

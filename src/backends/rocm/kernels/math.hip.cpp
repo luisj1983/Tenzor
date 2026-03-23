@@ -1780,8 +1780,12 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val, hipStream_t
         hipLaunchKernelGGL(clamp_kernel_f16, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), min_val, max_val, n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = clamp_kernel(input_f32, min_val, max_val, stream);
+        return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("clamp operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("clamp operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());

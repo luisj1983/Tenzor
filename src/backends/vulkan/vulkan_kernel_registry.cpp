@@ -320,7 +320,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Norm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchNorm(inputs[0],
-            static_cast<float>(attrs.get_float(AttrKey::P, 2.0)), attrs.get_int(AttrKey::Dim, -1),
+            static_cast<float>(attrs.get_float(AttrKey::P, 2.0)), attrs.get_int(AttrKey::Dim, INT64_MIN),
             attrs.get_bool(AttrKey::Keepdim, false))};
     });
 
@@ -603,9 +603,11 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::MaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // inputs: [grad_output, input, output] from autograd
+        // inputs: [grad_output, indices, input] from autograd
+        // Vulkan backward shader re-computes max positions from original input (inputs[2]),
+        // rather than using pre-computed indices (inputs[1])
         return std::vector<Tensor>{get_vulkan_backend()->dispatchMaxPool2dBackward(
-            inputs[0], inputs[1], attrs)};
+            inputs[0], inputs[2], attrs)};
     });
 
     table.register_kernel(OpId::AvgPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {

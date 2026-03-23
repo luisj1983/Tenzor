@@ -66,11 +66,12 @@ public:
 
         // Use OpId dispatch for non-CPU devices (CUDA, Vulkan, etc.)
         if (grad_output.device().type != Device::Type::CPU) {
-            std::vector<Tensor> inputs = {grad_output, input, output};
+            std::vector<Tensor> inputs = {grad_output, indices, input};
             OpAttributes bwd_attrs;
             bwd_attrs.set(AttrKey::KernelSize, kernel_size_);
             bwd_attrs.set(AttrKey::Stride, stride_);
             bwd_attrs.set(AttrKey::Padding, padding_);
+            bwd_attrs.set(AttrKey::InputShape, std::to_string(N) + "," + std::to_string(C) + "," + std::to_string(H_in) + "," + std::to_string(W_in));
             auto result = dispatch_to_device(OpId::MaxPool2dBackward, grad_output.device().type,
                 inputs, bwd_attrs);
             return {result[0]};
@@ -779,7 +780,7 @@ public:
             OpAttributes attrs;
             attrs.set(AttrKey::InputH, H_in_);
             attrs.set(AttrKey::InputW, W_in_);
-            std::vector<Tensor> inputs = {grad_output};
+            std::vector<Tensor> inputs = {grad_output, saved_tensors_[0]};
             return dispatch<OpId::AdaptiveAvgPool2dBackward>(inputs, attrs);
         }
 
@@ -1077,7 +1078,7 @@ auto AdaptiveAvgPool2d::forward_impl(const Variable& input) -> Variable {
 
     // Setup backward function if gradient is required
     if (input.requires_grad()) {
-        std::vector<Tensor> tensors_to_save = {};  // No tensors needed
+        std::vector<Tensor> tensors_to_save = {input.tensor()};
 
         auto backward_fn = std::make_shared<AdaptiveAvgPool2dBackward>(
             H_in, W_in, H_out, W_out, std::move(tensors_to_save)

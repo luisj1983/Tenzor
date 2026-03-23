@@ -27,8 +27,11 @@ void main() {
 
         if (gid < params.n_elements) {
             float val = input_data[gid];
-            is_nonzero = (abs(val) > 1e-10) ? 1u : 0u;
-            flags[gid] = is_nonzero;
+            is_nonzero = (val != 0.0) ? 1u : 0u;
+            // Write as float-encoded bits so prefix_sum's uintBitsToFloat()
+            // sees 1.0 (normalized) instead of denormalized 1.4e-45 which
+            // would be flushed to zero by GPU FTZ mode
+            flags[gid] = is_nonzero != 0u ? floatBitsToUint(1.0) : 0u;
         }
 
         shared_count[tid] = is_nonzero;

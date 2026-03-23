@@ -1271,6 +1271,56 @@ auto conv2d_backward_kernel(
                 }
                 HIP_CHECK(hipGetLastError());
                 HIP_CHECK(hipFree(grad_col));
+            } else if (dtype == DType::Float64) {
+                // Float64 path using rocblas_dgemm
+                double* grad_col;
+                HIP_CHECK(hipMalloc(&grad_col, col_rows * col_cols * sizeof(double)));
+
+                double alpha = 1.0;
+                double beta = 0.0;
+
+                const double* grad_out_ptr;
+                if (layout == DataLayout::NCHW) {
+                    grad_out_ptr = grad_output.data<double>() + out_start * out_h * out_w;
+                } else {
+                    grad_out_ptr = grad_output.data<double>() + out_start;
+                }
+                const double* weight_ptr = weight.data<double>() + out_start * in_channels_per_group * kernel_h * kernel_w;
+
+                ROCBLAS_CHECK(rocblas_dgemm(
+                    rocblas_handle,
+                    rocblas_operation_none,
+                    rocblas_operation_none,
+                    N, M, K,
+                    &alpha,
+                    weight_ptr, N,
+                    grad_out_ptr, K,
+                    &beta,
+                    grad_col, N
+                ));
+
+                // Apply col2im
+                dim3 grid, block;
+                int64_t total_output = batch * in_channels_per_group * height * width;
+                compute_launch_config_1d(total_output, grid, block);
+
+                double* grad_input_ptr;
+                if (layout == DataLayout::NCHW) {
+                    grad_input_ptr = grad_input.data<double>() + in_start * height * width;
+                    col2im_kernel_nchw<<<grid, block, 0, stream>>>(
+                        grad_col, grad_input_ptr, batch, in_channels_per_group,
+                        height, width, kernel_h, kernel_w,
+                        stride, padding, dilation, out_h, out_w
+                    );
+                } else {
+                    grad_input_ptr = grad_input.data<double>() + in_start;
+                    col2im_kernel_nhwc<<<grid, block, 0, stream>>>(
+                        grad_col, grad_input_ptr, batch, height, width, in_channels_per_group,
+                        kernel_h, kernel_w, stride, padding, dilation, out_h, out_w
+                    );
+                }
+                HIP_CHECK(hipGetLastError());
+                HIP_CHECK(hipFree(grad_col));
             } else {
                 // Float32 path (original code)
                 float* grad_col;
@@ -1384,6 +1434,59 @@ auto conv2d_backward_kernel(
                 ));
 
                 HIP_CHECK(hipFree(input_col));
+            } else if (dtype == DType::Float64) {
+                // Float64 path using rocblas_dgemm
+                double* input_col;
+                HIP_CHECK(hipMalloc(&input_col, col_rows * col_cols * sizeof(double)));
+
+                dim3 grid, block;
+                int64_t total_elements = batch * out_h * out_w * in_channels_per_group * kernel_h * kernel_w;
+                compute_launch_config_1d(total_elements, grid, block);
+
+                if (layout == DataLayout::NCHW) {
+                    const double* input_ptr = input.data<double>() + in_start * height * width;
+                    im2col_kernel_nchw<<<grid, block, 0, stream>>>(
+                        input_ptr, input_col, batch, in_channels_per_group,
+                        height, width, kernel_h, kernel_w,
+                        stride, padding, dilation, out_h, out_w
+                    );
+                } else {
+                    const double* input_ptr = input.data<double>() + in_start;
+                    im2col_kernel_nhwc<<<grid, block, 0, stream>>>(
+                        input_ptr, input_col, batch, height, width, in_channels_per_group,
+                        kernel_h, kernel_w, stride, padding, dilation, out_h, out_w
+                    );
+                }
+                HIP_CHECK(hipGetLastError());
+
+                int64_t M = out_channels_per_group;
+                int64_t K = col_rows;
+                int64_t N = col_cols;
+
+                double alpha = 1.0;
+                double beta = 0.0;
+
+                const double* grad_out_ptr;
+                if (layout == DataLayout::NCHW) {
+                    grad_out_ptr = grad_output.data<double>() + out_start * out_h * out_w;
+                } else {
+                    grad_out_ptr = grad_output.data<double>() + out_start;
+                }
+                double* grad_weight_ptr = grad_weight.data<double>() + out_start * in_channels_per_group * kernel_h * kernel_w;
+
+                ROCBLAS_CHECK(rocblas_dgemm(
+                    rocblas_handle,
+                    rocblas_operation_none,
+                    rocblas_operation_transpose,
+                    N, M, K,
+                    &alpha,
+                    input_col, N,
+                    grad_out_ptr, out_channels_per_group,
+                    &beta,
+                    grad_weight_ptr, N
+                ));
+
+                HIP_CHECK(hipFree(input_col));
             } else {
                 // Float32 path
                 float* input_col;
@@ -1451,6 +1554,13 @@ auto conv2d_backward_kernel(
         if (dtype == DType::Float16) {
             const __half* grad_out_data = reinterpret_cast<const __half*>(grad_output.data<Float16>());
             __half* grad_bias_data = reinterpret_cast<__half*>(grad_bias.data<Float16>());
+
+            sum_bias_grad_kernel_wave_reduce<<<out_channels, 256, 0, stream>>>(
+                grad_out_data, grad_bias_data, batch, out_channels, spatial_size
+            );
+        } else if (dtype == DType::Float64) {
+            const double* grad_out_data = grad_output.data<double>();
+            double* grad_bias_data = grad_bias.data<double>();
 
             sum_bias_grad_kernel_wave_reduce<<<out_channels, 256, 0, stream>>>(
                 grad_out_data, grad_bias_data, batch, out_channels, spatial_size
@@ -1551,6 +1661,11 @@ auto conv2d_backward_bias(
         sum_bias_grad_kernel_wave_reduce<<<out_channels, 256, 0, stream>>>(
             reinterpret_cast<const __half*>(grad_output.data<Float16>()),
             reinterpret_cast<__half*>(grad_bias.data<Float16>()),
+            batch, out_channels, spatial_size
+        );
+    } else if (dtype == DType::Float64) {
+        sum_bias_grad_kernel_wave_reduce<<<out_channels, 256, 0, stream>>>(
+            grad_output.data<double>(), grad_bias.data<double>(),
             batch, out_channels, spatial_size
         );
     } else {
@@ -1683,6 +1798,19 @@ auto conv_transpose2d_forward_kernel(
             batch, in_channels, in_h, in_w, out_channels, out_h, out_w,
             kernel_h, kernel_w, stride_h, stride_w,
             padding_h, padding_w, output_padding_h, output_padding_w);
+    } else if (input.dtype() == DType::Float16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto weight_f32 = weight.to(DType::Float32);
+        Tensor bias_f32;
+        const Tensor* bias_f32_ptr = nullptr;
+        if (bias) {
+            bias_f32 = bias->to(DType::Float32);
+            bias_f32_ptr = &bias_f32;
+        }
+        auto result = conv_transpose2d_forward_kernel(input_f32, weight_f32, bias_f32_ptr,
+                                                       stride_h, stride_w, padding_h, padding_w,
+                                                       output_padding_h, output_padding_w, stream);
+        return result.to(DType::Float16);
     } else if (input.dtype() == DType::BFloat16) {
         auto input_f32 = input.to(DType::Float32);
         auto weight_f32 = weight.to(DType::Float32);

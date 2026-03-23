@@ -61,7 +61,7 @@ protected:
         // ViT-Large with gradients and Float64
         // Vulkan needs smaller images due to unfused attention intermediates
         if (param_count > 200'000'000 && needs_gradients && is_float64) {
-            return is_vulkan ? 112 : 160;  // Both divisible by 16
+            return is_vulkan ? 64 : 160;  // 64 divisible by 16, smaller for Vulkan F64 memory
         }
         // Large image sizes (512+) need reduction with Float64
         if (default_size >= 512 && is_float64) {

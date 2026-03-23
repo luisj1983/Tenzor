@@ -933,7 +933,10 @@ TEST_F(VulkanTrigParity, Asin) {
     auto cpu_r = asin(a);
     auto vk_r = asin(a.to(vk_));
 
-    assert_parity(cpu_r, vk_r, 1e-5f, 1e-7f, "Asin");
+    auto vk_cpu = vk_r.to(cpu_);
+    float diff = max_abs_diff(cpu_r, vk_cpu);
+    // GPU asin may differ from CPU std::asin by up to ~2 ULP (float32)
+    EXPECT_LT(diff, 5e-7f) << "Asin max absolute difference too large: " << diff;
 }
 
 TEST_F(VulkanTrigParity, Acos) {
@@ -942,7 +945,10 @@ TEST_F(VulkanTrigParity, Acos) {
     auto cpu_r = acos(a);
     auto vk_r = acos(a.to(vk_));
 
-    assert_parity(cpu_r, vk_r, 1e-5f, 1e-7f, "Acos");
+    auto vk_cpu = vk_r.to(cpu_);
+    float diff = max_abs_diff(cpu_r, vk_cpu);
+    // GPU acos may differ from CPU std::acos by up to ~2 ULP (float32)
+    EXPECT_LT(diff, 5e-7f) << "Acos max absolute difference too large: " << diff;
 }
 
 TEST_F(VulkanTrigParity, Atan) {

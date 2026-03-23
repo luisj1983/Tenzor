@@ -766,6 +766,8 @@ auto VulkanBackend::dispatchTrigonometricOp(const std::string& op_name,
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
+    synchronize(device_id);
+
     return output;
 }
 
@@ -839,6 +841,8 @@ auto VulkanBackend::dispatchHyperbolicOp(const std::string& op_name,
     insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
+
+    synchronize(device_id);
 
     return output;
 }

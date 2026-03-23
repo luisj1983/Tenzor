@@ -17,7 +17,10 @@ inline Tensor create_hip_zeros(const std::vector<int64_t>& shape, DType dtype, D
     Tensor t(shape, dtype, device);
     size_t bytes = t.numel() * dtype_size(dtype);
     if (bytes > 0) {
-        hipMemsetAsync(t.data_ptr(), 0, bytes, stream);
+        hipError_t err = hipMemset(t.data_ptr(), 0, bytes);
+        if (err != hipSuccess) {
+            throw std::runtime_error(std::string("hipMemset failed: ") + hipGetErrorString(err));
+        }
     }
     return t;
 }

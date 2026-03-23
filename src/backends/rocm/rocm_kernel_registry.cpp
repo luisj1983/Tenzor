@@ -1527,12 +1527,15 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::ConvTranspose2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
-        int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
-        int64_t padding_h = attrs.get_int(AttrKey::PaddingH, 0);
-        int64_t padding_w = attrs.get_int(AttrKey::PaddingW, 0);
-        int64_t output_padding_h = attrs.get_int(AttrKey::OutputPaddingH, 0);
-        int64_t output_padding_w = attrs.get_int(AttrKey::OutputPaddingW, 0);
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
+        int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t padding_h = attrs.get_int(AttrKey::PaddingH, padding);
+        int64_t padding_w = attrs.get_int(AttrKey::PaddingW, padding);
+        int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
+        int64_t output_padding_h = attrs.get_int(AttrKey::OutputPaddingH, output_padding);
+        int64_t output_padding_w = attrs.get_int(AttrKey::OutputPaddingW, output_padding);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return std::vector<Tensor>{rocm::conv_transpose2d_forward_kernel(
             inputs[0], inputs[1], bias, stride_h, stride_w, padding_h, padding_w,
@@ -3414,12 +3417,15 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             stride, padding, dilation, groups, get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::ConvTranspose2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
-        int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
-        int64_t padding_h = attrs.get_int(AttrKey::PaddingH, 0);
-        int64_t padding_w = attrs.get_int(AttrKey::PaddingW, 0);
-        int64_t output_padding_h = attrs.get_int(AttrKey::OutputPaddingH, 0);
-        int64_t output_padding_w = attrs.get_int(AttrKey::OutputPaddingW, 0);
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t stride_h = attrs.get_int(AttrKey::StrideH, stride);
+        int64_t stride_w = attrs.get_int(AttrKey::StrideW, stride);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t padding_h = attrs.get_int(AttrKey::PaddingH, padding);
+        int64_t padding_w = attrs.get_int(AttrKey::PaddingW, padding);
+        int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
+        int64_t output_padding_h = attrs.get_int(AttrKey::OutputPaddingH, output_padding);
+        int64_t output_padding_w = attrs.get_int(AttrKey::OutputPaddingW, output_padding);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return rocm::conv_transpose2d_forward_kernel(inputs[0], inputs[1], bias,
             stride_h, stride_w, padding_h, padding_w, output_padding_h, output_padding_w,

@@ -323,6 +323,26 @@ inline float max_abs_diff(const Tensor& a, const Tensor& b) {
         return static_cast<float>(max_diff);
     }
 
+    if (a_cpu.dtype() == DType::Int64) {
+        const int64_t* a_data = a_cpu.data<int64_t>();
+        const int64_t* b_data = b_cpu.data<int64_t>();
+        int64_t max_diff = 0;
+        for (int64_t i = 0; i < a_cpu.numel(); ++i) {
+            max_diff = std::max(max_diff, std::abs(a_data[i] - b_data[i]));
+        }
+        return static_cast<float>(max_diff);
+    }
+
+    if (a_cpu.dtype() == DType::Int32) {
+        const int32_t* a_data = a_cpu.data<int32_t>();
+        const int32_t* b_data = b_cpu.data<int32_t>();
+        int32_t max_diff = 0;
+        for (int64_t i = 0; i < a_cpu.numel(); ++i) {
+            max_diff = std::max(max_diff, static_cast<int32_t>(std::abs(a_data[i] - b_data[i])));
+        }
+        return static_cast<float>(max_diff);
+    }
+
     // Default: Float32 path (also handles promoted half types)
     const float* a_data = a_cpu.data<float>();
     const float* b_data = b_cpu.data<float>();

@@ -1,6 +1,8 @@
 #version 450
 
 // Trigonometric functions: sin, cos, tan, asin, acos, atan
+// sin/cos/tan use the same algorithm as the CPU's AVX2/AVX512 fast-math
+// implementation to ensure parity between CPU and Vulkan backends.
 layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer InputBuffer { float input_data[]; };
@@ -10,6 +12,42 @@ layout(push_constant) uniform PushConstants {
     uint n;          // Number of elements
     uint op;         // Operation: 0=sin, 1=cos, 2=tan, 3=asin, 4=acos, 5=atan
 } params;
+
+// Algorithm matches CPU sin_avx2(): range reduction to [-pi, pi] then
+// degree-9 Taylor polynomial.  Using the same constants ensures bitwise
+// parity with the CPU backend.
+const float INV_2PI = 0.15915494309;  // 1/(2*pi)
+const float TWO_PI  = 6.28318530718;  // 2*pi
+const float PI_OVER_2 = 1.57079632679; // pi/2
+
+// Polynomial coefficients for sin(x) on [-pi, pi]
+const float S3 = -0.16666666666;   // -1/3!
+const float S5 =  0.00833333333;   //  1/5!
+const float S7 = -0.00019841270;   // -1/7!
+const float S9 =  0.0000027557319; //  1/9!
+
+float fast_sin(float x) {
+    // Range reduction: x = x - round(x/(2*pi)) * 2*pi
+    float k = round(x * INV_2PI);
+    x = x - k * TWO_PI;
+
+    // Horner evaluation: sin(x) ≈ x*(1 + x²*(c3 + x²*(c5 + x²*(c7 + x²*c9))))
+    float x2 = x * x;
+    float p = S9 * x2 + S7;
+    p = p * x2 + S5;
+    p = p * x2 + S3;
+    p = p * x2 + 1.0;
+    return p * x;
+}
+
+float fast_cos(float x) {
+    // cos(x) = sin(x + pi/2), matching CPU cos_avx2()
+    return fast_sin(x + PI_OVER_2);
+}
+
+float fast_tan(float x) {
+    return fast_sin(x) / fast_cos(x);
+}
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
@@ -22,13 +60,13 @@ void main() {
 
     switch (params.op) {
         case 0: // sin
-            output_data[idx] = sin(val);
+            output_data[idx] = fast_sin(val);
             break;
         case 1: // cos
-            output_data[idx] = cos(val);
+            output_data[idx] = fast_cos(val);
             break;
         case 2: // tan
-            output_data[idx] = tan(val);
+            output_data[idx] = fast_tan(val);
             break;
         case 3: // asin
             output_data[idx] = asin(val);
