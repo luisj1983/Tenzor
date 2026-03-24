@@ -10,6 +10,11 @@
 #include <memory>
 #include <cstring>
 #include <cstdint>
+#include <cstdlib>
+
+#ifdef __x86_64__
+#include <cpuid.h>
+#endif
 
 #ifdef TENZOR_HAS_ONEMKL
 #include <oneapi/mkl.hpp>
@@ -346,6 +351,63 @@ namespace oneapi_internal {
     }
 } // namespace oneapi_internal
 
+// ============================================================================
+// Intel OpenCL CPU Runtime: CPU architecture auto-detection
+// ============================================================================
+// The Intel OpenCL CPU runtime JIT-compiles SYCL/SPIR-V kernels to native
+// code. It recognises Intel CPUs automatically, but does not recognise AMD
+// or other x86-64 CPUs, emitting "Unknown host CPU" and failing to vectorise
+// certain kernels ("Do not know how to split the result of this operator!").
+//
+// Fix: detect the host CPU feature set via CPUID and set the environment
+// variable CL_CONFIG_CPU_TARGET_ARCH to a compatible Intel code-name that
+// the runtime *does* know, before any SYCL platform/device enumeration
+// triggers JIT compilation.
+// ============================================================================
+static void configure_opencl_cpu_target_arch() {
+#ifdef __x86_64__
+    // If the user already set it, respect their choice.
+    if (std::getenv("CL_CONFIG_CPU_TARGET_ARCH")) return;
+
+    // Use CPUID to detect the actual feature set of the host CPU.
+    unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
+
+    // Check max basic CPUID leaf
+    __cpuid(0, eax, ebx, ecx, edx);
+    unsigned int max_leaf = eax;
+    if (max_leaf < 7) {
+        // Very old CPU — use the safest baseline
+        setenv("CL_CONFIG_CPU_TARGET_ARCH", "corei7", /*overwrite=*/0);
+        return;
+    }
+
+    // Leaf 1: detect SSE4.2 and AVX
+    __cpuid(1, eax, ebx, ecx, edx);
+    bool has_sse42  = (ecx >> 20) & 1;
+    bool has_avx    = (ecx >> 28) & 1;
+
+    // Leaf 7, sub-leaf 0: detect AVX2, AVX-512F
+    __cpuid_count(7, 0, eax, ebx, ecx, edx);
+    bool has_avx2   = (ebx >> 5) & 1;
+    bool has_avx512f = (ebx >> 16) & 1;
+
+    // Map features to an Intel code-name the OpenCL CPU runtime understands.
+    // We intentionally pick conservative targets to maximise compatibility.
+    const char* arch = "corei7";           // SSE4.2 baseline
+    if (has_avx512f) {
+        arch = "skx";                      // Skylake-X: AVX-512F
+    } else if (has_avx2) {
+        arch = "corei7-avx";              // AVX2 (Haswell-class)
+    } else if (has_avx) {
+        arch = "corei7-avx";              // AVX (Sandy Bridge-class)
+    } else if (has_sse42) {
+        arch = "corei7";                   // SSE4.2 (Nehalem-class)
+    }
+
+    setenv("CL_CONFIG_CPU_TARGET_ARCH", arch, /*overwrite=*/0);
+#endif  // __x86_64__
+}
+
 /**
  * @brief OneAPI/SYCL backend implementation for Intel GPUs and CPUs.
  *
@@ -361,6 +423,11 @@ public:
         oneapi_internal::set_queue_getter([](void* backend, int32_t device_id) -> sycl::queue& {
             return static_cast<OneAPIBackend*>(backend)->get_queue(device_id);
         });
+
+        // Configure the Intel OpenCL CPU runtime's JIT target architecture.
+        // Must happen before any SYCL platform/device enumeration so the
+        // runtime picks up the setting before it JIT-compiles SPIR-V kernels.
+        configure_opencl_cpu_target_arch();
 
         try {
             // Enumerate all available SYCL devices
